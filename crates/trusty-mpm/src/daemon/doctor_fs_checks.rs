@@ -93,10 +93,24 @@ pub(super) fn check_agents(paths: &FrameworkPaths, project_dir: Option<&Path>) -
     // delegatable agents while this branch reported only "no agent files".
     // Returning early with a deploy fact and no routing fact is the same
     // conflation this check exists to remove.
-    let roster = match project_dir {
-        Some(project) => format!(
-            "{} delegatable",
-            crate::core::delegation_authority::resolve_roster(project).len()
+    // #5544: `_reporting`, because this check is what the composed prompt's
+    // `ROSTER INCOMPLETE` banner tells the operator to run. A remedy that
+    // reports a truncated count as authoritative carries the defect it is
+    // being consulted about.
+    let scan = project_dir.map(crate::core::delegation_authority::resolve_roster_reporting);
+    let roster_incomplete = scan.as_ref().is_some_and(|s| !s.unreadable.is_empty());
+    let roster = match &scan {
+        Some(s) if s.unreadable.is_empty() => format!("{} delegatable", s.agents.len()),
+        Some(s) => format!(
+            "at least {} delegatable — {}: {} path(s) unreadable ({})",
+            s.agents.len(),
+            crate::core::delegation_authority::ROSTER_INCOMPLETE_MARKER,
+            s.unreadable.len(),
+            s.unreadable
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
         ),
         None => "delegatable roster unknown (no project directory)".to_string(),
     };
@@ -112,9 +126,17 @@ pub(super) fn check_agents(paths: &FrameworkPaths, project_dir: Option<&Path>) -
     }
     let manifest = dir.join(MANIFEST_FILE);
     if manifest.exists() {
+        // #5544: an incomplete roster downgrades the otherwise-healthy arm. `Ok`
+        // beside a count that understates the roster is the reading an operator
+        // acts on, and it is the one thing this check must not say when a read
+        // failed.
         DoctorCheck::new(
             "agents",
-            CheckStatus::Ok,
+            if roster_incomplete {
+                CheckStatus::Warn
+            } else {
+                CheckStatus::Ok
+            },
             format!(
                 "{md_count} agent file(s) deployed in {} with manifest; {roster}",
                 dir.display()
@@ -525,6 +547,61 @@ mod tests {
         std::fs::create_dir_all(paths.skill_source_dir()).unwrap();
         let check = check_skill_source(&paths);
         assert_eq!(check.status, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn agents_check_is_not_ok_when_a_roster_read_failed() {
+        // #5544 review: the composed prompt's `ROSTER INCOMPLETE` banner tells
+        // the operator to run `tm doctor`. This check took its number from the
+        // non-reporting `resolve_roster`, so it answered a question about a
+        // truncated roster with a count that read as authoritative and a green
+        // `Ok` beside it — the remedy carrying the defect.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+        let agents = paths.agent_deploy_dir();
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("engineer.md"), "agent").unwrap();
+        std::fs::write(agents.join(MANIFEST_FILE), "{}").unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let project_tier = project.path().join(".claude").join("agents");
+        std::fs::create_dir_all(&project_tier).unwrap();
+        let locked = project_tier.join("ticketing.md");
+        std::fs::write(&locked, "---\nname: ticketing\n---\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        if std::fs::read_to_string(&locked).is_ok() {
+            eprintln!("skipping: cannot deny read on this platform/privilege level");
+            return;
+        }
+
+        let check = check_agents(&paths, Some(project.path()));
+
+        assert_ne!(
+            check.status,
+            CheckStatus::Ok,
+            "an incomplete roster must not report as healthy: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("ROSTER INCOMPLETE"),
+            "the loss must be named, not merely reflected in a lower count: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("at least"),
+            "the count must not read as a total: {}",
+            check.message
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600));
+        }
     }
 
     #[test]

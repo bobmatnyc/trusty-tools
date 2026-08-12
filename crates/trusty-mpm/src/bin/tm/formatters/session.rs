@@ -90,3 +90,33 @@ pub(crate) fn deploy_summary_line(
 ) -> String {
     format!("{label}: {deployed} deployed, {skipped} skipped, {unchanged} unchanged")
 }
+
+/// Render the `session start` delegation-roster line, declaring the count
+/// incomplete when a roster read failed.
+///
+/// Why (#5544): this line is where `tm session start` publishes
+/// [`trusty_mpm::core::instruction_pipeline::PipelineOutput::agent_count`], and
+/// an unreadable agent file lowers that number with nothing to distinguish it
+/// from a genuinely smaller roster. Printing the bare count was the same
+/// incomplete-result-reported-as-complete shape the composed prompt's
+/// `ROSTER INCOMPLETE` banner exists to remove, surviving one layer up.
+/// What: the plain `"Instructions: N agents in delegation authority"` when
+/// nothing was lost; otherwise `N` is qualified as `at least N` and the line
+/// carries `ROSTER INCOMPLETE` with the unreadable paths named.
+/// Test: `session_start_roster_line_is_plain_when_the_roster_is_whole`,
+/// `session_start_roster_line_declares_an_incomplete_roster`.
+pub(crate) fn delegation_roster_line(
+    agent_count: usize,
+    unreadable: &[std::path::PathBuf],
+) -> String {
+    if unreadable.is_empty() {
+        return format!("Instructions: {agent_count} agents in delegation authority");
+    }
+    let paths: Vec<String> = unreadable.iter().map(|p| p.display().to_string()).collect();
+    format!(
+        "Instructions: at least {agent_count} agents in delegation authority — \
+         ROSTER INCOMPLETE: {} path(s) could not be read, so the real count is higher ({})",
+        unreadable.len(),
+        paths.join(", "),
+    )
+}
