@@ -506,7 +506,9 @@ impl PalaceRegistry {
     /// `true` only for `NotFound`, whose sole production site in this crate is
     /// `PalaceStore::load_palace`'s absence guard. Every other failure —
     /// including `Io` and `Json` raised by that same call — returns `false`.
-    /// Test: `open_error_is_absent_only_for_a_genuine_absence`.
+    /// Test: `open_error_is_absent_only_for_a_genuine_absence` covers a denied
+    /// read; `open_error_is_not_absent_for_an_unstattable_palace_json` covers a
+    /// denied stat, the shape #5574 turned from `NotFound` into `Io`.
     pub fn open_error_is_absent(err: &anyhow::Error) -> bool {
         matches!(
             err.downcast_ref::<PalaceStoreError>(),

@@ -825,14 +825,21 @@ fn writer_open_queue_wait_is_bounded_under_sustained_contention() {
 
 /// Restore a path's mode on drop, including while unwinding from a failed
 /// assertion, so a test can never leave `tempfile` an untraversable tree.
+///
+/// The mode is a field because the tests below lock two kinds of path: a
+/// regular `palace.json` (0o600) and the directory holding it (0o700), which a
+/// file's mode would leave untraversable.
 #[cfg(unix)]
-struct RestoreMode(std::path::PathBuf);
+struct RestoreMode {
+    path: std::path::PathBuf,
+    mode: u32,
+}
 
 #[cfg(unix)]
 impl Drop for RestoreMode {
     fn drop(&mut self) {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
     }
 }
 
@@ -876,7 +883,10 @@ fn open_error_is_absent_only_for_a_genuine_absence() {
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
     // Declared after `dir` so it drops first: the mode is restored before
     // `TempDir` walks the tree, including while unwinding from a failure below.
-    let _restore = RestoreMode(target.clone());
+    let _restore = RestoreMode {
+        path: target.clone(),
+        mode: 0o600,
+    };
 
     // Root bypasses the mode bits outright and some filesystems ignore them,
     // so confirm the denial actually took hold. A vacuous pass here would
@@ -913,5 +923,74 @@ fn open_error_is_absent_only_for_a_genuine_absence() {
         PalaceRegistry::open_error_is_absent(&missing),
         "a genuinely absent palace must still classify as absence, or every 404 the callers \
          owe becomes a 500: {missing:#}"
+    );
+}
+
+/// Why (#5549, #5574): the sibling test above locks the FILE, so the stat
+/// probe succeeds and the read under it fails. This one locks the DIRECTORY, so
+/// the probe itself fails — the shape #5574 changed from `NotFound` to `Io` at
+/// `load_palace`. Both halves live in this crate, so the claim that the
+/// classifier carries #5574's new `Io` through as "not absence" belongs here
+/// rather than only at the HTTP callers downstream.
+/// What: creates a palace, evicts its cached handle, strips the palace's own
+/// directory to mode 000, and asserts the resulting open error is NOT
+/// classified as absence. Panics rather than passing vacuously if the denial
+/// does not take hold.
+/// Test: this test itself.
+#[cfg(unix)]
+#[test]
+fn open_error_is_not_absent_for_an_unstattable_palace_json() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    reg.create_palace(
+        data_root,
+        Palace {
+            id: PalaceId::new("alpha"),
+            name: "alpha".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("alpha"),
+        },
+    )
+    .expect("create palace");
+    reg.remove(&PalaceId::new("alpha"));
+
+    let palace_dir = data_root.join("alpha");
+    std::fs::set_permissions(&palace_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Declared after `dir` so it drops first: the mode is restored before
+    // `TempDir` walks the tree, including while unwinding from a failure below.
+    let _restore = RestoreMode {
+        path: palace_dir.clone(),
+        mode: 0o700,
+    };
+
+    let target = palace_dir.join("palace.json");
+    match target.try_exists() {
+        Ok(_) => panic!(
+            "cannot exercise #5549: {} is still stattable with its directory at mode 000. Run \
+             this suite as a non-root user on a filesystem that honours POSIX permission bits.",
+            target.display()
+        ),
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected the locked directory to deny statting palace.json, got {e}"
+        ),
+    }
+
+    // `PalaceHandle` is not `Debug`, so `expect_err` is unavailable here.
+    let denied = match reg.open_palace(data_root, &PalaceId::new("alpha")) {
+        Ok(_) => panic!("a palace.json that cannot be statted must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        !PalaceRegistry::open_error_is_absent(&denied),
+        "a palace whose metadata could not be statted was classified as absent — #5574 made \
+         that an Io error at load_palace, and this classifier read it back as absence: {denied:#}"
     );
 }

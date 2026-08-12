@@ -40,7 +40,8 @@ use crate::AppState;
 /// otherwise.
 /// Test: `delete_palace_returns_not_found_for_missing_id`,
 /// `kg_list_subjects_returns_distinct`,
-/// `unreadable_palace_is_500_not_404_at_the_web_open_handle`.
+/// `unreadable_palace_is_500_not_404_at_the_web_open_handle`,
+/// `unstattable_palace_is_500_not_404_at_the_web_open_handle`.
 pub(crate) fn open_handle(
     state: &AppState,
     id: &str,

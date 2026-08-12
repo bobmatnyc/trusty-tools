@@ -469,6 +469,7 @@ impl MemoryService {
     /// `PalaceRegistry::open_error_is_absent` confirms the palace is genuinely
     /// not there, and `ServiceError::Internal` (500) otherwise.
     /// Test: `unreadable_palace_is_500_not_404_at_the_service_open_handle`,
+    /// `unstattable_palace_is_500_not_404_at_the_service_open_handle`,
     /// `absent_palace_is_still_404_at_both_open_handles`.
     pub fn open_handle(&self, id: &str) -> ServiceResult<Arc<PalaceHandle>> {
         self.state
