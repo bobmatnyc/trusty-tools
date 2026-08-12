@@ -1,0 +1,390 @@
+#!/usr/bin/env bash
+#
+# check-ui-bundle-freshness-selftest.sh — failing-case fixtures for
+# scripts/check-ui-bundle-freshness.sh (#3606).
+#
+# Why: the gate this exercises was written because three publishes in a row
+#   shipped a stale UI bundle with every existing gate green. A fourth gate
+#   inherits that problem until its FAILING branches are pinned: "the bundle was
+#   fresh" and "the check enumerated nothing and returned 0" produce the same
+#   output. Half the cases below are therefore vacuous-scan refusals — an empty
+#   manifest, a manifest row pointing at an empty bundle directory, a UI source
+#   tree with no files, a bundle whose index.html references no assets. Each one
+#   MUST exit nonzero; a gate that passes them is the failure this whole change
+#   exists to prevent.
+#
+# What: builds a synthetic git repo per case — its own scripts/ui-bundle-manifest.tsv
+#   and crates/<crate>/{ui,bundle} trees — runs the gate against it with --repo,
+#   and asserts BOTH the exit status and the finding code on stderr. Asserting
+#   the code is what stops a case passing for the wrong reason: a stale-bundle
+#   fixture that failed as MANIFEST-GAP (say, because the manifest column order
+#   changed) would otherwise look like coverage it is not.
+#
+#   Case 3 is the regression test proper — it reproduces #3509's shape, a
+#   commit touching only ui/src while the committed bundle stays put, which is
+#   exactly what trusty-search 0.37.0 published.
+#
+#   Case 18 runs against THIS repo rather than a fixture: the real 0.37.0
+#   publish commit fc7f396f, with real objects. Corroboration, not the
+#   load-bearing coverage — it self-skips in a shallow clone that lacks the
+#   commit.
+#
+# Test: this IS the test. Run directly:
+#   bash scripts/check-ui-bundle-freshness-selftest.sh
+#
+# Portability: POSIX tools only, bash 3.2 (macOS) and bash 5 (Linux CI).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+GATE="${SCRIPT_DIR}/check-ui-bundle-freshness.sh"
+
+PASSED=0
+FAILED=0
+SKIPPED=0
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/ui-bundle-selftest.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+
+pass_case() {
+  echo "  ok  $1"
+  PASSED=$((PASSED + 1))
+}
+fail_case() {
+  echo "SELF-TEST FAIL: $1" >&2
+  shift
+  printf '%s\n' "$@" | sed 's/^/       /' >&2
+  FAILED=$((FAILED + 1))
+}
+skip_case() {
+  echo "  -- skip $1"
+  SKIPPED=$((SKIPPED + 1))
+}
+
+TAB="$(printf '\t')"
+
+# mkrepo <name> -> prints the repo path. Empty workspace, no manifest yet.
+mkrepo() {
+  local repo="${WORK}/$1"
+  mkdir -p "$repo"
+  git -C "$repo" init --quiet
+  git -C "$repo" config user.email selftest@example.invalid
+  git -C "$repo" config user.name "ui bundle selftest"
+  echo "$repo"
+}
+
+# add_manifest <repo> <row>... — write scripts/ui-bundle-manifest.tsv.
+add_manifest() {
+  local repo="$1"
+  shift
+  mkdir -p "${repo}/scripts"
+  {
+    echo "# crate_dir${TAB}source_dir${TAB}bundle_dir"
+    printf '%s\n' "$@"
+  } > "${repo}/scripts/ui-bundle-manifest.tsv"
+}
+
+# add_crate <repo> <crate> — a minimal manifest so resolve_crate_dir works.
+add_crate() {
+  local repo="$1" crate="$2"
+  mkdir -p "${repo}/crates/${crate}"
+  cat > "${repo}/crates/${crate}/Cargo.toml" <<TOML
+[package]
+name = "${crate}"
+version = "0.1.0"
+edition = "2021"
+TOML
+}
+
+# add_ui_source <repo> <crate> <marker>
+add_ui_source() {
+  local repo="$1" crate="$2" marker="$3"
+  mkdir -p "${repo}/crates/${crate}/ui/src/lib/styles"
+  echo "export const APP = '${marker}';" > "${repo}/crates/${crate}/ui/src/main.js"
+  echo "[data-theme='${marker}'] { color: #fff; }" > "${repo}/crates/${crate}/ui/src/lib/styles/tokens.css"
+  echo '{"name":"ui","scripts":{"build":"vite build"}}' > "${repo}/crates/${crate}/ui/package.json"
+  echo '<html><body><div id="app"></div></body></html>' > "${repo}/crates/${crate}/ui/index.html"
+}
+
+# add_bundle <repo> <crate> <bundle-dir-rel> <hash> [base]
+# Writes a Vite-shaped bundle: index.html plus content-hashed assets.
+add_bundle() {
+  local repo="$1" crate="$2" rel="$3" hash="$4" base="${5:-./}"
+  local dir="${repo}/crates/${crate}/${rel}"
+  mkdir -p "${dir}/assets"
+  echo "/* built ${hash} */" > "${dir}/assets/index-${hash}.js"
+  echo "/* built ${hash} */" > "${dir}/assets/index-${hash}.css"
+  cat > "${dir}/index.html" <<HTML
+<html><head>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<script type="module" src="${base}assets/index-${hash}.js"></script>
+<link rel="stylesheet" href="${base}assets/index-${hash}.css">
+</head><body></body></html>
+HTML
+}
+
+commit_all() {
+  local repo="$1" msg="$2"
+  git -C "$repo" add -A
+  git -C "$repo" commit --quiet -m "$msg"
+}
+
+# run_case <label> <expect-exit> <expect-substring|-> <repo> [gate args...]
+run_case() {
+  local label="$1" want_exit="$2" want_sub="$3" repo="$4"
+  shift 4
+  local out rc=0
+  out="$(bash "$GATE" --repo "$repo" "$@" 2>&1)" || rc=$?
+  if [ "$rc" -ne "$want_exit" ]; then
+    fail_case "${label}: expected exit ${want_exit}, got ${rc}" "$out"
+    return
+  fi
+  if [ "$want_sub" != "-" ] && ! printf '%s' "$out" | grep -qF -- "$want_sub"; then
+    fail_case "${label}: exit ${rc} but output never said '${want_sub}'" "$out"
+    return
+  fi
+  pass_case "${label} -> exit ${rc}${want_sub:+ (${want_sub})}"
+}
+
+echo "check-ui-bundle-freshness-selftest: running"
+
+# ---------------------------------------------------------------------------
+# Case 1 — source and bundle committed together. PASS, and the PASS line must
+# state the counts it inspected, not merely that nothing failed.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case1)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "feat(ui): dark mode + rebuilt bundle"
+run_case "case1 fresh (same commit)" 0 "3 blob hash(es)" "$R"
+run_case "case1 counts source files" 0 "4 source file(s)" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 2 — bundle regenerated in a LATER commit than the source change.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case2)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea light
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "initial"
+add_ui_source "$R" cratea dark
+commit_all "$R" "feat(ui): dark mode"
+rm -rf "${R}/crates/cratea/ui-dist"
+add_bundle "$R" cratea ui-dist BBB222
+commit_all "$R" "chore(ui): rebuild bundle"
+run_case "case2 fresh (bundle rebuilt after source)" 0 "asset ref(s) resolved" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 3 — THE REGRESSION TEST. #3509's shape: a commit touching only ui/src,
+# with the committed bundle left untouched. This is what 0.37.0 published.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case3)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea light
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "initial"
+add_ui_source "$R" cratea dark
+commit_all "$R" "feat(ui): migrate to Foundry v2 tokens"
+run_case "case3 stale bundle (#3606 shape)" 1 "BUNDLE-STALE" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 4 — the ui/dist layout (bundle nested INSIDE the source dir), same
+# staleness. The nested layout is where an unfiltered source scan would count
+# the bundle's own files as source and never report drift.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case4)"
+add_crate "$R" crateb
+add_ui_source "$R" crateb light
+add_bundle "$R" crateb ui/dist AAA111
+add_manifest "$R" "crateb${TAB}crates/crateb/ui${TAB}crates/crateb/ui/dist"
+commit_all "$R" "initial"
+add_ui_source "$R" crateb dark
+commit_all "$R" "feat(ui): dark mode"
+run_case "case4 stale bundle (nested ui/dist layout)" 1 "BUNDLE-STALE" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 5 — VACUOUS SCAN: a manifest row whose bundle directory tracks nothing.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case5)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "ui source only, no bundle"
+run_case "case5 vacuous: empty bundle dir" 1 "MANIFEST-STALE" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 6 — VACUOUS SCAN: a row whose UI source tree tracks no build inputs
+# (only prose, which the gate excludes). Nothing to compare the bundle against.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case6)"
+add_crate "$R" cratea
+mkdir -p "${R}/crates/cratea/ui"
+echo "# UI" > "${R}/crates/cratea/ui/README.md"
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "bundle without source"
+run_case "case6 vacuous: no UI source files" 1 "NO-SOURCES" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 7 — VACUOUS SCAN: no manifest at all.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case7)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_bundle "$R" cratea ui-dist AAA111
+commit_all "$R" "no manifest"
+run_case "case7 vacuous: manifest file missing" 1 "MANIFEST-MISSING" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 8 — VACUOUS SCAN: a manifest that declares zero crates. This is the
+# shape a well-meaning "temporarily disable the gate" edit produces.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case8)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_bundle "$R" cratea ui-dist AAA111
+mkdir -p "${R}/scripts"
+printf '# crate_dir\tsource_dir\tbundle_dir\n#\n' > "${R}/scripts/ui-bundle-manifest.tsv"
+commit_all "$R" "comment-only manifest"
+run_case "case8 vacuous: manifest declares zero crates" 1 "MANIFEST-MISSING" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 9 — a crate ships a committed bundle but has no manifest row. A new UI
+# crate must not be able to sit outside the gate.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case9)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_bundle "$R" cratea ui-dist AAA111
+add_crate "$R" cratec
+add_ui_source "$R" cratec dark
+add_bundle "$R" cratec ui/dist CCC333
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "second UI crate, unlisted"
+run_case "case9 unlisted UI crate" 1 "MANIFEST-GAP" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 10 — half-mirrored bundle: index.html arrived, the hashed assets did
+# not. Ancestry alone calls this fresh; the asset check is what catches it.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case10)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_bundle "$R" cratea ui-dist AAA111
+rm -f "${R}/crates/cratea/ui-dist/assets/index-AAA111.js"
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "partial mirror"
+run_case "case10 partially mirrored bundle" 1 "ASSET-MISSING" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 11 — VACUOUS SCAN: an index.html referencing zero local assets. The
+# asset check would otherwise report success having resolved nothing.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case11)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+mkdir -p "${R}/crates/cratea/ui-dist/assets"
+echo "/* orphan */" > "${R}/crates/cratea/ui-dist/assets/index-AAA111.js"
+echo '<html><head><link href="https://fonts.googleapis.com"></head><body></body></html>' \
+  > "${R}/crates/cratea/ui-dist/index.html"
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "index with no local refs"
+run_case "case11 vacuous: zero asset references" 1 "NO-ASSET-REFS" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 12 — bundle with assets but no entry point.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case12)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+mkdir -p "${R}/crates/cratea/ui-dist/assets"
+echo "/* orphan */" > "${R}/crates/cratea/ui-dist/assets/index-AAA111.js"
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "bundle without index.html"
+run_case "case12 bundle has no index.html" 1 "NO-INDEX" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 13 — absolute asset refs under a deploy base (trusty-console sets
+# vite base '/ui/'). These must RESOLVE, not report ASSET-MISSING; a false
+# alarm here is how a correct gate gets deleted after one bad week.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case13)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_bundle "$R" cratea ui/dist AAA111 "/ui/"
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui/dist"
+commit_all "$R" "absolute base refs"
+run_case "case13 absolute /base/ asset refs resolve" 0 "2 asset ref(s) resolved" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 14 — a prose-only change under ui/ must NOT demand a rebuild.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case14)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "initial"
+echo "# UI notes" > "${R}/crates/cratea/ui/README.md"
+commit_all "$R" "docs(ui): notes"
+run_case "case14 prose-only ui/ change is not staleness" 0 "-" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 15 — uncommitted source edit with a clean bundle.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case15)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea light
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "initial"
+echo "[data-theme='dark'] { color: #000; }" > "${R}/crates/cratea/ui/src/lib/styles/tokens.css"
+run_case "case15 dirty source, clean bundle" 1 "DIRTY-SOURCE" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 16 — the same edit with the bundle rebuilt alongside it, uncommitted.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case16)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea light
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "initial"
+echo "[data-theme='dark'] { color: #000; }" > "${R}/crates/cratea/ui/src/lib/styles/tokens.css"
+echo "/* rebuilt */" >> "${R}/crates/cratea/ui-dist/assets/index-AAA111.css"
+run_case "case16 dirty source with rebuilt bundle" 0 "-" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 17 — a crate with no UI at all exits 0 with an explicit N/A line, so
+# preflight-publish.sh can call this for every crate it releases.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case17)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_bundle "$R" cratea ui-dist AAA111
+add_crate "$R" plainlib
+mkdir -p "${R}/crates/plainlib/src"
+echo "pub fn f() {}" > "${R}/crates/plainlib/src/lib.rs"
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+commit_all "$R" "workspace with one UI crate"
+run_case "case17 non-UI crate is N/A" 0 "tracks no committed UI bundle" "$R" plainlib
+
+# ---------------------------------------------------------------------------
+# Case 18 — the real incident, against this repo's real objects: trusty-search
+# at fc7f396f, the commit 0.37.0 was published from.
+# ---------------------------------------------------------------------------
+if git -C "$REPO_ROOT" rev-parse --verify --quiet 'fc7f396f^{commit}' > /dev/null; then
+  run_case "case18 real 0.37.0 publish commit" 1 "BUNDLE-STALE" \
+    "$REPO_ROOT" --rev fc7f396f trusty-search
+else
+  skip_case "case18 real 0.37.0 publish commit (fc7f396f not in this clone)"
+fi
+
+echo
+echo "check-ui-bundle-freshness-selftest: ${PASSED} passed, ${FAILED} failed, ${SKIPPED} skipped"
+[ "$FAILED" -eq 0 ] || exit 1
+exit 0

@@ -1,0 +1,74 @@
+# Committed UI bundle freshness gate (#3606).
+#
+# Four crates commit a pre-built Svelte/Vite bundle that cargo packages
+# verbatim: trusty-search (ui-dist/) plus trusty-memory, trusty-analyze and
+# trusty-console (ui/dist/). SKIP_UI_BUILD=1 is set globally in ci.yml, so
+# build.rs never regenerates any of them here — CI ships whatever is committed.
+# Three trusty-search releases went out carrying a bundle built from source that
+# had already changed, the last of them 0.37.0, whose admin dashboard had no
+# dark mode.
+#
+# The real stop is scripts/preflight-publish.sh CHECK 7, since cargo publish
+# runs on a maintainer's machine and no CI job can interrupt it. This workflow
+# closes the window BEFORE that: drift merged on 2026-07-20 and shipped on
+# 2026-07-21, and for that whole day every git-installed build off main carried
+# the stale bundle too.
+#
+# ci.yml's ui-checks job declined a rebuild-then-diff for a good reason — Vite's
+# content-hashed filenames are not byte-stable across toolchain patch versions.
+# This gate rebuilds nothing and compares last-touch COMMITS, so it needs no
+# Node, no pnpm, and has nothing for a hash to make flaky.
+name: UI bundle freshness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/*/ui/**"
+      - "crates/*/ui-dist/**"
+      - "scripts/check-ui-bundle-freshness.sh"
+      - "scripts/check-ui-bundle-freshness-selftest.sh"
+      - "scripts/ui-bundle-manifest.tsv"
+      - ".github/workflows/ui-bundle-freshness.yml"
+  pull_request:
+    # Explicit activity types, matching line-cap.yml: `edited` catches a
+    # base-branch retarget, which the default set does not.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+    paths:
+      - "crates/*/ui/**"
+      - "crates/*/ui-dist/**"
+      - "scripts/check-ui-bundle-freshness.sh"
+      - "scripts/check-ui-bundle-freshness-selftest.sh"
+      - "scripts/ui-bundle-manifest.tsv"
+      - ".github/workflows/ui-bundle-freshness.yml"
+
+concurrency:
+  group: ui-bundle-freshness-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  freshness:
+    name: Committed UI bundles match their source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # fetch-depth: 0 for two reasons: the gate resolves last-touch commits
+      # across full history, and the self-test's case 18 runs against the real
+      # fc7f396f (trusty-search 0.37.0's publish commit). Case 18 self-skips
+      # when that commit is absent, so a shallow clone degrades it to a skip
+      # rather than a false failure.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Self-test FIRST. A freshness gate that cannot fail is indistinguishable
+      # from the three years this drift went unnoticed, so the failing branches
+      # — including the refusals that stop an empty scan reporting success — are
+      # pinned before the gate's own green means anything. Mirrors
+      # line-cap.yml's selftest-then-gate ordering.
+      - name: Freshness gate self-test (must catch a stale bundle)
+        run: bash scripts/check-ui-bundle-freshness-selftest.sh
+
+      - name: Committed UI bundle freshness
+        run: bash scripts/check-ui-bundle-freshness.sh

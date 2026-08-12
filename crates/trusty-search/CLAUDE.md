@@ -974,8 +974,19 @@ cargo publish                                  # single crate (lib + bin)
 
 `make release-prep` runs `pnpm install --frozen-lockfile && pnpm build` (or
 the npm equivalent) and then mirrors `ui/dist/` into the crate-root
-`ui-dist/`. CI fails if `ui-dist/` is stale relative to a fresh build (see
-`.github/workflows/ci.yml` → `ui-dist-check` job).
+`ui-dist/`.
+
+🔴 **CI does NOT check this.** This section used to claim a
+`.github/workflows/ci.yml` → `ui-dist-check` job fails on a stale bundle; no
+such job has ever existed, and believing it did is part of why 0.37.0 shipped
+without dark mode (#3606). What actually guards it is
+`scripts/preflight-publish.sh` CHECK 7, at the publish boundary:
+`scripts/check-ui-bundle-freshness.sh` fails when `ui-dist/`'s last-touch
+commit predates `ui/`'s. Run it yourself any time:
+
+```bash
+bash scripts/check-ui-bundle-freshness.sh trusty-search
+```
 
 When the Rust build runs after the JS step is already done (CI publish flow),
 set `SKIP_UI_BUILD=1` to skip `build.rs`'s embedded UI build:
