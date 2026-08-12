@@ -64,7 +64,8 @@ Homebrew provides:
 > IAM role, or SSO) for the default `bedrock/` provider, or `OPENROUTER_API_KEY`
 > for OpenRouter models.
 >
-> **Contributor profiling** moved to `tga profile` in tga 2.19.0 (#5468).
+> **Contributor profiling** moved to `tga profile` in tga 2.19.0
+> ([#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)).
 > `trusty-review profile` was removed in 0.16.0.
 >
 > **Sidecar services** (optional, degrade gracefully when absent):

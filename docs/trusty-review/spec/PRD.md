@@ -114,7 +114,7 @@ Status tags:
 | `run --local-diff <path>` | ✅ | |
 | `compare` (multi-model table) | ✅ | |
 | `serve` | ✅ | |
-| `profile` (contributor profiling) | ✅ | |
+| ~~`profile` (contributor profiling)~~ | ❌ | Removed in 0.16.0; moved to `tga profile` ([#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)) |
 | `list` / `stats` / `show` / `eval` | 🔵 | Tracked in #553 |
 
 ### 4.5 Integrations
@@ -155,19 +155,17 @@ Status tags:
 | Wire map-reduce into `run_review` + `MapReduceStats` (Phase 5 of #680) | 🔵 | Tracked in #680 |
 | Enable auto map-reduce by default (Phase 6 of #680) | 🔵 | Tracked in #680 |
 
-### 4.7 Longitudinal contributor profiles (epic #558)
+### 4.7 Longitudinal contributor profiles — removed, moved to tga
 
-| Requirement | Status | Notes |
-|-------------|--------|-------|
-| `ContributorSelector` / identity resolution | ✅ | `profile/selector.rs` |
-| Period-batch assembly | ✅ | `profile/batch.rs` |
-| Diff sampler | ✅ | `profile/diff_sampler/` |
-| `BatchReviewer` (per-period LLM calls) | ✅ | `profile/batch_reviewer.rs` |
-| `Synthesizer` (longitudinal pattern synthesis) | ✅ | `profile/synthesizer.rs` |
-| `Reporter` (JSON + Markdown output) | ✅ | `profile/reporter.rs` |
-| `reporter_github.rs` (optional GitHub issue) | ✅ | |
-| **`profile` CLI subcommand** | ✅ | `cli_profile.rs`; full longitudinal contributor pipeline |
-| Per-PR review personalization from contributor profile (#569) | 🔵 | Blocked on full 16-stage pipeline (#552) |
+Contributor profiling (originally epic #558: `ContributorSelector`, period
+batching, diff sampling, `BatchReviewer`, `Synthesizer`, `Reporter`, GitHub
+issue publishing, and the `profile` CLI subcommand) was removed from
+trusty-review in 0.16.0
+([#5466](https://github.com/bobmatnyc/trusty-tools/issues/5466)). It is not a
+gap — trusty-review has no profiling code and no `tga`/`rusqlite`/`git2`
+dependency, by owner ruling that contributor profiling is entirely tga's
+domain. The equivalent pipeline lives at `tga profile`
+([#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)).
 
 ### 4.8 Persistence
 
@@ -559,17 +557,20 @@ the GitHub API and includes a compact summary of their verdicts, any recurring
 findings, and the trend (improving/stable/declining). This context is passed to
 the reviewer prompt as a named block.
 
-This is complementary to, but distinct from, the longitudinal contributor profile
-(`profile/` pipeline, already ✅): the profile is a periodic batch-synthesized
-narrative; the prior-PR context source is a lightweight, per-review, recent-history
-snapshot fetched just-in-time.
+This is complementary to, but distinct from, the longitudinal contributor
+profile (now `tga profile`, see
+[#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)): the profile is
+a periodic batch-synthesized narrative built from a tga database; the prior-PR
+context source described here is a lightweight, per-review, recent-history
+snapshot fetched just-in-time from the GitHub API, with no tga dependency.
 
 **Rationale:** A reviewer who knows "this author's last 3 PRs all had the same
 missing-error-check pattern" can weigh findings more appropriately and tailor
 the tone. This is standard practice in Duetto's highest-rated human reviews.
-The MAY priority reflects that the longitudinal profile (already ✅) partially
-satisfies this need; this source adds recency and is cheaper to compute.
+The MAY priority reflects that the longitudinal profile in `tga profile`
+partially satisfies this need; this source adds recency and is cheaper to
+compute, without pulling trusty-review back into a tga dependency.
 
 **Forward reference:** #1423. Depends on GitHub PR history API access (already
-available via `integrations/github/`). Low implementation risk; gated P3 because
-profile pipeline (#558) already covers the deeper version.
+available via `integrations/github/`). Low implementation risk; gated P3
+because `tga profile` already covers the deeper version.

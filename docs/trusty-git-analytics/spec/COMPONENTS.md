@@ -347,11 +347,16 @@ three #405/#406/#407 additions implemented; secret values never persisted.
 
 ---
 
-## 13. Contributor-profile data pipeline (`src/collect/git/diff.rs`, `src/report/period_trends/`)
+## 13. Contributor profiling (`src/collect/git/diff.rs`, `src/report/period_trends/`, `src/profile/`, `src/commands/profile.rs`)
 
-**Responsibility.** Provide the tga data-supply layer for the longitudinal
-per-contributor profiling epic (#558) so `trusty-review` can build LLM-backed
-review profiles without duplicating git/DB logic.
+**Responsibility.** Own the full longitudinal per-contributor profiling
+pipeline: two low-level data-supply functions plus identity resolution, period
+batching, diff sampling, per-period LLM review, cross-period synthesis,
+reporting, and the `tga profile` CLI. Originally (epic #558) only the two
+data-supply functions lived here and `trusty-review` built the LLM pipeline on
+top of them; [epic #5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)
+moved the whole pipeline into tga by owner ruling, and `trusty-review` no
+longer depends on tga at all.
 
 **Key types & modules.**
 - `collect::git::diff::diff_for_commit(repo_path, sha) → Result<String>` —
@@ -368,14 +373,21 @@ review profiles without duplicating git/DB logic.
   wide buckets, and builds one `AuthorPeriodSummary` per bucket by querying
   existing `commits`, `fact_commit_effort`, `fact_weekly_quality`, and
   `pull_requests` rows. No schema change required.
+- `profile::` — `ContributorSelector` (identity resolution), `assemble_period_batches`
+  (period assembly), a diff sampler, `PeriodReviewer`/`BatchReviewer` (per-period
+  LLM review via `trusty_common::inference`), `Synthesizer` (cross-period
+  narrative), `Reporter` (JSON/Markdown output), and `reporter_github`
+  (GitHub issue-thread publishing).
+- `commands::profile::ProfileArgs` — the `tga profile <contributor>` CLI
+  surface: `--since`/`--until`/`--window`, `--dry-run`, `--model`,
+  `--github-issue`/`--github-repo`. See the crate
+  [README](../../../crates/trusty-git-analytics/README.md#tga-profile) for the
+  full flag reference.
 
-**Current state.** ✅ Both functions implemented and tested; `period_trends`
+**Current state.** ✅ All of the above implemented and tested. `period_trends`
 module split into `mod.rs`/`model.rs`/`query.rs`/`tests.rs` to stay within the
-500-line file cap. Public APIs exported from `tga::report`.
-
-**Gaps.** The LLM-backed profiling logic (batch_reviewer, synthesizer, profile
-CLI) lives in `trusty-review`, not tga. tga's responsibility ends at data supply.
-trusty-review issues #561–#568 are BLOCKED-ON-MVP.
+500-line file cap; `profile/` is similarly split by responsibility. Public
+data-supply APIs remain exported from `tga::report` for any other caller.
 
 ---
 
