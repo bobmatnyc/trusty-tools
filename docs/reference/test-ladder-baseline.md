@@ -144,18 +144,18 @@ Isolation races in this crate are pre-existing and documented above.
 
 🔴 **The correct response is to prove the failure is pre-existing — never to
 `#[ignore]`, `cfg`-gate, or `--exclude` a failing test.** If the failing crate
-depends on nothing you changed, the proof is a path list — empty output is
-the evidence; paste it in the PR:
+depends on nothing you changed, an empty path list proves it. Otherwise —
+across a dependency edge such as `trusty-search` on `trusty-common` — that
+path list can come back empty while the branch is still guilty, and the valid
+proof is reproducing the failure on `origin/main` (step 2 below; the
+shared-crate caveat is at step 5). When the path list is the applicable proof,
+paste it in the PR:
 
 ```bash
 git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
                                            crates/trusty-mpm/src/client/
 ```
 
-Otherwise — across a dependency edge such as `trusty-search` on
-`trusty-common` — that path list can come back empty while the branch is
-still guilty, so the valid proof is reproducing the failure on `origin/main`
-instead (step 2 below); the shared-crate caveat is spelled out at step 5.
 `create_index_cannot_register_while_a_delete_is_tearing_the_id_down` above is a
 worked example of that `origin/main` reproduction, measured directly on
 `origin/main` (documented by

@@ -56,8 +56,8 @@ them. All patches must live in the root `Cargo.toml`.
 🟡 **`default-features` cannot be disabled on a member manifest when the
 dependency is `{ workspace = true }`** — the `[workspace.dependencies]` entry
 owns `default-features`; writing `default-features = false` on the member is
-silently ignored if the workspace entry omits the key. Cargo warns rather
-than failing, today:
+ignored if the workspace entry omits the key. Cargo warns rather than
+failing, today:
 ```
 warning: `default-features` is ignored for trusty-review, since `default-features`
 was not specified for `workspace.dependencies.trusty-review`, this could become
