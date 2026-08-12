@@ -19,7 +19,9 @@
 //! succeeding. The failure directions are deliberately asymmetric: see
 //! [`persist_deferred_embed_pending`].
 //!
-//! Test: `service::boot_markers_tests`.
+//! Test: see the `tests` submodule below for the marker read/write contract
+//! and re-arm decision, and `commands::start_restore`'s `markers_tests`
+//! submodule for the end-to-end restore-path proof (#4390 / #4391).
 
 use std::sync::Arc;
 
@@ -41,8 +43,8 @@ use crate::service::persistence::{
 /// cannot detect down-time drift, because nothing was ever stored to compare
 /// against. Backfilling from live git rather than triggering a reindex is what
 /// keeps a 200-index fleet from re-walking every tree on one upgrade.
-/// Test: `restore_prefers_the_persisted_head_sha_over_live_git` and
-/// `restore_backfills_a_missing_head_sha_from_live_git`.
+/// Test: `resolve_prefers_the_persisted_head_sha_over_live_git` and
+/// `resolve_backfills_a_missing_head_sha_from_live_git`.
 pub fn resolve_indexed_head_sha(entry: &PersistedIndex) -> Option<String> {
     if let Some(stored) = entry.indexed_head_sha.clone() {
         return Some(stored);
@@ -64,7 +66,8 @@ pub fn resolve_indexed_head_sha(entry: &PersistedIndex) -> Option<String> {
 /// nothing is propagated. The cost of a lost write is one boot's worth of
 /// missed drift detection, which is exactly the pre-fix behaviour — never a
 /// corrupted index.
-/// Test: `finish_reindex_persists_the_head_sha_it_stamps`.
+/// Test: `stamp_handle_persists_the_sha_it_writes` exercises this exact
+/// write-through contract via `reconcile::stamp_handle`, its other caller.
 pub fn persist_indexed_head_sha(index_id: &str, sha: Option<&str>) {
     let owned = sha.map(str::to_owned);
     patch_marker(index_id, "indexed_head_sha", move |entry| {
@@ -154,8 +157,8 @@ pub fn should_rearm_deferred_embed(
 /// pass is owed to nobody and the marker would otherwise re-fire on every boot
 /// forever. An index with no embedder KEEPS its marker — the embedder may be
 /// wired on a later boot, and the work is still genuinely owed.
-/// Test: `pending_deferred_embed_is_rearmed_at_restore`,
-/// `rearm_clears_the_marker_for_a_skip_vector_index`.
+/// Test: `restore_rearms_an_interrupted_deferred_embed_pass`,
+/// `restore_drops_the_marker_for_a_skip_vector_index`.
 pub async fn rearm_deferred_embed_if_pending(
     handle: &Arc<IndexHandle>,
     pending: bool,

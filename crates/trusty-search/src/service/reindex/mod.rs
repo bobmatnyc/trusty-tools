@@ -169,7 +169,7 @@ pub(crate) use defer_embed::run_embed_catch_up;
 /// Why: the boot re-arm must go through the same size-ordered queue
 /// `finish_reindex` uses, so re-armed passes serialise behind the single
 /// background permit instead of every restored index racing at once.
-/// Test: `service::boot_markers_tests::pending_deferred_embed_is_rearmed_at_restore`.
+/// Test: `commands::start_restore::markers_tests::restore_rearms_an_interrupted_deferred_embed_pass`.
 pub(crate) use defer_embed::spawn_deferred_embed_pass;
 
 /// Re-export the two public entry points for kicking off a reindex task.
