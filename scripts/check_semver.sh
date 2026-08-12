@@ -44,6 +44,11 @@
 #
 # Baseline policy — SCOPED TO PUBLISHED CRATES, and an absent baseline is a
 #   RECORDED SKIP, never a silent one:
+#     - listed in scripts/semver-checks-crate-exclusions.tsv
+#                                    -> skip (no LIBRARY consumer to protect —
+#                                       see "Crate exclusions" below, which is
+#                                       also where the guard that keeps this row
+#                                       from going silent lives)
 #     - `publish = false`            -> skip (never reaches crates.io)
 #     - no library target            -> skip (a bin-only crate has no API surface
 #                                       cargo-semver-checks can compare)
@@ -118,6 +123,23 @@
 #   rustc it can find rather than the pinned one — see select_toolchain below for
 #   why that costs no coverage and cannot manufacture a pass.
 #
+# Crate exclusions: the gate protects LIBRARY consumers, so a crate nothing
+#   links as a library has nobody to protect. trusty-mpm is installed as the `tm`
+#   executable, and a binary user gets a whole new executable on every
+#   `cargo install`, so the library API it happens to expose is not part of what
+#   they consume. Rows live in scripts/semver-checks-crate-exclusions.tsv, each
+#   with a written reason, and each is a real coverage hole.
+#
+#   A ROW IS A CLAIM ABOUT CONSUMPTION, AND CLAIMS GO STALE. A skip list is the
+#   exact shape this repo keeps getting wrong: it stops protecting and reports
+#   success. So the premise is re-checked on every run rather than trusted — the
+#   gate asks `cargo metadata` whether any workspace package depends on the
+#   excluded crate, and REFUSES the skip (exit 3, naming the dependent) when one
+#   does. What it cannot see is an out-of-repo consumer on crates.io; that stays
+#   a stated assumption, re-checkable with
+#   `curl -s https://crates.io/api/v1/crates/<crate>/reverse_dependencies`.
+#   See docs/reference/semver-gate.md, "Crate exclusions".
+#
 # Features: cargo-semver-checks' default heuristic enables every feature, which
 #   here means building CUDA and CoreML backends that no CI runner can build
 #   (`cudarc` panics with "nvcc --version failed"). Passing --default-features
@@ -144,6 +166,8 @@
 #
 #   SEMVER_GATE_TOOLCHAIN_BIN=<dir>  pin the rustc/cargo the check runs under.
 #   SEMVER_GATE_TOOLCHAIN_BIN=       (set but empty) keep the ambient toolchain.
+#   SEMVER_GATE_CRATE_EXCLUSIONS=<file>  read crate exclusions from <file>. A
+#                                    self-test seam; no caller sets it.
 #
 # Exit (#5289 split 1 from 3 — a verdict and a non-verdict are different facts):
 #   0  every checked crate is SemVer-clean, or is a recorded skip.
@@ -152,8 +176,9 @@
 #   2  usage error.
 #   3  NO VERDICT — the gate could not do its job: cargo-semver-checks never
 #      completed a check run (rustdoc build failure, baseline retrieval
-#      failure), the diff scanned nothing, the registry was unreachable, or the
-#      tool is missing. Nothing was compared, so nothing may be concluded.
+#      failure), the diff scanned nothing, the registry was unreachable, the
+#      tool is missing, or a crate exclusion's premise has died. Nothing was
+#      compared, so nothing may be concluded.
 #
 # Test: `scripts/check_semver_selftest.sh` proves every way this gate could lie
 #   — a vacuous scan, an unreachable registry, and (since #5289) a rustdoc build
@@ -169,7 +194,10 @@
 #   summary line and both a clean run and a four-failure run were reported as
 #   never having happened. Cases 20-21 (#5440) pin the zero-check false pass:
 #   a summary that says `0 checks: 0 pass, 254 skip` at exit 0 is NO VERDICT in
-#   the PASS/FAIL arm and a BLIND inventory in the advisory one.
+#   the PASS/FAIL arm and a BLIND inventory in the advisory one. Cases 23-24 pin
+#   the crate-exclusion arm: an excluded crate is a recorded skip that attempts
+#   no comparison, and an exclusion contradicted by a workspace dependency
+#   refuses the skip rather than granting it.
 #   The catch itself is demonstrated in PR #5051 against #4088's real shape.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
@@ -186,6 +214,11 @@ PROBE_ONLY=""
 PROBE_VERSION_OVERRIDE=""
 INDEX_BASE="${SEMVER_GATE_INDEX_BASE:-https://index.crates.io}"
 EXCLUSIONS_FILE="${REPO_ROOT}/scripts/semver-checks-feature-exclusions.tsv"
+# Whole-crate exclusions, one row per crate with a written reason. Overridable so
+# check_semver_selftest.sh can drive the arm from a fixture instead of the real
+# file; the default is the only path any caller uses.
+CRATE_EXCLUSIONS_REL="scripts/semver-checks-crate-exclusions.tsv"
+CRATE_EXCLUSIONS_FILE="${SEMVER_GATE_CRATE_EXCLUSIONS:-${REPO_ROOT}/${CRATE_EXCLUSIONS_REL}}"
 
 # Exit statuses. `1` is reserved for a COMPUTED verdict that says break; every
 # way the gate can fail to compute one is `3` (#5289). Callers that only test
@@ -506,6 +539,19 @@ elif mode == "exists":
     want = sys.argv[3]
     print("yes" if any(p["name"] == want for p in meta["packages"]) else "no")
 
+elif mode == "dependents":
+    # Workspace packages that declare <want> as a dependency, one per line. A
+    # Cargo dependency IS a library dependency — nothing can depend on another
+    # crate's binary — so a non-empty answer means the crate has an in-repo
+    # library consumer, which is what a crate exclusion claims it does not.
+    # Dev- and build-dependencies count: they link the library too.
+    want = sys.argv[3]
+    for p in meta["packages"]:
+        if p["name"] == want:
+            continue
+        if any(d["name"] == want for d in p["dependencies"]):
+            print(p["name"])
+
 elif mode == "features":
     crate = sys.argv[3]
     excluded = set(filter(None, sys.argv[4].split()))
@@ -541,6 +587,14 @@ pkg_field() {
     echo "FAIL: TOOL ERROR — no workspace metadata for package '${1}' (field '${2}')." >&2
     exit "$EXIT_NO_VERDICT"
   }
+}
+
+# crate_exclusion_reason <crate> — the reason column for <crate> in the crate
+# exclusions TSV, or empty when the crate is not excluded. Keyed on the package
+# name, which is what the loop below has already resolved to.
+crate_exclusion_reason() {
+  [[ -f "$CRATE_EXCLUSIONS_FILE" ]] || return 0
+  awk -F'\t' -v c="$1" '$0 !~ /^#/ && $1 == c { print $2; exit }' "$CRATE_EXCLUSIONS_FILE"
 }
 
 # dir_to_crate <dirname> — package name for crates/<dirname>/, or empty when the
@@ -927,6 +981,40 @@ select_toolchain
 
 while IFS= read -r crate; do
   [[ -z "$crate" ]] && continue
+
+  # Crate exclusion. This gate protects LIBRARY consumers — a dependent that
+  # re-resolves a version floor on a lockfile-free `cargo install` and stops
+  # compiling (#4088). A crate nothing links as a library has nobody to protect:
+  # trusty-mpm ships as the `tm` executable, and a binary user gets a whole new
+  # executable, so its library API compatibility is not part of what they get.
+  #
+  # That is a claim about consumption, not about the API, and a skip list is the
+  # exact shape that stops protecting SILENTLY once the claim goes stale. So the
+  # premise is re-checked here instead of trusted: a workspace crate that depends
+  # on the excluded one REFUSES the skip. Nothing was compared, so this is a
+  # non-verdict rather than a break — preflight-publish.sh CHECK 5 reports it as
+  # "the gate could not run" and the publish still stops.
+  excl_reason="$(crate_exclusion_reason "$crate")"
+  if [[ -n "$excl_reason" ]]; then
+    if ! dependents="$(python3 "$PY_HELPER" dependents "$META_FILE" "$crate")"; then
+      echo "FAIL: TOOL ERROR — could not list workspace dependents of '${crate}'." >&2
+      exit "$EXIT_NO_VERDICT"
+    fi
+    if [[ -n "$dependents" ]]; then
+      {
+        echo "FAIL: EXCLUSION NO LONGER HOLDS — ${crate} is excluded from the SemVer gate"
+        echo "      because nothing depends on its library, but these workspace crates now do:"
+        printf '%s\n' "$dependents" | sed 's/^/        - /'
+        echo "      An exclusion that has stopped being true is a silent coverage hole, so the"
+        echo "      skip is REFUSED and NOTHING was compared. Delete the '${crate}' row from"
+        echo "      ${CRATE_EXCLUSIONS_REL} to restore full gating."
+      } >&2
+      exit "$EXIT_NO_VERDICT"
+    fi
+    echo "SKIP ${crate}: excluded by ${CRATE_EXCLUSIONS_REL} — ${excl_reason}"
+    skipped=$((skipped + 1))
+    continue
+  fi
 
   if [[ "$(pkg_field "$crate" publishable)" == "no" ]]; then
     echo "SKIP ${crate}: publish = false — never reaches crates.io"
