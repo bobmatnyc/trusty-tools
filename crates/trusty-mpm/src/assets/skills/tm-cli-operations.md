@@ -280,7 +280,18 @@ session picker — a numbered menu of live managed sessions. Actions:
 - `<N>` — connect to session N.
 - **`d<N>`** (or `d <N>`) — **delete** the session at slot N (#2304). A
   confirm prompt guards it, and the delete is routed correctly for managed vs
-  local sessions.
+  local sessions. The only form that can delete a RUNNING session.
+- **`d <glob>`** — **bulk delete by tmux name** (#5539), e.g. `d tm-test-*`.
+  Glob only (`*`, `?`, `[…]`); a plain word is not a pattern, so `d delete`
+  stays unrecognised. Deletes only `stopped`/`errored` matches — running ones
+  are listed as `keep` and need `d<N>`. Excludes your own session, skips
+  already-deleted rows, and never matches a session with an empty tmux name.
+  Prints every match marked `DELETE`/`keep`, then asks for the number of
+  `DELETE` rows typed back (the prompt does not print it, so a bulk delete
+  cannot be confirmed unread). No match = says so, deletes nothing.
+- **`d <glob> --dry-run`** (flag on either side) — preview, delete nothing.
+  ⚠️ After a `tmux kill-server`/reboot every session reads `stopped`, so `d *`
+  proposes the whole fleet. Dry-run any broad pattern first.
 - Piped / `--json` / non-TTY invocations degrade to a static, pipeable list
   (never block on stdin). `tm ls --projects` (`-p`) shows the repo-alias /
   project registry instead of sessions.
@@ -307,6 +318,8 @@ tm session prune --state ephemeral|stopped|decommissioned|all [--dry-run] [--inc
 tm session decommission-ephemeral               # tear down all test/throwaway sessions
 tm session prune-worktrees [--force]            # remove orphaned .worktrees/ dirs (default dry-run)
 ```
+
+To clear a batch by NAME rather than state, use the picker's `d <glob>` above.
 
 The `.worktrees/` path above is what `tm`'s own session provisioning writes
 today; it is NOT the canonical worktree home. Hand-provisioned and
