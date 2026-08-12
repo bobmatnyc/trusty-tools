@@ -9,6 +9,7 @@
 //! Test: `all_tools_returns_expected_set`, `execute_tool_dispatches_known_tools`
 //! in `web::tests`.
 
+use crate::kg_write::CachePolicy;
 use crate::service::helpers::{collect_palace_stats, list_palaces_blocking, open_palaces_blocking};
 use crate::web::{load_user_config, palace_info_from, DreamStatusPayload};
 use crate::AppState;
@@ -522,6 +523,15 @@ async fn execute_create_memory(
 /// past 20 facts, or land an unbounded one — defeating both limits through the
 /// path users hit most routinely. The refusal is returned as `{"error": …}`
 /// like every other failure here, so the model sees it and can retire a fact.
+///
+/// #4905: it also owed the prompt-cache rebuild and never ran it, so a user who
+/// told the assistant to remember a standing rule got a success report and a
+/// rule that reached no later turn. Routing through
+/// [`crate::kg_write::assert_triple`] makes that structural rather than
+/// remembered.
+/// Test: `chat_kg_assert_refreshes_prompt_cache`,
+/// `chat_kg_assert_reports_tier_s_refusal_without_writing` in
+/// `web::tests::chat_tests`.
 async fn execute_kg_assert(
     state: &AppState,
     palace_id: &str,
@@ -537,15 +547,6 @@ async fn execute_kg_assert(
         Ok(h) => h,
         Err(e) => return json!({ "error": format!("open palace {palace_id}: {e:#}") }),
     };
-    // Bound to `_admission` so the admission lock is held across `kg.assert`.
-    let _admission = match crate::prompt_facts::check_tier_s_admission(
-        state, &handle, subject, predicate, object,
-    )
-    .await
-    {
-        Ok(a) => a,
-        Err(e) => return json!({ "error": format!("{e:#}") }),
-    };
     let triple = Triple {
         subject: subject.to_string(),
         predicate: predicate.to_string(),
@@ -555,8 +556,10 @@ async fn execute_kg_assert(
         confidence,
         provenance: Some("chat:assistant".to_string()),
     };
-    match handle.kg.assert(triple).await {
-        Ok(()) => json!({ "status": "asserted" }),
-        Err(e) => json!({ "error": format!("kg assert: {e:#}") }),
+    // #4905: the shared entry point owns admission, the write, and the
+    // prompt-cache refresh, so a fact written from chat reaches later turns.
+    match crate::kg_write::assert_triple(state, &handle, triple, CachePolicy::Inline).await {
+        Ok(_) => json!({ "status": "asserted" }),
+        Err(e) => json!({ "error": format!("{e:#}") }),
     }
 }
