@@ -886,14 +886,16 @@ impl PalaceHandle {
         })
     }
 
-    /// List drawers with optional room/tag filters, sorted by importance desc.
+    /// List drawers with optional room/tag filters, most important first.
     ///
     /// Why: CLI `list` and MCP introspection need a uniform read view over the
     /// in-memory drawer table without exposing the lock semantics.
-    /// What: Snapshots the drawer table, applies filters, sorts by importance
-    /// descending, and truncates to `limit`.
+    /// What: Snapshots the drawer table, applies filters, orders by
+    /// [`drawer_listing_order`], and truncates to `limit`.
     /// Test: `cli_list_filters_by_room` writes drawers in distinct rooms and
-    /// asserts the room filter narrows the list.
+    /// asserts the room filter narrows the list;
+    /// `list_drawers_keeps_the_newest_drawer_within_an_importance_tie` covers
+    /// what `limit` cuts when importance ties.
     pub fn list_drawers(
         &self,
         room: Option<RoomType>,
@@ -921,11 +923,8 @@ impl PalaceHandle {
             .cloned()
             .collect();
         drop(drawers);
-        filtered.sort_by(|a, b| {
-            b.importance
-                .partial_cmp(&a.importance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // #4836: importance alone left `limit` cutting on drawer-UUID order.
+        filtered.sort_by(super::types::drawer_listing_order);
         filtered.truncate(limit);
         filtered
     }

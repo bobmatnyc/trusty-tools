@@ -1,0 +1,7 @@
+Fixed
+
+- Drawer listings no longer let `limit` cut on drawer-UUID order, which hid the newest drawers from `memory_list` ([#4836](https://github.com/bobmatnyc/trusty-tools/issues/4836))
+  - `PalaceHandle::list_drawers` and `list_drawers_in_wing` ranked on `importance` alone before truncating. Rust's sort is stable, so drawers tied on importance kept the drawer table's own order — UUID ascending, as the store iterates it — and `limit` cut on that. Importance is effectively bimodal in a live palace (1.0 for curated facts, 0.5 for everything else), so the tie-break decided almost every listing.
+  - Measured on the `trusty-tools` palace: `memory_list(tag = "pre-authorized", limit = 12)` matched 94 drawers and returned the 12 with the smallest UUIDs. All nine drawers written that day fell outside the window, including the one the caller was looking for, at index 62 of 94.
+  - Both listers now share one comparator: `importance` descending, then `created_at` descending, then `id` ascending. Importance stays the primary key, so curated essentials still lead; recency only breaks ties, and the trailing `id` makes the order total so equal drawers cannot swap between calls.
+  - `dedup_gate` in `trusty-memory` is fixed by the same change. It asked `list_drawers` for "recent drawers" to compare against a 10-minute window, and was handed an arbitrary UUID-ordered slice that mostly predated the window, so near-duplicate detection degraded on any palace larger than its scan limit.
