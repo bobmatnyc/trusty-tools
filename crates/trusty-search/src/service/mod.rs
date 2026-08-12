@@ -40,6 +40,9 @@ pub mod ui;
 pub mod walker;
 pub mod warm_boot;
 pub mod watch_loop;
+/// #4731: condition-based waiting shared by every watcher test in this module.
+#[cfg(test)]
+pub(crate) mod watch_test_support;
 pub mod watcher;
 pub mod watcher_manager;
 

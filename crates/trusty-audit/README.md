@@ -5,9 +5,10 @@ codebases, and returns a report. It installs the pinned tools it needs
 (`tga`, `trusty-analyze`, `trusty-review`) and drives the audit workflow —
 "really an installer runner".
 
-**Status: scaffold (#5502).** The crate, its working-directory layout, and the
-CLI surface exist. The audit run, package assembly, signing and the desktop
-shell do not — they are later milestones on #5473 / #5477.
+**Status (#5502, #5495).** The crate, its working-directory layout, the CLI
+surface, and pinned tool installation exist. The audit run, package assembly,
+signing and the desktop shell do not — they are later milestones on
+#5473 / #5477.
 
 ## Shape: a library with a CLI over it
 
@@ -31,7 +32,8 @@ launch an unattended sweep.
 trusty-audit                    # guided flow
 trusty-audit workdir            # create the working directory, print what lands where
 trusty-audit repos              # repositories this engagement is configured to audit
-trusty-audit tools              # which pinned tools are installed
+trusty-audit tools              # which pinned tools are installed, at which versions
+trusty-audit install            # download and verify the pinned tools
 trusty-audit manifest           # engagement metadata from the companion manifest.toml
 ```
 
@@ -39,7 +41,8 @@ The same program is also installed as `taudit`, a shorter name for repeat use �
 `taudit workdir` and `trusty-audit workdir` are one binary built from one
 `src/main.rs` (the `trusty-installer` / `tctl` precedent).
 
-Global options: `--work-dir <DIR>` and `--manifest <FILE>`.
+Global options: `--work-dir <DIR>`, `--manifest <FILE>`, and `--config <FILE>`
+(the engagement config, default `./engagement.toml`).
 
 ## The working directory — what is written where
 
@@ -76,11 +79,53 @@ message either.
 
 ## Tool downloads
 
-`tools::install` is a **seam**, not an implementation. Downloading, verifying
-and placing binaries is `trusty-installer`'s domain, and #5491 is adding the
-pinned, fail-closed entry point this crate will call. Until then the seam
-returns an error rather than falling back to anything — a bespoke download here
-would duplicate that domain, which CLAUDE.md's common-entry-point rule forbids.
+`trusty-audit install` fetches `tga`, `trusty-analyze` and `trusty-review` at
+the exact versions the engagement config pins, and installs all three or none.
+There is no download, checksum or extraction code in this crate: it calls
+`trusty_installer::download::pinned::install_pinned_set`, which owns that domain
+(#5491, #5495). `cargo install` is unreachable from that path, so a failure is
+never a locally-built substitute.
+
+The versions come from the engagement config, which is required — there is no
+"latest" and no default:
+
+```toml
+[tools]
+tga = "2.9.4"
+trusty-analyze = "0.9.2"
+# Pin the artifact's bytes as well as its version, when the handoff was built
+# with a recorded digest.
+trusty-review = { version = "0.15.1", sha256 = "9f86d0…" }
+```
+
+All three keys are required. A config pinning two of them does not parse, which
+is deliberate: an unpinned tool is one that would resolve to whatever is
+current, and #5454 is what a mismatched triple costs — a new `tga` paired with
+an old `trusty-review` produced a deterministic report and exited 0.
+
+**What it refuses.** A checksum that does not match, an artifact that cannot be
+downloaded, a binary reporting a version other than the pin, a version that was
+never published, a `tools/` directory that is really a symlink pointing outside
+the working directory. Each installs nothing and exits non-zero. Whether the
+install directory is clean is stated by the error itself — `trusty-installer`
+distinguishes "nothing was placed" from an interrupted commit that left files,
+and this crate passes that distinction through rather than flattening it.
+
+**What it records.** On success, `state/tool-versions.toml` holds the exact
+triple, and `trusty-audit tools` reports it. A binary sitting in `tools/` that
+this client did not place shows as `UNVERIFIED` with no version, because a
+version it did not verify is one it cannot vouch for. The deliverable package
+(#5499) reads that record; it does not re-derive versions by running the tools.
+
+### Known v1 risk: a network that blocks binary downloads
+
+A recipient behind an egress proxy that blocks arbitrary binary downloads fails
+at `trusty-audit install` — in the first thirty seconds, naming the URL it could
+not reach — rather than an hour into an audit. That is as far as v1 goes.
+Nothing retries through a proxy, and there is no bundled-binary fallback
+variant; whether one should exist is deferred (#5495), not solved. The remedy
+today is to allow the GitHub release-asset host, or to ask for a package built
+for that network.
 
 ## Reading the manifest
 
@@ -97,7 +142,11 @@ Run progress is a separate record this crate will own (#5494).
 cargo check   -p trusty-audit --all-targets
 cargo clippy  -p trusty-audit --all-targets -- -D warnings
 cargo test    -p trusty-audit
+cargo test    -p trusty-audit -- --include-ignored   # adds the network refusals
 ```
+
+The `#[ignore]`d tests reach the GitHub release API and are the only ones that
+do; everything else runs offline.
 
 Note `-p trusty-audit` is the Cargo package name; `trusty-audit` and `taudit`
 are its two binary targets.

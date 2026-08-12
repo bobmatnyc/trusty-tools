@@ -11,8 +11,11 @@
 //! task. The debouncer is held inside the returned struct — dropping it stops
 //! the watcher cleanly.
 //!
-//! Test: `cargo test -p trusty-search-service watcher` writes a file in a
-//! `tempfile::TempDir` and asserts that a `Modified` event arrives within 1s.
+//! Test: `modified_event_emitted_within_one_second` and
+//! `removed_event_emitted_on_delete` below. Each re-saves a file in a
+//! `tempfile::TempDir` once per debounce window and waits for the matching
+//! event, rather than asserting a fixed deadline — see
+//! `crate::service::watch_test_support` for why (#4731).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -93,79 +96,109 @@ impl FileWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::watch_test_support::await_watch_condition;
     use std::fs;
-    use std::time::Duration;
+    use std::sync::Arc;
     use tokio::sync::mpsc;
-    use tokio::time::timeout;
+    use tokio::sync::Mutex;
 
-    /// Modifying a file inside the watched root produces a `Modified` event
-    /// within ~1s (covers the 500ms debounce + scheduling jitter).
+    /// Drain everything queued so far and report whether any event matched.
+    ///
+    /// Stray events (tempdir creation, parent-directory mtime updates) are
+    /// tolerated: only a match ends the wait.
+    async fn saw_event(
+        rx: &Arc<Mutex<mpsc::UnboundedReceiver<WatchEvent>>>,
+        want: impl Fn(&WatchEvent) -> bool,
+    ) -> bool {
+        let mut rx = rx.lock().await;
+        while let Ok(event) = rx.try_recv() {
+            if want(&event) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `file_name()` rather than `ends_with()`: the watcher delivers the
+    /// canonicalized path, so this survives macOS resolving `/tmp` →
+    /// `/private/var/folders/…` and any future path-normalization change.
+    fn is_named(path: &std::path::Path, name: &str) -> bool {
+        path.file_name().and_then(|n| n.to_str()) == Some(name)
+    }
+
+    /// Modifying a file inside the watched root produces a `Modified` event.
+    ///
+    /// #4731: the save is re-applied until the event arrives — a fixed sleep
+    /// then a single write cannot survive an FSEvents queue overflow, which
+    /// reaches this layer as no event at all.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn modified_event_emitted_within_one_second() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rx = Arc::new(Mutex::new(rx));
 
         let _watcher = FileWatcher::start(dir.path().to_path_buf(), tx).expect("watcher starts");
 
-        // Give the OS watcher a moment to install its kqueue/inotify hooks
-        // before generating events; otherwise the very first write can be lost.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
         let file_path = dir.path().join("hello.txt");
-        fs::write(&file_path, b"hello").expect("write file");
+        let saw = {
+            let rx = Arc::clone(&rx);
+            await_watch_condition(
+                |generation| {
+                    fs::write(&file_path, format!("hello {generation}")).expect("write file");
+                },
+                move || {
+                    let rx = Arc::clone(&rx);
+                    async move {
+                        saw_event(&rx, |event| {
+                            matches!(event, WatchEvent::Modified(p) if is_named(p, "hello.txt"))
+                        })
+                        .await
+                    }
+                },
+            )
+            .await
+        };
 
-        // Drain events until we see a Modified for our path or time out. We
-        // tolerate stray Modified events (e.g., tempdir creation events on macOS).
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let event = timeout(remaining, rx.recv())
-                .await
-                .expect("event arrives before deadline")
-                .expect("channel still open");
-            if let WatchEvent::Modified(p) = event {
-                // Use file_name() rather than ends_with() so the assertion is
-                // immune to macOS resolving /tmp → /private/var/folders/…
-                // (the watcher delivers the canonicalized path; ends_with does
-                // component matching which is correct, but file_name() is more
-                // explicit and also survives any future path-normalization changes).
-                if p.file_name().and_then(|n| n.to_str()) == Some("hello.txt") {
-                    return;
-                }
-            }
-        }
+        assert!(saw, "no Modified event for hello.txt arrived");
     }
 
     /// Deleting a previously-created file produces a `Removed` event.
+    ///
+    /// #4731: each generation recreates and re-deletes the file, so a dropped
+    /// delete event is retried instead of stranding the test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn removed_event_emitted_on_delete() {
         let dir = tempfile::tempdir().expect("tempdir");
         let file_path = dir.path().join("doomed.txt");
         fs::write(&file_path, b"transient").expect("write file");
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rx = Arc::new(Mutex::new(rx));
         let _watcher = FileWatcher::start(dir.path().to_path_buf(), tx).expect("watcher starts");
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let saw = {
+            let rx = Arc::clone(&rx);
+            await_watch_condition(
+                |generation| {
+                    // Recreate then delete: the debouncer coalesces the pair
+                    // into one event whose path no longer exists, which is the
+                    // `Removed` classification under test.
+                    fs::write(&file_path, format!("transient {generation}")).expect("write file");
+                    fs::remove_file(&file_path).expect("delete file");
+                },
+                move || {
+                    let rx = Arc::clone(&rx);
+                    async move {
+                        saw_event(&rx, |event| {
+                            matches!(event, WatchEvent::Removed(p) if is_named(p, "doomed.txt"))
+                        })
+                        .await
+                    }
+                },
+            )
+            .await
+        };
 
-        fs::remove_file(&file_path).expect("delete file");
-
-        // Drain events until we see a Removed for our path or time out. We
-        // tolerate stray Modified events that some platforms emit for parent
-        // directory mtime updates.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let event = timeout(remaining, rx.recv())
-                .await
-                .expect("event arrives before deadline")
-                .expect("channel still open");
-            if let WatchEvent::Removed(p) = event {
-                // file_name() comparison is canonical-path-safe (macOS /tmp symlink).
-                if p.file_name().and_then(|n| n.to_str()) == Some("doomed.txt") {
-                    return;
-                }
-            }
-        }
+        assert!(saw, "no Removed event for doomed.txt arrived");
     }
 }
