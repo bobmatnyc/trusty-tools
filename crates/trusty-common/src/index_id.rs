@@ -19,8 +19,9 @@
 //! basename, preserved verbatim for backward-compatibility with already-indexed
 //! projects). No global state; pure functions.
 //!
-//! Test: `cargo test -p trusty-common -- index_id::tests` covers basename
-//! derivation, the git-root walk, and the no-marker fallback.
+//! Test: `cargo test -p trusty-common --features unconditional-only --
+//! index_id::tests` covers basename derivation, the git-root walk, and the
+//! no-marker fallback.
 
 use std::path::{Path, PathBuf};
 

@@ -270,6 +270,15 @@ postcard = { workspace = true }
 
 [features]
 default = []
+# #4901: names a test run that deliberately covers only the always-compiled
+# surface (banner, port, slug, data_dir, chat, tmux, …). Enables no module and
+# pulls in no dependency — its whole job is to be typed on the command line, so
+# that `cargo test -p trusty-common --features unconditional-only` says out loud
+# what the bare form used to hide: 328 of the crate's ~2062 tests ran, and the
+# feature-gated modules were never compiled. The `build.rs` zero-feature guard
+# rejects the bare form; this is the documented way through it when the gated
+# modules genuinely are not what you changed.
+unconditional-only = []
 # Enables the `docgen` module: marker-delimited generated documentation
 # regions (`<!-- BEGIN GENERATED: <id> -->`) plus the MCP-tool-table renderer
 # and the check-or-rewrite gate the consumer crates' `tests/generated_docs.rs`

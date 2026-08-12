@@ -28,6 +28,28 @@ Why `cargo test --workspace` is absent from rungs 1–3, and the "scope down,
 never scope away" line that constrains picking a lower rung, are stated with the
 ladder itself in [`CLAUDE.md`](../../CLAUDE.md) — not repeated here.
 
+### `-p <crate>` is only a gate when the crate's default features compile the code
+
+Every `-p <crate>` cell above assumes the crate's default feature set compiles
+what you changed. `trusty-common` declares `default = []` and gates 25+ modules,
+so `cargo test -p trusty-common` used to run 328 of the crate's ~2062 tests and
+exit 0 — a green that covered neither `memory_core` nor `uds` nor `sld`, and
+held even when a `memory_core` file did not compile (#4901; PR #4899 shipped on
+that green). Since #4901 that form is a `compile_error!` instead. Substitute
+these wherever a rung says `cargo test -p trusty-common`:
+
+| What you changed | Command |
+|---|---|
+| `memory_core` | `cargo test -p trusty-common --features memory-core,embedder-test-support` |
+| any other gated module | `cargo test -p trusty-common --features <feature>` |
+| only unconditional modules | `cargo test -p trusty-common --features unconditional-only` |
+
+The same shape exists wherever a non-default feature gates real code —
+`trusty-common`'s `codex-config` is enabled by no crate in the workspace, so even
+`cargo clippy --workspace` never compiles it and CI lints it in a dedicated step
+(#5264). Before reading a crate-scoped green as a gate, check whether the module
+you edited is behind a `#[cfg(feature = …)]` the command did not enable.
+
 ## The Three Stages in Cargo Terms
 
 `Skill(skill="tm-workflow")` ("Test Scope Widens by Stage") sets the framework

@@ -54,11 +54,12 @@
 //! initialize, `404` → available-index signpost) is what makes ids findable;
 //! the two changes are complements, and neither substitutes for the other.
 //!
-//! Test: `cargo test -p trusty-common -- project_index_id` — the sibling
-//! `project_index_id_tests.rs` covers sibling clones, linked worktrees,
-//! differing operators, remoteless directories, symlinked roots, determinism,
-//! the id charset, and the origin/operator drift cases enumerated in
-//! [`ProjectIdentity::index_id`]'s `Known limitation` block.
+//! Test: `cargo test -p trusty-common --features unconditional-only --
+//! project_index_id` — the sibling `project_index_id_tests.rs` covers sibling
+//! clones, linked worktrees, differing operators, remoteless directories,
+//! symlinked roots, determinism, the id charset, and the origin/operator drift
+//! cases enumerated in [`ProjectIdentity::index_id`]'s `Known limitation`
+//! block.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
