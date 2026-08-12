@@ -38,6 +38,9 @@ sync-ui:
 	rm -rf $(UI_EMBED)
 	cp -r $(UI_DIST) $(UI_EMBED)
 	@echo ">> synced $(UI_DIST) → $(UI_EMBED)"
+	# #3606: the mirror above wipes ui-dist/, so the stamp recording which source
+	# this bundle came from is written after it, never before.
+	@bash $(MAKEFILE_DIR)../../scripts/stamp-ui-bundle.sh trusty-search
 
 ## Build UI + sync (required before cargo publish)
 release-prep: build-ui sync-ui
