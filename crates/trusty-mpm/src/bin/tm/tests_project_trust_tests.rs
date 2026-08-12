@@ -6,14 +6,15 @@
 //! `_tests.rs` get the 1500-SLOC test-file cap.
 //! What: CLI parse round-trips for `ProjectAction::Trust`, plus a behavioral
 //! test driving `commands::project::trust_cmd` (the local, daemon-free
-//! grant/revoke handler) against a faked `$HOME` so it never touches the
-//! operator's real trust store.
+//! grant/revoke handler) against an injected store root so it never touches
+//! the operator's real trust store — and never repoints the process's `$HOME`
+//! to get there (#5544).
 //! Test: this file IS the test module.
 
 use clap::Parser;
 
 use crate::cli::{Cli, Command, ProjectAction};
-use crate::commands::project::trust_cmd;
+use crate::commands::project::trust_cmd_in;
 
 #[test]
 fn cli_parses_project_trust() {
@@ -46,63 +47,70 @@ fn cli_parses_project_trust_revoke() {
     }
 }
 
-/// Point `$HOME` at `home` for the body, restoring it afterwards even on
-/// panic — mirrors the equivalent guard in `custom_mcp_tests.rs`.
-fn with_fake_home<F: FnOnce()>(home: &std::path::Path, body: F) {
-    let prev = std::env::var("HOME").ok();
-    // SAFETY: callers are `#[serial_test::serial]`, so no other thread races
-    // this set/restore; the restore runs regardless of a panic in `body`.
-    unsafe { std::env::set_var("HOME", home) };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
-    match prev {
-        Some(p) => unsafe { std::env::set_var("HOME", p) },
-        None => unsafe { std::env::remove_var("HOME") },
-    }
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
-}
-
 #[test]
-#[serial_test::serial]
 fn project_trust_grants_and_revokes() {
-    // Why: `trust_cmd` is the only way to flip `core::project_trust`'s
+    // Why: `trust_cmd_in` is the only way to flip `core::project_trust`'s
     // user-scope state; this proves the full grant -> query -> revoke cycle
-    // through the actual CLI handler, isolated to a faked `$HOME`.
-    let home = tempfile::tempdir().unwrap();
+    // through the actual CLI handler.
+    //
+    // #5544: the store ROOT is injected, not reached via a repointed `$HOME`.
+    // The previous revision pointed the process's `$HOME` at a tempdir behind
+    // `#[serial]`. `cargo test` runs a target's tests as threads in ONE
+    // process, so that write was visible to every sibling for its duration,
+    // and `#[serial]` excludes only other `#[serial]` tests. `$HOME` is read
+    // transitively — `dirs::home_dir`, `FrameworkPaths`, and the three-tier
+    // agent-roster scan all consult it — so the set of readers that could
+    // straddle the repoint was unbounded. `trust_cmd_in` removes the write;
+    // `#[serial]` is gone with it.
+    let store_root = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let project_dir = project.path().to_string_lossy().to_string();
+    let root = store_root.path();
 
-    with_fake_home(home.path(), || {
-        assert!(!trusty_mpm::core::project_trust::is_project_trusted(
-            project.path()
-        ));
+    assert!(!trusty_mpm::core::project_trust::is_project_trusted_at(
+        project.path(),
+        root
+    ));
 
-        trust_cmd(Some(project_dir.clone()), false).expect("trust succeeds");
-        assert!(trusty_mpm::core::project_trust::is_project_trusted(
-            project.path()
-        ));
+    trust_cmd_in(Some(project_dir.clone()), false, root).expect("trust succeeds");
+    assert!(trusty_mpm::core::project_trust::is_project_trusted_at(
+        project.path(),
+        root
+    ));
 
-        // Trust state must live under the FAKE home, never inside the
-        // project directory itself (a cloned repo must not be able to
-        // self-trust).
-        assert!(
-            !project.path().join("project-trust.json").exists(),
-            "trust state must never be written inside the project directory"
-        );
-        let store_path = home
-            .path()
-            .join(".trusty-tools")
-            .join("trusty-mpm")
-            .join("project-trust.json");
-        assert!(
-            store_path.exists(),
-            "trust state must live under the user-scope tm config dir"
-        );
+    // Trust state must live under the injected store root, never inside the
+    // project directory itself (a cloned repo must not be able to self-trust).
+    assert!(
+        !project.path().join("project-trust.json").exists(),
+        "trust state must never be written inside the project directory"
+    );
+    assert!(
+        root.join("project-trust.json").exists(),
+        "trust state must live under the user-scope tm config dir"
+    );
 
-        trust_cmd(Some(project_dir), true).expect("revoke succeeds");
-        assert!(!trusty_mpm::core::project_trust::is_project_trusted(
-            project.path()
-        ));
-    });
+    trust_cmd_in(Some(project_dir), true, root).expect("revoke succeeds");
+    assert!(!trusty_mpm::core::project_trust::is_project_trusted_at(
+        project.path(),
+        root
+    ));
+}
+
+/// The production root the injected one stands in for.
+///
+/// Why (#5544): `trust_cmd_in` takes the root, so nothing else asserts WHERE
+/// production puts the store. Reading `$HOME` is safe — only writing it is the
+/// hazard — so this pins the layout without reintroducing the mutation.
+/// What: asserts `trust_store_root()` resolves under the user-scope tm config
+/// directory rather than anywhere project-relative.
+/// Test: this function IS the test.
+#[test]
+fn trust_store_root_is_the_user_scope_tm_config_dir() {
+    let root = trusty_mpm::core::project_trust::trust_store_root()
+        .expect("a home directory resolves on every supported platform");
+    assert!(
+        root.ends_with(std::path::Path::new(".trusty-tools").join("trusty-mpm")),
+        "the trust store must live under the user-scope tm config dir, got {}",
+        root.display()
+    );
 }
