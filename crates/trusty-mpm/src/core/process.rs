@@ -52,15 +52,22 @@ pub fn find_claude_pid_in_tmux(
 ///
 /// Why: the `claude` process is a child of this shell; it is the root we walk
 /// the process tree from.
-/// What: runs `tmux display-message -t <session> -p '#{pane_pid}'` and parses
-/// the single integer it prints. Returns `None` when tmux is absent or the
-/// session does not exist.
+/// What: runs `tmux display-message -t <session> -p '#{pane_pid}'` (via
+/// `core::tmux::display_message_argv`/`run_tmux_argv_with_bin` — #2414) and
+/// parses the single integer it prints. Returns `None` when tmux is absent or
+/// the session does not exist.
 /// Test: exercised via `find_claude_pid_returns_none_for_nonexistent_session`.
 fn tmux_pane_pid(session_name: &str) -> Option<u32> {
-    let output = Command::new("tmux")
-        .args(["display-message", "-t", session_name, "-p", "#{pane_pid}"])
-        .output()
-        .ok()?;
+    // #2414: routes through the shared tmux binary-resolution + TCC-disclaim
+    // spawn primitive instead of a bare, unresolved `Command::new("tmux")`.
+    // `TmuxTarget::session` renders the BARE session name (never a
+    // `"session:%pane"` compound, which tmux would parse as a window spec).
+    let tmux_bin = crate::core::tmux::resolve_tmux_binary_or_bare();
+    let argv = crate::core::tmux::display_message_argv(
+        Some(&crate::core::tmux::TmuxTarget::session(session_name)),
+        "#{pane_pid}",
+    );
+    let output = crate::core::tmux::run_tmux_argv_with_bin(&tmux_bin, &argv).ok()?;
     if !output.status.success() {
         return None;
     }
