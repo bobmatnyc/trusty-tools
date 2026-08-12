@@ -119,6 +119,7 @@ impl OrchestratorBackend for MockBackend {
         tmux_window: Option<&str>,
         all_projects: bool,
         full: bool,
+        sessions_offset: usize,
     ) -> Result<Value, String> {
         Ok(json!({
             "sessions": [],
@@ -132,6 +133,7 @@ impl OrchestratorBackend for MockBackend {
             "tmux_window": tmux_window,
             "all_projects": all_projects,
             "full": full,
+            "sessions_offset": sessions_offset,
         }))
     }
     async fn session_context_pause(
@@ -859,6 +861,37 @@ async fn dispatch_session_context_catchup_forwards_tmux_window() {
             .as_str()
             .unwrap()
             .contains("tm-dogfood:0:@230")
+    );
+}
+
+/// Why: #5557 — pagination only rescues `full: true` if the offset the response
+/// hands back actually reaches the backend. A parser that dropped it would
+/// leave every caller pinned to page 0 and the rest of the history unreachable,
+/// with the suite green.
+/// What: the argument arrives at the backend; an absent or malformed one reads
+/// as 0 rather than erroring.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_session_context_catchup_forwards_sessions_offset() {
+    let offset_in = |args: serde_json::Value| async move {
+        let resp = dispatch(&MockBackend, call("session_context_catchup", args)).await;
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap().to_string();
+        serde_json::from_str::<Value>(&text).unwrap()["sessions_offset"]
+            .as_u64()
+            .unwrap()
+    };
+
+    assert_eq!(
+        offset_in(json!({ "project_dir": "/tmp/proj", "sessions_offset": 12 })).await,
+        12
+    );
+    assert_eq!(offset_in(json!({ "project_dir": "/tmp/proj" })).await, 0);
+    assert_eq!(
+        offset_in(json!({ "project_dir": "/tmp/proj", "sessions_offset": -3 })).await,
+        0,
+        "a malformed offset reads as the first page, not an error"
     );
 }
 

@@ -205,3 +205,48 @@ fn reporter_markdown_no_cost_section_when_zero() {
         "zero cost must omit the cost section"
     );
 }
+
+// ─── Coverage note (#5465) ────────────────────────────────────────────────────
+
+/// Why: a run where the provider failed on some periods writes a report that
+/// looks complete — same sections, just fewer findings. The coverage note is the
+/// only thing in the file that tells a reader the trajectory covers a smaller
+/// sample, so `render` dropping it reinstates exactly the silence #5464 closed,
+/// one layer downstream.
+/// What: renders with and without a note, asserting the note appears above the
+/// first section, that the profile body survives intact, and that a reporter
+/// with no note renders byte-identically to `render_markdown`.
+/// Test: this test itself.
+#[test]
+fn reporter_markdown_carries_the_coverage_note() {
+    let profile = make_profile();
+    let plain = Reporter::new("/tmp/unused", ReportFormat::Markdown);
+    assert_eq!(
+        plain.render(&profile),
+        render_markdown(&profile),
+        "with no note, render must be exactly the plain markdown"
+    );
+
+    let noted = Reporter::new("/tmp/unused", ReportFormat::Markdown)
+        .with_coverage_note("## Coverage\n\n1 of 2 period(s) reviewed; `2026-Q2` skipped.\n");
+    let out = noted.render(&profile);
+
+    assert!(
+        out.contains("2026-Q2` skipped"),
+        "the coverage note must reach the rendered report: {out}"
+    );
+    let note_at = out.find("## Coverage").expect("note present");
+    let trend_at = out.find("## Quality Trend").expect("trend section present");
+    assert!(
+        note_at < trend_at,
+        "the note must sit above the trend it qualifies (note {note_at}, trend {trend_at})"
+    );
+    assert!(
+        out.contains("# Developer Profile: Alice Smith"),
+        "the header must survive the splice: {out}"
+    );
+    assert!(
+        out.contains("Consistent ticket coverage"),
+        "the body must survive the splice: {out}"
+    );
+}
