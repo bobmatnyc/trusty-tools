@@ -46,6 +46,8 @@ fn every_capability_prints_the_same_under_both_names() {
     let work = tmp.path().join("work");
 
     // A bare invocation plus one per verb — the whole capability set.
+    // `install` is absent on purpose: it downloads, and this file is about the
+    // two binary names being one program, not about the network.
     let cases: [&[&str]; 6] = [
         &[],
         &["guided"],

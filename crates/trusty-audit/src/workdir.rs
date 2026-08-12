@@ -152,8 +152,12 @@ impl WorkDir {
     }
 
     /// Path of one layout area.
+    ///
+    /// This computes a path; it does not check what is at it. A pre-planted
+    /// symlink at an area would send writes outside the root and survive the
+    /// delete — `tools::install` refuses that before installing (#5495), and
+    /// repo cloning owes the same check when it lands (#5215).
     pub fn path(&self, area: Area) -> PathBuf {
-        // #5495: a pre-planted symlink here is inert until #5491 installs and repo cloning write through it.
         self.root.join(area.dir_name())
     }
 

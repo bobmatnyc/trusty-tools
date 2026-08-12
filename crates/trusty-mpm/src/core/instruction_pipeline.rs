@@ -30,7 +30,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::core::delegation_authority::resolve_roster;
+use crate::core::delegation_authority::resolve_roster_reporting;
 use crate::core::instruction_package::SectionId;
 
 /// Separator placed between merged instruction sections.
@@ -660,9 +660,29 @@ pub struct PipelineInput {
 #[derive(Debug, Clone)]
 pub struct PipelineOutput {
     /// How many delegatable agents were found.
+    ///
+    /// #5544: a FLOOR, not a total, whenever `unreadable_agent_paths` is
+    /// non-empty — an agent whose file could not be read is missing from it.
     pub agent_count: usize,
     /// True if the `CLAUDE.md` stub was created during this run.
     pub claude_md_created: bool,
+    /// Agent files and tier directories that exist but could not be read, and
+    /// are therefore absent from `agent_count` (#5544). Empty on the healthy
+    /// path; non-empty means the count understates the real roster.
+    pub unreadable_agent_paths: Vec<PathBuf>,
+}
+
+impl PipelineOutput {
+    /// Whether `agent_count` is the whole roster.
+    ///
+    /// Why (#5544): callers print `agent_count` to an operator, and a number
+    /// that silently understates the roster reads exactly like one that does
+    /// not. This is the check every such call site owes before presenting it.
+    /// What: `true` when nothing was lost to a failed read.
+    /// Test: `build_instructions_reports_an_unreadable_agent_file`.
+    pub fn roster_is_complete(&self) -> bool {
+        self.unreadable_agent_paths.is_empty()
+    }
 }
 
 /// A failure raised while composing session launch instructions.
@@ -732,7 +752,10 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
     // delegation section delivered to the PM — so `agent_count`, which
     // `tm session start` prints verbatim, cannot describe a different set of
     // agents than the PM received.
-    let agent_count = resolve_roster(&input.project_dir).len();
+    // #5544: `_reporting` so a file that failed to read is carried out of here
+    // rather than silently lowering the number `tm session start` prints.
+    let roster = resolve_roster_reporting(&input.project_dir);
+    let agent_count = roster.agents.len();
 
     // Side effect only: ensure the project CLAUDE.md stub exists so a fresh
     // workspace always has a place for project notes. Claude Code memory-loads
@@ -744,6 +767,7 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
     Ok(PipelineOutput {
         agent_count,
         claude_md_created,
+        unreadable_agent_paths: roster.unreadable,
     })
 }
 

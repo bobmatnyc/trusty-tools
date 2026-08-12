@@ -82,6 +82,19 @@ fn fake_tarball(binary: &str, version_line: &str) -> Vec<u8> {
     header.set_mode(0o755);
     header.set_cksum();
     ar.append_data(&mut header, binary, data).unwrap();
+
+    // #5495: every real release tarball in this workspace also ships a
+    // non-executable `LICENSE`, and every crate ships the SAME filename. The
+    // fixture carries one so a multi-tool set here has the same shape as one in
+    // production — without it the suite was green while `taudit install` could
+    // not install the real tga/trusty-analyze/trusty-review triple at all.
+    let license = b"MIT\n";
+    let mut doc = tar::Header::new_gnu();
+    doc.set_size(license.len() as u64);
+    doc.set_mode(0o644);
+    doc.set_cksum();
+    ar.append_data(&mut doc, "LICENSE", &license[..]).unwrap();
+
     ar.into_inner().unwrap().finish().unwrap()
 }
 
@@ -189,7 +202,15 @@ async fn run(
         releases_url: &releases_url,
         download_base: &download_base,
     };
-    install_pinned_set_at(&reqwest::Client::new(), &endpoints, tools, install_dir).await
+    // #5495: the same constructor `trusty-audit` now calls, so this suite proves
+    // the client the out-of-crate caller gets, not a lookalike built here.
+    install_pinned_set_at(
+        &crate::download::http_client(),
+        &endpoints,
+        tools,
+        install_dir,
+    )
+    .await
 }
 
 /// Assert nothing landed in the install directory — the "nothing was
@@ -709,6 +730,48 @@ async fn a_set_installs_every_tool_when_all_verify() {
     assert_eq!(installed[1].version, "2.0.0");
     assert!(dir.path().join("tool-a").exists());
     assert!(dir.path().join("tool-b").exists());
+}
+
+/// Why: Both fixtures ship a `LICENSE`, exactly as every real release tarball in
+/// this workspace does. Placing archive documentation made a multi-tool set
+/// collide on one filename and fail, so the three-tool set `trusty-audit` needs
+/// could never install (#5495). An install directory of executables also has no
+/// use for a `LICENSE` it cannot tell apart from another crate's.
+/// What: Installs a two-tool set; asserts the binaries land and the shared
+/// documentation file does not.
+/// Test: This is the test.
+#[tokio::test]
+async fn documentation_files_are_not_installed() {
+    let Some(target) = tier1() else { return };
+    let base = Fixture::new(target)
+        .publish("tool-a", "1.0.0", Flaw::None)
+        .publish("tool-b", "2.0.0", Flaw::None)
+        .start()
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let installed = run(
+        &base,
+        &[
+            PinnedTool::new("tool-a", "1.0.0"),
+            PinnedTool::new("tool-b", "2.0.0"),
+        ],
+        dir.path(),
+    )
+    .await
+    .expect("two tools shipping the same LICENSE must still install");
+
+    assert!(
+        !dir.path().join("LICENSE").exists(),
+        "archive documentation must not be installed"
+    );
+    assert!(
+        installed.iter().all(|i| i
+            .paths
+            .iter()
+            .all(|p| p.file_name() != Some("LICENSE".as_ref()))),
+        "a non-executable must not be reported as placed: {installed:?}"
+    );
 }
 
 /// Why: An unreachable release list must not be mistaken for "not published",

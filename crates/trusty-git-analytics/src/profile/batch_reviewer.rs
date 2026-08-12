@@ -1,0 +1,317 @@
+//! Per-period prompt assembly and finding-response parsing.
+//!
+//! Why: reviewing every period in one prompt would blow the context budget and
+//! blur the periods together, so each period is reviewed on its own — and the
+//! two halves that decide what a period's prompt says and how its answer is
+//! read are pure functions with no network in them.
+//! What: [`period_reviewer_system_prompt`], [`period_findings_schema`], and
+//! [`build_period_user_message`] produce the request text; [`parse_period_findings`]
+//! turns a response body into [`LongitudinalFinding`] values.
+//!
+//! The transport that carries these to a model is deliberately absent — #5464
+//! adds it on top of `trusty_common::inference`. That is why
+//! [`parse_period_findings`] takes a `&str` rather than a response struct.
+//!
+//! Test: `batch_reviewer_tests.rs`.
+
+use serde::Deserialize;
+use tracing::{debug, warn};
+
+use super::types::{Effort, Finding, LongitudinalFinding, PeriodBatch};
+
+// ─── Request parameters ───────────────────────────────────────────────────────
+
+/// Sampling temperature for a period-review call.
+///
+/// Low, because the task is extraction into a fixed schema rather than prose.
+pub const PERIOD_REVIEWER_TEMPERATURE: f32 = 0.2;
+
+/// Output-token ceiling for a period-review call.
+pub const PERIOD_REVIEWER_MAX_TOKENS: u32 = 2048;
+
+/// Diffs included in one period prompt, however many the sampler collected.
+const MAX_DIFFS_IN_PROMPT: usize = 10;
+
+// ─── Prompt construction ──────────────────────────────────────────────────────
+
+/// JSON Schema for the period-findings response.
+///
+/// Why: with a schema attached the model must emit a parseable object, which is
+/// what keeps [`parse_period_findings`] from silently returning nothing on a
+/// prose answer.
+/// What: returns the bare schema value. The caller wraps it in whatever
+/// structured-output type its provider takes.
+/// Test: `period_findings_schema_has_findings_property`.
+pub fn period_findings_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "description": {"type": "string"},
+                        "suggestion": {"type": "string"},
+                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                        "file": {"type": "string"},
+                        "severity": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "critical"]
+                        }
+                    },
+                    "required": ["kind", "description"]
+                }
+            }
+        },
+        "required": ["findings"]
+    })
+}
+
+/// System prompt for the period-review role.
+///
+/// Test: `batch_reviewer_system_prompt_contains_schema`.
+pub fn period_reviewer_system_prompt() -> &'static str {
+    r#"You are a senior software engineer reviewing a sample of one engineer's commits
+over a specific time window as part of a longitudinal quality analysis.
+
+## Task
+Identify code-quality findings present in the sampled diffs. Focus on:
+- Correctness bugs, error-handling gaps, resource leaks
+- Security weaknesses (injection, auth, secrets in code)
+- Logic errors, off-by-one issues, data-loss risks
+- Missing tests or test-quality issues
+- Recurring anti-patterns visible across multiple commits in this window
+
+## Output (REQUIRED)
+Populate the structured response with a `findings` array.
+Each finding must include:
+- `kind`: short category label (e.g. error_handling, security, logic)
+- `description`: concise description of the issue observed
+- `suggestion`: concrete improvement suggestion
+- `confidence`: float in [0.0, 1.0]
+- `file`: most relevant file path; use "multiple" if the issue spans files
+- `severity`: one of low, medium, high, critical
+
+`findings` may be an empty array if the sample looks clean."#
+}
+
+/// Build the user-turn message for one period.
+///
+/// Why: the model needs the period's numbers next to its diffs — a quality
+/// score alone is not reviewable, and diffs alone lose the period context that
+/// makes a trend visible.
+/// What: renders the period label and bounds, the commit statistics, and up to
+/// [`MAX_DIFFS_IN_PROMPT`] sampled diffs in fenced blocks.
+/// Test: `batch_reviewer_prompt_contains_period_label`,
+/// `batch_reviewer_prompt_handles_empty_diffs`.
+pub fn build_period_user_message(batch: &PeriodBatch) -> String {
+    let s = &batch.stats;
+    let mut msg = String::with_capacity(4096);
+
+    msg.push_str(&format!(
+        "## Period: {}\nFrom {} to {}\n\n",
+        s.period_label, s.since, s.until
+    ));
+
+    msg.push_str("### Statistics\n");
+    msg.push_str(&format!("- Commits: {}\n", s.commit_count));
+    msg.push_str(&format!("- Quality score: {:.2}\n", s.quality_score));
+    msg.push_str(&format!("- Ticketed %: {:.0}%\n", s.ticketed_pct * 100.0));
+
+    if !s.categories.is_empty() {
+        let mut cats: Vec<(&String, &u64)> = s.categories.iter().collect();
+        cats.sort_by_key(|(k, _)| k.as_str());
+        let cat_str: Vec<String> = cats.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        msg.push_str(&format!("- Categories: {}\n", cat_str.join(", ")));
+    }
+
+    if !s.repositories.is_empty() {
+        msg.push_str(&format!("- Repositories: {}\n", s.repositories.join(", ")));
+    }
+    msg.push('\n');
+
+    if batch.sampled_diffs.is_empty() {
+        msg.push_str("### Sampled diffs\n*(no diffs available for this period)*\n\n");
+    } else {
+        msg.push_str("### Sampled diffs\n\n");
+        for (i, diff) in batch
+            .sampled_diffs
+            .iter()
+            .enumerate()
+            .take(MAX_DIFFS_IN_PROMPT)
+        {
+            let cat = diff.category.as_deref().unwrap_or("unknown");
+            let effort = diff.effort.as_deref().unwrap_or("?");
+            msg.push_str(&format!(
+                "#### Diff {} — {} ({repo}) [category={cat}, effort={effort}]\n",
+                i + 1,
+                &diff.sha[..8.min(diff.sha.len())],
+                repo = diff.repository,
+            ));
+            msg.push_str(&format!("Commit: {}\n\n", diff.message));
+            msg.push_str("```diff\n");
+            msg.push_str(&diff.diff_text);
+            if !diff.diff_text.ends_with('\n') {
+                msg.push('\n');
+            }
+            msg.push_str("```\n\n");
+        }
+    }
+
+    msg.push_str(
+        "Please review the diffs above and populate the structured `findings` \
+         array as specified in the system prompt.\n",
+    );
+
+    msg
+}
+
+// ─── Response parsing ─────────────────────────────────────────────────────────
+
+/// Wire shape of the period-findings response body.
+#[derive(Debug, Deserialize)]
+struct PeriodFindingsBlock {
+    #[serde(default)]
+    findings: Vec<PeriodFindingWire>,
+}
+
+/// Wire shape of one finding in that body.
+#[derive(Debug, Deserialize)]
+struct PeriodFindingWire {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    suggestion: String,
+    #[serde(default)]
+    confidence: f32,
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    severity: String,
+}
+
+/// Parse a period-review response body into findings.
+///
+/// Why: one unparseable period must cost that period's findings, not the whole
+/// profile — a run over twelve quarters should not be lost because the eleventh
+/// answer came back as prose.
+/// What: tries a direct JSON parse first (structured output returns the object
+/// as the whole body), then falls back to extracting the last ```` ```json ````
+/// fence. Every failure path logs and returns an empty `Vec`.
+/// `trend_tag` is left `None` — only the synthesizer, which sees every period,
+/// can assign it.
+/// Test: `batch_reviewer_parses_findings_from_json`,
+/// `batch_reviewer_parses_direct_json`,
+/// `batch_reviewer_fail_safe_on_empty_response`,
+/// `batch_reviewer_fail_safe_on_malformed_json`,
+/// `batch_reviewer_fail_safe_on_prose_response`.
+pub fn parse_period_findings(body: &str, period_label: &str) -> Vec<LongitudinalFinding> {
+    let body = body.trim();
+    if body.is_empty() {
+        warn!(period = %period_label, "batch_reviewer: empty response — returning empty findings");
+        return Vec::new();
+    }
+
+    // Strategy 1: the body IS the JSON object (structured-output path).
+    // #5463: tga is edition 2021, so this cannot be the source's let-chain.
+    if body.starts_with('{') {
+        if let Ok(block) = serde_json::from_str::<PeriodFindingsBlock>(body) {
+            debug!(
+                period = %period_label,
+                findings = block.findings.len(),
+                "batch_reviewer: parsed via direct JSON"
+            );
+            return convert_period_block(block, period_label);
+        }
+    }
+
+    // Strategy 2: a fenced JSON block inside free text.
+    let Some(fence_start) = body.rfind("```json") else {
+        warn!(
+            period = %period_label,
+            "batch_reviewer: no JSON block in response — returning empty findings"
+        );
+        return Vec::new();
+    };
+
+    let after = &body[fence_start + 7..];
+    let Some(fence_end) = after.find("```") else {
+        warn!(period = %period_label, "batch_reviewer: unclosed JSON block — returning empty findings");
+        return Vec::new();
+    };
+
+    match serde_json::from_str::<PeriodFindingsBlock>(after[..fence_end].trim()) {
+        Ok(block) => convert_period_block(block, period_label),
+        Err(e) => {
+            warn!(
+                period = %period_label,
+                error = %e,
+                "batch_reviewer: JSON parse error — returning empty findings"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Convert wire findings into [`LongitudinalFinding`] values.
+///
+/// An empty `file` or `kind` becomes a sentinel rather than an empty string, so
+/// the Markdown report never renders a blank table cell.
+fn convert_period_block(
+    block: PeriodFindingsBlock,
+    period_label: &str,
+) -> Vec<LongitudinalFinding> {
+    block
+        .findings
+        .into_iter()
+        .map(|f| {
+            let effort = severity_to_effort(&f.severity);
+            let file = if f.file.is_empty() {
+                "unknown".to_string()
+            } else {
+                f.file
+            };
+            let kind = if f.kind.is_empty() {
+                "general".to_string()
+            } else {
+                f.kind
+            };
+            LongitudinalFinding {
+                period_label: period_label.to_string(),
+                finding: Finding::new(
+                    file,
+                    kind,
+                    f.description,
+                    f.suggestion,
+                    f.confidence,
+                    effort,
+                ),
+                trend_tag: None,
+            }
+        })
+        .collect()
+}
+
+/// Map a severity label to a remediation [`Effort`].
+///
+/// Unrecognised severities fall to `Low` — an unknown label must not inflate a
+/// finding's weight.
+///
+/// Test: `severity_to_effort_mapping`.
+pub fn severity_to_effort(severity: &str) -> Effort {
+    match severity.to_lowercase().as_str() {
+        "high" | "critical" => Effort::High,
+        "medium" => Effort::Medium,
+        _ => Effort::Low,
+    }
+}
+
+// ─── Unit tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "batch_reviewer_tests.rs"]
+mod tests;
