@@ -822,3 +822,96 @@ fn writer_open_queue_wait_is_bounded_under_sustained_contention() {
          {WRITER_COUNT} concurrent callers (issue #3992)"
     );
 }
+
+/// Restore a path's mode on drop, including while unwinding from a failed
+/// assertion, so a test can never leave `tempfile` an untraversable tree.
+#[cfg(unix)]
+struct RestoreMode(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+/// Why (#5549, ADR-0045): `open_palace` returns `anyhow::Error`, which flattens
+/// a genuine absence together with a denied read, a transient `EIO`/`ESTALE`,
+/// undecodable metadata, an open-queue timeout, and a redb lock conflict. Every
+/// caller that mapped `Err` to "not found" therefore told its client a palace
+/// it could not read does not exist. `open_error_is_absent` is what lets a
+/// caller keep the two apart, so if it answered `true` for a denied read the
+/// callers would be exactly where they started.
+/// What: creates a palace, evicts its cached handle so the next open reads
+/// disk, strips `palace.json` to mode 000, and asserts the resulting open error
+/// is NOT classified as absence — then asserts an id that was never created IS.
+/// Panics rather than passing vacuously if the denial does not take hold.
+/// Test: this test itself.
+#[cfg(unix)]
+#[test]
+fn open_error_is_absent_only_for_a_genuine_absence() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    reg.create_palace(
+        data_root,
+        Palace {
+            id: PalaceId::new("alpha"),
+            name: "alpha".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("alpha"),
+        },
+    )
+    .expect("create palace");
+    // Drop the cached handle so the next open goes back to disk.
+    reg.remove(&PalaceId::new("alpha"));
+
+    let target = data_root.join("alpha").join("palace.json");
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Declared after `dir` so it drops first: the mode is restored before
+    // `TempDir` walks the tree, including while unwinding from a failure below.
+    let _restore = RestoreMode(target.clone());
+
+    // Root bypasses the mode bits outright and some filesystems ignore them,
+    // so confirm the denial actually took hold. A vacuous pass here would
+    // assert nothing at all.
+    match std::fs::read(&target) {
+        Ok(_) => panic!(
+            "cannot exercise #5549: {} is still readable at mode 000. Run this suite as a \
+             non-root user on a filesystem that honours POSIX permission bits.",
+            target.display()
+        ),
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected the locked palace.json to deny reads, got {e}"
+        ),
+    }
+
+    // `PalaceHandle` is not `Debug`, so `expect_err` is unavailable here.
+    let denied = match reg.open_palace(data_root, &PalaceId::new("alpha")) {
+        Ok(_) => panic!("a palace.json that cannot be read must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        !PalaceRegistry::open_error_is_absent(&denied),
+        "a palace whose metadata could not be read was classified as absent — that is the \
+         #5549 coercion, and the HTTP callers render it as 404 'palace not found': {denied:#}"
+    );
+
+    let missing = match reg.open_palace(data_root, &PalaceId::new("never-created")) {
+        Ok(_) => panic!("an id with no palace on disk must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        PalaceRegistry::open_error_is_absent(&missing),
+        "a genuinely absent palace must still classify as absence, or every 404 the callers \
+         owe becomes a 500: {missing:#}"
+    );
+}

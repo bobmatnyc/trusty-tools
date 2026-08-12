@@ -16,7 +16,7 @@ use crate::memory_core::community::KnowledgeGap;
 use crate::memory_core::palace::{Palace, PalaceId};
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::concurrent_open::OpenIntent;
-use crate::memory_core::store::palace_store::PalaceStore;
+use crate::memory_core::store::palace_store::{PalaceStore, PalaceStoreError};
 use crate::palace_alias::PalaceAliasStore;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -486,6 +486,32 @@ impl PalaceRegistry {
         Self::backfill_rooms(&handle);
         self.register_arc(handle.clone());
         Ok(handle)
+    }
+
+    /// Does this [`Self::open_palace`] error mean the palace is genuinely not
+    /// there?
+    ///
+    /// Why (#5549, ADR-0045): `open_palace` returns `anyhow::Error`, which
+    /// flattens six unrelated failures into one opaque value — a genuinely
+    /// absent `palace.json`, a stat or read we were denied, a transient `EIO` /
+    /// `ESTALE` on a network mount, undecodable metadata, an open-queue timeout
+    /// (#3992), and a redb write-lock conflict inside
+    /// `PalaceHandle::open_with_intent`. A caller that maps that value straight
+    /// to "not found" tells its client the palace does not exist when in fact
+    /// nothing could determine whether it does, which is the same coercion
+    /// `load_palace` stopped making one layer down. This is the only place that
+    /// knows which of `open_palace`'s failure modes is absence, so the answer
+    /// lives here instead of being re-derived at each call site.
+    /// What: walks the `anyhow` chain for a [`PalaceStoreError`] and returns
+    /// `true` only for `NotFound`, whose sole production site in this crate is
+    /// `PalaceStore::load_palace`'s absence guard. Every other failure —
+    /// including `Io` and `Json` raised by that same call — returns `false`.
+    /// Test: `open_error_is_absent_only_for_a_genuine_absence`.
+    pub fn open_error_is_absent(err: &anyhow::Error) -> bool {
+        matches!(
+            err.downcast_ref::<PalaceStoreError>(),
+            Some(PalaceStoreError::NotFound(_))
+        )
     }
 
     /// Register a `ROOMS` row for every room the palace's drawers already use.

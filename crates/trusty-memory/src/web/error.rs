@@ -4,8 +4,8 @@
 //! handler submodule can import from one path without duplicating the
 //! lightweight error-wrapping logic.
 //! What: `ApiError` wraps an HTTP status code + message and converts to an
-//! axum `Response`; `open_handle` opens a palace by id and maps open
-//! failures to 404.
+//! axum `Response`; `open_handle` opens a palace by id and maps a genuine
+//! absence to 404 and every other open failure to 500.
 //! Test: `ApiError` conversions are exercised implicitly by every handler
 //! test; `delete_palace_refuses_when_drawers_present` and
 //! `remember_async_rejects_short_content` exercise `conflict` and
@@ -18,18 +18,29 @@ use axum::{
 };
 use serde_json::json;
 use trusty_common::memory_core::palace::PalaceId;
+use trusty_common::memory_core::PalaceRegistry;
 
 use crate::AppState;
 
-/// Open a palace handle by id, converting open failures to 404.
+/// Open a palace handle by id, mapping a genuine absence to 404 and every
+/// other open failure to 500.
 ///
 /// Why: Every handler that references a palace by id has to perform the same
 /// registry lookup and map the not-found path to an `ApiError`. Centralising
-/// the conversion avoids boilerplate and keeps the 404 message consistent.
-/// What: Calls `PalaceRegistry::open_palace`; maps `Err` to
-/// `ApiError::not_found(...)`.
+/// the conversion avoids boilerplate and keeps the messages consistent.
+/// Answering 404 for an open that merely could not be completed (#5549,
+/// ADR-0045) tells the client the palace does not exist, which sends an
+/// operator looking for a deleted palace instead of a denied read or a jammed
+/// redb lock — and the 404 reaches many more handlers here than at the two
+/// rename paths, since `/api/v1/kg/gaps`, `/api/v1/kg/aliases`, and the three
+/// `/api/v1/messages` endpoints all funnel through this one helper.
+/// What: Calls `PalaceRegistry::open_palace`; asks
+/// `PalaceRegistry::open_error_is_absent` which failure it got, and returns
+/// `ApiError::not_found` only for a genuine absence, `ApiError::internal`
+/// otherwise.
 /// Test: `delete_palace_returns_not_found_for_missing_id`,
-/// `kg_list_subjects_returns_distinct`.
+/// `kg_list_subjects_returns_distinct`,
+/// `unreadable_palace_is_500_not_404_at_the_web_open_handle`.
 pub(crate) fn open_handle(
     state: &AppState,
     id: &str,
@@ -37,7 +48,15 @@ pub(crate) fn open_handle(
     state
         .registry
         .open_palace(&state.data_root, &PalaceId::new(id))
-        .map_err(|e| ApiError::not_found(format!("palace not found: {id} ({e:#})")))
+        .map_err(|e| {
+            // #5549: every open failure mapped to 404, so a palace that could
+            // not be read was reported as one that is not there.
+            if PalaceRegistry::open_error_is_absent(&e) {
+                ApiError::not_found(format!("palace not found: {id} ({e:#})"))
+            } else {
+                ApiError::internal(format!("palace could not be loaded: {id} ({e:#})"))
+            }
+        })
 }
 
 /// Lightweight error type for HTTP handlers.
