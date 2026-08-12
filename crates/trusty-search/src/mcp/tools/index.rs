@@ -37,6 +37,24 @@ fn required_index_id(server: &McpServer, args: &Value) -> Result<String, Dispatc
         .ok_or_else(|| DispatchError::InvalidParams(super::types::MISSING_INDEX_ID.into()))
 }
 
+/// Read `key` as a non-empty array whose every entry is a string.
+///
+/// Why: `create_index` forwards `exclude_globs` verbatim into the HTTP body,
+/// and the daemon deserialises it as `Option<Vec<String>>` — a caller that
+/// passed `[1, 2]` would get a 422 from the daemon instead of an MCP-level
+/// answer. Validating here keeps the wire body well-typed.
+/// What: all-or-nothing. Returns `None` when the key is absent, is not an
+/// array, is empty, or holds ANY non-string entry. The last case used to drop
+/// just the offending entries, so `["a", 1, "b"]` registered an index filtered
+/// by two globs when the caller wrote three — a quieter outcome for the same
+/// typo that `[1, 2]` already rejected whole.
+/// Test: `create_index_forwards_exclude_globs`,
+/// `create_index_omits_malformed_exclude_globs` in `tests.rs`.
+fn string_array(args: &Value, key: &str) -> Option<Vec<Value>> {
+    let items = args.get(key)?.as_array()?;
+    (!items.is_empty() && items.iter().all(Value::is_string)).then(|| items.clone())
+}
+
 /// Route one of the eight index-management tool names to the correct daemon
 /// call.
 ///
@@ -112,6 +130,13 @@ pub(super) async fn dispatch_index_tool(
             // reached through a symlink.
             if let Some(follow) = args.get("follow_links").and_then(Value::as_bool) {
                 body["follow_links"] = Value::Bool(follow);
+            }
+            // #4356: `POST /indexes` has accepted `exclude_globs` since the
+            // repo-config work, but this tool never forwarded it, so an MCP
+            // caller could only register a whole tree and hope the built-in
+            // `SKIP_DIRS` + `.gitignore` filters were enough.
+            if let Some(globs) = string_array(args, "exclude_globs") {
+                body["exclude_globs"] = Value::Array(globs);
             }
             Some(server.post("/indexes", &body).await)
         }

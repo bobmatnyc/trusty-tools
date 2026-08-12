@@ -32,7 +32,20 @@ impl CodeIndexer {
     /// What: single-pass BM25 upsert, single-call HNSW `upsert_batch`, one
     /// corpus write lock for the whole batch, one entities write lock, then
     /// the (optional) graph rebuild.
-    /// Test: covered indirectly by `test_index_files_batch_*`.
+    ///
+    /// **The returned `chunks_dropped_by_cap` is the batch's only report that
+    /// part of it did not land, and it is the whole truth about that batch.**
+    /// Two places can drop a chunk for the `TRUSTY_MAX_CHUNKS` cap: the
+    /// pre-filter below (read lock, before any subsystem is touched) and
+    /// [`Self::commit_corpus`]'s re-check under the write lock, which catches
+    /// a corpus that grew between the two. Both totals are summed here, and
+    /// `chunks` counts only what actually reached the corpus — a caller that
+    /// treats `Ok` as "the whole batch landed" is wrong whenever
+    /// `chunks_dropped_by_cap` is non-zero. `CodeIndexer::index_file` turns a
+    /// non-zero count into an `Err` for exactly that reason.
+    /// Test: covered indirectly by `test_index_files_batch_*`;
+    /// `commit_parsed_batch_reports_cap_drops_in_timings` in
+    /// `indexer::tests::chunk_cap` pins the drop accounting.
     pub async fn commit_parsed_batch(
         &self,
         parsed: ParsedBatch,
@@ -128,7 +141,12 @@ impl CodeIndexer {
             self.commit_corpus_to_redb(&all_chunks, &entities_by_file)
                 .await;
         }
-        self.commit_corpus(&mut all_chunks).await;
+        // The pre-filter above read the corpus under a READ lock and released
+        // it; `commit_corpus` re-checks under the write lock. A concurrent
+        // commit that filled the remaining headroom in that window makes the
+        // two disagree, and the write-lock verdict is the authoritative one.
+        // Its count must reach the caller or that race is a silent drop.
+        let late_dropped = self.commit_corpus(&mut all_chunks).await;
         self.commit_entities(entities_by_file).await;
 
         let kg_ms = if defer_graph_rebuild {
@@ -145,11 +163,11 @@ impl CodeIndexer {
         self.spawn_incremental_persist(false);
 
         Ok(CommitTimings {
-            chunks: chunk_total,
+            chunks: chunk_total.saturating_sub(late_dropped),
             bm25_ms,
             vector_upsert_ms,
             kg_ms,
-            chunks_dropped_by_cap: pre_filter_dropped,
+            chunks_dropped_by_cap: pre_filter_dropped.saturating_add(late_dropped),
         })
     }
 
@@ -299,9 +317,17 @@ impl CodeIndexer {
     /// Why: single-lock insertion shrinks the write-lock window to milliseconds
     /// even for large batches.
     /// What: consumes `chunks` via `drain` so callers don't keep a stale copy.
-    /// Honours `max_chunks_per_index()` (issue #75).
-    /// Test: covered indirectly by every search test.
-    pub(crate) async fn commit_corpus(&self, chunks: &mut Vec<RawChunk>) {
+    /// Honours `max_chunks_per_index()` (issue #75) and RETURNS how many chunks
+    /// that cap dropped, so [`Self::commit_parsed_batch`] can fold the number
+    /// into `CommitTimings::chunks_dropped_by_cap`. The return value is
+    /// `#[must_use]`: dropping it is what made this cap silent, and the caller
+    /// reporting `Ok` while chunks vanished is the whole defect.
+    /// Test: `at_cap_index_file_is_an_error_not_a_silent_success` and
+    /// `commit_parsed_batch_reports_cap_drops_in_timings` in
+    /// `indexer::tests::chunk_cap`; covered indirectly by every search test.
+    #[must_use = "the cap-drop count is the only report that part of the batch \
+                  did not land; discarding it reports data loss as success"]
+    pub(crate) async fn commit_corpus(&self, chunks: &mut Vec<RawChunk>) -> usize {
         let cap = max_chunks_per_index();
         let mut corpus = self.chunks.write().await;
         let mut dropped = 0usize;
@@ -320,6 +346,7 @@ impl CodeIndexer {
                 dropped
             );
         }
+        dropped
     }
 
     /// Persist a committed batch to the durable redb corpus store (issue #28).
