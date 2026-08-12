@@ -16,9 +16,14 @@
 //! (separate zip parts, e.g. `word/header1.xml`) are intentionally out of
 //! scope for v1 — the body is the primary searchable content.
 //!
+//! Truncated input is a first-class case, not an edge case: the file watcher
+//! reads documents while Word is still writing them. A document ending inside
+//! an open element emits everything parsed so far — see [`close_open_tables`].
+//!
 //! Test: `test_extracts_paragraphs_preserving_breaks`,
 //! `test_table_rows_become_pipe_delimited_lines`,
 //! `test_heading_paragraphs_get_markdown_prefix`,
+//! `test_unterminated_table_still_emits_its_content`,
 //! `test_missing_document_xml_errors`, `test_not_a_zip_errors`.
 
 use std::collections::HashMap;
@@ -54,6 +59,18 @@ const STYLES_XML_PATH: &str = "word/styles.xml";
 /// Deeper Word headings clamp here rather than emitting `#######`, which no
 /// markdown reader treats as a heading.
 const MAX_HEADING_DEPTH: u8 = 6;
+
+/// Maximum `<w:tbl>` nesting depth that allocates a [`TableCtx`].
+///
+/// Why: the parse pushes one context per open table, so a crafted
+/// `document.xml` sitting under [`MAX_DOCUMENT_XML_BYTES`] could otherwise
+/// drive millions of allocated contexts from ~19 bytes of markup each. Real
+/// documents nest one or two deep; 16 is far past anything Word produces.
+/// What: tables opened past this depth are not tracked — their text still
+/// reaches the innermost tracked cell, so content degrades to plain text
+/// instead of being lost.
+/// Test: `test_table_nesting_depth_is_capped`.
+const MAX_TABLE_NESTING_DEPTH: u8 = 16;
 
 /// The `w:outlineLvl` value meaning "body text, not in the outline".
 ///
@@ -314,6 +331,81 @@ fn sink(out: &mut String, enclosing: &mut [TableCtx], block: &str, trailing: &st
     }
 }
 
+/// Close the open cell of the innermost table, pushing it onto that table's
+/// pending row.
+///
+/// Why: `</w:tc>` and the EOF unwind must close a cell identically, so both
+/// call this rather than each writing the step out. See [`close_table`].
+/// Test: `test_unterminated_row_matches_closed_row`.
+fn close_cell(tables: &mut [TableCtx]) {
+    if let Some(table) = tables.last_mut() {
+        let text = table.cell.take().unwrap_or_default();
+        table.row.push(normalize_cell(&text));
+    }
+}
+
+/// Emit the innermost table's pending row as a pipe-delimited line.
+///
+/// Why: shared by `</w:tr>` and the EOF unwind — see [`close_table`].
+/// What: emits nothing for an empty row; the first row of each table is
+/// followed by the markdown delimiter that makes it read as a table.
+/// Test: `test_table_rows_become_pipe_delimited_lines`,
+/// `test_unterminated_row_matches_closed_row`.
+fn close_row(out: &mut String, tables: &mut [TableCtx]) {
+    let Some((table, enclosing)) = tables.split_last_mut() else {
+        return;
+    };
+    if !table.row.is_empty() {
+        let mut block = format!("| {} |", table.row.join(" | "));
+        table.rows_emitted += 1;
+        if table.rows_emitted == 1 {
+            block.push_str("\n|");
+            for _ in 0..table.row.len() {
+                block.push_str(" --- |");
+            }
+        }
+        sink(out, enclosing, &block, "\n");
+    }
+    table.row.clear();
+}
+
+/// Pop the innermost table and close its block.
+///
+/// Why: `</w:tbl>` and the EOF unwind must agree byte for byte. A second,
+/// simpler EOF path that only approximated this is exactly what the paragraph
+/// flush already avoids, so the table flush routes through the same helpers.
+/// What: a table that emitted rows gets a blank line after it so the next
+/// paragraph does not read as one more row.
+/// Test: `test_paragraph_after_table_is_separated`,
+/// `test_unterminated_table_still_emits_its_content`.
+fn close_table(out: &mut String, tables: &mut Vec<TableCtx>) {
+    if tables.pop().is_some_and(|t| t.rows_emitted > 0) {
+        sink(out, tables, "", "\n");
+    }
+}
+
+/// Close every still-open table at EOF, innermost first.
+///
+/// Why: `.docx` files are read mid-write by the file watcher and arrive
+/// truncated over the network, and both end inside an open `<w:tbl>`. Without
+/// this the document indexes with no error and no warning while every table
+/// cell is missing (#4879). The paragraph path has had the equivalent
+/// trailing-flush guard all along.
+/// What: replays the same `</w:tc>` / `</w:tr>` / `</w:tbl>` sequence the
+/// well-formed path would have run, through the same three helpers, so the
+/// output is identical to the closed document's.
+/// Test: `test_unterminated_table_still_emits_its_content`,
+/// `test_unterminated_row_matches_closed_row`.
+fn close_open_tables(out: &mut String, tables: &mut Vec<TableCtx>) {
+    while !tables.is_empty() {
+        if tables.last().is_some_and(|t| t.cell.is_some()) {
+            close_cell(tables);
+        }
+        close_row(out, tables);
+        close_table(out, tables);
+    }
+}
+
 /// Normalize one cell's accumulated text for a pipe-delimited row.
 ///
 /// Why: the row delimiter is only meaningful if it cannot be confused with
@@ -362,6 +454,9 @@ fn paragraphs_from_document_xml(
     let mut in_ppr = false;
     let mut heading: Option<u8> = None;
     let mut tables: Vec<TableCtx> = Vec::new();
+    // Depth of `<w:tbl>` nesting beyond MAX_TABLE_NESTING_DEPTH, tracked so
+    // the matching `</w:tbl>` does not pop a table that was never pushed.
+    let mut over_depth: usize = 0;
 
     loop {
         match reader.read_event() {
@@ -427,46 +522,33 @@ fn paragraphs_from_document_xml(
                     _ => {}
                 }
             }
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"p" => {
-                heading = None;
-                para.clear();
-            }
+            // #4879: past MAX_TABLE_NESTING_DEPTH a table is not tracked at
+            // all — its rows and cells are ignored so their text falls
+            // through to the innermost tracked cell as plain prose.
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"tbl" => {
-                tables.push(TableCtx::default())
+                if over_depth > 0 || tables.len() >= MAX_TABLE_NESTING_DEPTH as usize {
+                    over_depth += 1;
+                } else {
+                    tables.push(TableCtx::default());
+                }
             }
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"tc" => {
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"tbl" => {
+                if over_depth > 0 {
+                    over_depth -= 1;
+                } else {
+                    close_table(&mut out, &mut tables);
+                }
+            }
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"tc" && over_depth == 0 => {
                 if let Some(table) = tables.last_mut() {
                     table.cell = Some(String::new());
                 }
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"tc" => {
-                if let Some(table) = tables.last_mut() {
-                    let text = table.cell.take().unwrap_or_default();
-                    table.row.push(normalize_cell(&text));
-                }
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"tc" && over_depth == 0 => {
+                close_cell(&mut tables)
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"tr" => {
-                if let Some((table, enclosing)) = tables.split_last_mut() {
-                    if !table.row.is_empty() {
-                        let mut block = format!("| {} |", table.row.join(" | "));
-                        table.rows_emitted += 1;
-                        if table.rows_emitted == 1 {
-                            block.push_str("\n|");
-                            for _ in 0..table.row.len() {
-                                block.push_str(" --- |");
-                            }
-                        }
-                        sink(&mut out, enclosing, &block, "\n");
-                    }
-                    table.row.clear();
-                }
-            }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"tbl" => {
-                if tables.pop().is_some_and(|t| t.rows_emitted > 0) {
-                    // Close the table block so the next paragraph is not
-                    // read as one more row.
-                    sink(&mut out, &mut tables, "", "\n");
-                }
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"tr" && over_depth == 0 => {
+                close_row(&mut out, &mut tables)
             }
             Ok(Event::End(e)) if e.local_name().as_ref() == b"p" => {
                 let text = para.trim_end();
@@ -489,11 +571,14 @@ fn paragraphs_from_document_xml(
         }
     }
     // A trailing run outside any `</w:p>` (malformed/truncated input) is
-    // still surfaced rather than silently dropped.
+    // still surfaced rather than silently dropped. It routes through `sink`
+    // so a run truncated inside a cell lands in that cell, which the unwind
+    // below then flushes.
     if !para.trim().is_empty() {
-        out.push_str(para.trim_end());
-        out.push('\n');
+        sink(&mut out, &mut tables, para.trim_end(), "\n");
     }
+    // #4879: same guarantee for a document truncated inside a `<w:tbl>`.
+    close_open_tables(&mut out, &mut tables);
     Ok(out)
 }
 
@@ -771,6 +856,95 @@ mod tests {
         );
         let text = paragraphs_from_document_xml(&body, &HashMap::new()).unwrap();
         assert!(text.contains("|\n\nAfter the table."), "{text}");
+    }
+
+    /// A `.docx` read mid-write (Word/LibreOffice still saving) or truncated
+    /// in transit ends inside its `<w:tbl>`. `</w:tr>` and `</w:tbl>` are the
+    /// only paths that flush table content, so without an EOF unwind the
+    /// document indexes "successfully" with every table cell missing — no
+    /// error, no warning. The live file watcher reaches exactly this shape.
+    #[test]
+    fn test_unterminated_table_still_emits_its_content() {
+        let truncated = "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>important data</w:t></w:r></w:p>";
+        let text = paragraphs_from_document_xml(truncated, &HashMap::new()).unwrap();
+        assert!(
+            text.contains("important data"),
+            "truncated table content was silently dropped: {text:?}"
+        );
+
+        // The EOF unwind is a second exit from the parse loop, so it must
+        // produce byte-identical output to the well-formed close path rather
+        // than an approximation of it.
+        let closed = format!("{truncated}</w:tc></w:tr></w:tbl>");
+        assert_eq!(
+            text,
+            paragraphs_from_document_xml(&closed, &HashMap::new()).unwrap(),
+            "EOF unwind must match the normal close path exactly"
+        );
+    }
+
+    /// A partially-written cell (EOF before `</w:tc>`) is the same failure one
+    /// element deeper.
+    #[test]
+    fn test_unterminated_row_matches_closed_row() {
+        let truncated = "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>\
+                         <w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p>";
+        let text = paragraphs_from_document_xml(truncated, &HashMap::new()).unwrap();
+        assert_eq!(
+            text,
+            paragraphs_from_document_xml(
+                &format!("{truncated}</w:tc></w:tr></w:tbl>"),
+                &HashMap::new()
+            )
+            .unwrap()
+        );
+        assert!(text.contains("| a | b |"), "{text}");
+    }
+
+    /// `tables` grows one entry per `<w:tbl>`, so a crafted `document.xml`
+    /// sitting under the 50 MiB cap could otherwise push it to millions of
+    /// allocated contexts. Past the cap the table degrades to plain text —
+    /// content is preserved, the stack is not.
+    #[test]
+    fn test_table_nesting_depth_is_capped() {
+        let depth = MAX_TABLE_NESTING_DEPTH as usize + 10;
+        let mut body = String::new();
+        for _ in 0..depth {
+            body.push_str("<w:tbl><w:tr><w:tc>");
+        }
+        body.push_str("<w:p><w:r><w:t>deep</w:t></w:r></w:p>");
+        for _ in 0..depth {
+            body.push_str("</w:tc></w:tr></w:tbl>");
+        }
+        let text = paragraphs_from_document_xml(&body, &HashMap::new()).unwrap();
+
+        assert!(
+            text.contains("deep"),
+            "content past the depth cap must degrade to text, not vanish: {text}"
+        );
+        // One delimiter per TRACKED table, and the cap is what bounds that
+        // count. Counting occurrences rather than LINES matters: a nested
+        // table renders inside its enclosing cell, where `normalize_cell`
+        // collapses it onto one line.
+        let delimiters = text.matches("---").count();
+        assert!(
+            delimiters <= MAX_TABLE_NESTING_DEPTH as usize,
+            "nesting past the cap still allocated a table context: {delimiters} delimiters for depth {depth}"
+        );
+    }
+
+    /// A malformed nested `<w:p>` must not discard the outer paragraph's
+    /// accumulated text.
+    #[test]
+    fn test_malformed_nested_paragraph_keeps_outer_text() {
+        let body = "<w:p><w:r><w:t>outer </w:t></w:r>\
+                    <w:p><w:r><w:t>inner</w:t></w:r></w:p></w:p>";
+        let text = paragraphs_from_document_xml(body, &HashMap::new()).unwrap();
+        assert!(
+            text.contains("outer"),
+            "outer paragraph text was discarded: {text:?}"
+        );
+        assert!(text.contains("inner"), "{text:?}");
     }
 
     #[test]
