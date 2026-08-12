@@ -16,6 +16,7 @@ use tempfile::tempdir;
 use uuid::Uuid;
 
 use super::layers::{L1_NO_SIMILARITY_PENALTY, uuid_prefix_eq};
+use super::types::L1_CAP;
 
 /// Pre-seed the process-wide shared embedder with `MockEmbedder` so no
 /// HuggingFace download is attempted. Safe to call multiple times (no-op
@@ -1752,6 +1753,143 @@ fn wing_scope_returns_only_that_wings_drawers() {
 
     // The default wing owns neither of them.
     assert!(list_drawers_in_wing(&handle, DEFAULT_WING_ID, None, 50).is_empty());
+}
+
+/// Seed `count` drawers that tie on importance, newest last and highest-id last.
+///
+/// Why (#4836): reproduces the shape a live palace actually hands to
+/// `list_drawers` — one importance value across the whole tag, and a drawer
+/// table iterated in UUID order that is uncorrelated with age. Giving the
+/// NEWEST drawer the LARGEST id is what makes an importance-only sort strand it
+/// at the end of the vector, where `truncate(limit)` drops it.
+/// What: ids `1..=count`, `created_at` ascending with the id, every drawer
+/// tagged `tag` at importance 0.5 and filed in `room_id`. Returns the newest
+/// drawer's id.
+fn seed_importance_tie(handle: &PalaceHandle, room_id: Uuid, tag: &str, count: u128) -> Uuid {
+    let now = chrono::Utc::now();
+    let mut newest = Uuid::nil();
+    for i in 0..count {
+        let mut drawer = Drawer::new(room_id, format!("tied drawer {i}"));
+        drawer.id = Uuid::from_u128(i + 1);
+        drawer.importance = 0.5;
+        drawer.created_at = now - chrono::Duration::minutes((count - 1 - i) as i64);
+        drawer.tags = vec![tag.to_string()];
+        newest = drawer.id;
+        handle.add_drawer(drawer);
+    }
+    newest
+}
+
+/// #4836: a `limit` must not cut the newest drawer when importance ties.
+///
+/// Why: this is the measured defect. `memory_list(palace = "trusty-tools",
+/// tag = "pre-authorized", limit = 12)` matched 94 drawers and returned the 12
+/// with the smallest UUIDs — every one of the nine drawers written that day
+/// fell outside the window, including the one the caller was looking for.
+/// What: 20 drawers tied at importance 0.5, newest carrying the largest id, and
+/// a listing capped at 5. Pre-fix the sort is importance-only and stable, so the
+/// returned five are ids 1-5 (the OLDEST five) and this fails.
+#[test]
+fn list_drawers_keeps_the_newest_drawer_within_an_importance_tie() {
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let newest = seed_importance_tie(&handle, Uuid::nil(), "pre-authorized", 20);
+
+    let listed = handle.list_drawers(None, Some("pre-authorized".to_string()), 5);
+
+    assert_eq!(listed.len(), 5, "the tag matches 20 drawers, limit is 5");
+    assert_eq!(
+        listed[0].id,
+        newest,
+        "an importance tie must be broken by recency, so the newest drawer leads; got {:?}",
+        listed.iter().map(|d| &d.content).collect::<Vec<_>>()
+    );
+}
+
+/// #4836: the wing-scoped lister must break ties the same way.
+///
+/// Why: `list_drawers_in_wing` carried its own copy of the importance-only sort,
+/// so fixing only `PalaceHandle::list_drawers` would leave the two read paths
+/// disagreeing on what a `limit` means.
+#[test]
+fn list_drawers_in_wing_keeps_the_newest_drawer_within_an_importance_tie() {
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let (wing, room) = wing_with_room(&handle, "engineer", "Planning");
+    let newest = seed_importance_tie(&handle, room, "pre-authorized", 20);
+
+    let listed = list_drawers_in_wing(&handle, wing, Some("pre-authorized".to_string()), 5);
+
+    assert_eq!(listed.len(), 5);
+    assert_eq!(
+        listed[0].id, newest,
+        "the wing lister must order ties by recency too"
+    );
+}
+
+/// #4836 guard: recency is the TIE-break, never the primary key.
+///
+/// Why: the cheap way to make the two tests above pass is to sort by
+/// `created_at` outright, which would silently demote the curated
+/// importance-1.0 facts that L1 and every `memory_list` caller depend on
+/// surfacing first. This fails if the fix overshoots that way.
+#[test]
+fn list_drawers_ranks_importance_above_recency() {
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    seed_importance_tie(&handle, Uuid::nil(), "pre-authorized", 5);
+
+    // Older than every drawer above, but curated.
+    let mut curated = Drawer::new(Uuid::nil(), "curated essential".to_string());
+    curated.id = Uuid::from_u128(9_999);
+    curated.importance = 1.0;
+    curated.created_at = chrono::Utc::now() - chrono::Duration::days(30);
+    curated.tags = vec!["pre-authorized".to_string()];
+    let curated_id = curated.id;
+    handle.add_drawer(curated);
+
+    let listed = handle.list_drawers(None, Some("pre-authorized".to_string()), 3);
+    assert_eq!(
+        listed[0].id, curated_id,
+        "importance still outranks recency; recency only breaks ties"
+    );
+}
+
+/// #4836: L1 selection must be recency-aware too, not just the two listers.
+///
+/// Why: `refresh_l1` carried its own copy of the importance-only sort, and L1
+/// is not a cosmetic ordering — it is a SELECTION. `l1_drawers` is capped at
+/// `L1_CAP`, feeds `retrieve_l0_l1`, and from there seeds `retrieve_l2`, which
+/// is where the prompt-injection hook and `memory_recall` converge. Leaving the
+/// stale comparator here fixed `memory_list` while still letting the hook
+/// surface a set of drawers chosen without reference to age.
+/// What: 20 drawers tied at importance 0.5, appended oldest-first, against an
+/// `L1_CAP` of 15. Pre-fix the stable importance-only sort preserves insertion
+/// order, so L1 holds the 15 OLDEST and the newest five never reach a prompt.
+#[test]
+fn refresh_l1_keeps_the_newest_drawers_within_an_importance_tie() {
+    let dir = tempdir().unwrap();
+    let mut handle = make_handle(dir.path());
+    let newest = seed_importance_tie(&handle, Uuid::nil(), "pre-authorized", 20);
+
+    handle.refresh_l1();
+
+    assert_eq!(handle.l1_drawers.len(), L1_CAP, "L1 is capped at L1_CAP");
+    assert_eq!(
+        handle.l1_drawers[0].id,
+        newest,
+        "an importance tie must be broken by recency, so the newest drawer leads L1; got {:?}",
+        handle
+            .l1_drawers
+            .iter()
+            .map(|d| &d.content)
+            .collect::<Vec<_>>()
+    );
+    // Ids are 1..=20 ascending with age, so the newest 15 are ids 6..=20.
+    assert!(
+        handle.l1_drawers.iter().all(|d| d.id >= Uuid::from_u128(6)),
+        "L1 must hold the newest 15 of the tie, not the oldest 15"
+    );
 }
 
 #[test]
