@@ -137,6 +137,8 @@ chmod +x "${SCRATCH}/scripts/check_semver.sh"
 # The subshell is what lets a case set PREFLIGHT_SEMVER_UNVERIFIED (or not) and
 # have the next case see a clean environment.
 # ---------------------------------------------------------------------------
+# shellcheck disable=SC2034  # PKG_NAME/VERSION/MANIFEST/REPO_ROOT/TMP_SEMVER are read
+# by the functions eval'd below, which shellcheck cannot see into.
 run_decision() {
   local fixture="$1" gate_rc="$2"
   (
