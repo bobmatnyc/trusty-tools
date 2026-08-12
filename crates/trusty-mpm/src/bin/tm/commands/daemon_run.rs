@@ -227,7 +227,10 @@ async fn wait_for_shutdown_signal() {
 fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) -> bool {
     use trusty_common::supervision::{LaunchdSupervision, launchd_supervision};
 
-    let plist_exists = crate::commands::launchd_probe::mpm_launchd_plist_exists();
+    // #5623: fail-closed — an unreadable `~/Library/LaunchAgents` now counts as
+    // "launchd may own this", so `/health` reports the hazard instead of a
+    // `supervised: true` it never established.
+    let plist_exists = crate::commands::launchd_probe::launchd_may_own_daemon();
     // #4469: ONE authoritative query, whose three-state answer is published on
     // `/health` alongside the bool it collapses into. Without the third state a
     // launchctl that could not be asked reads as `supervised: false`, and

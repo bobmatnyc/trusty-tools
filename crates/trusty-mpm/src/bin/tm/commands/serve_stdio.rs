@@ -77,7 +77,7 @@ fn build_rpc_client() -> Result<reqwest::Client> {
 /// What: returns a config that probes `/health`, resolves the base URL from
 /// the lock file each poll, sets `no_spawn` to
 /// [`crate::commands::launchd_probe::compute_no_spawn`] applied to
-/// [`crate::commands::launchd_probe::mpm_launchd_plist_exists`], and sets a
+/// [`crate::commands::launchd_probe::launchd_may_own_daemon`], and sets a
 /// trusty-mpm-specific `no_spawn_hint` (issue #2491) — the shared helper's
 /// generic hint names a `{service} setup` subcommand and an
 /// `io.trusty.{service}.plist` path that do not exist for trusty-mpm (there is
@@ -90,7 +90,7 @@ fn build_rpc_client() -> Result<reqwest::Client> {
 /// `no_spawn_error_uses_hint_when_set`).
 fn build_bridge_config() -> DaemonBridgeConfig {
     let no_spawn = crate::commands::launchd_probe::compute_no_spawn(
-        crate::commands::launchd_probe::mpm_launchd_plist_exists(),
+        crate::commands::launchd_probe::launchd_may_own_daemon(),
     );
     DaemonBridgeConfig {
         service_name: "trusty-mpm".to_string(),
@@ -289,14 +289,14 @@ mod tests {
 
     /// Why (#2486): `build_bridge_config`'s `no_spawn` must track whether a
     /// trusty-mpm launchd unit is registered on this host — this test compares
-    /// against `mpm_launchd_plist_exists()` directly (not via
+    /// against `launchd_may_own_daemon()` directly (not via
     /// `compute_no_spawn`, since `compute_no_spawn` is currently the identity
     /// function over that boolean) so the assertion pins the actual invariant
     /// rather than restating `build_bridge_config`'s own call chain. The pure
     /// decision table itself is covered by `commands::launchd_probe::tests`.
     #[test]
     fn build_bridge_config_no_spawn_matches_plist_probe() {
-        let plist_exists = crate::commands::launchd_probe::mpm_launchd_plist_exists();
+        let plist_exists = crate::commands::launchd_probe::launchd_may_own_daemon();
         let cfg = build_bridge_config();
         assert_eq!(
             cfg.no_spawn, plist_exists,
