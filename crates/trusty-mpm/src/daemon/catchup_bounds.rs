@@ -6,16 +6,34 @@
 //! file and the resuming session had to read that instead. A resume tool whose
 //! own output the resumer cannot read has lost its one purpose. Measurement
 //! (2026-08-12, 31 snapshots) put `sessions` at 184,056 of 194,434 bytes —
-//! 94.7% — with a 5,961-byte median and a 9,890-byte maximum. No single record
-//! is oversized; the COUNT is what grows without bound, and it only ever grows.
+//! 94.7% — with a 5,961-byte median and a 9,890-byte maximum. Those figures are
+//! PRE-redaction: they were taken over `generate_catchup_json`, while the MCP
+//! path applies #5386 first, which nulls `in_progress` / `next_steps` /
+//! `git_context` for a session the caller does not own and keeps `summary`. A
+//! caller owning one of 31 sessions therefore sees closer to the 70,195-byte
+//! summary total, so a page holds more records than the raw median suggests.
+//! Neither number changes the shape of the problem: 70k still exceeds any
+//! readable response, no single record is oversized, and the COUNT is what
+//! grows without bound.
 //! So the bound is a page over records, not a clamp on any field: truncating a
 //! summary mid-string would corrupt the exact prose a resume reads, while
 //! dropping whole records off the end is recoverable by asking for the next
 //! page.
-//! What: [`bound_catchup`] fills a page with WHOLE records, newest-first, until
-//! the serialized budget is spent, and reports what it left behind plus the
-//! offset that retrieves it. Nothing is ever silently withheld — see
+//! What: [`bound_catchup`] orders the records, fills a page with WHOLE ones
+//! until the serialized budget is spent, and reports what it left behind plus
+//! the offset that retrieves it. Every record it DROPS is announced — see
 //! [`BoundedCatchup::truncation_notice`].
+//!
+//! What it does NOT promise: the offset is positional, into a list rebuilt from
+//! the filesystem on each call. A snapshot written mid-walk sorts to the front
+//! and shifts every index, so a later page can REPEAT a record. That is
+//! disclosed on the response rather than engineered away, and the alternatives
+//! are worse: a `paused_at` cursor cannot address an undatable record — the
+//! ones #5072 exists to keep reachable through `full` — and ties at the
+//! filename's one-second resolution would either skip or loop; an id cursor
+//! needs a stable public id, but `source_file` is withheld from a non-owner
+//! (#5386) and a `claude-mpm` record has none. Both trade today's duplication
+//! for tomorrow's silent loss, which is the defect this module removes.
 //! Test: `page_stops_at_the_budget`, `page_always_makes_progress`,
 //! `bound_catchup_leaves_a_fitting_digest_alone`,
 //! `paging_reaches_every_session_in_order`.
@@ -29,8 +47,9 @@ use trusty_common::catchup::{CatchupJson, PausedSessionJson, RecentMemoryJson};
 /// Why: the observed failure was a 112,096-character body the harness could not
 /// deliver. A tool result is capped near 25k tokens, and dense JSON tokenizes
 /// worse than prose, so this sits at roughly half that in characters — enough
-/// headroom that the page is deliverable with the JSON-RPC framing around it,
-/// and still ~6 snapshots per page at this repo's 5,961-byte median.
+/// headroom that the page is deliverable with the JSON-RPC framing around it.
+/// At this repo's post-redaction record size that is roughly 16 snapshots a
+/// page — far more than a resume reads.
 /// What: the total the three digest arrays are fitted into, not a hard limit on
 /// the encoded response — the fixed scalar keys and a single over-budget record
 /// can carry it past this number (see [`page`]).
@@ -58,7 +77,7 @@ const AUX_BUDGET_BYTES: usize = 12_000;
 /// Test: `bound_catchup_leaves_a_fitting_digest_alone`,
 /// `paging_reaches_every_session_in_order`.
 pub struct BoundedCatchup {
-    /// The sessions on this page, newest-first.
+    /// The sessions on this page: the caller's own first, then newest-first.
     pub sessions: Vec<PausedSessionJson>,
     /// How many sessions matched the filter before paging.
     pub sessions_total: usize,
@@ -68,10 +87,14 @@ pub struct BoundedCatchup {
     pub recent_commits: Vec<CommitSummary>,
     /// How many commits were collected before trimming.
     pub recent_commits_total: usize,
-    /// Palace drawers on this page, newest-first.
+    /// Palace drawers on this page, in the order the daemon returned them.
     pub recent_memory: Vec<RecentMemoryJson>,
     /// How many drawers were collected before trimming.
     pub recent_memory_total: usize,
+    /// Serialized bytes of the three arrays on this page.
+    pub page_bytes: usize,
+    /// The budget those bytes were fitted to.
+    pub budget: usize,
 }
 
 impl BoundedCatchup {
@@ -99,6 +122,23 @@ impl BoundedCatchup {
             || self.recent_memory.len() < self.recent_memory_total
     }
 
+    /// Whether this page exceeded the budget anyway.
+    ///
+    /// Why: [`page`] takes its first record unconditionally, so one record
+    /// larger than the whole budget still ships — and `truncated` is FALSE for
+    /// it, correctly, because nothing was withheld. Without this the caller
+    /// receives the original oversized-response failure with nothing on the
+    /// body saying so, and paging cannot help because the single record
+    /// exceeds the page. The record is caller-controlled and uncapped:
+    /// `session_context_pause` writes `summary` / `in_progress` / `next_steps`
+    /// straight through, so the 9,890-byte maximum measured on this repo is a
+    /// sample, not a bound.
+    /// What: true when the emitted arrays serialize past `budget`.
+    /// Test: `over_budget_record_is_announced_even_though_nothing_was_dropped`.
+    pub fn over_budget(&self) -> bool {
+        self.page_bytes > self.budget
+    }
+
     /// Prose naming what was withheld and how to retrieve it, or `None` when
     /// the page is complete.
     ///
@@ -111,14 +151,17 @@ impl BoundedCatchup {
     /// literal `sessions_offset` value to pass back.
     /// Test: `truncation_notice_names_the_counts_and_the_recovery`.
     pub fn truncation_notice(&self) -> Option<String> {
-        if !self.truncated() {
+        if !self.truncated() && !self.over_budget() {
             return None;
         }
         let mut parts = Vec::new();
         if let Some(next) = self.next_offset() {
             parts.push(format!(
-                "Showing paused sessions {}–{} of {} (newest first); re-call \
-                 session_context_catchup with sessions_offset: {next} for the rest.",
+                "Showing paused sessions {}–{} of {} — yours first, then newest \
+                 first; re-call session_context_catchup with sessions_offset: \
+                 {next} for the rest. The store is live: a snapshot paused \
+                 between calls shifts the indexes, so a later page can repeat a \
+                 record you have already seen.",
                 self.sessions_offset,
                 next.saturating_sub(1),
                 self.sessions_total
@@ -126,18 +169,27 @@ impl BoundedCatchup {
         }
         if self.recent_commits.len() < self.recent_commits_total {
             parts.push(format!(
-                "Showing {} of {} recent commits; the oldest were dropped to fit \
-                 the response budget — use git log for the remainder.",
+                "Showing the {} newest of {} recent commits; the older ones were \
+                 dropped to fit the response budget.",
                 self.recent_commits.len(),
                 self.recent_commits_total
             ));
         }
         if self.recent_memory.len() < self.recent_memory_total {
+            // Drawers carry no timestamp here, so this claims no ordering.
             parts.push(format!(
-                "Showing {} of {} memory drawers; the oldest were dropped to fit \
+                "Showing {} of {} memory drawers; the rest were dropped to fit \
                  the response budget.",
                 self.recent_memory.len(),
                 self.recent_memory_total
+            ));
+        }
+        if self.over_budget() {
+            parts.push(format!(
+                "This page is {} bytes, over the {}-byte budget: one record is \
+                 larger than a whole page, so it ships intact rather than being \
+                 cut mid-field. Paging cannot shrink it.",
+                self.page_bytes, self.budget
             ));
         }
         Some(parts.join(" "))
@@ -181,15 +233,32 @@ fn page<T: Serialize + Clone>(items: &[T], from: usize, budget: usize) -> Vec<T>
 /// Why: the entry point the MCP tool calls instead of serializing the whole
 /// digest. See the module doc for why the bound is a record page rather than a
 /// field clamp.
-/// What: commits and drawers are trimmed first, into a fixed
-/// [`AUX_BUDGET_BYTES`] share; sessions get whatever the budget has left, so
+/// What: orders first, then trims. Sessions sort owned-before-unowned and then
+/// newest-first; commits sort newest-first; both put an undatable record last.
+/// The sort lives HERE, next to the notice that claims that order, because the
+/// input does not arrive in it: `CatchupJson::absorb` CONCATENATES per-project
+/// digests under `all_projects: true`, so the merged list is newest-first only
+/// within each project block. Hoisting owned records is what makes page 0
+/// carry the entry a resume reads, which `tm-session-resume` tells the caller
+/// to expect. Then commits and drawers are trimmed into a fixed
+/// [`AUX_BUDGET_BYTES`] share and sessions get whatever the budget has left, so
 /// the array that grows without bound is the one that absorbs the pressure.
 /// `offset` is clamped to the session count, so an out-of-range page is empty
 /// rather than an error.
 /// Test: `bound_catchup_leaves_a_fitting_digest_alone`,
 /// `bound_catchup_trims_commits_into_their_share`,
-/// `paging_reaches_every_session_in_order`.
-pub fn bound_catchup(merged: CatchupJson, offset: usize, budget: usize) -> BoundedCatchup {
+/// `paging_reaches_every_session_in_order`,
+/// `bound_catchup_puts_owned_sessions_on_page_zero`.
+pub fn bound_catchup(mut merged: CatchupJson, offset: usize, budget: usize) -> BoundedCatchup {
+    // #5557: the notice claims this order, so establish it here rather than
+    // trusting the caller. `sort_by_key` is stable, so ties keep input order.
+    merged
+        .sessions
+        .sort_by_key(|s| (!s.owned, std::cmp::Reverse(s.paused_at)));
+    merged
+        .recent_commits
+        .sort_by_key(|c| std::cmp::Reverse(c.ts));
+
     let aux_budget = AUX_BUDGET_BYTES.min(budget);
     let recent_commits = page(&merged.recent_commits, 0, aux_budget);
     let commit_bytes: usize = recent_commits.iter().map(|c| cost_of(c, 0)).sum();
@@ -207,6 +276,8 @@ pub fn bound_catchup(merged: CatchupJson, offset: usize, budget: usize) -> Bound
         budget.saturating_sub(commit_bytes + memory_bytes),
     );
 
+    let session_bytes: usize = sessions.iter().map(|s| cost_of(s, 0)).sum();
+
     BoundedCatchup {
         sessions,
         sessions_total: merged.sessions.len(),
@@ -215,6 +286,8 @@ pub fn bound_catchup(merged: CatchupJson, offset: usize, budget: usize) -> Bound
         recent_commits,
         recent_memory_total: merged.recent_memory.len(),
         recent_memory,
+        page_bytes: session_bytes + commit_bytes + memory_bytes,
+        budget,
     }
 }
 
@@ -406,6 +479,66 @@ mod tests {
         assert!(
             notice.contains(&format!("sessions_offset: {next}")),
             "names the recovery: {notice}"
+        );
+    }
+
+    /// Why: the unconditional first record is the one case that can carry a
+    /// page past the budget, and `truncated` is FALSE for it because nothing
+    /// was withheld. Without a separate signal the caller gets the original
+    /// oversized-response failure with a body that reads as healthy, and no
+    /// offset can shrink it — the record is bigger than a page.
+    /// What: one record past the whole budget sets `over_budget`, reports
+    /// `page_bytes`, and produces a notice even though `truncated` is false.
+    /// Test: itself.
+    #[tokio::test]
+    async fn over_budget_record_is_announced_even_though_nothing_was_dropped() {
+        let bounded = bound_catchup(digest(1, 80_000).await, 0, CATCHUP_BUDGET_BYTES);
+        assert_eq!(bounded.sessions.len(), 1, "the record still ships whole");
+        assert!(
+            !bounded.truncated(),
+            "nothing was withheld, so not truncated"
+        );
+        assert!(bounded.over_budget(), "but the page is over budget");
+        assert!(bounded.page_bytes > CATCHUP_BUDGET_BYTES);
+        let notice = bounded
+            .truncation_notice()
+            .expect("an over-budget page must still announce itself");
+        assert!(
+            notice.contains(&bounded.page_bytes.to_string()),
+            "the notice must name the size: {notice}"
+        );
+    }
+
+    /// Why: `tm-session-resume` tells the caller page 0 is normally enough. On
+    /// a machine with many concurrent sessions a global newest-first order can
+    /// push the caller's OWN entry — the one record that is unredacted, and
+    /// the one a resume reads — past the page boundary while page 0 fills with
+    /// other sessions' stubs. Ordering owned-first makes the skill's claim true
+    /// by construction rather than by luck.
+    /// What: an owned record that is the OLDEST by timestamp still lands on
+    /// page 0, ahead of newer unowned ones.
+    /// Test: itself.
+    #[tokio::test]
+    async fn bound_catchup_puts_owned_sessions_on_page_zero() {
+        let mut merged = digest(30, 4_000).await;
+        // Everything arrives owned; mark all but the oldest as someone else's.
+        let oldest = merged.sessions.len() - 1;
+        for (i, s) in merged.sessions.iter_mut().enumerate() {
+            s.owned = i == oldest;
+            s.summary = format!("{i}-{}", s.summary);
+        }
+        let mine = merged.sessions[oldest].summary.clone();
+
+        let bounded = bound_catchup(merged, 0, CATCHUP_BUDGET_BYTES);
+
+        assert!(
+            bounded.next_offset().is_some(),
+            "the fixture must actually need paging"
+        );
+        assert_eq!(
+            bounded.sessions.first().map(|s| s.summary.clone()),
+            Some(mine),
+            "the caller's own session must lead page 0"
         );
     }
 

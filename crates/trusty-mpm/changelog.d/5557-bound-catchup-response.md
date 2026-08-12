@@ -9,8 +9,17 @@ Fixed
   48,000-byte budget. `sessions_offset` (new, optional, defaults to 0) selects
   the page and the response's `sessions_next_offset` names the next one, so
   `full: true` still delivers every snapshot in history — one readable page per
-  call. Nothing is dropped silently: whenever anything is withheld the response
-  carries `truncated: true`, the `sessions_total` / `recent_commits_total` /
+  call. Pages are ordered with the caller's own sessions first, then newest
+  first, so page 0 always carries the entry a resume reads. Nothing is dropped
+  silently: whenever anything is withheld the response carries
+  `truncated: true`, the `sessions_total` / `recent_commits_total` /
   `recent_memory_total` counts, and a `truncation_notice` naming the counts and
-  the exact `sessions_offset` that retrieves the rest. A digest that already
-  fits comes back byte-identical (#5557).
+  the exact `sessions_offset` that retrieves the rest. The one page that can
+  exceed the budget — a single record larger than a whole page, which ships
+  intact rather than being cut mid-field — reports `over_budget: true` and
+  `page_bytes`, since nothing was withheld there and `truncated` would
+  otherwise read as healthy. The offset is positional into a list rebuilt from
+  disk on each call, so a snapshot paused mid-walk can make a later page repeat
+  a record; that is stated in the tool schema and in the notice rather than
+  left to be discovered. A digest that already fits comes back byte-identical
+  (#5557).

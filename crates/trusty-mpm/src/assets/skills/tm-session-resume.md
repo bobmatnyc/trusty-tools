@@ -136,12 +136,21 @@ knowledge of the repo state if anything looks stale.
 
 > **`sessions` is a page, and `truncated` says so.** The response is fitted to
 > a size you can read in one tool result, so on a project with a long pause
-> history `sessions` holds the newest few rather than all of them (#5557). When
+> history `sessions` holds a page rather than all of them (#5557). When
 > `truncated` is `true`, `truncation_notice` names what was withheld and the
 > `sessions_offset` that retrieves it — re-call with that value to walk the
 > rest. This does not weaken `full: true`: full history is paged, never
-> dropped, and `sessions_next_offset` is `null` once you have all of it. A
-> resume normally needs only page 0.
+> dropped, and `sessions_next_offset` is `null` once you have all of it. Page 0
+> is ordered with the sessions you own first, so it carries your own entry;
+> that is why a resume normally needs only page 0.
+>
+> Two things the page does NOT promise. `over_budget: true` means nothing was
+> withheld but one record is larger than a whole page — it ships intact, and
+> `page_bytes` says how big the response got; no offset can shrink it. And the
+> offset is positional into a list rebuilt from disk on each call, so if a
+> session pauses while you are walking pages, a later page can repeat a record
+> you already have — de-duplicate on `source_file` or `paused_at` if you are
+> collecting them. Neither is a dropped record.
 
 > **`sessions` and `resolved_snapshot` answer different questions** and
 > legitimately disagree under a recent watermark: `sessions` is "what paused

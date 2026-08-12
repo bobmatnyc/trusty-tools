@@ -83,6 +83,8 @@ fn catchup_payload(
         "recent_memory": page.recent_memory,
         "recent_memory_total": page.recent_memory_total,
         "truncated": page.truncated(),
+        "over_budget": page.over_budget(),
+        "page_bytes": page.page_bytes,
         "truncation_notice": page.truncation_notice(),
         "resolved_snapshot": snapshot,
         "resolved_via": via,
@@ -529,7 +531,21 @@ mod tests {
         }
     }
 
+    /// The `summary` of every session on a response, in page order.
+    fn summaries(body: &Value) -> Vec<String> {
+        body["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["summary"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
     /// Seed `n` paused snapshots of roughly `body_bytes` of prose each.
+    ///
+    /// Each summary carries its own `orig<NNNN>-` prefix so a test can tell the
+    /// records apart — identical bodies would collapse under any set-based
+    /// assertion and quietly pass a walk that dropped 24 of 25.
     fn seed_snapshots(project: &std::path::Path, n: usize, body_bytes: usize) {
         let dir = project.join(".trusty-mpm").join("sessions");
         std::fs::create_dir_all(&dir).unwrap();
@@ -537,7 +553,7 @@ mod tests {
         for i in 0..n {
             std::fs::write(
                 dir.join(format!("session-20260801-12{:02}{:02}.md", i / 60, i % 60)),
-                format!("## Summary\n{body}\n\n## Next Steps\n{body}\n"),
+                format!("## Summary\norig{i:04}-{body}\n\n## Next Steps\n{body}\n"),
             )
             .unwrap();
         }
@@ -560,11 +576,16 @@ mod tests {
                 .await
                 .unwrap();
 
+        // The arrays are bounded to the budget plus at most ONE record's
+        // overshoot, so the ceiling is the budget plus this fixture's record
+        // size — not a round slack number that a 59k regression would slip past.
+        let fixture_record = 6_000 + 512;
         let len = serde_json::to_string(&result).unwrap().len();
         assert!(
-            len <= CATCHUP_BUDGET_BYTES + 12_000,
+            len <= CATCHUP_BUDGET_BYTES + fixture_record,
             "response is {len} chars against a {CATCHUP_BUDGET_BYTES}-byte budget"
         );
+        assert_eq!(result["over_budget"], false);
         assert!(
             !result["sessions"].as_array().unwrap().is_empty(),
             "a bound that returns nothing is not a bound: {result}"
@@ -617,6 +638,65 @@ mod tests {
         }
         assert!(pages > 1, "the fixture must actually need paging");
         assert_eq!(seen, 25, "`full` must still deliver the whole history");
+    }
+
+    /// Why: the offset is positional into a list rebuilt from disk on every
+    /// call, so a snapshot paused mid-walk sorts to the front and shifts every
+    /// index. The module doc and the schema both disclose that a later page can
+    /// then REPEAT a record; nothing pinned that the behaviour is repetition
+    /// rather than a skip, which is the difference between a disclosed
+    /// inefficiency and the silent loss this PR exists to remove.
+    /// What: writes a new snapshot between page 0 and page 1 and asserts the
+    /// walk still delivers every pre-existing record — the shift duplicates,
+    /// never drops.
+    /// Test: itself.
+    #[tokio::test]
+    async fn a_snapshot_written_mid_walk_repeats_a_record_but_never_drops_one() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        seed_snapshots(tmp.path(), 25, 6_000);
+
+        let first = session_context_catchup(dir, None, None, false, true, 0)
+            .await
+            .unwrap();
+        let page0: Vec<String> = summaries(&first);
+        let next = first["sessions_next_offset"].as_u64().unwrap() as usize;
+
+        // A 26th snapshot lands at the front of the newest-first list.
+        std::fs::write(
+            tmp.path()
+                .join(".trusty-mpm")
+                .join("sessions")
+                .join("session-20260801-235959.md"),
+            format!("## Summary\ninjected-{}\n", "n".repeat(6_000)),
+        )
+        .unwrap();
+
+        let mut seen = page0.clone();
+        let mut offset = Some(next);
+        while let Some(o) = offset {
+            let body = session_context_catchup(dir, None, None, false, true, o)
+                .await
+                .unwrap();
+            seen.extend(summaries(&body));
+            offset = body["sessions_next_offset"].as_u64().map(|v| v as usize);
+        }
+
+        // Every original record still arrives — the shift costs a repeat, and
+        // the repeat is what the schema and the notice disclose.
+        let originals: std::collections::HashSet<&String> =
+            seen.iter().filter(|s| s.starts_with("orig")).collect();
+        assert_eq!(
+            originals.len(),
+            25,
+            "an index shift must not drop a record; got {} distinct of 25",
+            originals.len()
+        );
+        assert!(
+            seen.len() > originals.len(),
+            "the shift is expected to repeat at least one record, so the \
+             disclosure describes something real"
+        );
     }
 
     /// Why: the bound must not change what a normal project gets back — a
