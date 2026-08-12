@@ -46,7 +46,6 @@
 mod support;
 
 use std::collections::HashSet;
-use std::process::Command;
 use std::time::Duration;
 
 use serde_json::json;
@@ -566,7 +565,7 @@ async fn m1_cutline_cancel_path() {
 #[test]
 fn m1_cutline_replay_via_thin_cli() {
     let project = project_with_agents();
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "run-task",
             "pm",

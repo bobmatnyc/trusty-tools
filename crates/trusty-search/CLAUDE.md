@@ -114,11 +114,14 @@ pub struct CodeChunk {
   | `vector_unavailable` | 503 | per `reason` | Semantic lane cannot serve this query — see `POST /indexes/:id/search`. |
   | `contrib_not_merged` | 503 | earned | `POST /indexes/:id/graph` only (#5505). The contributed graph was stored durably (`persisted: true`, plus `producer` / `replaced` / `reason`) but could not be folded into the serving graph, so it is not queryable yet. One unreadable `kg_contrib` row fails the whole load, so `blocking_producer` names the row to fix when one is to blame: `retryable` is `true` only when no row is implicated or when the blocker is THIS producer's row (a re-send replaces it), and `false` when another producer's row is the blocker — retrying then fails identically forever. |
 
-  `restore_via` on `index_not_resident` names `POST /indexes/{id}/search`, the
-  only endpoint that reloads a cold-parked index. `status`, `chunks`, `grep`,
-  `index-file`, and `remove-file` report the state truthfully but cannot clear
-  it themselves; a search against the same id does, after which they answer
-  normally.
+  `restore_via` on `index_not_resident` names `POST /indexes/{id}/search`.
+  `search`, `index-file`, and `remove-file` all RELOAD a cold-parked index
+  themselves (#5349), so none of them returns `index_not_resident` at all — a
+  cold-but-not-failed index is loaded and the request served, and only a load
+  that fails produces a verdict (`index_restore_failed`, `index_loading`, or
+  `embedder_initializing`). `status`, `chunks`, and `grep` report the state
+  truthfully but cannot clear it themselves; any of the three reloading
+  endpoints does, after which they answer normally.
 
   **The MCP surface relays this contract as data (#5350).** A `503` whose body
   is a JSON object with an `error` field becomes a structured MCP error rather
@@ -163,6 +166,20 @@ daemon.
     `indexes_populated + indexes_empty <= indexes`; the shortfall is the honest
     signal. An empty-but-walked index is not itself a fault and does not force
     `degraded` — `indexes_stuck_empty` (#4680) covers the genuinely broken case.
+  - `indexes_stuck_mid_walk` (#5336): registered indexes whose lexical walk
+    STARTED and was then abandoned — the reindex task panicked, was cancelled,
+    or returned early, leaving `stages.lexical` frozen at `in_progress` with
+    nothing driving the index. On every other field, and on
+    `GET /indexes/:id/status`, that is indistinguishable from a genuine
+    multi-minute reindex. Liveness is read from the index's own
+    mutual-exclusion permit, which the reindex runner takes before it flips the
+    stage and releases only when its task ends, so a running reindex is never
+    counted here. Partitions with `indexes_stuck_empty` (#4680, the
+    never-walked cohort) on whether a walk ever started — an index is counted by
+    at most one. Non-zero forces `status: "degraded"`. Surfacing only: nothing
+    retries it, because a partial walk may have committed chunks and the cause
+    that killed the first walk would likely kill the retry. Clear it with
+    `POST /indexes/:id/reindex`.
   - `indexes_watcher_network_degraded` (issue #3408): count of registered
     indexes whose file watcher was refused because `root_path` was detected as
     a network-mounted filesystem (NFS/EFS/SMB/CIFS). inotify/FSEvents cannot
@@ -262,6 +279,11 @@ Per-index stats.
     `vectors_unavailable_reason` says which state produced it:
     `no_vector_store` (BM25-only / `skip_vector` — healthy) or
     `count_unreadable` (a store is attached but its count errored — a fault).
+  - `stuck_mid_walk` (#5336): the per-index form of `/health`'s
+    `indexes_stuck_mid_walk`. `true` when this index's walk started and nothing
+    is driving it any more, so `status: "indexing"` and
+    `stages.lexical: in_progress` above are a frozen claim rather than live
+    work. `POST /indexes/:id/reindex` clears it.
 - **Response 404 / 503**: see the index-scoped error contract above.
 
 ##### `POST /indexes/:id/search`
@@ -624,7 +646,7 @@ this table is generated from it, not maintained by hand.
 |---|---|---|
 | `chat` | `index_id`, `api_key?`, `history?`, `message?`, `model?`, `question?`, `top_k?` | Ask a natural-language question about the indexed codebase. |
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
-| `create_index` | `id`, `root_path`, `follow_links?` | Register a new (empty) index |
+| `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
 | `delete_index` | `index_id` | Delete a registered index and all its data |
 | `get_call_chain` | `index_id`, `entry_point`, `direction?`, `include_source?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `glob?`, `index_id?`, `invert_match?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |

@@ -1,23 +1,35 @@
-//! Per-period prompt assembly and finding-response parsing.
+//! Per-period prompt assembly, transport, and finding-response parsing.
 //!
 //! Why: reviewing every period in one prompt would blow the context budget and
 //! blur the periods together, so each period is reviewed on its own — and the
 //! two halves that decide what a period's prompt says and how its answer is
-//! read are pure functions with no network in them.
+//! read stay pure functions with no network in them.
 //! What: [`period_reviewer_system_prompt`], [`period_findings_schema`], and
 //! [`build_period_user_message`] produce the request text; [`parse_period_findings`]
-//! turns a response body into [`LongitudinalFinding`] values.
+//! turns a response body into [`LongitudinalFinding`] values;
+//! [`build_period_request`] assembles the two into a
+//! [`trusty_common::inference::ChatRequest`] and [`PeriodReviewer`] sends it.
 //!
-//! The transport that carries these to a model is deliberately absent — #5464
-//! adds it on top of `trusty_common::inference`. That is why
-//! [`parse_period_findings`] takes a `&str` rather than a response struct.
+//! #5464: the transport is `trusty_common::inference` — the workspace's one
+//! inference entry point, which tga already consumes in
+//! [`crate::classify::tiers::bedrock`]. Profiling therefore reaches a model with
+//! no Cargo edge to trusty-review, and prefix routing (`bedrock/…`,
+//! `openrouter/…`) stays the commons' job rather than being re-implemented here.
 //!
 //! Test: `batch_reviewer_tests.rs`.
 
+use std::sync::Arc;
+use std::time::Instant;
+
 use serde::Deserialize;
 use tracing::{debug, warn};
+use trusty_common::credentials::{default_store, KeyStore};
+use trusty_common::inference::{
+    register_default_factories, ChatMessage, ChatRequest, Configurator, InferenceAdapter,
+    InferenceError,
+};
 
-use super::types::{Effort, Finding, LongitudinalFinding, PeriodBatch};
+use super::types::{Effort, Finding, LongitudinalFinding, PeriodBatch, TokenCostSummary};
 
 // ─── Request parameters ───────────────────────────────────────────────────────
 
@@ -166,6 +178,228 @@ pub fn build_period_user_message(batch: &PeriodBatch) -> String {
     );
 
     msg
+}
+
+// ─── Request assembly ─────────────────────────────────────────────────────────
+
+/// Assemble the shared-inference request for one period.
+///
+/// Why: [`trusty_common::inference::ChatRequest`] carries no structured-output
+/// field, so the schema only reaches the model if the system turn spells it
+/// out. Stating it there keeps [`parse_period_findings`]'s direct-JSON path —
+/// the one that needs no fence — the likely outcome rather than the lucky one.
+/// What: system turn = the reviewer role plus [`period_findings_schema`]
+/// rendered as JSON; user turn = [`build_period_user_message`]. `model` is
+/// passed through UNCHANGED: a `bedrock/` or `openrouter/` prefix is what
+/// `provider_for` routes on, and the adapter strips it for the wire in
+/// `ProviderId::wire_model_id`.
+/// Test: `period_request_preserves_routing_prefix`,
+/// `period_request_carries_schema_and_sampling`.
+pub fn build_period_request(batch: &PeriodBatch, model: &str) -> ChatRequest {
+    // `to_string_pretty` over a `Value` this module built cannot fail; an empty
+    // string would still leave the prose instructions in the system turn.
+    let schema = serde_json::to_string_pretty(&period_findings_schema()).unwrap_or_default();
+    let system = format!(
+        "{}\n\n## Response schema\nReturn ONLY a JSON object conforming to this schema:\n\
+         ```json\n{schema}\n```",
+        period_reviewer_system_prompt()
+    );
+
+    let mut req = ChatRequest::new(
+        model,
+        vec![
+            ChatMessage::system(system),
+            ChatMessage::user(build_period_user_message(batch)),
+        ],
+    );
+    req.temperature = Some(PERIOD_REVIEWER_TEMPERATURE);
+    req.max_tokens = Some(PERIOD_REVIEWER_MAX_TOKENS);
+    req
+}
+
+// ─── Transport ────────────────────────────────────────────────────────────────
+
+/// What one period's review produced, and whether it happened at all.
+///
+/// Why: a bare `Vec` cannot tell a caller "the model read this period and found
+/// nothing" from "the provider never answered" — both are zero findings, and a
+/// Bedrock outage across twelve quarters would render as twelve clean quarters.
+/// Since the profile's trajectory is derived from the periods that WERE
+/// reviewed, a caller that cannot see the difference publishes a trend over a
+/// silently smaller sample. #5464: the shape is inherited from trusty-review's
+/// original; it is fixed here rather than after #5465 wires the first caller to
+/// it.
+/// What: the findings, plus [`Self::skipped`] carrying the provider error when
+/// the call failed. Deliberately NOT a `Result`, so no caller can `?` a single
+/// period's outage into aborting the whole run — the audit must survive one bad
+/// period. `#[non_exhaustive]` because the parse-failure case wants the same
+/// treatment once `ChatRequest` can enforce a schema.
+/// Test: `period_review_distinguishes_provider_failure_from_a_clean_period`.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct PeriodReview {
+    /// Findings the model reported. Empty whenever [`Self::skipped`] is set.
+    pub findings: Vec<LongitudinalFinding>,
+
+    /// The provider error that skipped this period, or `None` when the model
+    /// answered — in which case `findings` is what it said, including,
+    /// legitimately, nothing.
+    pub skipped: Option<InferenceError>,
+}
+
+impl PeriodReview {
+    /// Whether the provider call failed and this period was never reviewed.
+    pub fn was_skipped(&self) -> bool {
+        self.skipped.is_some()
+    }
+}
+
+/// The period-review transport: one model call per period, over the shared
+/// inference stack.
+///
+/// Why: #5464 — contributor profiling is tga's domain, so the call that turns a
+/// period's diffs into findings routes through `trusty_common::inference`
+/// directly instead of trusty-review's `crate::llm`. Any residual interaction
+/// with trusty-review stays a process boundary (its `review_diff` MCP tool, or
+/// the `trusty-review` binary `tga audit` already spawns) — never a Cargo edge.
+/// What: holds a [`InferenceAdapter`] and the routing slug it was resolved from.
+/// [`Self::review_period`] survives a provider failure and reports it as a
+/// skipped period rather than a clean one.
+/// Test: `period_reviewer_routes_through_shared_inference`,
+/// `period_review_distinguishes_provider_failure_from_a_clean_period`.
+pub struct PeriodReviewer {
+    adapter: Arc<dyn InferenceAdapter>,
+    model: String,
+}
+
+impl PeriodReviewer {
+    /// Resolve `model` against the shared credential store and build its adapter.
+    ///
+    /// Why: the slug → provider → credential → adapter ladder is
+    /// `trusty_common`'s, and routing it through [`Configurator`] is what keeps
+    /// tga from growing a second copy of the "which backend, whose key" decision.
+    /// What: registers the default HTTP provider factories (plus the Bedrock
+    /// Converse factory when tga is built `--features bedrock`), then resolves
+    /// `model` against [`default_store`].
+    ///
+    /// # Errors
+    ///
+    /// [`super::ProfileError::Inference`] when no credential resolves for the
+    /// slug's provider family, or when no factory is registered for it.
+    ///
+    /// Test: `from_slug_with_store_builds_an_adapter_for_a_stored_credential`,
+    /// `from_slug_with_store_errors_when_no_credential_resolves`.
+    pub fn from_slug(model: &str) -> super::Result<Self> {
+        Self::from_slug_with_store(model, default_store().as_ref())
+    }
+
+    /// [`Self::from_slug`] against an explicit credential store.
+    ///
+    /// Why: [`default_store`] reads the machine's real keychain, so a test built
+    /// on it asserts whatever the developer happens to have exported. Injecting
+    /// the store is how `trusty_common`'s own `provider_for` tests stay
+    /// deterministic, and taking the same seam here is what makes both arms of
+    /// this resolution testable.
+    /// What: registers the default HTTP provider factories (plus the Bedrock
+    /// Converse factory under tga's `bedrock` feature), then resolves `model`
+    /// against `store` — env tier first, then the store, per `resolve_key_with`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_slug`].
+    pub fn from_slug_with_store(model: &str, store: &dyn KeyStore) -> super::Result<Self> {
+        let mut configurator = Configurator::new();
+        register_default_factories(&mut configurator);
+        // #5464: the Bedrock Converse factory is registered separately from the
+        // OpenAI-dialect ones, and only exists under tga's `bedrock` feature.
+        #[cfg(feature = "bedrock")]
+        trusty_common::inference::register_bedrock_factory(&mut configurator);
+
+        let adapter = configurator.build(model, store)?;
+        Ok(Self {
+            adapter: Arc::from(adapter),
+            model: model.to_string(),
+        })
+    }
+
+    /// Bind a reviewer to an already-built adapter.
+    ///
+    /// Why: tests drive the real transport with the commons' `ScriptedAdapter`,
+    /// and a caller that already resolved an adapter should reuse it rather than
+    /// re-running credential resolution per period.
+    /// Test: `period_reviewer_routes_through_shared_inference`.
+    pub fn with_adapter(adapter: Arc<dyn InferenceAdapter>, model: impl Into<String>) -> Self {
+        Self {
+            adapter,
+            model: model.into(),
+        }
+    }
+
+    /// Review one period.
+    ///
+    /// Why: a run over twelve quarters must not be lost because the eleventh
+    /// call timed out, so a provider failure never propagates — but it is
+    /// REPORTED, in [`PeriodReview::skipped`], so the caller can say "9 of 12
+    /// periods reviewed" instead of publishing a trend over a silently smaller
+    /// sample.
+    /// What: sends [`build_period_request`] through the adapter, accumulates the
+    /// call's usage into `cost_out`, and parses the body with
+    /// [`parse_period_findings`]. `cost_usd` is the provider's authoritative
+    /// figure; a provider that reports none contributes 0 and leaves the token
+    /// counts as the record of what the call cost. A failed call bills nothing
+    /// and returns no findings.
+    /// Test: `period_reviewer_routes_through_shared_inference`,
+    /// `period_review_distinguishes_provider_failure_from_a_clean_period`.
+    pub async fn review_period(
+        &self,
+        batch: &PeriodBatch,
+        cost_out: &mut TokenCostSummary,
+    ) -> PeriodReview {
+        let period = &batch.stats.period_label;
+        let request = build_period_request(batch, &self.model);
+        let start = Instant::now();
+
+        let response = match self.adapter.chat(&request).await {
+            Ok(r) => r,
+            Err(e) => {
+                // #5464: the error travels back to the caller — a logged warning
+                // alone made a skipped period indistinguishable from a clean one.
+                warn!(
+                    period = %period,
+                    model = %self.model,
+                    error = %e,
+                    "batch_reviewer: inference call failed — period skipped"
+                );
+                return PeriodReview {
+                    findings: Vec::new(),
+                    skipped: Some(e),
+                };
+            }
+        };
+
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let usage = response.usage();
+        cost_out.accumulate(
+            u64::from(usage.prompt_tokens),
+            u64::from(usage.completion_tokens),
+            usage.cost_usd.unwrap_or(0.0),
+            latency_ms,
+        );
+
+        debug!(
+            period = %period,
+            model = %response.resolved_model(&self.model),
+            input_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens,
+            latency_ms,
+            "batch_reviewer: inference call complete"
+        );
+
+        PeriodReview {
+            findings: parse_period_findings(&response.first_text().unwrap_or_default(), period),
+            skipped: None,
+        }
+    }
 }
 
 // ─── Response parsing ─────────────────────────────────────────────────────────
