@@ -32,8 +32,6 @@
 
 mod support;
 
-use std::process::Command;
-
 use serde_json::json;
 
 /// A bare project tempdir with NO `.claude/agents/` directory — the exact
@@ -61,7 +59,7 @@ fn bare_project() -> tempfile::TempDir {
 #[test]
 fn run_task_engineer_direct_embedded_agent_dispatches_successfully() {
     let project = bare_project();
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "run-task",
             "engineer",
@@ -101,7 +99,7 @@ fn run_task_engineer_direct_embedded_agent_dispatches_successfully() {
 #[test]
 fn run_task_rust_engineer_composed_embedded_agent_dispatches_successfully() {
     let project = bare_project();
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "run-task",
             "rust-engineer",

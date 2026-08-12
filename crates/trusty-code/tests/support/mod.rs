@@ -45,6 +45,39 @@ use tokio::time::timeout;
 /// test in seconds rather than hanging the suite.
 const WIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The ONLY way an integration test may name the `tcode` binary — a
+/// `Command` for the freshly-built executable with ambient-daemon isolation
+/// already installed (#3036, #3195).
+///
+/// Why: `trusty_common::search_index` refuses daemon writes when
+/// `running_under_test_harness()` holds (#4255), but that reads the RUNNING
+/// process's own path. `env!("CARGO_BIN_EXE_tcode")` is
+/// `target/<profile>/tcode` — outside `deps/` — so a spawned child is
+/// indistinguishable from a user's real invocation and warms its
+/// `--project` into whatever trusty-search daemon it discovers. On a
+/// developer machine that is the OPERATOR's live daemon, which registers the
+/// test's `$TMPDIR/.tmpXXXXXX` fixture and writes `.gitignore` plus
+/// `.trusty-search/{index.redb,hnsw.usearch,…}` back INSIDE the sandbox.
+/// Those files land at an unpredictable moment — the warm-up is a detached
+/// thread and the daemon walks the tree asynchronously — so they corrupt
+/// whichever `run_task` before/after diff assertion happens to be open,
+/// which is why a different test failed each run and why `--test-threads=1`
+/// looked green. `spawn_inner`/`spawn_http_daemon_with_env` already set this
+/// on the two children they own; the ~26 tests that built their own
+/// `Command` did not, and that residue is #3036/#3195.
+/// What: `std::process::Command` for the binary, with
+/// `TRUSTY_TEST_HARNESS=1` set so the child reports itself as a test process
+/// and every `search_index` write is refused at the source. Pinning `HOME`
+/// is NOT a substitute: macOS resolves the data dir through `NSFileManager`,
+/// which ignores `$HOME`.
+/// Test: `no_test_spawns_the_tcode_binary_unguarded` (in the lib suite)
+/// fails if any test file names the binary directly instead of calling this.
+pub fn tcode_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_tcode"));
+    cmd.env(trusty_common::test_harness::FORCE_ENV, "1");
+    cmd
+}
+
 /// Provision a throwaway project with `.claude/agents/{pm,python-engineer}.md`.
 ///
 /// Why: shared by `tests/task_e2e.rs` (drives the daemon directly) and
