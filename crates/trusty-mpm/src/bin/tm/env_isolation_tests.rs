@@ -258,10 +258,11 @@ fn mutation_sites(code: &str) -> Vec<(usize, bool)> {
 /// Why: see the module docs. This is the rule that eliminates #5544's race class:
 /// with zero writers, a newly added non-serial reader of a `$HOME`-relative
 /// tier cannot race one, because there is nothing left to race.
-/// What: for each mutation site, inspects the following 120 CHARS — enough to
-/// span a multi-line `set_var(\n    "HOME",\n    …)` — for a banned name. A site
-/// whose key is not a literal is unverifiable and is handled by rule 2's
-/// indirect column instead.
+/// What: for each mutation site, extracts the variable name via [`literal_key`]
+/// and compares it EXACTLY against [`BANNED_ENV_WRITES`] — exact, because
+/// `XDG_CONFIG_HOME` contains `HOME` and this target writes it. A site whose key
+/// is not a literal is unverifiable and is handled by rule 2's indirect column
+/// instead.
 /// Test: this function IS the test; `the_guard_detects_a_home_write_and_ignores_prose`
 /// proves the detection fires.
 #[test]

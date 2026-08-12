@@ -30,18 +30,28 @@ use super::{start_session, start_session_in_place};
 // #5544: there is no `$HOME` guard here any more. The two tests below used to
 // repoint the process's `$HOME` at a tempdir behind `#[serial]`, because
 // `prepare_session` reached the real `~/.claude.json` and `~/.claude/settings.json`
-// through `dirs::home_dir()` — a DIFFERENT resolution path from the `fw`
-// parameter they already isolated with `FrameworkPaths::under(tempdir)`. That
-// escape is now closed at the source: `preseed_workspace_trust_home` and
-// `remove_global_trusty_memory_hooks` resolve from `fw.claude_home_dir()`, the
-// accessor #1860 added for exactly this. Production is unchanged, because
-// `FrameworkPaths::default().claude_home_dir()` IS the real home.
+// through `dirs::home_dir()` — a resolution path the `fw` parameter they already
+// isolated with `FrameworkPaths::under(tempdir)` had no say over.
+//
+// The home is now a PARAMETER: `prepare_session_with_home` takes it, and
+// `start_session_in_place` threads it through. Production passes
+// `dirs::home_dir()`, byte-identical to before under every framework root.
+//
+// 🔴 Do NOT "simplify" this by resolving the home from `fw` instead.
+// `FrameworkPaths::claude_home_dir()` still exists and looks like the obvious
+// answer; it is not. `for_managed_project` rewrites `claude_agents`, which that
+// accessor derives from, so for every managed session it returns the WORKSPACE —
+// which drops an untracked `.claude.json` into the operator's repo and points the
+// global hook cleanup at a file that does not exist. A missing file is success by
+// contract, so nothing reports it. That defect shipped twice in this PR's review
+// and cost two rounds; the parameter is what makes it unreachable.
 //
 // The env write had to go rather than be serialised: `cargo test` runs a
 // target's tests as threads in ONE process, so `$HOME` was repointed for every
 // sibling for the duration, and `#[serial]` excludes only other `#[serial]`
-// tests. `prepare_session_confines_home_writes_to_the_framework_base` below is
-// the regression test for the escape itself.
+// tests. `prepare_session_does_not_seed_the_workspace_on_the_managed_path` and
+// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`
+// (`core::session_launch::tests`) are the regression tests for the escape.
 
 /// Run `git <args>` in `dir`, panicking with full context on failure.
 ///
