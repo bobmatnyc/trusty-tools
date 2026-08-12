@@ -181,6 +181,16 @@ jobs:
       # the release job's changelog --tag-pattern, which must match the literal
       # pushed tag. For non-aliased crates tag_prefix == crate.
       tag_prefix: ${{ steps.parse.outputs.tag_prefix }}
+      # Why (See #5455): the SINGLE resolved release tag, computed once here
+      # instead of read from `github.ref_name` at each call site. On a real tag
+      # push, `github.ref_name` IS the tag, so this equals it exactly. On
+      # `workflow_dispatch`, `github.ref_name` is whatever branch/ref the run
+      # was dispatched against (e.g. literal `main`), NOT a tag — reading it
+      # directly at a downstream step produced an unrecoverable trap (see the
+      # `release` job comments below). Every step that needs "the tag" reads
+      # `needs.setup.outputs.tag`; no other expression may reference
+      # `github.ref_name` for this purpose.
+      tag: ${{ steps.parse.outputs.tag }}
       version:  ${{ steps.parse.outputs.version }}
       matrix:   ${{ steps.matrix.outputs.matrix }}
       dry_run:  ${{ steps.parse.outputs.dry_run }}
@@ -216,6 +226,26 @@ jobs:
             DRY_RUN="false"
           fi
 
+          # See #5455: resolve the SINGLE canonical release tag here, once, for
+          # every downstream consumer. On a `push` of a tag, `$TAG` above IS the
+          # literal pushed tag (already validated against <prefix>-v<version>
+          # above) — reuse it unchanged rather than reconstructing it, so a tag
+          # this branch's own regex would reject can never mismatch what actually
+          # got pushed. On `workflow_dispatch` there is no `$TAG` — synthesize
+          # one from the raw (pre-alias) crate input, using the SAME
+          # `<prefix>-v<version>` convention documented in CLAUDE.md ("Git Tag /
+          # Release Convention") and enforced by the regex above, so a manual
+          # republish targets the tag that was actually pushed (e.g. `tga-v2.18.0`,
+          # not `trusty-git-analytics-v2.18.0`). Reading `github.ref_name`
+          # directly at each downstream call site is what broke this: under
+          # workflow_dispatch it resolves to the dispatched-against REF (e.g. the
+          # literal string `main`), never the crate/version inputs.
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            RESOLVED_TAG="${CRATE}-v${VERSION}"
+          else
+            RESOLVED_TAG="$TAG"
+          fi
+
           # ── Tag-prefix aliases (issue #1128) ─────────────────────────────────
           # Some crates publish to crates.io under a SHORT package name that
           # differs from their directory / canonical crate name, and the
@@ -243,10 +273,11 @@ jobs:
           {
             echo "crate=$CRATE"
             echo "tag_prefix=$TAG_PREFIX"
+            echo "tag=$RESOLVED_TAG"
             echo "version=$VERSION"
             echo "dry_run=$DRY_RUN"
           } >> "$GITHUB_OUTPUT"
-          echo "Parsed: crate=$CRATE  tag_prefix=$TAG_PREFIX  version=$VERSION  dry_run=$DRY_RUN"
+          echo "Parsed: crate=$CRATE  tag_prefix=$TAG_PREFIX  tag=$RESOLVED_TAG  version=$VERSION  dry_run=$DRY_RUN"
 
       # ── Per-crate configuration table ──────────────────────────────────────
       # Each entry encodes everything the build job needs for one crate:
@@ -823,13 +854,19 @@ jobs:
         shell: bash
         # TAG is passed via `env:` rather than interpolated directly into the
         # script (as `.claude/skills/cargo-publish/SKILL.md`-documented issue
-        # #3568 review flagged: raw `${{ github.ref_name }}` interpolation is
-        # a shell-injection hazard — a ref name can contain `$`, backticks,
-        # quotes, parens) and always referenced quoted (`"$TAG"`). Matches the
-        # `homebrew-bump` job's existing `env: TAG: ${{ github.ref_name }}`
-        # pattern below — one convention for this file, not two.
+        # #3568 review flagged: raw ref/tag interpolation is a shell-injection
+        # hazard — a ref name can contain `$`, backticks, quotes, parens) and
+        # always referenced quoted (`"$TAG"`). Matches the `homebrew-bump`
+        # job's `env: TAG: ...` pattern below — one convention for this file,
+        # not two.
+        #
+        # See #5455: reads the single resolved tag from `needs.setup.outputs.tag`
+        # rather than `github.ref_name` directly — this step only runs its
+        # ancestry check on `push` (guarded below), where the two are
+        # identical, but a second independent `github.ref_name` read here
+        # would reintroduce the exact drift #5455/#5571 fixed everywhere else.
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.setup.outputs.tag }}
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" != "push" ]]; then
@@ -1823,10 +1860,94 @@ jobs:
         env:
           OUTPUT: RELEASE_NOTES.md
 
+      # ── Detect (never repair-by-deletion) a stuck immutable asset-less
+      # release (issue #5455, revised in PR #5591 after this exact strategy
+      # was proven destructive) ──────────────────────────────────────────────
+      # WHY THE ORIGINAL "delete and let softprops recreate" REPAIR DOES NOT
+      # WORK, established empirically while investigating trusty-installer-v0.5.0:
+      #   This repo has GitHub's Immutable Releases enabled repo-wide — every
+      #   release object here reports `"immutable": true` via the REST API
+      #   (`gh api repos/<repo>/releases --paginate --jq '.[]|{tag_name,immutable}'`,
+      #   confirmed across every crate's release history, not just this tag).
+      #   Two GitHub-documented facts combine to make delete-and-recreate
+      #   actively destructive rather than a repair:
+      #     1. "Once you publish a release as immutable, its assets can't be
+      #        added, modified, or deleted." (github.blog/changelog,
+      #        2025-10-28, "Immutable releases are now generally available")
+      #        — so there is no in-place repair for an asset-less immutable
+      #        release; assets can never be attached to it after the fact.
+      #     2. "If you delete the immutable release, you can delete the tag,
+      #        but you cannot reuse the same tag name." (GitHub Docs,
+      #        code-security/concepts/supply-chain-security/immutable-releases)
+      #        — so deleting the release object to let softprops recreate it
+      #        PERMANENTLY forfeits the tag name. A recreate attempt fails at
+      #        finalize with "tag_name was used by an immutable release" —
+      #        the exact failure observed reproducing this for
+      #        trusty-installer-v0.5.0 after a fresh release object had
+      #        already uploaded all 6 assets successfully. The original
+      #        release for that tag had published once (2026-08-04, run
+      #        30961682562) before an earlier repair attempt deleted its
+      #        asset-less release object, so the tag name was already gone —
+      #        turning a degraded (0-asset) release into NO release (404).
+      #   Net effect: for an immutable, asset-less release, THERE IS NO SAFE
+      #   AUTOMATED REPAIR. The only real remedy is a new version (new tag).
+      #
+      # WHAT THIS STEP DOES INSTEAD: looks up the release for this tag and
+      # reads GitHub's own `.immutable` field directly off the release object
+      # — the authoritative per-release signal, not an inference from repo
+      # history — then NEVER deletes:
+      #   - No release exists: nothing to do; softprops creates fresh. OK.
+      #   - Release exists with >0 assets: already fine, leave untouched. OK.
+      #   - Release exists, 0 assets, immutable=false: a genuinely mutable
+      #     stale release (e.g. from before immutable releases was enabled on
+      #     this repo). softprops's normal GET → PATCH → upload path already
+      #     handles this in place — a mutable release does not reject the
+      #     target_commitish PATCH the way an immutable one does — so there is
+      #     nothing to delete here either.
+      #   - Release exists, 0 assets, immutable=true: THE HAZARD. FAIL THE JOB
+      #     LOUDLY (never delete, never touch the release) and name the real
+      #     remedy in the error text: cut a new version/tag.
+      #
+      # TAG is `needs.setup.outputs.tag`, not `github.ref_name` (#5455): under
+      # `workflow_dispatch` — a manual republish, exactly the case this step
+      # exists for — `github.ref_name` is the dispatched-against REF (e.g. the
+      # literal string "main"), not a tag at all.
+      - name: Detect a stuck immutable asset-less release for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          set -euo pipefail
+          RELEASE_INFO="$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
+            --jq '[(.assets | length), (.immutable // false)] | @tsv' 2>/dev/null || echo "")"
+          if [[ -z "$RELEASE_INFO" ]]; then
+            echo "No existing release for tag '${TAG}' — nothing to do; softprops will create it."
+            exit 0
+          fi
+
+          ASSET_COUNT="$(cut -f1 <<< "$RELEASE_INFO")"
+          IMMUTABLE="$(cut -f2 <<< "$RELEASE_INFO")"
+
+          if [[ "$ASSET_COUNT" != "0" ]]; then
+            echo "Existing release for '${TAG}' already has ${ASSET_COUNT} asset(s) attached — leaving it in place."
+            exit 0
+          fi
+
+          if [[ "$IMMUTABLE" == "true" ]]; then
+            echo "::error::Release '${TAG}' exists with 0 assets and is IMMUTABLE. GitHub permanently forbids adding assets to a published immutable release, and deleting it would permanently forfeit the tag name (any recreate attempt then fails at finalize with 'tag_name was used by an immutable release' — see github.blog/changelog 2025-10-28 'Immutable releases are now generally available', and GitHub Docs code-security/concepts/supply-chain-security/immutable-releases: 'If you delete the immutable release, you can delete the tag, but you cannot reuse the same tag name.'). There is NO safe automated repair for this tag. Cut a NEW version for this crate (a new tag) instead — do not delete or recreate this release. See #5455."
+            exit 1
+          fi
+
+          echo "Existing release for '${TAG}' has 0 assets but is NOT immutable — softprops's normal update path can attach assets to it in place; nothing to delete."
+
       - name: Create / update GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          # See #5455: single resolved tag (needs.setup.outputs.tag), not
+          # github.ref_name — see the "Detect a stuck immutable asset-less
+          # release" step above for why a raw ref_name read is wrong here
+          # under workflow_dispatch.
+          tag_name: ${{ needs.setup.outputs.tag }}
           name: "${{ needs.setup.outputs.crate }} v${{ needs.setup.outputs.version }}"
           prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
           # Release notes are now generated by git-cliff (step above) instead of
@@ -1968,8 +2089,10 @@ jobs:
         env:
           CRATE:   ${{ needs.setup.outputs.crate }}
           VERSION: ${{ needs.setup.outputs.version }}
-          # TAG is the raw git ref name, e.g. "trusty-analyze-v0.5.1"
-          TAG:     ${{ github.ref_name }}
+          # See #5455: single resolved tag, e.g. "trusty-analyze-v0.5.1" — was
+          # `github.ref_name`, which under workflow_dispatch is the
+          # dispatched-against ref (e.g. literal "main"), not a tag.
+          TAG:     ${{ needs.setup.outputs.tag }}
           # GITHUB_REPOSITORY is "bobmatnyc/trusty-tools"
           REPO:    ${{ github.repository }}
         run: |

@@ -61,6 +61,15 @@ pub enum ProfileError {
     /// An I/O failure, e.g. writing the report to an unwritable directory.
     #[error("I/O error in profile pipeline: {0}")]
     Io(#[from] std::io::Error),
+
+    /// The period-review model could not be resolved or reached.
+    ///
+    /// #5464: raised by `PeriodReviewer::from_slug` when no credential resolves
+    /// for the slug's provider family, or no adapter factory is registered for
+    /// it. A failure DURING a period review is not this — that path is fail-safe
+    /// and returns no findings.
+    #[error("inference provider error: {0}")]
+    Inference(#[from] trusty_common::inference::InferenceError),
 }
 
 /// `Result` specialised to [`ProfileError`].

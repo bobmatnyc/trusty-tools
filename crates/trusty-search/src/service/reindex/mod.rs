@@ -155,6 +155,14 @@ pub(crate) use semaphore::index_semaphore;
 /// Test: `semaphore::tests_index_lock_eviction`.
 pub(crate) use semaphore::remove_index_semaphore;
 
+/// Re-export `index_task_in_flight` so `service::server::{health, status}` can
+/// ask whether anything is actually driving an index before reporting its
+/// `InProgress` stage as a live reindex (#5336).
+/// Why: the semaphore registry lives in the private `semaphore` submodule.
+/// What: delegates to `semaphore::index_task_in_flight`.
+/// Test: `service::server::tests_health_degraded::health_does_not_flag_an_in_flight_reindex_as_stuck_mid_walk`.
+pub(crate) use semaphore::index_task_in_flight;
+
 /// Re-export the cancel-signal accessors `service::server::search` needs (#3049).
 ///
 /// Why: `unregister_index` signals a cancel before waiting on the index permit
@@ -274,3 +282,6 @@ mod resume_tests;
 // passing coverage while the swap silently discarded every contribution.
 #[cfg(test)]
 mod contrib_survival_tests;
+// #5047: poller shutdown latency — teardown must not wait out the current tick.
+#[cfg(test)]
+mod pollers_tests;

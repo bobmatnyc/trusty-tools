@@ -35,7 +35,9 @@ use std::time::Duration;
 
 use crate::service::persistence::PersistedIndex;
 pub use restore::{restore_one_index_bounded, BoundedRestoreOutcome};
-pub use stages::{derive_warm_boot_stages, index_is_stuck_unwalked, WarmBootInputs};
+pub use stages::{
+    derive_warm_boot_stages, index_is_stuck_mid_walk, index_is_stuck_unwalked, WarmBootInputs,
+};
 // #4846: root-existence triage + the global salvage budget.
 pub use triage::{
     salvage_budget_secs, triage_entries, triage_entries_with, SalvageBudget, SalvageGrant,
