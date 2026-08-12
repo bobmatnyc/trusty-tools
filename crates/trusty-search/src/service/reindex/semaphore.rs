@@ -149,6 +149,48 @@ pub(crate) fn index_semaphore(id: &IndexId) -> Arc<Semaphore> {
         .clone()
 }
 
+/// `true` when some task currently holds `id`'s per-index mutual-exclusion
+/// permit — a reindex, a deferred-embed pass, or a component catch-up is alive
+/// and driving this index right now (#5336).
+///
+/// Why: an index's `stages` surface is a CLAIM about work; this is the only
+/// in-process fact about whether anyone is actually doing it. `run_reindex`
+/// acquires this permit (via [`index_semaphore`]) BEFORE
+/// `reset_stages_for_reindex` flips lexical to `InProgress`, and holds it in a
+/// local until the function returns, so it is held across the whole window in
+/// which the stage claims a walk is underway — including on the paths that
+/// strand one, since a panic or an `.await` cancellation releases the permit
+/// while leaving the stage frozen at `InProgress`. "Lexical is `InProgress` and
+/// this reports `false`" is therefore the signature of a stage nobody is
+/// backing.
+///
+/// `SearchAppState::reindex_progress` cannot answer this. `reconcile::
+/// trigger_full_reindex` and `components::spawn_component_catch_up` each
+/// allocate a `ReindexProgress` without ever inserting it into that map, so a
+/// boot-reconcile reindex is genuinely in flight with no entry there — reading
+/// absence as "nothing running" would report every such index as stuck.
+///
+/// What: a read-only lookup. Unlike [`index_semaphore`] it never inserts, so a
+/// per-poll scan across the whole registry does not populate [`INDEX_LOCKS`]
+/// with an entry per index. An id no task has ever locked has no entry and no
+/// holder, so it reports `false`.
+///
+/// Deliberately conservative in one direction: a deferred-embed pass or a
+/// component catch-up holds the same permit, so a stuck index whose id happens
+/// to be busy with one of those is not flagged for that poll. Missing a stuck
+/// index for a few seconds is the safe error; calling a live reindex stuck is
+/// not.
+///
+/// Test: `health_does_not_flag_an_in_flight_reindex_as_stuck_mid_walk` and
+/// `health_reports_degraded_for_an_abandoned_mid_walk_index` in
+/// `service::server::tests_health_degraded`.
+pub(crate) fn index_task_in_flight(id: &IndexId) -> bool {
+    INDEX_LOCKS
+        .get()
+        .and_then(|map| map.get(id).map(|sem| sem.available_permits() == 0))
+        .unwrap_or(false)
+}
+
 /// Remove `id`'s entry from [`INDEX_LOCKS`], e.g. when the index itself is
 /// deleted (issue #2984 Phase 1 delta-review MEDIUM finding).
 ///
