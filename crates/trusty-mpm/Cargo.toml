@@ -221,6 +221,10 @@ semver.workspace = true
 tempfile.workspace = true
 sha2.workspace = true
 regex.workspace = true
+# Glob compilation for the `tm ls` picker's `d <glob>` bulk delete (#5539).
+# Already a workspace dep (trusty-code) and already in the lockfile, so this
+# adds no new dependency to resolve.
+globset.workspace = true
 # #2734: quote-aware shell word-splitting for the PM Bash guard's git-argv
 # parsing (`src/bin/tm/commands/pm_guard_bash/shell_lex.rs`).
 shlex.workspace = true

@@ -200,7 +200,7 @@ pub fn tool_descriptors() -> Value {
         },
         {
             "name": "create_index",
-            "description": "Register a new (empty) index",
+            "description": "Register a new (empty) index. The reindex that populates it refuses any tree over the daemon's file-count / total-byte budget (TRUSTY_MAX_INDEX_FILES, default 50000; TRUSTY_MAX_INDEX_BYTES, default 2 GiB) rather than silently truncating it — narrow a large tree with exclude_globs.",
             "inputSchema": {
                 "type": "object",
                 "required": ["id", "root_path"],
@@ -210,6 +210,11 @@ pub fn tool_descriptors() -> Value {
                     "follow_links": {
                         "type": "boolean",
                         "description": "Dereference symlinks during the index walk. Default false (do not follow) — the safe choice for roots containing symlinks that escape the tree. Set true to index vendored / monorepo-aliased subtrees reached via a symlink."
+                    },
+                    "exclude_globs": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Glob patterns to exclude from the walk, on top of the built-in ignores (.gitignore, node_modules, .git, target, dist, build, ...). Use this to bring an oversized tree under the index budget, e.g. [\"**/fixtures/**\", \"**/*.generated.ts\"]."
                     }
                 }
             }
@@ -230,8 +235,19 @@ pub fn tool_descriptors() -> Value {
         },
         {
             "name": "search_health",
-            "description": "Probe daemon liveness and version",
-            "inputSchema": { "type": "object", "properties": {} }
+            "description": "Diagnose this session's search back-end (issue #5264). \
+                            Reports which daemon answered — base URL, version, index \
+                            and chunk counts — so a healthy daemon that is not YOUR \
+                            daemon is visible, and separates 'nothing is listening' \
+                            from 'answered badly' from 'healthy but this project is \
+                            not indexed'. Branch on `healthy`, not on the call \
+                            succeeding; every non-ok status carries a `remediation`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index_id": { "type": "string" }
+                }
+            }
         },
         {
             "name": "delete_index",

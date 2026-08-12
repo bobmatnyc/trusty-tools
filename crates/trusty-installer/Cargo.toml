@@ -1,6 +1,6 @@
 [package]
 name = "trusty-installer"
-version = "0.6.0"
+version = "0.8.0"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"
@@ -61,6 +61,10 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 # Semantic-version parsing for GitHub release tag resolution (Phase 2 / #1760).
 semver = { workspace = true }
+# Structured library error type for the pinned, fail-closed download entry point
+# (#5491). This crate ships a [lib] target consumed by trusty-audit, so its
+# public error surface follows the repo's thiserror-for-libraries convention.
+thiserror = { workspace = true }
 # Structured logging to stderr (CLAUDE.md: logs → stderr, stdout = data)
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

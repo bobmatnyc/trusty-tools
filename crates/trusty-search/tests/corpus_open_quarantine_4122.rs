@@ -44,6 +44,7 @@ use tempfile::tempdir;
 use tokio::sync::RwLock;
 use trusty_common::embedder::MockEmbedder;
 use trusty_search::core::corpus::CorpusStore;
+use trusty_search::core::registry::IndexId;
 use trusty_search::core::{chunk_ast, Embedder};
 use trusty_search::service::indexed_files::IndexedFiles;
 use trusty_search::service::persistence::PersistedIndex;
@@ -105,11 +106,10 @@ fn mock_embedder() -> Arc<dyn Embedder> {
 
 /// Build a colocated `PersistedIndex` entry rooted at `root`.
 fn entry_at(id: &str, root: &Path) -> PersistedIndex {
-    PersistedIndex {
-        id: id.to_string(),
-        root_path: root.to_path_buf(),
-        colocated: true,
-        ..Default::default()
+    {
+        let mut e = PersistedIndex::new(id.to_string(), root.to_path_buf());
+        e.colocated = true;
+        e
     }
 }
 
@@ -194,10 +194,20 @@ async fn quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero() {
     let broken = Arc::new(RwLock::new(broken));
     let healthy = Arc::new(RwLock::new(healthy));
 
-    let _broken_watch = spawn_watch_loop(&broken_root, Arc::clone(&broken), IndexedFiles::new())
-        .expect("spawn broken watch loop");
-    let _healthy_watch = spawn_watch_loop(&healthy_root, Arc::clone(&healthy), IndexedFiles::new())
-        .expect("spawn healthy watch loop");
+    let _broken_watch = spawn_watch_loop(
+        &broken_root,
+        IndexId::new("broken"),
+        Arc::clone(&broken),
+        IndexedFiles::new(),
+    )
+    .expect("spawn broken watch loop");
+    let _healthy_watch = spawn_watch_loop(
+        &healthy_root,
+        IndexId::new("healthy"),
+        Arc::clone(&healthy),
+        IndexedFiles::new(),
+    )
+    .expect("spawn healthy watch loop");
 
     // Ordinary, unrelated saves in each worktree — the production trigger.
     // Driven by `await_condition_resaving` so a save that lands before the OS

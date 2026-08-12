@@ -492,7 +492,7 @@ pub fn run_gap_report(root: &Path) -> GapReport {
 
         report
             .broken_references
-            .extend(checks::check_code_file(&path, &content, ext, &lookup));
+            .extend(checks::check_code_file(&path, &content, ext, &lookup).diagnostics);
 
         let Some(syntax) = syntax_for_extension(ext) else {
             continue;
@@ -515,7 +515,7 @@ pub fn run_gap_report(root: &Path) -> GapReport {
 
         report
             .broken_references
-            .extend(checks::check_markdown_refs(&path, &content, &lookup));
+            .extend(checks::check_markdown_refs(&path, &content, &lookup).diagnostics);
 
         let anchors = spec_anchors(&content);
         report.spec_sections_scanned += anchors.len();

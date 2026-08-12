@@ -476,18 +476,9 @@ cannot be overridden:
 | `$HOME` itself, `~/Desktop`, `~/Downloads`, `~/Documents`, `~/Library` | Home top-level dirs |
 
 The daemon returns HTTP 403 with a `{"error": "..."}` body when a denylist
-pattern matches. The error message names the matched pattern.
-
-### Operator bypass (for automation / CI)
-
-Set `TRUSTY_ALLOW_UNLISTED=1` in the daemon's environment to disable the
-allowlist check entirely. Use this only in fully controlled, network-isolated
-environments where you trust every `POST /indexes` caller. Never set this on a
-shared or production host.
-
-```bash
-TRUSTY_ALLOW_UNLISTED=1 trusty-search start
-```
+pattern matches. The error message names the matched pattern. There is no
+environment-variable override for either the allowlist or the denylist — a
+path is registerable only by adding it to `allowlist.toml`.
 
 ## CLI
 
@@ -534,7 +525,7 @@ this table is generated from it, not maintained by hand.
 |---|---|---|
 | `chat` | `index_id`, `api_key?`, `history?`, `message?`, `model?`, `question?`, `top_k?` | Ask a natural-language question about the indexed codebase. |
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
-| `create_index` | `id`, `root_path`, `follow_links?` | Register a new (empty) index |
+| `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
 | `delete_index` | `index_id` | Delete a registered index and all its data |
 | `get_call_chain` | `index_id`, `entry_point`, `direction?`, `include_source?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `glob?`, `index_id?`, `invert_match?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
@@ -546,7 +537,7 @@ this table is generated from it, not maintained by hand.
 | `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
 | `search` | `index_id`, `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
 | `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `full_content?`, `index_id?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
-| `search_health` | — | Probe daemon liveness and version |
+| `search_health` | `index_id?` | Diagnose this session's search back-end (issue #5264). |
 | `search_kg` | `index_id`, `query`, `mode?`, `path_prefix?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
 | `search_lexical` | `index_id`, `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
 | `search_semantic` | `index_id`, `query`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |

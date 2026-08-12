@@ -625,7 +625,13 @@ assert_eq "no gate in semver-checks branches on the activity type" "0" \
   "$(grep -c 'github\.event\.action' <<<"$(sed -n '/^jobs:/,$p' .github/workflows/semver-checks.yml)" || true)"
 # The expensive half of the SemVer gate stays behind the diff verdict — this is
 # what keeps #5149's "not 20 minutes on every PR" true while the context reports.
-assert_eq "semver-checks gates its costly steps on there being work" "5" \
+# #5440 added a sixth guarded step (libdbus install, needed for trusty-common's
+# keyring-store feature): Install stable toolchain, Install system dependencies
+# (libdbus for keyring-store), Install cargo-semver-checks (pinned prebuilt),
+# Cache cargo artifacts, SemVer gate selftest, Enforce public-API SemVer against
+# crates.io. All six belong behind have_work — none of them has a reason to run
+# when nothing is being released.
+assert_eq "semver-checks gates its costly steps on there being work" "6" \
   "$(grep -c "if: steps.crate.outputs.have_work == 'true'" .github/workflows/semver-checks.yml || true)"
 
 echo

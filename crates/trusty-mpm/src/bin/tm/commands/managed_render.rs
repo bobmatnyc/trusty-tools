@@ -73,6 +73,35 @@ fn pad_visible(text: &str, width: usize, color: StateColor, use_color: bool) -> 
     format!("{}{}", colorize(text, color, use_color), " ".repeat(pad))
 }
 
+/// Report that `tm ls -a` matched nothing.
+///
+/// Why: an empty table under `-a` is a legitimate answer — nobody is attached
+/// to anything — and printing a bare header (or nothing) leaves the operator
+/// unable to tell that apart from a broken filter or an unreachable daemon.
+/// The distinct wording also keeps it from reading as "you have no sessions",
+/// which `render_session_table`'s "no managed sessions" would wrongly imply
+/// while a dozen detached sessions are running.
+/// What: prints `no attached sessions[ for <slug>]`, mirroring
+/// [`render_session_table`]'s empty-list phrasing. The caller returns `Ok(())`,
+/// so the exit status is 0.
+/// Test: `render_no_attached_sessions_*` in `tests_behavior_d_tests.rs`.
+pub(crate) fn render_no_attached_sessions(source_id: Option<&str>) {
+    println!("{}", no_attached_sessions_line(source_id));
+}
+
+/// The exact line [`render_no_attached_sessions`] prints, as a pure value.
+///
+/// Why: splitting the string from the `println!` is what makes the message
+/// assertable in a unit test without capturing stdout.
+/// Test: `render_no_attached_sessions_line_unscoped`,
+/// `render_no_attached_sessions_line_scoped_to_source_id`.
+pub(crate) fn no_attached_sessions_line(source_id: Option<&str>) -> String {
+    match source_id {
+        Some(sid) => format!("no attached sessions for {sid}"),
+        None => "no attached sessions".to_string(),
+    }
+}
+
 /// Render the static `tm session ls` / `tm ls` table for a scoped session list.
 ///
 /// Why: both the static list command and the `tm ls` connector's non-picker path

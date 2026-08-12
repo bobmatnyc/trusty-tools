@@ -168,9 +168,24 @@ All other tracked `.rs` files are **production files**, capped at 500 SLOC.
 tests to a 460-SLOC module without splitting it. Only that exact shape is
 excluded — `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on an
 `fn`/`impl`/`use`, and predicates like `all(test, …)` or `any(test, …)` are all
-still counted, as is any test module whose brace balance is skewed by a brace
-inside a string literal. The matcher is line-based and fails closed: it can
-raise a false cap violation, never silently drop production code.
+still counted. Braces inside string, byte-string, raw-string, and `'{'` char
+literals do NOT skew the region any more; they are blanked before balancing.
+
+🔴 **That region detector is SHARED, and a new consumer inherits its failure
+modes.** It lives in `scripts/lib/sloc_awk.sh` and is used by
+`scripts/check_line_cap.sh` (to skip test bodies when counting) and
+`scripts/check_teardown_guard.sh` (to skip test-only call sites, via
+`emit_skip=1`). It is line-based, not a Rust parser, and it fails CLOSED: an
+unrecognised spelling leaves the region COUNTED, never silently dropped.
+
+Read that as a per-consumer question before reusing it, because one bias has
+two consequences. For the cap, a missed region is a false cap violation —
+noise. For the teardown gate, a missed region reported ten test fixtures as
+unguarded production writers, and the only way to silence one is a row in
+`scripts/teardown-guard-manifest.tsv` — a durable claim that a real write is
+exempt, which outlives the mistake and reads later as a considered decision.
+A consumer that would fail OPEN on a missed region must not use this detector
+as its only check.
 
 🟡 **No standalone SLOC-cap fix.** Never open a PR whose only purpose is bringing
 a file back under cap — the split ships inside the PR that next adds to that
@@ -255,6 +270,18 @@ unnoticed and will surface at the release that ships it. Prefer
 stay non-breaking by construction, and check a risky change yourself with
 `bash scripts/check_semver.sh --crate <crate>`. See
 [docs/reference/semver-gate.md](docs/reference/semver-gate.md).
+
+🔴 **The tag must name the commit that gets published.** Nothing bound the two
+together until `preflight-publish.sh` CHECK 6
+(`scripts/check-tag-publish-parity.sh`): `check-publish-ready.sh` GUARD 2 asks
+only whether the tag is an ANCESTOR of `origin/main`, and CHECK 1 asks only
+whether HEAD EQUALS `origin/main`, so a tag several commits behind HEAD passes
+both. That is where a release lands whenever `main` moves and the run is
+fast-forwarded to satisfy CHECK 1 — which shipped `tga-v2.17.0` tagged at
+`246e4ca2` against a published `.cargo_vcs_info.json` of `7d5cf82e1` on
+2026-08-11, all gates green. **Fast-forwarded after tagging? Re-tag before
+publishing.** After `cargo publish`, run `make publish-verify CRATE=<crate>`.
+See [release-workflow.md](docs/reference/release-workflow.md#tagpublish-commit-parity-guard).
 
 🔴 **CRITICAL macOS note:** never use `cp` to install a release binary on
 macOS — always `cargo install`. A plain `cp` over an on-PATH binary leaves a
@@ -341,6 +368,7 @@ When the user (or any agent) refers to a crate by abbreviation, resolve it using
 | `t-agents-local` | trusty-agents-local | `-p trusty-agents-local` | `crates/trusty-agents-local/` |
 | `tcode` | trusty-code | `-p trusty-code` | `crates/trusty-code/` |
 | `tctl` | trusty-installer | `-p trusty-installer` | `crates/trusty-installer/` |
+| `taudit` | trusty-audit | `-p trusty-audit` | `crates/trusty-audit/` (bins: `trusty-audit`, `taudit`) |
 
 These abbreviations apply everywhere: ticket descriptions, build commands, references in conversation. Always expand before running `cargo` commands.
 

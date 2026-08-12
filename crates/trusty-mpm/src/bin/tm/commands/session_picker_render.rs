@@ -241,6 +241,11 @@ pub(crate) fn command_legend(launch_slot: Option<u32>) -> Vec<String> {
     if launch_slot.is_some() {
         lines.push(row("[d<N>]".to_string(), "delete session N (e.g. d1)"));
         lines.push(row(
+            "[d <glob>]".to_string(),
+            "delete every stopped session matching a name pattern \
+             (e.g. d tm-test-*, add --dry-run to preview)",
+        ));
+        lines.push(row(
             "[r<N> <new-name>]".to_string(),
             "rename session N (e.g. r1 tm-my-new-name)",
         ));

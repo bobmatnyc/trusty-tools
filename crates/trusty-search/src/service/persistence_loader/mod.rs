@@ -137,6 +137,9 @@ pub async fn build_indexer_from_entry(
     // `load_chunks_from_disk`) can skip the symbol-graph load/rebuild
     // entirely instead of paying the heap cost the flag was meant to avoid.
     indexer.skip_kg = entry.skip_kg;
+    // #3048: same propagation for the vector lane — `index_file` (watcher /
+    // reconcile / index-file endpoint) reads it to skip embedding entirely.
+    indexer.skip_vector = entry.skip_vector;
 
     // Issue #28/#840/#1158: wire the durable redb corpus store.  Failure is
     // non-fatal but logged at ERROR (#840) because a missing corpus means the

@@ -222,7 +222,6 @@ crates/trusty-common/src/memory_core/store/kg_redb/write_ops.rs	cascade_delete_r
 crates/trusty-common/src/memory_core/store/kg_writer.rs	writer_reports_error_per_op
 crates/trusty-common/src/memory_core/store/kg/ops.rs	cascade_delete_removes_triples_for_drawer
 crates/trusty-common/src/memory_core/store/kg/ops.rs	palace_handle_read_only_when_kg_snapshotted
-crates/trusty-common/src/memory_core/store/palace_store.rs	load_palace_missing_returns_not_found
 crates/trusty-common/src/rpc/client.rs	parse_args
 crates/trusty-common/src/rpc/transport/http.rs	http_transport_roundtrip
 crates/trusty-common/src/rpc/transport/stdio.rs	stdio_transport_echo
@@ -337,8 +336,6 @@ crates/trusty-memory/src/tools/tests.rs	remember_returns_warming_error_while_sta
 crates/trusty-memory/src/web/activity.rs	hook_activity_endpoint_appends_to_activity_log
 crates/trusty-memory/src/web/health.rs	health_endpoint_probe_param_triggers_round_trip
 crates/trusty-memory/src/web/health.rs	health_sentinel_prefix_match_is_robust
-crates/trusty-memory/src/web/kg_routes.rs	kg_delete_triple_returns_204_on_success
-crates/trusty-memory/src/web/kg_routes.rs	kg_delete_triple_returns_404_for_missing
 crates/trusty-memory/src/web/recall_routes.rs	recall_all_handler_surfaces_error_envelope
 crates/trusty-memory/src/web/rpc.rs	http_rpc_endpoint_roundtrip
 crates/trusty-mpm/src/activity/monitor.rs	summarizing_clears_after_check

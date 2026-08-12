@@ -57,6 +57,21 @@ pub(super) struct HealthResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) embedderd_rss_mb: Option<u64>,
     pub(super) background_reindex_queue_depth: usize,
+    /// #4390: deferred-embed (C2) catch-up passes queued or in flight.
+    ///
+    /// Why: `deferred_embed_queue_depth`'s own doc comment claimed it was
+    /// exposed here and it was not — only the completion epoch was consumed. It
+    /// is the one counter that says an index's semantic lane is still being
+    /// filled in, including the boot re-arms this issue added, so an operator
+    /// watching a restart drain had no way to see them.
+    /// What: the same `QUEUE_DEPTH` gauge `defer_embed_queue` maintains,
+    /// fleet-wide rather than per index. Additive field; every existing
+    /// consumer parses this response with optional/ignored unknown fields.
+    /// Test: none dedicated yet — `tests_stall.rs`'s `HealthResponse`
+    /// fixtures set this field to a literal `0` without exercising the live
+    /// `reindex::deferred_embed_queue_depth()` wiring end to end. This is a
+    /// coverage gap, not a claim of tested behavior; see #5523.
+    pub(super) deferred_embed_queue_depth: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) update_available: Option<String>,
     /// Warm-boot summary: how many indexes loaded vs. skipped and by what
@@ -134,6 +149,29 @@ pub(super) struct HealthResponse {
     /// `health_does_not_flag_a_walked_index_as_stuck` in
     /// `tests_health_degraded`.
     pub(super) indexes_stuck_empty: usize,
+    /// Issue #5336: count of registered indexes whose lexical walk STARTED and
+    /// was then abandoned — the stage still says `InProgress` (rendered
+    /// `"walking"`) but no task is driving the index.
+    ///
+    /// Why: #4680's `indexes_stuck_empty` deliberately only fires when no walk
+    /// ever started, so an index whose walk began and died — the reindex task
+    /// panicked, was cancelled, or returned early — was counted by neither. It
+    /// is indistinguishable, on every other field of this response and on
+    /// `GET /indexes/:id/status`, from an index that is genuinely mid-reindex:
+    /// same stage, same `lifecycle_status`, same empty `search_capabilities`.
+    /// Nothing completes it and nothing retries it, so it stays that way for
+    /// the daemon's lifetime with no signal to poll.
+    /// What: computed live in the same single registry scan as
+    /// `indexes_stuck_empty`, from
+    /// [`crate::service::warm_boot::index_is_stuck_mid_walk`]. The two
+    /// predicates partition the `InProgress` lexical lane on `walk_started`, so
+    /// an index is counted by at most one of them. Non-zero forces the
+    /// top-level `status` to `"degraded"`. This SURFACES the condition; nothing
+    /// recovers from it — see the predicate's doc for why.
+    /// Test: `health_reports_degraded_for_an_abandoned_mid_walk_index` and
+    /// `health_does_not_flag_an_in_flight_reindex_as_stuck_mid_walk` in
+    /// `tests_health_degraded`.
+    pub(super) indexes_stuck_mid_walk: usize,
     /// Issue #4839: registered indexes that actually hold chunks
     /// (`chunk_count > 0`), as opposed to `indexes` /
     /// `warmboot_summary.indexes_loaded`, which count registration SLOTS.
@@ -596,6 +634,8 @@ pub(super) async fn health_handler(
     // #4680: count indexes whose lexical stage still owes work but that no walk
     // has ever touched — the state every other health signal was blind to.
     let mut indexes_stuck_empty = 0usize;
+    // #5336: the complement — a walk that started and was then abandoned.
+    let mut indexes_stuck_mid_walk = 0usize;
     // #4839: registration is not population. Folded into the SAME scan, from
     // the durable corpus rather than the in-memory map (which reads 0 after
     // idle eviction and would report a healthy index as empty).
@@ -674,11 +714,22 @@ pub(super) async fn health_handler(
                     // — a contended walk-diagnostics read undercounts this poll
                     // only, and the next 2 s poll re-scans.
                     if let Ok(diag) = handle.walk_diagnostics.try_read() {
+                        let walk_started = diag.last_walk_started_at.is_some();
                         if crate::service::warm_boot::index_is_stuck_unwalked(
                             stages.lexical.status,
-                            diag.last_walk_started_at.is_some(),
+                            walk_started,
                         ) {
                             indexes_stuck_empty += 1;
+                        }
+                        // #5336: the walk started and nothing is driving this
+                        // index any more — a frozen `"walking"` claim, not a
+                        // live reindex.
+                        if crate::service::warm_boot::index_is_stuck_mid_walk(
+                            stages.lexical.status,
+                            walk_started,
+                            crate::service::reindex::index_task_in_flight(&handle.id),
+                        ) {
+                            indexes_stuck_mid_walk += 1;
                         }
                     }
                     stages.any_failed()
@@ -766,9 +817,13 @@ pub(super) async fn health_handler(
     // #4125: an embedder that permanently failed to reach the backend it was
     // configured for (or fell back off it) is the same class of capability gap
     // as #3408's refused watcher — see `embedder_capability_degraded` above.
+    // #5336: an abandoned mid-walk index is the same outage as #4680's
+    // never-walked one — the lexical lane serves nothing and no one is coming to
+    // fix it — so it rides the same channel.
     let overall_status = if warmboot_summary.warm_boot_degraded
         || indexes_watcher_network_degraded > 0
         || indexes_stuck_empty > 0
+        || indexes_stuck_mid_walk > 0
         || embedder_capability_degraded
     {
         "degraded"
@@ -795,12 +850,16 @@ pub(super) async fn health_handler(
         // Issue #458: expose the background reindex backlog so operators can
         // watch the startup storm drain without reading daemon logs.
         background_reindex_queue_depth: crate::service::reindex::background_reindex_queue_depth(),
+        // #4390: honour the claim `deferred_embed_queue_depth`'s doc already made.
+        deferred_embed_queue_depth: crate::service::reindex::deferred_embed_queue_depth(),
         update_available,
         indexes_kg_disabled,
         indexes_vector_disabled,
         indexes_component_catch_up_in_progress,
         indexes_embed_pool_missing,
         indexes_stuck_empty,
+        // #5336: the abandoned-mid-walk complement of the counter above.
+        indexes_stuck_mid_walk,
         // #4839: registered vs. populated, plus the fleet-wide corpus size.
         indexes_populated,
         indexes_empty,

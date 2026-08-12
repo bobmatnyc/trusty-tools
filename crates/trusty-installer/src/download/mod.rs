@@ -26,6 +26,10 @@
 
 pub mod fetch;
 pub mod glibc;
+// #5491: pinned-version, fail-closed install path for consumers that pin exact
+// versions — additive; `try_install_prebuilt` below keeps its latest+fallback
+// semantics for its existing callers.
+pub mod pinned;
 pub mod platform;
 pub mod release;
 
@@ -78,7 +82,7 @@ pub enum Outcome {
 /// Test: `tests::fallback_on_unsupported_target`; the full prebuilt path is
 /// validated by the `#[ignore]`-tagged live integration test.
 pub async fn try_install_prebuilt(crate_name: &str, install_dir: &std::path::Path) -> Outcome {
-    let client = build_client();
+    let client = http_client();
 
     // Step 1: Check Tier-1 target.
     let target = match platform::current_target() {
@@ -157,16 +161,27 @@ pub async fn try_install_prebuilt(crate_name: &str, install_dir: &std::path::Pat
     }
 }
 
-/// Build the shared reqwest client.
+/// Build the client every download in this crate runs over.
 ///
 /// Why: A single client reuses the underlying connection pool across the two
-/// downloads (`.sha256` and the tarball) within one install operation.
+/// downloads (`.sha256` and the tarball) within one install operation. It is
+/// PUBLIC because [`pinned::install_pinned_set`] takes a `&reqwest::Client` and
+/// its out-of-crate caller (`trusty-audit`, #5495) must not answer "how is this
+/// workspace's download client built?" for a second time — CLAUDE.md's
+/// common-entry-point rule puts that answer here, in the crate that owns
+/// downloading, and a consumer that calls this needs no `reqwest` dependency of
+/// its own.
+///
+/// Note this is NOT `commands::ensure::daemon::build_client`, which is a
+/// short-timeout client for daemon health probes. Downloads and health probes
+/// want different timeouts, so they are deliberately two clients.
 ///
 /// What: Returns a default `reqwest::Client` with `rustls-tls` (the workspace
 /// reqwest is configured with `rustls-tls`).
 ///
-/// Test: Exercised indirectly by any live network test.
-fn build_client() -> reqwest::Client {
+/// Test: Exercised by every `pinned::tests` case, which passes a client built
+/// this way to the fixture server.
+pub fn http_client() -> reqwest::Client {
     reqwest::Client::new()
 }
 

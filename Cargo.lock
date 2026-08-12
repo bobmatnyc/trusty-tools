@@ -6535,7 +6535,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10288,7 +10288,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "2.16.0"
+version = "2.19.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -10300,6 +10300,7 @@ dependencies = [
  "criterion",
  "crossterm 0.28.1",
  "csv",
+ "dirs 5.0.1",
  "futures",
  "git2",
  "indicatif 0.17.11",
@@ -10311,6 +10312,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "serial_test",
  "strsim",
  "tempfile",
  "tera",
@@ -11318,6 +11320,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-audit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml 0.8.23",
+ "trusty-installer",
+]
+
+[[package]]
 name = "trusty-bm25-daemon"
 version = "0.2.0"
 dependencies = [
@@ -11398,7 +11414,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.33.0"
+version = "0.33.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11581,7 +11597,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.6.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -11596,6 +11612,7 @@ dependencies = [
  "sha2 0.10.9",
  "tar",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -11627,7 +11644,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11683,6 +11700,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "futures-util",
+ "globset",
  "gray_matter",
  "http-body-util",
  "jsonwebtoken",
@@ -11764,7 +11782,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",

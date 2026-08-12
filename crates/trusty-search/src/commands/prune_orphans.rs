@@ -279,11 +279,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn entry(id: &str, root: &str) -> PersistedIndex {
-        PersistedIndex {
-            id: id.to_string(),
-            root_path: PathBuf::from(root),
-            ..Default::default()
-        }
+        PersistedIndex::new(id.to_string(), PathBuf::from(root))
     }
 
     /// Why: the core contract — an entry whose root_path does not exist must be
@@ -300,11 +296,7 @@ mod tests {
         let dead = entry("ghost", "/tmp/trusty-prune-orphans-dead-root-xyz9999");
         // Live root (the tempdir itself exists).
         let live_root = tmp.path().to_path_buf();
-        let live = PersistedIndex {
-            id: "live".into(),
-            root_path: live_root.clone(),
-            ..Default::default()
-        };
+        let live = PersistedIndex::new("live", live_root.clone());
 
         save_index_registry_at(&toml_path, &[dead, live]).unwrap();
         assert_eq!(
@@ -334,11 +326,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let toml_path = tmp.path().join("indexes.toml");
 
-        let live = PersistedIndex {
-            id: "myproject".into(),
-            root_path: tmp.path().to_path_buf(),
-            ..Default::default()
-        };
+        let live = PersistedIndex::new("myproject", tmp.path().to_path_buf());
         save_index_registry_at(&toml_path, &[live]).unwrap();
 
         handle_prune_orphans_at(&toml_path, false, true, false, None).unwrap();
@@ -402,11 +390,10 @@ mod tests {
         let tmp = tempdir().unwrap();
         let toml_path = tmp.path().join("indexes.toml");
 
-        let mk = |id: &str, root: &str, identity: &str| PersistedIndex {
-            id: id.into(),
-            root_path: std::path::PathBuf::from(root),
-            repo_identity: Some(identity.into()),
-            ..Default::default()
+        let mk = |id: &str, root: &str, identity: &str| {
+            let mut e = PersistedIndex::new(id, std::path::PathBuf::from(root));
+            e.repo_identity = Some(identity.into());
+            e
         };
         let a1 = mk(
             "wt-a1",
@@ -442,23 +429,27 @@ mod tests {
         let tmp = tempdir().unwrap();
         let toml_path = tmp.path().join("indexes.toml");
 
-        let live = PersistedIndex {
-            id: "base".into(),
-            root_path: tmp.path().to_path_buf(), // exists
-            repo_identity: Some("bobmatnyc/trusty-tools".into()),
-            ..Default::default()
+        let live = {
+            let mut e = PersistedIndex::new("base", tmp.path().to_path_buf());
+            // exists
+            e.repo_identity = Some("bobmatnyc/trusty-tools".into());
+            e
         };
-        let orphan = PersistedIndex {
-            id: "wt-1".into(),
-            root_path: std::path::PathBuf::from("/tmp/trusty-report-dead-xyz"),
-            repo_identity: Some("bobmatnyc/trusty-tools".into()),
-            ..Default::default()
+        let orphan = {
+            let mut e = PersistedIndex::new(
+                "wt-1",
+                std::path::PathBuf::from("/tmp/trusty-report-dead-xyz"),
+            );
+            e.repo_identity = Some("bobmatnyc/trusty-tools".into());
+            e
         };
-        let unrelated = PersistedIndex {
-            id: "other".into(),
-            root_path: std::path::PathBuf::from("/tmp/trusty-report-other-xyz"),
-            repo_identity: Some("acme/widget".into()),
-            ..Default::default()
+        let unrelated = {
+            let mut e = PersistedIndex::new(
+                "other",
+                std::path::PathBuf::from("/tmp/trusty-report-other-xyz"),
+            );
+            e.repo_identity = Some("acme/widget".into());
+            e
         };
         save_index_registry_at(&toml_path, &[live, orphan, unrelated]).unwrap();
 
@@ -486,11 +477,11 @@ mod tests {
     fn report_repo_identity_no_match_is_ok() {
         let tmp = tempdir().unwrap();
         let toml_path = tmp.path().join("indexes.toml");
-        let e = PersistedIndex {
-            id: "only".into(),
-            root_path: std::path::PathBuf::from("/tmp/trusty-nomatch-xyz"),
-            repo_identity: Some("acme/widget".into()),
-            ..Default::default()
+        let e = {
+            let mut e =
+                PersistedIndex::new("only", std::path::PathBuf::from("/tmp/trusty-nomatch-xyz"));
+            e.repo_identity = Some("acme/widget".into());
+            e
         };
         save_index_registry_at(&toml_path, &[e]).unwrap();
 
@@ -524,11 +515,7 @@ mod tests {
 
         let tmp = tempdir().unwrap();
         let toml_path = tmp.path().join("indexes.toml");
-        let live = PersistedIndex {
-            id: "live".into(),
-            root_path: tmp.path().to_path_buf(),
-            ..Default::default()
-        };
+        let live = PersistedIndex::new("live", tmp.path().to_path_buf());
         save_index_registry_at(
             &toml_path,
             &[

@@ -1,0 +1,171 @@
+//! The crate's error type.
+//!
+//! Why: `trusty-audit` is a library with a thin CLI over it (#5502), so the
+//! library owes callers a structured error rather than `anyhow` — the CLI, and
+//! later the Tauri shell, each render failures their own way.
+//! What: one `#[non_exhaustive]` enum covering what this crate can fail at —
+//! touching the working directory, reading the companion files, installing the
+//! pinned tools, and being asked for a capability that is not built yet.
+//!
+//! Every install-side variant is a REFUSAL, never a degraded success (#5495).
+//! [`AuditError::Install`] keeps `trusty-installer`'s structured
+//! `PinnedError` rather than flattening it to a string, because that type
+//! already states whether the install directory is clean, and a front end
+//! deciding what to tell the operator needs that distinction intact.
+//! Test: `super::error_tests`.
+
+use std::path::PathBuf;
+
+/// Everything `trusty-audit`'s library surface can fail with.
+///
+/// Why: every variant names the path or tool it concerns, because the recipient
+/// running this is not the author and a bare `io::Error` tells them nothing
+/// about which of the working directory's several files was unreadable.
+/// What: `#[non_exhaustive]` so adding a variant in a later milestone is not a
+/// breaking change (CLAUDE.md, semver gate).
+/// Test: `super::error_tests::messages_name_the_offending_path`.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum AuditError {
+    /// A working-directory entry could not be created or inspected.
+    #[error("working directory {path}: {source}")]
+    WorkDir {
+        /// The path that failed.
+        path: PathBuf,
+        /// The underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A companion file (engagement config, audit manifest) could not be read.
+    #[error("cannot read {path}: {source}")]
+    Read {
+        /// The file that failed.
+        path: PathBuf,
+        /// The underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A companion file was read but is not valid TOML for its schema.
+    #[error("{path} is not a valid {what}: {source}")]
+    Parse {
+        /// The file that failed.
+        path: PathBuf,
+        /// Which schema was expected, e.g. `"audit manifest"`.
+        what: &'static str,
+        /// The underlying TOML error.
+        ///
+        /// Boxed because `toml::de::Error` carries the full input span and is
+        /// large enough on its own to trip `clippy::result_large_err` for every
+        /// `Result<_, AuditError>` in the crate.
+        #[source]
+        source: Box<toml::de::Error>,
+    },
+
+    /// The pinned install refused. Carries `trusty-installer`'s own reason.
+    ///
+    /// Why: #5495 routes downloading through `trusty-installer`'s fail-closed
+    /// entry point, and that entry point's error already says what was pinned,
+    /// what arrived, and whether the install directory is clean. Re-describing
+    /// it here would lose the one field that matters most —
+    /// `PinnedError::PlacementInterrupted` names files left on disk, and a
+    /// caller that flattened it to a string would report a clean directory that
+    /// is not clean.
+    /// What: a transparent wrapper. Boxed because `PinnedError` carries
+    /// `anyhow::Error` and several `Vec`s, and an unboxed variant makes every
+    /// `Result<_, AuditError>` in the crate trip `clippy::result_large_err`.
+    /// Test: `crate::tools::tool_tests::install_errors_keep_the_installers_reason`.
+    #[error(transparent)]
+    Install {
+        /// Why the pinned install refused, verbatim from `trusty-installer`.
+        #[from]
+        source: Box<trusty_installer::download::pinned::PinnedError>,
+    },
+
+    /// An installed binary does not report the version the config pinned.
+    ///
+    /// Why: `trusty-installer` proves the pin before placing anything, so this
+    /// is the client's own second look at what it was handed — belt and braces
+    /// on the exact defect class #5454 closed from the run side. Reaching it
+    /// means the installer's postcondition did not hold, which is worth an
+    /// explicit refusal rather than a silent acceptance.
+    /// What: names the tool, the pin, and what came back.
+    /// Test: `crate::tools::tool_tests::a_version_that_drifts_from_the_pin_is_refused`.
+    #[error(
+        "{tool}: the engagement pins {pinned} but the installed binary is {installed}; \
+         nothing will run at a version this engagement did not pin"
+    )]
+    VersionMismatch {
+        /// The tool whose version drifted.
+        tool: &'static str,
+        /// What the engagement config pinned.
+        pinned: String,
+        /// What was actually installed.
+        installed: String,
+    },
+
+    /// The working directory's `tools/` area is not a real directory.
+    ///
+    /// Why: [`crate::workdir`] promises that `rm -rf <root>` removes everything
+    /// this client wrote, which holds only while every area is a directory
+    /// inside the root. A symlink planted at `tools/` before the first run
+    /// redirects the install elsewhere and survives the delete. That was inert
+    /// while nothing installed; #5495 is what makes it live, so #5495 checks it.
+    /// What: names the path and what it is instead.
+    /// Test: `crate::tools::tool_tests::a_symlinked_tools_area_is_refused`.
+    #[error(
+        "{path} is not a real directory (it is a {kind}), so installing there would \
+         write outside the working directory; nothing was installed"
+    )]
+    UnsafeToolsDir {
+        /// The path that failed the check.
+        path: PathBuf,
+        /// What it is instead — `"symlink"`, `"file"`.
+        kind: &'static str,
+    },
+
+    /// A capability this scaffold declares but does not yet implement.
+    ///
+    /// Why: a half-built capability must fail closed rather than silently
+    /// report success. The tool-download seam this variant originally guarded
+    /// is now implemented (#5495, via `trusty-installer`'s pinned entry point);
+    /// the variant remains for the capabilities later milestones add.
+    #[error("{capability} is not implemented yet — tracked in #{issue}")]
+    NotImplemented {
+        /// Human-readable capability name.
+        capability: &'static str,
+        /// The issue that lands it.
+        issue: u32,
+    },
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn messages_name_the_offending_path() {
+        let err = AuditError::Read {
+            path: PathBuf::from("/tmp/engagement/manifest.toml"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("/tmp/engagement/manifest.toml"),
+            "error should name the file: {rendered}"
+        );
+    }
+
+    #[test]
+    fn not_implemented_cites_the_issue_that_lands_it() {
+        let err = AuditError::NotImplemented {
+            capability: "tool downloads",
+            issue: 5491,
+        };
+        assert_eq!(
+            err.to_string(),
+            "tool downloads is not implemented yet — tracked in #5491"
+        );
+    }
+}

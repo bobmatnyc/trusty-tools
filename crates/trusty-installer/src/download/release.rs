@@ -19,8 +19,10 @@ use anyhow::{anyhow, Context};
 use semver::Version;
 use serde::Deserialize;
 
-const RELEASES_API: &str = "https://api.github.com/repos/bobmatnyc/trusty-tools/releases";
-const RELEASE_DL_BASE: &str = "https://github.com/bobmatnyc/trusty-tools/releases/download";
+pub(crate) const RELEASES_API: &str =
+    "https://api.github.com/repos/bobmatnyc/trusty-tools/releases";
+pub(crate) const RELEASE_DL_BASE: &str =
+    "https://github.com/bobmatnyc/trusty-tools/releases/download";
 
 /// A resolved release tag for a given crate.
 ///
@@ -87,8 +89,31 @@ fn asset_name_for_tag(crate_name: &str) -> &str {
 ///
 /// Test: `tests::asset_url_shape`, `tests::asset_url_shape_tga_alias`.
 pub fn asset_url(tag: &str, crate_name: &str, version: &str, target: &str) -> String {
+    asset_url_at_base(RELEASE_DL_BASE, tag, crate_name, version, target)
+}
+
+/// [`asset_url`], against a caller-supplied download base.
+///
+/// Why: #5491's pinned path must be provable offline. Its tests point the whole
+/// download→verify→extract pipeline at a loopback fixture server, which needs the
+/// base to be injectable — the same seam [`resolve_latest_tag_from_url`] already
+/// established for the releases API. Keeping ONE filename/URL construction and
+/// parameterising the base (rather than a second `format!` in the pinned module)
+/// means the `tga` asset-name alias cannot drift between the two paths.
+///
+/// What: Joins `base`, `tag`, and the alias-resolved asset filename.
+///
+/// Test: `tests::asset_url_at_base_honours_alias_and_base`; `asset_url`'s own
+/// tests cover the production base by delegation.
+pub(crate) fn asset_url_at_base(
+    base: &str,
+    tag: &str,
+    crate_name: &str,
+    version: &str,
+    target: &str,
+) -> String {
     let filename = asset_filename(asset_name_for_tag(crate_name), version, target);
-    format!("{RELEASE_DL_BASE}/{tag}/{filename}")
+    format!("{base}/{tag}/{filename}")
 }
 
 /// Build the SHA-256 checksum URL for a prebuilt asset.
@@ -225,6 +250,152 @@ pub(crate) async fn resolve_latest_tag_from_url(
         .with_context(|| "deserialising GitHub releases JSON")?;
 
     select_highest_semver(&releases, crate_name)
+}
+
+/// Why a pinned-version lookup failed (#5491).
+///
+/// Why: The pinned entry point must fail CLOSED, which means its caller needs to
+/// distinguish "the release list was unreachable" from "that exact version was
+/// never published" — the second carries the published set so the error can tell
+/// the operator (or a GUI) what they could have pinned instead. A bare
+/// `anyhow::Error` would flatten both into a string and force the caller to
+/// re-parse it.
+///
+/// What: [`ResolveError::Fetch`] wraps any transport/deserialisation failure;
+/// [`ResolveError::NotPublished`] carries every stable version published for the
+/// crate. Crate-internal — the public surface is `download::pinned::PinnedError`.
+///
+/// Test: `tests::select_exact_version_rejects_absent_version` and the fail-closed
+/// arms in `download::pinned::tests`.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ResolveError {
+    /// The release list could not be fetched or parsed.
+    #[error("could not fetch the release list: {0}")]
+    Fetch(#[source] anyhow::Error),
+    /// No stable release matched the pinned version.
+    #[error("no stable release matched the pinned version")]
+    NotPublished {
+        /// Every stable version published for the crate, ascending.
+        available: Vec<String>,
+    },
+}
+
+/// Select the release matching an EXACT pinned version (#5491).
+///
+/// Why: [`select_highest_semver`] answers "what is newest", which is precisely
+/// the wrong question for a pinned consumer — a caller asking for 2.9.4 must get
+/// 2.9.4 or an error, never 2.9.5. This is the pure half of that guarantee, kept
+/// separate from the HTTP call so the fail-closed decision is testable offline.
+///
+/// # Postconditions
+/// On `Ok`, the returned tag's parsed version equals `version` exactly. On `Err`,
+/// NOTHING resembling a fallback is returned — the caller cannot accidentally
+/// proceed with a different version.
+///
+/// What: Matches `<crate_name>-v<version>` against the release list, skipping
+/// prereleases (both the API flag and semver pre-release identifiers, matching
+/// [`select_highest_semver`]'s conservative stance). On no match, returns the
+/// published stable versions ascending so the error can list them.
+///
+/// Test: `tests::select_exact_version_picks_exact`,
+/// `tests::select_exact_version_rejects_absent_version`,
+/// `tests::select_exact_version_ignores_other_crates`,
+/// `tests::select_exact_version_skips_prerelease`,
+/// `tests::select_exact_version_rejects_non_semver_pin`.
+fn select_exact_version(
+    releases: &[GhRelease],
+    crate_name: &str,
+    version: &str,
+) -> Result<ResolvedTag, ResolveError> {
+    let prefix = format!("{crate_name}-v");
+    // Normalise through semver so `2.9.4` and a tag written `2.9.4` compare by
+    // value rather than by string — and so a caller-supplied non-semver pin is
+    // rejected here rather than 404ing later against a URL built from garbage.
+    let wanted = Version::parse(version).ok();
+    let mut available: Vec<Version> = Vec::new();
+
+    for release in releases {
+        if release.prerelease {
+            continue;
+        }
+        let Some(ver_str) = release.tag_name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Ok(ver) = Version::parse(ver_str) else {
+            continue;
+        };
+        if !ver.pre.is_empty() {
+            continue;
+        }
+        if wanted.as_ref() == Some(&ver) {
+            return Ok(ResolvedTag {
+                tag: release.tag_name.clone(),
+                version: ver.to_string(),
+            });
+        }
+        available.push(ver);
+    }
+
+    available.sort();
+    Err(ResolveError::NotPublished {
+        available: available.iter().map(Version::to_string).collect(),
+    })
+}
+
+/// Resolve the release tag for an EXACT pinned version of `crate_name` (#5491).
+///
+/// Why: The pinned install path never consults `latest`; this is the only
+/// resolver it uses, so there is no code path along which a version drift can
+/// enter.
+///
+/// What: Fetches the production releases API and delegates to
+/// [`select_exact_version`].
+///
+/// Test: Live network — covered by the offline fixture tests on
+/// [`resolve_pinned_tag_from_url`] and the pure `select_exact_version` tests.
+pub async fn resolve_pinned_tag(
+    client: &reqwest::Client,
+    crate_name: &str,
+    version: &str,
+) -> anyhow::Result<ResolvedTag> {
+    resolve_pinned_tag_from_url(client, RELEASES_API, crate_name, version)
+        .await
+        .map_err(anyhow::Error::new)
+}
+
+/// [`resolve_pinned_tag`], against a (possibly mock) releases URL.
+///
+/// Why: Same seam as [`resolve_latest_tag_from_url`] — it is what lets the
+/// fail-closed arms run against a loopback fixture instead of real GitHub.
+///
+/// What: Fetches `url`, deserialises the release list, delegates to
+/// [`select_exact_version`].
+///
+/// Test: `download::pinned::tests` drives this through the full entry point.
+pub(crate) async fn resolve_pinned_tag_from_url(
+    client: &reqwest::Client,
+    url: &str,
+    crate_name: &str,
+    version: &str,
+) -> Result<ResolvedTag, ResolveError> {
+    let mut req = client.get(url).header("User-Agent", "trusty-installer");
+    if let Some(token) = github_token() {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+    let releases: Vec<GhRelease> = req
+        .send()
+        .await
+        .with_context(|| format!("fetching GitHub releases from {url}"))
+        .map_err(ResolveError::Fetch)?
+        .error_for_status()
+        .context("GitHub releases API returned an error status")
+        .map_err(ResolveError::Fetch)?
+        .json()
+        .await
+        .context("deserialising GitHub releases JSON")
+        .map_err(ResolveError::Fetch)?;
+
+    select_exact_version(&releases, crate_name, version)
 }
 
 #[cfg(test)]
@@ -389,6 +560,97 @@ mod tests {
             "https://github.com/bobmatnyc/trusty-tools/releases/download/\
              tga-v2.9.4/trusty-git-analytics-2.9.4-aarch64-apple-darwin.tar.gz"
         );
+    }
+
+    /// Why: The base must be injectable for #5491's offline fixture tests, and
+    /// the `tga` alias must survive that injection — if the pinned path built
+    /// filenames independently, `tga` would 404 exactly as it did before the
+    /// alias table existed.
+    /// What: Builds a `tga` URL against a loopback base; asserts both the base
+    /// and the aliased filename appear.
+    /// Test: This is the test.
+    #[test]
+    fn asset_url_at_base_honours_alias_and_base() {
+        let url = asset_url_at_base(
+            "http://127.0.0.1:9/dl",
+            "tga-v2.9.4",
+            "tga",
+            "2.9.4",
+            "aarch64-apple-darwin",
+        );
+        assert_eq!(
+            url,
+            "http://127.0.0.1:9/dl/tga-v2.9.4/\
+             trusty-git-analytics-2.9.4-aarch64-apple-darwin.tar.gz"
+        );
+    }
+
+    /// Why: The pinned resolver must return the version the caller asked for.
+    /// What: Asks for 0.24.1 from a list whose newest is 0.25.0; asserts the tag
+    /// and version are the PINNED ones.
+    /// Test: This is the test.
+    #[test]
+    fn select_exact_version_picks_exact() {
+        let releases = vec![
+            release("trusty-search-v0.25.0", false),
+            release("trusty-search-v0.24.1", false),
+        ];
+        let rt = select_exact_version(&releases, "trusty-search", "0.24.1").unwrap();
+        assert_eq!(rt.tag, "trusty-search-v0.24.1");
+        assert_eq!(rt.version, "0.24.1");
+    }
+
+    /// Why: THE fail-closed guarantee at the resolver layer — a newer release
+    /// existing must never satisfy a pin for a version that was never published.
+    /// This is the exact drift `try_install_prebuilt`'s `latest` resolution
+    /// would introduce.
+    /// What: Pins 9.9.9 against a list containing only 0.25.0/0.24.1; asserts
+    /// `NotPublished` carrying both published versions — not a silent 0.25.0.
+    /// Test: This is the test.
+    #[test]
+    fn select_exact_version_rejects_absent_version() {
+        let releases = vec![
+            release("trusty-search-v0.25.0", false),
+            release("trusty-search-v0.24.1", false),
+        ];
+        let err = select_exact_version(&releases, "trusty-search", "9.9.9")
+            .expect_err("an unpublished pin must not resolve");
+        match err {
+            ResolveError::NotPublished { available } => {
+                assert_eq!(available, vec!["0.24.1".to_owned(), "0.25.0".to_owned()]);
+            }
+            other => panic!("expected NotPublished, got {other:?}"),
+        }
+    }
+
+    /// Why: Another crate's tag at the pinned version must not satisfy the pin.
+    /// What: Pins trusty-search 0.18.0 when only trusty-memory-v0.18.0 exists.
+    /// Test: This is the test.
+    #[test]
+    fn select_exact_version_ignores_other_crates() {
+        let releases = vec![release("trusty-memory-v0.18.0", false)];
+        assert!(select_exact_version(&releases, "trusty-search", "0.18.0").is_err());
+    }
+
+    /// Why: A prerelease must not satisfy a pin, matching the latest-path stance;
+    /// otherwise pinning `0.26.0` could land an `0.26.0` release still flagged
+    /// prerelease.
+    /// What: Marks the matching entry `prerelease = true`; asserts Err.
+    /// Test: This is the test.
+    #[test]
+    fn select_exact_version_skips_prerelease() {
+        let releases = vec![release("trusty-search-v0.26.0", true)];
+        assert!(select_exact_version(&releases, "trusty-search", "0.26.0").is_err());
+    }
+
+    /// Why: A non-semver pin must be rejected at the resolver rather than
+    /// producing a URL built from garbage that 404s with a confusing message.
+    /// What: Pins the literal string `latest`; asserts Err even though releases exist.
+    /// Test: This is the test.
+    #[test]
+    fn select_exact_version_rejects_non_semver_pin() {
+        let releases = vec![release("trusty-search-v0.25.0", false)];
+        assert!(select_exact_version(&releases, "trusty-search", "latest").is_err());
     }
 
     /// Why: Live integration proof that the GitHub API is reachable and returns a

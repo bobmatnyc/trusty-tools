@@ -355,18 +355,26 @@ where
 /// and never retracts, and the four pattern predicates are absent from
 /// `FUNCTIONAL_PREDICATES`, so `assert` supersedes only an identical object.
 /// Without this pass every triple already in the graph stays there forever.
+///
+/// Error containment stops at the palace: a registry read that fails yields no
+/// palaces to contain, and swallowing it printed `0 subjects deleted` over data
+/// the pass never read. A TCC denial on the data dir makes that `read_dir`
+/// return EPERM, so the clean-looking exit-0 is reachable, not theoretical.
 /// What: per palace, scans every active triple, picks the subjects
 /// [`stale_subject_candidates`] returns, and (when `apply`) calls the existing
-/// `delete_by_subject` on each. Errors are captured per palace.
-/// Test: `purge_selects_only_stopword_subjects`, `purge_skips_namespaced_subjects`.
+/// `delete_by_subject` on each. A failing palace is captured as a summary
+/// carrying `error`; a failure to list the palaces at all propagates instead.
+/// Test: `purge_selects_only_stopword_subjects`, `purge_skips_namespaced_subjects`,
+/// `purge_palaces_propagates_an_unreadable_data_root`.
 pub async fn purge_palaces(
     state: &AppState,
     palace_filter: Option<&str>,
     apply: bool,
 ) -> Result<Vec<PalacePurgeSummary>> {
     let mut out: Vec<PalacePurgeSummary> = Vec::new();
+    // #5511: an unreadable data root is a failed purge, never an empty one.
     let palaces = trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
-        .unwrap_or_default();
+        .with_context(|| format!("list palaces under {}", state.data_root.display()))?;
     for palace in palaces {
         let id = palace.id.0.clone();
         if let Some(filter) = palace_filter {
@@ -521,19 +529,28 @@ pub fn stale_subject_candidates(active: &[Triple]) -> Vec<String> {
 /// real `memory_remember` path, drop the auto-extracted triples on the floor
 /// (by retracting), and then re-run `rebuild_palaces` to confirm it can
 /// reseed the KG end-to-end without touching the CLI surface.
+///
+/// This pass only asserts, so a swallowed registry read costs less than the
+/// purge's does — nothing is deleted, and the operator is merely told
+/// `0 drawers, 0 triples` about a back-fill that never opened a palace. It is
+/// still a lie about work not done, and the same TCC denial produces it, so it
+/// propagates for the same reason `purge_palaces` does.
 /// What: When `palace_filter` is `Some`, processes only the matching palace;
 /// otherwise iterates every loaded palace via `PalaceRegistry::list_palaces`.
 /// Each palace is processed inside its own `rebuild_one` call so a single
-/// failure is captured per-palace rather than aborting the run.
+/// failure is captured per-palace rather than aborting the run; a failure to
+/// list the palaces at all propagates instead.
 /// Test: `kg_rebuild_processes_all_drawers`,
-/// `kg_rebuild_processes_named_palace_only`.
+/// `kg_rebuild_processes_named_palace_only`,
+/// `rebuild_palaces_propagates_an_unreadable_data_root`.
 pub async fn rebuild_palaces(
     state: &AppState,
     palace_filter: Option<&str>,
 ) -> Result<Vec<PalaceRebuildSummary>> {
     let mut out: Vec<PalaceRebuildSummary> = Vec::new();
+    // #5511: an unreadable data root is a failed back-fill, never an empty one.
     let palaces = trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
-        .unwrap_or_default();
+        .with_context(|| format!("list palaces under {}", state.data_root.display()))?;
     for palace in palaces {
         let id = palace.id.0.clone();
         if let Some(filter) = palace_filter {
@@ -1066,6 +1083,42 @@ mod tests {
         Ok(())
     }
 
+    /// Why: `list_palaces` was called with `unwrap_or_default()`, so a registry
+    /// read that failed became zero palaces and this DESTRUCTIVE pass printed a
+    /// zero-count summary and exited 0 over data it never read. A macOS TCC
+    /// denial on the data dir is exactly that failure — `read_dir` returns
+    /// EPERM — and the operator's evidence that the purge ran clean would be a
+    /// pass that never opened a single palace. Same defect `merge_palaces`
+    /// closed in #5401; this is the sibling site.
+    /// What: a `data_root` whose listing fails makes the purge — and the
+    /// `report_purge` that wraps it — return `Err`. A regular file stands in for
+    /// the denial: both reach the same `read_dir` error arm, and this one
+    /// reproduces without depending on the uid the suite runs as.
+    /// Test: This test.
+    #[tokio::test]
+    async fn purge_palaces_propagates_an_unreadable_data_root() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let data_root = tmp.path().join("not-a-directory");
+        std::fs::write(&data_root, b"")?;
+        let state = AppState::new(data_root);
+
+        for apply in [false, true] {
+            let err = purge_palaces(&state, None, apply)
+                .await
+                .expect_err("an unlistable data root must fail the purge, not report an empty one");
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("list palaces"),
+                "the error must name what could not be read, got {rendered}"
+            );
+        }
+
+        report_purge(&state, None, true)
+            .await
+            .expect_err("the reporting wrapper must not print a clean summary either");
+        Ok(())
+    }
+
     /// Why: Validate the back-fill end-to-end against a freshly-created
     /// palace with a known drawer count.
     /// What: Build a tempdir-rooted `AppState`, create two palaces, drop a
@@ -1242,6 +1295,33 @@ mod tests {
         let summaries = rebuild_palaces(&state, Some("a")).await?;
         assert_eq!(summaries.len(), 1, "only palace 'a' should be processed");
         assert_eq!(summaries[0].palace_id, "a");
+        Ok(())
+    }
+
+    /// Why: `rebuild_palaces` carried the same `unwrap_or_default()` on the
+    /// registry read as `purge_palaces` did. This pass only asserts, so the
+    /// cost is lower — nothing is deleted — but the operator is still told
+    /// `0 drawers, 0 triples` about a back-fill that never opened a palace, and
+    /// the same macOS TCC denial on the data dir produces it.
+    /// What: a `data_root` whose listing fails makes the back-fill return
+    /// `Err`. Same stand-in as the purge's twin: a regular file reaches the
+    /// `read_dir` error arm without depending on the uid the suite runs as.
+    /// Test: This test.
+    #[tokio::test]
+    async fn rebuild_palaces_propagates_an_unreadable_data_root() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let data_root = tmp.path().join("not-a-directory");
+        std::fs::write(&data_root, b"")?;
+        let state = AppState::new(data_root);
+
+        let err = rebuild_palaces(&state, None)
+            .await
+            .expect_err("an unlistable data root must fail the back-fill, not report an empty one");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("list palaces"),
+            "the error must name what could not be read, got {rendered}"
+        );
         Ok(())
     }
 }

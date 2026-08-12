@@ -166,10 +166,11 @@ pub(crate) fn try_locate_moved_root(
                 new_root.display(),
             );
             // Persist the new root_path so subsequent restarts skip the scan.
-            let updated = PersistedIndex {
-                root_path: new_root.clone(),
-                ..entry.clone()
-            };
+            // #4391: `PersistedIndex` is `#[non_exhaustive]`, so this crate (the
+            // binary, a separate crate from the library) assigns rather than
+            // using struct-update syntax. Same value, same one field overridden.
+            let mut updated = entry.clone();
+            updated.root_path = new_root.clone();
             if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
                 tracing::warn!(
                     "warm-boot: could not persist relocated root_path for '{}': {e}",
@@ -301,10 +302,9 @@ pub(crate) async fn restore_one_index(
         entry.root_path = canonical_root;
         // Persist so subsequent restarts see the canonical path immediately,
         // avoiding repeated canonicalization and keeping indexes.toml accurate.
-        let updated = PersistedIndex {
-            root_path: entry.root_path.clone(),
-            ..entry.clone()
-        };
+        // `entry.root_path` was set to `canonical_root` just above, so the old
+        // struct-update form was a verbose `entry.clone()`.
+        let updated = entry.clone();
         if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
             tracing::warn!(
                 "warm-boot: could not persist canonicalized root_path for '{}': {e}",
@@ -324,10 +324,8 @@ pub(crate) async fn restore_one_index(
             .map(|r| r.canonical())
         {
             entry.repo_identity = Some(identity.clone());
-            let updated = PersistedIndex {
-                repo_identity: Some(identity),
-                ..entry.clone()
-            };
+            // `entry.repo_identity` was set to `identity` just above.
+            let updated = entry.clone();
             if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
                 tracing::warn!(
                     "warm-boot: could not persist backfilled repo_identity for '{}': {e}",
@@ -374,10 +372,13 @@ pub(crate) async fn restore_one_index(
         .filter(|e| !e.is_empty())
         .collect();
     indexer.set_domain_terms(entry.domain_terms.clone());
-    // Issue #75: capture the current git HEAD SHA at registration so the
-    // search response can flag staleness when the working tree advances
-    // past the indexed commit. Best-effort: `None` outside a git repo.
-    let indexed_head_sha = crate::core::git::head_sha(&entry.root_path);
+    // Issue #75: the handle carries the HEAD SHA its corpus was built against so
+    // the search response can flag staleness when the working tree advances past
+    // the indexed commit.
+    // #4391: read it from `indexes.toml`, not from live git. Re-deriving it here
+    // made `reconcile_git_path` compare current HEAD against current HEAD, so no
+    // git-backed index could ever be found stale at boot.
+    let indexed_head_sha = crate::service::boot_markers::resolve_indexed_head_sha(&entry);
     let lexical_only = entry.lexical_only;
     // Issue #313: read skip_kg from the persisted entry. When true, the
     // graph stage is forced to Skipped at warm-boot regardless of on-disk
@@ -388,6 +389,8 @@ pub(crate) async fn restore_one_index(
     let skip_vector = entry.skip_vector;
     // Issue #923: read defer_embed from the persisted entry. Default `true`.
     let defer_embed = entry.defer_embed;
+    // #4390: read the marker before `entry` is consumed by the handle below.
+    let deferred_embed_pending = entry.deferred_embed_pending;
     // Issue #135: inspect the on-disk artifacts that
     // `build_indexer_from_entry` just restored and derive the staged-pipeline
     // state from them. Before this, every warm-booted index landed with
@@ -478,9 +481,24 @@ pub(crate) async fn restore_one_index(
         )),
     };
     let registered = state.registry.register(handle);
+    // #4390: an embed pass interrupted before it committed leaves the corpus
+    // silently short its most recent vectors, and warm boot reports `Ready`
+    // regardless because an older HNSW snapshot exists on disk. Re-arm it.
+    crate::service::boot_markers::rearm_deferred_embed_if_pending(
+        &registered,
+        deferred_embed_pending,
+        chunk_count,
+    )
+    .await;
     // Issue #1621 (epic #1619 WI-2): activate the filesystem watcher for this
     // warm-booted index so subsequent saves are incrementally indexed within
     // the 500ms debounce window. No-op when the watcher is disabled
     // (`TRUSTY_DISABLE_WATCHER=1`) or already watching this index.
     state.watcher_manager.spawn_for_index(&registered).await;
 }
+
+// #4390 / #4391: end-to-end warm-boot marker tests live in a sibling file so
+// this module stays under the 500-SLOC production cap.
+#[cfg(test)]
+#[path = "start_restore_markers_tests.rs"]
+mod markers_tests;

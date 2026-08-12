@@ -29,7 +29,8 @@ use super::CorpusStore;
 /// the ingest contract is replace-per-producer (ADR-0009 + #819 discussion),
 /// so the natural unit of storage is the producer's entire contribution.
 /// Replace = one insert; delete = one remove; load = iterate producers.
-const KG_CONTRIB_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("kg_contrib");
+pub(super) const KG_CONTRIB_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("kg_contrib");
 
 /// One contributed node: extractor-minted canonical identity.
 ///
@@ -83,6 +84,26 @@ pub struct ContribGraph {
     pub edges: Vec<ContribEdge>,
 }
 
+/// One stored contribution that will not deserialize, named by its producer.
+///
+/// Why: `load_contrib_graphs` fails the WHOLE load on the first bad row, and
+/// the resulting 503 used to say only "deserialize contrib graph" — a caller
+/// retrying its own ingest could not learn that a different producer's row was
+/// the blocker, so it would retry forever (#5505). Carried inside the
+/// `anyhow::Error` so no signature changes; recover it with `downcast_ref`.
+/// What: the producer key of the offending row plus the serde failure.
+/// Test: `contrib_load_failure_installs_nothing` in
+/// `core::symbol_graph::contrib_tests` — its assertions on
+/// `blocking_producer` and the reason string were added inline to this test
+/// rather than a dedicated one (#5514).
+#[derive(Debug, thiserror::Error)]
+#[error("contrib row for producer '{producer}' is unreadable: {source}")]
+pub struct ContribRowError {
+    pub producer: String,
+    #[source]
+    pub source: serde_json::Error,
+}
+
 impl CorpusStore {
     /// Replace `graph.producer`'s contribution with `graph` (ADR-0009).
     ///
@@ -131,9 +152,13 @@ impl CorpusStore {
         };
         let mut out: Vec<ContribGraph> = Vec::new();
         for entry in table.iter().context("iterate kg_contrib")? {
-            let (_, value) = entry.context("read kg_contrib row")?;
-            let graph: ContribGraph =
-                serde_json::from_slice(value.value()).context("deserialize contrib graph")?;
+            let (key, value) = entry.context("read kg_contrib row")?;
+            // #5505: keep the row's producer key. One unreadable row fails the
+            // whole load, so an error that does not name it leaves the caller
+            // with nothing to act on.
+            let producer = key.value().to_string();
+            let graph: ContribGraph = serde_json::from_slice(value.value())
+                .map_err(|source| ContribRowError { producer, source })?;
             out.push(graph);
         }
         out.sort_by(|a, b| a.producer.cmp(&b.producer));
@@ -159,6 +184,74 @@ impl CorpusStore {
         }
         txn.commit().context("commit contrib delete txn")?;
         Ok(existed)
+    }
+
+    /// Copy every stored contribution from `source` into `self` (ADR-0009).
+    ///
+    /// Why: a reindex stages its rebuilt corpus in a fresh `index.redb.tmp` and
+    /// renames it over the live file, so any table the staging store does not
+    /// hold is gone the moment the swap commits. `kg_contrib` is the one table
+    /// no reindex phase can regenerate — nothing writes it but the external
+    /// `POST /indexes/{id}/graph` ingest — so without this copy every reindex
+    /// dropped every contribution while reporting `Complete` / graph `Ready`.
+    /// ADR-0009 requires the opposite: contributed data survives restart *and*
+    /// reindex by construction. Separate from
+    /// [`CorpusStore::copy_all_from`](CorpusStore::copy_all_from) because a
+    /// force reindex deliberately seeds no chunks and must still carry
+    /// contributions forward. See PR #5527.
+    ///
+    /// What: streams every `kg_contrib` row from `source` into `self` in one
+    /// write transaction, returning the number of producers copied. A `source`
+    /// with no `kg_contrib` table (nothing ever ingested, or a pre-upgrade DB)
+    /// copies zero rows and is not an error. Rows move as stored bytes with no
+    /// deserialization, so a row that will not parse is carried forward rather
+    /// than silently dropped — whether it can be merged is the load path's
+    /// verdict to report, not this one's to pre-empt.
+    ///
+    /// That is a deliberate behavior change worth knowing when debugging a
+    /// graph that stays degraded across reindexes. `load_contrib_graphs` fails
+    /// all-or-nothing on the first row that will not deserialize. Before this
+    /// copy existed, a reindex destroyed such a row along with every valid one,
+    /// which incidentally left the table empty and readable again — the graph
+    /// "healed" by losing data. It now persists, so the load keeps failing on
+    /// every boot and `save_then_merge_contrib` keeps degrading to the
+    /// derived-only graph until the producer re-ingests or the row is deleted.
+    /// Preserving data inertly beats destroying it silently, and #5505's
+    /// `blocking_producer` names the row to fix.
+    /// Test: `copy_contrib_from_carries_every_producer`,
+    /// `copy_contrib_from_missing_source_table_is_a_no_op`,
+    /// `copy_contrib_from_preserves_an_unreadable_row` below; end-to-end in
+    /// `service::reindex::contrib_survival_tests`.
+    pub(crate) fn copy_contrib_from(&self, source: &CorpusStore) -> anyhow::Result<usize> {
+        let src_txn = source
+            .db
+            .begin_read()
+            .context("begin contrib source read txn")?;
+        let src_table = match src_txn.open_table(KG_CONTRIB_TABLE) {
+            Ok(t) => t,
+            // Nothing was ever contributed to this index: no rows to carry.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+            Err(e) => return Err(e).context("open source kg_contrib table"),
+        };
+        let dst_txn = self
+            .db
+            .begin_write()
+            .context("begin contrib copy write txn")?;
+        let mut copied = 0usize;
+        {
+            let mut dst_table = dst_txn
+                .open_table(KG_CONTRIB_TABLE)
+                .context("open staging kg_contrib table")?;
+            for entry in src_table.iter().context("iterate source kg_contrib")? {
+                let (key, value) = entry.context("read source kg_contrib row")?;
+                dst_table
+                    .insert(key.value(), value.value())
+                    .with_context(|| format!("copy contrib row '{}'", key.value()))?;
+                copied += 1;
+            }
+        }
+        dst_txn.commit().context("commit contrib copy txn")?;
+        Ok(copied)
     }
 }
 
@@ -254,6 +347,79 @@ mod tests {
         assert!(store.delete_contrib_graph("navigatsql").expect("delete"));
         assert!(!store.delete_contrib_graph("navigatsql").expect("re-delete"));
         assert!(store.load_contrib_graphs().expect("load").is_empty());
+    }
+
+    /// Why: the staging corpus a reindex promotes is a different redb file from
+    /// the live one, so contributions reach the promoted index only if they are
+    /// copied into staging first (ADR-0009).
+    /// Test: this test.
+    #[test]
+    fn copy_contrib_from_carries_every_producer() {
+        let (_src_dir, source) = store();
+        source
+            .save_contrib_graph(&sample("navigatsql", "dbo.orders"))
+            .expect("save a");
+        source
+            .save_contrib_graph(&sample("roslyn", "dbo.customers"))
+            .expect("save b");
+
+        let (_dst_dir, staging) = store();
+        assert_eq!(
+            staging.copy_contrib_from(&source).expect("copy"),
+            2,
+            "every producer's row must be carried"
+        );
+        let loaded = staging.load_contrib_graphs().expect("load");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].producer, "navigatsql");
+        assert_eq!(loaded[1].producer, "roslyn");
+        assert!(loaded[0].edges.iter().any(|e| e.to == "dbo.orders"));
+    }
+
+    /// Why: an index that never received a contribution has no `kg_contrib`
+    /// table at all, and every reindex of every such index calls this. A
+    /// missing table must read as "nothing to carry", not as a failure that
+    /// aborts the run.
+    /// Test: this test.
+    #[test]
+    fn copy_contrib_from_missing_source_table_is_a_no_op() {
+        let (_src_dir, source) = store();
+        let (_dst_dir, staging) = store();
+        assert_eq!(staging.copy_contrib_from(&source).expect("copy"), 0);
+        assert!(staging.load_contrib_graphs().expect("load").is_empty());
+    }
+
+    /// Why: the copy must not become a second place that decides which
+    /// contributions are valid. A row that will not deserialize is still the
+    /// producer's only copy of its data — dropping it during a reindex would
+    /// destroy it, whereas carrying it forward leaves the load path free to
+    /// report it (the `contrib_not_merged` verdict) and the producer free to
+    /// re-send.
+    /// Test: this test.
+    #[test]
+    fn copy_contrib_from_preserves_an_unreadable_row() {
+        let (_src_dir, source) = store();
+        source
+            .save_contrib_graph(&sample("navigatsql", "dbo.orders"))
+            .expect("save");
+        // Plant bytes that are not a `ContribGraph` under a second producer.
+        {
+            let txn = source.db.begin_write().expect("begin");
+            {
+                let mut table = txn.open_table(KG_CONTRIB_TABLE).expect("open");
+                table
+                    .insert("broken", b"{ not a contrib graph".as_slice())
+                    .expect("insert");
+            }
+            txn.commit().expect("commit");
+        }
+
+        let (_dst_dir, staging) = store();
+        assert_eq!(staging.copy_contrib_from(&source).expect("copy"), 2);
+        assert!(
+            staging.load_contrib_graphs().is_err(),
+            "the unreadable row must have been carried across, not dropped"
+        );
     }
 
     #[test]

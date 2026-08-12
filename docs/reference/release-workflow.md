@@ -56,6 +56,12 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
    Also runs automatically post-merge: `make version-parity-check` (or wait
    for `.github/workflows/version-parity.yml` on the merge commit) — see
    [Version-Parity Guard](#version-parity-guard-issue-3366) below.
+7b. Run `scripts/preflight-publish.sh <crate-name>` immediately before step 8.
+   Its CHECK 6 is the one that catches a tag left behind by a fast-forward —
+   see [Tag/Publish-Commit Parity Guard](#tagpublish-commit-parity-guard) below.
+   🔴 If main moved between steps 5 and 7 and you fast-forwarded this checkout
+   to satisfy the merged-main check, the tag from step 5 is now stale. Re-tag
+   before publishing; do not publish with the two disagreeing.
 8. Publish: `cargo publish -p <crate-name>`.
    - **UI-embedding crates** (trusty-search, trusty-memory, trusty-analyze): prefix with `SKIP_UI_BUILD=1`:
      ```bash
@@ -115,6 +121,64 @@ push and would silently disable every release) against the true
 `origin/main` tip. A tag pushed from an unmerged branch now fails this job
 loudly and the whole pipeline — build, release, homebrew-bump, and the
 publish-dry-run job below — is skipped rather than silently proceeding.
+
+## Tag/Publish-Commit Parity Guard
+
+🔴 **The release tag must name the commit `cargo publish` actually ships.**
+`scripts/check-tag-publish-parity.sh <crate> [version]` enforces it, and
+`scripts/preflight-publish.sh` runs it as CHECK 6 with no override.
+
+**The defect it closes.** Nothing bound the tag to the upload. Step 5 tags,
+step 8 publishes, and the two gates in between check different things:
+`check-publish-ready.sh` GUARD 2 asks whether the tag's commit is an ANCESTOR
+of `origin/main`, and `preflight-publish.sh` CHECK 1 asks whether HEAD EQUALS
+`origin/main`. A tag several commits behind HEAD satisfies both. That is the
+exact state a release run lands in whenever `main` moves between steps 5 and 7
+and the run is fast-forwarded to satisfy CHECK 1 — which is the documented way
+to satisfy it.
+
+**What happened on 2026-08-11.** `tga-v2.17.0` points at `246e4ca2`; the
+published crate's `.cargo_vcs_info.json` records `7d5cf82e1`, two
+`trusty-search` commits later. Every gate was green.
+`git diff 246e4ca2 7d5cf82e1 -- crates/trusty-git-analytics/` is empty, so that
+tag misrepresents nothing — luck, not design. Had any intervening commit
+touched the crate, `git checkout tga-v2.17.0` would show a tree that is not
+what shipped. `trusty-review-v0.15.0`, cut at the same `246e4ca2`, is
+consistent only because it published before the fast-forward.
+
+**What it checks.** The tag's commit (dereferencing annotated tags, preferring
+origin over local refs, accepting both the crate-dir and `tga` alias series)
+against `git rev-parse HEAD` — the sha1 `cargo package` writes into
+`.cargo_vcs_info.json`. Four named findings: `TAG-MISSING`, `TAG-SPLIT` (the
+two alias series disagree), `TAG-DRIFT` (the fast-forward case, whose message
+lists the commits added since the tag and gives the re-tag command), and
+`VCS-INFO-MISMATCH`.
+
+**After publishing**, confirm what cargo recorded rather than what it was
+expected to record — this is the only check that still works once the upload
+has happened, and it is what made 2026-08-11 provable:
+
+```bash
+scripts/check-tag-publish-parity.sh --vcs-info auto <crate>
+```
+
+It reads `target/package/<pkg>-<version>/.cargo_vcs_info.json` and fails if it
+is absent, unreadable, or records a commit other than the tag's. This is a
+separate explicit step rather than part of CHECK 6 because cargo leaves that
+artifact on disk indefinitely: reading whatever happens to be there would fail
+a legitimate release whose dry-run predated a rebase, and a gate that cries
+wolf gets routed around.
+
+**Residual gap, stated plainly.** A human can pass preflight, fast-forward, and
+then publish. Closing that needs the tag and the upload to be one command, and
+`cargo publish` is not ours to wrap. The post-publish `--vcs-info` run detects
+it, before the tag becomes something anyone has relied on.
+
+**Tested by** `scripts/check-tag-publish-parity-selftest.sh` (CI:
+`.github/workflows/tag-publish-parity.yml`), which builds a synthetic repo per
+failure and asserts the finding code, not just a non-zero exit. CI runs the
+self-test rather than the gate: on a tag push the workflow checkout IS the
+tagged commit, so the comparison is true by construction and proves nothing.
 
 ## Version-Parity Guard (issue #3366)
 

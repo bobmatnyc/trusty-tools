@@ -1,0 +1,61 @@
+[package]
+name = "trusty-audit"
+version = "0.1.0"
+description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
+readme = "README.md"
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+keywords = ["audit", "due-diligence", "installer", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# #5502: not published to crates.io. The delivery path for this crate is the
+# handoff zip of pre-compiled macOS arm64 binaries (#5483), not `cargo install`
+# by the recipient. Flip this to a real publish only if that changes.
+publish = false
+
+[lib]
+name = "trusty_audit"
+path = "src/lib.rs"
+
+# #5502: the binary ships under BOTH names, the `trusty-installer` / `tctl`
+# precedent. `trusty-audit` is what the docs and the handoff README say — the
+# recipient is an outsider who types it once from a page in front of them.
+# `taudit` is the short form for repeat use. Two targets, ONE `src/main.rs`:
+# there is a single implementation and no second code path to drift. Cargo
+# compiles that file once per target, so the binary is built twice.
+# `-p <crate>` still takes the Cargo `name` field (`trusty-audit`).
+[[bin]]
+name = "trusty-audit"
+path = "src/main.rs"
+
+[[bin]]
+name = "taudit"
+path = "src/main.rs"
+
+[dependencies]
+# Binary/CLI error handling (CLAUDE.md: anyhow for binaries, thiserror for libs).
+anyhow = { workspace = true }
+# Argument parsing. The parser lives in the LIBRARY (`cli.rs`) so every CLI
+# invocation is unit-testable without spawning the binary.
+clap = { workspace = true }
+# Reading the companion engagement config and tga's `manifest.toml`.
+serde = { workspace = true }
+toml = { workspace = true }
+# Library error type.
+thiserror = { workspace = true }
+# #5495: the pinned, fail-closed download entry point. Downloading, verifying
+# and placing binaries is this crate's domain, not ours — CLAUDE.md's
+# common-entry-point rule makes a second implementation here a defect. It also
+# supplies the HTTP client (`download::http_client`), which is why `reqwest` is
+# deliberately absent from this manifest.
+trusty-installer = { workspace = true }
+# Async runtime for the binary. `Session::execute` is async because installing
+# the pinned tools downloads; the Tauri shell will drive the same future.
+tokio = { workspace = true }
+
+[dev-dependencies]
+# Real directories for the working-directory creation tests.
+tempfile = { workspace = true }

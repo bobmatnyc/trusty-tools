@@ -373,6 +373,8 @@ pub(crate) async fn session(
                 json,
                 sid.as_deref(),
                 all,
+                // `-a` is a `tm ls` flag only; `tm sessions ls` is unchanged.
+                false,
                 sort,
                 filter,
             )

@@ -1,3 +1,5 @@
+/// #4390 / #4391: durable boot-integrity markers on `indexes.toml`.
+pub mod boot_markers;
 pub mod call_chain;
 #[cfg(feature = "candle")]
 pub mod candle_embedder;
@@ -14,6 +16,8 @@ pub mod embed_pool;
 pub mod embedder_supervisor;
 pub mod fs_discovery;
 pub mod grep;
+/// Issue #4356: fail-closed file-count / total-byte ceiling for the reindex walk.
+pub mod index_budget;
 pub mod indexed_files;
 pub mod lazy_loader;
 pub(crate) mod lazy_restore;
@@ -38,6 +42,11 @@ pub mod ui;
 pub mod walker;
 pub mod warm_boot;
 pub mod watch_loop;
+/// Dropped-event (`Flag::Rescan`) tree reconciliation for the file watcher.
+pub mod watch_rescan;
+/// #4731: condition-based waiting shared by every watcher test in this module.
+#[cfg(test)]
+pub(crate) mod watch_test_support;
 pub mod watcher;
 pub mod watcher_manager;
 

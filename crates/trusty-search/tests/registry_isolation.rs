@@ -90,11 +90,10 @@ fn registering_an_index_never_writes_to_the_production_registry() {
     let before = std::fs::read(&production).ok();
 
     let id = format!("ts-4255-isolation-{}", std::process::id());
-    let entry = PersistedIndex {
-        id: id.clone(),
-        root_path: PathBuf::from("/nonexistent/ts-4255-fixture-root"),
-        ..Default::default()
-    };
+    let entry = PersistedIndex::new(
+        id.clone(),
+        PathBuf::from("/nonexistent/ts-4255-fixture-root"),
+    );
     upsert_index_registry_entry(entry).expect("upsert must succeed against the isolated registry");
 
     let after = std::fs::read(&production).ok();
