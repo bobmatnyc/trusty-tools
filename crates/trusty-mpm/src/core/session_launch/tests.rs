@@ -173,7 +173,7 @@ fn prepare_session_does_not_seed_the_workspace_on_the_managed_path() {
     let workspace = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    let mut fw = crate::core::paths::FrameworkPaths::for_managed_project(
+    let fw = crate::core::paths::FrameworkPaths::for_managed_project(
         managed_root.path(),
         workspace.path(),
     );
@@ -182,7 +182,7 @@ fn prepare_session_does_not_seed_the_workspace_on_the_managed_path() {
         workspace.path().join(".claude").join("agents"),
         "fixture must genuinely be the managed shape, else this test is vacuous"
     );
-    fw.home_tier = Some(home.path().to_path_buf());
+    let fw = fw.with_home_tier(Some(home.path().to_path_buf()));
 
     prepare_session_with_style_and_native(&fw, workspace.path(), None, true)
         .expect("prep succeeds");
@@ -287,7 +287,7 @@ fn global_hook_cleanup_reaches_the_home_tier_under_an_overridden_root() {
     )
     .unwrap();
 
-    let mut fw = crate::core::paths::FrameworkPaths::for_managed_project(
+    let fw = crate::core::paths::FrameworkPaths::for_managed_project(
         std::path::Path::new("/opt/tm-roots/team-a/.trusty-mpm"),
         workspace.path(),
     );
@@ -296,7 +296,7 @@ fn global_hook_cleanup_reaches_the_home_tier_under_an_overridden_root() {
         dirs::home_dir().as_deref(),
         "the fixture must start from the production tier, else redirecting it proves nothing"
     );
-    fw.home_tier = Some(home.path().to_path_buf());
+    let fw = fw.with_home_tier(Some(home.path().to_path_buf()));
 
     super::settings::remove_global_trusty_memory_hooks(&fw).expect("cleanup succeeds");
 
@@ -320,8 +320,8 @@ fn global_hook_cleanup_reaches_the_home_tier_under_an_overridden_root() {
 fn home_writes_are_skipped_when_the_home_tier_is_relative() {
     let base = tempdir().unwrap();
     let workspace = tempdir().unwrap();
-    let mut fw = crate::core::paths::FrameworkPaths::under(base.path());
-    fw.home_tier = Some(std::path::PathBuf::from("."));
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
+    let fw = fw.with_home_tier(Some(std::path::PathBuf::from(".")));
 
     super::settings::preseed_workspace_trust_home(&fw, workspace.path()).expect("soft skip");
     super::settings::remove_global_trusty_memory_hooks(&fw).expect("soft skip");
@@ -353,8 +353,8 @@ fn home_tier_is_the_temp_base_under() {
 fn home_writes_are_skipped_when_the_home_tier_is_unresolved() {
     let base = tempdir().unwrap();
     let workspace = tempdir().unwrap();
-    let mut fw = crate::core::paths::FrameworkPaths::under(base.path());
-    fw.home_tier = None;
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
+    let fw = fw.with_home_tier(None);
 
     super::settings::preseed_workspace_trust_home(&fw, workspace.path()).expect("soft skip");
     super::settings::remove_global_trusty_memory_hooks(&fw).expect("soft skip");

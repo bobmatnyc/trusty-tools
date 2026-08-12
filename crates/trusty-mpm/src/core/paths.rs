@@ -22,12 +22,7 @@ pub const FRAMEWORK_DIR_NAME: &str = ".trusty-mpm";
 /// [`FrameworkPaths::default`] (home-relative) or [`FrameworkPaths::under`]
 /// (for tests against a temp dir).
 /// Test: `default_resolves_under_trusty_mpm`, `under_nests_subdirectories`.
-// #5544: `#[non_exhaustive]` so a future field addition stays non-breaking —
-// the `home_tier` addition below was not, and CLAUDE.md asks for this shape on
-// public structs for exactly that reason (#4088). The only struct literal is
-// `under()`, in-crate, which `non_exhaustive` does not restrict.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct FrameworkPaths {
     /// `~/.trusty-mpm`
     pub root: PathBuf,
@@ -92,7 +87,7 @@ pub struct FrameworkPaths {
     /// Test: `home_tier_survives_the_managed_project_rewrite`,
     /// `home_tier_is_the_real_home_for_a_managed_workspace`,
     /// `home_tier_is_the_temp_base_under`.
-    pub home_tier: Option<PathBuf>,
+    home_tier: Option<PathBuf>,
     /// `~/.trusty-tools/trusty-mpm/claude-config/agents` — the ONE tier
     /// bundled (framework-owned) agents deploy into (issue #4409).
     ///
@@ -502,6 +497,18 @@ impl FrameworkPaths {
     /// `home_tier_is_the_real_home_for_a_managed_workspace`.
     pub fn home_tier_dir(&self) -> Option<&Path> {
         self.home_tier.as_deref()
+    }
+
+    /// Redirect the user-global home tier.
+    ///
+    /// Why (#5544): a test driving the real `prepare_session` pipeline must be
+    /// able to point the user-global writes at a tempdir without repointing the
+    /// process's `$HOME`, which every sibling test in the same binary would see.
+    /// What: consuming builder; production never calls it.
+    /// Test: `prepare_session_does_not_seed_the_workspace_on_the_managed_path`.
+    pub fn with_home_tier(mut self, home: Option<PathBuf>) -> Self {
+        self.home_tier = home;
+        self
     }
 
     /// The base this layout's `.claude/{agents,skills}` tiers nest under.
