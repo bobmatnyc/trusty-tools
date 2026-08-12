@@ -110,14 +110,6 @@
 
 !README.md
 
-# Generated Svelte/Vite build output under any crate's ui/ directory (#5076).
-# `pnpm build` (invoked from `build.rs` unless `SKIP_UI_BUILD=1`) regenerates
-# this on demand — nothing under `dist/` is source, so `git add -A crates/`
-# must never be able to stage it. `crates/*/ui/` (the Svelte SOURCE tree) is
-# deliberately untouched by this rule — only the `dist/` build output beneath
-# it is ignored.
-crates/*/ui/dist/
-
 # trusty-search runtime artifacts
 crates/trusty-search/.claude-mpm/
 crates/trusty-search/ui/node_modules/
