@@ -259,7 +259,19 @@ path enforces it (#5050, moved to release-time by #5149).**
 `scripts/preflight-publish.sh` CHECK 5 runs `cargo-semver-checks` against the
 crate's latest crates.io release immediately before `cargo publish`, and its
 nonzero exit is the absolute stop — that is what blocks a bad upload, since
-`cargo publish` runs locally and no CI job can stop it. The tag-push workflow
+`cargo publish` runs locally and no CI job can stop it.
+
+🔴 **A zero exit is NOT the mirror of that stop (#5620).** `check_semver.sh`
+exits 0 both when it compared a crate and found nothing wrong and when it
+compared nothing at all, and CHECK 5 used to read only the status — so
+`0 crate(s) checked, 0 skipped, 1 inventory NOT computed` printed `[PASS]` and
+trusty-review 0.16.0 shipped with its public-API delta unexamined by any tool.
+CHECK 5 now reads the counts: **`0 compared` and `[PASS]` are unreachable
+together.** A recorded skip prints `[SKIP]` and permits, a blind gate prints
+`[FAIL]` and stops, and `PREFLIGHT_SEMVER_UNVERIFIED="<reason>"` downgrades a
+blind gate to `[WARN]` — a reason string, never a boolean, and never for a
+standing machine limitation (that belongs in
+`scripts/semver-checks-feature-exclusions.tsv`). The tag-push workflow
 `.github/workflows/semver-checks.yml` reports the same check independently.
 Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is the MINOR
 position. A workspace `cargo check` can never catch this class of break — the

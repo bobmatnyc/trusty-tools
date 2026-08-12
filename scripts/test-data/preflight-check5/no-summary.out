@@ -1,0 +1,5 @@
+toolchain: rustc 1.97.1 (selected over ambient 1.94.1; the scratch resolution ignores Cargo.lock)
+CHECK stub-crate: 0.31.0 -> 0.31.1 (minor release), 4 feature(s)
+     Checked [   0.871s] 196 checks: 196 pass, 58 skip
+     Summary no semver update required
+semver gate: examined 1 package, all clean.
