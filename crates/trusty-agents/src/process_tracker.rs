@@ -12,6 +12,8 @@
 //! (graceful termination of all running children).
 //! Test: Unit tests exercise register/load round-trip, mark_completed state
 //! transitions, and cleanup_stale removing fake (dead) PIDs.
+//! `tests/process_tracker_fail_open.rs` covers the load error arm and proves
+//! no entry point rewrites the tracker from a load it could not perform.
 
 #![allow(dead_code)]
 
@@ -65,12 +67,26 @@ impl ProcessTracker {
     /// Load all tracked entries from disk.
     ///
     /// Why: Callers read-modify-write; returning an empty map when the file
-    /// is absent makes first-run and steady-state paths uniform.
-    /// What: Reads and parses the JSON. Missing file → empty map. Malformed
-    /// JSON returns an error.
-    /// Test: `test_register_and_load` — registers a PID, reloads, asserts present.
+    /// is absent makes first-run and steady-state paths uniform. But "absent"
+    /// and "I could not find out" are different answers, and every caller
+    /// writes the result back over `processes.json`. Collapsing the second
+    /// into the first turns one transient probe failure — `EIO`, `ETIMEDOUT`,
+    /// `ESTALE` on a network mount — into a tracker rewritten from an empty
+    /// map, which forgets every live PID and leaves those children unreapable
+    /// by `cleanup_stale` and unkillable by `shutdown_all` (ADR-0045, #5552).
+    /// What: Reads and parses the JSON. A genuine `NotFound` (including a
+    /// missing parent directory, the first-run case) → empty map. An
+    /// undeterminable probe, and malformed JSON, return an error.
+    /// Test: `test_register_and_load` — registers a PID, reloads, asserts
+    /// present. The error arm and its blast radius live in
+    /// `tests/process_tracker_fail_open.rs`.
     pub async fn load(&self) -> Result<HashMap<u32, ProcessEntry>> {
-        if !fs::try_exists(&self.tracker_path).await.unwrap_or(false) {
+        // #5552: an undeterminable probe must not read as "file absent" — every
+        // caller writes the loaded map straight back over the tracker.
+        let present = fs::try_exists(&self.tracker_path)
+            .await
+            .with_context(|| format!("probing {}", self.tracker_path.display()))?;
+        if !present {
             return Ok(HashMap::new());
         }
         let bytes = fs::read(&self.tracker_path)
@@ -113,9 +129,18 @@ impl ProcessTracker {
     /// succeeds; the entry must be on disk before we yield control so a
     /// simultaneous crash can't orphan the child.
     /// What: Inserts a `Running` `ProcessEntry` with the current timestamp.
-    /// Test: `test_register_and_load`.
+    /// Returns the load error rather than registering into an empty map: the
+    /// only way to add one PID without dropping the rest is to have read the
+    /// rest first (#5552).
+    /// Test: `test_register_and_load`;
+    /// `register_leaves_previously_tracked_pids_intact_when_the_probe_fails`.
     pub async fn register(&self, pid: u32, agent_name: &str, task_id: &str) -> Result<()> {
-        let mut entries = self.load().await.unwrap_or_default();
+        // #5552: registering into `unwrap_or_default()` would save a one-entry
+        // map over every PID the failed load could not see.
+        let mut entries = self
+            .load()
+            .await
+            .with_context(|| format!("registering pid {pid} in {}", self.tracker_path.display()))?;
         entries.insert(
             pid,
             ProcessEntry {
@@ -135,10 +160,18 @@ impl ProcessTracker {
     /// `--check-orphans` can show the difference between running and dead)
     /// but will not be re-killed or reported as orphans.
     /// What: Updates `status` to `Completed` if the PID is present; no-op
-    /// otherwise.
-    /// Test: `test_mark_completed`.
+    /// otherwise. A failed load propagates instead of degrading to a map with
+    /// only this PID in it, which would drop every other entry (#5552).
+    /// Test: `test_mark_completed`;
+    /// `mark_completed_propagates_and_leaves_the_tracker_intact`.
     pub async fn mark_completed(&self, pid: u32) -> Result<()> {
-        let mut entries = self.load().await.unwrap_or_default();
+        // #5552: a failed load here would silently discard the other entries.
+        let mut entries = self.load().await.with_context(|| {
+            format!(
+                "marking pid {pid} completed in {}",
+                self.tracker_path.display()
+            )
+        })?;
         if let Some(entry) = entries.get_mut(&pid) {
             entry.status = ProcessStatus::Completed;
             self.save(&entries).await?;
@@ -152,10 +185,18 @@ impl ProcessTracker {
     /// phantom orphans. Entries whose PIDs are still alive are left alone
     /// (they'll be cleaned up by the owning process).
     /// What: Walks the map, checks `kill -0 <pid>`, and drops any `Running`
-    /// entry whose PID is dead. Returns the number removed.
-    /// Test: `test_cleanup_stale_removes_dead_pids`.
+    /// entry whose PID is dead. Returns the number removed. A failed load
+    /// propagates: "I cannot tell what is tracked" must not be reported to
+    /// startup as the `Ok(0)` that means "nothing needed reaping" (#5552).
+    /// Test: `test_cleanup_stale_removes_dead_pids`;
+    /// `cleanup_stale_propagates_rather_than_reporting_zero_reaped`.
     pub async fn cleanup_stale(&self) -> Result<usize> {
-        let mut entries = self.load().await.unwrap_or_default();
+        // #5552: `Ok(0)` from an unread tracker is indistinguishable from a
+        // clean reap, and startup logs it as success.
+        let mut entries = self
+            .load()
+            .await
+            .with_context(|| format!("reaping stale pids in {}", self.tracker_path.display()))?;
         let before = entries.len();
         entries.retain(|pid, entry| {
             if entry.status != ProcessStatus::Running {
@@ -176,11 +217,20 @@ impl ProcessTracker {
     /// a chance to flush logs / close files before being force-killed.
     /// What: Sends SIGTERM via `kill -TERM <pid>`, waits up to 5 seconds for
     /// the process to exit, then SIGKILL (`kill -KILL <pid>`) the stragglers.
-    /// Updates each entry's status to `Killed`.
-    /// Test: Not unit-tested — requires live children; covered by manual
-    /// Ctrl-C during workflow runs.
+    /// Updates each entry's status to `Killed`. A failed load propagates: an
+    /// empty map here signals nobody and returns `Ok(())`, so the caller
+    /// exits believing every child was terminated (#5552).
+    /// Test: The signalling path needs live children and is covered by manual
+    /// Ctrl-C during workflow runs;
+    /// `shutdown_all_propagates_rather_than_signalling_nobody` pins the error
+    /// arm.
     pub async fn shutdown_all(&self) -> Result<()> {
-        let mut entries = self.load().await.unwrap_or_default();
+        // #5552: signalling an empty map and returning Ok(()) reports a
+        // complete shutdown over children we never looked at.
+        let mut entries = self
+            .load()
+            .await
+            .with_context(|| format!("shutting down pids in {}", self.tracker_path.display()))?;
         let running: Vec<u32> = entries
             .iter()
             .filter(|(_, e)| e.status == ProcessStatus::Running)
