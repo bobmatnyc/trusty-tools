@@ -456,9 +456,11 @@ pub(super) async fn search_handler(
     // when either (a) the caller explicitly asked for it, or (b) the
     // semantic stage is not yet ready. Doing this here keeps the indexer
     // unaware of the index-handle-level capability surface.
-    let stages_snapshot = { handle.stages.read().await.clone() };
-    let caps = stages_snapshot.search_capabilities();
-    let semantic_ready = caps.contains(&"vector");
+    let mut handle = handle;
+    let mut index_id = index_id;
+    let mut stages_snapshot = { handle.stages.read().await.clone() };
+    // #5069: names the index the caller asked for when a sibling facet answered.
+    let mut routed_from: Option<String> = None;
     // #5068: a caller that PINNED the semantic lane asked a question this index
     // cannot answer. Serving BM25 rows under a 200 answers a different question
     // silently, so refuse with the same shape `search_kg` uses for `skip_kg`.
@@ -468,9 +470,27 @@ pub(super) async fn search_handler(
             handle.skip_vector,
             &stages_snapshot,
         ) {
-            return Err(resp);
+            // #5069: worktree indexes are `skip_vector` (#5060), so run the
+            // caller's declared lane against the facet of the same repo that
+            // holds the vectors before refusing outright.
+            let Some((served_id, served_handle)) =
+                super::facet_route::resolve_semantic_facet(&state, &index_id).await
+            else {
+                return Err(resp);
+            };
+            tracing::info!(
+                requested = %index_id,
+                served_by = %served_id,
+                "search_handler: routed a declared semantic lane to the repo's vector-carrying facet"
+            );
+            routed_from = Some(index_id.0.clone());
+            stages_snapshot = served_handle.stages.read().await.clone();
+            index_id = served_id;
+            handle = served_handle;
         }
     }
+    let caps = stages_snapshot.search_capabilities();
+    let semantic_ready = caps.contains(&"vector");
     if query.stage.is_none() && !semantic_ready {
         // Force lexical lane until the embedder catches up. The caller's
         // request is preserved if they explicitly asked for `mode = all`
@@ -574,7 +594,7 @@ pub(super) async fn search_handler(
         (Some(a), Some(b)) => a != b,
         _ => false,
     };
-    Ok(Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "results": results,
         "intent": format!("{:?}", intent),
         "latency_ms": latency_ms,
@@ -623,5 +643,21 @@ pub(super) async fn search_handler(
             // handles one contract, not two.
             "vector_disabled_by_config": handle.skip_vector,
         },
-    })))
+    });
+    // #5069: a routed query's results belong to the SERVING facet's tree, which
+    // sits on a different commit than the worktree the caller asked about — so
+    // name both indexes and the root the paths are relative to. Added only when
+    // routing actually happened, so an unrouted response is byte-identical to
+    // what it was before.
+    if let Some(from) = routed_from {
+        if let Some(meta) = body.get_mut("meta").and_then(|m| m.as_object_mut()) {
+            meta.insert("routed_from_index".into(), serde_json::json!(from));
+            meta.insert("served_by_index".into(), serde_json::json!(index_id.0));
+            meta.insert(
+                "served_root_path".into(),
+                serde_json::json!(handle.root_path.display().to_string()),
+            );
+        }
+    }
+    Ok(Json(body))
 }
