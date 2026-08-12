@@ -456,14 +456,37 @@ impl MemoryService {
     }
 
     // -----------------------------------------------------------------
-    // Internal helper — open a palace handle or return 404.
+    // Internal helper — open a palace handle, 404 only on a genuine absence.
     // -----------------------------------------------------------------
 
-    /// Open the named palace, returning `ServiceError::NotFound` on failure.
+    /// Open the named palace.
+    ///
+    /// Why (#5549, ADR-0045): this mapped every `open_palace` failure to
+    /// `NotFound`, which the HTTP layer renders as 404. A denied or transient
+    /// read of `palace.json`, undecodable metadata, an open-queue timeout, or a
+    /// redb write-lock conflict then all reported that the palace does not
+    /// exist — erasing at the caller the distinction `load_palace` draws, and
+    /// across a much wider surface than the two rename paths: every
+    /// `/api/v1/palaces/{id}/kg*` endpoint, the drawer CRUD routes, and
+    /// per-palace recall reach this one helper.
+    /// What: returns `ServiceError::NotFound` only when
+    /// `PalaceRegistry::open_error_is_absent` confirms the palace is genuinely
+    /// not there, and `ServiceError::Internal` (500) otherwise.
+    /// Test: `unreadable_palace_is_500_not_404_at_the_service_open_handle`,
+    /// `unstattable_palace_is_500_not_404_at_the_service_open_handle`,
+    /// `absent_palace_is_still_404_at_both_open_handles`.
     pub fn open_handle(&self, id: &str) -> ServiceResult<Arc<PalaceHandle>> {
         self.state
             .registry
             .open_palace(&self.state.data_root, &PalaceId::new(id))
-            .map_err(|e| ServiceError::not_found(format!("palace not found: {id} ({e:#})")))
+            .map_err(|e| {
+                // #5549: every open failure mapped to 404, so a palace that
+                // could not be read was reported as one that is not there.
+                if PalaceRegistry::open_error_is_absent(&e) {
+                    ServiceError::not_found(format!("palace not found: {id} ({e:#})"))
+                } else {
+                    ServiceError::internal(format!("palace could not be loaded: {id} ({e:#})"))
+                }
+            })
     }
 }

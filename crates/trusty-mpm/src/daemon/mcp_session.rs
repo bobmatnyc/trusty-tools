@@ -312,8 +312,23 @@ pub async fn session_prune(
 mod tests {
     use super::*;
 
-    fn state() -> Arc<DaemonState> {
-        DaemonState::shared()
+    /// An ISOLATED daemon state rooted in a tempdir.
+    ///
+    /// Why (#5544): this used to be `DaemonState::shared()`, whose
+    /// `FrameworkPaths` are rooted at the process's working directory. The
+    /// lifecycle tools these tests drive run real `prepare_session` side
+    /// effects, so the fixture seeded a workspace-trust record for the crate
+    /// directory — into the operator's real `~/.claude.json` before the home
+    /// tier was confined to the framework base, and into an untracked
+    /// `crates/trusty-mpm/.claude.json` afterwards. A test asserting "unknown id
+    /// errors" has no business writing either.
+    /// What: returns a state over a fresh tempdir, with the `TempDir` handed
+    /// back so the caller keeps it alive for the test's duration.
+    /// Test: used by every test in this module.
+    async fn state() -> (tempfile::TempDir, Arc<DaemonState>) {
+        let tmp = tempfile::tempdir().expect("isolated daemon root");
+        let state = DaemonState::with_root_isolated_managed(tmp.path().to_path_buf()).await;
+        (tmp, Arc::new(state))
     }
 
     /// A tmux driver that actually TRACKS created/killed session names (#2022).
@@ -381,7 +396,7 @@ mod tests {
     /// Test: this test.
     #[tokio::test]
     async fn unknown_id_errors_for_all_single_id_tools() {
-        let s = state();
+        let (_root, s) = state().await;
         let id = uuid::Uuid::new_v4().to_string();
 
         assert!(
@@ -427,7 +442,7 @@ mod tests {
     /// Test: this test.
     #[tokio::test]
     async fn garbage_id_rejected_for_all_single_id_tools() {
-        let s = state();
+        let (_root, s) = state().await;
         for r in [
             session_stop(&s, "xx").await,
             session_resume(&s, "xx").await,
@@ -513,7 +528,7 @@ mod tests {
     /// Test: this test.
     #[tokio::test]
     async fn session_new_invalid_runtime_errors() {
-        let s = state();
+        let (_root, s) = state().await;
         let err = session_new(
             &s,
             "https://example.com/r.git",

@@ -1,0 +1,31 @@
+# Crates scripts/check_semver.sh must NOT gate (issue #5050).
+#
+# The gate protects LIBRARY consumers: a dependent that re-resolves a `^0.y` or
+# `^x.y` floor on a lockfile-free `cargo install` and stops compiling. That is
+# #4088 — trusty-common 0.22.5 added a required public field on a patch bump and
+# cost trusty-analyze 0.7.3 a yank — and trusty-common has 17 in-repo consumers,
+# so every one of them was exposed.
+#
+# A crate with NO library consumer has nobody to protect. Its users install a
+# binary, and a binary user gets a whole new executable on every `cargo install`;
+# the library API it happens to expose is not part of what they consume.
+#
+# EVERY ROW IS A COVERAGE HOLE AND HAS TO EARN ITS PLACE. An excluded crate's
+# public API is never compared against the registry, so the row must name a
+# reason that is a FACT about how the crate is consumed, not a preference. "It
+# is slow", "it always fails", and "we are mid-refactor" are not reasons.
+#
+# THE ROW RESTS ON AN ASSUMPTION, AND THE GATE RE-CHECKS IT ON EVERY RUN.
+# Before granting the skip, check_semver.sh asks `cargo metadata` whether any
+# workspace package declares a dependency on the excluded crate. One does and
+# the skip is REFUSED: the run exits 3 (no verdict) naming the dependent, so the
+# day the premise dies the publish stops instead of quietly proceeding
+# unprotected. What it cannot see is an out-of-repo consumer on crates.io — that
+# one is a stated assumption, re-checkable with
+#   curl -s https://crates.io/api/v1/crates/<crate>/reverse_dependencies
+#
+# Format (tab-separated):  <crate>	<reason>
+# <crate> is the package name (`tga`), not the crates/ directory name.
+#
+# <crate>	<reason>
+trusty-mpm	binary-only consumer surface: installed as the `tm` executable via `cargo install trusty-mpm`, and a binary user gets a whole new executable, so library API compatibility is meaningless to them. Zero workspace packages depend on it (re-checked by the gate) and crates.io reported 0 reverse dependencies on 2026-08-12.

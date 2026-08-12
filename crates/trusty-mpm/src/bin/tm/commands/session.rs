@@ -624,6 +624,34 @@ pub(crate) fn compose_session_instructions(
     trusty_mpm::core::instruction_pipeline::PipelineOutput,
     std::path::PathBuf,
 )> {
+    compose_session_instructions_with_roster(project_dir, None)
+}
+
+/// [`compose_session_instructions`] with the deployed-agent roster supplied.
+///
+/// Why (#5544): the equality this function's tests assert —
+/// `compose_session_instructions(p).0 == build_system_prompt_for(p)` — puts two
+/// independent scans of the three LIVE agent tiers on either side of an
+/// `assert_eq!`. Those tiers are machine-global mutable state, so the two scans
+/// can legitimately disagree and the test fails with a message that reads as a
+/// prompt regression. Injecting one roster into both sides is the fix. The
+/// alternative — pinning `$HOME` and `$CLAUDE_CONFIG_DIR` around the test — is
+/// a PROCESS-GLOBAL write every sibling in the `tm` bin target can observe
+/// mid-scan, which is the flake class #5544 tracks rather than a cure for it.
+/// What: identical to [`compose_session_instructions`] except that a
+/// `Some(roster)` routes the prompt through
+/// [`trusty_mpm::core::session_launch::build_system_prompt_for_with_roster`].
+/// `None` — every production caller — takes the live scan, unchanged.
+/// Test: `compose_session_instructions_display_matches_live_prompt`,
+/// `compose_session_instructions_display_matches_live_prompt_with_override`.
+pub(crate) fn compose_session_instructions_with_roster(
+    project_dir: &std::path::Path,
+    roster: Option<String>,
+) -> anyhow::Result<(
+    String,
+    trusty_mpm::core::instruction_pipeline::PipelineOutput,
+    std::path::PathBuf,
+)> {
     use trusty_mpm::core::instruction_pipeline::{PipelineInput, build_instructions};
 
     // Run the legacy pipeline for its side-effects: seed CLAUDE.md if absent
@@ -647,7 +675,13 @@ pub(crate) fn compose_session_instructions(
     // divergence this function was written to prevent. Routing through
     // `build_system_prompt_for` keeps display, stash, and launch identical
     // regardless of Claude Code version.
-    let resolved_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project_dir);
+    let resolved_prompt = match roster {
+        Some(roster) => trusty_mpm::core::session_launch::build_system_prompt_for_with_roster(
+            project_dir,
+            Some(roster),
+        ),
+        None => trusty_mpm::core::session_launch::build_system_prompt_for(project_dir),
+    };
     // #4832: the harness ROOT, not `project_dir` — a worktree must never grow
     // its own `.trusty-mpm/`.
     let stash_dir = trusty_mpm::core::harness_root::harness_dir(project_dir);

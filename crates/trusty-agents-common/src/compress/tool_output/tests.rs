@@ -231,6 +231,137 @@ fn size_gate_lets_large_inputs_through() {
     assert!(!out.contains("passing_0 ... ok"));
 }
 
+// ── grep/ls/find/rg dispatch (#1957) ───────────────────────────────────
+
+#[test]
+fn compress_tool_output_reduces_long_grep_output() {
+    // #1957: grep had no filter branch — the #1953 spike measured 0%
+    // reduction for `grep -r` output. This must shrink once the branch
+    // exists.
+    let mut input = String::new();
+    for i in 0..150 {
+        input.push_str(&format!(
+            "crates/foo/src/bar{i}.rs:{}:    some matched line of code here\n",
+            10 + i
+        ));
+    }
+    let out = compress_tool_output("grep", &input);
+    assert!(
+        out.lines().count() < input.lines().count(),
+        "grep output should be compressed, got {} lines from {} input lines",
+        out.lines().count(),
+        input.lines().count()
+    );
+}
+
+#[test]
+fn compress_tool_output_reduces_long_ls_output() {
+    // #1957: ls had no filter branch — the #1953 spike measured 0%
+    // reduction for `ls -la` output.
+    let mut input = String::from("total 912\n");
+    for i in 0..150 {
+        input.push_str(&format!(
+            "-rw-r--r--   1 user  staff  {:>5} Jul  3 09:{:02} module_{i}.rs\n",
+            1200 + i * 7,
+            i % 60
+        ));
+    }
+    let out = compress_tool_output("ls", &input);
+    assert!(
+        out.lines().count() < input.lines().count(),
+        "ls output should be compressed, got {} lines from {} input lines",
+        out.lines().count(),
+        input.lines().count()
+    );
+}
+
+#[test]
+fn filter_grep_output_caps_long_match_list() {
+    let mut input = String::new();
+    for i in 0..150 {
+        input.push_str(&format!(
+            "src/mod{i}.rs:{}:    let x = compress(y);\n",
+            10 + i
+        ));
+    }
+    let out = filter_grep_output(&input);
+    assert!(out.contains("lines omitted"));
+    assert!(out.contains("src/mod0.rs"), "head lines must be kept");
+    assert!(out.contains("src/mod149.rs"), "tail lines must be kept");
+    assert!(out.lines().count() < input.lines().count());
+}
+
+#[test]
+fn filter_grep_output_passthrough_short() {
+    let input = "a.rs:1:match one\nb.rs:2:match two\n";
+    assert_eq!(filter_grep_output(input), input);
+}
+
+#[test]
+fn filter_ls_output_caps_long_listing() {
+    let mut input = String::from("total 912\n");
+    for i in 0..150 {
+        input.push_str(&format!(
+            "-rw-r--r--   1 user  staff  {:>5} Jul  3 09:{:02} module_{i}.rs\n",
+            1200 + i * 7,
+            i % 60
+        ));
+    }
+    let out = filter_ls_output(&input);
+    assert!(out.contains("lines omitted"));
+    assert!(out.contains("module_0.rs"), "head entries must be kept");
+    assert!(out.contains("module_149.rs"), "tail entries must be kept");
+    assert!(out.lines().count() < input.lines().count());
+}
+
+#[test]
+fn filter_ls_output_passthrough_short() {
+    let input = "total 8\n-rw-r--r--  1 user  staff  100 Jul  3 09:00 a.rs\n";
+    assert_eq!(filter_ls_output(input), input);
+}
+
+#[test]
+fn compress_tool_output_dispatch_routes_find_and_rg() {
+    let mut find_input = String::new();
+    for i in 0..100 {
+        find_input.push_str(&format!("crates/foo/src/mod{i}.rs\n"));
+    }
+    let out = compress_tool_output("find", &find_input);
+    assert!(out.lines().count() < find_input.lines().count());
+
+    let mut rg_input = String::new();
+    for i in 0..100 {
+        rg_input.push_str(&format!("src/mod{i}.rs:{}:matched line\n", 10 + i));
+    }
+    let out = compress_tool_output("rg", &rg_input);
+    assert!(out.lines().count() < rg_input.lines().count());
+}
+
+#[test]
+fn compress_tool_output_grep_tool_name_variants_route_correctly() {
+    // "Grep" (capitalized, as an MCP tool name) and a "grep -r <pattern>"
+    // shaped tool name must both route through the grep filter.
+    let mut input = String::new();
+    for i in 0..100 {
+        input.push_str(&format!("src/mod{i}.rs:{}:matched line\n", 10 + i));
+    }
+    let out = compress_tool_output("Grep", &input);
+    assert!(out.lines().count() < input.lines().count());
+}
+
+#[test]
+fn compress_tool_output_does_not_misfire_on_rg_substring() {
+    // #1957: "rg" is a substring of unrelated tool names ("cargo", "git
+    // merge"). The dispatch must not route these through the grep filter —
+    // it has no branch for "merge", so this must pass through unchanged.
+    let mut input = String::new();
+    for i in 0..40 {
+        input.push_str(&format!("Merge made by the 'ort' strategy, file {i}.rs\n"));
+    }
+    let out = compress_tool_output("git merge", &input);
+    assert_eq!(out, input);
+}
+
 // ── Structured-format detection ──────────────────────────────────────
 
 #[test]

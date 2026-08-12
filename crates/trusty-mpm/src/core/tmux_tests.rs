@@ -7,6 +7,60 @@
 
 use super::*;
 
+// ── #2414: untyped-argv builders for display-message / show-environment ──
+
+#[test]
+fn display_message_argv_untargeted() {
+    assert_eq!(
+        display_message_argv(None, "#S"),
+        vec!["display-message", "-p", "#S"]
+    );
+}
+
+#[test]
+fn display_message_argv_session_targeted() {
+    assert_eq!(
+        display_message_argv(Some(&TmuxTarget::session("tmpm-sess")), "#{pane_pid}"),
+        vec!["display-message", "-t", "tmpm-sess", "-p", "#{pane_pid}"]
+    );
+}
+
+#[test]
+fn show_environment_argv_untargeted() {
+    assert_eq!(
+        show_environment_argv(None, "TM_MANAGED_SESSION_ID"),
+        vec!["show-environment", "TM_MANAGED_SESSION_ID"]
+    );
+}
+
+#[test]
+fn show_environment_argv_session_targeted() {
+    assert_eq!(
+        show_environment_argv(Some("tmpm-sess"), "TM_MANAGED_SESSION_ID"),
+        vec![
+            "show-environment",
+            "-t",
+            "tmpm-sess",
+            "TM_MANAGED_SESSION_ID"
+        ]
+    );
+}
+
+#[test]
+fn run_tmux_argv_with_bin_does_not_panic_on_missing_binary() {
+    // Mirrors `run_tmux_with_bin_does_not_panic_on_missing_binary` for the
+    // untyped-argv spawn path.
+    let result = run_tmux_argv_with_bin(
+        "definitely-not-a-real-tmux-binary-2414",
+        &[
+            "display-message".to_string(),
+            "-p".to_string(),
+            "#S".to_string(),
+        ],
+    );
+    assert!(result.is_err());
+}
+
 #[test]
 fn resolve_tmux_binary_does_not_panic() {
     // Works whether or not tmux is installed on the test host.

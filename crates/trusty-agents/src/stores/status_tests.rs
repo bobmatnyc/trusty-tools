@@ -72,6 +72,13 @@ async fn mock_daemon() -> String {
             get(|Path(id): Path<String>| async move {
                 if id == "owner-profile" {
                     (StatusCode::OK, Json(json!({"drawers": []})))
+                } else if id == "unopenable-palace" {
+                    // #5592: trusty-memory answers 500 for a palace that exists
+                    // but could not be opened; before it, that was a 404.
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "palace could not be loaded"})),
+                    )
                 } else {
                     (StatusCode::NOT_FOUND, Json(json!({"error": "no palace"})))
                 }
@@ -212,6 +219,36 @@ async fn reports_missing_palace_without_downgrading_index() {
             .unwrap()
             .contains("does not exist")
     );
+}
+
+/// Why (#5592): `probe_palace` is one of three trusty-agents HTTP clients that
+/// consume `/api/v1/palaces/{id}/drawers`, and the only one whose OPERATOR-VISIBLE
+/// output changes when trusty-memory stops answering 404 for a palace it could
+/// not open. Telling an operator a palace "does not exist" sends them looking
+/// for a deleted palace when the real cause was a denied read or a jammed redb
+/// lock; the reason string has to carry the status through instead.
+/// What: points a store at the mock's 500 palace and asserts the reason names
+/// HTTP 500 and specifically does NOT claim absence — while the index stays
+/// connected, as in the sibling 404 test.
+/// Test: this test itself.
+#[tokio::test]
+async fn reports_unopenable_palace_as_a_server_error_not_an_absence() {
+    let base = mock_daemon().await;
+    let stores = stores_toml(
+        "[[stores]]\nname = \"bob-kb\"\nindex = \"bob-kb\"\npalace = \"unopenable-palace\"\n",
+    );
+    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(&base)).await;
+    assert!(
+        out[0].connected,
+        "index health must not depend on the palace"
+    );
+    assert_eq!(out[0].palace_connected, Some(false));
+    let reason = out[0].palace_reason.as_deref().unwrap();
+    assert!(
+        !reason.contains("does not exist"),
+        "a palace that could not be opened was reported as absent: {reason}"
+    );
+    assert!(reason.contains("500"), "reason was: {reason}");
 }
 
 #[tokio::test]
