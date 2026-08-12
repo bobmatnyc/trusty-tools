@@ -127,8 +127,9 @@ sloc-cfg-test-other-predicate.rs	17
 sloc-cfg-test-non-mod-item.rs	9
 sloc-cfg-test-brace-skew.rs	3
 sloc-cfg-test-string-braces.rs	6
-sloc-cfg-test-glob-comment.rs	6
+sloc-cfg-test-glob-comment.rs	3
 sloc-cfg-test-decoy-in-literal.rs	11
+sloc-cfg-test-anchor-disagrees.rs	7
 sloc-cfg-test-unterminated.rs	9"
 
 fail=0

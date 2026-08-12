@@ -10,9 +10,16 @@
 //! A lexer that loses track of the raw string sees `#[cfg(test)] mod tests {`
 //! at column 0, finds the `}` at column 0 four lines later, and excludes both
 //! — silently dropping real production lines from the count. Correct
-//! behaviour is to exclude NOTHING here, so all 8 production lines count.
+//! behaviour is to exclude NOTHING here, so all 11 lines count.
 //!
-//! Keep the expectation at 8. If a future edit makes this fixture DROP, the
+//! This is not hypothetical and it is the one place this change makes a count
+//! go UP: the PREVIOUS matcher scored this file skip=4, sloc=7. It fell for
+//! the decoy and excluded four lines of a string literal as though they were a
+//! test module. So the primitive did not have a single failure direction
+//! before this change — it could already drop real lines silently. It scores
+//! skip=0, sloc=11 now.
+//!
+//! Keep the expectation at 11. If a future edit makes this fixture DROP, the
 //! matcher has started excluding on evidence it cannot actually read, and the
 //! one-directional failure property that makes both consumers safe is gone.
 
