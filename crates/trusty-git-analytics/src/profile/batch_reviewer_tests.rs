@@ -3,20 +3,33 @@
 //! Why: split out of `batch_reviewer.rs` so that file stays well under the
 //! production SLOC cap while the coverage stays whole.
 //! What: covers the response schema, the system prompt, user-message assembly,
-//! severity mapping, and every parse path including the three fail-safe ones.
+//! severity mapping, every parse path including the three fail-safe ones, and
+//! (since #5464) the request the transport builds and the round trip through a
+//! `trusty_common::inference` adapter.
 //! Test: included as `#[cfg(test)] mod tests` from `batch_reviewer.rs`.
 //!
-//! Two prompt tests from the trusty-review original are deliberately absent:
-//! the `bedrock/` and `openrouter/` model-prefix-stripping regressions belong
-//! with the provider routing they guard, which lands in #5464.
+//! The trusty-review original's two model-prefix-stripping tests are inverted
+//! here rather than ported: #5464 routes through `trusty_common::inference`,
+//! which owns prefix routing and wire-id normalisation, so
+//! `period_request_preserves_routing_prefix` asserts tga hands the slug over
+//! UNTOUCHED instead of stripping it a second time.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use trusty_common::inference::test_support::ScriptedAdapter;
+use trusty_common::inference::{
+    capabilities, AssistantMessage, ChatChoice, ChatResponse, ProviderId, UsageBlock,
+};
 
 use super::{
-    build_period_user_message, parse_period_findings, period_findings_schema,
-    period_reviewer_system_prompt, severity_to_effort,
+    build_period_request, build_period_user_message, parse_period_findings, period_findings_schema,
+    period_reviewer_system_prompt, severity_to_effort, PeriodReviewer, PERIOD_REVIEWER_MAX_TOKENS,
+    PERIOD_REVIEWER_TEMPERATURE,
 };
-use crate::profile::types::{AuthorPeriodSummary, Effort, PeriodBatch, SampledDiff};
+use crate::profile::types::{
+    AuthorPeriodSummary, Effort, PeriodBatch, SampledDiff, TokenCostSummary,
+};
 
 fn make_batch() -> PeriodBatch {
     PeriodBatch::from_stats(AuthorPeriodSummary {
@@ -231,4 +244,120 @@ fn severity_to_effort_mapping() {
     assert_eq!(severity_to_effort("medium"), Effort::Medium);
     assert_eq!(severity_to_effort("low"), Effort::Low);
     assert_eq!(severity_to_effort("unknown"), Effort::Low);
+}
+
+// ─── Transport (#5464) ────────────────────────────────────────────────────────
+
+/// Build a `ChatResponse` carrying `body` as the assistant turn.
+fn scripted_response(body: &str, prompt_tokens: u32, completion_tokens: u32) -> ChatResponse {
+    ChatResponse {
+        id: "test".to_string(),
+        model: "test-model".to_string(),
+        choices: vec![ChatChoice {
+            message: AssistantMessage {
+                content: Some(body.to_string()),
+                tool_calls: Vec::new(),
+            },
+            finish_reason: Some("stop".to_string()),
+        }],
+        usage: UsageBlock {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            ..Default::default()
+        },
+    }
+}
+
+/// Why: prefix routing (`bedrock/…`, `openrouter/…`) and wire-id normalisation
+/// belong to `trusty_common::inference`, which strips the marker itself in
+/// `ProviderId::wire_model_id`. A second strip here would send a bare id that
+/// resolves to the wrong provider — the exact duplication #5464 exists to avoid.
+/// What: asserts the slug reaches `ChatRequest.model` byte-for-byte, prefix and
+/// all.
+/// Test: this test itself.
+#[test]
+fn period_request_preserves_routing_prefix() {
+    let req = build_period_request(&make_batch(), "bedrock/us.anthropic.claude-sonnet-4-5-v1:0");
+    assert_eq!(
+        req.model, "bedrock/us.anthropic.claude-sonnet-4-5-v1:0",
+        "the routing prefix is trusty_common's to consume, not tga's to strip"
+    );
+
+    let req = build_period_request(&make_batch(), "openrouter/openai/gpt-5.4-mini");
+    assert_eq!(req.model, "openrouter/openai/gpt-5.4-mini");
+}
+
+/// Why: `ChatRequest` carries no structured-output field, so the schema only
+/// reaches the model if the system turn spells it out — and low temperature is
+/// what keeps the answer extraction rather than prose.
+/// What: asserts the two-turn shape, the schema text in the system turn, the
+/// period label in the user turn, and both sampling parameters.
+/// Test: this test itself.
+#[test]
+fn period_request_carries_schema_and_sampling() {
+    let req = build_period_request(&make_batch(), "openai/gpt-5.4-mini");
+
+    assert_eq!(req.messages.len(), 2, "one system turn, one user turn");
+    assert_eq!(req.messages[0].role, "system");
+    assert_eq!(req.messages[1].role, "user");
+
+    let system = req.messages[0].content.clone().unwrap_or_default();
+    assert!(
+        system.contains("\"findings\""),
+        "the schema must reach the system turn: {system}"
+    );
+    let user = req.messages[1].content.clone().unwrap_or_default();
+    assert!(user.contains("2026-Q1"), "the user turn carries the period");
+
+    assert_eq!(req.temperature, Some(PERIOD_REVIEWER_TEMPERATURE));
+    assert_eq!(req.max_tokens, Some(PERIOD_REVIEWER_MAX_TOKENS));
+}
+
+/// Why: this is the closure condition of #5464 — the period-review call reaches
+/// a model through `trusty_common::inference::InferenceAdapter`, so tga needs no
+/// dependency on trusty-review's `crate::llm`. Driving it with the commons'
+/// own `ScriptedAdapter` is what proves the seam is that trait and not a
+/// tga-private client.
+/// What: queues a findings body on a `ScriptedAdapter`, reviews one period, and
+/// asserts both findings arrive labelled and the adapter's usage lands in the
+/// cost summary.
+/// Test: this test itself.
+#[tokio::test]
+async fn period_reviewer_routes_through_shared_inference() {
+    let adapter = ScriptedAdapter::new("scripted", capabilities(ProviderId::OpenRouter))
+        .with_response(scripted_response(JSON_RESPONSE, 1200, 340));
+    let reviewer = PeriodReviewer::with_adapter(Arc::new(adapter), "openai/gpt-5.4-mini");
+
+    let mut cost = TokenCostSummary::default();
+    let findings = reviewer.review_period(&make_batch(), &mut cost).await;
+
+    assert_eq!(
+        findings.len(),
+        2,
+        "both findings must survive the round trip"
+    );
+    assert_eq!(findings[0].period_label, "2026-Q1");
+    assert_eq!(findings[1].finding.kind, "security");
+
+    assert_eq!(cost.input_tokens, 1200, "adapter usage must be accumulated");
+    assert_eq!(cost.output_tokens, 340);
+}
+
+/// Why: one unreachable provider must cost that period's findings, not the run —
+/// a twelve-quarter profile should not be lost to the eleventh call.
+/// What: exhausts a strict `ScriptedAdapter` (its empty queue errors), asserts an
+/// empty finding list and that no token counts were invented for the failed call.
+/// Test: this test itself.
+#[tokio::test]
+async fn period_reviewer_fail_safe_on_adapter_error() {
+    let adapter = ScriptedAdapter::new("scripted", capabilities(ProviderId::OpenRouter));
+    let reviewer = PeriodReviewer::with_adapter(Arc::new(adapter), "openai/gpt-5.4-mini");
+
+    let mut cost = TokenCostSummary::default();
+    let findings = reviewer.review_period(&make_batch(), &mut cost).await;
+
+    assert!(findings.is_empty(), "an adapter error yields no findings");
+    assert_eq!(cost.input_tokens, 0, "a failed call bills nothing");
+    assert_eq!(cost.output_tokens, 0);
 }
