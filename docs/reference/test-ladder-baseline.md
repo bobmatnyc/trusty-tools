@@ -142,22 +142,24 @@ parallel test runs is not evidence your branch broke something. Re-run with
 it goes green, the failure was isolation-specific, not a correctness defect.
 Isolation races in this crate are pre-existing and documented above.
 
-🔴 **The correct response is to prove your diff touches zero files in those
-crates — never to `#[ignore]`, `cfg`-gate, or `--exclude` them.** The proof is a
-path list, and empty output is the evidence; paste it in the PR:
+🔴 **The correct response is to prove the failure is pre-existing — never to
+`#[ignore]`, `cfg`-gate, or `--exclude` a failing test.** Reproduce it on
+`origin/main` (step 2 below), or, **only when the failing crate depends on
+nothing you changed**, show your diff touches zero files in it instead — the
+proof is a path list, and empty output is the evidence; paste it in the PR:
 
 ```bash
 git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
                                            crates/trusty-mpm/src/client/
 ```
 
-🔴 **That path-list proof is valid only when the failing crate doesn't depend
-on anything your diff touched** — across a dependency edge (`trusty-search` on
-`trusty-common`) it can read as a clean exoneration while being wrong; see the
-shared-crate caveat at step 5 and the valid alternative at step 2 below.
+Across a dependency edge (`trusty-search` on `trusty-common`) that path list
+can come back empty while the branch is still guilty — the shared-crate caveat
+is spelled out at step 5 below.
 `create_index_cannot_register_while_a_delete_is_tearing_the_id_down` above is a
-worked example of that alternative, reproduced directly on `origin/main`
-(documented by [#5607](https://github.com/bobmatnyc/trusty-tools/pull/5607)).
+worked example of the `origin/main` reproduction, measured directly on
+`origin/main` (documented by
+[#5607](https://github.com/bobmatnyc/trusty-tools/pull/5607)).
 
 ## Telling A Pre-Existing Red From One You Caused — Crate-Scoped Confirmation
 
