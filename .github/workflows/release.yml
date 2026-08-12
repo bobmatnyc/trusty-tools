@@ -1860,61 +1860,93 @@ jobs:
         env:
           OUTPUT: RELEASE_NOTES.md
 
-      # ── Clear a stale, asset-less release before softprops runs (issue #5455) ──
-      # WHY: GitHub's "Immutable Releases" enforcement rejects ANY update to an
-      #   already-published release that includes `target_commitish` —
-      #   softprops/action-gh-release@v2 submits it on its update-existing-
-      #   release path unconditionally (upstream: softprops/action-gh-release
-      #   issues #653 and #641, "Incompatible with immutable releases"). If a
-      #   release object for this tag ALREADY exists when this job runs — from
-      #   an earlier partial/failed run of this same workflow, a manual
-      #   `gh release create`, or any retry/re-dispatch — softprops's own GET
-      #   finds it, tries to reconcile fields via PATCH, and dies with:
-      #     "target_commitish cannot be changed when release is immutable"
-      #   *before ever uploading assets*. That is exactly what happened to
-      #   trusty-installer-v0.5.0 (run 30961682562, 2026-08-04): all three
-      #   build legs succeeded and produced valid tarballs, but the release
-      #   was left with ZERO assets because this step failed first — breaking
-      #   install.sh for every new user with a 404 on the checksum download.
+      # ── Detect (never repair-by-deletion) a stuck immutable asset-less
+      # release (issue #5455, revised in PR #5591 after this exact strategy
+      # was proven destructive) ──────────────────────────────────────────────
+      # WHY THE ORIGINAL "delete and let softprops recreate" REPAIR DOES NOT
+      # WORK, established empirically while investigating trusty-installer-v0.5.0:
+      #   This repo has GitHub's Immutable Releases enabled repo-wide — every
+      #   release object here reports `"immutable": true` via the REST API
+      #   (`gh api repos/<repo>/releases --paginate --jq '.[]|{tag_name,immutable}'`,
+      #   confirmed across every crate's release history, not just this tag).
+      #   Two GitHub-documented facts combine to make delete-and-recreate
+      #   actively destructive rather than a repair:
+      #     1. "Once you publish a release as immutable, its assets can't be
+      #        added, modified, or deleted." (github.blog/changelog,
+      #        2025-10-28, "Immutable releases are now generally available")
+      #        — so there is no in-place repair for an asset-less immutable
+      #        release; assets can never be attached to it after the fact.
+      #     2. "If you delete the immutable release, you can delete the tag,
+      #        but you cannot reuse the same tag name." (GitHub Docs,
+      #        code-security/concepts/supply-chain-security/immutable-releases)
+      #        — so deleting the release object to let softprops recreate it
+      #        PERMANENTLY forfeits the tag name. A recreate attempt fails at
+      #        finalize with "tag_name was used by an immutable release" —
+      #        the exact failure observed reproducing this for
+      #        trusty-installer-v0.5.0 after a fresh release object had
+      #        already uploaded all 6 assets successfully. The original
+      #        release for that tag had published once (2026-08-04, run
+      #        30961682562) before an earlier repair attempt deleted its
+      #        asset-less release object, so the tag name was already gone —
+      #        turning a degraded (0-asset) release into NO release (404).
+      #   Net effect: for an immutable, asset-less release, THERE IS NO SAFE
+      #   AUTOMATED REPAIR. The only real remedy is a new version (new tag).
       #
-      # WHAT: if a release already exists for this tag AND it currently has no
-      #   assets attached, delete the release OBJECT only (never the git tag —
-      #   `--cleanup-tag` is intentionally omitted) so softprops's normal
-      #   create → upload-assets → publish path runs unobstructed on a clean
-      #   slate. A release that already carries real assets is left
-      #   completely untouched — this only clears the specific "empty stale
-      #   release" collision, never a legitimate published release.
-      # See #5455: TAG is `needs.setup.outputs.tag`, not `github.ref_name` —
-      # under `workflow_dispatch` (a manual republish, exactly the case this
-      # step exists to unblock) `github.ref_name` is the dispatched-against
-      # REF, not a tag at all, so this step would look up and potentially
-      # delete a release for the literal string "main" instead of the real
-      # tag. `needs.setup.outputs.tag` is the single resolved value every
-      # tag-consuming step in this workflow now reads.
-      - name: Clear a stale asset-less release for this tag, if present
+      # WHAT THIS STEP DOES INSTEAD: looks up the release for this tag and
+      # reads GitHub's own `.immutable` field directly off the release object
+      # — the authoritative per-release signal, not an inference from repo
+      # history — then NEVER deletes:
+      #   - No release exists: nothing to do; softprops creates fresh. OK.
+      #   - Release exists with >0 assets: already fine, leave untouched. OK.
+      #   - Release exists, 0 assets, immutable=false: a genuinely mutable
+      #     stale release (e.g. from before immutable releases was enabled on
+      #     this repo). softprops's normal GET → PATCH → upload path already
+      #     handles this in place — a mutable release does not reject the
+      #     target_commitish PATCH the way an immutable one does — so there is
+      #     nothing to delete here either.
+      #   - Release exists, 0 assets, immutable=true: THE HAZARD. FAIL THE JOB
+      #     LOUDLY (never delete, never touch the release) and name the real
+      #     remedy in the error text: cut a new version/tag.
+      #
+      # TAG is `needs.setup.outputs.tag`, not `github.ref_name` (#5455): under
+      # `workflow_dispatch` — a manual republish, exactly the case this step
+      # exists for — `github.ref_name` is the dispatched-against REF (e.g. the
+      # literal string "main"), not a tag at all.
+      - name: Detect a stuck immutable asset-less release for this tag
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.setup.outputs.tag }}
         run: |
           set -euo pipefail
-          ASSET_COUNT="$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
-            --jq '.assets | length' 2>/dev/null || echo "")"
-          if [[ -z "$ASSET_COUNT" ]]; then
-            echo "No existing release for tag '${TAG}' — nothing to clear."
-          elif [[ "$ASSET_COUNT" == "0" ]]; then
-            echo "::warning::Found an existing release for '${TAG}' with 0 assets — deleting the release object (tag left intact) so softprops/action-gh-release can recreate it cleanly. See #5455."
-            gh release delete "${TAG}" --yes
-          else
-            echo "Existing release for '${TAG}' already has ${ASSET_COUNT} asset(s) attached — leaving it in place."
+          RELEASE_INFO="$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
+            --jq '[(.assets | length), (.immutable // false)] | @tsv' 2>/dev/null || echo "")"
+          if [[ -z "$RELEASE_INFO" ]]; then
+            echo "No existing release for tag '${TAG}' — nothing to do; softprops will create it."
+            exit 0
           fi
+
+          ASSET_COUNT="$(cut -f1 <<< "$RELEASE_INFO")"
+          IMMUTABLE="$(cut -f2 <<< "$RELEASE_INFO")"
+
+          if [[ "$ASSET_COUNT" != "0" ]]; then
+            echo "Existing release for '${TAG}' already has ${ASSET_COUNT} asset(s) attached — leaving it in place."
+            exit 0
+          fi
+
+          if [[ "$IMMUTABLE" == "true" ]]; then
+            echo "::error::Release '${TAG}' exists with 0 assets and is IMMUTABLE. GitHub permanently forbids adding assets to a published immutable release, and deleting it would permanently forfeit the tag name (any recreate attempt then fails at finalize with 'tag_name was used by an immutable release' — see github.blog/changelog 2025-10-28 'Immutable releases are now generally available', and GitHub Docs code-security/concepts/supply-chain-security/immutable-releases: 'If you delete the immutable release, you can delete the tag, but you cannot reuse the same tag name.'). There is NO safe automated repair for this tag. Cut a NEW version for this crate (a new tag) instead — do not delete or recreate this release. See #5455."
+            exit 1
+          fi
+
+          echo "Existing release for '${TAG}' has 0 assets but is NOT immutable — softprops's normal update path can attach assets to it in place; nothing to delete."
 
       - name: Create / update GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
           # See #5455: single resolved tag (needs.setup.outputs.tag), not
-          # github.ref_name — see the "Clear a stale asset-less release" step
-          # above for why a raw ref_name read is wrong here under
-          # workflow_dispatch.
+          # github.ref_name — see the "Detect a stuck immutable asset-less
+          # release" step above for why a raw ref_name read is wrong here
+          # under workflow_dispatch.
           tag_name: ${{ needs.setup.outputs.tag }}
           name: "${{ needs.setup.outputs.crate }} v${{ needs.setup.outputs.version }}"
           prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
