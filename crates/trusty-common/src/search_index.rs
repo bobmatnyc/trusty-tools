@@ -32,9 +32,11 @@
 //! file write/edit, it POSTs just that file's fresh content to the daemon's
 //! cheap per-file `POST /indexes/{id}/index-file` endpoint (never a full
 //! reindex walk), so the growing codebase stays searchable within the same
-//! task. Same fail-open contract, and non-blocking by construction (spawns its
-//! own detached thread rather than relying on the caller to wrap it, since
-//! its call sites are tcode's tool executors, not a one-shot task-start hook).
+//! task. Same fail-open contract, and non-blocking by construction (hands the
+//! work to a background pool rather than relying on the caller to wrap it,
+//! since its call sites are tcode's tool executors, not a one-shot task-start
+//! hook). That pool is BOUNDED (issue #2798) — see [`crate::index_dispatch`]
+//! for the sizes and for what happens to a batch submitted when it is full.
 //!
 //! `allow_sensitive_path` (issue #2914 — ephemeral index leak): earlier
 //! revisions hardcoded `allow_sensitive_path: true` on every `POST /indexes`
@@ -63,7 +65,8 @@
 //! `retry_backoff_is_bounded_and_increasing` /
 //! `post_index_file_retries_transient_send_failure` /
 //! `post_index_file_exhausts_retries_and_returns_send_failed` in the `tests`
-//! module below.
+//! module below, plus the #2798 saturation test
+//! `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`.
 
 use std::path::Path;
 
@@ -399,13 +402,24 @@ fn refuse_daemon_write_under_test(operation: &str, index_id: &str) -> bool {
 /// (expensive); the daemon's per-file `POST /indexes/{id}/index-file`
 /// endpoint lets a caller add or update ONE file's chunks cheaply, so the
 /// growing codebase stays searchable within the same task.
-/// What: spawns ONE detached OS thread and returns immediately — the caller
-/// (a tool executor mid-turn) must never block or fail because trusty-search
-/// is unreachable or slow. Inside the thread, [`index_files_inner`] derives
-/// the same `(root, index_id)` [`ensure_project_indexed`] would (so this
-/// always targets the same index a task-start call already created) and
-/// POSTs each of `paths` to the daemon. A no-op with zero thread spawn when
-/// `paths` is empty.
+/// What: submits ONE job to the shared bounded pool ([`crate::index_dispatch`])
+/// and returns immediately — the caller (a tool executor mid-turn) must never
+/// block or fail because trusty-search is unreachable or slow. On a worker,
+/// [`index_files_inner`] derives the same `(root, index_id)`
+/// [`ensure_project_indexed`] would (so this always targets the same index a
+/// task-start call already created) and POSTs each of `paths` to the daemon. A
+/// no-op with zero work submitted when `paths` is empty.
+///
+/// Saturation (issue #2798): the pool runs at most
+/// [`crate::index_dispatch::MAX_INDEX_WORKERS`] batches at once with at most
+/// [`crate::index_dispatch::INDEX_QUEUE_CAPACITY`] more queued. A batch
+/// submitted when both are full is **DROPPED, not blocked and not queued** —
+/// the alternative, blocking the caller, would turn a slow daemon into a
+/// stalled agent task. The drop is not silent: it is logged at `warn` naming
+/// the file count, the project root, the first path, and the running
+/// process-wide drop total. Losing an incremental update degrades mid-task
+/// search freshness until the next write or reindex covers the file; it does
+/// not lose the file, and it does not fail the tool call.
 ///
 /// Sensitive-path note (issue #2747): unlike `POST /indexes`, the per-file
 /// `index-file` endpoint does NOT re-run the sensitive-path denylist — it
@@ -415,23 +429,40 @@ fn refuse_daemon_write_under_test(operation: &str, index_id: &str) -> bool {
 /// an index created under the #2747 `allow_sensitive_path` bypass (a tempdir
 /// root) accepts incremental updates unconditionally. No bypass flag is
 /// threaded through here because none is needed.
-/// Test: this function is a thin spawn wrapper (side-effect only, no return
-/// to assert); its logic is [`index_files_inner`], which the
-/// `index_files_inner_*` tests below exercise directly (synchronously, off
-/// the spawned thread) for determinism.
+/// Test: `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`
+/// covers the submit/reject half; the work itself is [`index_files_inner`],
+/// which the `index_files_inner_*` tests below exercise directly
+/// (synchronously, off any worker) for determinism.
 pub fn index_files_best_effort(project_root: &Path, paths: &[std::path::PathBuf]) {
     if paths.is_empty() {
         return;
     }
+    let count = paths.len();
+    let root_display = project_root.display().to_string();
+    let first = paths.first().map(|p| p.display().to_string());
     let project_root = project_root.to_path_buf();
     let paths = paths.to_vec();
-    std::thread::spawn(move || {
+
+    // #2798: bound the in-flight indexing threads — a degraded daemon must not
+    // let a burst of writes spawn OS threads without limit.
+    let accepted = crate::index_dispatch::global().try_submit(Box::new(move || {
         index_files_inner(&project_root, &paths);
-    });
+    }));
+    if !accepted {
+        tracing::warn!(
+            "DROPPED incremental trusty-search index update for {count} file(s) under \
+             {root_display} (first: {}): all {} indexing workers are busy and the \
+             {}-slot queue is full; {} batch(es) dropped in this process so far (#2798)",
+            first.as_deref().unwrap_or("<none>"),
+            crate::index_dispatch::MAX_INDEX_WORKERS,
+            crate::index_dispatch::INDEX_QUEUE_CAPACITY,
+            crate::index_dispatch::global().rejected(),
+        );
+    }
 }
 
-/// Synchronous body of [`index_files_best_effort`], run on its detached
-/// thread (or called directly by tests for determinism).
+/// Synchronous body of [`index_files_best_effort`], run on a pool worker (or
+/// called directly by tests for determinism).
 ///
 /// Why: split out so tests can exercise the fail-open branches (empty index
 /// id, undiscoverable daemon) synchronously, without waiting on — or racing
@@ -652,8 +683,9 @@ fn post_index_file_with_retries(
 /// `client` [`index_files_inner`] built once for the batch (so rapid writes
 /// reuse keep-alive connections). Unlike [`best_effort_create_index`], this
 /// does NOT spawn-and-join its own nested OS thread: it is only ever reached
-/// from inside [`index_files_inner`]'s own detached thread (spawned by
-/// [`index_files_best_effort`]), which is already off any tokio runtime, so a
+/// from inside [`index_files_inner`] running on a [`crate::index_dispatch`]
+/// pool worker (submitted by [`index_files_best_effort`]), a plain
+/// `std::thread` that is already off any tokio runtime, so a
 /// direct blocking call here cannot trigger the "cannot drop a runtime in a
 /// context where blocking is not allowed" panic. A non-2xx response (including
 /// 404 for an unregistered/unknown index — e.g. the daemon restarted since task

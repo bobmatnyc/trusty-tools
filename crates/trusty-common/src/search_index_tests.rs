@@ -258,6 +258,74 @@ fn index_files_inner_skips_gracefully_when_daemon_down() {
     // means there is nothing further to observe from this call.
 }
 
+/// `index_files_best_effort` DROPS a batch — observably — once the shared
+/// bounded pool is saturated, instead of spawning another thread (#2798).
+///
+/// Why: the pre-fix implementation called `std::thread::spawn` per batch, so
+/// there was no saturation point at all: this test could not fail because a
+/// submission could never be refused. It is the end-to-end half of the bound;
+/// the pool's own boundary and concurrency ceiling are pinned deterministically
+/// in `index_dispatch`'s tests.
+/// What: occupies every worker with a job that blocks until released, fills the
+/// queue by submitting no-ops until one is refused, then calls
+/// `index_files_best_effort` and asserts the process-wide rejection counter
+/// advanced by exactly one — i.e. THIS batch was the one dropped. Filling by
+/// "submit until refused" rather than by a fixed count keeps the test honest if
+/// a sibling test ever shares the pool. The blocked workers are released before
+/// returning so the queued no-ops drain.
+/// Test: this test.
+#[test]
+fn index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated() {
+    use crate::index_dispatch::{INDEX_QUEUE_CAPACITY, MAX_INDEX_WORKERS, global};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    let wait = Duration::from_secs(30);
+    let (started_tx, started_rx) = channel();
+    let mut releases = Vec::with_capacity(MAX_INDEX_WORKERS);
+    for _ in 0..MAX_INDEX_WORKERS {
+        let (release_tx, release_rx) = channel::<()>();
+        releases.push(release_tx);
+        let started = started_tx.clone();
+        assert!(
+            global().try_submit(Box::new(move || {
+                let _ = started.send(());
+                let _ = release_rx.recv_timeout(wait);
+            })),
+            "the shared pool refused a job before every worker was even busy"
+        );
+    }
+    for i in 0..MAX_INDEX_WORKERS {
+        started_rx
+            .recv_timeout(wait)
+            .unwrap_or_else(|e| panic!("blocker {i} never started: {e}"));
+    }
+
+    // Fill the queue until a submission is actually refused.
+    let mut filled = 0usize;
+    while global().try_submit(Box::new(|| {})) {
+        filled += 1;
+        assert!(
+            filled <= INDEX_QUEUE_CAPACITY,
+            "the queue accepted {filled} jobs, more than its {INDEX_QUEUE_CAPACITY}-slot capacity"
+        );
+    }
+
+    let before = global().rejected();
+    index_files_best_effort(Path::new("/nonexistent-2798"), &[PathBuf::from("main.rs")]);
+    let after = global().rejected();
+
+    for release in &releases {
+        let _ = release.send(());
+    }
+
+    assert_eq!(
+        after,
+        before + 1,
+        "a batch submitted to a saturated pool must be dropped and counted"
+    );
+}
+
 /// `relative_index_path` strips the project root prefix so the posted
 /// path matches the corpus's existing `file` field convention.
 ///
