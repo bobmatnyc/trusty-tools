@@ -534,6 +534,11 @@ async fn upgrade_one(
                 ))
             }
         }
+        // #5518: verification failed — abort this candidate instead of
+        // upgrading it from source. `apply_all`'s Err arm already renders this
+        // via `narr.error` and sets `ok: false`, so the mismatch reaches both
+        // the terminal and the exit code.
+        Outcome::ChecksumMismatch(mismatch) => Err(anyhow::Error::new(mismatch)),
         Outcome::Fallback { reason } => {
             tracing::info!(crate_name = %c.crate_name, %reason, "prebuilt unavailable; using cargo install");
             // Verify cargo is available before attempting the fallback.

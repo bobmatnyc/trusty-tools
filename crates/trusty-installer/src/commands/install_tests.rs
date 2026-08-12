@@ -35,6 +35,7 @@ fn outcome(member: &str, ok: bool, detail: &str) -> InstallOutcome {
         shadow_ok: true,
         shadow_detail: String::new(),
         required: true,
+        integrity_ok: true,
     }
 }
 
@@ -45,6 +46,69 @@ fn optional_outcome(member: &str, ok: bool, detail: &str) -> InstallOutcome {
         required: false,
         ..outcome(member, ok, detail)
     }
+}
+
+/// Why: #5518 — the graceful-degrade rule says an OPTIONAL member's install
+/// failure never fails the run. Applied to a checksum mismatch that would mean
+/// `tctl install` sees a tampered artifact and still exits 0, which is the
+/// original defect re-appearing one layer above `download::Outcome`.
+/// What: An optional member that failed verification; asserts `all_ok` is false
+/// and the exit code is 2, unlike the routine optional failure above.
+/// Test: This is the test.
+#[test]
+fn report_all_ok_reflects_an_optional_members_checksum_mismatch() {
+    let tampered = InstallReport::build(vec![
+        outcome("trusty-search", true, "installed"),
+        InstallOutcome {
+            integrity_ok: false,
+            ..optional_outcome("tga", false, "SECURITY: checksum mismatch for tga 2.18.0")
+        },
+    ]);
+    assert!(
+        !tampered.all_ok,
+        "an optional member's failed checksum must still fail the run"
+    );
+    assert_eq!(tampered.exit_code(), 2);
+
+    // The graceful degrade itself is unchanged: a routine optional failure
+    // still exits 0, so this is not just "every optional failure now fails".
+    let degraded = InstallReport::build(vec![
+        outcome("trusty-search", true, "installed"),
+        optional_outcome("tga", false, "no prebuilt for this platform"),
+    ]);
+    assert!(degraded.all_ok);
+    assert_eq!(degraded.exit_code(), 0);
+}
+
+/// Why: `install_all` decides between "skipped (optional, no prebuilt for this
+/// platform)" and a loud failure by asking this predicate. If it missed a
+/// mismatch wrapped in caller context, the tamper signal would be rendered as a
+/// routine skip (#5518).
+/// What: Wraps a `ChecksumMismatch` in two layers of context; asserts it is
+/// still recognised.
+/// Test: This is the test.
+#[test]
+fn is_integrity_failure_spots_a_checksum_mismatch_through_context() {
+    let mismatch = crate::download::ChecksumMismatch {
+        crate_name: "tga".to_owned(),
+        version: "2.18.0".to_owned(),
+        archive: "tga-2.18.0.tar.gz".to_owned(),
+        url: "https://example.invalid/tga.tar.gz".to_owned(),
+        expected: "a".repeat(64),
+        actual: "b".repeat(64),
+    };
+    let wrapped = anyhow::Error::new(mismatch).context("installing tga");
+    assert!(is_integrity_failure(&wrapped));
+}
+
+/// Why: The predicate must not classify every failure as an integrity failure,
+/// or the graceful degrade it guards disappears.
+/// What: A plain error; asserts it is NOT an integrity failure.
+/// Test: This is the test.
+#[test]
+fn is_integrity_failure_ignores_a_routine_failure() {
+    let e = anyhow::anyhow!("no Rust toolchain found on PATH (cargo not available)");
+    assert!(!is_integrity_failure(&e));
 }
 
 /// Why: The JSON envelope is a public contract; pin its shape.
@@ -242,6 +306,49 @@ fn summary_lines_match_the_gating_set() {
     assert!(report.all_ok);
 }
 
+/// Why: #5518 — `summary_lines` degrades every non-gating failure to
+/// `skipped (no prebuilt for this platform)`, which is the exact sentence a
+/// tamper signal must never wear. Left alone it would have re-hidden an
+/// optional member's mismatch on the human path while `all_ok` failed the run,
+/// putting the two channels back into the disagreement #5806 closed.
+/// What: an optional member with `integrity_ok: false` beside a healthy
+/// required one; asserts the footer carries an error naming it and no `skipped`
+/// line, and that the routine optional failure still reads as a skip.
+/// Test: This is the test.
+#[test]
+fn an_optional_members_checksum_mismatch_is_never_summarised_as_skipped() {
+    let report = InstallReport::build(vec![
+        outcome("trusty-search", true, "installed"),
+        InstallOutcome {
+            integrity_ok: false,
+            ..optional_outcome("tga", false, "SECURITY: checksum mismatch for tga 2.18.0")
+        },
+    ]);
+    let lines = install_report::summary_lines(&report);
+
+    assert!(
+        lines.skipped.is_empty(),
+        "a tampered artifact must never be summarised as a skip: {:?}",
+        lines.skipped
+    );
+    assert_eq!(lines.errors.len(), 1, "{:?}", lines.errors);
+    assert!(
+        lines.errors[0].contains("tga") && lines.errors[0].contains("checksum mismatch"),
+        "the error line must name the member and the mismatch: {:?}",
+        lines.errors
+    );
+    assert!(!report.all_ok);
+
+    // The graceful degrade it sits beside is unchanged.
+    let degraded = InstallReport::build(vec![
+        outcome("trusty-search", true, "installed"),
+        optional_outcome("tga", false, "no prebuilt for this platform"),
+    ]);
+    let degraded_lines = install_report::summary_lines(&degraded);
+    assert!(degraded_lines.errors.is_empty());
+    assert_eq!(degraded_lines.skipped.len(), 1);
+}
+
 /// Why (#5806): `summary_lines_match_the_gating_set` pins ONE selection shape,
 /// so the agreement between the footer and `all_ok` held there by construction
 /// rather than by rule. The defect this change closes was the two channels
@@ -315,6 +422,19 @@ fn summary_errors_agree_with_all_ok_across_selection_shapes() {
                 optional_outcome("b", true, "installed"),
             ],
         ),
+        // #5518: the one shape where a NON-gating member decides the verdict.
+        // `build` fails the run for it, so the footer must carry an error line
+        // or the two channels disagree again.
+        (
+            "mixed, optional member's checksum mismatch",
+            vec![
+                outcome("a", true, "installed"),
+                InstallOutcome {
+                    integrity_ok: false,
+                    ..optional_outcome("b", false, "SECURITY: checksum mismatch for b 1.0.0")
+                },
+            ],
+        ),
     ];
 
     let (mut verdicts_ok, mut verdicts_failed) = (0, 0);
@@ -362,6 +482,7 @@ fn report_all_ok_reflects_service_failure() {
         shadow_ok: true,
         shadow_detail: String::new(),
         required: true,
+        integrity_ok: true,
     }]);
     assert!(
         !failed.all_ok,
@@ -378,6 +499,7 @@ fn report_all_ok_reflects_service_failure() {
         shadow_ok: true,
         shadow_detail: String::new(),
         required: true,
+        integrity_ok: true,
     }]);
     assert!(
         skipped.all_ok,
@@ -406,6 +528,7 @@ fn report_all_ok_reflects_shadow_failure() {
                          the shell resolves `tm` to /x/.cargo/bin/tm (0.19.26)"
             .to_owned(),
         required: true,
+        integrity_ok: true,
     }]);
     assert!(
         !shadowed.all_ok,
@@ -912,6 +1035,7 @@ fn refused_foreign_port_drives_all_ok_false_and_a_nonzero_exit_code() {
         shadow_ok: true,
         shadow_detail: String::new(),
         required: true,
+        integrity_ok: true,
     }]);
 
     assert!(

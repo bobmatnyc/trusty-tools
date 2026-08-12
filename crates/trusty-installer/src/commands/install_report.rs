@@ -75,6 +75,13 @@ pub struct InstallOutcome {
     /// `StableMember::required`). Drives [`InstallReport::build`]'s `all_ok`
     /// derivation and the human summary's skip-vs-fail wording.
     pub required: bool,
+    /// `false` ONLY when this member's prebuilt artifact failed SHA-256
+    /// verification (#5518). Unlike every other field here, it is NOT filtered
+    /// by `required`: an optional member's routine install failure is a
+    /// graceful degrade, but an optional member's TAMPERED download is still a
+    /// tampered download, and a run that exits 0 after seeing one has not
+    /// reported it.
+    pub integrity_ok: bool,
 }
 
 impl InstallOutcome {
@@ -152,19 +159,27 @@ impl InstallReport {
     /// evidence of a successful install, and the vacuous `.all()` that made it
     /// `true` is the same shape being fixed one line up.
     ///
+    /// #5518: `integrity_ok` is folded in across ALL members, required or not,
+    /// outside the gating split. That split is a graceful-degrade rule for
+    /// "this component did not install"; a failed checksum is not that, and
+    /// letting an optional member's tampered artifact exit 0 would leave the
+    /// signal unreported.
+    ///
     /// Test: `tests::report_all_ok`, `tests::report_all_ok_reflects_service_failure`,
     /// `tests::report_all_ok_reflects_shadow_failure`,
     /// `tests::report_all_ok_ignores_optional_failure`,
     /// `tests::all_optional_selection_does_not_fail_open`,
     /// `tests::lone_optional_installer_failure_exits_nonzero`,
-    /// `tests::empty_report_is_not_all_ok`.
+    /// `tests::empty_report_is_not_all_ok`,
+    /// `tests::report_all_ok_reflects_an_optional_members_checksum_mismatch`.
     pub(super) fn build(members: Vec<InstallOutcome>) -> Self {
         let all_ok = !members.is_empty()
             && crate::commands::stable_set::required_gate(
                 &members,
                 |m| m.required,
                 |m| m.ok && m.service_ok && m.shadow_ok,
-            );
+            )
+            && members.iter().all(|m| m.integrity_ok);
         Self {
             command: "install",
             members,
@@ -421,12 +436,18 @@ pub(super) struct SummaryLines {
 /// when the gating set genuinely is the required subset — with no required
 /// member, `0/0 required` was itself misleading.
 ///
+/// #5518: a non-gating member that failed VERIFICATION is the one exception to
+/// that degrade. It is reported as an error, because `build` fails the run for
+/// it and because "skipped (no prebuilt for this platform)" is the exact
+/// wording a tamper signal must never wear.
+///
 /// # Postconditions
 /// - Over a non-empty selection, `errors` is empty iff every gating member
-///   installed and bootstrapped — the same verdict [`InstallReport::all_ok`]
-///   reaches before the verify tail folds in. `build(vec![])` is the one
-///   deliberate exception: no member can fail, so `errors` is empty while
-///   `all_ok` is `false` ("installed nothing" is not a success).
+///   installed and bootstrapped AND every member passed verification — the same
+///   verdict [`InstallReport::all_ok`] reaches before the verify tail folds in.
+///   `build(vec![])` is the one deliberate exception: no member can fail, so
+///   `errors` is empty while `all_ok` is `false` ("installed nothing" is not a
+///   success).
 /// - PATH shadowing is the one `all_ok` input this footer does not restate. A
 ///   shadow is reported at ERROR level the moment it is detected
 ///   (`install_one`, #3554), so it reaches the operator on the human path
@@ -435,7 +456,8 @@ pub(super) struct SummaryLines {
 ///
 /// Test: `tests::summary_lines_match_the_gating_set`,
 /// `tests::all_optional_failure_summary_does_not_read_as_success`,
-/// `tests::summary_errors_agree_with_all_ok_across_selection_shapes`.
+/// `tests::summary_errors_agree_with_all_ok_across_selection_shapes`,
+/// `tests::an_optional_members_checksum_mismatch_is_never_summarised_as_skipped`.
 pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
     // #5806: read the partition, never re-derive it — `build` above folds
     // `required_gate` over the same split, and the two channels drifting apart
@@ -464,6 +486,19 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
             .filter(|m| m.ok && !m.service_ok)
             .map(|m| format!("{}: {}", m.member, m.service_detail)),
     );
+    // #5518: an integrity failure is never a graceful degrade. A non-gating
+    // member whose artifact failed verification is reported as an error, in the
+    // same words `install_all` uses, because "skipped (no prebuilt for this
+    // platform)" is the one sentence a tamper signal must never be rendered as.
+    // `build` already flips `all_ok` for it, so leaving it under `skipped` would
+    // put the two channels back into the disagreement #5806 closed.
+    errors.extend(
+        split
+            .non_gating
+            .iter()
+            .filter(|m| !m.integrity_ok)
+            .map(|m| format!("{}: {}", m.member, m.detail)),
+    );
 
     SummaryLines {
         headline: format!("installed {gating_ok}/{} {noun} component(s)", gating.len()),
@@ -471,7 +506,7 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
         skipped: split
             .non_gating
             .iter()
-            .filter(|m| !m.ok)
+            .filter(|m| !m.ok && m.integrity_ok)
             .map(|m| format!("{}: skipped (no prebuilt for this platform)", m.member))
             .collect(),
     }

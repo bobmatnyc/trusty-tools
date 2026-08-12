@@ -18,8 +18,9 @@
 //!
 //! The public entry point is [`try_install_prebuilt`]: it orchestrates the full
 //! download→verify→extract→place pipeline and returns an `Outcome` that tells the
-//! caller which path was taken. The caller (`install.rs` / `upgrade.rs`) always
-//! falls back to `cargo install` on `Outcome::Fallback`.
+//! caller which path was taken. The caller (`install.rs` / `upgrade.rs` /
+//! `self_update.rs`) falls back to `cargo install` on `Outcome::Fallback`, and
+//! ABORTS on `Outcome::ChecksumMismatch` (#5518).
 //!
 //! Test: Each submodule has its own tests (pure + `#[ignore]`-tagged live tests).
 //! The orchestrator's fallback decision logic is tested in `tests` below.
@@ -32,6 +33,10 @@ pub mod glibc;
 pub mod pinned;
 pub mod platform;
 pub mod release;
+/// Loopback release-server fixtures shared by this module's suite and
+/// `pinned::tests` — one server, not two (#5518).
+#[cfg(test)]
+pub(crate) mod test_fixture;
 
 use std::path::PathBuf;
 
@@ -41,17 +46,94 @@ use anyhow::Context;
 // default is `default_install_dir()` below (the shared canonical cargo bin
 // dir, which honours `CARGO_HOME` where a literal string cannot).
 
+/// A downloaded artifact whose bytes do not hash to the checksum the release
+/// published beside them.
+///
+/// Why: This is the one condition the checksum exists to detect, so it must
+/// survive to the operator as its own fact rather than collapsing into a
+/// fallback reason string (#5518). It carries both digests because "they
+/// differ" is not actionable and "published X, got Y" is.
+///
+/// What: A structured record of the failed comparison, plus a `Display` that IS
+/// the operator-facing message every caller prints — one text, so `tctl
+/// install`, `tctl upgrade`, and `tctl self-update` cannot drift into saying
+/// different things about the same event. It implements `std::error::Error` so
+/// a caller that has flattened the outcome into an `anyhow::Error` can still
+/// recover the fact by downcast, which is how `install::install_all` keeps a
+/// mismatch out of its "no prebuilt for this platform" bucket.
+///
+/// Test: `tests::mismatch_message_names_both_digests_and_never_offers_a_source_build`.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ChecksumMismatch {
+    /// The crate whose artifact failed verification.
+    pub crate_name: String,
+    /// The version the download layer resolved and was fetching.
+    pub version: String,
+    /// The asset filename whose digest was checked.
+    pub archive: String,
+    /// The URL the bytes came from.
+    pub url: String,
+    /// Digest from the published `.sha256` sidecar.
+    pub expected: String,
+    /// Digest actually computed over the downloaded bytes.
+    pub actual: String,
+}
+
+impl std::fmt::Display for ChecksumMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            crate_name,
+            version,
+            archive,
+            url,
+            expected,
+            actual,
+        } = self;
+        write!(
+            f,
+            "SECURITY: checksum mismatch for {crate_name} {version} — the downloaded \
+             artifact is not the one the release published.\n\
+             The release publishes SHA-256 {expected} for {archive}, but the bytes \
+             served from {url} hash to {actual}.\n\
+             Nothing was installed, and the installer will NOT build from source to \
+             work around this: a corrupt or tampered download is not the same as \
+             'no prebuilt for this platform', and silently substituting a source \
+             build would hide it.\n\
+             Retry once in case the download was truncated. If it repeats, treat the \
+             release as suspect and report it before installing anything. To proceed \
+             deliberately anyway, build it yourself: \
+             `cargo install {crate_name} --locked`"
+        )
+    }
+}
+
+impl std::error::Error for ChecksumMismatch {}
+
 /// Outcome of a [`try_install_prebuilt`] call.
 ///
-/// Why: The `install`/`upgrade` handlers need to know whether the prebuilt path
-/// succeeded (so they can skip `cargo install`) or whether they should fall back.
+/// Why: The `install`/`upgrade`/`self-update` handlers need to know whether the
+/// prebuilt path succeeded (so they can skip `cargo install`), whether it was
+/// merely absent (so they can fall back), or whether it FAILED VERIFICATION (so
+/// they can abort). Before #5518 the last two shared one variant, which is why
+/// a tampered download surfaced to the user as a slower install rather than a
+/// warning.
 ///
 /// What: [`Outcome::Installed`] carries the list of binary paths placed on disk;
 /// [`Outcome::Fallback`] carries the human-readable reason for the fallback so
-/// the caller can print an informative message before running `cargo install`.
+/// the caller can print an informative message before running `cargo install`;
+/// [`Outcome::ChecksumMismatch`] is terminal and carries the digests. It is NOT
+/// a fallback reason — a caller that routes it into `cargo install` has undone
+/// the fix.
 ///
-/// Test: `tests::fallback_on_unsupported_target`.
+/// `#[non_exhaustive]` so a later variant stays a non-breaking addition, and so
+/// an out-of-crate `match` cannot silently absorb one into a catch-all it wrote
+/// before the variant existed.
+///
+/// Test: `tests::fallback_on_unsupported_target`,
+/// `tests::a_mismatch_and_an_absent_prebuilt_are_different_outcomes`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Outcome {
     /// Prebuilt binaries were successfully downloaded, verified, and placed.
     Installed {
@@ -65,6 +147,9 @@ pub enum Outcome {
         /// Human-readable reason for the fallback.
         reason: String,
     },
+    /// The artifact downloaded but failed SHA-256 verification. Terminal —
+    /// the caller must abort, never fall back (#5518).
+    ChecksumMismatch(ChecksumMismatch),
 }
 
 /// Attempt to install a prebuilt binary for `crate_name` into `install_dir`.
@@ -77,14 +162,44 @@ pub enum Outcome {
 /// stable tag, builds the download URL, downloads + verifies + extracts the
 /// tarball, and atomically places all binaries into `install_dir`.
 ///
-/// Returns [`Outcome::Fallback`] on any failure (network, 404, SHA mismatch, I/O)
-/// so the caller can always proceed via `cargo install`.
+/// Returns [`Outcome::Fallback`] on a routine failure (network, 404, I/O) so the
+/// caller can proceed via `cargo install`, and [`Outcome::ChecksumMismatch`] —
+/// which is NOT a fallback — when the artifact downloads but fails verification
+/// (#5518).
 ///
-/// Test: `tests::fallback_on_unsupported_target`; the full prebuilt path is
-/// validated by the `#[ignore]`-tagged live integration test.
+/// Test: `tests::fallback_on_unsupported_target`; end-to-end against a loopback
+/// fixture in `tests::a_checksum_mismatch_is_reported_as_a_checksum_mismatch`;
+/// the live path by the `#[ignore]`-tagged integration test.
 pub async fn try_install_prebuilt(crate_name: &str, install_dir: &std::path::Path) -> Outcome {
-    let client = http_client();
+    try_install_prebuilt_at(
+        &http_client(),
+        &pinned::Endpoints::default(),
+        crate_name,
+        install_dir,
+    )
+    .await
+}
 
+/// [`try_install_prebuilt`], against caller-supplied endpoints and client.
+///
+/// Why: The seam that lets the checksum-mismatch outcome be proved offline
+/// against a loopback fixture — the same injection `pinned::install_pinned_set_at`
+/// and `release::resolve_latest_tag_from_url` already established. Without it,
+/// the only way to reach the verify step is a live GitHub download, which is why
+/// the #5518 defect survived: the arm that conflated a mismatch with an absent
+/// asset was never executed by a test.
+///
+/// What: The real implementation; [`try_install_prebuilt`] is this with the
+/// production endpoints and client.
+///
+/// Test: `tests::a_checksum_mismatch_is_reported_as_a_checksum_mismatch`,
+/// `tests::a_missing_asset_still_falls_back`.
+pub(crate) async fn try_install_prebuilt_at(
+    client: &reqwest::Client,
+    endpoints: &pinned::Endpoints<'_>,
+    crate_name: &str,
+    install_dir: &std::path::Path,
+) -> Outcome {
     // Step 1: Check Tier-1 target.
     let target = match platform::current_target() {
         Some(t) => t,
@@ -101,7 +216,13 @@ pub async fn try_install_prebuilt(crate_name: &str, install_dir: &std::path::Pat
     };
 
     // Step 2: Resolve the latest release tag.
-    let resolved = match release::resolve_latest_tag(&client, crate_name).await {
+    let resolved = match release::resolve_latest_tag_from_url(
+        client,
+        endpoints.releases_url,
+        crate_name,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             return Outcome::Fallback {
@@ -124,12 +245,18 @@ pub async fn try_install_prebuilt(crate_name: &str, install_dir: &std::path::Pat
 
     // Step 4: Build URLs from the chosen suffix.
     let archive_name = release::asset_filename(crate_name, &resolved.version, suffix);
-    let tarball_url = release::asset_url(&resolved.tag, crate_name, &resolved.version, suffix);
-    let sha_url = release::sha256_url(&resolved.tag, crate_name, &resolved.version, suffix);
+    let tarball_url = release::asset_url_at_base(
+        endpoints.download_base,
+        &resolved.tag,
+        crate_name,
+        &resolved.version,
+        suffix,
+    );
+    let sha_url = format!("{tarball_url}.sha256");
 
     // Step 5: Download into a temp dir, verify, extract, place — atomically.
-    match install_from_urls(
-        &client,
+    let result = install_from_urls(
+        client,
         crate_name,
         &resolved.version,
         &archive_name,
@@ -137,28 +264,89 @@ pub async fn try_install_prebuilt(crate_name: &str, install_dir: &std::path::Pat
         &sha_url,
         install_dir,
     )
-    .await
-    {
-        Ok(paths) => {
-            // A load-dynamic asset dlopen()s libonnxruntime.so at startup and
-            // will not run until ORT_DYLIB_PATH is set — surface the setup steps
-            // rather than leaving a binary that silently fails to start.
-            if choice.load_dynamic {
-                tracing::warn!(
-                    crate_name,
-                    asset = suffix,
-                    "{}",
-                    glibc::ort_dylib_instructions(target)
-                );
-            }
-            Outcome::Installed {
-                paths,
-                version: resolved.version,
+    .await;
+
+    let outcome = classify(
+        crate_name,
+        &resolved.version,
+        &archive_name,
+        &tarball_url,
+        result,
+    );
+
+    // A load-dynamic asset dlopen()s libonnxruntime.so at startup and will not
+    // run until ORT_DYLIB_PATH is set — surface the setup steps rather than
+    // leaving a binary that silently fails to start.
+    if matches!(outcome, Outcome::Installed { .. }) && choice.load_dynamic {
+        tracing::warn!(
+            crate_name,
+            asset = suffix,
+            "{}",
+            glibc::ort_dylib_instructions(target)
+        );
+    }
+    outcome
+}
+
+/// Turn a finished download attempt into the outcome its caller acts on.
+///
+/// Why: This is where the abort-vs-fall-back decision is made, so it is a pure
+/// function of the attempt's result rather than three lines buried in an async
+/// orchestrator that only a live network call can reach. #5518 is exactly a
+/// defect in this mapping, and a defect in a mapping wants a test on the
+/// mapping.
+///
+/// What: `Ok` → [`Outcome::Installed`]. A [`fetch::DownloadError::ChecksumMismatch`]
+/// → [`Outcome::ChecksumMismatch`], logged at ERROR because it is a security
+/// event and `info` is below the installer's default filter. Every other error
+/// → [`Outcome::Fallback`], logged at INFO because a 404 on an unbuilt platform
+/// is routine.
+///
+/// Test: `tests::a_mismatch_and_an_absent_prebuilt_are_different_outcomes`.
+fn classify(
+    crate_name: &str,
+    version: &str,
+    archive_name: &str,
+    tarball_url: &str,
+    result: Result<Vec<PathBuf>, fetch::DownloadError>,
+) -> Outcome {
+    match result {
+        Ok(paths) => Outcome::Installed {
+            paths,
+            version: version.to_owned(),
+        },
+        // #5518: the checksum's whole purpose is to detect this, so it must not
+        // be flattened into a fallback reason the caller prints as "prebuilt
+        // unavailable".
+        Err(fetch::DownloadError::ChecksumMismatch {
+            archive,
+            expected,
+            actual,
+        }) => {
+            let mismatch = ChecksumMismatch {
+                crate_name: crate_name.to_owned(),
+                version: version.to_owned(),
+                archive,
+                url: tarball_url.to_owned(),
+                expected,
+                actual,
+            };
+            tracing::error!(
+                crate_name,
+                version,
+                expected = %mismatch.expected,
+                actual = %mismatch.actual,
+                url = tarball_url,
+                "prebuilt artifact failed SHA-256 verification; refusing to install"
+            );
+            Outcome::ChecksumMismatch(mismatch)
+        }
+        Err(fetch::DownloadError::Other(e)) => {
+            tracing::info!(crate_name, version, archive_name, error = %e, "prebuilt unavailable");
+            Outcome::Fallback {
+                reason: format!("prebuilt download failed ({e}); falling back to cargo install"),
             }
         }
-        Err(e) => Outcome::Fallback {
-            reason: format!("prebuilt download failed ({e}); falling back to cargo install"),
-        },
     }
 }
 
@@ -189,13 +377,17 @@ pub fn http_client() -> reqwest::Client {
 /// Inner impl: download, verify, extract, and place into `install_dir`.
 ///
 /// Why: Extracted from `try_install_prebuilt` so errors propagate cleanly with
-/// `?` and the `Fallback` wrapping is done once at the call site.
+/// `?` and the outcome wrapping is done once, in [`classify`].
 ///
 /// What: Creates a system temp dir scoped to this call (auto-cleaned on drop),
 /// calls `fetch::download_and_verify`, then `fetch::extract_binaries`, then
-/// `fetch::place_binaries`.
+/// `fetch::place_binaries`. #5518: returns `fetch::DownloadError` rather than a
+/// bare `anyhow::Error`, so the checksum verdict survives this hop — a
+/// `.context()` wrap here is what used to erase it.
 ///
-/// Test: Exercised by the `#[ignore]`-tagged live integration test.
+/// Test: `tests::a_checksum_mismatch_is_reported_as_a_checksum_mismatch` drives
+/// it through the orchestrator against a fixture server; the live path is
+/// exercised by the `#[ignore]`-tagged integration test.
 async fn install_from_urls(
     client: &reqwest::Client,
     crate_name: &str,
@@ -204,15 +396,15 @@ async fn install_from_urls(
     tarball_url: &str,
     sha_url: &str,
     install_dir: &std::path::Path,
-) -> anyhow::Result<Vec<PathBuf>> {
+) -> Result<Vec<PathBuf>, fetch::DownloadError> {
     // Create a temp dir; it is cleaned up on drop even on error.
     let tmp = tempfile::tempdir().context("creating temp directory for prebuilt download")?;
     let tmp_path = tmp.path();
 
-    // Download and verify integrity.
-    let tarball = fetch::download_and_verify(client, tarball_url, sha_url, archive_name, tmp_path)
-        .await
-        .context("downloading and verifying prebuilt tarball")?;
+    // Download and verify integrity. No `.context()` — it would re-wrap the
+    // typed mismatch into an opaque `Other` and undo #5518.
+    let tarball =
+        fetch::download_and_verify(client, tarball_url, sha_url, archive_name, tmp_path).await?;
 
     // Extract all regular files from the archive (into the temp dir only).
     let extract_dir = tmp_path.join("extracted");
@@ -229,7 +421,8 @@ async fn install_from_urls(
         return Err(anyhow::anyhow!(
             "tarball contained none of {crate_name}'s expected binaries \
              (found: {extracted:?})"
-        ));
+        )
+        .into());
     }
 
     // Atomically place into the install directory.
@@ -674,7 +867,7 @@ mod tests {
                 assert!(!paths.is_empty());
                 assert_eq!(version, "0.25.0");
             }
-            Outcome::Fallback { .. } => panic!("expected Installed"),
+            other => panic!("expected Installed, got {other:?}"),
         }
 
         let fb = Outcome::Fallback {
@@ -682,7 +875,7 @@ mod tests {
         };
         match fb {
             Outcome::Fallback { reason } => assert!(!reason.is_empty()),
-            Outcome::Installed { .. } => panic!("expected Fallback"),
+            other => panic!("expected Fallback, got {other:?}"),
         }
     }
 
@@ -706,6 +899,16 @@ mod tests {
                 // Acceptable on non-Tier-1 hosts (e.g. Intel Mac CI).
                 eprintln!("fallback (expected on non-Tier-1): {reason}");
             }
+            Outcome::ChecksumMismatch(m) => {
+                panic!("a real GitHub release must verify against its own checksum: {m}")
+            }
         }
     }
 }
+
+// The #5518 checksum-mismatch suite lives in its own file: it carries a
+// loopback fixture server and would push this module past the 500-SLOC
+// production cap (only the bare `#[cfg(test)] mod x { … }` shape is excluded,
+// per #5153). `mod_tests.rs` is classified test-file by basename.
+#[cfg(test)]
+mod mod_tests;

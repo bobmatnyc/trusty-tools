@@ -608,9 +608,19 @@ async fn install_all(
                     shadow_ok,
                     shadow_detail,
                     required: m.required,
+                    // This member installed and health-gated, so its artifact
+                    // passed verification by construction.
+                    integrity_ok: true,
                 });
             }
             Err(e) => {
+                // #5518: a checksum mismatch is never "skipped (optional, no
+                // prebuilt for this platform)". The graceful-degrade branch
+                // below would have rendered a tamper signal on an OPTIONAL
+                // member as an info-level skip AND left the run exiting 0 —
+                // re-conflating, one layer up, exactly what `Outcome` was split
+                // to separate.
+                let integrity_ok = !is_integrity_failure(&e);
                 // Graceful degrade (demo-critical fix): an OPTIONAL member's
                 // install failure (e.g. no prebuilt for this platform, no
                 // Rust toolchain to fall back to `cargo install`) is reported
@@ -619,7 +629,7 @@ async fn install_all(
                 // does not need to succeed. The checklist row itself (glyph +
                 // label) already carries this distinction in live mode, so no
                 // separate `note` is needed there.
-                if m.required {
+                if m.required || !integrity_ok {
                     checklist.set(&m.crate_name, ComponentState::Failed(short_reason(&e)));
                     if !live {
                         let _ = narr.error(&format!("{}: {e}", m.crate_name));
@@ -646,6 +656,7 @@ async fn install_all(
                     shadow_ok: true,
                     shadow_detail: String::new(),
                     required: m.required,
+                    integrity_ok,
                 });
             }
         }
@@ -668,6 +679,26 @@ async fn install_all(
         eprintln!("{}", super::macos_signing::signing_persistence_tip());
     }
     InstallReport::build(outcomes)
+}
+
+/// Whether an install failure is a failed integrity check rather than a routine
+/// "this component did not install".
+///
+/// Why: `install_all`'s graceful-degrade branch reports an OPTIONAL member's
+/// failure as `skipped (optional, no prebuilt for this platform)` at info level
+/// and lets the run exit 0. That is right for a 404 and wrong for a tampered
+/// artifact, so the two have to be told apart HERE as well — separating them in
+/// `download::Outcome` alone would leave the conflation intact one layer up
+/// (#5518).
+///
+/// What: Walks the error's source chain for a `download::ChecksumMismatch`. The
+/// chain, not just the head, because a caller may add context above it.
+///
+/// Test: `tests::is_integrity_failure_spots_a_checksum_mismatch_through_context`,
+/// `tests::is_integrity_failure_ignores_a_routine_failure`.
+fn is_integrity_failure(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|c| c.is::<crate::download::ChecksumMismatch>())
 }
 
 /// Shorten an install error to a single-line reason for the live checklist row.
@@ -854,6 +885,10 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
                 existed_before: existed_at_preferred,
             })
         }
+        // #5518: verification failed — abort this member rather than building
+        // it from source, and hand `install_all` the TYPED fact so it cannot
+        // file this under "no prebuilt for this platform".
+        Outcome::ChecksumMismatch(mismatch) => Err(anyhow::Error::new(mismatch)),
         Outcome::Fallback { reason } => {
             tracing::info!(crate_name = %m.crate_name, %reason, "prebuilt unavailable; using cargo install");
             // Verify cargo is available before attempting the fallback.

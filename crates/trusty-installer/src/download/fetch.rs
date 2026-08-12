@@ -23,6 +23,43 @@ use anyhow::{anyhow, Context};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
+/// Why a prebuilt download did not yield a verified artifact.
+///
+/// Why: [`download_and_verify`] used to return a bare `anyhow::Error`, so the
+/// one condition the checksum exists to detect — bytes that do not hash to the
+/// digest published beside them — reached the caller as a string
+/// indistinguishable from a 404 or a dropped connection (#5518). A caller that
+/// cannot tell those apart cannot treat one as a tamper signal and the other as
+/// a routine absence.
+///
+/// What: [`DownloadError::ChecksumMismatch`] is that signal and carries both
+/// digests; everything else — transport, HTTP status, I/O, a malformed sidecar,
+/// extraction, placement — is [`DownloadError::Other`].
+///
+/// Test: `tests::download_and_verify_reports_a_mismatch_as_a_mismatch`,
+/// `tests::download_and_verify_reports_a_missing_asset_as_other`.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DownloadError {
+    /// The artifact's bytes do not hash to the checksum published beside them.
+    #[error(
+        "SHA-256 mismatch for {archive}: the published checksum is {expected}, \
+         but the downloaded bytes hash to {actual}"
+    )]
+    ChecksumMismatch {
+        /// The asset filename whose digest was checked.
+        archive: String,
+        /// Digest read from the published `.sha256` sidecar.
+        expected: String,
+        /// Digest actually computed over the downloaded bytes.
+        actual: String,
+    },
+
+    /// Any other failure on the download path. Carries no integrity meaning.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 /// Download a URL to a local file path, streaming the response body.
 ///
 /// Why: Streaming avoids buffering the entire tarball in memory; prebuilt
@@ -69,16 +106,24 @@ pub async fn download_to_file(
 /// What: Downloads `sha256_url` into `{tmp_dir}/{archive_name}.sha256`, then
 /// `tarball_url` into `{tmp_dir}/{archive_name}`. Reads the `.sha256` file (format:
 /// `<hex>  <filename>` or just `<hex>`), computes SHA-256 of the tarball, and
-/// returns `Err` on mismatch. Returns the path to the verified tarball on success.
+/// returns [`DownloadError::ChecksumMismatch`] when they differ. Returns the
+/// path to the verified tarball on success.
 ///
-/// Test: `tests::verify_sha256_match`, `tests::verify_sha256_tampered`.
+/// # Postconditions
+/// On `Ok(p)`, the bytes at `p` hash to the digest the release published for
+/// them. On `Err(DownloadError::ChecksumMismatch)`, they provably do not, and
+/// both digests are named. Any other `Err` says nothing about integrity.
+///
+/// Test: `tests::download_and_verify_reports_a_mismatch_as_a_mismatch`,
+/// `tests::download_and_verify_reports_a_missing_asset_as_other`,
+/// `tests::download_and_verify_accepts_matching_bytes`.
 pub async fn download_and_verify(
     client: &reqwest::Client,
     tarball_url: &str,
     sha256_url: &str,
     archive_name: &str,
     tmp_dir: &Path,
-) -> anyhow::Result<PathBuf> {
+) -> Result<PathBuf, DownloadError> {
     let sha_path = tmp_dir.join(format!("{archive_name}.sha256"));
     let tar_path = tmp_dir.join(archive_name);
 
@@ -100,10 +145,14 @@ pub async fn download_and_verify(
     // Compute the actual digest.
     let actual_hex = sha256_file(&tar_path)?;
 
+    // #5518: a typed variant, not a string — the caller must be able to tell a
+    // tamper signal from a routine "no asset for this platform".
     if actual_hex != expected_hex {
-        return Err(anyhow!(
-            "SHA-256 mismatch for {archive_name}: expected {expected_hex}, got {actual_hex}"
-        ));
+        return Err(DownloadError::ChecksumMismatch {
+            archive: archive_name.to_owned(),
+            expected: expected_hex,
+            actual: actual_hex,
+        });
     }
 
     Ok(tar_path)
