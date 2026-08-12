@@ -25,6 +25,7 @@ use tokio::task::JoinHandle;
 
 use crate::service::indexed_files::IndexedFiles;
 use crate::service::walker::{path_in_skipped_dir, should_skip_path};
+use crate::service::watch_rescan::RescanFollowUp;
 use crate::service::watcher::{FileWatcher, WatchEvent};
 
 /// Handle for a running watch loop. Drop it (or call [`WatcherTask::stop`]) to
@@ -114,17 +115,38 @@ pub fn spawn_watch_loop(
                 // nothing will redeliver them, so the changed paths can only be
                 // re-derived from disk. Discarding this is a silent data loss.
                 WatchEvent::Rescan => {
-                    match crate::service::watch_rescan::reconcile_after_rescan(
+                    let outcome = crate::service::watch_rescan::reconcile_after_rescan(
                         &index_id,
                         &canonical_root,
                         &raw_root,
                         &indexer,
                         &indexed_files,
                     )
-                    .await
-                    {
-                        Ok(stats) if stats.is_complete() => {
+                    .await;
+                    // One decision for every way a pass can fall short. The
+                    // partial-read case used to reset the counter and schedule
+                    // nothing, which left those files stale with only a `warn`
+                    // to show for it. See `watch_rescan::rescan_follow_up`.
+                    let follow_up = crate::service::watch_rescan::rescan_follow_up(
+                        outcome.as_ref(),
+                        rescan_failures,
+                    );
+                    let retry_attempt = match follow_up {
+                        RescanFollowUp::InSync => {
                             rescan_failures = 0;
+                            None
+                        }
+                        RescanFollowUp::Retry { attempt } => {
+                            rescan_failures = attempt;
+                            crate::service::watch_rescan::schedule_rescan_retry(
+                                retry_tx.clone(),
+                                attempt,
+                            );
+                            Some(attempt)
+                        }
+                    };
+                    match &outcome {
+                        Ok(stats) if retry_attempt.is_none() => {
                             tracing::info!(
                                 index_id = %index_id,
                                 files_reindexed = stats.files_reindexed,
@@ -134,30 +156,24 @@ pub fn spawn_watch_loop(
                             );
                         }
                         // The pass ran, but some files could not be read, so
-                        // their contents are still unknown to the index. Say so
-                        // at `warn` instead of reporting a clean reconcile.
+                        // their contents are still unknown to the index.
                         Ok(stats) => {
-                            rescan_failures = 0;
                             tracing::warn!(
                                 index_id = %index_id,
+                                attempt = retry_attempt,
                                 files_reindexed = stats.files_reindexed,
                                 chunks_indexed = stats.chunks_indexed,
                                 files_removed = stats.files_removed,
                                 files_unreadable = stats.files_unreadable,
-                                "reconciled watched tree after a dropped-event rescan, but \
-                                 some files could not be read and remain unreconciled",
+                                "watched tree is NOT fully reconciled after a dropped-event \
+                                 rescan — some files could not be read; will retry",
                             );
                         }
                         Err(err) => {
-                            rescan_failures = rescan_failures.saturating_add(1);
                             tracing::error!(
                                 index_id = %index_id,
-                                attempt = rescan_failures,
+                                attempt = retry_attempt,
                                 "index is NOT in sync after a dropped-event rescan and will be retried: {err:#}",
-                            );
-                            crate::service::watch_rescan::schedule_rescan_retry(
-                                retry_tx.clone(),
-                                rescan_failures,
                             );
                         }
                     }

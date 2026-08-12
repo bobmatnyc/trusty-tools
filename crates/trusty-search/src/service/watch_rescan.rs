@@ -269,21 +269,69 @@ async fn sweep_deleted(
     Ok(removed)
 }
 
+/// What the watch loop owes after a reconcile pass finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RescanFollowUp {
+    /// Every walked file is reconciled. Clear the consecutive-failure count.
+    InSync,
+    /// The tree is still not in sync. Schedule a retry as this attempt number.
+    Retry {
+        /// 1-based consecutive-failure count, which drives [`retry_backoff`].
+        attempt: u32,
+    },
+}
+
+/// Map a finished reconcile pass to the watch loop's next step.
+///
+/// Why: a pass falls short in two ways — it returns [`RescanError`], or it
+/// returns `Ok` having skipped files it could not read — and the loop answered
+/// them differently. The partial case reset the failure count and scheduled
+/// nothing, so a transiently unreadable file was reindexed only if some later
+/// event happened to touch it. That is the same silent staleness a dropped
+/// `Flag::Rescan` produces, reached through this module's own error handling
+/// instead of through the lost events, so it gets the same answer: re-arm.
+///
+/// What: returns [`RescanFollowUp::InSync`] only for an `Ok` whose
+/// [`RescanStats::is_complete`] holds; every other outcome is a retry at
+/// `consecutive_failures + 1`. Keeping the decision here rather than in the
+/// loop's match arms is what makes it one decision instead of three.
+///
+/// A permanently unreadable file therefore re-walks the tree every
+/// [`RETRY_MAX`] forever. That is the cost this module already accepts for a
+/// failed pass, and for the same reason: the alternative is a daemon that
+/// believes an index is in sync when it is not.
+///
+/// Test: `rescan_follow_up_clears_the_counter_only_when_the_tree_is_in_sync`,
+/// `rescan_partial_pass_schedules_a_retry_that_fires`.
+pub(crate) fn rescan_follow_up(
+    outcome: Result<&RescanStats, &RescanError>,
+    consecutive_failures: u32,
+) -> RescanFollowUp {
+    if matches!(outcome, Ok(stats) if stats.is_complete()) {
+        RescanFollowUp::InSync
+    } else {
+        RescanFollowUp::Retry {
+            attempt: consecutive_failures.saturating_add(1),
+        }
+    }
+}
+
 /// Re-arm a failed reconcile by pushing another [`WatchEvent::Rescan`] onto the
 /// watch loop's own channel after a backoff.
 ///
-/// Why: a failed reconcile means the index is still out of sync. Returning to
-/// the event loop at that point would leave the daemon serving stale results
-/// with nothing scheduled to fix them — the same silent miss, one layer up.
-/// Re-queueing keeps the loop in the "not yet reconciled" state until a pass
-/// actually succeeds.
+/// Why: a pass that did not fully reconcile leaves the index out of sync.
+/// Returning to the event loop at that point would leave the daemon serving
+/// stale results with nothing scheduled to fix them — the same silent miss, one
+/// layer up. Re-queueing keeps the loop in the "not yet reconciled" state until
+/// a pass actually succeeds.
 ///
-/// What: spawns a detached timer that sends one `Rescan`. Only ever called on
-/// failure and only once per failure, so retries never stack. If the watch loop
-/// has been torn down the send fails against a closed channel and the timer
-/// simply expires.
+/// What: spawns a detached timer that sends one `Rescan`. Called once per
+/// [`RescanFollowUp::Retry`] and never otherwise, so retries cannot stack. If
+/// the watch loop has been torn down the send fails against a closed channel
+/// and the timer simply expires.
 ///
-/// Test: `rescan_retry_backoff_grows_and_saturates`.
+/// Test: `rescan_partial_pass_schedules_a_retry_that_fires`,
+/// `rescan_retry_backoff_grows_and_saturates`.
 pub fn schedule_rescan_retry(tx: UnboundedSender<WatchEvent>, consecutive_failures: u32) {
     let delay = retry_backoff(consecutive_failures);
     tokio::spawn(async move {

@@ -11,6 +11,10 @@ Fixed
   re-walk of the watched tree: every walked file is re-indexed in bounded
   batches, chunks for tracked files that no longer exist on disk are dropped,
   and the symbol graph is rebuilt once.
-- A reconcile that fails is logged at ERROR and retried with backoff instead of
-  being reported as success, and files that could not be read are counted into
-  `RescanStats::files_unreadable` and surfaced at WARN.
+- A reconcile that does not fully reconcile the tree is retried with backoff
+  instead of being reported as success. That covers both ways a pass falls
+  short: it returns an error, or it returns successfully having skipped files it
+  could not read. The partial case previously cleared the consecutive-failure
+  count and scheduled nothing, so a transiently unreadable file was left stale
+  behind a single WARN until some unrelated event happened to touch it. Files
+  that could not be read are counted into `RescanStats::files_unreadable`.

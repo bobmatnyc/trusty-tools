@@ -299,6 +299,115 @@ async fn rescan_reconcile_keeps_a_tracked_file_the_walk_skipped() {
     );
 }
 
+/// A walked file the reconcile cannot read.
+///
+/// `read_content` sends a `.rs` file straight to `tokio::fs::read_to_string`,
+/// which rejects invalid UTF-8. That is deterministic on every platform and
+/// needs no permission games, so it does not depend on the test user not being
+/// root the way a `chmod 000` fixture would.
+fn write_unreadable_source(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = root.join(name);
+    std::fs::write(&path, [0xF0, 0x9F, 0x00, 0xFF, 0xFE]).expect("write");
+    path
+}
+
+/// Why: the loop must not report a pass that skipped files as a success. Only a
+/// pass that reconciled everything may clear the failure count; an error and a
+/// partial read are both "still out of sync" and must re-arm.
+#[test]
+fn rescan_follow_up_clears_the_counter_only_when_the_tree_is_in_sync() {
+    let clean = RescanStats {
+        files_reindexed: 3,
+        ..RescanStats::default()
+    };
+    assert_eq!(
+        rescan_follow_up(Ok(&clean), 0),
+        RescanFollowUp::InSync,
+        "a pass that read every walked file is in sync"
+    );
+
+    let partial = RescanStats {
+        files_reindexed: 2,
+        files_unreadable: 1,
+        ..RescanStats::default()
+    };
+    assert_eq!(
+        rescan_follow_up(Ok(&partial), 0),
+        RescanFollowUp::Retry { attempt: 1 },
+        "an unreadable file leaves the tree unreconciled, so it must re-arm"
+    );
+    assert_eq!(
+        rescan_follow_up(Ok(&partial), 4),
+        RescanFollowUp::Retry { attempt: 5 },
+        "and it must advance the backoff rather than restart it"
+    );
+
+    let failed = RescanError::Remove {
+        index_id: "watch-rescan-test".to_string(),
+        path: "gone.rs".to_string(),
+        source: anyhow::anyhow!("corpus closed"),
+    };
+    assert_eq!(
+        rescan_follow_up(Err(&failed), 1),
+        RescanFollowUp::Retry { attempt: 2 },
+        "a failed pass re-arms as it always did"
+    );
+}
+
+/// Why: the retry wiring is what turns "not in sync" into another attempt, and
+/// nothing proved it end to end — only the backoff arithmetic was covered. A
+/// partial pass that silently stopped retrying is the same lost-update outcome
+/// this module exists to prevent.
+///
+/// Drives the real functions in sequence: a genuine reconcile over a tree with
+/// one unreadable file, the real follow-up decision, the real scheduler, and
+/// the real channel the watch loop reads. Reaching through `spawn_watch_loop`
+/// itself would need a real kernel queue overflow, which is the one condition
+/// these tests cannot provoke (see the module docs).
+#[tokio::test(start_paused = true)]
+async fn rescan_partial_pass_schedules_a_retry_that_fires() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+    let (index_id, indexer, tracker) = fixture(&root);
+
+    std::fs::write(root.join("good.rs"), "fn good() {}\n").expect("write");
+    write_unreadable_source(&root, "broken.rs");
+
+    let stats = reconcile_after_rescan(&index_id, &root, &root, &indexer, &tracker)
+        .await
+        .expect("the pass itself succeeds — one file was merely skipped");
+    assert_eq!(
+        stats.files_unreadable, 1,
+        "the unreadable file must be counted, not silently dropped"
+    );
+    assert_eq!(
+        stats.files_reindexed, 1,
+        "the readable file is still indexed"
+    );
+    assert!(
+        !stats.is_complete(),
+        "a pass that skipped a file has not reconciled the tree"
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WatchEvent>();
+    let RescanFollowUp::Retry { attempt } = rescan_follow_up(Ok(&stats), 0) else {
+        panic!("a partial pass must ask for a retry");
+    };
+    schedule_rescan_retry(tx, attempt);
+
+    // Paused clock: this resolves only because the scheduled timer actually
+    // elapses and sends, not because the channel already held something.
+    assert!(
+        rx.try_recv().is_err(),
+        "the retry must not fire immediately"
+    );
+    assert_eq!(
+        rx.recv().await,
+        Some(WatchEvent::Rescan),
+        "the scheduled retry must put another Rescan back on the loop's channel"
+    );
+}
+
 /// Why: a reconcile that fails leaves the index out of sync, so the retry must
 /// keep coming back rather than backing off to never.
 #[test]
