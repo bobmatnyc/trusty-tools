@@ -202,6 +202,37 @@ pub(super) async fn run_reindex(
             diag.last_walk_error = Some(reason);
         }
     }
+
+    // #4356: refuse a tree too large to index completely, rather than letting
+    // `TRUSTY_MAX_CHUNKS` truncate it into a corpus that reports success.
+    //
+    // This is the last point where nothing has been committed — no staging
+    // corpus is open, no chunk is written — so a refusal leaves the existing
+    // index byte-identical. The check runs on the POST-FILTER list, so
+    // narrowing the index (`exclude_globs`, `extra_skip_dirs`, `include_paths`,
+    // `extensions`) is what clears it; the env ceilings are the blunt override.
+    if let Err(over) = crate::service::index_budget::IndexBudget::from_env().check(&walk.files) {
+        let reason = over.to_string();
+        tracing::warn!("reindex[{}]: {}", index_id.0, reason);
+        handle.walk_diagnostics.write().await.last_walk_error = Some(reason.clone());
+        mark_reindex_failed(&handle, &reason).await;
+        progress.status.store(ReindexStatus::Failed);
+        progress
+            .push(serde_json::json!({
+                "event": "error",
+                "index_id": index_id.0,
+                "message": reason,
+                "fatal": true,
+            }))
+            .await;
+        drop(term_guard);
+        schedule_progress_cleanup(cleanup_map, cleanup_id);
+        if let Some(ref q) = quarantine {
+            q.record_failure(&index_id);
+        }
+        return;
+    }
+
     progress.total_files.store(total, Ordering::Release);
 
     // Issue #3979: before touching the hash cache, decide whether an

@@ -559,3 +559,100 @@ async fn pinned_grep_scopes_to_pinned_index() {
     let seen = captured.lock().await;
     assert_eq!(seen.as_slice(), &["/indexes/pinned-proj/grep".to_string()]);
 }
+
+/// Spin up a mock daemon that captures the `POST /indexes` body, dispatch
+/// `create_index` with `args`, and return what the daemon received.
+///
+/// Why: the #4356 forwarding claim is about the WIRE body, so asserting on the
+/// dispatcher's inputs would prove nothing.
+/// What: mirrors `grep_max_count_alias_forwarded_as_max_results`'s harness,
+/// routed at `/indexes`.
+async fn captured_create_index_body(args: Value) -> Value {
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let captured: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+
+    async fn create_handler(
+        axum::extract::State(captured): axum::extract::State<Arc<Mutex<Option<Value>>>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        *captured.lock().await = Some(body);
+        Json(serde_json::json!({ "id": "idx", "created": true }))
+    }
+
+    let app = Router::new()
+        .route("/indexes", post(create_handler))
+        .with_state(Arc::clone(&captured));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let server = McpServer::new(format!("http://{addr}"));
+    let resp = server.dispatch(req("create_index", args)).await;
+    assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+    let body = captured.lock().await.clone();
+    body.expect("no request captured")
+}
+
+/// #4356: `create_index` forwards `exclude_globs` to `POST /indexes`.
+///
+/// Why: the daemon has accepted `exclude_globs` on this endpoint since the
+/// repo-config work, but the MCP tool never sent it — so an MCP caller
+/// registering a large tree had no way to narrow it, which is half of what
+/// makes an oversized index a hazard.
+/// What: dispatches `create_index` with two globs and asserts both reach the
+/// wire body.
+/// Test: this test. It fails against the pre-fix commit, where the body carries
+/// only `id` and `root_path`.
+#[tokio::test]
+async fn create_index_forwards_exclude_globs() {
+    let body = captured_create_index_body(serde_json::json!({
+        "id": "idx",
+        "root_path": "/projects/idx",
+        "exclude_globs": ["**/fixtures/**", "**/*.generated.ts"],
+    }))
+    .await;
+    assert_eq!(
+        body.get("exclude_globs"),
+        Some(&serde_json::json!(["**/fixtures/**", "**/*.generated.ts"])),
+        "both globs must reach the daemon; got body: {body:?}"
+    );
+}
+
+/// #4356: a malformed `exclude_globs` is omitted rather than forwarded.
+///
+/// Why: the daemon deserialises the field as `Option<Vec<String>>`, so sending
+/// `[1, 2]` would 422 the whole registration — an unrelated failure for a
+/// caller who merely mistyped an optional filter.
+/// What: a non-array value and an array with no strings both leave the field
+/// off the body entirely.
+/// Test: this test.
+#[tokio::test]
+async fn create_index_omits_malformed_exclude_globs() {
+    let not_an_array = captured_create_index_body(serde_json::json!({
+        "id": "idx",
+        "root_path": "/projects/idx",
+        "exclude_globs": "**/fixtures/**",
+    }))
+    .await;
+    assert!(
+        not_an_array.get("exclude_globs").is_none(),
+        "a bare string must not be forwarded: {not_an_array:?}"
+    );
+
+    let no_strings = captured_create_index_body(serde_json::json!({
+        "id": "idx",
+        "root_path": "/projects/idx",
+        "exclude_globs": [1, 2],
+    }))
+    .await;
+    assert!(
+        no_strings.get("exclude_globs").is_none(),
+        "an array with no strings must not be forwarded: {no_strings:?}"
+    );
+}

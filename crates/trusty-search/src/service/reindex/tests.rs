@@ -2475,3 +2475,135 @@ async fn reindex_producer_panic_does_not_report_complete() {
         "anything polling status must see the failure, not just an SSE subscriber"
     );
 }
+
+/// RAII override of `TRUSTY_MAX_INDEX_FILES` (#4356).
+///
+/// Env is process-global and shared across a test binary's threads, so every
+/// test that uses this must also be `#[serial_test::serial]`.
+struct MaxIndexFilesEnvGuard(Option<String>);
+
+impl MaxIndexFilesEnvGuard {
+    fn set(v: &str) -> Self {
+        let prior = std::env::var(crate::service::index_budget::ENV_MAX_INDEX_FILES).ok();
+        std::env::set_var(crate::service::index_budget::ENV_MAX_INDEX_FILES, v);
+        Self(prior)
+    }
+}
+
+impl Drop for MaxIndexFilesEnvGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(v) => std::env::set_var(crate::service::index_budget::ENV_MAX_INDEX_FILES, v),
+            None => std::env::remove_var(crate::service::index_budget::ENV_MAX_INDEX_FILES),
+        }
+    }
+}
+
+/// Stage `count` walkable `.rs` files under a fresh tempdir and return both.
+fn budget_fixture(count: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    for i in 0..count {
+        fs::write(root.join(format!("f{i}.rs")), format!("fn f{i}() {{}}\n")).unwrap();
+    }
+    (tmp, root)
+}
+
+/// Run one reindex against `root` under index id `id` and return its progress.
+async fn run_budget_reindex(id: &str, root: &std::path::Path) -> Arc<ReindexProgress> {
+    let indexer = CodeIndexer::new(id.to_string(), root.to_path_buf());
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.to_path_buf(),
+    ));
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(Arc::clone(&handle), Arc::clone(&progress), false)
+        .await
+        .expect("reindex task must not panic");
+    // Keep the handle alive until the task has finished writing diagnostics.
+    let diag_error = handle.walk_diagnostics.read().await.last_walk_error.clone();
+    if progress.status.load() == ReindexStatus::Failed {
+        let reason = diag_error.expect("a refused walk must record last_walk_error");
+        assert!(
+            reason.contains("TRUSTY_MAX_INDEX_FILES"),
+            "the refusal must name the ceiling that raises it: {reason}"
+        );
+    }
+    progress
+}
+
+/// #4356: a walk over the file budget refuses the whole reindex instead of
+/// indexing a truncated prefix.
+///
+/// Why: before this, the only ceiling was `TRUSTY_MAX_CHUNKS`, which DROPS
+/// chunks past the cap and still reports `complete`. An index truncated that
+/// way returns empty results that a caller cannot tell from a legitimate miss.
+/// What: three walkable files against a one-file budget. Asserts the terminal
+/// status is `Failed`, nothing was indexed, and the SSE frame is fatal and
+/// names the ceiling.
+/// Test: this test. It fails against the pre-fix commit, where the same
+/// fixture reaches `ReindexStatus::Complete` with `indexed == 3`.
+#[tokio::test]
+#[serial_test::serial]
+async fn reindex_refuses_walk_over_file_budget() {
+    let _guard = MaxIndexFilesEnvGuard::set("1");
+    let (_tmp, root) = budget_fixture(3);
+
+    let progress = run_budget_reindex("budget-over", &root).await;
+
+    assert_eq!(
+        progress.status.load(),
+        ReindexStatus::Failed,
+        "an over-budget walk must fail, never complete truncated"
+    );
+    assert_eq!(
+        progress.indexed.load(Ordering::Acquire),
+        0,
+        "the refusal happens before any file is committed"
+    );
+
+    let events = progress.events.lock().await;
+    let fatal = events
+        .iter()
+        .find(|e| e.contains("\"event\":\"error\"") && e.contains("\"fatal\":true"))
+        .expect("a fatal error event must be emitted");
+    assert!(
+        fatal.contains("TRUSTY_MAX_INDEX_FILES") && fatal.contains("exclude_globs"),
+        "the frame must name both remedies: {fatal}"
+    );
+}
+
+/// #4356: the budget is inclusive — exactly at the ceiling still indexes.
+///
+/// Why: an off-by-one that made the guard fire AT the limit would refuse every
+/// index sized exactly to its budget, and the enforcement test above cannot
+/// tell that apart from correct behaviour.
+/// What: two walkable files against a two-file budget, then the same fixture
+/// against a one-file budget.
+/// Test: this test. The `Complete` half also proves the guard does not break
+/// the ordinary under-budget path.
+#[tokio::test]
+#[serial_test::serial]
+async fn reindex_budget_is_inclusive_at_the_boundary() {
+    let (_tmp, root) = budget_fixture(2);
+
+    {
+        let _guard = MaxIndexFilesEnvGuard::set("2");
+        let progress = run_budget_reindex("budget-exact", &root).await;
+        assert_eq!(
+            progress.status.load(),
+            ReindexStatus::Complete,
+            "exactly at the ceiling must still index"
+        );
+        assert_eq!(progress.indexed.load(Ordering::Acquire), 2);
+    }
+
+    let _guard = MaxIndexFilesEnvGuard::set("1");
+    let progress = run_budget_reindex("budget-one-over", &root).await;
+    assert_eq!(
+        progress.status.load(),
+        ReindexStatus::Failed,
+        "one file over the ceiling must refuse"
+    );
+}
