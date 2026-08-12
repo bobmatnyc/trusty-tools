@@ -101,6 +101,9 @@ mod tests_health_switchable;
 mod tests_index;
 #[cfg(test)]
 mod tests_index_config;
+// #2203: a search that drops rows after fusion must report how many and why.
+#[cfg(test)]
+mod tests_dropped_results;
 // #5068 / #5061 / #4787 / #4839: the index-routing + status-reporting cluster.
 #[cfg(test)]
 mod tests_index_routing;
