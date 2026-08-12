@@ -1,4 +1,4 @@
-//! Drift guards for the canonical launchd-label registry (#4868).
+//! Drift guards for the canonical launchd-label registry (#4919).
 //!
 //! Why: the registry only helps if nothing outside it writes a launchd label.
 //! #2827 was fixed by correcting one literal, and the same class of defect came
@@ -23,7 +23,7 @@ fn canonical_consts_match_the_convention() {
             canonical_label(svc.member),
             "{}'s label restates something the `com.trusty.<stem>` convention \
              does not produce — either the convention changed (update \
-             `canonical_label`) or the literal drifted (#4868)",
+             `canonical_label`) or the literal drifted (#4919)",
             svc.member
         );
     }
@@ -51,7 +51,7 @@ fn sub_unit_labels_extend_their_base() {
 
 /// Why: listing a still-canonical label as legacy makes an install evict the
 /// unit it just bootstrapped — a self-inflicted outage, which is half of what
-/// #4868 is about.
+/// #4919 is about.
 /// What: no legacy alias may equal any service's canonical label.
 /// Test: this is the test.
 #[test]
@@ -87,7 +87,7 @@ fn every_legacy_label_resolves_to_one_service() {
     }
 }
 
-/// Why: the pre-#4868 labels must stay recorded as legacy or an upgrade from a
+/// Why: the pre-#4919 labels must stay recorded as legacy or an upgrade from a
 /// host installed before this fix silently leaves the old unit running beside
 /// the new one — #2938's exact footgun, two daemons on :7878.
 /// What: pins the specific aliases the divergent sites used.
@@ -96,7 +96,7 @@ fn every_legacy_label_resolves_to_one_service() {
 fn pre_fix_labels_are_recorded_as_legacy() {
     assert!(
         legacy_labels_for(SEARCH).contains(&"com.trusty.trusty-search"),
-        "the label `trusty-search service install` wrote before #4868 must be \
+        "the label `trusty-search service install` wrote before #4919 must be \
          evicted on upgrade"
     );
     assert!(
@@ -118,7 +118,7 @@ fn pre_fix_labels_are_recorded_as_legacy() {
 /// not be normalised onto the launchd convention.
 const SCAN_EXEMPT_PATHS: &[&str] = &["trusty-installer/src/commands/macos_signing"];
 
-/// Why (#4868, and #2827 before it): every re-fix so far corrected one literal
+/// Why (#4919, and #2827 before it): every re-fix so far corrected one literal
 /// and left the mechanism that mints them intact, so a new divergent literal
 /// appeared somewhere else — the installer's mirror table, a Makefile, a shell
 /// hint. This scans the production sources for launchd-label literals and
@@ -196,7 +196,7 @@ fn no_stray_launchd_label_literals_in_workspace_sources() {
     assert!(
         strays.is_empty(),
         "launchd label literals not owned by `trusty_common::launchd_labels` \
-         (#4868 — derive them from the registry instead of restating them):\n  {}",
+         (#4919 — derive them from the registry instead of restating them):\n  {}",
         strays.join("\n  ")
     );
 }
@@ -222,7 +222,7 @@ enum Kind {
 /// hosts, such as `launchd_probe`'s `com.trusty.mpm.dogfood`. Scanning either
 /// would force them to lie.
 ///
-/// #4868 review: the first version used `take_while`, so the scan STOPPED at the
+/// #4919 review: the first version used `take_while`, so the scan STOPPED at the
 /// first `#[cfg(test)]`-ish line. In a `mod.rs` that declaration sits near the
 /// top among the module list, so the entire production body below it went
 /// unscanned — a literal planted at line 301 of
@@ -261,7 +261,7 @@ fn production_lines(body: &str, kind: Kind) -> Vec<String> {
 ///
 /// 1. A substring match for `test` fires on
 ///    `#[cfg(feature = "embedder-test-support")]`, which gates production code.
-/// 2. #4868 review: POLARITY. `#[cfg(not(test))]` gates code that exists in
+/// 2. #4919 review: POLARITY. `#[cfg(not(test))]` gates code that exists in
 ///    every NON-test build — the most production a thing can be — and
 ///    `#[cfg(any(…, test))]` gates code that exists in test builds AND others.
 ///    Treating either as "a test item" made `skip_test_item` swallow exactly
@@ -323,7 +323,7 @@ fn under_negation_or_disjunction(prefix: &str) -> bool {
 
 /// Consume the item a `#[cfg(test)]` attribute applies to.
 ///
-/// Why (#4868 review): `#[cfg(test)] use std::fmt;` puts the attribute and the
+/// Why (#4919 review): `#[cfg(test)] use std::fmt;` puts the attribute and the
 /// item on ONE line. Unconditionally consuming from the NEXT line therefore ate
 /// a line of production code — a literal planted there passed the guard.
 ///
@@ -388,7 +388,7 @@ fn consume_until_balanced<'a>(
 
 /// Remove the comment portion of a line for the given file kind.
 ///
-/// Why (#4868 review): the Rust arm used to blank any line whose trimmed start
+/// Why (#4919 review): the Rust arm used to blank any line whose trimmed start
 /// was `*`, as a proxy for "inside a block comment". That also blanked a deref
 /// assignment — `*target = "com.trusty.trusty-search".to_string();` passed the
 /// guard while the identical `let` form failed. Block-comment state is now
@@ -460,7 +460,7 @@ fn workspace_root() -> std::path::PathBuf {
 
 /// Recursively collect the files the label scan covers.
 ///
-/// Why (#4868 review): scanning `crates/**/src/**.rs` alone left the two file
+/// Why (#4919 review): scanning `crates/**/src/**.rs` alone left the two file
 /// types the last recurrence actually lived in unguarded — the per-crate
 /// `Makefile`s carried the `com.bobmatnyc.*` family and
 /// `scripts/install-trusty-search-signed.sh` carried the inverted hint. A guard
@@ -511,7 +511,7 @@ fn collect_scannable_files(dir: &std::path::Path, out: &mut Vec<std::path::PathB
     }
 }
 
-/// Why (#4868 review): the first `production_lines` used `take_while`, so a
+/// Why (#4919 review): the first `production_lines` used `take_while`, so a
 /// `mod tests;` declaration near the top of a `mod.rs` terminated the scan and
 /// everything below it went unread — 342 of 2847 files lost more than half
 /// their body, many after ~15 lines. A planted literal at line 301 of
@@ -579,7 +579,7 @@ fn production_lines_strips_hash_comments() {
     assert!(kept[0].contains("com.trusty.search"));
 }
 
-/// Why (#4868 review, round 2): POLARITY. `#[cfg(not(test))]` gates code that
+/// Why (#4919 review, round 2): POLARITY. `#[cfg(not(test))]` gates code that
 /// exists in every non-test build, and `#[cfg(any(…, test))]` gates code that
 /// exists in test builds AND others — both are PRODUCTION. Treating them as
 /// test items made the scan skip exactly what it should read; literals planted
@@ -623,7 +623,7 @@ fn production_lines_reads_bodies_gated_on_not_test() {
     );
 }
 
-/// Why (#4868 review, round 2): `strip_comment` blanked any line whose trimmed
+/// Why (#4919 review, round 2): `strip_comment` blanked any line whose trimmed
 /// start was `*`, as a proxy for "inside a block comment". A deref assignment
 /// starts with `*` too, so `*target = "com.trusty.trusty-search".to_string();`
 /// passed the guard while the identical `let` form failed.
@@ -655,7 +655,7 @@ fn strip_comment_tracks_block_comment_state() {
     assert!(kept.iter().any(|l| l.contains("let a = 1")));
 }
 
-/// Why (#4868 review, round 2): `#[cfg(test)] use std::fmt;` puts the attribute
+/// Why (#4919 review, round 2): `#[cfg(test)] use std::fmt;` puts the attribute
 /// AND the item on one line, so consuming from the next line ate a line of
 /// production code — a literal planted there passed.
 /// What: an attribute line carrying its whole item consumes nothing further.
@@ -670,7 +670,7 @@ fn skip_test_item_consumes_nothing_when_the_item_is_on_the_attribute_line() {
     );
 }
 
-/// Why (#4868 review, round 2): the codesign skip was whole-line, so a shell
+/// Why (#4919 review, round 2): the codesign skip was whole-line, so a shell
 /// line carrying both an identifier and a plist path had its real launchd label
 /// skipped along with the identifier.
 /// What: only the token adjacent to the marker is removed.
@@ -734,7 +734,7 @@ fn eviction_lines_may_name_a_legacy_label() {
 /// full binary name deliberately — renaming one invalidates a binary's
 /// designated requirement and re-triggers macOS TCC prompts (#2558).
 ///
-/// #4868 review: skipping the whole LINE was too coarse. A shell line carrying
+/// #4919 review: skipping the whole LINE was too coarse. A shell line carrying
 /// both an identifier and a plist path —
 /// `local X_IDENTIFIER="a"; local f2=".../com.bobmatnyc.trusty-search.plist"` —
 /// had its real launchd label skipped along with the identifier.

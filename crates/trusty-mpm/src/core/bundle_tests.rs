@@ -600,10 +600,7 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
     let agents = [
         // Increment 1 agents
@@ -649,7 +646,7 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
     ];
 
     for name in agents {
-        let composed = compose_agent(name, &assets_dir)
+        let composed = compose_agent(name, assets_dir)
             .unwrap_or_else(|e| panic!("compose_agent({name}) failed: {e}"));
         // Composed output must have a frontmatter block.
         assert!(
@@ -682,12 +679,9 @@ fn base_agent_guidance_sections_survive_composition() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
-    let composed = compose_agent("version-control", &assets_dir)
+    let composed = compose_agent("version-control", assets_dir)
         .expect("compose_agent(version-control) must succeed");
 
     assert!(
@@ -750,7 +744,7 @@ fn base_agent_guidance_sections_survive_composition() {
     // #2610: local-ops (the release-agent offender) must carry its own
     // long-wait reinforcement on top of the inherited BASE-AGENT rule.
     let local_ops =
-        compose_agent("local-ops", &assets_dir).expect("compose_agent(local-ops) must succeed");
+        compose_agent("local-ops", assets_dir).expect("compose_agent(local-ops) must succeed");
     assert!(
         local_ops.contains("## Long Waits — Block On Your Own Gates, Never On CI"),
         "composed local-ops is missing its persona-level long-wait section (#2610)"
@@ -991,15 +985,12 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
     use crate::core::instruction_pipeline::assemble_system_prompt;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
     // (a) BASE-AGENT.md's report-don't-promise subsection (which replaced the
     // retired chunked-repoll guidance in #4792) must reach a composed agent
     // that inherits BASE-AGENT (version-control extends it).
-    let composed = compose_agent("version-control", &assets_dir)
+    let composed = compose_agent("version-control", assets_dir)
         .expect("compose_agent(version-control) must succeed");
     assert!(
         composed.contains("### Report, don't promise"),
@@ -1075,12 +1066,9 @@ fn pm_authority_doctrine_survives_composition() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
-    let composed = compose_agent("version-control", &assets_dir)
+    let composed = compose_agent("version-control", assets_dir)
         .expect("compose_agent(version-control) must succeed");
 
     // (a) BASE-AGENT's PM Authority & Escalation section must be inherited by
@@ -1191,12 +1179,9 @@ fn documentation_style_unions_into_engineer_family_via_base_engineer() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
-    let composed = compose_agent("rust-engineer", &assets_dir)
+    let composed = compose_agent("rust-engineer", assets_dir)
         .expect("compose_agent(rust-engineer) must succeed");
     assert!(
         composed.contains("documentation-style"),
@@ -1230,13 +1215,10 @@ fn rust_build_performance_declared_by_rust_family_agents() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
     for agent in ["rust-engineer", "tauri-engineer"] {
-        let composed = compose_agent(agent, &assets_dir)
+        let composed = compose_agent(agent, assets_dir)
             .unwrap_or_else(|e| panic!("compose_agent({agent}) must succeed: {e}"));
         assert!(
             composed.contains("rust-build-performance"),
@@ -1330,12 +1312,9 @@ fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
         }
     }
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
     let composed =
-        compose_agent("version-control", &assets_dir).expect("compose_agent must succeed");
+        compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
     for needle in REQUIRED {
         assert!(
             composed.contains(needle),
@@ -1370,12 +1349,9 @@ fn the_honest_ban_reaches_both_prose_channels() {
         }
     }
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
     let composed =
-        compose_agent("version-control", &assets_dir).expect("compose_agent must succeed");
+        compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
     for needle in REQUIRED {
         assert!(
             composed.contains(needle),
@@ -1393,13 +1369,10 @@ fn base_agent_graduated_verbosity_survives_composition() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
     let composed =
-        compose_agent("version-control", &assets_dir).expect("compose_agent must succeed");
+        compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
 
     assert!(
         composed.contains("Verbosity scales with what went wrong"),

@@ -18,7 +18,7 @@ Maintain agent health, detect improvement opportunities, and streamline contribu
 ## Agent Lifecycle
 
 ### Discovery
-- Bundled agents live in `crates/trusty-mpm/src/assets/agents/*.md`
+- Bundled agents live in `crates/trusty-agents-common/src/assets/agents/*.md`
 - Each agent has a 5-field frontmatter: `name`, `role`, `description`, `model`, `extends`
 - The inheritance chain resolves at deploy time via `compose_agent()` in `core/agent_builder.rs`
 - `core/bundle.rs::ALL` is the authoritative registry; every `.md` file must appear there
@@ -79,7 +79,7 @@ custom agent.
   precedence — `/doctor` flags that as a duplicate. Never rely on it.
 
 ### Adding a New Agent
-1. Create `crates/trusty-mpm/src/assets/agents/<name>.md` with 5-field frontmatter
+1. Create `crates/trusty-agents-common/src/assets/agents/<name>.md` with 5-field frontmatter
 2. Add a `pub const` in `core/bundle.rs` with `include_str!`
 3. Add a `BundledArtifact` entry to `ALL` with `InstallPolicy::Overwrite` (agents are framework-owned, not user-editable)
 4. Update the count assertion in `bundle_tests.rs`
@@ -88,7 +88,7 @@ custom agent.
 ## Improvement Workflow
 
 When an agent needs improvement:
-1. Edit the `.md` file in `src/assets/agents/`
+1. Edit the `.md` file in `crates/trusty-agents-common/src/assets/agents/`
 2. Verify the composed output: `cargo test -p trusty-mpm bundle`
 3. Commit with `feat(trusty-mpm): improve <agent-name> agent — <reason>`
 4. Open a PR referencing the relevant GitHub issue

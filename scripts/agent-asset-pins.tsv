@@ -1,25 +1,26 @@
-# agent-asset-pins.tsv — pinned trusty-mpm source hashes for deliberately
-# deviated tcode agent copies (issue #2958 Slice E4).
+# agent-asset-pins.tsv — pinned SHARED agent-asset source hashes for
+# deliberately deviated trusty-code copies (issue #2958 Slice E4).
 #
-# Format: <mpm-source-relative-path><TAB><sha256-of-mpm-source-file>
+# Format: <shared-source-relative-path><TAB><sha256-of-that-file>
 #
-# These 4 files are the KNOWN INTENTIONAL DEVIATIONS from byte-parity
-# documented in crates/trusty-code/src/assets/mod.rs ("Tools-restriction
-# deviation" / "Prose deviation follow-up" doc blocks, Slice E3, PR #3041):
-# the tcode copy carries an added `tools:` frontmatter line plus (for three
-# of the four) reworded read-only prose, so it can never be byte-identical
-# to the trusty-mpm source it was derived from.
+# These 4 files are the KNOWN INTENTIONAL DEVIATIONS documented in
+# crates/trusty-code/src/assets/mod.rs ("Tools-restriction deviation" /
+# "Prose deviation follow-up" doc blocks, Slice E3, PR #3041): the tcode
+# copy carries an added `tools:` frontmatter line plus (for three of the
+# four) reworded read-only prose, so it can never be byte-identical to the
+# shared asset it was derived from.
 #
-# check_agent_assets.sh does NOT byte-compare these 4 tcode copies against
-# their mpm source (that would always fail by design). Instead it hashes the
-# CURRENT mpm SOURCE file and compares against the pin recorded here. If the
-# mpm source hash no longer matches, upstream changed behind a deliberately
-# deviated copy — the guard fails so a human reconciles the tcode copy on
-# purpose, rather than silently drifting.
+# Every OTHER agent asset is not copied at all — trusty-mpm and trusty-code
+# both embed the one file under crates/trusty-agents-common/src/assets/
+# agents/ via trusty_agents_common::agent_assets, so there is nothing to
+# pin. check_agent_assets.sh hashes the CURRENT shared source for these 4
+# and compares against the pin here; if it no longer matches, the shared
+# source changed behind a deliberately deviated fork and the guard fails so
+# a human reconciles that fork on purpose.
 #
-# Regenerate a pin (only after manually reconciling the tcode copy with the
-# new upstream content) with: scripts/check_agent_assets.sh --update
-crates/trusty-mpm/src/assets/agents/code-analyzer.md	4396b3ddaa81d064082f9cd8376a0113ce66c6002e114b767cf123afef0a277a
-crates/trusty-mpm/src/assets/agents/code-critic.md	b8c5a3710accf73f4c07243e9daf313654cf2ea92928c260ce2eadb9f7f2c644
-crates/trusty-mpm/src/assets/agents/qa.md	40d4b79e9ecfd934fd77012a249396a80fefd43a9ccc7f0e347755e922366ca2
-crates/trusty-mpm/src/assets/agents/web-qa.md	339ba6d85e2024ea7b5683249bf5c53feff2d45f610d998cd286b198a638d31a
+# Regenerate (only after manually reconciling the trusty-code fork with the
+# new shared content) with: scripts/check_agent_assets.sh --update
+crates/trusty-agents-common/src/assets/agents/code-analyzer.md	4396b3ddaa81d064082f9cd8376a0113ce66c6002e114b767cf123afef0a277a
+crates/trusty-agents-common/src/assets/agents/code-critic.md	b8c5a3710accf73f4c07243e9daf313654cf2ea92928c260ce2eadb9f7f2c644
+crates/trusty-agents-common/src/assets/agents/qa.md	40d4b79e9ecfd934fd77012a249396a80fefd43a9ccc7f0e347755e922366ca2
+crates/trusty-agents-common/src/assets/agents/web-qa.md	339ba6d85e2024ea7b5683249bf5c53feff2d45f610d998cd286b198a638d31a
