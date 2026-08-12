@@ -116,7 +116,8 @@ fn flag_value(arg: &str, flag: &str, next: Option<&String>) -> Option<String> {
 /// What: `Error` when the registration exists but omits `serve`, `Warn` when it
 /// is absent entirely, `Ok` otherwise. Every arm names `trusty-search setup`.
 /// Test: `registration_with_empty_args_is_an_error`,
-/// `registration_with_serve_is_ok`, `absent_registration_warns`.
+/// `registration_with_serve_is_ok_and_reports_the_five_facts`,
+/// `absent_registration_warns`.
 pub fn check_registration(
     reg: Option<&McpRegistration>,
     client: &str,

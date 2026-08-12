@@ -296,8 +296,8 @@ pub struct PersistedIndex {
     /// `boot_markers::resolve_indexed_head_sha`), so the first boot after
     /// upgrade behaves exactly as before and every later boot has a genuine
     /// stored value.
-    /// Test: `restore_prefers_the_persisted_head_sha_over_live_git` in
-    /// `service::boot_markers_tests`.
+    /// Test: `resolve_prefers_the_persisted_head_sha_over_live_git` in
+    /// `boot_markers`'s `tests` submodule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_head_sha: Option<String>,
 
@@ -317,8 +317,8 @@ pub struct PersistedIndex {
     /// every write failure errs toward re-running rather than toward silence.
     /// `#[serde(default)]` + `skip_serializing_if` keep legacy files loading as
     /// `false` and the TOML compact.
-    /// Test: `pending_deferred_embed_is_rearmed_at_restore` in
-    /// `service::boot_markers_tests`.
+    /// Test: `restore_rearms_an_interrupted_deferred_embed_pass` in
+    /// `commands::start_restore`'s `markers_tests` submodule.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deferred_embed_pending: bool,
 }

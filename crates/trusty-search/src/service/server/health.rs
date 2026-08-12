@@ -67,8 +67,10 @@ pub(super) struct HealthResponse {
     /// What: the same `QUEUE_DEPTH` gauge `defer_embed_queue` maintains,
     /// fleet-wide rather than per index. Additive field; every existing
     /// consumer parses this response with optional/ignored unknown fields.
-    /// Test: `health_reports_the_deferred_embed_queue_depth` in
-    /// `service::boot_markers_tests`.
+    /// Test: none dedicated yet — `tests_stall.rs`'s `HealthResponse`
+    /// fixtures set this field to a literal `0` without exercising the live
+    /// `reindex::deferred_embed_queue_depth()` wiring end to end. This is a
+    /// coverage gap, not a claim of tested behavior; see #5523.
     pub(super) deferred_embed_queue_depth: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) update_available: Option<String>,
