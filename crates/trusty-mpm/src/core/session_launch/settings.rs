@@ -590,12 +590,26 @@ pub(super) fn preseed_workspace_trust_home(
 /// managed path, because that accessor derives its base from `claude_agents`,
 /// which the managed constructors rewrite. `home_tier` is stored, not derived,
 /// so it cannot be relocated by a deploy-destination change.
-/// What: returns `fw.home_tier_dir()`, logging at `warn!` when absent so the
-/// declined write is visible rather than silent.
-/// Test: `home_writes_are_skipped_when_the_home_tier_is_unresolved`.
+/// What: returns `fw.home_tier_dir()` when it is present AND absolute, logging
+/// at `warn!` otherwise so the declined write is visible rather than silent.
+/// Test: `home_writes_are_skipped_when_the_home_tier_is_unresolved`,
+/// `home_writes_are_skipped_when_the_home_tier_is_relative`.
 fn resolved_home_tier(fw: &crate::core::paths::FrameworkPaths) -> Option<PathBuf> {
     match fw.home_tier_dir() {
-        Some(home) => Some(home.to_path_buf()),
+        // #5544: absoluteness is the second gate, kept deliberately after the
+        // tier itself was made correct. `FrameworkPaths::default()` substitutes
+        // `"."` for the DEPLOY paths when no home resolves, and a relative tier
+        // reaching here would seed `./.claude.json` beside whatever directory
+        // the process happens to be in — the stray-file outcome this whole
+        // change exists to prevent. `Some(".")` must decline, not write.
+        Some(home) if home.is_absolute() => Some(home.to_path_buf()),
+        Some(home) => {
+            tracing::warn!(
+                tier = %home.display(),
+                "skipping user-global session writes: the home tier is not an absolute path"
+            );
+            None
+        }
         None => {
             tracing::warn!(
                 "skipping user-global session writes: no home directory resolved for this \

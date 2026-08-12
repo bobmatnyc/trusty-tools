@@ -39,9 +39,11 @@
 //! `fn set(key, val)` is that exact shape and predates this guard. Those calls
 //! are not waved through: rule 2 counts them separately, so a new one fails and
 //! each recorded number is a reviewable claim about the calls already there.
-//! What remains genuinely open is a write routed through a helper in ANOTHER
-//! target, and this file, which is skipped so its own pattern literals do not
-//! match itself. It detects; it does not prevent.
+//! A same-target wrapper is covered too: `set_env` / `remove_env`, the pair
+//! `commands/managed_root.rs` defines, are matched by name. What remains
+//! genuinely open is a wrapper under some OTHER name, a write routed through a
+//! helper in another target, and this file, which is skipped so its own pattern
+//! literals do not match itself. It detects; it does not prevent.
 //! Test: this file IS the test module.
 
 use std::path::{Path, PathBuf};
@@ -74,8 +76,11 @@ const ENV_MUTATION_BUDGET: &[(&str, usize, usize)] = &[
     ("tm/gh_identity.rs", 3, 0),
     // Production: daemonisation chdir.
     ("tm/commands/daemon_run.rs", 2, 0),
-    // Test-only: TRUSTY_MPM_ROOT / XDG_CONFIG_HOME behind a file-local mutex.
-    ("tm/commands/managed_root.rs", 2, 2),
+    // Test-only: TRUSTY_MPM_ROOT / XDG_CONFIG_HOME, via this target's own
+    // `set_env`/`remove_env` wrappers behind a file-local mutex. The wrappers
+    // themselves take a `key` parameter (the 4 indirect sites); their call sites
+    // pass literals and rule 1 reads them normally.
+    ("tm/commands/managed_root.rs", 24, 4),
     // Test-only: TRUSTY_MPM_SUB_AGENT / TRUSTY_MPM_DISABLE_HOOKS.
     ("tm/tests_behavior_a.rs", 4, 4),
     // Test-only: REPOS_ROOT / TMUX / managed-session-id.
@@ -180,34 +185,36 @@ fn strip_comments(text: &str) -> String {
     }
 }
 
-/// The code following `at`, capped at 120 chars, never splitting a char.
+/// The variable name a mutation at `at` writes, when it is a string literal.
 ///
-/// Why (#5544, code-critic MEDIUM): a byte-width slice can land mid-char and
-/// panic. Taking CHARS cannot. 120 is enough to span a multi-line
-/// `set_var(\n    "HOME",\n    p,\n)`.
-/// What: `code[at..]` truncated to 120 chars.
+/// Why (#5544): rule 1 must compare the key EXACTLY. A substring scan of the
+/// following bytes reports `XDG_CONFIG_HOME` as a `$HOME` write — and
+/// `commands/managed_root.rs` writes exactly that — so the guard would fail on a
+/// legitimate file, which is the one outcome a guard must never produce.
+/// Extracting the literal also removes the fixed-width window whose byte slicing
+/// could split a char boundary.
+///
+/// A key that is NOT a literal returns `None`. Such a call could write anything,
+/// so it is unverifiable rather than clean, and rule 2's indirect column
+/// ratchets it. `commands/managed_root.rs`'s `fn set_env(key, val)` is that
+/// shape; its own CALL SITES pass literals and are read normally.
+/// What: skips to the opening paren, and if the first non-space character starts
+/// a plain `"…"` literal, returns its contents. Raw and escaped forms return
+/// `None` — conservatively unverifiable, never silently cleared.
 /// Test: `the_guard_detects_a_home_write_and_ignores_prose`,
-/// `the_guard_survives_non_ascii_source`.
-fn window_after(code: &str, at: usize) -> String {
-    code[at..].chars().take(120).collect()
-}
-
-/// Does the mutation at `at` name its variable with a string literal?
-///
-/// Why (#5544, code-critic MEDIUM): rule 1 can only read a literal. A call whose
-/// key is a variable — `commands/managed_root.rs`'s `fn set(key, val)` is the
-/// existing example — could write `HOME` and the scan would never see it. Such
-/// a call is therefore UNVERIFIABLE rather than clean, and is ratcheted by
-/// [`ENV_MUTATION_BUDGET`]'s second number instead of being silently allowed.
-/// What: skips to the opening paren and reports whether the first non-space
-/// character of the argument list starts a string literal (`"` or `r"`/`r#"`).
-/// Test: `the_guard_flags_an_indirect_env_key`.
-fn has_literal_key(code: &str, at: usize) -> bool {
-    let Some(open) = code[at..].find('(') else {
-        return false;
-    };
+/// `the_guard_flags_an_indirect_env_key`,
+/// `the_guard_does_not_confuse_xdg_config_home_for_home`.
+fn literal_key(code: &str, at: usize) -> Option<String> {
+    let open = code[at..].find('(')?;
     let args = code[at + open + 1..].trim_start();
-    args.starts_with('"') || args.starts_with("r\"") || args.starts_with("r#\"")
+    let body = args.strip_prefix('"')?;
+    let end = body.find('"')?;
+    // An escape before the closing quote means this is not a simple name.
+    let key = &body[..end];
+    if key.contains('\\') {
+        return None;
+    }
+    Some(key.to_string())
 }
 
 /// Every `set_var(` / `remove_var(` / `set_current_dir(` call, as
@@ -222,6 +229,15 @@ fn mutation_sites(code: &str) -> Vec<(usize, bool)> {
         ("set_var", true),
         ("remove_var", true),
         ("set_current_dir", false),
+        // #5544 (code-critic round 3): the target's OWN wrappers.
+        // `commands/managed_root.rs` defines `fn set_env(key, val)` /
+        // `fn remove_env(key)` around the `unsafe` calls, so `set_env("HOME", p)`
+        // matched no pattern and evaded BOTH rules — the same evasion shape as
+        // the indirect-key gap, one level in. Matching the wrapper names means a
+        // literal key routed through them is still read by rule 1, and a
+        // non-literal one still moves the indirect count.
+        ("set_env", true),
+        ("remove_env", true),
     ];
     let mut sites = Vec::new();
     for (call, names_a_var) in CALLS {
@@ -254,14 +270,14 @@ fn bin_target_writes_no_home_env() {
     for path in bin_target_sources() {
         let code = strip_comments(&std::fs::read_to_string(&path).expect("read source"));
         for (at, names_a_var) in mutation_sites(&code) {
-            if !names_a_var || !has_literal_key(&code, at) {
+            if !names_a_var {
                 continue;
             }
-            let window = window_after(&code, at);
-            for banned in BANNED_ENV_WRITES {
-                if window.contains(banned) {
-                    findings.push(format!("{}: writes ${banned}", path.display()));
-                }
+            let Some(key) = literal_key(&code, at) else {
+                continue;
+            };
+            if BANNED_ENV_WRITES.contains(&key.as_str()) {
+                findings.push(format!("{}: writes ${key}", path.display()));
             }
         }
     }
@@ -298,7 +314,7 @@ fn bin_target_env_mutation_count_does_not_grow() {
         let total = sites.len();
         let indirect = sites
             .iter()
-            .filter(|(at, names_a_var)| *names_a_var && !has_literal_key(&code, *at))
+            .filter(|(at, names_a_var)| *names_a_var && literal_key(&code, *at).is_none())
             .count();
         let display = path.display().to_string();
         let (budget, indirect_budget) = ENV_MUTATION_BUDGET
@@ -363,10 +379,8 @@ fn the_guard_detects_a_home_write_and_ignores_prose() {
     let banned: Vec<usize> = mutation_sites(&code)
         .into_iter()
         .filter(|(at, names_a_var)| {
-            *names_a_var && has_literal_key(&code, *at) && {
-                let window = window_after(&code, *at);
-                BANNED_ENV_WRITES.iter().any(|b| window.contains(b))
-            }
+            *names_a_var
+                && literal_key(&code, *at).is_some_and(|k| BANNED_ENV_WRITES.contains(&k.as_str()))
         })
         .map(|(at, _)| at)
         .collect();
@@ -401,7 +415,7 @@ fn the_guard_flags_an_indirect_env_key() {
     let code = strip_comments(sample);
     let indirect: Vec<usize> = mutation_sites(&code)
         .into_iter()
-        .filter(|(at, names_a_var)| *names_a_var && !has_literal_key(&code, *at))
+        .filter(|(at, names_a_var)| *names_a_var && literal_key(&code, *at).is_none())
         .map(|(at, _)| at)
         .collect();
 
@@ -409,6 +423,42 @@ fn the_guard_flags_an_indirect_env_key() {
         indirect.len(),
         2,
         "a parameter key and a const key are both unverifiable; a string literal is not"
+    );
+}
+
+/// `XDG_CONFIG_HOME` is not a `$HOME` write.
+///
+/// Why (#5544, code-critic round 3): rule 1 used to scan the following bytes for
+/// the substring `HOME`, and `commands/managed_root.rs` writes
+/// `XDG_CONFIG_HOME` — which contains it. Once the guard learned to read that
+/// file's `set_env`/`remove_env` wrappers, a substring scan would have failed
+/// the build on a legitimate file. Exact literal comparison is what separates
+/// the two, and this pins it.
+/// What: asserts the extractor returns the whole key and that only the exact
+/// banned names match.
+/// Test: this function IS the test.
+#[test]
+fn the_guard_does_not_confuse_xdg_config_home_for_home() {
+    let sample = concat!(
+        "fn a() { set_env(\"XDG_CONFIG_HOME\", v) }\n",
+        "fn b() { set_env(\"HOME\", v) }\n",
+        "fn c() { remove_env(\"TRUSTY_MPM_ROOT\") }\n",
+    );
+    let code = strip_comments(sample);
+    let keys: Vec<String> = mutation_sites(&code)
+        .into_iter()
+        .filter_map(|(at, _)| literal_key(&code, at))
+        .collect();
+    assert_eq!(keys, ["XDG_CONFIG_HOME", "HOME", "TRUSTY_MPM_ROOT"]);
+
+    let banned: Vec<&String> = keys
+        .iter()
+        .filter(|k| BANNED_ENV_WRITES.contains(&k.as_str()))
+        .collect();
+    assert_eq!(
+        banned,
+        [&"HOME".to_string()],
+        "only the exact name is a violation — a variable that merely CONTAINS it is not"
     );
 }
 
@@ -440,14 +490,14 @@ fn the_guard_survives_non_ascii_source() {
     assert!(!code.contains("🤖"), "the comment must still be stripped");
     for (at, _) in mutation_sites(&code) {
         // The assertion is that this does not panic on a char boundary.
-        let _ = window_after(&code, at);
+        let _ = literal_key(&code, at);
     }
 
     // And the real target's sources, which is where the panic would have landed.
     for path in bin_target_sources() {
         let code = strip_comments(&std::fs::read_to_string(&path).expect("read source"));
         for (at, _) in mutation_sites(&code) {
-            let _ = window_after(&code, at);
+            let _ = literal_key(&code, at);
         }
     }
 }
