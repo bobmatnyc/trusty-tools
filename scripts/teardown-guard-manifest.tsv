@@ -1,0 +1,34 @@
+# scripts/teardown-guard-manifest.tsv — declared exemptions for
+# scripts/check_teardown_guard.sh (issue #3049 round 4).
+#
+# One row per durable-write call site that does NOT acquire the per-index
+# teardown guard earlier in its own scope. This is the only place such a site may
+# be declared, and the gate fails on any site that is neither guarded nor listed
+# here — so an omission is a red gate, not a silent gap.
+#
+# Format: <path><TAB><method><TAB><scope><TAB><disposition><TAB><reason>
+#   scope        innermost `fn` name, plus `+spawn` when the call is inside a
+#                spawned task body. The gate prints the exact scope string for
+#                any site it rejects, so a new row is copy-paste, not guesswork.
+#   disposition  CALLER:<fn>  the guard is held by an ancestor named <fn>, which
+#                             must exist in a scanned file that acquires a guard.
+#                EXEMPT       deliberately unguarded; the reason says why.
+#   reason       mandatory, non-empty.
+#
+# A row that stops matching an unguarded site FAILS as stale. Delete it when the
+# site becomes guarded; update it when the site moves.
+crates/trusty-search/src/core/indexer/files.rs	remove_chunks_from_stores	remove_file	CALLER:remove_file_handler	Inner step of CodeIndexer::remove_file. Every caller of remove_file is an entry point that already holds the guard (HTTP handler, watcher, boot reconcile); taking it again here would be the same lock twice on one path.
+crates/trusty-search/src/core/indexer/files.rs	remove_chunks_from_stores	remove_file_no_kg_rebuild	CALLER:remove_file_handler	Same inner step as the row above, on the variant that skips the symbol-graph rebuild.
+crates/trusty-search/src/core/indexer/ingest/mod.rs	commit_parsed_batch	index_file	CALLER:index_file_handler	Inner call of CodeIndexer::index_file, the choke point every guarded entry point routes through — HTTP index-file, the watcher, and boot reconcile all hold the guard across it.
+crates/trusty-search/src/core/indexer/ingest/mod.rs	commit_parsed_batch	index_files_batch_inner	CALLER:run_reindex	Batch ingest fast path, reached only from the reindex pipeline; run_reindex holds the shared side for the whole run.
+crates/trusty-search/src/core/migration/m001.rs	commit_parsed_batch	apply	CALLER:spawn_index_migrations	Startup schema migration. The guard is taken inside the spawned task in commands/start/daemon.rs and held for the whole per-index migration (#3049 round 4) — this is the path three review rounds missed.
+crates/trusty-search/src/service/reindex/batch.rs	commit_parsed_batch	commit_parsed_and_finalize	CALLER:run_reindex	Reindex pipeline batch commit, inside run_reindex's guarded span; it also holds INDEX_LOCKS.
+crates/trusty-search/src/service/reindex/completion.rs	rebuild_symbol_graph_now	rebuild_symbol_graph_for_reindex	CALLER:run_reindex	Reindex completion step, inside run_reindex's guarded span.
+crates/trusty-search/src/service/reindex/corpus_swap.rs	clear_reindex_checkpoint_sync	clear_checkpoint_before_promote	CALLER:run_reindex	Clears the checkpoint on the STAGING corpus during promotion, inside run_reindex's guarded span. The spawn_blocking is awaited, so it cannot outlive the guard.
+crates/trusty-search/src/service/reindex/corpus_swap.rs	clear_reindex_checkpoint_sync	clear_checkpoint_on_released_file+spawn	CALLER:run_reindex	Fallback clear on the released staging file, also inside run_reindex's guarded span and also awaited. It writes the staging file, not the live corpus directory.
+crates/trusty-search/src/service/reindex/defer_embed.rs	embed_deferred_chunks	run_embed_catch_up	CALLER:wait_for_turn	The deferred-embed queue worker takes the guard before dispatching the pass (defer_embed_queue.rs).
+crates/trusty-search/src/service/reindex/hash_cache.rs	clear_file_hashes	clear_persisted	CALLER:run_reindex	Force-reindex hash-cache clear, called from inside run_reindex's guarded span.
+crates/trusty-search/src/service/reindex/root_gate.rs	set_root_path	sync_indexer_root_after_trusted_move	EXEMPT	Assigns the indexer's in-memory root_path field under the indexer write lock. No corpus bytes are written, so a concurrent teardown costs a stale field on a handle about to be dropped, not a partial write.
+crates/trusty-search/src/service/reindex/root_gate.rs	set_root_path	restore_indexer_root_after_refusal	EXEMPT	Same in-memory field assignment as the row above, on the refusal path.
+crates/trusty-search/src/service/server/reindex_handlers.rs	set_root_path	reindex_handler	EXEMPT	In-memory root_path assignment under the indexer write lock; writes no corpus bytes. The reindex it queues takes the guard through run_reindex.
+crates/trusty-search/src/service/server/contrib_graph.rs	save_contrib_graph	ingest_graph_handler	CALLER:ingest_graph_handler	The redb write runs in a spawn_blocking closure, so the gate treats it as deferred. It is not: the handler AWAITS that join handle while holding the guard it took at the top, so the closure cannot outlive the guard. CAUTION when editing that line: the closure is brace-less (move || corpus.save_contrib_graph(&contrib)), which the gate cannot see as deferred on its own — it is caught only because the inline spawn_blocking( shares the line. Binding it to a variable first drops the site out of the gate entirely and makes this row fail as stale. See KNOWN LIMITS in check_teardown_guard.sh.

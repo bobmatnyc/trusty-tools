@@ -8,8 +8,14 @@
 //! Test: see `tests` submodule for async unit tests.
 
 pub(crate) mod path_match;
+// #2936: reaps staging files a SIGKILLed process left behind. Its own file so
+// `usearch_store.rs` stays under the 500-SLOC production cap.
+mod staging_reap;
 #[cfg(test)]
 mod tests;
+// #2936: staging-file reaping and the abort-race guarantee against a real save.
+#[cfg(test)]
+mod tests_2936;
 mod types;
 mod usearch_impl;
 // Issue #4707: snapshot-adoption recovery for the #1711 guard. Kept in its own

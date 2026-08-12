@@ -123,6 +123,10 @@ pub(super) async fn ingest_graph_handler(
         "contrib ingest received"
     );
 
+    // #3049: this handler writes redb (`save_contrib_graph`) and rebuilds the
+    // serving symbol graph, so it holds the teardown lock's shared side for the
+    // span of both.
+    let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     // Persist (replace-per-producer) on a blocking worker — redb is sync.
     let replaced = {
         let indexer = handle.indexer.read().await;

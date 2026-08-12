@@ -717,6 +717,12 @@ async fn apply_delta(
             };
             // Acquire and drop per-call: gives writers a window between files.
             let result = {
+                // #3049: teardown-lock read side, per call. Reconcile
+                // deliberately releases between files, so the guard is scoped
+                // the same way — a DELETE waits at most one file, not the
+                // whole reconcile pass.
+                let _teardown_guard =
+                    crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
                 let idx = handle.indexer.read().await;
                 idx.index_file(rel_path_str, &content).await
             };
@@ -734,6 +740,9 @@ async fn apply_delta(
             // Deleted: remove all chunks for this file.
             // Acquire and drop per-call so write-lock contention is bounded.
             let result = {
+                // #3049: see the index_file arm above.
+                let _teardown_guard =
+                    crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
                 let idx = handle.indexer.read().await;
                 idx.remove_file(rel_path_str).await
             };
