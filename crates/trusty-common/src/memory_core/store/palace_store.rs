@@ -272,9 +272,12 @@ impl PalaceStore {
     /// What: `try_exists()` on the metadata path. `Ok(false)` means genuinely
     /// absent; `Ok(true)` means present; `Err` means the probe itself failed
     /// and the caller must NOT infer absence from it.
-    /// Test: `metadata_present_distinguishes_absent_from_present`;
+    /// Test: `metadata_present_distinguishes_absent_from_present`. The caller
+    /// contract this exists for is covered cross-crate, in
+    /// `crates/trusty-mpm/src/core/sm/memory_tests.rs`, by
     /// `ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_palace`
-    /// (trusty-mpm) covers the caller contract this exists for.
+    /// — named in prose because `scripts/check_test_pointers.sh` resolves a
+    /// cited name only within the citing crate.
     pub fn metadata_present(data_dir: &Path) -> Result<bool> {
         let target = data_dir.join(PALACE_JSON);
         target
