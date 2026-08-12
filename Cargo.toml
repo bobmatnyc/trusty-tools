@@ -130,7 +130,14 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 # trusty-review: LLM-backed PR-review service. Referenced by trusty-analyze
 # (behind the optional `review` feature) so the analyze MCP server can expose
 # the trusty-review pipeline as `tr_review_*` tools (#630).
-trusty-review = { path = "crates/trusty-review", version = "0.16" }
+# Why (#5466): `default-features = false` HERE, not only on the member entry.
+#      Cargo ignores a member's `default-features = false` when the workspace
+#      entry omits the key (it warns, and says it may become a hard error), so
+#      trusty-analyze's own `default-features = false` was a silent no-op until
+#      this line existed. Both consumers name what they need: trusty-analyze's
+#      `review` feature pulls `trusty-review/mcp`; trusty-mpm's dev-dependency
+#      only touches `integrations`, which is unconditional.
+trusty-review = { path = "crates/trusty-review", version = "0.16", default-features = false }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
