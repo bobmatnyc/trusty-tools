@@ -600,10 +600,7 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
     let agents = [
         // Increment 1 agents
@@ -682,10 +679,7 @@ fn base_agent_guidance_sections_survive_composition() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
     let composed = compose_agent("version-control", &assets_dir)
         .expect("compose_agent(version-control) must succeed");
@@ -991,10 +985,7 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
     use crate::core::instruction_pipeline::assemble_system_prompt;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
     // (a) BASE-AGENT.md's report-don't-promise subsection (which replaced the
     // retired chunked-repoll guidance in #4792) must reach a composed agent
@@ -1075,10 +1066,7 @@ fn pm_authority_doctrine_survives_composition() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
     let composed = compose_agent("version-control", &assets_dir)
         .expect("compose_agent(version-control) must succeed");
@@ -1191,10 +1179,7 @@ fn documentation_style_unions_into_engineer_family_via_base_engineer() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
     let composed = compose_agent("rust-engineer", &assets_dir)
         .expect("compose_agent(rust-engineer) must succeed");
@@ -1230,10 +1215,7 @@ fn rust_build_performance_declared_by_rust_family_agents() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
     for agent in ["rust-engineer", "tauri-engineer"] {
         let composed = compose_agent(agent, &assets_dir)
@@ -1330,10 +1312,7 @@ fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
         }
     }
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
     let composed =
         compose_agent("version-control", &assets_dir).expect("compose_agent must succeed");
     for needle in REQUIRED {
@@ -1370,10 +1349,7 @@ fn the_honest_ban_reaches_both_prose_channels() {
         }
     }
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
     let composed =
         compose_agent("version-control", &assets_dir).expect("compose_agent must succeed");
     for needle in REQUIRED {
@@ -1393,10 +1369,7 @@ fn base_agent_graduated_verbosity_survives_composition() {
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
-    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("assets")
-        .join("agents");
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
 
     let composed =
         compose_agent("version-control", &assets_dir).expect("compose_agent must succeed");

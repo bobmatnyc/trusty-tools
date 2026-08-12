@@ -22,10 +22,10 @@ overwrites.
 An agent is **official** (source-controlled, built via the compose chain) if
 its name resolves inside `paths.agent_source_dir()` — which prefers the
 `agents/agents/` git submodule when present, otherwise the bundled assets
-under `crates/trusty-mpm/src/assets/agents/`. Check:
+under `crates/trusty-agents-common/src/assets/agents/`. Check:
 
 ```bash
-ls crates/trusty-mpm/src/assets/agents/ | grep <agent-name>
+ls crates/trusty-agents-common/src/assets/agents/ | grep <agent-name>
 # or, if the submodule is populated:
 ls agents/agents/ | grep <agent-name>
 ```
@@ -68,12 +68,12 @@ checksum mismatch and left alone, never clobbered).
 ### Step 1: Identify the Source
 
 ```bash
-ls crates/trusty-mpm/src/assets/agents/ | grep <agent-name>
+ls crates/trusty-agents-common/src/assets/agents/ | grep <agent-name>
 ```
 
 ### Step 2: Update the Source
 
-Edit `crates/trusty-mpm/src/assets/agents/<agent-name>.md` (or the `BASE-*.md`
+Edit `crates/trusty-agents-common/src/assets/agents/<agent-name>.md` (or the `BASE-*.md`
 template it extends, if the change is base-wide). Follow the project's
 Why/What/Test doc-comment convention if you touch the surrounding Rust
 wiring, not the Markdown itself.
@@ -97,7 +97,7 @@ valid frontmatter and an `extends:` chain that resolves).
 
 **BLOCK** any attempt to edit `.claude/agents/<official-agent>.md` directly —
 it is a build output. Update the source under
-`crates/trusty-mpm/src/assets/agents/`, rebuild, and redeploy instead. This
+`crates/trusty-agents-common/src/assets/agents/`, rebuild, and redeploy instead. This
 is the CB#1 (Large Implementation) pattern applied to agent files
 specifically: delegate the source edit to the appropriate Engineer agent, do
 not Edit the deployed copy.
@@ -111,7 +111,7 @@ Edit: ~/.claude/agents/web-qa.md   # VIOLATION — this is a composed build outp
 ### Correct
 
 ```
-1. Edit: crates/trusty-mpm/src/assets/agents/web-qa.md   # update source
+1. Edit: crates/trusty-agents-common/src/assets/agents/web-qa.md   # update source
 2. Run:  cargo build -p trusty-mpm && tm install          # rebuild + redeploy
 3. Test: cargo test -p trusty-mpm --lib bundle            # validate wiring
 ```
