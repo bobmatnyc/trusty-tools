@@ -142,14 +142,26 @@ parallel test runs is not evidence your branch broke something. Re-run with
 it goes green, the failure was isolation-specific, not a correctness defect.
 Isolation races in this crate are pre-existing and documented above.
 
-🔴 **The correct response is to prove your diff touches zero files in those
-crates — never to `#[ignore]`, `cfg`-gate, or `--exclude` them.** The proof is a
-path list, and empty output is the evidence; paste it in the PR:
+🔴 **The correct response is to prove the failure is pre-existing — never to
+`#[ignore]`, `cfg`-gate, or `--exclude` a failing test.** If the failing crate
+depends on nothing you changed, an empty path list proves it. Otherwise —
+across a dependency edge such as `trusty-search` on `trusty-common` — that
+path list can come back empty while the branch is still guilty, and the valid
+proof is reproducing the failure on `origin/main` (step 2 below; the
+shared-crate caveat is at step 5). When the path list is the applicable proof,
+paste it in the PR:
 
+<!-- Load-bearing order: keep both branches above this block — moving the
+     block ahead of them re-opens the #5594 misreading. -->
 ```bash
 git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
                                            crates/trusty-mpm/src/client/
 ```
+
+`create_index_cannot_register_while_a_delete_is_tearing_the_id_down` above is a
+worked example of that `origin/main` reproduction, measured directly on
+`origin/main` (documented by
+[#5607](https://github.com/bobmatnyc/trusty-tools/pull/5607)).
 
 ## Telling A Pre-Existing Red From One You Caused — Crate-Scoped Confirmation
 
@@ -166,9 +178,10 @@ git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
 3. **Serialize before blaming isolation:** `-- --test-threads=1`. If it still
    fails serialized, parallel interference is not the explanation and "flaky
    under load" is the wrong diagnosis.
-4. **Check the path evidence:** `git diff --name-only origin/main...HEAD`. If the
-   failing crate does not appear there, and you did not touch a shared library it
-   depends on, the red is not yours.
+4. **Check the path evidence:** if the failing crate depends on nothing you
+   changed, an empty `git diff --name-only origin/main...HEAD` for it means the
+   red is not yours; otherwise an empty diff proves nothing — see the
+   shared-crate caveat next.
 5. 🔴 **The shared-crate caveat:** a green `cargo test -p <your-crate>` does
    **not** clear you when you changed `trusty-common`, `trusty-embedderd`, or any
    other shared library. A red in a *dependent* crate is yours until rung 4 of
