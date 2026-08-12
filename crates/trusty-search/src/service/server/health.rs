@@ -57,6 +57,21 @@ pub(super) struct HealthResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) embedderd_rss_mb: Option<u64>,
     pub(super) background_reindex_queue_depth: usize,
+    /// #4390: deferred-embed (C2) catch-up passes queued or in flight.
+    ///
+    /// Why: `deferred_embed_queue_depth`'s own doc comment claimed it was
+    /// exposed here and it was not — only the completion epoch was consumed. It
+    /// is the one counter that says an index's semantic lane is still being
+    /// filled in, including the boot re-arms this issue added, so an operator
+    /// watching a restart drain had no way to see them.
+    /// What: the same `QUEUE_DEPTH` gauge `defer_embed_queue` maintains,
+    /// fleet-wide rather than per index. Additive field; every existing
+    /// consumer parses this response with optional/ignored unknown fields.
+    /// Test: none dedicated yet — `tests_stall.rs`'s `HealthResponse`
+    /// fixtures set this field to a literal `0` without exercising the live
+    /// `reindex::deferred_embed_queue_depth()` wiring end to end. This is a
+    /// coverage gap, not a claim of tested behavior; see #5523.
+    pub(super) deferred_embed_queue_depth: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) update_available: Option<String>,
     /// Warm-boot summary: how many indexes loaded vs. skipped and by what
@@ -795,6 +810,8 @@ pub(super) async fn health_handler(
         // Issue #458: expose the background reindex backlog so operators can
         // watch the startup storm drain without reading daemon logs.
         background_reindex_queue_depth: crate::service::reindex::background_reindex_queue_depth(),
+        // #4390: honour the claim `deferred_embed_queue_depth`'s doc already made.
+        deferred_embed_queue_depth: crate::service::reindex::deferred_embed_queue_depth(),
         update_available,
         indexes_kg_disabled,
         indexes_vector_disabled,

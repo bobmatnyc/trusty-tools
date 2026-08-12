@@ -1,5 +1,6 @@
 //! Miscellaneous tool arms: `search_health`, `chat`, `grep`, `get_call_chain`,
-//! `upgrade`, and `console_metrics`.
+//! `upgrade`, and `console_metrics`. `search_health`'s body lives in
+//! [`super::health`] (#5264); the arm here only routes to it.
 //!
 //! Why: these tools share no common theme with the search or index groups
 //! but each is too small to justify its own file. Grouping them here keeps
@@ -30,7 +31,9 @@ pub(super) async fn dispatch_misc_tool(
     args: &Value,
 ) -> Option<Result<Value, DispatchError>> {
     match tool {
-        "search_health" => Some(server.get("/health").await),
+        // #5264: a raw `GET /health` forward could not say WHY it failed, nor
+        // which daemon answered when it succeeded. See `super::health`.
+        "search_health" => Some(Ok(super::health::handle_search_health(server, args).await)),
         "chat" => {
             // Default `index_id` to the session's pinned index (#1373).
             let index_id = match server.resolve_index_id(args) {

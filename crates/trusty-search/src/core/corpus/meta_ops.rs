@@ -327,9 +327,21 @@ impl CorpusStore {
     /// changed (fresh) + unchanged (copied).
     ///
     /// Tables copied: `CHUNKS_TABLE`, `ENTITIES_TABLE`, `FILE_HASHES_TABLE`,
-    /// and `_meta` (indexed_root, schema_version). KG tables are intentionally
-    /// NOT copied here — they are rebuilt from scratch at the end of every
-    /// reindex via `rebuild_symbol_graph_for_reindex` + `save_kg_graph`.
+    /// and `_meta` (indexed_root, schema_version).
+    ///
+    /// The KG tables split in two, and only one half is regenerable. The
+    /// DERIVED tables (`kg_nodes`, `kg_edges`) are computed from the chunk
+    /// corpus and genuinely rebuilt at the end of every reindex via
+    /// `rebuild_symbol_graph_for_reindex` + `save_kg_graph`, so not copying
+    /// them is correct. The CONTRIBUTED table (`kg_contrib`, ADR-0009) is not:
+    /// it is written only by the external `POST /indexes/{id}/graph` ingest,
+    /// which a reindex never calls, so nothing regenerates it and dropping it
+    /// destroys data no part of this daemon can recover. It is carried across
+    /// the swap by `CorpusStore::copy_contrib_from`, which
+    /// `begin_staged_corpus_swap` calls on the force path as well as this one —
+    /// reading an absent `kg_contrib` here as "it gets rebuilt" is what let
+    /// every reindex silently discard every contribution while reporting
+    /// success. See PR #5527.
     ///
     /// `META_KEY_REINDEX_CHECKPOINT` is likewise and deliberately NOT in the
     /// copied-key list (#3979): the checkpoint describes the run building

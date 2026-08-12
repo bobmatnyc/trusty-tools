@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 
 use crate::core::chunker::{chunk_ast, RawChunk};
 use crate::core::entity::RawEntity;
-use crate::core::symbol_graph::{ChunkTuple, SymbolGraph};
+use crate::core::symbol_graph::{ChunkTuple, ContribMergeOutcome, SymbolGraph};
 
 use super::{populate_virtual_terms, CodeIndexer, ParsedBatch};
 
@@ -43,10 +43,13 @@ impl CodeIndexer {
     /// corpus is small + in-memory, so we favour simplicity over incremental
     /// maintenance.
     /// What: snapshots chunk tuples and entity lists under read locks, builds
-    /// a new `SymbolGraph`, persists it to the corpus if wired, and installs it.
+    /// a new `SymbolGraph`, persists it to the corpus if wired, and installs
+    /// it — unless the contributed-overlay merge failed, in which case the
+    /// previous serving graph is kept and the failure is returned (#5505).
     /// Test: every test that calls `add_chunk` or `index_file` exercises the
-    /// rebuild path indirectly.
-    pub(super) async fn rebuild_symbol_graph(&self) {
+    /// rebuild path indirectly; `contrib_load_failure_installs_nothing` covers
+    /// the not-installed arm.
+    pub(super) async fn rebuild_symbol_graph(&self) -> ContribMergeOutcome {
         // Issue #2162 follow-up: this function reads `self.chunks` and
         // `self.entities` directly below, but several call paths
         // (`remove_file`, `remove_chunk` from the FSEvents watcher,
@@ -147,16 +150,24 @@ impl CodeIndexer {
         // graph (best-effort, pre-merge so the derived kg_* tables never
         // absorb contributed rows), then fold the stored contributed overlay
         // back in — a reindex must not evict contributed edges from the
-        // serving graph. Both redb-bound steps run on one blocking worker;
-        // failures degrade with warnings (see `save_then_merge_contrib`).
-        let new_graph = crate::core::symbol_graph::save_then_merge_contrib(
+        // serving graph. Both redb-bound steps run on one blocking worker.
+        let (new_graph, outcome) = crate::core::symbol_graph::save_then_merge_contrib(
             new_graph,
             self.corpus.clone(),
             self.index_id.clone(),
         )
         .await;
 
-        *self.symbol_graph.write().await = new_graph;
+        // #5505: install nothing rather than a graph known to be missing the
+        // contributed overlay — the caller reports the failure instead.
+        match new_graph {
+            Some(g) => *self.symbol_graph.write().await = g,
+            None => tracing::error!(
+                index_id = %self.index_id,
+                "kg: rebuild produced no installable graph — previous serving graph retained"
+            ),
+        }
+        outcome
     }
 
     /// Add (or replace) a chunk in the corpus. If an embedder + store are
@@ -395,8 +406,12 @@ impl CodeIndexer {
 
     /// Public hook for the bulk reindex orchestrator: rebuild the symbol graph
     /// once after a series of `index_files_batch_no_rebuild` calls.
-    pub async fn rebuild_symbol_graph_now(&self) {
-        self.rebuild_symbol_graph().await;
+    ///
+    /// Returns what the pass could not do (#5505) — the contributed-graph
+    /// ingest endpoint reports it; callers that only need the rebuild may
+    /// ignore it.
+    pub async fn rebuild_symbol_graph_now(&self) -> ContribMergeOutcome {
+        self.rebuild_symbol_graph().await
     }
 
     async fn index_files_batch_inner(

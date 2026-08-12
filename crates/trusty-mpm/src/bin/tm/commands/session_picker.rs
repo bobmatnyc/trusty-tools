@@ -103,6 +103,13 @@ pub(crate) enum PickerDecision {
     /// running session, a force-confirm — before touching the store, so this
     /// variant only signals intent, never an unconditional destructive action.
     Delete(usize),
+    /// Bulk-delete every session whose NAME matches a glob (#5539). Entered as
+    /// `d <glob>` — e.g. `d tm-test-*`, `d *-01 --dry-run`. Reachable only when
+    /// the remainder carries a glob metacharacter, so a mistyped `delete` still
+    /// resolves to `Unrecognised` rather than a bulk destructive action. The
+    /// driver previews the full match set and requires the match COUNT typed
+    /// back before deleting anything, and never deletes a running session.
+    DeleteGlob(super::picker_delete_glob::GlobDeleteRequest),
     /// Selection (bare Enter OR an explicit numeric choice) targeted the
     /// 0-based-indexed session whose workspace is gone for good — the
     /// server-computed `unresumable` flag was `true` (#2595). Resuming it
@@ -826,6 +833,11 @@ fn launch_new_argument(choice: &str) -> Option<&str> {
 ///     (#2304); the driver still runs a confirm/force-confirm prompt before
 ///     deleting. Matching a TOMBSTONED slot → `SlotDeleted(i)` (#3034 — no
 ///     double-delete, no silent no-op).
+///   • `d <glob>` whose remainder is not a slot number but DOES contain a glob
+///     metacharacter (`*`, `?`, `[`) → `DeleteGlob` (#5539) — a bulk delete by
+///     session name, previewed and count-confirmed by the driver. A remainder
+///     with no metacharacter (`delete`, an unknown name, an out-of-range
+///     number) stays `Unrecognised`, so a typo can never start a bulk action.
 ///   • `r<N> <new-name>` / `r <N> <new-name>` matching a LIVE `sessions[i].slot`,
 ///     with a non-empty trimmed name → `Rename(i, new-name)` (#3724). A
 ///     TOMBSTONED slot → `SlotDeleted(i)`; a missing/unparseable number or an
@@ -903,14 +915,23 @@ pub(crate) fn parse_picker_choice(
     // a slot the daemon already reports `deleted` (#3034) cannot be deleted
     // again, so it resolves to `SlotDeleted` instead of a silent no-op.
     if let Some(rest) = choice.strip_prefix(['d', 'D']) {
-        return match rest
+        if let Some(idx) = rest
             .trim()
             .parse::<u32>()
             .ok()
             .and_then(|n| find_slot(sessions, n))
         {
-            Some(idx) if sessions[idx].deleted => PickerDecision::SlotDeleted(idx),
-            Some(idx) => PickerDecision::Delete(idx),
+            return match sessions[idx].deleted {
+                true => PickerDecision::SlotDeleted(idx),
+                false => PickerDecision::Delete(idx),
+            };
+        }
+        // #5539: not a slot number — accept the bulk `d <glob>` form. The
+        // remainder must carry a glob metacharacter, which is what keeps a
+        // mistyped `delete` falling through to `Unrecognised` (see
+        // `picker_delete_glob::parse_glob_delete`).
+        return match super::picker_delete_glob::parse_glob_delete(rest) {
+            Some(req) => PickerDecision::DeleteGlob(req),
             None => PickerDecision::Unrecognised,
         };
     }
@@ -1226,6 +1247,16 @@ pub(crate) async fn run_tty_picker(
             PickerDecision::Delete(i) => {
                 super::picker_delete::confirm_and_delete(client, url, &sessions[i]).await?;
             }
+            // #5539: bulk delete by name glob. The preview, the count-confirm
+            // prompt, and the running-session guard live in
+            // `picker_delete_glob`; deletions route through the same
+            // `delete_managed_then_local` the single-slot arm above uses. Every
+            // non-destructive outcome (no match, nothing deletable, dry run,
+            // bad pattern, cancel) returns 0 and falls through to the re-fetch.
+            PickerDecision::DeleteGlob(ref req) => {
+                super::picker_delete_glob::confirm_and_delete_glob(client, url, &sessions, req)
+                    .await?;
+            }
             // #3724: rename the selected session through the existing
             // hardened `commands::rename::do_rename_request` path (the same
             // PATCH `tm sessions rename` issues); the driver prints the
@@ -1248,7 +1279,7 @@ pub(crate) async fn run_tty_picker(
             PickerDecision::Unrecognised => {
                 eprintln!(
                     "tm: unrecognised choice '{}' — accepted: 1..{new_idx}, n [<name>], \
-                     ls, d<N>, r<N> <name>, q",
+                     ls, d<N>, d <glob>, r<N> <name>, q",
                     line.trim()
                 );
                 continue;

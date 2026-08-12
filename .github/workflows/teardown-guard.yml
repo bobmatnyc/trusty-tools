@@ -1,0 +1,48 @@
+# Teardown-guard gate for trusty-search (issue #3049 round 4).
+#
+# Every durable-write call site in `crates/trusty-search/src/` either acquires
+# the per-index teardown guard earlier in its own scope, or is declared in
+# `scripts/teardown-guard-manifest.tsv` with a reason. Replaces a prose table in
+# `service/reindex/semaphore.rs` that was re-derived by hand each review round
+# and was wrong three rounds running — each miss let a `DELETE ?delete_data=true`
+# report `quiesced: true` and `remove_dir_all` a directory a live writer was
+# writing into.
+#
+# Pure text scanning — no Rust toolchain or build needed, so this runs as its own
+# lightweight job (matches line-cap.yml's checkout style).
+name: Teardown guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks. `ready_for_review` covers a draft being
+    # marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+
+concurrency:
+  group: teardown-guard-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  teardown-guard:
+    name: Durable writes hold the teardown guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      # Mutation self-test FIRST: proves the gate still rejects an empty scan, a
+      # guard placed after the write, and a write inside a spawned task whose
+      # guard is outside it. A gate that cannot fail makes the real run's green
+      # meaningless, so its ability to fail is verified before it is trusted.
+      # Mirrors line-cap.yml's selftest-then-gate ordering.
+      - name: Selftest (the gate must reject each known-bad shape)
+        run: bash scripts/check_teardown_guard_selftest.sh
+
+      - name: Every durable write holds the teardown guard, or is declared
+        run: bash scripts/check_teardown_guard.sh

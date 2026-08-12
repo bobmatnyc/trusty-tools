@@ -112,6 +112,7 @@ pub struct CodeChunk {
   | `embedder_initializing` | 503 | `true` | Retry once `/health` reports `embedder: "ready"`. |
   | `index_corpus_unavailable` | 503 | see `transient` | Durable corpus failed to open (#4087); carries the #4333 `failure_kind`. |
   | `vector_unavailable` | 503 | per `reason` | Semantic lane cannot serve this query — see `POST /indexes/:id/search`. |
+  | `contrib_not_merged` | 503 | earned | `POST /indexes/:id/graph` only (#5505). The contributed graph was stored durably (`persisted: true`, plus `producer` / `replaced` / `reason`) but could not be folded into the serving graph, so it is not queryable yet. One unreadable `kg_contrib` row fails the whole load, so `blocking_producer` names the row to fix when one is to blame: `retryable` is `true` only when no row is implicated or when the blocker is THIS producer's row (a re-send replaces it), and `false` when another producer's row is the blocker — retrying then fails identically forever. |
 
   `restore_via` on `index_not_resident` names `POST /indexes/{id}/search`, the
   only endpoint that reloads a cold-parked index. `status`, `chunks`, `grep`,
@@ -635,7 +636,7 @@ this table is generated from it, not maintained by hand.
 | `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
 | `search` | `index_id`, `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
 | `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `full_content?`, `index_id?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
-| `search_health` | — | Probe daemon liveness and version |
+| `search_health` | `index_id?` | Diagnose this session's search back-end (issue #5264). |
 | `search_kg` | `index_id`, `query`, `mode?`, `path_prefix?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
 | `search_lexical` | `index_id`, `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
 | `search_semantic` | `index_id`, `query`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |

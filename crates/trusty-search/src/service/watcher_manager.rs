@@ -220,6 +220,8 @@ impl WatcherManager {
         let indexed_files = IndexedFiles::new();
         let task = match spawn_watch_loop(
             &handle.root_path,
+            // #3049: the watcher takes this index's teardown-lock read side.
+            handle.id.clone(),
             Arc::clone(&handle.indexer),
             indexed_files,
         ) {

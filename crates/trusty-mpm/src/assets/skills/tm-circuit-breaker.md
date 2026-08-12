@@ -209,7 +209,9 @@ ps`, `make`, `pytest`, `npm test` directly via Bash.
 targets) or **QA** (test suites, endpoint checks). Service liveness for
 trusty-* daemons specifically routes through MCP health tools, never Bash —
 see `tm-tool-usage-guide` (`mcp__trusty-search__search_health`,
-`mcp__trusty-memory__memory_recall`).
+`mcp__trusty-memory__memory_recall`). `search_health` returns `Ok` whether or
+not the daemon is up — branch on the response's `healthy` field, not on the
+call succeeding.
 
 **Violation:** `PM: Bash(curl http://localhost:7878/health)`
 

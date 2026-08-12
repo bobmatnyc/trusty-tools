@@ -1,0 +1,3 @@
+Fixed
+
+- **`corpus_corruption_quarantine_4227.rs` used a `PersistedIndex` struct literal that no longer compiles.** #5523 marked `PersistedIndex` `#[non_exhaustive]` and converted every struct-literal construction site that existed at the time of its sweep; the #4227 quarantine test file landed in parallel and was never visited, so `cargo check -p trusty-search --tests` failed with `E0639` once both were on `main`. The test now builds through `PersistedIndex::new()`. `finish_reindex`'s teardown helpers (`stop_pollers`, `resolve_corpus_swap`, `resolve_hnsw_swap`, `rebuild_kg`) are also extracted into a new `finish_teardown` module, bringing `finish.rs` back under the 500-SLOC cap after #5514 and #5527 combined pushed it over

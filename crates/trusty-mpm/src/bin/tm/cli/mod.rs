@@ -877,11 +877,13 @@ pub(crate) enum Command {
     /// What: with `--projects`/`-p`, prints the local-project + managed-fleet alias
     /// registry (`--json` = combined JSON, `--root` overrides the managed root).
     /// Without `--projects`, it is the session connector: a TTY with ≥1 session
-    /// opens the picker; `--json`, `--all`, a non-TTY, or 0 sessions print the
-    /// static table. `--source-id`/`--current`/`--all` mirror `tm sessions ls`.
+    /// opens the picker; `--json`, `--all`, `--attached`/`-a`, a non-TTY, or 0
+    /// sessions print the static table. `--source-id`/`--current`/`--all` mirror
+    /// `tm sessions ls`.
     /// Test: `cli_parses_ls_connector_bare`, `cli_parses_ls_projects`,
     /// `cli_parses_ls_projects_short`, `cli_parses_ls_json`, `cli_parses_ls_current`,
-    /// `cli_ls_source_id_and_current_conflict`, `cli_parses_ls_terms_*`.
+    /// `cli_ls_source_id_and_current_conflict`, `cli_parses_ls_terms_*`,
+    /// `cli_parses_ls_attached_short`, `cli_parses_ls_attached_long`.
     #[command(name = "ls")]
     Ls {
         /// Sort keyword and/or filter term(s) (session mode only; ignored with
@@ -927,8 +929,32 @@ pub(crate) enum Command {
         /// Include decommissioned tombstone sessions (session mode only).
         ///
         /// Forces static output (the full forensic list is not a connect target).
+        /// Note: the short `-a` is `--attached`, NOT this flag — `--all` is
+        /// long-only and always has been.
         #[arg(long)]
         all: bool,
+        /// List ONLY sessions with a tmux client attached right now (session
+        /// mode only).
+        ///
+        /// Why: "which sessions am I actually looking at?" is a different
+        /// question from "which sessions are running". A session can be live —
+        /// its tmux entity exists and the daemon reports `active` — with nobody
+        /// connected to it; `-a` keeps only the ones a client is attached to.
+        /// The signal is the daemon's per-session `attached` flag, which comes
+        /// from tmux's own `#{session_attached}` (see
+        /// `session_manager::driver::TmuxDriver::attached_session_names`), not
+        /// from the lifecycle `state` word.
+        /// What: forces static output for the same reason `--all` does — a
+        /// session you already have a client on is the one target where the
+        /// picker's "connect" action is a no-op, so `-a` is a listing question,
+        /// not a connect one. Matching zero sessions prints `no attached
+        /// sessions` and exits 0. No effect on `--json` (raw daemon response is
+        /// always complete, matching `--all` and the filter terms) or on
+        /// `--projects` (the alias registry has no sessions).
+        /// Test: `cli_parses_ls_attached_short`, `cli_parses_ls_attached_long`,
+        /// `filter_attached_*`, `ls_connector_should_show_picker_attached_static`.
+        #[arg(long, short = 'a')]
+        attached: bool,
         /// Override the managed root (default: `~/.trusty-mpm`). `--projects` only.
         ///
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >

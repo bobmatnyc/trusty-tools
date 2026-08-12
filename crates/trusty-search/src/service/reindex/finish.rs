@@ -20,23 +20,21 @@
 use crate::core::memguard::{current_rss_mb, current_rss_mb_for_pid};
 use crate::core::registry::{IndexHandle, IndexId};
 use dashmap::DashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::completion::{
-    emit_complete_event, rebuild_symbol_graph_for_reindex, KgRebuildOutcome, RunTotals,
-};
-use super::corpus_swap::{abort_staged_corpus_swap, commit_staged_corpus_swap};
+use super::completion::{emit_complete_event, RunTotals};
 use super::defer_embed::spawn_deferred_embed_pass;
+use super::finish_teardown::{rebuild_kg, resolve_corpus_swap, resolve_hnsw_swap, stop_pollers};
 use super::guard::ReindexTerminationGuard;
-use super::hnsw_swap::{abort_staged_hnsw_swap, commit_staged_hnsw_swap, HnswSwapPaths};
+use super::hnsw_swap::HnswSwapPaths;
 use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
 use super::stage_timings::StageTimings;
 use super::stages::{
-    mark_graph_ready, mark_lexical_ready_semantic_in_progress, mark_reindex_failed,
+    mark_lexical_ready_semantic_in_progress, mark_reindex_failed,
     mark_semantic_ready_graph_in_progress, now_rfc3339, refresh_context_embedding,
     schedule_progress_cleanup,
 };
@@ -114,6 +112,15 @@ pub(super) struct FinishCtx {
     /// already exists for `defer_embed`, which embeds exactly the chunks the
     /// vector store is missing.
     pub(super) resumed: bool,
+    /// Issue #1451: the parse/embed producer task panicked or was cancelled.
+    ///
+    /// Why: the batches that ran before the fault committed normally, so the
+    /// #601 counter gate sees vectors and reports a run that stopped partway as
+    /// complete. This carries the runner's captured `JoinError` reason into the
+    /// terminal verdict, where `validate::override_with_producer_failure` turns
+    /// it into a `Failed` outcome — which both rolls the staged corpus back and
+    /// marks the index failed. `None` on every run whose producer finished.
+    pub(super) producer_failure: Option<String>,
 }
 
 /// Post-batch-loop completion: prune, KG rebuild, poller teardown, and events.
@@ -161,6 +168,7 @@ pub(super) async fn finish_reindex(
         mem_limit,
         force,
         resumed,
+        producer_failure,
     } = ctx;
 
     let BatchTotals {
@@ -208,6 +216,10 @@ pub(super) async fn finish_reindex(
         progress.skipped.load(AtomicOrdering::Acquire),
         total_vector_count,
     );
+    // #1451: a producer that panicked never reached the end of the file list,
+    // so its healthy-looking counters describe a partial run.
+    let reindex_outcome =
+        validate::override_with_producer_failure(reindex_outcome, producer_failure);
     let staging_resolution = staging::resolve_staging(memory_aborted, &reindex_outcome);
 
     // Issue #109, Phase 1: flip the lexical stage to Ready.
@@ -276,14 +288,18 @@ pub(super) async fn finish_reindex(
     .await;
     stage_timings.corpus_commit_ms = corpus_commit_started.elapsed().as_millis() as u64;
 
-    // Issue #601: a zero-vector embed failure on a full-pipeline index is a HARD failure.
+    // Issue #601: a zero-vector embed failure on a full-pipeline index is a HARD
+    // failure. #1451: so is a producer panic, which reaches here through the same
+    // outcome — with a nonzero vector count, hence the counter below rather than
+    // a hardcoded zero.
     if let Some(reason) = reindex_outcome.failure_reason() {
         let embed_failure_count = progress.errors.load(AtomicOrdering::Acquire);
         tracing::error!(
-            "reindex[{}]: FAILED — {reason} (walked_files={}, vectors=0, \
+            "reindex[{}]: FAILED — {reason} (walked_files={}, vectors={}, \
              embed_failure_count={})",
             index_id.0,
             total,
+            total_vector_count,
             embed_failure_count,
         );
         mark_reindex_failed(&handle, reason).await;
@@ -295,7 +311,7 @@ pub(super) async fn finish_reindex(
                 "message": reason,
                 "embed_failure_count": embed_failure_count,
                 "walked_files": total,
-                "vector_count": 0,
+                "vector_count": total_vector_count,
                 "fatal": true,
             }))
             .await;
@@ -390,6 +406,9 @@ pub(super) async fn finish_reindex(
         progress.status.store(ReindexStatus::Complete);
         // Issue #75: refresh the captured HEAD SHA.
         let new_sha = crate::core::git::head_sha(&handle.root_path);
+        // #4391: the in-memory stamp dies with the handle — persist it so the
+        // next boot compares against what was actually indexed, not live HEAD.
+        crate::service::boot_markers::persist_indexed_head_sha(&handle.id.0, new_sha.as_deref());
         *handle.indexed_head_sha.write().await = new_sha;
         // Issue #878: stamp the authoritative last-indexed timestamp.
         *handle.last_indexed_at.write().await = Some(now_rfc3339());
@@ -531,177 +550,14 @@ pub(super) async fn finish_reindex(
         // hold time on `handle.indexer`'s read lock is small and bounded by
         // corpus size, not worth the added public-API surface.
         let pending_chunks = handle.indexer.read().await.pending_embed_count().await;
+        // #4390: record the pass as outstanding BEFORE it is queued. C2 commits
+        // its vectors once at the very end, so a stop anywhere inside it
+        // persists none of them; this marker is the only thing that survives to
+        // tell the next boot the pass is still owed.
+        crate::service::boot_markers::persist_deferred_embed_pending(&handle.id.0, true);
         spawn_deferred_embed_pass(handle, progress.clone(), pending_chunks);
     }
 
     // Issue #75: GC the progress entry after a short delay.
     schedule_progress_cleanup(cleanup_map, cleanup_id);
-}
-
-/// Stop both RSS pollers and await their join handles.
-///
-/// Why: the same teardown sequence is needed on two code paths (hard failure
-/// exit and the normal success path). Extracted to avoid duplication.
-/// What: sets the stop flag, awaits the join handle. No-ops for `None` handles.
-/// Test: exercised on every `finish_reindex` code path.
-async fn stop_pollers(
-    poller_stop: Arc<AtomicBool>,
-    poller_handle: tokio::task::JoinHandle<()>,
-    embedderd_stop: Option<Arc<AtomicBool>>,
-    embedderd_handle: Option<tokio::task::JoinHandle<()>>,
-) {
-    poller_stop.store(true, AtomicOrdering::Release);
-    let _ = poller_handle.await;
-    if let Some(stop) = embedderd_stop {
-        stop.store(true, AtomicOrdering::Release);
-    }
-    if let Some(h) = embedderd_handle {
-        let _ = h.await;
-    }
-}
-
-/// Resolve the atomic corpus swap: commit, rollback, or write indexed_root only.
-///
-/// Why: extracted from `finish_reindex` to keep line count manageable.
-/// What: if `corpus_swap_tmp` is `Some`, commits or aborts the staged swap;
-/// otherwise writes `indexed_root` when the reindex succeeded without staging.
-/// Test: `reindex_walks_directory_and_emits_events` exercises the commit path.
-async fn resolve_corpus_swap(
-    handle: &IndexHandle,
-    index_id: &IndexId,
-    canonical_root: &Path,
-    corpus_swap_tmp: Option<&Path>,
-    staging_resolution: &staging::StagingResolution,
-    reindex_outcome: &validate::ReindexOutcome,
-    memory_aborted: bool,
-) {
-    if let Some(tmp_path) = corpus_swap_tmp {
-        if staging_resolution.is_commit() {
-            commit_staged_corpus_swap(handle, index_id, tmp_path).await;
-            if let Err(e) = handle.write_indexed_root(canonical_root).await {
-                tracing::warn!(
-                    "reindex[{}]: failed to persist indexed_root {} ({e}) — \
-                     a future root-move may not re-relativize paths",
-                    index_id.0,
-                    canonical_root.display(),
-                );
-            }
-        } else {
-            if let staging::StagingResolution::Rollback { reason } = staging_resolution {
-                tracing::warn!(
-                    "reindex[{}]: rolling back staged corpus — {reason}",
-                    index_id.0,
-                );
-            }
-            abort_staged_corpus_swap(handle, index_id, tmp_path).await;
-        }
-    } else if reindex_outcome.is_ready() && !memory_aborted {
-        if let Err(e) = handle.write_indexed_root(canonical_root).await {
-            tracing::debug!(
-                "reindex[{}]: indexed_root not persisted (no durable corpus): {e}",
-                index_id.0,
-            );
-        }
-    }
-}
-
-/// Resolve the staged HNSW swap: commit or roll back (issue #3970).
-///
-/// Why: extracted so `finish_reindex` stays readable — mirrors
-/// `resolve_corpus_swap`, reusing the SAME `staging_resolution` the corpus
-/// swap already computed (a `Ready` outcome with no memory-abort commits,
-/// anything else rolls back). No-op when `hnsw_swap_paths` is `None` (staging
-/// was never begun, e.g. an unresolvable path at reindex start) — the caller
-/// already fell back to the old detached forced-save-to-live in that case.
-/// What: `Commit` publishes the staged snapshot atomically to the live path;
-/// `Rollback` discards the staged snapshot and leaves the live one untouched.
-/// Test: `hnsw_swap::tests::commit_staged_hnsw_swap_publishes_final_state`,
-/// `hnsw_swap::tests::abort_staged_hnsw_swap_leaves_live_untouched_and_cleans_staging`.
-async fn resolve_hnsw_swap(
-    handle: &IndexHandle,
-    index_id: &IndexId,
-    hnsw_swap_paths: Option<&HnswSwapPaths>,
-    staging_resolution: &staging::StagingResolution,
-) {
-    let Some(paths) = hnsw_swap_paths else {
-        return;
-    };
-    if staging_resolution.is_commit() {
-        commit_staged_hnsw_swap(handle, index_id, paths).await;
-    } else {
-        if let staging::StagingResolution::Rollback { reason } = staging_resolution {
-            tracing::warn!(
-                "reindex[{}]: rolling back staged HNSW snapshot — {reason}",
-                index_id.0,
-            );
-        }
-        abort_staged_hnsw_swap(handle, index_id, paths).await;
-    }
-}
-
-/// Run Phase 3: rebuild the symbol graph and flip the graph stage to Ready.
-///
-/// Why: extracted from `finish_reindex` to reduce function length.
-/// What: emits `kg_start` / `kg_complete` SSE events; rebuilds the KG; flips
-/// the graph stage. Returns the `KgRebuildOutcome` for logging.
-/// Test: `reindex_walks_directory_and_emits_events` exercises KG rebuild.
-#[allow(clippy::too_many_arguments)]
-async fn rebuild_kg(
-    handle: &Arc<IndexHandle>,
-    progress: &Arc<ReindexProgress>,
-    index_id: &IndexId,
-    peak_rss_atomic: &Arc<AtomicU64>,
-    mem_limit: Option<u64>,
-    mem_limit_hit: bool,
-    mem_abort: &Arc<AtomicBool>,
-) -> KgRebuildOutcome {
-    if handle.skip_kg {
-        tracing::info!(
-            "reindex[{}]: KG construction skipped (skip_kg=true)",
-            index_id.0,
-        );
-        return KgRebuildOutcome {
-            symbol_count: 0,
-            edge_count: 0,
-            kg_ms: 0,
-            kg_skipped: true,
-        };
-    }
-
-    // Emit `kg_start` so the CLI activates the KG progress bar (issue #401).
-    progress
-        .push(serde_json::json!({
-            "event": "kg_start",
-            "index_id": index_id.0,
-        }))
-        .await;
-
-    let outcome = rebuild_symbol_graph_for_reindex(handle).await;
-
-    // Issue #401: emit `kg_complete` with timing + graph stats.
-    progress
-        .push(serde_json::json!({
-            "event": "kg_complete",
-            "index_id": index_id.0,
-            "kg_ms": outcome.kg_ms,
-            "symbol_count": outcome.symbol_count,
-            "edge_count": outcome.edge_count,
-        }))
-        .await;
-
-    mark_graph_ready(handle).await;
-    if mem_limit_hit || mem_abort.load(AtomicOrdering::Acquire) {
-        tracing::warn!(
-            "reindex: memory limit was breached during batch processing for \
-             index {} (peak_rss={}MB, limit={:?}MB) — KG was still rebuilt \
-             (symbols={}, edges={}) because graph construction is bounded by \
-             TRUSTY_MAX_KG_NODES and independent of the embedding spike",
-            index_id.0,
-            peak_rss_atomic.load(AtomicOrdering::Acquire),
-            mem_limit,
-            outcome.symbol_count,
-            outcome.edge_count,
-        );
-    }
-    outcome
 }

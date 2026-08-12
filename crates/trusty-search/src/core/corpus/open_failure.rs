@@ -26,6 +26,7 @@
 use std::time::Duration;
 
 use crate::core::corpus::open_guard::{CorpusOpenTimeout, CorpusOpenWedged};
+use crate::core::corpus_recovery::CorpusCorrupted;
 
 /// Why a durable redb corpus failed to open on this boot (issue #4333).
 ///
@@ -74,6 +75,7 @@ impl CorpusOpenFailure {
     /// `classify_database_already_open_is_contention`,
     /// `classify_upgrade_required_is_format_incompatible`,
     /// `classify_corrupted_storage_is_format_incompatible`,
+    /// `classify_corpus_corrupted_marker_is_format_incompatible`,
     /// `classify_unknown_error_is_unclassified`.
     pub fn classify(err: &anyhow::Error) -> Self {
         if err.downcast_ref::<CorpusOpenTimeout>().is_some() {
@@ -81,6 +83,12 @@ impl CorpusOpenFailure {
         }
         if err.downcast_ref::<CorpusOpenWedged>().is_some() {
             return Self::Contention;
+        }
+        // #4227: corruption reaches the loader as this typed marker rather than
+        // a raw redb error, because the recovery path consumed the original
+        // error to move the damaged file aside.
+        if err.downcast_ref::<CorpusCorrupted>().is_some() {
+            return Self::FormatIncompatible;
         }
         if let Some(db_err) = err.downcast_ref::<redb::DatabaseError>() {
             return match db_err {
@@ -266,6 +274,29 @@ mod tests {
         assert_eq!(
             CorpusOpenFailure::classify(&err),
             CorpusOpenFailure::Unclassified
+        );
+    }
+
+    /// Why (issue #4227): the recovery path consumes the original redb error to
+    /// move the damaged file aside, so by the time the loader classifies the
+    /// failure the only thing left is the typed marker. If `classify` did not
+    /// recognise it, a corrupt corpus would report `Unclassified` — the wording
+    /// that tells an operator to diagnose before rebuilding — for the one case
+    /// where rebuilding IS the remedy, and the quarantine's own diagnostic would
+    /// contradict itself.
+    /// Test: this test.
+    #[test]
+    fn classify_corpus_corrupted_marker_is_format_incompatible() {
+        let err = anyhow::Error::new(crate::core::corpus_recovery::CorpusCorrupted {
+            path: "/tmp/index.redb".to_string(),
+            backup: "/tmp/index.redb.v2-incompatible".to_string(),
+        });
+        let kind = CorpusOpenFailure::classify(&err);
+        assert_eq!(kind, CorpusOpenFailure::FormatIncompatible);
+        assert!(
+            !kind.is_transient(),
+            "a corrupt corpus never self-heals — reporting it transient tells the \
+             operator to wait forever"
         );
     }
 

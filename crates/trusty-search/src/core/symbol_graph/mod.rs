@@ -30,7 +30,7 @@ mod persist_tests;
 mod tests;
 
 pub(crate) use contrib::parse_kind_token;
-pub use contrib::{save_then_merge_contrib, ContribMergeStats};
+pub use contrib::{save_then_merge_contrib, ContribMergeOutcome, ContribMergeStats};
 
 // Public type aliases shared across submodules.
 use crate::core::chunker::ChunkType;

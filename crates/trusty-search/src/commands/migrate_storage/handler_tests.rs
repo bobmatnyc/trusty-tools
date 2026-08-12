@@ -41,11 +41,10 @@ fn migrate_storage_moves_files_and_updates_registry() {
     std::fs::write(legacy_dir.join("schema_version.json"), b"{}").unwrap();
 
     // Write an indexes.toml with the legacy entry (colocated=false).
-    save_index_registry(&[PersistedIndex {
-        id: index_id.to_string(),
-        root_path: project_root.path().to_path_buf(),
-        colocated: false,
-        ..Default::default()
+    save_index_registry(&[{
+        let mut e = PersistedIndex::new(index_id.to_string(), project_root.path().to_path_buf());
+        e.colocated = false;
+        e
     }])
     .unwrap();
 
@@ -141,11 +140,10 @@ fn handle_legacy_pointer_file_migrates_correctly() {
     std::fs::write(src.join("hnsw.usearch"), b"ptr-hnsw-data").unwrap();
 
     // Write indexes.toml with colocated=true (the misleading pre-#491 state).
-    save_index_registry(&[PersistedIndex {
-        id: index_id.to_string(),
-        root_path: project_root.path().to_path_buf(),
-        colocated: true, // BUG: was true but filesystem had pointer file!
-        ..Default::default()
+    save_index_registry(&[{
+        let mut e = PersistedIndex::new(index_id.to_string(), project_root.path().to_path_buf());
+        e.colocated = true;
+        e
     }])
     .unwrap();
 
@@ -190,11 +188,10 @@ fn migrate_storage_skips_missing_root() {
     }
 
     let nonexistent_root = PathBuf::from("/tmp/trusty-test-missing-root-12345");
-    save_index_registry(&[PersistedIndex {
-        id: "gone-index".to_string(),
-        root_path: nonexistent_root.clone(),
-        colocated: false,
-        ..Default::default()
+    save_index_registry(&[{
+        let mut e = PersistedIndex::new("gone-index".to_string(), nonexistent_root.clone());
+        e.colocated = false;
+        e
     }])
     .unwrap();
 
@@ -229,11 +226,10 @@ fn migrate_storage_idempotent_for_colocated() {
     std::fs::create_dir_all(&colocated_dir).unwrap();
     std::fs::write(colocated_dir.join("index.redb"), b"already-done").unwrap();
 
-    save_index_registry(&[PersistedIndex {
-        id: "col-index".to_string(),
-        root_path: project_root.path().to_path_buf(),
-        colocated: true,
-        ..Default::default()
+    save_index_registry(&[{
+        let mut e = PersistedIndex::new("col-index".to_string(), project_root.path().to_path_buf());
+        e.colocated = true;
+        e
     }])
     .unwrap();
 
@@ -274,11 +270,10 @@ fn migrate_storage_dry_run_no_changes() {
     std::fs::create_dir_all(&legacy_dir).unwrap();
     std::fs::write(legacy_dir.join("index.redb"), b"dry-data").unwrap();
 
-    save_index_registry(&[PersistedIndex {
-        id: index_id.to_string(),
-        root_path: project_root.path().to_path_buf(),
-        colocated: false,
-        ..Default::default()
+    save_index_registry(&[{
+        let mut e = PersistedIndex::new(index_id.to_string(), project_root.path().to_path_buf());
+        e.colocated = false;
+        e
     }])
     .unwrap();
 
@@ -346,11 +341,10 @@ fn migrate_storage_preserves_a_registration_made_during_the_migration_window() {
             .join(format!("legacy-{i}"));
         std::fs::create_dir_all(&legacy_dir).unwrap();
         std::fs::write(legacy_dir.join("index.redb"), b"sentinel").unwrap();
-        entries.push(PersistedIndex {
-            id: format!("legacy-{i}"),
-            root_path: root.path().to_path_buf(),
-            colocated: false,
-            ..Default::default()
+        entries.push({
+            let mut e = PersistedIndex::new(format!("legacy-{i}"), root.path().to_path_buf());
+            e.colocated = false;
+            e
         });
         project_roots.push(root);
     }
@@ -382,11 +376,13 @@ fn migrate_storage_preserves_a_registration_made_during_the_migration_window() {
     // storage is still walking/copying the remaining data directories.
     let toml_path = indexes_toml_path().unwrap();
     let mut current = load_index_registry_at(&toml_path).unwrap();
-    current.push(PersistedIndex {
-        id: "newcomer".to_string(),
-        root_path: PathBuf::from("/tmp/migrate-storage-newcomer"),
-        colocated: false,
-        ..Default::default()
+    current.push({
+        let mut e = PersistedIndex::new(
+            "newcomer".to_string(),
+            PathBuf::from("/tmp/migrate-storage-newcomer"),
+        );
+        e.colocated = false;
+        e
     });
     save_index_registry_at(&toml_path, &current).unwrap();
 
@@ -438,11 +434,10 @@ fn migrate_storage_blocks_on_the_cross_process_registry_lock() {
     let legacy_dir = data_dir().unwrap().join("indexes").join(index_id);
     std::fs::create_dir_all(&legacy_dir).unwrap();
     std::fs::write(legacy_dir.join("index.redb"), b"sentinel").unwrap();
-    save_index_registry(&[PersistedIndex {
-        id: index_id.to_string(),
-        root_path: project_root.path().to_path_buf(),
-        colocated: false,
-        ..Default::default()
+    save_index_registry(&[{
+        let mut e = PersistedIndex::new(index_id.to_string(), project_root.path().to_path_buf());
+        e.colocated = false;
+        e
     }])
     .unwrap();
 
