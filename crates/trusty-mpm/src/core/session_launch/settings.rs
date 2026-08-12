@@ -639,7 +639,7 @@ fn resolved_home_tier(fw: &crate::core::paths::FrameworkPaths) -> Option<PathBuf
 /// whose array becomes empty is removed entirely. Writes the file back. A
 /// missing or malformed file is treated as success (nothing to clean up).
 /// Test: `remove_global_hooks_removes_trusty_memory_entries`,
-/// `prepare_session_confines_home_writes_to_the_framework_base`.
+/// `global_hook_cleanup_reaches_the_home_tier_under_an_overridden_root`.
 pub(super) fn remove_global_trusty_memory_hooks(
     fw: &crate::core::paths::FrameworkPaths,
 ) -> Result<(), PrepError> {
