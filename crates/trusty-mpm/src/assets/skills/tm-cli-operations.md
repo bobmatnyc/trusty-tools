@@ -285,6 +285,19 @@ session picker — a numbered menu of live managed sessions. Actions:
   (never block on stdin). `tm ls --projects` (`-p`) shows the repo-alias /
   project registry instead of sessions.
 
+**`tm ls -a` / `--attached` — only what you're actually looking at.** Lists the
+sessions with a tmux client attached RIGHT NOW, and nothing else. A session can
+be live and reported `active` with nobody connected to it; `-a` drops those.
+The signal is tmux's own `#{session_attached}`, not the lifecycle state word.
+
+- Forces the static table (like `--all`) — a session you already have a client
+  on is the one thing the picker cannot usefully connect you to.
+- Nothing attached prints `no attached sessions` and exits 0.
+- No effect on `--json` (raw daemon response is always complete, matching
+  `--all` and the filter terms) or on `--projects`.
+- ⚠️ `-a` here NARROWS; it does not mean "all" as in `ls -a` / `docker ps -a`.
+  `--all` (tombstones included) stays long-only.
+
 ### Delete / teardown semantics — pick the right verb
 
 | Verb | Runtime | Workspace on disk | Record | Resumable? |

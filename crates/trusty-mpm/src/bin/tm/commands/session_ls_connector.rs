@@ -27,23 +27,27 @@ use super::session_picker::{
 /// Decide whether `tm ls` should open the interactive picker or print statically.
 ///
 /// Why: a testable seam that folds every gate into one pure decision so the
-/// non-TTY / `--json` / `--all` / empty-list branches are unit-testable without a
-/// live terminal or daemon. Requiring BOTH stdin and stdout to be TTYs is the
-/// anti-hang guarantee: a piped input (would EOF) or a piped output (must stay a
-/// clean pipeable table) both fall through to static output.
-/// What: returns `true` only when stdin AND stdout are TTYs, neither `--json` nor
-/// `--all` was requested, and at least one session exists. `--all` forces static
-/// output because its purpose is the forensic full list (including
-/// decommissioned tombstones), not connecting.
+/// non-TTY / `--json` / `--all` / `--attached` / empty-list branches are
+/// unit-testable without a live terminal or daemon. Requiring BOTH stdin and
+/// stdout to be TTYs is the anti-hang guarantee: a piped input (would EOF) or a
+/// piped output (must stay a clean pipeable table) both fall through to static
+/// output.
+/// What: returns `true` only when stdin AND stdout are TTYs, none of `--json`,
+/// `--all`, or `--attached` was requested, and at least one session exists.
+/// `--all` forces static output because its purpose is the forensic full list
+/// (including decommissioned tombstones), not connecting; `--attached` forces it
+/// because the sessions it keeps are exactly the ones a client is already on, so
+/// the picker's connect action has nothing left to do.
 /// Test: `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`.
 pub(crate) fn should_show_picker(
     stdin_tty: bool,
     stdout_tty: bool,
     json: bool,
     all: bool,
+    attached: bool,
     session_count: usize,
 ) -> bool {
-    stdin_tty && stdout_tty && !json && !all && session_count > 0
+    stdin_tty && stdout_tty && !json && !all && !attached && session_count > 0
 }
 
 /// `tm ls` — the interactive managed-session connector (top-level).
@@ -52,12 +56,15 @@ pub(crate) fn should_show_picker(
 /// managed fleet: on a real terminal it opens the session picker; piped or
 /// scripted it degrades to the same static, pipeable list as `tm session ls`.
 /// What: resolves the scope (`--current` derives `owner/repo` from the cwd git
-/// remote, mirroring `tm session ls`); routes `--json`, `--all`, or any non-TTY
-/// invocation straight to the static [`super::managed::session_ls`] renderer
-/// (preserving its raw `--json` passthrough byte-for-byte); otherwise fetches the
-/// live sessions once and either renders the static table (0 sessions) or opens
-/// [`run_tty_picker`] (≥1 session). Launch-new inside the picker targets the cwd
-/// project only when it is a GitHub-backed git checkout.
+/// remote, mirroring `tm session ls`); routes `--json`, `--all`, `--attached`, or
+/// any non-TTY invocation straight to the static [`super::managed::session_ls`]
+/// renderer (preserving its raw `--json` passthrough byte-for-byte); otherwise
+/// fetches the live sessions once and either renders the static table (0
+/// sessions) or opens [`run_tty_picker`] (≥1 session). Launch-new inside the
+/// picker targets the cwd project only when it is a GitHub-backed git checkout.
+/// `attached` is a pure listing filter and never reaches the picker — see
+/// [`should_show_picker`] — so the static renderer is the single place it is
+/// applied.
 /// Test: parse tests `cli_parses_ls_*` and the gate tests
 /// `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`.
 #[allow(clippy::too_many_arguments)]
@@ -68,6 +75,7 @@ pub(crate) async fn run_ls_connector(
     source_id: Option<String>,
     current: bool,
     all: bool,
+    attached: bool,
     sort: SessionSortArg,
     term: Option<SessionFilter>,
 ) -> anyhow::Result<()> {
@@ -83,14 +91,24 @@ pub(crate) async fn run_ls_connector(
     let stdin_tty = std::io::stdin().is_terminal();
     let stdout_tty = std::io::stdout().is_terminal();
 
-    // Cheap pre-gate: `--json`, `--all`, or any non-interactive stream never
-    // fetches for the picker — delegate straight to the static renderer, which
-    // owns the raw `--json` passthrough and the `--all` tombstone sort. `sort`/
-    // `term` ride along (the static renderer applies them; `--json` ignores
-    // them, matching `--all`'s existing "no effect on --json" precedent).
-    if json || all || !stdin_tty || !stdout_tty {
-        return super::managed::session_ls(client, url, json, sid.as_deref(), all, sort, term)
-            .await;
+    // Cheap pre-gate: `--json`, `--all`, `--attached`, or any non-interactive
+    // stream never fetches for the picker — delegate straight to the static
+    // renderer, which owns the raw `--json` passthrough, the `--all` tombstone
+    // sort, and the `-a` attached-only filter. `sort`/`term` ride along (the
+    // static renderer applies them; `--json` ignores them, matching `--all`'s
+    // existing "no effect on --json" precedent).
+    if json || all || attached || !stdin_tty || !stdout_tty {
+        return super::managed::session_ls(
+            client,
+            url,
+            json,
+            sid.as_deref(),
+            all,
+            attached,
+            sort,
+            term,
+        )
+        .await;
     }
 
     // Interactive stream: fetch the live sessions once. On any fetch error
@@ -105,6 +123,7 @@ pub(crate) async fn run_ls_connector(
                 false,
                 sid.as_deref(),
                 false,
+                false,
                 sort,
                 term,
             )
@@ -114,7 +133,7 @@ pub(crate) async fn run_ls_connector(
     let mut sessions = filter_sessions_by_term(sessions, term.as_ref());
     sort_sessions(&mut sessions, sort);
 
-    if !should_show_picker(stdin_tty, stdout_tty, json, all, sessions.len()) {
+    if !should_show_picker(stdin_tty, stdout_tty, json, all, attached, sessions.len()) {
         // 0 sessions on a TTY: print the static "no managed sessions" line rather
         // than an empty picker.
         super::managed_render::render_session_table(&sessions, sid.as_deref());
