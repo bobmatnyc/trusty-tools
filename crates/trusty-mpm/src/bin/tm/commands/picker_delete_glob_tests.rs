@@ -458,6 +458,68 @@ fn glob_report_leads_with_the_tmux_name() {
     );
 }
 
+/// The count the prompt accepts is exactly the count of `DELETE` rows shown.
+///
+/// Why this test carries the weight it does: the prompt deliberately does not
+/// print the number to type, so the operator derives it by counting `DELETE`
+/// markers in the listing. That makes "markers shown" and "count accepted" two
+/// independently-computed values — `plan_lines` walks the plan to render, and
+/// `confirm_matches_count` compares against `plan.deletable.len()`. If they ever
+/// diverge, a correct operator who counts carefully is REJECTED, and the
+/// obvious repair is to print the number again, which is exactly the property
+/// the review said must not be given up. Nothing else in the suite couples the
+/// two.
+#[test]
+fn glob_report_marks_delete_rows() {
+    // Several shapes, so a divergence cannot hide in one arrangement: a mixed
+    // plan, an all-deletable plan, and the widest pattern.
+    for pattern in ["tm-test-*", "tm-apex-*", "*"] {
+        let fleet = fleet();
+        let (_, plan) = decide_glob_delete(&fleet, &req(pattern, false), None);
+        let lines = plan_lines(&fleet, &plan);
+
+        let marked = lines
+            .iter()
+            .filter(|l| l.trim_start().starts_with("DELETE"))
+            .count();
+        let kept = lines
+            .iter()
+            .filter(|l| l.trim_start().starts_with("keep"))
+            .count();
+
+        // The operator's count of DELETE rows is what the prompt must accept.
+        assert!(
+            confirm_matches_count(&marked.to_string(), plan.deletable.len()),
+            "'{pattern}': counting {marked} DELETE row(s) must be accepted as \
+             the confirmation, but the prompt expects {}",
+            plan.deletable.len()
+        );
+        // Stated the other way round, so a plan that renders too FEW markers
+        // fails too — not just one that renders too many.
+        assert_eq!(
+            marked,
+            plan.deletable.len(),
+            "'{pattern}': DELETE markers shown must equal the deletable count"
+        );
+        // Every row is accounted for, so counting cannot silently skip one.
+        assert_eq!(marked + kept, lines.len());
+        assert_eq!(kept, plan.skipped.len());
+
+        // A miscount is rejected in both directions — the coupling is exact,
+        // not merely "some number works".
+        assert!(!confirm_matches_count(
+            &(marked + 1).to_string(),
+            plan.deletable.len()
+        ));
+        if marked > 0 {
+            assert!(!confirm_matches_count(
+                &(marked - 1).to_string(),
+                plan.deletable.len()
+            ));
+        }
+    }
+}
+
 #[test]
 fn glob_report_lists_every_match() {
     let fleet = fleet();
