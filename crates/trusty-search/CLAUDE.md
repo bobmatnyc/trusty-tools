@@ -166,6 +166,20 @@ daemon.
     `indexes_populated + indexes_empty <= indexes`; the shortfall is the honest
     signal. An empty-but-walked index is not itself a fault and does not force
     `degraded` — `indexes_stuck_empty` (#4680) covers the genuinely broken case.
+  - `indexes_stuck_mid_walk` (#5336): registered indexes whose lexical walk
+    STARTED and was then abandoned — the reindex task panicked, was cancelled,
+    or returned early, leaving `stages.lexical` frozen at `in_progress` with
+    nothing driving the index. On every other field, and on
+    `GET /indexes/:id/status`, that is indistinguishable from a genuine
+    multi-minute reindex. Liveness is read from the index's own
+    mutual-exclusion permit, which the reindex runner takes before it flips the
+    stage and releases only when its task ends, so a running reindex is never
+    counted here. Partitions with `indexes_stuck_empty` (#4680, the
+    never-walked cohort) on whether a walk ever started — an index is counted by
+    at most one. Non-zero forces `status: "degraded"`. Surfacing only: nothing
+    retries it, because a partial walk may have committed chunks and the cause
+    that killed the first walk would likely kill the retry. Clear it with
+    `POST /indexes/:id/reindex`.
   - `indexes_watcher_network_degraded` (issue #3408): count of registered
     indexes whose file watcher was refused because `root_path` was detected as
     a network-mounted filesystem (NFS/EFS/SMB/CIFS). inotify/FSEvents cannot
@@ -265,6 +279,11 @@ Per-index stats.
     `vectors_unavailable_reason` says which state produced it:
     `no_vector_store` (BM25-only / `skip_vector` — healthy) or
     `count_unreadable` (a store is attached but its count errored — a fault).
+  - `stuck_mid_walk` (#5336): the per-index form of `/health`'s
+    `indexes_stuck_mid_walk`. `true` when this index's walk started and nothing
+    is driving it any more, so `status: "indexing"` and
+    `stages.lexical: in_progress` above are a frozen claim rather than live
+    work. `POST /indexes/:id/reindex` clears it.
 - **Response 404 / 503**: see the index-scoped error contract above.
 
 ##### `POST /indexes/:id/search`
