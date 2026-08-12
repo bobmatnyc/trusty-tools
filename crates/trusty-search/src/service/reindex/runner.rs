@@ -215,7 +215,11 @@ pub(super) async fn run_reindex(
         let reason = over.to_string();
         tracing::warn!("reindex[{}]: {}", index_id.0, reason);
         handle.walk_diagnostics.write().await.last_walk_error = Some(reason.clone());
-        mark_reindex_failed(&handle, &reason).await;
+        // NOT `mark_reindex_failed`: that one leaves `lexical` alone because
+        // the BM25 lane was genuinely built. Here nothing was, and leaving it
+        // at the `InProgress` that `reset_stages_for_reindex` just set would
+        // strand the index mid-walk with no reindex in flight.
+        super::stages::mark_reindex_failed_before_lexical(&handle, &reason).await;
         progress.status.store(ReindexStatus::Failed);
         progress
             .push(serde_json::json!({

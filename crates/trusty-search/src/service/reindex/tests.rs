@@ -2509,8 +2509,12 @@ fn budget_fixture(count: usize) -> (tempfile::TempDir, std::path::PathBuf) {
     (tmp, root)
 }
 
-/// Run one reindex against `root` under index id `id` and return its progress.
-async fn run_budget_reindex(id: &str, root: &std::path::Path) -> Arc<ReindexProgress> {
+/// Run one reindex against `root` under index id `id` and return its progress
+/// plus the handle, so a caller can inspect the terminal stage snapshot.
+async fn run_budget_reindex_with_handle(
+    id: &str,
+    root: &std::path::Path,
+) -> (Arc<ReindexProgress>, Arc<IndexHandle>) {
     let indexer = CodeIndexer::new(id.to_string(), root.to_path_buf());
     let handle = Arc::new(IndexHandle::bare(
         IndexId::new(id),
@@ -2521,7 +2525,6 @@ async fn run_budget_reindex(id: &str, root: &std::path::Path) -> Arc<ReindexProg
     spawn_reindex_awaitable(Arc::clone(&handle), Arc::clone(&progress), false)
         .await
         .expect("reindex task must not panic");
-    // Keep the handle alive until the task has finished writing diagnostics.
     let diag_error = handle.walk_diagnostics.read().await.last_walk_error.clone();
     if progress.status.load() == ReindexStatus::Failed {
         let reason = diag_error.expect("a refused walk must record last_walk_error");
@@ -2530,7 +2533,12 @@ async fn run_budget_reindex(id: &str, root: &std::path::Path) -> Arc<ReindexProg
             "the refusal must name the ceiling that raises it: {reason}"
         );
     }
-    progress
+    (progress, handle)
+}
+
+/// `run_budget_reindex_with_handle` for callers that only need the progress.
+async fn run_budget_reindex(id: &str, root: &std::path::Path) -> Arc<ReindexProgress> {
+    run_budget_reindex_with_handle(id, root).await.0
 }
 
 /// #4356: a walk over the file budget refuses the whole reindex instead of
@@ -2550,7 +2558,7 @@ async fn reindex_refuses_walk_over_file_budget() {
     let _guard = MaxIndexFilesEnvGuard::set("1");
     let (_tmp, root) = budget_fixture(3);
 
-    let progress = run_budget_reindex("budget-over", &root).await;
+    let (progress, handle) = run_budget_reindex_with_handle("budget-over", &root).await;
 
     assert_eq!(
         progress.status.load(),
@@ -2562,6 +2570,18 @@ async fn reindex_refuses_walk_over_file_budget() {
         0,
         "the refusal happens before any file is committed"
     );
+
+    // #4356: nothing was walked, so no lane may be left mid-flight. A stranded
+    // `lexical: InProgress` reads as an index stuck mid-walk (#5575) and would
+    // force `/health` to `degraded` for a refusal that worked as designed.
+    let stages = handle.stages.read().await.clone();
+    assert_ne!(
+        stages.lexical.status,
+        StageStatus::InProgress,
+        "the lexical lane must not be stranded mid-walk by a refusal"
+    );
+    assert_eq!(stages.lexical.status, StageStatus::Failed);
+    assert_eq!(stages.lifecycle_status(), "failed");
 
     let events = progress.events.lock().await;
     let fatal = events

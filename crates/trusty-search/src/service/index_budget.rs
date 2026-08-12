@@ -116,7 +116,8 @@ impl IndexBudget {
     /// What: reads [`ENV_MAX_INDEX_FILES`] / [`ENV_MAX_INDEX_BYTES`], falling
     /// back to the defaults. `0` means uncapped; a malformed value logs a
     /// `warn` and falls back to the default rather than silently uncapping.
-    /// Test: `zero_disables_the_cap`, `malformed_value_falls_back_to_default`.
+    /// Test: `zero_disables_the_cap`, `malformed_value_falls_back_to_default`,
+    /// `absent_value_falls_back_to_default`.
     pub fn from_env() -> Self {
         Self {
             max_files: zero_is_none(env_limit(ENV_MAX_INDEX_FILES, DEFAULT_MAX_INDEX_FILES)),
@@ -228,10 +229,45 @@ mod tests {
         assert_eq!(zero_is_none(7usize), Some(7));
     }
 
+    /// An unparseable value falls back to the default, NOT to `0`.
+    ///
+    /// Why: `0` means uncapped. Treating garbage as `0` would silently disable
+    /// the guardrail — the exact failure this module exists to prevent — and a
+    /// typo in a deploy script would be indistinguishable from a deliberate
+    /// opt-out.
+    /// What: sets the var to a value that cannot parse and asserts the default
+    /// survives. This is the only test that reaches `env_limit`'s parse-`Err`
+    /// branch; `absent_value_falls_back_to_default` covers the other arm.
+    /// Test: this test.
     #[test]
+    #[serial_test::serial]
     fn malformed_value_falls_back_to_default() {
-        // `env_limit` is pure over its inputs apart from the var read; an
-        // absent var takes the same fallback branch a malformed one does.
+        const VAR: &str = "TRUSTY_MAX_INDEX_FILES_MALFORMED_4356";
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                std::env::remove_var(VAR);
+            }
+        }
+        let _g = Guard;
+
+        std::env::set_var(VAR, "banana");
+        assert_eq!(
+            env_limit(VAR, 99usize),
+            99,
+            "garbage must fall back to the default, never to 0 (uncapped)"
+        );
+
+        std::env::set_var(VAR, "-1");
+        assert_eq!(
+            env_limit(VAR, 99usize),
+            99,
+            "a negative value does not parse as usize and must not uncap"
+        );
+    }
+
+    #[test]
+    fn absent_value_falls_back_to_default() {
         assert_eq!(env_limit("TRUSTY_MAX_INDEX_FILES_ABSENT_4356", 99usize), 99);
     }
 
