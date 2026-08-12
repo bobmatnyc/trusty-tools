@@ -11,18 +11,28 @@
 //! the narrative request; [`apply_synthesis_json`] reads its answer, and
 //! [`apply_fallback_narrative`] writes a usable one when there is no answer.
 //!
-//! The transport is deliberately absent — #5464 adds it on top of
-//! `trusty_common::inference`, which is why [`apply_synthesis_json`] takes a
-//! `&str` rather than a response struct.
+//! [`Synthesizer`] is the transport, added in #5465 on the same
+//! `trusty_common::inference` adapter the period review uses — which is why
+//! [`apply_synthesis_json`] takes a `&str` rather than a response struct and
+//! stays testable with no network.
 //!
 //! Test: `synthesizer_tests.rs`.
 
 use std::cmp::Reverse;
+use std::sync::Arc;
+use std::time::Instant;
 
 use serde::Deserialize;
-use tracing::warn;
+use tracing::{debug, warn};
+use trusty_common::credentials::{default_store, KeyStore};
+use trusty_common::inference::{
+    register_default_factories, ChatMessage, ChatRequest, Configurator, InferenceAdapter,
+    InferenceError,
+};
 
-use super::types::{ContributorProfile, LongitudinalFinding, PeriodBatch, Trajectory, TrendTag};
+use super::types::{
+    ContributorProfile, LongitudinalFinding, PeriodBatch, TokenCostSummary, Trajectory, TrendTag,
+};
 
 // ─── Request parameters ───────────────────────────────────────────────────────
 
@@ -364,6 +374,161 @@ pub fn build_synthesizer_user_message(profile: &ContributorProfile) -> String {
     );
 
     msg
+}
+
+/// Assemble the narrative request.
+///
+/// Why: like the period request, [`ChatRequest`] carries no structured-output
+/// field, so the schema only reaches the model if the system turn states it.
+/// What: system turn = [`synthesizer_system_prompt`] plus
+/// [`synthesis_output_schema`] as JSON; user turn =
+/// [`build_synthesizer_user_message`]. `model` passes through unchanged so the
+/// commons' prefix routing keeps working.
+/// Test: `synthesis_request_preserves_routing_prefix_and_sampling`.
+pub fn build_synthesis_request(profile: &ContributorProfile, model: &str) -> ChatRequest {
+    // `to_string_pretty` over a `Value` this module built cannot fail.
+    let schema = serde_json::to_string_pretty(&synthesis_output_schema()).unwrap_or_default();
+    let system = format!(
+        "{}\n\n## Response schema\nReturn ONLY a JSON object conforming to this schema:\n\
+         ```json\n{schema}\n```",
+        synthesizer_system_prompt()
+    );
+
+    let mut req = ChatRequest::new(
+        model,
+        vec![
+            ChatMessage::system(system),
+            ChatMessage::user(build_synthesizer_user_message(profile)),
+        ],
+    );
+    req.temperature = Some(SYNTHESIZER_TEMPERATURE);
+    req.max_tokens = Some(SYNTHESIZER_MAX_TOKENS);
+    req
+}
+
+// ─── Narrative transport ──────────────────────────────────────────────────────
+
+/// The narrative pass: one model call per profile, over the shared inference
+/// stack.
+///
+/// Why (#5465): `tga profile` has to produce the narrative itself now that
+/// profiling is tga's domain, and it routes through
+/// `trusty_common::inference` for the same reason the period review does —
+/// no Cargo edge to trusty-review, and one place that knows which backend and
+/// whose key.
+/// What: holds an [`InferenceAdapter`] and its routing slug.
+/// [`Self::synthesize`] never fails the run: a provider failure leaves the
+/// deterministic results intact and writes the fallback narrative.
+/// Test: `synthesizer_transport_applies_the_models_narrative`,
+/// `synthesizer_transport_falls_back_and_reports_the_failure`.
+pub struct Synthesizer {
+    adapter: Arc<dyn InferenceAdapter>,
+    model: String,
+}
+
+impl Synthesizer {
+    /// Resolve `model` against the shared credential store and build its adapter.
+    ///
+    /// # Errors
+    ///
+    /// [`super::ProfileError::Inference`] when no credential resolves for the
+    /// slug's provider family, or no factory is registered for it.
+    pub fn from_slug(model: &str) -> super::Result<Self> {
+        Self::from_slug_with_store(model, default_store().as_ref())
+    }
+
+    /// [`Self::from_slug`] against an explicit credential store.
+    ///
+    /// Why: [`default_store`] reads the machine's real keychain, which makes a
+    /// test built on it assert whatever the developer happens to have exported.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_slug`].
+    pub fn from_slug_with_store(model: &str, store: &dyn KeyStore) -> super::Result<Self> {
+        let mut configurator = Configurator::new();
+        register_default_factories(&mut configurator);
+        #[cfg(feature = "bedrock")]
+        trusty_common::inference::register_bedrock_factory(&mut configurator);
+
+        let adapter = configurator.build(model, store)?;
+        Ok(Self {
+            adapter: Arc::from(adapter),
+            model: model.to_string(),
+        })
+    }
+
+    /// Bind a synthesizer to an already-built adapter.
+    ///
+    /// Why: a run that already resolved an adapter for the period reviews should
+    /// reuse it rather than re-running credential resolution, and tests drive
+    /// the real transport with the commons' `ScriptedAdapter`.
+    pub fn with_adapter(adapter: Arc<dyn InferenceAdapter>, model: impl Into<String>) -> Self {
+        Self {
+            adapter,
+            model: model.into(),
+        }
+    }
+
+    /// Run the narrative pass over an already deterministically-synthesised
+    /// profile.
+    ///
+    /// Why: the trajectory, the quality series, and the trend tags are computed
+    /// before this call and must survive it — the narrative supplies judgements
+    /// that cannot be computed, never the ones that were.
+    /// What: sends [`build_synthesis_request`], accumulates usage into
+    /// `profile.token_cost`, and applies the answer with
+    /// [`apply_synthesis_json`]. On provider failure it writes
+    /// [`apply_fallback_narrative`] and RETURNS the error, so a caller can say
+    /// the narrative is a fallback rather than presenting it as the model's.
+    /// Test: `synthesizer_transport_applies_the_models_narrative`,
+    /// `synthesizer_transport_falls_back_and_reports_the_failure`.
+    pub async fn synthesize(&self, profile: &mut ContributorProfile) -> Option<InferenceError> {
+        let request = build_synthesis_request(profile, &self.model);
+        let start = Instant::now();
+
+        let response = match self.adapter.chat(&request).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    model = %self.model,
+                    error = %e,
+                    "synthesizer: inference call failed — using the deterministic fallback narrative"
+                );
+                apply_fallback_narrative(profile);
+                return Some(e);
+            }
+        };
+
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let usage = response.usage();
+        accumulate_usage(&mut profile.token_cost, &response, latency_ms);
+        debug!(
+            model = %response.resolved_model(&self.model),
+            input_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens,
+            latency_ms,
+            "synthesizer: inference call complete"
+        );
+
+        apply_synthesis_json(profile, &response.first_text().unwrap_or_default());
+        None
+    }
+}
+
+/// Fold one response's usage into the run's cost summary.
+fn accumulate_usage(
+    cost: &mut TokenCostSummary,
+    response: &trusty_common::inference::ChatResponse,
+    latency_ms: u64,
+) {
+    let usage = response.usage();
+    cost.accumulate(
+        u64::from(usage.prompt_tokens),
+        u64::from(usage.completion_tokens),
+        usage.cost_usd.unwrap_or(0.0),
+        latency_ms,
+    );
 }
 
 // ─── Narrative response ───────────────────────────────────────────────────────
