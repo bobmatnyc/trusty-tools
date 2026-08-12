@@ -112,6 +112,15 @@ pub(super) struct FinishCtx {
     /// already exists for `defer_embed`, which embeds exactly the chunks the
     /// vector store is missing.
     pub(super) resumed: bool,
+    /// Issue #1451: the parse/embed producer task panicked or was cancelled.
+    ///
+    /// Why: the batches that ran before the fault committed normally, so the
+    /// #601 counter gate sees vectors and reports a run that stopped partway as
+    /// complete. This carries the runner's captured `JoinError` reason into the
+    /// terminal verdict, where `validate::override_with_producer_failure` turns
+    /// it into a `Failed` outcome — which both rolls the staged corpus back and
+    /// marks the index failed. `None` on every run whose producer finished.
+    pub(super) producer_failure: Option<String>,
 }
 
 /// Post-batch-loop completion: prune, KG rebuild, poller teardown, and events.
@@ -159,6 +168,7 @@ pub(super) async fn finish_reindex(
         mem_limit,
         force,
         resumed,
+        producer_failure,
     } = ctx;
 
     let BatchTotals {
@@ -206,6 +216,10 @@ pub(super) async fn finish_reindex(
         progress.skipped.load(AtomicOrdering::Acquire),
         total_vector_count,
     );
+    // #1451: a producer that panicked never reached the end of the file list,
+    // so its healthy-looking counters describe a partial run.
+    let reindex_outcome =
+        validate::override_with_producer_failure(reindex_outcome, producer_failure);
     let staging_resolution = staging::resolve_staging(memory_aborted, &reindex_outcome);
 
     // Issue #109, Phase 1: flip the lexical stage to Ready.
@@ -274,14 +288,18 @@ pub(super) async fn finish_reindex(
     .await;
     stage_timings.corpus_commit_ms = corpus_commit_started.elapsed().as_millis() as u64;
 
-    // Issue #601: a zero-vector embed failure on a full-pipeline index is a HARD failure.
+    // Issue #601: a zero-vector embed failure on a full-pipeline index is a HARD
+    // failure. #1451: so is a producer panic, which reaches here through the same
+    // outcome — with a nonzero vector count, hence the counter below rather than
+    // a hardcoded zero.
     if let Some(reason) = reindex_outcome.failure_reason() {
         let embed_failure_count = progress.errors.load(AtomicOrdering::Acquire);
         tracing::error!(
-            "reindex[{}]: FAILED — {reason} (walked_files={}, vectors=0, \
+            "reindex[{}]: FAILED — {reason} (walked_files={}, vectors={}, \
              embed_failure_count={})",
             index_id.0,
             total,
+            total_vector_count,
             embed_failure_count,
         );
         mark_reindex_failed(&handle, reason).await;
@@ -293,7 +311,7 @@ pub(super) async fn finish_reindex(
                 "message": reason,
                 "embed_failure_count": embed_failure_count,
                 "walked_files": total,
-                "vector_count": 0,
+                "vector_count": total_vector_count,
                 "fatal": true,
             }))
             .await;

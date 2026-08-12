@@ -541,40 +541,41 @@ pub(super) async fn run_reindex(
     // in that case the failure_slot is never written and the termination guard's
     // `Drop` falls back to its generic "exited unexpectedly" message. That path
     // is still non-silent (the guard logs at `error!`), just less specific.
+    //
+    // #1451: recording the cause in the guard's slot only covers the paths that
+    // exit through `Drop`. The normal path disarms the guard, so a producer
+    // panic whose counters looked healthy reached `emit_complete_event` and the
+    // run reported `complete`. The reason is now also returned to `finish` as a
+    // value, where it overrides the counter verdict.
+    let mut producer_failure: Option<String> = None;
     if let Err(join_err) = producer.await {
-        if join_err.is_panic() {
-            // Index id lives in the `reindex[{}]:` message prefix only (no
-            // duplicate structured `index_id` field) to avoid double emission
-            // in JSON log backends; `reindex[...]: ... PANICKED` greps still
-            // match (issue #1428 review follow-up).
+        // Index id lives in the `reindex[{}]:` message prefix only (no
+        // duplicate structured `index_id` field) to avoid double emission
+        // in JSON log backends; `reindex[...]: ... PANICKED` greps still
+        // match (issue #1428 review follow-up).
+        let reason = if join_err.is_panic() {
             tracing::error!(
                 "reindex[{}]: parse/embed producer task PANICKED — the reindex \
                  is incomplete; this usually indicates an embedder fault (e.g. \
                  GPU OOM / sidecar stall). JoinError: {join_err}",
                 index_id.0,
             );
-            ReindexTerminationGuard::set_failure_reason(
-                &failure_slot,
-                format!(
-                    "parse/embed producer task panicked ({join_err}) — reindex \
-                     incomplete; check the daemon log for the panic backtrace \
-                     and the embedder (GPU OOM / sidecar stall is the common cause)"
-                ),
-            );
+            format!(
+                "parse/embed producer task panicked ({join_err}) — reindex \
+                 incomplete; check the daemon log for the panic backtrace \
+                 and the embedder (GPU OOM / sidecar stall is the common cause)"
+            )
         } else {
-            // Cancellation (e.g. runtime shutdown) — still non-silent. Index id
-            // is in the `reindex[{}]:` message prefix only (no duplicate
-            // structured field) per the #1428 review follow-up.
+            // Cancellation (e.g. runtime shutdown) — still non-silent.
             tracing::error!(
                 "reindex[{}]: parse/embed producer task was cancelled — reindex \
                  incomplete. JoinError: {join_err}",
                 index_id.0,
             );
-            ReindexTerminationGuard::set_failure_reason(
-                &failure_slot,
-                format!("parse/embed producer task cancelled ({join_err}) — reindex incomplete"),
-            );
-        }
+            format!("parse/embed producer task cancelled ({join_err}) — reindex incomplete")
+        };
+        ReindexTerminationGuard::set_failure_reason(&failure_slot, reason.clone());
+        producer_failure = Some(reason);
     }
 
     stage_timings.pipeline_ms = pipeline_started.elapsed().as_millis() as u64;
@@ -610,6 +611,9 @@ pub(super) async fn run_reindex(
         // #3979: a resumed run inherits chunks whose vectors only ever reached
         // the staged HNSW snapshot, so `finish` must run a vector catch-up.
         resumed,
+        // #1451: a panicked/cancelled producer means the pipeline never ran to
+        // the end of the file list, whatever the counters say.
+        producer_failure,
     };
     let batch_totals = BatchTotals {
         walk_ms,
