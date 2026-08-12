@@ -1,2 +1,0 @@
-Fixed
-- `download::pinned::install_pinned_set` installs executables only. It placed every regular file in the archive, and every release tarball in this workspace ships a `LICENSE`, so a multi-tool set collided on one destination filename and refused — the three-tool `tga` / `trusty-analyze` / `trusty-review` set could never install. A genuine two-binaries-one-name conflict is still an error ([#5495](https://github.com/bobmatnyc/trusty-tools/issues/5495))

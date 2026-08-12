@@ -350,3 +350,92 @@ async fn execute_tool_dispatches_known_tools() {
         "expected missing-arg error, got {missing}"
     );
 }
+
+/// Create a palace on `state` and return its name, for the chat KG tests.
+fn seed_palace(state: &crate::AppState, name: &str) {
+    let palace = trusty_common::memory_core::Palace {
+        id: PalaceId::new(name),
+        name: name.to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join(name),
+    };
+    state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create palace");
+}
+
+/// Regression for [#4905](https://github.com/bobmatnyc/trusty-tools/issues/4905):
+/// a standing rule the assistant is told to remember in chat must reach the
+/// prompt context, not just storage.
+///
+/// Before the fix `execute_kg_assert` returned `{"status":"asserted"}` without
+/// rebuilding the cache, so the user got a success report and a rule that
+/// reached no later turn — ADR-0028's Tier S guarantee inverted. This assertion
+/// on `formatted` found an empty string against the pre-fix commit.
+#[tokio::test]
+async fn chat_kg_assert_refreshes_prompt_cache() {
+    let state = test_state();
+    seed_palace(&state, "chatassert");
+    let args = json!({
+        "palace_id": "chatassert",
+        "subject": "masa",
+        "predicate": "has_convention",
+        "object": "always branch off a freshly fetched origin/main",
+    })
+    .to_string();
+
+    let result = crate::chat::execute_tool("kg_assert", &args, &state).await;
+    assert_eq!(result["status"], "asserted", "got {result}");
+
+    let guard = state.prompt_context_cache.read().await;
+    assert!(
+        guard
+            .formatted
+            .contains("always branch off a freshly fetched origin/main"),
+        "chat kg_assert did not reach the prompt cache; got: {:?}",
+        guard.formatted
+    );
+}
+
+/// Error arm for the chat path: a Tier S refusal is reported to the model as
+/// `{"error": …}` and nothing is written.
+///
+/// The refusal text must survive consolidation intact — it is what tells the
+/// model to retire a fact, so an opaque wrapper would break the recovery the
+/// gate depends on.
+#[tokio::test]
+async fn chat_kg_assert_reports_tier_s_refusal_without_writing() {
+    let state = test_state();
+    seed_palace(&state, "chatreject");
+    let over_long = "x".repeat(crate::prompt_facts::TIER_S_MAX_OBJECT_CHARS + 1);
+    let args = json!({
+        "palace_id": "chatreject",
+        "subject": "masa",
+        "predicate": "has_convention",
+        "object": over_long,
+    })
+    .to_string();
+
+    let result = crate::chat::execute_tool("kg_assert", &args, &state).await;
+    let err = result["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("Tier S fact rejected"),
+        "expected the Tier S refusal text, got {result}"
+    );
+
+    let handle = state
+        .registry
+        .get(&PalaceId::new("chatreject"))
+        .expect("palace handle");
+    let stored = handle.kg.query_active("masa").await.expect("query");
+    assert!(
+        stored.is_empty(),
+        "refused write reached storage: {stored:?}"
+    );
+    assert!(
+        state.prompt_context_cache.read().await.triples.is_empty(),
+        "refused write reached the prompt cache"
+    );
+}

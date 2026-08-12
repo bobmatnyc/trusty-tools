@@ -1,7 +1,0 @@
-Changed
-
-- **The stable-set daemon-member rule now lives behind one entry point, `stable_set::daemon_members`, and its result is pinned by name.** `stack doctor` and `stack health` each carried an independent copy of the same `stable_set().into_iter().filter(|m| m.daemon)` expression, and no test in any crate exercised either one.
-  - This matters beyond `tctl`: `vmtest-harness` deliberately **derives** its daemon-liveness set from `stack doctor --json`'s member table rather than transcribing a list (`_verify_daemon_set`, `vmtest-harness/lib/verify.sh`). Narrowing the filter therefore shrank the harness's oracle silently — the dropped daemon stopped being probed, its name landed on the already-noisy `unreported` log line, and the run still reported PASS.
-  - `tests::daemon_members_is_pinned` pins the six daemon crate names in stable-set order, so a narrowing is a deliberate, reviewed edit rather than accidental drift. It pins the NAMES, not the filter expression, which would restate the implementation and catch nothing.
-  - `stack doctor <member>`'s named-member arm routes through the same entry point, so the daemon scoping cannot diverge between the two arms.
-  - Adds `tests::unknown_member_exits_3`, the unknown-member error path the `doctor` module header has claimed coverage for since the file was written; it also asserts a real but non-daemon member (`tga`) is rejected with exit 3 rather than sweeping the whole stack.
