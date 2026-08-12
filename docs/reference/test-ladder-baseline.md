@@ -125,6 +125,7 @@ disputed results. Agent-to-PM reporting keeps raw output in all cases
 | Gate | Where | Why it fails independent of your branch |
 |---|---|---|
 | The `trusty-search` filesystem-watcher tests (~6; the set drifts) | `crates/trusty-search/src/service/watch_loop.rs`, `watcher.rs`, `watcher_manager.rs` | **Retired as a known-environmental row by #4731** — the six tests no longer carry the timing assumption that produced it. They wait on their condition and re-apply the save once per debounce window (`service::watch_test_support`), so a save lost to an FSEvents queue overflow is retried rather than stranding a fixed 2–3 s deadline. A red run here is now a real signal: file it. One correction to what this row used to say: the earlier candidate mechanism — a save landing *before* OS watch registration finishes — does not apply, because `notify` 6.1.1's FSEvents backend does not return from `watch()` until after `FSEventStreamStart`. The actual loss path is an FSEvents queue overflow: it sets `MustScanSubDirs` on an event whose path is a DIRECTORY to rescan rather than the file that changed, `notify` attaches that directory path (`fsevent.rs` `callback_impl` calls `add_path` on every translated event, Rescan included), `notify-debouncer-mini`'s `DebouncedEvent` keeps only path and kind so `Flag::Rescan` is discarded, and the watcher sees an ordinary modify of a directory — dropped at the consumer's `is_dir()` guard. The specific save is never learned |
+| `create_index_cannot_register_while_a_delete_is_tearing_the_id_down` | `crates/trusty-search/src/service/server/tests_3049.rs:522` | Races an async index-DELETE teardown against a subsequent CREATE. Measured on `origin/main` at commit `f87f55377`: 5 pass / 1 fail over 6 runs. Failure assertion: `once teardown is done the recreate is an ordinary create and must succeed`, `left: 500`, `right: 200`. CI reproduced both outcomes on identical head SHA `1e62da13d` (run `31577687366` failed, run `31577755214` succeeded). The `500` status is the create hitting a conflict because teardown has not yet released the index id; `200` is expected once it has |
 | `execute_doctor_against_test_daemon` | `crates/trusty-mpm/src/client/executor/tests.rs` | It takes 9–13 s against a 10 s client timeout, so it loses on timing alone under any load |
 | `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet` | `crates/trusty-mpm/src/` (test-only) | Parallel-run race on `$HOME` mutation between tests. Fails 3 of 5 runs on a clean baseline worktree with no branch changes. Passes under `-- --test-threads=1` |
 | `safe_session_cwd_replaces_home_and_missing` | `crates/trusty-mpm/src/` (test-only) | Same `$HOME`-mutation race as `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet`, same evidence run (5 runs: 3 failed, 2 passed), same remedy (`-- --test-threads=1`) |
@@ -141,14 +142,26 @@ parallel test runs is not evidence your branch broke something. Re-run with
 it goes green, the failure was isolation-specific, not a correctness defect.
 Isolation races in this crate are pre-existing and documented above.
 
-🔴 **The correct response is to prove your diff touches zero files in those
-crates — never to `#[ignore]`, `cfg`-gate, or `--exclude` them.** The proof is a
-path list, and empty output is the evidence; paste it in the PR:
+🔴 **The correct response is to prove the failure is pre-existing — never to
+`#[ignore]`, `cfg`-gate, or `--exclude` a failing test.** If the failing crate
+depends on nothing you changed, an empty path list proves it. Otherwise —
+across a dependency edge such as `trusty-search` on `trusty-common` — that
+path list can come back empty while the branch is still guilty, and the valid
+proof is reproducing the failure on `origin/main` (step 2 below; the
+shared-crate caveat is at step 5). When the path list is the applicable proof,
+paste it in the PR:
 
+<!-- Load-bearing order: keep both branches above this block — moving the
+     block ahead of them re-opens the #5594 misreading. -->
 ```bash
 git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
                                            crates/trusty-mpm/src/client/
 ```
+
+`create_index_cannot_register_while_a_delete_is_tearing_the_id_down` above is a
+worked example of that `origin/main` reproduction, measured directly on
+`origin/main` (documented by
+[#5607](https://github.com/bobmatnyc/trusty-tools/pull/5607)).
 
 ## Telling A Pre-Existing Red From One You Caused — Crate-Scoped Confirmation
 
@@ -165,9 +178,10 @@ git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
 3. **Serialize before blaming isolation:** `-- --test-threads=1`. If it still
    fails serialized, parallel interference is not the explanation and "flaky
    under load" is the wrong diagnosis.
-4. **Check the path evidence:** `git diff --name-only origin/main...HEAD`. If the
-   failing crate does not appear there, and you did not touch a shared library it
-   depends on, the red is not yours.
+4. **Check the path evidence:** if the failing crate depends on nothing you
+   changed, an empty `git diff --name-only origin/main...HEAD` for it means the
+   red is not yours; otherwise an empty diff proves nothing — see the
+   shared-crate caveat next.
 5. 🔴 **The shared-crate caveat:** a green `cargo test -p <your-crate>` does
    **not** clear you when you changed `trusty-common`, `trusty-embedderd`, or any
    other shared library. A red in a *dependent* crate is yours until rung 4 of

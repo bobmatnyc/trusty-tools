@@ -43,6 +43,18 @@ fn parse_filename_timestamp_rejects_short() {
     assert!(parse_filename_timestamp("").is_none());
 }
 
+/// Regression test for issue #5294: a stem with a multi-byte UTF-8 character
+/// can satisfy the `len() == 15` / `len() == 8` byte-length guards while
+/// still landing a fixed-byte-offset slice mid-character. Before the fix,
+/// `stem="123é456-142030"` panicked with "byte index 4 is not a char
+/// boundary" (verbatim reproduction from the issue, confirmed during
+/// code-critic review of PR #5283). The fix must reject non-ASCII-digit
+/// content before slicing rather than panic.
+#[test]
+fn parse_filename_timestamp_rejects_non_ascii_without_panicking() {
+    assert!(parse_filename_timestamp("123é456-142030").is_none());
+}
+
 #[test]
 fn extract_section_finds_content() {
     let md = "# Title\n\n## Summary\nDid lots of work.\n\n## Next Steps\nFix tests.";

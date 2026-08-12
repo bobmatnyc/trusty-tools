@@ -85,6 +85,7 @@ normative grammar — this note does not restate it.
 | DOC-66 | `SPEC-SESSWS-01~draft` … `-07~draft` | [Session and Workstream in trusty-mpm: the 1:N model, lifecycle, and slot semantics](./DOC-66-session-workstream-model.md) | trusty-mpm — session/workstream data model, launch and provisioning paths, worktree reclamation. Encodes [ADR-0030](../adr/0030-sessions-own-many-workstreams-from-the-tm-checkout.md): one session owns many workstreams, the session's home is the tm checkout (managed, shared with the user — not the user's own clone), refreshed non-destructively, and the ~5 workstream cap is an advisory attention limit. Re-scopes DOC-52 §1.5/§3.1 |
 | DOC-67 | `SPEC-TGAUDIT-01~draft` … `-13~draft` | [tga AUDIT Mode: Remote Codebase Analysis for Acquisition Due Diligence](./DOC-67-tga-audit-mode.md) | `trusty-git-analytics` (tga) — orchestration, new `audit` subcommand, DD-manifest adapter; `trusty-review` — existing DD report pipeline, consumed unmodified; `trusty-analyze` — existing HTTP analysis surface, consumed unmodified by trusty-review, not touched by tga |
 | DOC-68 | `SPEC-AUDITPKG-01~draft` … `-15~draft` | [The Audit Engagement Handoff Package: Select, Clone, Analyze, Sign](./DOC-68-audit-handoff-package.md) | `trusty-audit` — the auditor client (orchestration, working directory, engagement config, tool seam); `trusty-git-analytics` (tga) — clone acquisition, the audit sweep, manifest emission; `trusty-installer` — pinned binary download and verification; `trusty-review` — report rendering, invoked unmodified as a subprocess |
+| DOC-69 | `SPEC-DECLSEARCH-01~draft` … `-09~draft` | [Client-Declared Search Modes: Un-Fused Lanes, Paging, and the Cosine Sort](./DOC-69-client-declared-search-modes.md) | `trusty-search` — search entry point, lane selection, HTTP/MCP search surfaces, result envelope; consumed by `trusty-review`, `trusty-code`, and the trusty-search Svelte UI. Implements [ADR-0046](../adr/0046-client-declared-search-modes-replace-the-fused-score.md): the client declares the mode, RRF fusion is removed, BM25 and KG return as separate labelled sets, cosine is a sort and never a published score. Replaces the calibrated-confidence ask in #4976, which the owner rejected |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -98,7 +99,14 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-69`** (updated 2026-08-11 — DOC-68 claimed by
+> **Next free `DOC-N` = `DOC-70`** (updated 2026-08-12 — DOC-69 claimed by
+> [Client-Declared Search Modes: Un-Fused Lanes, Paging, and the Cosine Sort](./DOC-69-client-declared-search-modes.md),
+> verified free on `origin/main` (`c40d8f3ce`): no filename or self-label claim
+> under `docs/specs/**`, no open pull request claiming `DOC-69`/`DOC-70`,
+> `check_doc_numbers.sh` clean (118 docs / 112 claims, 3 grandfathered, 0
+> violations) before the file was added.
+>
+> Previously — updated 2026-08-11 — DOC-68 claimed by
 > [The Audit Engagement Handoff Package: Select, Clone, Analyze, Sign](./DOC-68-audit-handoff-package.md),
 > verified free on `origin/main` (`aadbbd5bb`): no filename or self-label claim
 > under `docs/specs/**`, no open pull request claiming `DOC-68`/`DOC-69`,

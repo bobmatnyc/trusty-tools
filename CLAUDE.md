@@ -97,9 +97,12 @@ claims, and disputed results. Full rule in
 
 ### Baseline failures — the Rust specifics
 
+<!-- Load-bearing order below: keep the if/otherwise together — see the comment in test-ladder-baseline.md for why. -->
 🔴 **Never turn a red gate green by `#[ignore]`-ing, `cfg`-gating, or
-`--exclude`-ing a failing test** — prove your diff touches zero files in the
-failing crate instead (`git diff --name-only origin/main...HEAD -- <crate>/`).
+`--exclude`-ing a failing test — prove the failure is pre-existing instead.**
+If the failing crate depends on nothing you changed, prove it with an empty
+`git diff --name-only origin/main...HEAD -- <crate>/`; otherwise that diff
+proves nothing and you must reproduce the failure on `origin/main` instead.
 For the known-environmental flaky tests on this machine (the `trusty-search`
 filesystem-watcher tests, `execute_doctor_against_test_daemon`'s timing), the
 five-step protocol for telling a pre-existing red from one you caused, and the
@@ -445,7 +448,7 @@ For extended explanations, see [docs/reference/common-pitfalls.md](docs/referenc
 - **SLOC cap:** respect 500/3000 SLOC limits (prod/test); use `bash scripts/check_line_cap.sh`
 - **UI build:** install pnpm or set `SKIP_UI_BUILD=1` before `cargo build`
 - **Patch tables:** put all `[patch.crates-io]` in root `Cargo.toml` only
-- **Workspace deps:** shared external crates are declared once in `[workspace.dependencies]` and referenced as `dep = { workspace = true }` — never pin locally if already in the workspace table
+- **Workspace deps:** shared external crates are declared once in `[workspace.dependencies]` and referenced as `dep = { workspace = true }` — never pin locally if already in the workspace table; `default-features` is likewise owned by the root entry — `default-features = false` on a member is ignored unless the root entry sets it too (see common-pitfalls.md)
 - **Internal deps:** reference sibling crates as `trusty-common = { workspace = true }`; the workspace manifest owns the path, so every member resolves from in-tree source
 - **No global state:** helpers are free functions or small structs — no `lazy_static!` / `once_cell::sync::Lazy` except the tracing subscriber, which uses `try_init` to stay idempotent across test binaries
 - **MSRV drift:** prefer stable channel toolchains; don't break `rust-version = "1.94"`

@@ -138,6 +138,8 @@ pub mod hook_emit;
 /// existing `trusty_memory::run_http_on` paths are unchanged.
 mod http_server;
 pub mod kg_extract;
+// #5524: the single entry point every caller-supplied KG assert routes through.
+pub mod kg_write;
 pub mod mcp_service;
 pub mod messaging;
 pub mod openrpc;
@@ -400,7 +402,10 @@ pub struct AppState {
     /// block (for the unfiltered hot path) so neither code path re-walks
     /// the KG. The cache is rebuilt by
     /// `prompt_facts::rebuild_prompt_cache` after any write that touches a
-    /// hot predicate (`kg_assert`, `add_alias`, `remove_prompt_fact`).
+    /// hot predicate. #5524: every caller-supplied assert reaches that rebuild
+    /// through `kg_write::assert_triple` rather than each surface remembering
+    /// to call it; the retract side (`remove_prompt_fact`) still calls the
+    /// rebuild directly.
     /// What: An `Arc<tokio::sync::RwLock<PromptFactsCache>>` so the hot
     /// read path takes a brief read lock and clones the cache; rebuilds
     /// take a write lock for the assignment only. The async-aware lock

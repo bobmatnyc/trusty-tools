@@ -267,9 +267,25 @@ impl CodeIndexer {
     /// Before this, both ran unconditionally, so a BM25-only index kept
     /// embedding and kept rebuilding a graph on every file save while its own
     /// `/health` reported those stages `Skipped`.
+    /// #100: the per-index `TRUSTY_MAX_CHUNKS` cap is the second condition
+    /// that refuses rather than silently succeeding. `Ok(())` means every
+    /// chunk this file parsed into reached the corpus; if the cap dropped any
+    /// of them, this returns `Err` naming the cap and the drop count. Without
+    /// that, an index at its cap answered `"indexed": true` to every write it
+    /// discarded — permanently, since the corpus never shrinks — and a search
+    /// over the discarded content was indistinguishable from a correct empty
+    /// result. An update whose chunk ids already exist is exempt: the cap only
+    /// rejects NEW ids, so re-indexing a file already in the corpus still
+    /// succeeds at cap. A file that partly fits is committed partly and still
+    /// reported as an error, because a partially-indexed file is not the write
+    /// the caller asked for.
     /// Test: covered by every `index_file`-based test in `indexer::tests`;
     /// the quarantine branch by
     /// `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`;
+    /// the cap branch by `indexer::tests::chunk_cap`'s
+    /// `at_cap_index_file_is_an_error_not_a_silent_success`,
+    /// `at_cap_index_stays_an_error_for_every_later_write`, and
+    /// `at_cap_update_to_an_already_indexed_file_still_succeeds`;
     /// the component gates by `skip_vector_index_file_never_embeds`,
     /// `skip_vector_false_index_file_still_embeds`, and
     /// `skip_kg_index_file_never_rebuilds_the_symbol_graph`.
@@ -288,6 +304,11 @@ impl CodeIndexer {
 
         let chunk_contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
 
+        // #100: how many of this file's chunks the `TRUSTY_MAX_CHUNKS` cap
+        // discarded. Non-zero means the file is NOT fully indexed, and this
+        // call must report that rather than answer `Ok` — see the refusal at
+        // the end of the function for why it is deferred to there.
+        let mut dropped_by_cap = 0usize;
         if !chunks.is_empty() {
             // #3048: a vector-disabled index must not embed on the incremental
             // path either. All-`None` embeddings are exactly what
@@ -308,7 +329,10 @@ impl CodeIndexer {
                 embed_ms: 0,
                 vector_count: 0,
             };
-            self.commit_parsed_batch(parsed, true).await?;
+            dropped_by_cap = self
+                .commit_parsed_batch(parsed, true)
+                .await?
+                .chunks_dropped_by_cap;
         }
 
         let all_entities = self
@@ -328,6 +352,30 @@ impl CodeIndexer {
         // whose skip_kg semantics are not this issue's to change.
         if !self.skip_kg {
             self.rebuild_symbol_graph().await;
+        }
+
+        // #100: the cap used to drop chunks, log a `warn!`, and still return
+        // `Ok` — so `POST /index-file` answered `"indexed": true` for a write
+        // that never landed, and an index sitting AT the cap answered that way
+        // for every write forever while accepting nothing. The cap itself
+        // stays policy; reporting a discarded write as a successful one does
+        // not. Refusal is the same choice #4122 made for the quarantine branch
+        // above, on the same reasoning: this caller has no other signal.
+        //
+        // Reported here rather than at the commit above so the entity map and
+        // symbol graph still match whatever DID land — a file that partly fit
+        // is committed as completely as the cap allows, and the error says it
+        // was not the write the caller asked for.
+        if dropped_by_cap > 0 {
+            anyhow::bail!(
+                "index '{}' is at its chunk cap ({}): {} of '{file_path}'s chunks were \
+                 dropped, so the file is NOT fully indexed. Raise TRUSTY_MAX_CHUNKS and \
+                 restart the daemon, or split this root across indexes, then re-send the \
+                 file",
+                self.index_id,
+                super::max_chunks_per_index(),
+                dropped_by_cap
+            );
         }
         Ok(())
     }

@@ -156,9 +156,13 @@ fn git_branch(cwd: &str) -> Option<String> {
 /// human-meaningful session label (e.g. `tm-trusty-tools-01`) without any extra
 /// plumbing. The bounded-thread pattern matches [`git_branch`].
 /// What: returns `None` immediately when `$TMUX` is unset (not inside tmux);
-/// otherwise spawns a detached thread that runs `tmux display-message -p '#S'`,
-/// trims the output, and returns `None` on missing binary, non-zero exit, empty
-/// output, or a >100 ms stall.
+/// otherwise spawns a detached thread that runs `tmux display-message -p '#S'`
+/// (via `core::tmux::display_message_argv`/`run_tmux_argv_with_bin` — #2414;
+/// the resolve-then-spawn work happens INSIDE the bounded thread, so a slow
+/// binary resolution still cannot push this probe past its 100 ms budget —
+/// the caller's `recv_timeout` bounds it regardless), trims the output, and
+/// returns `None` on missing binary, non-zero exit, empty output, or a stall
+/// past 100 ms.
 /// Test: environment-dependent (requires a live tmux session), so covered
 /// indirectly via the pure [`select_branch_label`] selection tests and
 /// `project_segment_basename_fallback_non_git`, which asserts against this
@@ -178,10 +182,11 @@ pub(crate) fn tmux_session_name() -> Option<String> {
     let (tx, rx) = mpsc::channel::<Option<String>>();
     std::thread::spawn(move || {
         let result = (|| -> Option<String> {
-            let out = std::process::Command::new("tmux")
-                .args(["display-message", "-p", "#S"])
-                .output()
-                .ok()?;
+            // #2414: resolved binary + shared spawn primitive, matching
+            // every other tmux call site in the crate.
+            let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+            let argv = trusty_mpm::core::tmux::display_message_argv(None, "#S");
+            let out = trusty_mpm::core::tmux::run_tmux_argv_with_bin(&tmux_bin, &argv).ok()?;
             if !out.status.success() {
                 return None;
             }

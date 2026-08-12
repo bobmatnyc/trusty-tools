@@ -96,7 +96,7 @@ pub struct LaunchdConfig {
     pub fd_limit: Option<u32>,
     /// `WorkingDirectory`, when the agent needs one. `None` omits the key.
     ///
-    /// #4868: exists so a regenerated unit can carry forward a
+    /// #4919: exists so a regenerated unit can carry forward a
     /// `WorkingDirectory` the installed one had. Before install started
     /// overwriting the live plist this was invisible; now dropping it would be
     /// a silent behaviour change on every upgrade.
@@ -213,7 +213,7 @@ impl LaunchdConfig {
             crate::shutdown::TERMINATION_GRACE_SECS
         ));
 
-        // #4868: carried forward from the installed unit when it had one.
+        // #4919: carried forward from the installed unit when it had one.
         if let Some(wd) = &self.working_directory {
             s.push_str("  <key>WorkingDirectory</key>\n");
             s.push_str(&format!("  <string>{}</string>\n", xml_escape(wd)));
