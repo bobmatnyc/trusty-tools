@@ -351,8 +351,17 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     lexical however conceptual the query was. The second field separates "off
     for this index" from "not built yet". Counterparts to the existing
     `meta.bm25_lane_degraded`.
-- **Response 503** `vector_unavailable` (#5068): returned when the request
-  PINNED `"stage": "semantic"` and the vector lane cannot serve it. Returning
+  - `meta.routed_from_index` / `meta.served_by_index` / `meta.served_root_path`
+    (#5069): present ONLY when a pinned `"stage": "semantic"` was answered by a
+    different facet of the same repo — see the 503 below. `served_root_path` is
+    the tree every returned `file` is relative to, and it is not the root of the
+    index named in the URL: the base checkout sits on a different commit than
+    the worktree, so a caller that opens a returned path must resolve it against
+    this root, not its own. Absent on every unrouted response, which is
+    byte-identical to what it was before.
+- **Response 503** `vector_unavailable` (#5068, narrowed by #5069): returned when
+  the request PINNED `"stage": "semantic"`, the vector lane cannot serve it, and
+  no facet of the same repo can either. Returning
   lexical rows under a `200` would answer a different question than the one
   asked, so this mirrors the `503 kg_unavailable` contract `get_call_chain`
   already uses for `skip_kg` indexes. `reason` is `skipped_by_config`
@@ -363,6 +372,16 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
   the caller need not re-probe. An UNPINNED query is unaffected: it still
   returns `200` and degrades to whatever lanes are ready, reporting that via
   the `meta` flags above.
+
+  **Facet routing (#5069).** Before refusing, the daemon looks for a sibling
+  index carrying the same `PersistedIndex::repo_identity` that was built with
+  the vector component enabled, loads it, and runs the caller's own query there
+  — that is how a `tm` session worktree, which #5060 registers `skip_vector`,
+  reaches the embeddings on its base checkout. The declaration decides
+  everything: routing fires only for a PINNED semantic lane, never substitutes
+  one lane for another, and never crosses `repo_identity`. When nothing
+  qualifies the original `503` is returned unchanged, so this narrows when the
+  refusal fires without changing its shape.
 
 ##### `POST /indexes/:id/search_similar`
 
