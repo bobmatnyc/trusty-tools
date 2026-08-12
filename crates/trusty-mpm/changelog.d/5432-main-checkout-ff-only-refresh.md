@@ -1,7 +1,0 @@
-Added
-
-- `tm-workflow`'s "Worktree Discipline" section now tells sessions to keep the main checkout fresh: `git fetch` then `git pull --ff-only` at session start and after a PR this session merged lands on `origin/main`. Worktrees branch off `origin/main` and stay current, but nothing refreshes the main checkout, so it drifts and inspection reads start answering from old code
-  - fast-forward only, so the refresh cannot create a merge commit or rewrite history, and a dirty tree only blocks it when the incoming commits touch the same files
-  - when `--ff-only` is blocked by another session's uncommitted changes, the rule is preserve rather than discard — commit the orphaned work to a throwaway branch, then switch back and fast-forward. Committing reaches the same clean tree as discarding, costs the same number of steps, and cannot lose anything
-  - `git stash` stays banned (repo-level, shared across every worktree), as do `git checkout --`, `restore`, `reset --hard`, and `clean` — the main-checkout guard blocks those and hunting for an unblocked equivalent is routing around a safety control. A file showing ` M` in `git status --porcelain` was never staged, so nothing recovers it once discarded
-  - stated as inspection hygiene: the main checkout stays read-only for work, all edits still happen in a worktree, and `git pull` is already on the PM's allowlist so this needs no new authority
