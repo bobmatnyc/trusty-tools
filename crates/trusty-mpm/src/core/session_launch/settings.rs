@@ -551,20 +551,60 @@ pub(super) fn preseed_workspace_trust(
     Ok(())
 }
 
-/// Pre-seed workspace trust in the operator's real `~/.claude.json`.
+/// Pre-seed workspace trust in the user's `~/.claude.json`.
 ///
-/// Why: thin home-resolving wrapper over [`preseed_workspace_trust`] so
-/// `prepare_session` can call it without knowing the config-dir layout; tests
-/// target a temp file via the inner function directly.
-/// What: resolves `~/.claude.json` and delegates. A missing home directory is a
-/// soft failure (logged, non-fatal) so launch still proceeds.
-/// Test: covered by the inner `preseed_trust_*` tests.
-pub(super) fn preseed_workspace_trust_home(workspace: &Path) -> Result<(), PrepError> {
-    let Some(home) = dirs::home_dir() else {
-        tracing::warn!("skipping trust pre-seed: home directory unresolved");
+/// Why: thin wrapper over [`preseed_workspace_trust`] so `prepare_session` can
+/// call it without knowing the config-dir layout; tests target a temp file via
+/// the inner function directly.
+///
+/// #5544: the home arrives as a PARAMETER rather than being read from `fw`.
+/// `FrameworkPaths` describes where a session's framework and `.claude/` tiers
+/// live, and the managed constructors deliberately relocate those onto the
+/// workspace — so every accessor on it answers a question this function is not
+/// asking. `~/.claude.json` belongs to the USER, under every root. Production
+/// passes `dirs::home_dir()`, exactly as before this change; only tests pass
+/// anything else.
+/// What: resolves `<home>/.claude.json` and delegates. An absent or relative
+/// home is a soft skip (logged) — seeding a trust record beside the process's
+/// working directory would be worse than not seeding one.
+/// Test: `prepare_session_does_not_seed_the_workspace_on_the_managed_path`,
+/// `home_writes_are_skipped_when_the_home_is_unusable`; the seeding behaviour
+/// itself by the inner `preseed_trust_*` tests.
+pub(super) fn preseed_workspace_trust_home(
+    home: Option<&Path>,
+    workspace: &Path,
+) -> Result<(), PrepError> {
+    let Some(home) = usable_home(home) else {
         return Ok(());
     };
     preseed_workspace_trust(&home.join(".claude.json"), workspace)
+}
+
+/// The supplied home, when it is usable for a user-global write.
+///
+/// Why (#5544): `dirs::home_dir()` returns `None` on a stripped environment, and
+/// a caller that substituted a relative fallback would send the write beside the
+/// process's working directory — the stray-file outcome this change exists to
+/// prevent. Declining is the correct answer; both callers are best-effort side
+/// effects.
+/// What: passes an absolute path through, logging at `warn!` otherwise so a
+/// declined write is visible rather than silent.
+/// Test: `home_writes_are_skipped_when_the_home_is_unusable`.
+fn usable_home(home: Option<&Path>) -> Option<&Path> {
+    match home {
+        Some(home) if home.is_absolute() => Some(home),
+        Some(home) => {
+            tracing::warn!(
+                home = %home.display(),
+                "skipping user-global session writes: the home directory is not absolute"
+            );
+            None
+        }
+        None => {
+            tracing::warn!("skipping user-global session writes: no home directory resolved");
+            None
+        }
+    }
 }
 
 /// Remove the `trusty-memory` hook entries from `~/.claude/settings.json`.
@@ -573,22 +613,25 @@ pub(super) fn preseed_workspace_trust_home(workspace: &Path) -> Result<(), PrepE
 /// fired for every Claude Code session. Now that [`write_project_hooks`]
 /// scopes them to trusty-mpm projects, the global entries must be removed to
 /// stop them double-firing (and firing for unrelated sessions like claude-mpm).
-/// What: reads `~/.claude/settings.json`, and for each event in
+///
+/// #5544: the home arrives as a PARAMETER — see [`preseed_workspace_trust_home`]
+/// for why it is not read off `FrameworkPaths`. Pointing this at a managed
+/// workspace was the worse half of that bug: the file does not exist there, a
+/// missing file is success by contract, so the operator's REAL global hooks were
+/// never removed and kept double-firing with nothing to show for it. No second
+/// implementation of this cleanup exists to catch it.
+/// What: reads `<home>/.claude/settings.json`, and for each event in
 /// [`GLOBAL_TRUSTY_MEMORY_EVENTS`] filters out handler groups whose `hooks`
 /// array contains a command matching `trusty-memory hooks fire`. An event key
 /// whose array becomes empty is removed entirely. Writes the file back. A
 /// missing or malformed file is treated as success (nothing to clean up).
-/// Test: `remove_global_hooks_removes_trusty_memory_entries`.
-pub(super) fn remove_global_trusty_memory_hooks() -> Result<(), PrepError> {
-    let home = match dirs::home_dir() {
-        Some(home) => home,
-        None => {
-            tracing::warn!("skipping global trusty-memory hook removal: home unresolved");
-            return Ok(());
-        }
+/// Test: `remove_global_hooks_removes_trusty_memory_entries`,
+/// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`.
+pub(super) fn remove_global_trusty_memory_hooks(home: Option<&Path>) -> Result<(), PrepError> {
+    let Some(home) = usable_home(home) else {
+        return Ok(());
     };
-    let settings_path = home.join(".claude").join("settings.json");
-    clean_global_trusty_memory_hooks(&settings_path)
+    clean_global_trusty_memory_hooks(&home.join(".claude").join("settings.json"))
 }
 
 /// Filter `trusty-memory` hook entries out of the settings file at `settings_path`.

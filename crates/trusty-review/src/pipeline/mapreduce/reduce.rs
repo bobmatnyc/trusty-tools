@@ -9,8 +9,8 @@
 //! `grade::derive_verdict` precedence and clamp rules.
 //!
 //! What: `reduce` (1) unions all per-chunk findings, (2) dedups same-file
-//! findings by Jaccard similarity ≥ `FINDING_SIMILARITY_THRESHOLD` (reusing
-//! `profile::synthesizer::jaccard_similarity`), (3) prioritises by (Effort,
+//! findings by Jaccard similarity ≥ `FINDING_SIMILARITY_THRESHOLD` (see
+//! [`jaccard_similarity`] below), (3) prioritises by (Effort,
 //! confidence) and caps at `config.max_findings`, then (4) derives the overall
 //! verdict via `grade::derive_verdict` seeded by the STRICTER-OF all per-chunk
 //! verdicts (so a chunk REQUEST_CHANGES/BLOCK propagates to the whole review).
@@ -25,7 +25,6 @@ use crate::{
     config::{constants::FINDING_SIMILARITY_THRESHOLD, mapreduce::MapReduceConfig},
     models::{Effort, Finding, Verdict},
     pipeline::grade::derive_verdict,
-    profile::synthesizer::jaccard_similarity,
 };
 
 use super::outcome::{MapOutcome, MapReduceStats, ReducedReview, TokenUsage};
@@ -180,8 +179,6 @@ fn aggregate_verdict(chunk_verdicts: &[Verdict], findings: &[Finding]) -> Verdic
 ///
 /// Why: a single logical issue can surface in more than one chunk of the same
 /// file (e.g. a duplicated pattern); surfacing it twice spams the author.
-/// Reusing the profile synthesiser's Jaccard metric keeps the similarity rule
-/// consistent across the crate.
 /// What: keeps the FIRST occurrence; a later finding is dropped only when it
 /// shares the same `file` AND the same `kind` AND its `description`
 /// Jaccard-similarity to an already kept finding is ≥
@@ -244,6 +241,43 @@ fn effort_rank(effort: &Effort) -> u8 {
         Effort::Medium => 1,
         Effort::Low => 0,
     }
+}
+
+/// Compute Jaccard similarity between two finding-description strings.
+///
+/// Why: `dedup_findings` needs a dependency-free similarity metric that behaves
+/// well on short technical phrases. It used to live in `profile::synthesizer`;
+/// #5466 removed that module (profiling is tga's domain now, #5468), so the
+/// helper moved down here beside its only remaining caller.
+/// What: tokenises each string into lowercase alphanumeric words, then returns
+/// |intersection| / |union| of the token sets. Two empty inputs are identical
+/// (1.0); one empty input shares nothing (0.0).
+/// Test: `jaccard_similarity_basic`, `jaccard_similarity_similar_descriptions`.
+fn jaccard_similarity(a: &str, b: &str) -> f64 {
+    let tokens_a = tokenize(a);
+    let tokens_b = tokenize(b);
+    if tokens_a.is_empty() && tokens_b.is_empty() {
+        return 1.0;
+    }
+    if tokens_a.is_empty() || tokens_b.is_empty() {
+        return 0.0;
+    }
+    let mut intersection = 0usize;
+    for t in &tokens_a {
+        if tokens_b.contains(t) {
+            intersection += 1;
+        }
+    }
+    let union = tokens_a.len() + tokens_b.len() - intersection;
+    intersection as f64 / union as f64
+}
+
+/// Tokenise a string into lowercase alphanumeric tokens.
+fn tokenize(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect()
 }
 
 #[cfg(test)]

@@ -5,16 +5,17 @@
 tcode (the `trusty-code` harness, binary `tcode`) differs from Claude Code
 in that it emits **structured NDJSON event lines** in addition to pane text.
 
-## `__HARNESS_EVENT__` NDJSON Events
+## `__OMPM_EVENT__` NDJSON Events
 
-tcode emits events as NDJSON lines prefixed with `__HARNESS_EVENT__ `:
+tcode emits events as NDJSON lines prefixed with `__OMPM_EVENT__ `:
 
 ```
-__HARNESS_EVENT__ {"source":"code","seq":1,"payload":{"domain":"lifecycle","event":{"type":"session_started","session_id":"s1","project":"my-repo"}}}
+__OMPM_EVENT__ {"session_id":"s1","seq":1,"at":"2026-08-12T09:00:00Z","kind":"session_started","event":{"type":"session_started","session_id":"s1","project":"my-repo"}}
 ```
 
-To parse: strip the `__HARNESS_EVENT__ ` prefix (21 chars including trailing
-space), then parse the remainder as JSON as a `HarnessEvent` envelope.
+To parse: strip the `__OMPM_EVENT__ ` prefix (15 chars including the trailing
+space), then parse the remainder as JSON — a `SessionEventEnvelope`, whose
+top-level `kind` mirrors the tagged `event.type` for cheap filtering.
 
 Key event types to watch:
 - `session_started` / `session_ended` — lifecycle transitions
@@ -53,7 +54,7 @@ These patterns are completion evidence for "edit made" claims.
 
 ## State Classification for tcode
 
-Apply the agnostic model, but prefer `__HARNESS_EVENT__` events over pane text
+Apply the agnostic model, but prefer `__OMPM_EVENT__` events over pane text
 when available:
 
 | Event / pane signal | State |

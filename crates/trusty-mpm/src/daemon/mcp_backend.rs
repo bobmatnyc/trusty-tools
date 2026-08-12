@@ -434,6 +434,7 @@ impl OrchestratorBackend for StateBackend {
         tmux_window: Option<&str>,
         all_projects: bool,
         full: bool,
+        sessions_offset: usize,
     ) -> Result<Value, String> {
         super::mcp_context::session_context_catchup(
             project_dir,
@@ -441,6 +442,7 @@ impl OrchestratorBackend for StateBackend {
             tmux_window,
             all_projects,
             full,
+            sessions_offset,
         )
         .await
     }

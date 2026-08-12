@@ -179,14 +179,30 @@ fn prune_stale_project_entries(
 /// `workspace` is used only as the `projects.<workspace>` key — this never reads
 /// the workspace's own `.mcp.json`. Writes back atomically; idempotent once the
 /// entry is trusted and the approval key is gone. All other keys are preserved.
+///
+/// **Concurrency (issue #4076):** the whole read → mutate → write cycle runs
+/// under [`crate::core::claude_json_guard::lock`]. The daemon provisions
+/// sessions concurrently and calls this once per session, so two overlapping
+/// cycles were a lost update — the slower writer stored a snapshot taken before
+/// the faster writer's store, silently dropping that session's whole
+/// `projects.<workspace>` entry. This is the third seeder to take the guard;
+/// #4072 fixed the two that target `~/.claude.json`, and
+/// [`crate::core::mcp_config::seed_builtin_servers`] already held it against
+/// the SAME `<claude_config_dir>/.claude.json` this function writes, so leaving
+/// this one unguarded also left those two racing each other.
 /// Test: `test_preseed_managed_trust_marks_directory`,
 ///   `test_preseed_managed_trust_is_idempotent`,
 ///   `test_preseed_managed_trust_writes_no_mcp_approval`,
 ///   `test_preseed_managed_trust_strips_a_stale_mcp_approval`,
 ///   `test_preseed_managed_trust_no_home_write`,
-///   `test_preseed_managed_trust_quarantines_malformed_json`.
+///   `test_preseed_managed_trust_quarantines_malformed_json`,
+///   `concurrent_managed_seeds_preserve_every_workspace_entry` (#4076).
 pub fn preseed_managed_trust(claude_config_dir: &Path, workspace: &Path) -> anyhow::Result<()> {
     use serde_json::Value;
+
+    // #4076: hold the guard across the WHOLE read → mutate → write cycle, the
+    // third seeder to need it after #4072 fixed the other two.
+    let _guard = crate::core::claude_json_guard::lock();
 
     let claude_json = claude_config_dir.join(".claude.json");
 

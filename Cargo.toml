@@ -108,7 +108,7 @@ trusty-code = { path = "crates/trusty-code" }
 # shared by trusty-code's `tcode tui` and trusty-agents' tagent REPL (DOC-50,
 # epic #3411). Not yet published (Slice 1, #3425).
 trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.5.0" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.5.1" }
 trusty-common = { path = "crates/trusty-common", version = "0.33" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
@@ -117,8 +117,11 @@ trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.10" }
 # trusty-memory so `cargo install trusty-memory` produces both binaries from
 # one command (mirrors the trusty-embedderd / trusty-search pattern, PR #190).
 trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.2.0" }
-# tga: trusty-git-analytics — developer productivity analytics.
-# Referenced by trusty-review for contributor-profile data pipeline (#558).
+# tga: trusty-git-analytics — developer productivity analytics, and (since
+# #5468) the sole owner of contributor profiling. No workspace member takes a
+# Cargo edge on it: #5466 removed trusty-review's, and the tga -> trusty-review
+# direction is a PATH lookup, not a manifest edge (#5236, DOC-67 §6). The entry
+# stays so a future in-tree consumer resolves from source rather than crates.io.
 tga = { path = "crates/trusty-git-analytics", version = "2.10" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
@@ -127,7 +130,14 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 # trusty-review: LLM-backed PR-review service. Referenced by trusty-analyze
 # (behind the optional `review` feature) so the analyze MCP server can expose
 # the trusty-review pipeline as `tr_review_*` tools (#630).
-trusty-review = { path = "crates/trusty-review", version = "0.15" }
+# Why (#5466): `default-features = false` HERE, not only on the member entry.
+#      Cargo ignores a member's `default-features = false` when the workspace
+#      entry omits the key (it warns, and says it may become a hard error), so
+#      trusty-analyze's own `default-features = false` was a silent no-op until
+#      this line existed. Both consumers name what they need: trusty-analyze's
+#      `review` feature pulls `trusty-review/mcp`; trusty-mpm's dev-dependency
+#      only touches `integrations`, which is unconditional.
+trusty-review = { path = "crates/trusty-review", version = "0.16", default-features = false }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a

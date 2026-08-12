@@ -100,6 +100,12 @@ use doctor_skill_unmanaged::check_skill_unmanaged;
 mod doctor_agent_skills;
 use doctor_agent_skills::check_agent_skills;
 
+// #5032: the `gh_account` probe, split out when its tri-state outcome
+// (authenticated / unauthenticated / could-not-tell) pushed this file over cap.
+#[path = "doctor_gh_account.rs"]
+mod doctor_gh_account;
+use doctor_gh_account::check_gh_account;
+
 // Split out to keep this file under the 500-SLOC production cap (issue #2940
 // — the tm hook contamination / foreign claude-mpm hook conflict probe).
 #[path = "doctor_hooks_hygiene.rs"]
@@ -456,83 +462,6 @@ fn build_oauth_token_check(
             CheckStatus::Ok,
             "managed-session auth looks configured",
         )
-    }
-}
-
-/// Probe the active `gh` github.com account and warn on ambiguity.
-///
-/// Why (#gh-account-awareness): `tm` shells to `gh` for PR merges, issue edits,
-/// and managed spawn, but had no awareness of WHICH github.com identity was
-/// active. When several accounts are logged in, `gh` uses whichever is active —
-/// and a non-admin active account silently broke `gh pr merge --admin` with
-/// "1 approving review required". This probe makes the active account visible in
-/// `tm doctor` and warns when the dangerous multi-account ambiguity exists.
-/// What: off-loads the two bounded `gh`/`hosts.yml` reads to `spawn_blocking`
-/// (so the async executor is not stalled), then folds the result via
-/// [`build_gh_account_check`]. Advisory only: `Warn` when multiple accounts are
-/// logged in or `gh` is unauthenticated, `Ok` for a single clear account — never
-/// a hard `Fail`, since a missing/other `gh` identity is not a broken stack.
-/// Test: `build_gh_account_check` covers every branch;
-/// `gh_account_check_is_advisory_only` asserts it never returns `Fail`.
-async fn check_gh_account() -> DoctorCheck {
-    let (active, accounts) = tokio::task::spawn_blocking(|| {
-        let active = crate::core::gh_account::active_gh_account();
-        let accounts = crate::core::gh_account::logged_in_gh_accounts();
-        (active, accounts)
-    })
-    .await
-    .unwrap_or((None, Vec::new()));
-    build_gh_account_check(active, accounts)
-}
-
-/// Fold the resolved gh-account state into a [`DoctorCheck`] (pure).
-///
-/// Why: keeping the verdict logic pure makes every branch — single account,
-/// multi-account ambiguity, active-unknown, and unauthenticated — unit-testable
-/// without a live `gh`.
-/// What: returns `Warn` when `accounts` holds more than one login (naming them
-/// and pointing at `gh auth switch`), `Warn` when no account is detected, `Warn`
-/// when accounts exist but none is marked active, and `Ok` for a single clear
-/// active account. Never `Fail` — this is advisory.
-/// Test: `build_gh_account_check_single_ok`, `build_gh_account_check_multi_warn`,
-/// `build_gh_account_check_unauthenticated_warn`,
-/// `gh_account_check_is_advisory_only`.
-fn build_gh_account_check(active: Option<String>, accounts: Vec<String>) -> DoctorCheck {
-    if accounts.len() > 1 {
-        let list = accounts.join(", ");
-        let active_str = active.as_deref().unwrap_or("unknown");
-        return DoctorCheck::new(
-            "gh_account",
-            CheckStatus::Warn,
-            format!(
-                "{} github.com accounts logged in ({list}); active is `{active_str}`. \
-                 `gh` (and `gh pr merge --admin`) uses the ACTIVE account — if merges \
-                 fail on permissions, run `gh auth switch` to the repo owner.",
-                accounts.len()
-            ),
-        );
-    }
-    match active {
-        Some(login) => DoctorCheck::new(
-            "gh_account",
-            CheckStatus::Ok,
-            format!("active gh account: `{login}`"),
-        ),
-        None if accounts.is_empty() => DoctorCheck::new(
-            "gh_account",
-            CheckStatus::Warn,
-            "gh is not authenticated (no github.com account) — `gh` calls will fail; \
-             run `gh auth login`"
-                .to_string(),
-        ),
-        None => DoctorCheck::new(
-            "gh_account",
-            CheckStatus::Warn,
-            format!(
-                "gh authenticated ({}) but no active account is set — run `gh auth switch`",
-                accounts.join(", ")
-            ),
-        ),
     }
 }
 

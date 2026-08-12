@@ -269,20 +269,31 @@ fi
 
 # ===========================================================================
 # 6. FAIL-OPEN CASE A — check_agent_assets.sh with `git ls-files` failing.
-#    Pre-fix, the process substitution swallowed the 128 and the gate printed
-#    "0 byte-parity file(s) match — OK".
+#    Pre-fix, the process substitution swallowed the 128 and the gate reported
+#    OK having compared nothing. The gate's checks have since changed shape
+#    (the roster consolidated to one copy, so the byte-parity half became a
+#    no-re-copy guard) but the fail-open shape this case pins is the same:
+#    an enumeration that errors must never read as a pass.
 # ===========================================================================
 if want agent_assets_tool_error; then
   f="$(new_fixture)"
   install_gate "$f" check_agent_assets.sh
-  mkdir -p "$f/crates/trusty-code/src/assets/agents" "$f/crates/trusty-mpm/src/assets/agents"
+  mkdir -p "$f/crates/trusty-code/src/assets/agents" \
+           "$f/crates/trusty-agents-common/src/assets/agents"
+  # The 4 pinned deviations: a shared source, and a trusty-code fork of it that
+  # is SUPPOSED to differ.
   for base in code-analyzer code-critic qa web-qa; do
-    printf 'upstream %s\n' "$base" > "$f/crates/trusty-mpm/src/assets/agents/$base.md"
+    printf 'shared %s\n' "$base" > "$f/crates/trusty-agents-common/src/assets/agents/$base.md"
     printf 'deviated %s\n' "$base" > "$f/crates/trusty-code/src/assets/agents/$base.md"
   done
-  # A parity file that genuinely DRIFTED: the gate must never report OK over it.
-  printf 'source\n' > "$f/crates/trusty-mpm/src/assets/agents/research.md"
-  printf 'DRIFTED\n' > "$f/crates/trusty-code/src/assets/agents/research.md"
+  # The 4 tcode-only defaults, so the exact-count floor is satisfied and the
+  # run reaches the enumeration this case is actually about.
+  for base in engineer qa-agent code-reviewer pm; do
+    printf 'tcode-only %s\n' "$base" > "$f/crates/trusty-code/src/assets/agents/$base.md"
+  done
+  # A RE-COPIED shared asset: the gate must never report OK over it.
+  printf 'shared\n' > "$f/crates/trusty-agents-common/src/assets/agents/research.md"
+  printf 'shared\n' > "$f/crates/trusty-code/src/assets/agents/research.md"
   # The pins file must pre-exist: --force-add reads it before writing it.
   : > "$f/scripts/agent-asset-pins.tsv"
   ( cd "$f" && bash scripts/check_agent_assets.sh --force-add >/dev/null )

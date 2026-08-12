@@ -14,6 +14,8 @@
 //! multiple investigation batches, with a scripted provider that truncates one
 //! batch — asserting the OTHER batch's finding still renders and the failed
 //! batch is named in both the report and the synthesis-prompt coverage digest.
+//! Test: this file (only compiled with the default `report` feature).
+#![cfg(feature = "report")]
 
 use std::path::Path;
 use std::sync::Arc;

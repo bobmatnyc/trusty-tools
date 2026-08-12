@@ -31,7 +31,8 @@ use redb::Database;
 use uuid::Uuid;
 
 use crate::memory_core::store::concurrent_open::{
-    OpenIntent, OpenMode, SnapshotGuard, backoff_sleep_ms, try_open_or_snapshot,
+    OpenIntent, OpenMode, SnapshotGuard, backoff_sleep_ms, is_incompatible_format_refusal,
+    try_open_or_snapshot,
 };
 use crate::memory_core::store::hnsw_store::HnswStore;
 use crate::memory_core::store::kg_redb::READ_ONLY_ERROR_MSG;
@@ -141,6 +142,11 @@ fn open_or_get_cached_db(path: &Path, intent: OpenIntent) -> Result<Arc<VectorDb
                 return Ok(state);
             }
             Err(e) => {
+                // #4911: an incompatible on-disk format never resolves by
+                // waiting, unlike the lock races this loop exists for.
+                if is_incompatible_format_refusal(&e) {
+                    return Err(e);
+                }
                 last_err = Some(e);
                 if attempt < max_attempts {
                     // Exponential backoff: let any concurrent in-process

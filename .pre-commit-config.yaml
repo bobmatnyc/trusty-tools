@@ -80,6 +80,21 @@ repos:
         pass_filenames: false
         always_run: true
 
+  # build.rs canonical-block sync lint (issue #5528). Fails the commit when
+  # the daemon family (trusty-memory, trusty-analyze, trusty-console,
+  # trusty-search) or the tauri-ui family (trusty-code-gui, trusty-mpm-gui,
+  # trusty-agents-ui) carry a build.rs whose canonical block has drifted from
+  # its siblings. Runs against the whole tracked tree (pass_filenames: false),
+  # matching the line-cap hook's holistic scan.
+  - repo: local
+    hooks:
+      - id: buildrs-sync
+        name: "build.rs canonical-block sync lint"
+        entry: scripts/check_buildrs_sync.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
   # Document-number allocation lint. Fails the commit when two files claim the
   # same DOC-N or ADR-NNNN (by filename or by their own header self-label), when
   # a file's filename and self-label disagree, when a spec-catalog row points at
