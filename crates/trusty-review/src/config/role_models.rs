@@ -106,25 +106,40 @@ impl RoleModels {
     /// credentials. The built-in default layer is
     /// [`ProviderDefault::detect`]'s output — provider AND the matching model
     /// ids, because the two cannot be chosen independently (Bedrock's
-    /// inference-profile ids are meaningless to OpenRouter).
+    /// inference-profile ids are meaningless to OpenRouter). Detection runs
+    /// once per role against that role's own explicit provider, so a config
+    /// file naming a different provider per role gets a matching default model
+    /// for each.
     /// Test: `role_models_openrouter_key_selects_openrouter`,
-    /// `role_models_bedrock_only_unchanged`, `role_models_no_credential_source`.
+    /// `role_models_bedrock_only_unchanged`, `role_models_no_credential_source`,
+    /// `role_models_per_role_file_providers_keep_matching_models`.
     pub fn resolve_with_credentials(
         cli_overrides: Option<&RoleCliOverrides>,
         env: &RoleEnv,
         file_models: Option<&FileModels>,
         credentials: &CredentialEnv,
     ) -> Self {
-        let explicit = explicit_provider(cli_overrides, env, file_models);
-        let default = ProviderDefault::detect(explicit, credentials);
+        let file_reviewer = file_models.and_then(|f| f.reviewer.as_ref());
+        let file_verifier = file_models.and_then(|f| f.verifier.as_ref());
+        let file_summarizer = file_models.and_then(|f| f.summarizer.as_ref());
+        let role_default = |file_role: Option<&RoleConfigOverride>| {
+            ProviderDefault::detect(
+                explicit_provider_for_role(cli_overrides, env, file_role),
+                credentials,
+            )
+        };
+        let reviewer_default = role_default(file_reviewer);
+        let verifier_default = role_default(file_verifier);
+        let summarizer_default = role_default(file_summarizer);
+
         let reviewer = resolve_role(
             cli_overrides.and_then(|c| c.reviewer_model.as_deref()),
             cli_overrides.and_then(|c| c.provider.as_deref()),
             env.reviewer_model.as_deref(),
             env.provider.as_deref(),
-            file_models.and_then(|f| f.reviewer.as_ref()),
-            default.reviewer_model,
-            default.provider.clone(),
+            file_reviewer,
+            reviewer_default.reviewer_model,
+            reviewer_default.provider.clone(),
             0.3,
             4096,
         );
@@ -133,9 +148,9 @@ impl RoleModels {
             cli_overrides.and_then(|c| c.provider.as_deref()),
             env.verifier_model.as_deref(),
             env.provider.as_deref(),
-            file_models.and_then(|f| f.verifier.as_ref()),
-            default.verifier_model,
-            default.provider.clone(),
+            file_verifier,
+            verifier_default.verifier_model,
+            verifier_default.provider.clone(),
             1.0,
             128,
         );
@@ -144,14 +159,18 @@ impl RoleModels {
             cli_overrides.and_then(|c| c.provider.as_deref()),
             env.summarizer_model.as_deref(),
             env.provider.as_deref(),
-            file_models.and_then(|f| f.summarizer.as_ref()),
-            default.summarizer_model,
-            default.provider.clone(),
+            file_summarizer,
+            summarizer_default.summarizer_model,
+            summarizer_default.provider.clone(),
             0.0,
             4096,
         );
         Self {
-            provider_source: default.source,
+            provider_source: aggregate_source(
+                reviewer_default.source,
+                verifier_default.source,
+                summarizer_default.source,
+            ),
             reviewer,
             verifier,
             summarizer,
@@ -242,38 +261,59 @@ pub struct FileModels {
 
 // ─── Resolution helpers ──────────────────────────────────────────────────────
 
-/// The provider an operator named explicitly, across all three config layers.
+/// The provider an operator named explicitly for ONE role.
 ///
-/// Why: #5671 precedence rule 1 — an explicit provider always wins, and credential
-/// detection must not run at all in that case. Computing it once for the whole
-/// `RoleModels` (rather than per role) is what makes `ProviderSource::Explicit`
-/// mean "the operator chose", so `build_provider` never blocks a configured run.
-/// What: first parsable value of CLI flag → `TRUSTY_REVIEW_PROVIDER` → any
-/// role's config-file `provider` (roles are scanned reviewer → verifier →
-/// summarizer; a file that names different providers per role still counts as
-/// explicit, and each role keeps its own value via `resolve_role`).
+/// Why: #5671 precedence rule 1 — an explicit provider always wins, and
+/// credential detection must not run at all in that case. Resolving it per role
+/// is what keeps the built-in default MODEL paired with the provider that role
+/// actually uses: a file with `[models.reviewer] provider = "bedrock"` and
+/// `[models.verifier] provider = "openrouter"` used to hand the verifier
+/// Bedrock's `us.anthropic.*` inference-profile id, which OpenRouter rejects
+/// with `"… is not a valid model ID"` (HTTP 400).
+/// What: first parsable value of CLI flag → `TRUSTY_REVIEW_PROVIDER` → this
+/// role's own config-file `provider`. Deliberately the same chain and order
+/// `resolve_role` walks for the role's provider, so the two cannot disagree.
 /// Test: `role_models_explicit_env_beats_openrouter_key`,
-/// `role_models_config_file_provider_is_explicit`.
-fn explicit_provider(
+/// `role_models_config_file_provider_is_explicit`,
+/// `role_models_per_role_file_providers_keep_matching_models`.
+fn explicit_provider_for_role(
     cli_overrides: Option<&RoleCliOverrides>,
     env: &RoleEnv,
-    file_models: Option<&FileModels>,
+    file_role: Option<&RoleConfigOverride>,
 ) -> Option<Provider> {
     let parse = |s: &str| s.parse::<Provider>().ok();
-    if let Some(p) = cli_overrides
+    cli_overrides
         .and_then(|c| c.provider.as_deref())
         .and_then(parse)
-    {
-        return Some(p);
+        .or_else(|| env.provider.as_deref().and_then(parse))
+        .or_else(|| {
+            file_role
+                .and_then(|r| r.provider.as_deref())
+                .and_then(parse)
+        })
+}
+
+/// Collapse the three per-role provider sources into the one `RoleModels`
+/// carries.
+///
+/// Why: `build_provider` gates on a single `provider_source`, and
+/// `ProviderSource::Explicit` must mean "the operator chose a provider
+/// somewhere" — otherwise a file that names a provider for one role only would
+/// block that configured run. Without a config file all three sources are
+/// identical, so this only ever discriminates in the per-role case.
+/// What: `Explicit` if any role has it, else the (identical) credential-derived
+/// source.
+/// Test: `role_models_config_file_provider_is_explicit`,
+/// `role_models_no_credential_source`.
+fn aggregate_source(
+    reviewer: ProviderSource,
+    verifier: ProviderSource,
+    summarizer: ProviderSource,
+) -> ProviderSource {
+    if [verifier, summarizer].contains(&ProviderSource::Explicit) {
+        return ProviderSource::Explicit;
     }
-    if let Some(p) = env.provider.as_deref().and_then(parse) {
-        return Some(p);
-    }
-    let file = file_models?;
-    [&file.reviewer, &file.verifier, &file.summarizer]
-        .into_iter()
-        .flatten()
-        .find_map(|r| r.provider.as_deref().and_then(parse))
+    reviewer
 }
 
 // ─── Resolution helper (private) ─────────────────────────────────────────────

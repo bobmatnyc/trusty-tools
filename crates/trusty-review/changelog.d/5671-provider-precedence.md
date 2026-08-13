@@ -12,4 +12,11 @@ Fixed
   and no explicit override now uses OpenRouter — set
   `TRUSTY_REVIEW_PROVIDER=bedrock` to keep Bedrock. A machine whose only AWS
   credential source is EC2/ECS instance metadata is not detected; set
-  `TRUSTY_REVIEW_PROVIDER=bedrock` there.
+  `TRUSTY_REVIEW_PROVIDER=bedrock` there — the no-credential error message now
+  says so.
+- A config file naming a different `provider` per role now gives each role the
+  default model that belongs to its own provider (#5671). Previously the first
+  `provider` found across `[models.reviewer]`, `[models.verifier]` and
+  `[models.summarizer]` chose the default models for all three, so an
+  `openrouter` verifier under a `bedrock` reviewer was sent Bedrock's
+  `us.anthropic.*` inference-profile id and failed with HTTP 400.

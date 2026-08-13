@@ -230,12 +230,17 @@ impl ProviderDefault {
 /// Why: the damage in #5671 was not the wrong default but that the failure
 /// named Bedrock when the operator had supplied an OpenRouter key and had no
 /// idea why AWS was involved. This message names both options and the override.
+/// It also names the one case where detection is wrong rather than merely
+/// empty-handed: on EC2/ECS the credential can come from instance metadata,
+/// which [`aws_credentials_detected`] never probes, so the host is told it has
+/// no AWS credentials when it does.
 /// What: a single static string used by `llm::build_provider`.
 /// Test: `provider_default_message_names_both_options`.
 pub const NO_CREDENTIAL_MESSAGE: &str = "no LLM credential found: set OPENROUTER_API_KEY to use OpenRouter, or configure AWS \
      credentials (AWS_PROFILE, AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, or ~/.aws) to use \
-     Bedrock. To force a provider regardless of detection, set TRUSTY_REVIEW_PROVIDER=openrouter \
-     or TRUSTY_REVIEW_PROVIDER=bedrock.";
+     Bedrock. EC2/ECS instance-metadata (IMDS) credentials are not detected — on such a host \
+     set TRUSTY_REVIEW_PROVIDER=bedrock. To force a provider regardless of detection, set \
+     TRUSTY_REVIEW_PROVIDER=openrouter or TRUSTY_REVIEW_PROVIDER=bedrock.";
 
 #[cfg(test)]
 mod tests {
@@ -309,6 +314,9 @@ mod tests {
         assert!(NO_CREDENTIAL_MESSAGE.contains("OPENROUTER_API_KEY"));
         assert!(NO_CREDENTIAL_MESSAGE.contains("Bedrock"));
         assert!(NO_CREDENTIAL_MESSAGE.contains("TRUSTY_REVIEW_PROVIDER"));
+        // An IMDS-only host has AWS credentials that `aws_credentials_detected`
+        // cannot see; the message must say so rather than claim it has none.
+        assert!(NO_CREDENTIAL_MESSAGE.contains("IMDS"));
     }
 
     #[test]

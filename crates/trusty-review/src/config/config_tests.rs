@@ -116,6 +116,14 @@ fn role_models_openrouter_key_selects_openrouter() {
 }
 
 /// #5671: an existing Bedrock-only setup resolves exactly as before.
+///
+/// Why: this is the no-regression guard for every operator who had AWS
+/// credentials and no OpenRouter key before #5671, so it pins the model id of
+/// all three roles — pinning only the reviewer let a swapped verifier or
+/// summarizer constant pass.
+/// What: AWS-only credentials, no CLI/env/file layer; asserts provider AND
+/// model for reviewer, verifier, and summarizer.
+/// Test: this test itself.
 #[test]
 fn role_models_bedrock_only_unchanged() {
     let roles = RoleModels::resolve_with_credentials(None, &RoleEnv::default(), None, &aws_only());
@@ -126,7 +134,95 @@ fn role_models_bedrock_only_unchanged() {
         crate::llm::models::DEFAULT_REVIEWER_MODEL
     );
     assert_eq!(roles.verifier.provider, Provider::Bedrock);
+    assert_eq!(
+        roles.verifier.model,
+        crate::llm::models::DEFAULT_VERIFIER_MODEL
+    );
     assert_eq!(roles.summarizer.provider, Provider::Bedrock);
+    assert_eq!(
+        roles.summarizer.model,
+        crate::llm::models::DEFAULT_SUMMARIZER_MODEL
+    );
+}
+
+/// #5671 follow-up: a per-role config-file `provider` gets its OWN default model.
+///
+/// Why: `explicit_provider` used to take the first parsable `provider` found
+/// across the three role tables and drive one shared `ProviderDefault` from it.
+/// A file naming `bedrock` for the reviewer and `openrouter` for the verifier
+/// therefore gave the verifier OpenRouter as its provider but Bedrock's
+/// `us.anthropic.*` inference-profile id as its model — the exact HTTP-400
+/// pairing #5671 exists to remove, surviving in the mixed-provider path.
+/// What: both orderings (Bedrock first, then OpenRouter first) with no `model`
+/// override anywhere, asserting each role's default model belongs to its own
+/// resolved provider's namespace, and that a role with no file provider still
+/// falls through to credential detection.
+/// Test: this test itself.
+#[test]
+fn role_models_per_role_file_providers_keep_matching_models() {
+    let named = |provider: &str| {
+        Some(RoleConfigOverride {
+            provider: Some(provider.to_string()),
+            ..Default::default()
+        })
+    };
+
+    // Bedrock is scanned first; the verifier must still get OpenRouter slugs.
+    let file = FileModels {
+        reviewer: named("bedrock"),
+        verifier: named("openrouter"),
+        ..Default::default()
+    };
+    let roles =
+        RoleModels::resolve_with_credentials(None, &RoleEnv::default(), Some(&file), &aws_only());
+    assert_eq!(roles.reviewer.provider, Provider::Bedrock);
+    assert_eq!(
+        roles.reviewer.model,
+        crate::llm::models::DEFAULT_REVIEWER_MODEL
+    );
+    assert_eq!(roles.verifier.provider, Provider::OpenRouter);
+    assert_eq!(
+        roles.verifier.model,
+        crate::config::provider_default::DEFAULT_OPENROUTER_VERIFIER_MODEL,
+        "an OpenRouter verifier must not inherit the reviewer's Bedrock default"
+    );
+    assert!(
+        !roles.verifier.model.starts_with("us."),
+        "OpenRouter rejects Bedrock inference-profile ids: {}",
+        roles.verifier.model
+    );
+    // The summarizer named no provider, so it falls through to detection.
+    assert_eq!(roles.summarizer.provider, Provider::Bedrock);
+    assert_eq!(
+        roles.summarizer.model,
+        crate::llm::models::DEFAULT_SUMMARIZER_MODEL
+    );
+
+    // Reversed: OpenRouter is scanned first, so the Bedrock verifier must not
+    // inherit a vendor slug.
+    let file = FileModels {
+        reviewer: named("openrouter"),
+        verifier: named("bedrock"),
+        ..Default::default()
+    };
+    let roles =
+        RoleModels::resolve_with_credentials(None, &RoleEnv::default(), Some(&file), &aws_only());
+    assert_eq!(roles.reviewer.provider, Provider::OpenRouter);
+    assert_eq!(
+        roles.reviewer.model,
+        crate::config::provider_default::DEFAULT_OPENROUTER_REVIEWER_MODEL
+    );
+    assert_eq!(roles.verifier.provider, Provider::Bedrock);
+    assert_eq!(
+        roles.verifier.model,
+        crate::llm::models::DEFAULT_VERIFIER_MODEL,
+        "a Bedrock verifier must not inherit the reviewer's OpenRouter slug"
+    );
+    assert!(
+        roles.verifier.model.starts_with("us."),
+        "Bedrock needs an inference-profile id: {}",
+        roles.verifier.model
+    );
 }
 
 /// #5671: an explicit `TRUSTY_REVIEW_PROVIDER` outranks a present key.
