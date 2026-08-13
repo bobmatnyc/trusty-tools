@@ -98,6 +98,17 @@ The run uses the triple this client installed AND verified, at the version the
 engagement config pins today — a config bumped after `install` refuses the run
 rather than silently running the older binary.
 
+**What the run does not pin.** `tga` runs from its absolute path and the report
+renderer is named to the child through `TRUSTY_REVIEW_BIN`, so neither can come
+from your `PATH`. The analyze step is different: `tga audit` invokes
+`trusty-review report --analyze`, which reads metrics over HTTP from a URL
+(default `http://127.0.0.1:7879`) rather than spawning a binary — so no
+environment variable this client sets can pin it, and `TRUSTY_ANALYZE_BIN` is
+deliberately left unset because setting it would read as a guarantee it is not.
+Nothing in this chain starts a `trusty-analyze` daemon either, so today the
+analyze-derived sections come back empty through `trusty-review`'s documented
+fail-open path. That gap is tracked separately.
+
 The engagement's `instructions` prose and an audit window are NOT yet passed to
 the child: `tga audit` takes `--weeks`, not free prose, and mapping one to the
 other is its own decision. The instructions travel with the config for the human
