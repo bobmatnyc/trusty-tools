@@ -19,7 +19,7 @@
 //! report check state, so that policy belongs at the call site. The policies
 //! callers actually share are offered as thin combinators on top:
 //! [`GhCommand::stdout`] (non-zero is an error), [`GhCommand::nonempty_stdout`]
-//! (also rejects empty output), [`GhCommand::json`] (also parses), and
+//! (also rejects output that is blank after trimming), [`GhCommand::json`] (also parses), and
 //! [`gh_available`] (a pure probe). Spawn failure is classified: a missing
 //! binary becomes [`GhError::NotInstalled`] with the `gh auth login` hint,
 //! distinct from any other IO failure.
@@ -80,7 +80,7 @@ pub enum GhError {
         /// Trimmed stderr.
         stderr: String,
     },
-    /// `gh` exited zero but printed nothing where output was required.
+    /// `gh` exited zero but printed only whitespace where output was required.
     #[error("`gh {args}` returned empty output. {GH_MISSING_HINT}")]
     Empty {
         /// The rendered argv.
@@ -124,12 +124,13 @@ pub struct GhOutput {
 impl GhOutput {
     /// Assemble an outcome from a run this module did not spawn.
     ///
-    /// Why: [`GhCommand::to_std_command`] exists for call sites that own their
-    /// own runner (a kill-on-expiry timeout, a bounded worker thread). Those
-    /// callers still want the shared policy combinators — `ok`, `combined`,
-    /// `stdout_trimmed` — so they need a way to build the triple the runner
-    /// produced. `#[non_exhaustive]` is what makes that a constructor rather
-    /// than a struct literal (#5475).
+    /// Why: `GhOutput` is `#[non_exhaustive]`, so a consumer crate cannot
+    /// build one with a struct literal — and its tests need to, to exercise
+    /// the policy combinators against a known exit/stdout/stderr triple
+    /// without spawning `gh`. That is what `trusty-agents`' `map_gh_outcome`
+    /// tests do. A call site running its own spawner via
+    /// [`GhCommand::to_std_command`] could use it for the same reason; none
+    /// does today (#5475).
     /// What: `code` is the process exit code, `None` when signalled; `success`
     /// is derived as `code == Some(0)`.
     /// Test: `from_parts_derives_success_from_the_exit_code`.
@@ -195,11 +196,27 @@ impl GhOutput {
 pub struct GhCommand {
     args: Vec<OsString>,
     cwd: Option<PathBuf>,
-    envs: Vec<(OsString, OsString)>,
-    env_removals: Vec<OsString>,
+    /// Set/remove operations in CALL ORDER — `Some(v)` sets, `None` removes.
+    /// One list rather than two, so `.env_remove("X").env("X", "v")` leaves X
+    /// SET, which is what the chain reads as (#5475).
+    envs: Vec<(OsString, Option<OsString>)>,
 }
 
 impl GhCommand {
+    /// A binary-and-environment carrier with NO argv.
+    ///
+    /// Why: a caller that owns its own runner builds the environment here and
+    /// then appends the argv to the [`GhCommand::to_std_command`] result —
+    /// `worktree_reclaim` does exactly that. Naming it stops the empty-argv
+    /// case from reading as an oversight, and keeps anyone from running it:
+    /// `output()` on a bare command would invoke `gh` with no subcommand and
+    /// [`GhCommand::argv_display`] would render nothing (#5475).
+    /// What: equivalent to `GhCommand::new(std::iter::empty::<&str>())`.
+    /// Test: `bare_carries_no_argv`.
+    pub fn bare() -> Self {
+        Self::default()
+    }
+
     /// Build an invocation from a fully-formed argv (without the `gh` itself).
     pub fn new<I, S>(args: I) -> Self
     where
@@ -236,8 +253,10 @@ impl GhCommand {
     /// Overlay one environment variable on the child process.
     #[must_use]
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
-        self.envs
-            .push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
+        self.envs.push((
+            key.as_ref().to_os_string(),
+            Some(value.as_ref().to_os_string()),
+        ));
         self
     }
 
@@ -246,9 +265,13 @@ impl GhCommand {
     /// Why: `gh` reads `GH_REPO`, `GH_HOST` and `GH_TOKEN` from the
     /// environment, so a probe that must answer for a SPECIFIC directory or
     /// account has to strip the ambient overrides rather than inherit them.
+    /// What: recorded in the same list as [`GhCommand::env`], so a later call
+    /// on the same key wins whichever it is.
+    /// Test: `later_env_call_wins_over_an_earlier_removal`,
+    /// `later_removal_wins_over_an_earlier_env_call`.
     #[must_use]
     pub fn env_remove(mut self, key: impl AsRef<OsStr>) -> Self {
-        self.env_removals.push(key.as_ref().to_os_string());
+        self.envs.push((key.as_ref().to_os_string(), None));
         self
     }
 
@@ -267,10 +290,10 @@ impl GhCommand {
             cmd.apply_cwd(dir);
         }
         for (k, v) in &self.envs {
-            cmd.apply_env(k, v);
-        }
-        for k in &self.env_removals {
-            cmd.apply_env_remove(k);
+            match v {
+                Some(v) => cmd.apply_env(k, v),
+                None => cmd.apply_env_remove(k),
+            }
         }
         cmd
     }
@@ -331,16 +354,16 @@ impl GhCommand {
         Ok(self.output().await?.ok()?.stdout)
     }
 
-    /// Blocking [`GhCommand::stdout`].
-    pub fn stdout_blocking(&self) -> Result<String, GhError> {
-        Ok(self.output_blocking()?.ok()?.stdout)
-    }
-
-    /// Run `gh`, requiring a zero exit AND non-empty output, trimmed.
+    /// Run `gh`, requiring a zero exit AND non-blank output, trimmed.
     ///
-    /// Why: `gh auth token` exits zero and prints nothing when no account is
-    /// logged in, so a caller that only checked the exit status would hand an
-    /// empty string onward as if it were a credential.
+    /// Why: `gh auth token` exits non-zero when no account is logged in, so
+    /// the exit status does carry that signal. What it does NOT catch is a
+    /// blank credential supplied through the environment: with
+    /// `GH_TOKEN="   "`, gh 2.89.0 exits ZERO and prints `"   \n"`, so a
+    /// caller checking only the status hands whitespace onward as a token.
+    /// The check is post-trim for that reason.
+    /// What: `ok()` first, then rejects stdout that is empty after trimming.
+    /// Test: `empty_stdout_is_rejected`, `nonempty_stdout_trims_a_real_value`.
     pub async fn nonempty_stdout(&self) -> Result<String, GhError> {
         require_nonempty(self.output().await?.ok()?)
     }
@@ -381,11 +404,6 @@ fn require_nonempty(out: GhOutput) -> Result<String, GhError> {
 /// environment-dependent).
 pub async fn gh_available() -> bool {
     matches!(GhCommand::new(["auth", "status"]).output().await, Ok(o) if o.success)
-}
-
-/// Blocking [`gh_available`].
-pub fn gh_available_blocking() -> bool {
-    matches!(GhCommand::new(["auth", "status"]).output_blocking(), Ok(o) if o.success)
 }
 
 /// The two `Command` types share no trait, so this is the seam that lets
@@ -450,6 +468,11 @@ mod tests {
     }
 
     #[test]
+    fn bare_carries_no_argv() {
+        assert_eq!(GhCommand::bare().argv_display(), "");
+    }
+
+    #[test]
     fn repo_is_prepended_once() {
         let cmd = GhCommand::new(["issue", "list"]).repo(Some("o/r"));
         assert_eq!(cmd.argv_display(), "--repo o/r issue list");
@@ -497,15 +520,20 @@ mod tests {
 
     #[test]
     fn empty_stdout_is_rejected() {
-        // #5475: `gh auth token` exits ZERO with empty stdout when no account
-        // is logged in — the fail-open this combinator exists to close.
+        // #5475: `GH_TOKEN="   "` makes `gh auth token` exit ZERO printing
+        // "   \n" (verified against gh 2.89.0). Checking only the exit status
+        // would pass that whitespace on as a credential — this is the
+        // post-trim check that closes it.
         let err = require_nonempty(out(0, "  \n ", "")).unwrap_err();
         assert!(matches!(err, GhError::Empty { .. }), "got {err:?}");
     }
 
     #[test]
     fn nonempty_stdout_trims_a_real_value() {
-        assert_eq!(require_nonempty(out(0, " a-token \n", "")).unwrap(), "a-token");
+        assert_eq!(
+            require_nonempty(out(0, " a-token \n", "")).unwrap(),
+            "a-token"
+        );
     }
 
     #[test]
@@ -552,6 +580,7 @@ mod tests {
         assert_eq!(cmd.cwd.as_deref(), Some(Path::new("/tmp")));
         assert_eq!(cmd.envs.len(), 1);
         assert_eq!(cmd.envs[0].0, OsString::from("GH_CONFIG_DIR"));
+        assert_eq!(cmd.envs[0].1, Some(OsString::from("/tmp/ghcfg")));
     }
 
     #[test]
@@ -573,6 +602,36 @@ mod tests {
     #[test]
     fn env_removals_are_recorded() {
         let cmd = GhCommand::new(["pr", "list"]).env_remove("GH_REPO");
-        assert_eq!(cmd.env_removals, vec![OsString::from("GH_REPO")]);
+        assert_eq!(cmd.envs, vec![(OsString::from("GH_REPO"), None)]);
+    }
+
+    #[test]
+    fn later_env_call_wins_over_an_earlier_removal() {
+        // #5475: the chain must mean what it reads as. Two separate
+        // set-then-remove lists made this leave X REMOVED.
+        let cmd = GhCommand::new(["pr", "list"])
+            .env_remove("X")
+            .env("X", "v")
+            .to_std_command();
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert_eq!(
+            envs,
+            vec![(OsStr::new("X"), Some(OsStr::new("v")))],
+            "the later .env must win, leaving X set"
+        );
+    }
+
+    #[test]
+    fn later_removal_wins_over_an_earlier_env_call() {
+        let cmd = GhCommand::new(["pr", "list"])
+            .env("X", "v")
+            .env_remove("X")
+            .to_std_command();
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert_eq!(
+            envs,
+            vec![(OsStr::new("X"), None)],
+            "the later .env_remove must win, leaving X removed"
+        );
     }
 }

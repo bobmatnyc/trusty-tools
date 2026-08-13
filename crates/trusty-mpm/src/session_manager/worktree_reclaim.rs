@@ -361,7 +361,7 @@ fn gh_command(dir: &Path) -> Command {
     // point; this module keeps its own kill-on-timeout runner, which is why it
     // takes the unspawned `std::process::Command` rather than a runner method.
     // #2919: `current_dir`, NEVER `-C` — `gh` has no such flag.
-    let mut cmd = trusty_common::gh::GhCommand::new(std::iter::empty::<&str>()).cwd(dir);
+    let mut cmd = trusty_common::gh::GhCommand::bare().cwd(dir);
     for key in GH_STRIPPED_ENV {
         cmd = cmd.env_remove(key);
     }

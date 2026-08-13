@@ -13,5 +13,7 @@ Added
   policies on top; a missing binary is classified as `GhError::NotInstalled`
   with the `gh auth login` hint rather than an opaque IO error.
 - `tickets`' GitHub backend resolves its `gh auth token` fallback through that
-  entry point. Behaviour is unchanged, including the rejection of the
-  zero-exit-empty-output response `gh` gives when no account is logged in.
+  entry point. Behaviour is unchanged, including the post-trim blank-output
+  rejection: `gh auth token` exits non-zero when no account is logged in, but
+  with `GH_TOKEN="   "` it exits ZERO printing whitespace, which a status-only
+  check would pass on as a credential.
