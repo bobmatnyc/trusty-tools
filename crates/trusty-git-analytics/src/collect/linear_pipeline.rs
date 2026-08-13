@@ -196,7 +196,8 @@ fn build_commit_refs(commits: &[(String, String)]) -> HashMap<String, Vec<String
 /// Test: `persist_work_items_writes_linear_rows`,
 /// `persist_work_items_links_commits`, `persist_work_items_is_idempotent`,
 /// `persist_work_items_skips_unfetched_refs`,
-/// `persist_work_items_reports_write_failure`.
+/// `persist_work_items_reports_write_failure`,
+/// `persist_work_items_rolls_back_a_partial_write`.
 pub fn persist_work_items(
     db: &mut Database,
     issues: &[LinearIssue],
@@ -382,6 +383,34 @@ mod tests {
         assert!(
             err.to_string().contains("work_items"),
             "error names the failing table: {err}"
+        );
+    }
+
+    /// The interleaving the transaction exists for: the issue upsert succeeds,
+    /// then the link insert fails. Dropping only `commit_work_items` reaches
+    /// the link phase with a `work_items` row already written inside the open
+    /// transaction, so the assertion is about rollback rather than about the
+    /// error propagating.
+    #[test]
+    fn persist_work_items_rolls_back_a_partial_write() {
+        let mut db = Database::open_in_memory().expect("db");
+        db.connection()
+            .execute("DROP TABLE commit_work_items", [])
+            .expect("drop join table");
+
+        let commits = vec![("sha1".to_string(), "ENG-1: work".to_string())];
+        let refs = build_commit_refs(&commits);
+
+        let err = persist_work_items(&mut db, &[issue("ENG-1")], &refs)
+            .expect_err("link against a missing table must fail");
+        assert!(
+            err.to_string().contains("commit_work_items"),
+            "error names the failing table: {err}"
+        );
+        assert_eq!(
+            linear_row_count(&db),
+            0,
+            "the issue upsert that already succeeded must roll back with the transaction"
         );
     }
 
