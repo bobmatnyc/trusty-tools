@@ -94,8 +94,9 @@ impl ResponseSchema {
     /// on each object node, including objects under an array's `items` — then
     /// stores it alongside `name`. Idempotent, so an already-strict schema is
     /// unchanged.
-    /// Test: `every_sent_schema_is_openai_strict_compliant` and
-    /// `no_production_code_bypasses_response_schema_new` in
+    /// Test: `every_sent_schema_is_openai_strict_compliant`,
+    /// `synthesis_findings_items_is_strict`, and
+    /// `schema_enumeration_is_complete_and_nothing_bypasses_new` in
     /// `llm/all_schemas_tests.rs`.
     pub fn new(name: impl Into<String>, mut schema: serde_json::Value) -> Self {
         schema::enforce_strict_mode(&mut schema);

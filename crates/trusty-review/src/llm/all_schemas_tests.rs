@@ -29,8 +29,9 @@ use crate::llm::schema::assert_object_nodes_strict;
 /// #5675 survived #1235's fix.
 /// What: calls each builder with representative arguments (the size caps are
 /// irrelevant to strict-mode compliance).
-/// Test: consumed by both tests in this file;
-/// `schema_enumeration_is_complete` fails if a builder is missing from it.
+/// Test: consumed by every test in this file;
+/// `schema_enumeration_is_complete_and_nothing_bypasses_new` fails if a
+/// builder is missing from it.
 fn all_sent_schemas() -> Vec<(&'static str, ResponseSchema)> {
     vec![
         (
