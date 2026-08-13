@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::clone::{CloneOptions, CloneState};
+use crate::run::{RepoResult, RunStatus};
 use crate::session::{Command, NextStep, Outcome};
 
 /// The auditor client's command line.
@@ -87,6 +88,8 @@ pub enum Verb {
         #[arg(long, value_name = "GB")]
         budget_gb: Option<u64>,
     },
+    /// Run the audit sweep over the selected repositories.
+    Run,
 }
 
 impl Cli {
@@ -130,8 +133,25 @@ impl Cli {
                     },
                 },
             },
+            Some(Verb::Run) => Command::Run,
         }
     }
+}
+
+/// The process exit status an outcome deserves.
+///
+/// Why: #5555's fail-open guard, extended by #5215's — `Session::execute`
+/// returns `Ok` for a sweep or a clone that ran and only partly succeeded,
+/// because the per-repo failures are data a front end must render, but a
+/// shell, a CI job, or the operator reading `$?` must not see that as
+/// success. Kept as a thin forwarder to [`Outcome::exit_code`] (the policy's
+/// actual home, shared with the Tauri shell) so this crate's existing
+/// call sites and tests do not have to move.
+/// What: forwards to [`Outcome::exit_code`].
+/// Test: `super::cli_tests::a_partial_sweep_does_not_exit_zero`,
+/// `super::cli_tests::a_run_with_gaps_exits_non_zero`.
+pub fn exit_code(outcome: &Outcome) -> i32 {
+    outcome.exit_code()
 }
 
 /// Render an outcome as the text the CLI prints.
@@ -266,6 +286,48 @@ pub fn render(outcome: &Outcome) -> String {
             }
             out
         }
+        // #5555: a partial sweep must not read like a clean one. Each failure
+        // is printed with its reason and its log path, and the verdict line
+        // says which of the three states this run ended in.
+        Outcome::Run(report) => {
+            let mut out = String::new();
+            for run in &report.repos {
+                match &run.result {
+                    RepoResult::Succeeded => out.push_str(&format!(
+                        "ok      {:<24} {}\n",
+                        run.repo.name,
+                        run.output.display()
+                    )),
+                    RepoResult::Failed { reason } => {
+                        out.push_str(&format!("FAILED  {:<24} {reason}\n", run.repo.name))
+                    }
+                }
+                // #5555: a stated gap is a dimension the sweep could not assess
+                // (DOC-67 §9). It does not fail the repository, and it must not
+                // be invisible either — an audited repo with four gaps is not
+                // the same result as one with none.
+                for gap in &run.gaps {
+                    out.push_str(&format!("  gap   {gap}\n"));
+                }
+            }
+            let audited = report.repos.len() - report.failures().count();
+            out.push_str(&match report.status {
+                RunStatus::AllSucceeded => format!(
+                    "\nAudited {}.\n",
+                    count_of(audited, "repository", "repositories")
+                ),
+                RunStatus::Partial => format!(
+                    "\nPARTIAL: {} audited, {} failed. The report covers only what succeeded.\n",
+                    audited,
+                    report.failures().count()
+                ),
+                RunStatus::AllFailed => format!(
+                    "\nFAILED: no repository was audited ({} attempted).\n",
+                    report.repos.len()
+                ),
+            });
+            out
+        }
         Outcome::Cloned(report) => {
             let mut out = String::new();
             for repo in &report.repos {
@@ -338,9 +400,7 @@ fn describe_next(next: &NextStep) -> String {
                 names.join(", ")
             )
         }
-        NextStep::ReadyForRun => {
-            "everything checked here is in place; the audit run itself is later work".to_string()
-        }
+        NextStep::ReadyForRun => "run the audit sweep (`trusty-audit run`)".to_string(),
     }
 }
 
@@ -370,6 +430,7 @@ mod cli_tests {
             Command::Repos => vec!["taudit", "repos"],
             Command::DiscoverRepos => vec!["taudit", "discover"],
             Command::CloneRepos { .. } => vec!["taudit", "clone", "acme/api"],
+            Command::Run => vec!["taudit", "run"],
         }
     }
 
@@ -390,6 +451,7 @@ mod cli_tests {
                 repos: vec!["acme/api".to_owned()],
                 options: CloneOptions::default(),
             },
+            Command::Run,
         ]
     }
 
@@ -682,6 +744,52 @@ mod cli_tests {
         assert_eq!(count_of(1, "repository", "repositories"), "1 repository");
         assert_eq!(count_of(0, "repository", "repositories"), "0 repositories");
         assert_eq!(count_of(3, "repository", "repositories"), "3 repositories");
+    }
+
+    /// The fail-open guard: a sweep that partly failed is an `Ok` outcome, and
+    /// it must still not leave the process reporting success.
+    #[test]
+    fn a_partial_sweep_does_not_exit_zero() {
+        use crate::run::{RepoRun, RunReport, SelectedRepo};
+
+        let run = |result| RepoRun {
+            repo: SelectedRepo {
+                name: "acme-api".to_owned(),
+                path: PathBuf::from("repos/acme-api"),
+            },
+            output: PathBuf::from("/work/out/00-acme-api"),
+            log: PathBuf::from("/work/logs/00-acme-api.log"),
+            gaps: vec!["Collection stage `jira sync` did not complete.".to_owned()],
+            result,
+        };
+        let ok = run(RepoResult::Succeeded);
+        let bad = run(RepoResult::Failed {
+            reason: "`tga audit` exited with code 3; see /work/logs/acme-api.log".to_owned(),
+        });
+
+        let clean = Outcome::Run(RunReport::of(vec![ok.clone()]));
+        assert_eq!(exit_code(&clean), 0);
+        assert!(
+            render(&clean).contains("Audited 1 repository"),
+            "{}",
+            render(&clean)
+        );
+
+        let partial = Outcome::Run(RunReport::of(vec![ok, bad.clone()]));
+        assert_eq!(exit_code(&partial), 1);
+        let text = render(&partial);
+        assert!(text.contains("PARTIAL"), "{text}");
+        assert!(text.contains("exited with code 3"), "{text}");
+        // A stated gap is not a failure, and not invisible either.
+        assert!(text.contains("gap   Collection stage"), "{text}");
+
+        let total = Outcome::Run(RunReport::of(vec![bad]));
+        assert_eq!(exit_code(&total), 1);
+        assert!(
+            render(&total).contains("no repository was audited"),
+            "{}",
+            render(&total)
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@ use crate::config::EngagementConfig;
 use crate::discover::{self, DiscoveredRepo};
 use crate::error::AuditError;
 use crate::manifest::{AuditManifest, RepositoryEntry};
+use crate::run::{self, RunReport};
 use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
 use crate::workdir::{Area, WorkDir};
 
@@ -64,6 +65,8 @@ pub enum Command {
         /// How to clone.
         options: CloneOptions,
     },
+    /// Run `tga audit` over the selected repositories (#5555).
+    Run,
 }
 
 /// The working directory's layout, as reported to a front end.
@@ -91,7 +94,7 @@ pub enum NextStep {
     SelectRepositories,
     /// Repositories are known but tooling is missing (#5491, #5495).
     InstallTools(Vec<RequiredTool>),
-    /// Everything the scaffold can check is in place; the run itself is later work.
+    /// Repositories are selected and the pinned triple is installed; sweep (#5555).
     ReadyForRun,
 }
 
@@ -137,26 +140,42 @@ pub enum Outcome {
     Discovered(Vec<DiscoveredRepo>),
     /// From [`Command::CloneRepos`].
     Cloned(CloneReport),
+    /// From [`Command::Run`] — per-repository results and the sweep's verdict.
+    ///
+    /// A non-[`RunStatus::AllSucceeded`](crate::run::RunStatus::AllSucceeded)
+    /// report is an ORDINARY `Ok` here: the sweep ran and some of it failed, and
+    /// the failures are data the front end must show. It is [`Outcome::exit_code`]
+    /// that turns that into a non-zero process exit, so a caller cannot report
+    /// success without having read the status (#5555).
+    Run(RunReport),
 }
 
 /// Exit status for a run that succeeded but did not cover everything asked for.
 pub const EXIT_INCOMPLETE: i32 = 2;
 
+/// Exit status for a sweep that partly failed.
+pub const EXIT_PARTIAL: i32 = 1;
+
 impl Outcome {
     /// The process exit status this outcome should produce.
     ///
-    /// Why: acquisition continues past a repository it could not clone, which
-    /// is the right behaviour for a hundred-repo sweep and the wrong thing to
-    /// report as unqualified success. The rendered text names every exclusion,
-    /// but `taudit clone $(cat repos.txt) && taudit run` reads the status, not
-    /// the text — so a partial acquisition that exits 0 chains straight into a
-    /// sweep over an incomplete set (#5215 review).
-    /// What: [`EXIT_INCOMPLETE`] when a clone report carries gaps; 0 otherwise.
-    /// The policy lives here rather than in `main.rs` so the Tauri shell reads
-    /// the same judgement rather than re-deriving it.
-    /// Test: `crate::cli::cli_tests::a_run_with_gaps_exits_non_zero`.
+    /// Why: acquisition continues past a repository it could not clone, and a
+    /// sweep continues past a repository `tga audit` failed on — both are the
+    /// right behaviour for a hundred-repo run and the wrong thing to report as
+    /// unqualified success. The rendered text names every exclusion, but
+    /// `taudit clone $(cat repos.txt) && taudit run` reads the status, not the
+    /// text — so an incomplete outcome that exits 0 chains straight into the
+    /// next stage over a set the operator never actually got (#5215 review,
+    /// #5555).
+    /// What: [`EXIT_PARTIAL`] for a [`RunReport`] that did not fully succeed;
+    /// [`EXIT_INCOMPLETE`] for a [`CloneReport`] that carries gaps; 0
+    /// otherwise. The policy lives here rather than in `main.rs` so the Tauri
+    /// shell reads the same judgement rather than re-deriving it.
+    /// Test: `crate::cli::cli_tests::a_partial_sweep_does_not_exit_zero`,
+    /// `crate::cli::cli_tests::a_run_with_gaps_exits_non_zero`.
     pub fn exit_code(&self) -> i32 {
         match self {
+            Outcome::Run(report) if report.status != run::RunStatus::AllSucceeded => EXIT_PARTIAL,
             Outcome::Cloned(report) if !report.gaps.is_empty() => EXIT_INCOMPLETE,
             _ => 0,
         }
@@ -271,7 +290,19 @@ impl Session {
                     .await
                     .map(Outcome::Cloned)
             }
+            Command::Run => self.run().await.map(Outcome::Run),
         }
+    }
+
+    /// Read the engagement's key and pins, then sweep the selected repositories.
+    ///
+    /// The config is loaded for the same reason [`Session::install_tools`] loads
+    /// it: it carries the OpenRouter key `tga audit`'s report render needs, and
+    /// an absent config is a refusal rather than a run that will fail an hour in
+    /// (#5555).
+    async fn run(&self) -> Result<RunReport, AuditError> {
+        let config = EngagementConfig::load(&self.config_path)?;
+        run::sweep(&self.work, &config).await
     }
 
     /// Read the engagement's pins, then install exactly those.

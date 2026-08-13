@@ -5,10 +5,11 @@ codebases, and returns a report. It installs the pinned tools it needs
 (`tga`, `trusty-analyze`, `trusty-review`) and drives the audit workflow —
 "really an installer runner".
 
-**Status (#5502, #5495).** The crate, its working-directory layout, the CLI
-surface, and pinned tool installation exist. The audit run, package assembly,
-signing and the desktop shell do not — they are later milestones on
-#5473 / #5477.
+**Status (#5502, #5495, #5555).** The crate, its working-directory layout, the
+CLI surface, pinned tool installation, and the audit run exist. Repository
+selection and cloning, package assembly, signing and the desktop shell do not —
+they are later milestones on #5473 / #5477. The run reads the selection those
+will write; the file and its shape are documented under "Running the sweep".
 
 ## Shape: a library with a CLI over it
 
@@ -35,6 +36,7 @@ trusty-audit repos              # repositories this engagement is configured to 
 trusty-audit tools              # which pinned tools are installed, at which versions
 trusty-audit install            # download and verify the pinned tools
 trusty-audit manifest           # engagement metadata from the companion manifest.toml
+trusty-audit run                # run `tga audit` over the selected repositories
 ```
 
 The same program is also installed as `taudit`, a shorter name for repeat use —
@@ -43,6 +45,80 @@ The same program is also installed as `taudit`, a shorter name for repeat use �
 
 Global options: `--work-dir <DIR>`, `--manifest <FILE>`, and `--config <FILE>`
 (the engagement config, default `./engagement.toml`).
+
+## Running the sweep
+
+`trusty-audit run` audits each selected repository with the `tga` this client
+installed and verified — never a `tga` on your `PATH`. If the pinned triple is
+not installed the run refuses and says to install it; there is no fallback,
+because an unpinned tool is the version skew #5454 cost us.
+
+The repositories come from `<work-dir>/state/selected-repos.toml`. Selection and
+cloning are separate work (#5487, #5215); until they land, write the file
+yourself:
+
+```toml
+count = 1                   # how many entries follow — REQUIRED
+
+[[repositories]]
+name = "acme-api"
+path = "repos/acme-api"     # relative paths anchor to the work-dir root
+```
+
+Write it to a temporary file in `state/` and rename it into place: a rename is
+atomic, a write is not, and a producer that crashes part-way through one leaves
+valid TOML holding a prefix of the entries. `count` is what makes that
+detectable — a file carrying fewer entries than it declares is refused, not
+treated as a smaller selection. Absent or empty is a refusal too, never a
+zero-repository success.
+
+One `tga audit` child runs per repository, so a failure is attributable to one
+repository rather than to "the run". Files are stemmed `<index>-<name>` because
+sanitizing alone is not injective — `acme/api` and `acme-api` would otherwise
+share an output directory and a log file, and the second child would overwrite
+the first's evidence. Each child writes to `out/<stem>/`, `logs/<stem>.log`, and
+`extract/<stem>.db`. The results land in `state/run-progress.toml`.
+
+**A zero exit from `tga audit` is not proof anything was assessed.** Its own
+contract is to exit 0 whenever the sweep completed, failed stages included — so
+this client checks what the child produced: the manifest must exist, parse, name
+a repository, and state no failed `collect` stage. A child that exits 0 having
+written nothing is a failure. Other stated gaps (an unconfigured JIRA project, a
+repository that could not be fetched) are DOC-67 §9 named gaps: they are printed
+and recorded, and they do not fail the repository.
+
+A child that outlives four hours is killed and recorded as a timeout, so a hang
+costs one repository rather than the whole unattended run.
+
+The exit status distinguishes the three outcomes DOC-67 §9 needs: 0 when every
+repository was audited, 1 when only some were (`PARTIAL`, naming which failed),
+and 1 when none were. A partial sweep never reads as a clean one.
+
+The run uses the triple this client installed AND verified, at the version the
+engagement config pins today — a config bumped after `install` refuses the run
+rather than silently running the older binary.
+
+**What the run does not pin.** `tga` runs from its absolute path and the report
+renderer is named to the child through `TRUSTY_REVIEW_BIN`, so neither can come
+from your `PATH`. The analyze step is different: `tga audit` invokes
+`trusty-review report --analyze`, which reads metrics over HTTP from a URL
+(default `http://127.0.0.1:7879`) rather than spawning a binary — so no
+environment variable this client sets can pin it, and `TRUSTY_ANALYZE_BIN` is
+deliberately left unset because setting it would read as a guarantee it is not.
+Nothing in this chain starts a `trusty-analyze` daemon either, so today the
+analyze-derived sections come back empty through `trusty-review`'s documented
+fail-open path. That gap is tracked separately.
+
+The engagement's `instructions` prose and an audit window are NOT yet passed to
+the child: `tga audit` takes `--weeks`, not free prose, and mapping one to the
+other is its own decision. The instructions travel with the config for the human
+reading it.
+
+The engagement's OpenRouter key reaches the `tga` child through its
+**environment** — `tga audit` spawns `trusty-review report`, which needs
+inference. It is never written to a config file, a log line, or an error
+message. The limit of that seam: a child's environment is readable by other
+processes running as the same user on the same machine.
 
 ## The working directory — what is written where
 

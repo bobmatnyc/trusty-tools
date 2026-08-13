@@ -36,9 +36,12 @@ async fn main() -> Result<()> {
     let outcome = session.execute(cli.to_command()).await?;
     print!("{}", cli::render(&outcome));
 
-    // #5215: a run that skipped repositories must not exit 0 — `taudit clone …
-    // && taudit run` reads the status, not the text. The judgement itself is
-    // `Outcome::exit_code`, in the library, so the GUI shares it.
+    // #5215/#5555: a sweep that partly failed, or an acquisition that skipped
+    // repositories, returns `Ok` — the per-repo failures are data to render,
+    // not an error — so the process status is decided from the outcome.
+    // `taudit clone … && taudit run` reads the status, not the text. The
+    // judgement itself is `Outcome::exit_code`, in the library, so the Tauri
+    // shell reads the same verdict from the same place.
     let code = outcome.exit_code();
     if code == 0 {
         return Ok(());
