@@ -86,6 +86,7 @@ normative grammar — this note does not restate it.
 | DOC-67 | `SPEC-TGAUDIT-01~draft` … `-13~draft` | [tga AUDIT Mode: Remote Codebase Analysis for Acquisition Due Diligence](./DOC-67-tga-audit-mode.md) | `trusty-git-analytics` (tga) — orchestration, new `audit` subcommand, DD-manifest adapter; `trusty-review` — existing DD report pipeline, consumed unmodified; `trusty-analyze` — existing HTTP analysis surface, consumed unmodified by trusty-review, not touched by tga |
 | DOC-68 | `SPEC-AUDITPKG-01~draft` … `-15~draft` | [The Audit Engagement Handoff Package: Select, Clone, Analyze, Sign](./DOC-68-audit-handoff-package.md) | `trusty-audit` — the auditor client (orchestration, working directory, engagement config, tool seam); `trusty-git-analytics` (tga) — clone acquisition, the audit sweep, manifest emission; `trusty-installer` — pinned binary download and verification; `trusty-review` — report rendering, invoked unmodified as a subprocess |
 | DOC-69 | `SPEC-DECLSEARCH-01~draft` … `-09~draft` | [Client-Declared Search Modes: Un-Fused Lanes, Paging, and the Cosine Sort](./DOC-69-client-declared-search-modes.md) | `trusty-search` — search entry point, lane selection, HTTP/MCP search surfaces, result envelope; consumed by `trusty-review`, `trusty-code`, and the trusty-search Svelte UI. Implements [ADR-0046](../adr/0046-client-declared-search-modes-replace-the-fused-score.md): the client declares the mode, RRF fusion is removed, BM25 and KG return as separate labelled sets, cosine is a sort and never a published score. Replaces the calibrated-confidence ask in #4976, which the owner rejected |
+| DOC-70 | `SPEC-BOARDAXIS-01~draft` … `-14~draft` | [Linear Project-Board Selection as a Second Audit Selection Axis](./DOC-70-linear-board-selection-axis.md) | `trusty-audit` — pre-sweep board selection, the `state/` record, the Linear credential's lifetime; `trusty-common` — the one Linear client the audit path consumes, extended with two workspace-scoped calls; `trusty-git-analytics` (tga) — the board-listing subcommand, the pinned work-item corpus, the commit partition; `trusty-review` — the report section that makes the axis visible. Adds a second selection axis DOC-68 §6's `gh`-only repo flow does not anticipate: a board scopes the work-item corpus and the commit partition, never the repository set and never the time window. Hard-depends on #5219 (write side) and #5405 (read side) |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -99,7 +100,15 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-70`** (updated 2026-08-12 — DOC-69 claimed by
+> **Next free `DOC-N` = `DOC-71`** (updated 2026-08-13 — DOC-70 claimed by
+> [Linear Project-Board Selection as a Second Audit Selection Axis](./DOC-70-linear-board-selection-axis.md),
+> verified free on `origin/main` (`e892334f`): no filename or self-label claim
+> under `docs/specs/**` beyond this catalog note and DOC-69's reference to it,
+> no open pull request claiming `DOC-70`/`DOC-71`, `check_doc_numbers.sh` clean
+> (120 docs / 114 claims, 3 grandfathered, 0 violations) before the file was
+> added.
+>
+> Previously — updated 2026-08-12 — DOC-69 claimed by
 > [Client-Declared Search Modes: Un-Fused Lanes, Paging, and the Cosine Sort](./DOC-69-client-declared-search-modes.md),
 > verified free on `origin/main` (`c40d8f3ce`): no filename or self-label claim
 > under `docs/specs/**`, no open pull request claiming `DOC-69`/`DOC-70`,

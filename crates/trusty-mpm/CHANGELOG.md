@@ -338,7 +338,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - running binary NEWER than cargo's record at the same path is now `Unknown` — the prebuilt installer placed it and keeps no cargo metadata, so provenance is unverifiable rather than broken
   - running binary OLDER than cargo's record stays `Fail`, unchanged: an older binary on top of a newer install is the [#4033](https://github.com/bobmatnyc/trusty-tools/issues/4033) defect
   - versions that cannot be ordered as semver stay `Fail`
-  - `Warn` remains the correct terminal verdict for a `cargo install --path` install per [ADR-0043](docs/adr/0043-cargo-bin-policy.md)
+  - `Warn` remains the correct terminal verdict for a `cargo install --path` install per [ADR-0043](../../docs/adr/0043-cargo-bin-policy.md)
   - the `binary_provenance` description in the bundled `tm-capabilities` skill now states the direction split instead of the retired "any version disagreement fails"
 - `tm-workflow`'s "Worktree Discipline" section now carries the rest of the checkout rules that root `CLAUDE.md` used to state, so every project deploying the skill gets them rather than only this repo
   - the main checkout's forbidden-operation list is now explicit: any edit, any build or test run, any destructive git op (`git reset --hard`, `git checkout .`, `git stash`, `git restore .`), any file-mutating command (`sed`/`awk`/`patch`), and anything else that mutates the working tree, index, or build output
