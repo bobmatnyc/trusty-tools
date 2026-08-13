@@ -17,7 +17,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use std::sync::Arc;
-use tokio::process::Command;
 
 use super::gh_cli::gh_available;
 
@@ -248,27 +247,12 @@ impl GhActionsCliClient {
     }
 
     async fn run(&self, args: &[&str]) -> Result<String> {
-        let mut full: Vec<&str> = Vec::with_capacity(args.len() + 2);
-        if let Some(r) = &self.repo {
-            full.push("--repo");
-            full.push(r.as_str());
-        }
-        full.extend_from_slice(args);
-        let output = Command::new("gh")
-            .args(&full)
-            .output()
-            .await
-            .with_context(|| format!("failed to spawn 'gh {}'", full.join(" ")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "gh {} failed (exit {}): {}",
-                full.join(" "),
-                output.status,
-                stderr.trim()
-            );
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        // #5475: `--repo` prefixing, spawn, and non-zero mapping all come from
+        // trusty-common's single `gh` entry point.
+        Ok(trusty_common::gh::GhCommand::new(args)
+            .repo(self.repo.as_deref())
+            .stdout()
+            .await?)
     }
 }
 

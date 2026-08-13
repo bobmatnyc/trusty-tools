@@ -10,7 +10,8 @@
 //! tracks the run from start to completion — phases, costs, and final status —
 //! giving full traceability from git history to GitHub Issues without manual
 //! effort. Opt-in per-workflow via `ticket_management.enabled = true`.
-//! What: Wraps the `gh` CLI via `tokio::process::Command`. A `TicketManager`
+//! What: Wraps the `gh` CLI via trusty-common's `gh::GhCommand` entry point
+//! (#5475). A `TicketManager`
 //! owns a single `issue_number` across the lifecycle; hooks fire at workflow
 //! start, after each phase, and at success/failure. All `gh` failures are
 //! non-fatal — they are logged and the workflow continues.
@@ -18,7 +19,7 @@
 
 use std::path::Path;
 
-use tokio::process::Command;
+use trusty_common::gh::GhCommand;
 
 use crate::workflow::config::TicketManagementConfig;
 
@@ -125,12 +126,13 @@ impl TicketManager {
             args.push(self.config.milestone.clone());
         }
 
-        let output = Command::new("gh").args(&args).output().await?;
+        // #5475: single `gh` entry point.
+        let output = GhCommand::new(&args).output().await?;
 
-        if output.status.success() {
+        if output.success {
             // `gh issue create` prints the issue URL on stdout; the issue
             // number is the last path segment.
-            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let url = output.stdout_trimmed().to_string();
             if let Some(num_str) = url.rsplit('/').next()
                 && let Ok(num) = num_str.parse::<u64>()
             {
@@ -143,7 +145,7 @@ impl TicketManager {
                 );
             }
         } else {
-            let err = String::from_utf8_lossy(&output.stderr);
+            let err = &output.stderr;
             tracing::warn!("ticket manager: issue create failed: {}", err);
         }
 
@@ -235,19 +237,18 @@ impl TicketManager {
         self.add_comment(issue, &comment).await?;
 
         if self.config.close_on_success {
-            let close_status = Command::new("gh")
-                .args([
-                    "issue",
-                    "close",
-                    &issue.to_string(),
-                    "--repo",
-                    &self.config.repo,
-                    "--comment",
-                    "Closing — workflow run succeeded.",
-                ])
-                .status()
-                .await?;
-            if close_status.success() {
+            let close = GhCommand::new([
+                "issue",
+                "close",
+                &issue.to_string(),
+                "--repo",
+                &self.config.repo,
+                "--comment",
+                "Closing — workflow run succeeded.",
+            ])
+            .output()
+            .await?;
+            if close.success {
                 tracing::info!(issue = issue, "ticket manager: closed issue");
             } else {
                 tracing::warn!(issue = issue, "ticket manager: close failed");
@@ -308,27 +309,26 @@ impl TicketManager {
             return Ok(());
         };
 
-        let output = Command::new("gh")
-            .args([
-                "issue",
-                "list",
-                "--repo",
-                &self.config.repo,
-                "--state",
-                "all",
-                "--search",
-                task_keywords,
-                "--limit",
-                "5",
-                "--json",
-                "number,title",
-                "--jq",
-                ".[] | \"#\\(.number): \\(.title)\"",
-            ])
-            .output()
-            .await?;
+        let output = GhCommand::new([
+            "issue",
+            "list",
+            "--repo",
+            &self.config.repo,
+            "--state",
+            "all",
+            "--search",
+            task_keywords,
+            "--limit",
+            "5",
+            "--json",
+            "number,title",
+            "--jq",
+            ".[] | \"#\\(.number): \\(.title)\"",
+        ])
+        .output()
+        .await?;
 
-        let related = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let related = output.stdout_trimmed().to_string();
         if related.is_empty() {
             return Ok(());
         }
@@ -357,21 +357,20 @@ impl TicketManager {
     /// warning on non-zero exit. Always returns `Ok(())`.
     /// Test: Covered implicitly by the hook-level integration tests.
     async fn add_comment(&self, issue: u64, body: &str) -> anyhow::Result<()> {
-        let output = Command::new("gh")
-            .args([
-                "issue",
-                "comment",
-                &issue.to_string(),
-                "--repo",
-                &self.config.repo,
-                "--body",
-                body,
-            ])
-            .output()
-            .await?;
+        let output = GhCommand::new([
+            "issue",
+            "comment",
+            &issue.to_string(),
+            "--repo",
+            &self.config.repo,
+            "--body",
+            body,
+        ])
+        .output()
+        .await?;
 
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
+        if !output.success {
+            let err = &output.stderr;
             tracing::warn!(issue = issue, "ticket manager: comment failed: {}", err);
         }
         Ok(())

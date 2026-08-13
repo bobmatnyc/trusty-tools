@@ -161,6 +161,10 @@ trusty-agents-common = { workspace = true }
 trusty-common = { workspace = true, features = [
     "mcp",
     "cli-help",
+    # #5475: the workspace's single `gh` entry point (`trusty_common::gh`),
+    # which core::gh_account / gh_account_enforce / workstream_label and
+    # session_manager::worktree_reclaim all route through.
+    "gh-cli",
     "bug-capture",
     "crate-config",
     "console-metrics",
