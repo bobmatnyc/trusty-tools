@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::clone::{self, CloneOptions, CloneReport};
 use crate::config::EngagementConfig;
 use crate::discover::{self, DiscoveredRepo};
 use crate::error::AuditError;
@@ -53,6 +54,16 @@ pub enum Command {
     Repos,
     /// List the repositories the recipient's `gh` credential can reach (#5487).
     DiscoverRepos,
+    /// Clone the named repositories into the working directory (#5215).
+    ///
+    /// Carries its argument because acquisition acts on a SELECTION — what the
+    /// picker chose, which is not derivable from the session's own state.
+    CloneRepos {
+        /// `owner/name` per repository, in the order to acquire them.
+        repos: Vec<String>,
+        /// How to clone.
+        options: CloneOptions,
+    },
 }
 
 /// The working directory's layout, as reported to a front end.
@@ -124,6 +135,32 @@ pub enum Outcome {
     /// From [`Command::DiscoverRepos`] — what the credential can reach, not
     /// what the engagement selected.
     Discovered(Vec<DiscoveredRepo>),
+    /// From [`Command::CloneRepos`].
+    Cloned(CloneReport),
+}
+
+/// Exit status for a run that succeeded but did not cover everything asked for.
+pub const EXIT_INCOMPLETE: i32 = 2;
+
+impl Outcome {
+    /// The process exit status this outcome should produce.
+    ///
+    /// Why: acquisition continues past a repository it could not clone, which
+    /// is the right behaviour for a hundred-repo sweep and the wrong thing to
+    /// report as unqualified success. The rendered text names every exclusion,
+    /// but `taudit clone $(cat repos.txt) && taudit run` reads the status, not
+    /// the text — so a partial acquisition that exits 0 chains straight into a
+    /// sweep over an incomplete set (#5215 review).
+    /// What: [`EXIT_INCOMPLETE`] when a clone report carries gaps; 0 otherwise.
+    /// The policy lives here rather than in `main.rs` so the Tauri shell reads
+    /// the same judgement rather than re-deriving it.
+    /// Test: `crate::cli::cli_tests::a_run_with_gaps_exits_non_zero`.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Outcome::Cloned(report) if !report.gaps.is_empty() => EXIT_INCOMPLETE,
+            _ => 0,
+        }
+    }
 }
 
 /// One audit engagement, rooted at a working directory.
@@ -227,6 +264,13 @@ impl Session {
             Command::DiscoverRepos => discover::discover(discover::DEFAULT_LIMIT)
                 .await
                 .map(Outcome::Discovered),
+            // #5215: acquisition writes only under `self.work`, which is what
+            // keeps `rm -rf <root>` a complete uninstall.
+            Command::CloneRepos { repos, options } => {
+                clone::clone_all(&self.work, &repos, &options)
+                    .await
+                    .map(Outcome::Cloned)
+            }
         }
     }
 

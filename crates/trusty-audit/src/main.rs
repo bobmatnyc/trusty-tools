@@ -35,5 +35,15 @@ async fn main() -> Result<()> {
 
     let outcome = session.execute(cli.to_command()).await?;
     print!("{}", cli::render(&outcome));
-    Ok(())
+
+    // #5215: a run that skipped repositories must not exit 0 — `taudit clone …
+    // && taudit run` reads the status, not the text. The judgement itself is
+    // `Outcome::exit_code`, in the library, so the GUI shares it.
+    let code = outcome.exit_code();
+    if code == 0 {
+        return Ok(());
+    }
+    // `process::exit` does not flush Rust's stdout buffer.
+    std::io::Write::flush(&mut std::io::stdout()).context("cannot write the report")?;
+    std::process::exit(code);
 }

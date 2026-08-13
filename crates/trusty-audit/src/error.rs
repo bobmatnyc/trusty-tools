@@ -149,6 +149,58 @@ pub enum AuditError {
         source: Box<trusty_common::gh::GhError>,
     },
 
+    /// A working-directory area is not a real directory, so writing there would
+    /// escape the root.
+    ///
+    /// Why: the generalization of [`AuditError::UnsafeToolsDir`] to the second
+    /// area that writes. `workdir.rs` names the debt — "repo cloning owes the
+    /// same check when it lands (#5215)" — and the reason is identical: a
+    /// symlink planted at `repos/` sends every clone outside the root, where it
+    /// survives the delete the README promises is complete.
+    /// What: names the path and what is there instead.
+    /// Test: `crate::clone::clone_tests::a_symlinked_repos_area_is_refused`.
+    #[error(
+        "{path} is not a real directory (it is a {kind}), so writing there would go outside \
+         the working directory; nothing was written"
+    )]
+    UnsafeArea {
+        /// The path that failed the check.
+        path: PathBuf,
+        /// What it is instead — `"symlink"`, `"file"`.
+        kind: &'static str,
+    },
+
+    /// A repository identity is not a plain `owner/name`.
+    ///
+    /// Why: the name becomes a path under the working directory, so `..`, an
+    /// absolute path, or an embedded separator would each break the containment
+    /// property `rm -rf <root>` rests on. Refused before any clone runs, so a
+    /// typo in the last entry cannot leave the first ten half-acquired (#5215).
+    /// What: names the rejected input verbatim.
+    /// Test: `crate::clone::clone_tests::a_traversing_name_never_becomes_a_path`.
+    #[error("{name} is not a repository this client will clone — it must be a plain owner/name")]
+    InvalidRepoName {
+        /// What was asked for.
+        name: String,
+    },
+
+    /// Every requested repository failed to clone.
+    ///
+    /// Why: DOC-68 §14 Q2 extends DOC-67 §9's continue-on-failure policy to the
+    /// clone stage — one failure is a gap, not an abort. This is the single
+    /// exception it names: with no checkout at all there is nothing to audit,
+    /// and a report about zero repositories is worse than a refusal (#5215).
+    /// What: how many were attempted. The per-repository reasons are in the
+    /// report's gaps.
+    /// Test: `crate::clone::clone_tests::every_repo_failing_aborts_the_sequence`.
+    #[error(
+        "none of the {attempted} requested repositories could be cloned; there is nothing to audit"
+    )]
+    AllClonesFailed {
+        /// How many clones were attempted.
+        attempted: usize,
+    },
+
     /// A capability this scaffold declares but does not yet implement.
     ///
     /// Why: a half-built capability must fail closed rather than silently
