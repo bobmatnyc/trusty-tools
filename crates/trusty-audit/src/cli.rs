@@ -80,7 +80,10 @@ pub enum Verb {
         /// Fetch full history instead of only the tip commit.
         #[arg(long)]
         full: bool,
-        /// Stop cloning once this many gigabytes are used. 0 means no limit.
+        /// Stop STARTING clones once this many gigabytes are on disk (0: never).
+        ///
+        /// Not a cap on one repository: a clone already running is never
+        /// interrupted, so a single large repository can exceed this.
         #[arg(long, value_name = "GB")]
         budget_gb: Option<u64>,
     },
@@ -119,7 +122,10 @@ impl Cli {
                     shallow: !full,
                     budget_bytes: match budget_gb {
                         Some(0) => None,
-                        Some(gb) => Some(gb * 1024 * 1024 * 1024),
+                        // #5215 review: `--budget-gb 17179869184` overflowed u64 —
+                        // a panic in debug, and in release a wrap to 0 that
+                        // skipped every repo and ended in AllClonesFailed.
+                        Some(gb) => Some(gb.saturating_mul(1024 * 1024 * 1024)),
                         None => CloneOptions::default().budget_bytes,
                     },
                 },
@@ -269,17 +275,26 @@ pub fn render(outcome: &Outcome) -> String {
                     CloneState::Cloned => "cloned".to_string(),
                     CloneState::Reused => "already present".to_string(),
                     CloneState::Failed(why) => format!("FAILED — {why}"),
+                    CloneState::Empty(why) => format!("NOTHING CLONED — {why}"),
                     CloneState::Skipped(why) => format!("SKIPPED — {why}"),
                 };
                 out.push_str(&format!("  {:<40} {state}\n", repo.name_with_owner));
             }
             out.push_str(&format!(
-                "{} on disk, using {}.\n",
+                "{} on disk, using {}{}.\n",
                 count_of(
                     report.repos.iter().filter(|r| r.state.is_usable()).count(),
                     "repository",
                     "repositories"
                 ),
+                // #5215 review: a walk that hit something unreadable produces a
+                // floor, and saying "using X" of a floor is a confident number
+                // nothing measured.
+                if report.total_bytes_complete {
+                    ""
+                } else {
+                    "at least "
+                },
                 human_bytes(report.total_bytes)
             ));
             for gap in &report.gaps {
@@ -335,6 +350,7 @@ mod cli_tests {
     use crate::clone::{CloneReport, ClonedRepo};
     use crate::discover::DiscoveredRepo;
     use crate::manifest::AuditManifest;
+    use crate::session::EXIT_INCOMPLETE;
     use crate::session::{Session, WorkDirReport};
     use crate::tools::{InstalledTool, RequiredTool, ToolStatus};
     use crate::workdir::WorkDir;
@@ -574,15 +590,18 @@ mod cli_tests {
                     path: PathBuf::from("/w/repos/acme/api"),
                     state: CloneState::Cloned,
                     bytes: 2048,
+                    bytes_complete: true,
                 },
                 ClonedRepo {
                     name_with_owner: "acme/web".to_owned(),
                     path: PathBuf::from("/w/repos/acme/web"),
                     state: CloneState::Failed("no such repository".to_owned()),
                     bytes: 0,
+                    bytes_complete: true,
                 },
             ],
             total_bytes: 2048,
+            total_bytes_complete: true,
             gaps: vec!["acme/web was not audited — the clone failed".to_owned()],
         };
         let text = render(&Outcome::Cloned(report));
@@ -590,6 +609,72 @@ mod cli_tests {
         assert!(text.contains("2.0 KiB"), "{text}");
         assert!(text.contains("FAILED"), "{text}");
         assert!(text.contains("Gap: acme/web"), "{text}");
+    }
+
+    /// A budget so large it overflows must clamp, never panic or wrap to zero.
+    #[test]
+    fn an_enormous_budget_saturates_rather_than_wrapping() {
+        let cli =
+            Cli::try_parse_from(["taudit", "clone", "acme/api", "--budget-gb", "17179869184"])
+                .expect("parses")
+                .to_command();
+        let Command::CloneRepos { options, .. } = cli else {
+            panic!("clone must route to CloneRepos");
+        };
+        assert_eq!(options.budget_bytes, Some(u64::MAX));
+    }
+
+    /// A repository that produced no checkout must read as excluded, and the
+    /// run must not claim a byte figure a failed walk produced.
+    #[test]
+    fn rendering_reports_an_empty_clone_and_an_incomplete_measurement() {
+        let report = CloneReport {
+            repos: vec![
+                ClonedRepo {
+                    name_with_owner: "acme/api".to_owned(),
+                    path: PathBuf::from("/w/repos/acme/api"),
+                    state: CloneState::Cloned,
+                    bytes: 1024,
+                    bytes_complete: false,
+                },
+                ClonedRepo {
+                    name_with_owner: "acme/blank".to_owned(),
+                    path: PathBuf::from("/w/repos/acme/blank"),
+                    state: CloneState::Empty("the repository has no commits".to_owned()),
+                    bytes: 0,
+                    bytes_complete: true,
+                },
+            ],
+            total_bytes: 1024,
+            total_bytes_complete: false,
+            gaps: vec!["acme/blank was not audited — nothing was cloned".to_owned()],
+        };
+        let text = render(&Outcome::Cloned(report));
+        assert!(text.contains("NOTHING CLONED"), "{text}");
+        assert!(text.contains("at least 1.0 KiB"), "{text}");
+        assert!(text.contains("Gap: acme/blank"), "{text}");
+    }
+
+    /// A partial acquisition must not exit 0 — `taudit clone … && taudit run`
+    /// would otherwise proceed against an incomplete set.
+    #[test]
+    fn a_run_with_gaps_exits_non_zero() {
+        let clean = CloneReport {
+            repos: Vec::new(),
+            total_bytes: 0,
+            total_bytes_complete: true,
+            gaps: Vec::new(),
+        };
+        assert_eq!(Outcome::Cloned(clean).exit_code(), 0);
+
+        let gapped = CloneReport {
+            repos: Vec::new(),
+            total_bytes: 0,
+            total_bytes_complete: true,
+            gaps: vec!["acme/web was not audited".to_owned()],
+        };
+        assert_eq!(Outcome::Cloned(gapped).exit_code(), EXIT_INCOMPLETE);
+        assert_eq!(Outcome::Repos(Vec::new()).exit_code(), 0);
     }
 
     #[test]

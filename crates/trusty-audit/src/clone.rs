@@ -20,10 +20,11 @@
 //! doing casually. `gh` already has one: `trusty_common::gh::GhCommand` (#5475).
 //!
 //! **What a caller may assume, and may not.** A directory under
-//! [`Area::Repos`] is a COMPLETED clone, always. Work happens in a sibling
-//! `<name>.partial` and is renamed into place only after `gh` exits zero, so an
-//! interrupted run leaves a partial that the next run deletes and re-clones
-//! rather than a half-checkout a later stage would silently analyze (#5215).
+//! [`Area::Repos`] is a COMPLETED, VERIFIED checkout, always. Work happens
+//! under [`Area::State`] (see [`STAGING_DIR`]) and is renamed into place only
+//! after `gh` exits zero AND [`verify_checkout`] confirms a resolvable `HEAD`,
+//! so neither an interrupted run nor a commitless repository leaves something a
+//! later stage would silently analyze as whole (#5215).
 //!
 //! **Partial failure does not abort the sequence** (DOC-68 §8, §14 Q2, extending
 //! DOC-67 §9's continue-on-failure policy to the clone stage): one repository
@@ -40,15 +41,22 @@ use trusty_common::gh::{GhCommand, GhError};
 use crate::error::AuditError;
 use crate::workdir::{Area, WorkDir};
 
-/// Suffix of the in-progress directory a clone is built in.
-pub const PARTIAL_SUFFIX: &str = ".partial";
+/// Directory under [`Area::State`] where in-progress clones are built.
+///
+/// Why: the staging path must be one no repository name can address. Building
+/// `<dest>.partial` beside the destination was not: `.` is in the name
+/// allowlist, so the legal repository `acme/api.partial` resolved to exactly
+/// the staging path of `acme/api`, and cloning the latter deleted the former's
+/// completed checkout (#5215 review). Staging outside `repos/` entirely makes
+/// the collision unrepresentable rather than merely unlikely — `repos/<owner>/<name>`
+/// can never reach `state/clone-staging/`.
+/// Test: `super::clone_tests::a_repo_named_like_the_old_staging_path_is_safe`.
+pub const STAGING_DIR: &str = "clone-staging";
 
 /// Default ceiling on what the clones may occupy, in bytes (20 GiB).
 ///
-/// #5215's closure condition is that disk use is "bounded/reported, not
-/// unbounded". A default rather than `None` is the point: an org sweep the
-/// recipient did not size in advance stops at a number, and the repositories it
-/// did not reach are named as gaps instead of filling their disk.
+/// Read [`CloneOptions::budget_bytes`] for what this does and does not bound —
+/// it stops new clones from STARTING, and does not cap one already running.
 pub const DEFAULT_BUDGET_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 
 /// How to clone.
@@ -57,7 +65,16 @@ pub const DEFAULT_BUDGET_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 pub struct CloneOptions {
     /// Fetch only the tip commit. Bounds disk use; loses history.
     pub shallow: bool,
-    /// Stop once the clones occupy this many bytes. `None` is unbounded.
+    /// Stop STARTING new clones once this much is already on disk. `None` never
+    /// stops.
+    ///
+    /// This is a start gate, not a cap. It is checked between repositories and
+    /// nothing interrupts a clone in flight, so a single repository larger than
+    /// the remaining budget still lands in full — 19 GiB spent against a 20 GiB
+    /// budget admits a 100 GB monorepo and finishes at 119 GiB. Capping one
+    /// clone needs a watchdog that kills the child mid-fetch, which is not
+    /// implemented (#5215 review). Say "stops starting", never "bounded".
+    /// Test: `super::clone_tests::a_spent_budget_skips_rather_than_clones`.
     pub budget_bytes: Option<u64>,
 }
 
@@ -85,6 +102,16 @@ pub enum CloneState {
     Reused,
     /// The clone failed. Nothing was left under [`Area::Repos`] for it.
     Failed(String),
+    /// `gh` exited zero but produced no checkout worth analyzing.
+    ///
+    /// Why: its own state rather than a flavour of `Failed`, because the cause
+    /// is different and so is what the recipient should do. `git clone --depth=1`
+    /// of a commitless repository EXITS ZERO and leaves a directory containing
+    /// only `.git`; `gh repo clone` forwards that status. Reported as `Cloned`,
+    /// that is an audit claiming coverage of a repository it never read
+    /// (#5215 review).
+    /// Test: `super::clone_tests::a_commitless_clone_is_not_a_usable_checkout`.
+    Empty(String),
     /// Not attempted — the disk budget was already spent.
     Skipped(String),
 }
@@ -108,6 +135,14 @@ pub struct ClonedRepo {
     pub state: CloneState,
     /// Bytes on disk. Zero unless the state is usable.
     pub bytes: u64,
+    /// Whether [`ClonedRepo::bytes`] counted the whole tree.
+    ///
+    /// `false` when part of the walk was unreadable, which makes `bytes` a
+    /// floor rather than a total. Reported instead of swallowed so the budget's
+    /// arithmetic and the recipient's disk figure are not quietly confident
+    /// about a number a failed walk produced (#5215 review).
+    /// Test: `super::clone_tests::an_unreadable_subtree_marks_the_size_incomplete`.
+    pub bytes_complete: bool,
 }
 
 /// The whole acquisition step's result.
@@ -125,6 +160,11 @@ pub struct CloneReport {
     pub repos: Vec<ClonedRepo>,
     /// Total bytes the usable checkouts occupy.
     pub total_bytes: u64,
+    /// Whether [`CloneReport::total_bytes`] is a total or a floor.
+    ///
+    /// `false` when any repository's walk hit something unreadable — render it
+    /// as "at least", never as the figure.
+    pub total_bytes_complete: bool,
     /// One line per repository excluded from the audit, and why.
     pub gaps: Vec<String>,
 }
@@ -146,6 +186,26 @@ pub struct CloneReport {
 ///
 /// [`AuditError::InvalidRepoName`] naming the rejected input.
 pub fn destination(work: &WorkDir, name_with_owner: &str) -> Result<PathBuf, AuditError> {
+    let (owner, name) = split_name(name_with_owner)?;
+    Ok(work.path(Area::Repos).join(owner).join(name))
+}
+
+/// Where a clone is built before it is renamed into place.
+///
+/// Under [`Area::State`], not beside the destination — see [`STAGING_DIR`] for
+/// the collision that forced it. Same working-directory root as the
+/// destination, so the rename stays a same-filesystem atomic move.
+fn staging(work: &WorkDir, name_with_owner: &str) -> Result<PathBuf, AuditError> {
+    let (owner, name) = split_name(name_with_owner)?;
+    Ok(work
+        .path(Area::State)
+        .join(STAGING_DIR)
+        .join(owner)
+        .join(name))
+}
+
+/// Split and validate `owner/name`, the one place the charset is decided.
+fn split_name(name_with_owner: &str) -> Result<(&str, &str), AuditError> {
     let reject = || AuditError::InvalidRepoName {
         name: name_with_owner.to_string(),
     };
@@ -161,25 +221,30 @@ pub fn destination(work: &WorkDir, name_with_owner: &str) -> Result<PathBuf, Aud
             return Err(reject());
         }
     }
-    Ok(work.path(Area::Repos).join(owner).join(name))
+    Ok((owner, name))
 }
 
-/// Refuse a `repos/` area that is not a real directory.
+/// Refuse a path that exists but is not a real directory.
 ///
 /// Why: `workdir.rs` states this debt explicitly — "repo cloning owes the same
-/// check when it lands (#5215)". A symlink planted at `repos/` before the first
-/// run sends every clone outside the root, where it survives the delete the
-/// README promises is complete. `tools::install` already refuses the same shape
-/// for `tools/` (#5495).
-/// What: `symlink_metadata` on the area, so a symlink is seen as a symlink
-/// rather than followed. An absent area is fine — [`WorkDir::create`] makes it.
-/// Test: `super::clone_tests::a_symlinked_repos_area_is_refused`.
+/// check when it lands (#5215)". A symlink sends what is written through it
+/// outside the root, where it survives the delete the README promises is
+/// complete. `tools::install` already refuses the same shape for `tools/`
+/// (#5495).
+///
+/// It is applied at THREE levels, because guarding only `repos/` left the two
+/// below it open: a planted `repos/acme -> /Users/victim/.ssh` needs exactly
+/// the same precondition as a planted `repos/`, and `create_dir_all` follows
+/// it without complaint (#5215 review).
+/// What: `symlink_metadata`, so a symlink is seen rather than followed. An
+/// absent path is fine — it is about to be created.
+/// Test: `super::clone_tests::a_symlinked_repos_area_is_refused`,
+/// `super::clone_tests::a_symlinked_owner_directory_is_refused`.
 ///
 /// # Errors
 ///
 /// [`AuditError::UnsafeArea`] naming the path and what is there instead.
-fn ensure_repos_area_is_real(work: &WorkDir) -> Result<(), AuditError> {
-    let path = work.path(Area::Repos);
+fn ensure_real_dir(path: PathBuf) -> Result<(), AuditError> {
     match std::fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(AuditError::WorkDir { path, source }),
@@ -210,19 +275,80 @@ fn clone_command(name_with_owner: &str, into: &Path, shallow: bool) -> GhCommand
     GhCommand::new(args).env_remove("GH_REPO")
 }
 
-/// Bytes occupied by a directory tree, not following symlinks.
-fn dir_size(path: &Path) -> u64 {
+/// Bytes occupied by a directory tree, and whether the walk saw all of it.
+///
+/// Why: an unreadable subdirectory used to contribute 0 silently, so a failed
+/// walk produced a confident-looking total that understated disk use and made
+/// the budget stop later than asked. The flag is what stops the caller
+/// presenting a floor as a figure (#5215 review).
+/// What: recursive, never following symlinks. `false` means some entry could
+/// not be read, so the count is a lower bound.
+/// Test: `super::clone_tests::an_unreadable_subtree_marks_the_size_incomplete`.
+fn dir_size(path: &Path) -> (u64, bool) {
     let Ok(entries) = std::fs::read_dir(path) else {
-        return 0;
+        return (0, false);
     };
-    entries
-        .filter_map(Result::ok)
-        .map(|e| match e.path() {
-            p if p.is_symlink() => 0,
-            p if p.is_dir() => dir_size(&p),
-            p => std::fs::symlink_metadata(&p).map_or(0, |m| m.len()),
-        })
-        .sum()
+    let mut total = 0u64;
+    let mut complete = true;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            complete = false;
+            continue;
+        };
+        let child = entry.path();
+        if child.is_symlink() {
+            continue;
+        }
+        if child.is_dir() {
+            let (bytes, ok) = dir_size(&child);
+            total = total.saturating_add(bytes);
+            complete &= ok;
+        } else {
+            match std::fs::symlink_metadata(&child) {
+                Ok(meta) => total = total.saturating_add(meta.len()),
+                Err(_) => complete = false,
+            }
+        }
+    }
+    (total, complete)
+}
+
+/// Is this staged tree a checkout the sweep can actually read?
+///
+/// Why: `gh` exiting zero is not proof of a usable repository. `git clone
+/// --depth=1` of a COMMITLESS repository exits zero and leaves a directory
+/// holding only `.git`, and `gh repo clone` forwards that status — reported as
+/// `Cloned`, the audit claims coverage of a repository nothing ever read
+/// (#5215 review). This is the check the `#[ignore]`d live test was making and
+/// the production path was not.
+/// What: `.git` must be a real directory, and `HEAD` must resolve — either to a
+/// detached SHA, or to a ref that exists loose or in `packed-refs`. An
+/// unresolvable `HEAD` is exactly the commitless case.
+/// Test: `super::clone_tests::a_commitless_clone_is_not_a_usable_checkout`,
+/// `super::clone_tests::a_checkout_with_a_packed_head_ref_is_usable`.
+fn verify_checkout(tree: &Path) -> Result<(), String> {
+    let git = tree.join(".git");
+    if !git.is_dir() {
+        return Err("the clone left no .git directory".to_string());
+    }
+    let head = match std::fs::read_to_string(git.join("HEAD")) {
+        Ok(text) => text.trim().to_string(),
+        Err(source) => return Err(format!("the clone left no readable .git/HEAD: {source}")),
+    };
+    let Some(reference) = head.strip_prefix("ref:").map(str::trim) else {
+        // A detached HEAD is a raw SHA, which means there is a commit.
+        return Ok(());
+    };
+    if git.join(reference).exists() {
+        return Ok(());
+    }
+    let packed = std::fs::read_to_string(git.join("packed-refs")).unwrap_or_default();
+    if packed.lines().any(|line| line.ends_with(reference)) {
+        return Ok(());
+    }
+    Err(format!(
+        "the repository has no commits — HEAD points at {reference}, which does not exist"
+    ))
 }
 
 /// Turn one `gh` result into a state, moving the partial into place or removing it.
@@ -233,26 +359,33 @@ fn dir_size(path: &Path) -> u64 {
 /// and report on it as if it were whole. The rename is what makes "a directory
 /// under `repos/` is a completed clone" true by construction rather than by
 /// convention.
-/// What: on `Ok`, renames `partial` onto `dest` and measures it; on `Err`,
-/// removes `partial` and returns the reason. Never leaves `partial` behind.
+/// What: on `Err`, removes the staged tree and returns the reason. On `Ok`,
+/// VERIFIES the tree before promoting it — a zero exit that produced no usable
+/// checkout becomes [`CloneState::Empty`], and nothing is promoted. Only a
+/// verified tree is renamed onto `dest`. Never leaves the staged tree behind.
 /// Test: `super::clone_tests::a_failed_clone_leaves_nothing_behind`,
-/// `super::clone_tests::a_successful_clone_is_renamed_into_place`.
-fn finish_one(dest: &Path, partial: &Path, outcome: Result<(), GhError>) -> (CloneState, u64) {
+/// `super::clone_tests::a_successful_clone_is_renamed_into_place`,
+/// `super::clone_tests::a_commitless_clone_is_not_a_usable_checkout`.
+fn finish_one(dest: &Path, staged: &Path, outcome: Result<(), GhError>) -> (CloneState, u64, bool) {
+    let discard = |state: CloneState| {
+        let _ = std::fs::remove_dir_all(staged);
+        (state, 0, true)
+    };
     if let Err(source) = outcome {
-        let _ = std::fs::remove_dir_all(partial);
-        return (CloneState::Failed(source.to_string()), 0);
+        return discard(CloneState::Failed(source.to_string()));
     }
-    if let Err(source) = std::fs::rename(partial, dest) {
-        let _ = std::fs::remove_dir_all(partial);
-        return (
-            CloneState::Failed(format!(
-                "clone completed but could not be moved into place: {source}"
-            )),
-            0,
-        );
+    // #5215: verify BEFORE the rename, so an unusable tree never occupies the
+    // destination even briefly.
+    if let Err(why) = verify_checkout(staged) {
+        return discard(CloneState::Empty(why));
     }
-    let bytes = dir_size(dest);
-    (CloneState::Cloned, bytes)
+    if let Err(source) = std::fs::rename(staged, dest) {
+        return discard(CloneState::Failed(format!(
+            "clone completed but could not be moved into place: {source}"
+        )));
+    }
+    let (bytes, complete) = dir_size(dest);
+    (CloneState::Cloned, bytes, complete)
 }
 
 /// Assemble the report, deciding whether the sequence may continue.
@@ -272,16 +405,18 @@ fn summarize(repos: Vec<ClonedRepo>) -> Result<CloneReport, AuditError> {
             attempted: repos.len(),
         });
     }
-    let total_bytes = repos
-        .iter()
-        .filter(|r| r.state.is_usable())
-        .map(|r| r.bytes)
-        .sum();
+    let usable_repos = || repos.iter().filter(|r| r.state.is_usable());
+    let total_bytes = usable_repos().map(|r| r.bytes).sum();
+    let total_bytes_complete = usable_repos().all(|r| r.bytes_complete);
     let gaps = repos
         .iter()
         .filter_map(|r| match &r.state {
             CloneState::Failed(why) => Some(format!(
                 "{} was not audited — the clone failed: {why}",
+                r.name_with_owner
+            )),
+            CloneState::Empty(why) => Some(format!(
+                "{} was not audited — nothing was cloned: {why}",
                 r.name_with_owner
             )),
             CloneState::Skipped(why) => {
@@ -293,6 +428,7 @@ fn summarize(repos: Vec<ClonedRepo>) -> Result<CloneReport, AuditError> {
     Ok(CloneReport {
         repos,
         total_bytes,
+        total_bytes_complete,
         gaps,
     })
 }
@@ -301,44 +437,56 @@ fn summarize(repos: Vec<ClonedRepo>) -> Result<CloneReport, AuditError> {
 ///
 /// Why: #5215 — tga must be able to take a repository it has never seen and
 /// produce a local checkout with no prior manual `git clone`.
-/// What: validates the area and every name first, then per repository: reuses a
-/// completed checkout, discards any leftover partial, clones into a fresh
-/// partial, and renames it into place. Stops attempting new clones once the
-/// budget is spent; failures become gaps.
+/// What: guards `repos/` BEFORE creating anything, validates every name, then
+/// per repository: reuses a completed checkout, discards any leftover staged
+/// tree, clones into staging, verifies it, and renames it into place. Stops
+/// STARTING clones once the budget is spent; failures become gaps.
 /// Test: `super::clone_tests`, and `cloning_a_real_repository` (`#[ignore]`).
 ///
 /// # Errors
 ///
-/// [`AuditError::UnsafeArea`] for a `repos/` area that is not a real directory,
-/// [`AuditError::InvalidRepoName`] for anything that is not a plain
-/// `owner/name`, [`AuditError::WorkDir`] for a directory that cannot be made,
-/// and [`AuditError::AllClonesFailed`] when nothing at all could be cloned.
+/// [`AuditError::UnsafeArea`] for a `repos/` area, owner directory, or
+/// destination that is not a real directory, [`AuditError::InvalidRepoName`]
+/// for anything that is not a plain `owner/name`, [`AuditError::WorkDir`] for a
+/// directory that cannot be made, and [`AuditError::AllClonesFailed`] when
+/// nothing at all could be cloned.
 pub async fn clone_all(
     work: &WorkDir,
     repos: &[String],
     options: &CloneOptions,
 ) -> Result<CloneReport, AuditError> {
+    // #5215 review: the guard runs BEFORE `create`. The other order let
+    // `create_dir_all` follow a DANGLING `repos/` symlink and build the target
+    // outside the root, so `UnsafeArea`'s "nothing was written" was false by
+    // the time it was returned.
+    ensure_real_dir(work.path(Area::Repos))?;
     work.create()?;
-    ensure_repos_area_is_real(work)?;
 
     // #5215: every name is validated before ANY clone runs, so a typo in the
     // last entry cannot leave the first ten half-acquired.
-    let planned: Vec<(String, PathBuf)> = repos
+    let planned: Vec<(String, PathBuf, PathBuf)> = repos
         .iter()
-        .map(|r| destination(work, r).map(|d| (r.clone(), d)))
-        .collect::<Result<_, _>>()?;
+        .map(|r| Ok((r.clone(), destination(work, r)?, staging(work, r)?)))
+        .collect::<Result<_, AuditError>>()?;
 
     let mut out = Vec::with_capacity(planned.len());
     let mut spent: u64 = 0;
-    for (name_with_owner, dest) in planned {
+    for (name_with_owner, dest, staged) in planned {
+        // Each level between the area and the checkout is its own escape route.
+        if let Some(owner_dir) = dest.parent() {
+            ensure_real_dir(owner_dir.to_path_buf())?;
+        }
+        ensure_real_dir(dest.clone())?;
+
         if dest.is_dir() {
-            let bytes = dir_size(&dest);
-            spent += bytes;
+            let (bytes, complete) = dir_size(&dest);
+            spent = spent.saturating_add(bytes);
             out.push(ClonedRepo {
                 name_with_owner,
                 path: dest,
                 state: CloneState::Reused,
                 bytes,
+                bytes_complete: complete,
             });
             continue;
         }
@@ -350,43 +498,38 @@ pub async fn clone_all(
                     "the {spent}-byte disk budget for clones was already spent"
                 )),
                 bytes: 0,
+                bytes_complete: true,
             });
             continue;
         }
 
-        let partial = partial_path(&dest);
-        // A leftover partial is an interrupted previous run: discard and refetch
-        // rather than resume, which is what keeps a corrupt tree from surviving.
-        let _ = std::fs::remove_dir_all(&partial);
-        if let Some(parent) = dest.parent() {
+        // A leftover staged tree is an interrupted previous run: discard and
+        // refetch rather than resume, which is what keeps a corrupt tree from
+        // surviving.
+        let _ = std::fs::remove_dir_all(&staged);
+        for parent in [dest.parent(), staged.parent()].into_iter().flatten() {
             std::fs::create_dir_all(parent).map_err(|source| AuditError::WorkDir {
                 path: parent.to_path_buf(),
                 source,
             })?;
         }
 
-        let ran = clone_command(&name_with_owner, &partial, options.shallow)
+        let ran = clone_command(&name_with_owner, &staged, options.shallow)
             .output()
             .await
             .and_then(|o| o.ok())
             .map(|_| ());
-        let (state, bytes) = finish_one(&dest, &partial, ran);
-        spent += bytes;
+        let (state, bytes, complete) = finish_one(&dest, &staged, ran);
+        spent = spent.saturating_add(bytes);
         out.push(ClonedRepo {
             name_with_owner,
             path: dest,
             state,
             bytes,
+            bytes_complete: complete,
         });
     }
     summarize(out)
-}
-
-/// The in-progress sibling of a destination.
-fn partial_path(dest: &Path) -> PathBuf {
-    let mut name = dest.as_os_str().to_os_string();
-    name.push(PARTIAL_SUFFIX);
-    PathBuf::from(name)
 }
 
 #[cfg(test)]
@@ -413,7 +556,15 @@ mod clone_tests {
             path: PathBuf::from("/work/repos").join(name),
             state,
             bytes,
+            bytes_complete: true,
         }
+    }
+
+    /// A minimal tree `verify_checkout` accepts: HEAD pointing at a ref that exists.
+    fn plant_checkout(tree: &Path) {
+        std::fs::create_dir_all(tree.join(".git/refs/heads")).expect("mkdir");
+        std::fs::write(tree.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("HEAD");
+        std::fs::write(tree.join(".git/refs/heads/main"), b"abc123\n").expect("ref");
     }
 
     /// The property `workdir::layout_tests::every_layout_path_is_inside_the_root`
@@ -454,6 +605,152 @@ mod clone_tests {
         }
     }
 
+    /// The fail-open regression the review found: a depth-1 fetch of a
+    /// commitless repository EXITS ZERO leaving only `.git`. Promoting that is
+    /// an audit reporting coverage of a repository nothing ever read.
+    #[test]
+    fn a_commitless_clone_is_not_a_usable_checkout() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dest = tmp.path().join("api");
+        let staged = tmp.path().join("staged");
+        // Exactly what a commitless clone leaves: .git, HEAD, no such ref.
+        std::fs::create_dir_all(staged.join(".git/refs/heads")).expect("mkdir");
+        std::fs::write(staged.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("HEAD");
+
+        let (state, bytes, _) = finish_one(&dest, &staged, Ok(()));
+        let CloneState::Empty(why) = &state else {
+            panic!("a zero exit with no commits must not be Cloned: {state:?}");
+        };
+        assert!(why.contains("no commits"), "{why}");
+        assert!(!state.is_usable());
+        assert_eq!(bytes, 0);
+        assert!(!dest.exists(), "nothing may be promoted");
+        assert!(!staged.exists());
+    }
+
+    #[test]
+    fn a_tree_with_no_dot_git_is_not_a_checkout() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staged = tmp.path().join("staged");
+        std::fs::create_dir_all(&staged).expect("mkdir");
+        assert!(verify_checkout(&staged).is_err());
+    }
+
+    #[test]
+    fn a_checkout_with_a_packed_head_ref_is_usable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staged = tmp.path().join("staged");
+        std::fs::create_dir_all(staged.join(".git")).expect("mkdir");
+        std::fs::write(staged.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("HEAD");
+        std::fs::write(
+            staged.join(".git/packed-refs"),
+            b"# pack-refs with: peeled\nabc123 refs/heads/main\n",
+        )
+        .expect("packed-refs");
+        verify_checkout(&staged).expect("a packed ref resolves HEAD");
+    }
+
+    #[test]
+    fn a_detached_head_is_usable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staged = tmp.path().join("staged");
+        std::fs::create_dir_all(staged.join(".git")).expect("mkdir");
+        std::fs::write(staged.join(".git/HEAD"), b"abc123def\n").expect("HEAD");
+        verify_checkout(&staged).expect("a detached HEAD names a commit");
+    }
+
+    /// The data-loss regression: `.` is a legal name character, so the old
+    /// `<dest>.partial` staging path was addressable by the legal repository
+    /// `acme/api.partial` — and acquiring `acme/api` deleted it.
+    #[tokio::test]
+    async fn a_repo_named_like_the_old_staging_path_is_safe() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let victim = destination(&work, "acme/api.partial").expect("a legal name");
+        std::fs::create_dir_all(&victim).expect("mkdir");
+        std::fs::write(victim.join("f"), b"the recipient's source").expect("write");
+
+        let staged = staging(&work, "acme/api").expect("valid");
+        assert_ne!(staged, victim);
+        assert!(
+            !staged.starts_with(work.path(Area::Repos)),
+            "staging must live outside the repository namespace: {}",
+            staged.display()
+        );
+
+        let report = clone_all(
+            &work,
+            &["acme/api.partial".to_string(), "acme/api".to_string()],
+            &CloneOptions::default(),
+        )
+        .await
+        .expect("the first repo is usable, so the run continues");
+        assert_eq!(report.repos[0].state, CloneState::Reused);
+        assert!(
+            victim.join("f").is_file(),
+            "acquiring acme/api destroyed acme/api.partial's checkout"
+        );
+    }
+
+    /// A planted `repos/<owner>` symlink is the same escape as a planted
+    /// `repos/`, one level down.
+    #[tokio::test]
+    async fn a_symlinked_owner_directory_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("target");
+        std::os::unix::fs::symlink(&outside, work.path(Area::Repos).join("acme")).expect("symlink");
+
+        let err = clone_all(&work, &["acme/api".to_string()], &CloneOptions::default())
+            .await
+            .expect_err("an owner directory that is a symlink must be refused");
+        assert!(matches!(err, AuditError::UnsafeArea { .. }), "{err:?}");
+        assert!(
+            !outside.join("api").exists(),
+            "nothing may be written through the symlink"
+        );
+    }
+
+    /// A DANGLING symlink is the case the old ordering got wrong: `create`
+    /// followed it and built the target before the guard ever ran.
+    #[tokio::test]
+    async fn a_dangling_repos_symlink_is_refused_before_anything_is_created() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = WorkDir::new(tmp.path().join("work"));
+        std::fs::create_dir_all(work.root()).expect("root");
+        let never = tmp.path().join("never-created");
+        std::os::unix::fs::symlink(&never, work.path(Area::Repos)).expect("symlink");
+
+        let err = clone_all(&work, &["acme/api".to_string()], &CloneOptions::default())
+            .await
+            .expect_err("a dangling area symlink must be refused");
+        assert!(matches!(err, AuditError::UnsafeArea { .. }), "{err:?}");
+        assert!(
+            !never.exists(),
+            "the guard must run before anything follows the symlink"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_subtree_marks_the_size_incomplete() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tree = tmp.path().join("tree");
+        let blocked = tree.join("blocked");
+        std::fs::create_dir_all(&blocked).expect("mkdir");
+        std::fs::write(tree.join("f"), b"12345").expect("write");
+        std::fs::write(blocked.join("hidden"), b"0123456789").expect("write");
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let (bytes, complete) = dir_size(&tree);
+        // Restore first, so a failed assertion cannot leave an undeletable tree.
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755))
+            .expect("restore");
+        assert!(!complete, "an unreadable subtree must not read as a total");
+        assert_eq!(bytes, 5, "the readable part is still counted: {bytes}");
+    }
+
     #[test]
     fn a_symlinked_repos_area_is_refused() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -463,7 +760,8 @@ mod clone_tests {
         std::fs::create_dir_all(&elsewhere).expect("target");
         std::os::unix::fs::symlink(&elsewhere, work.path(Area::Repos)).expect("symlink");
 
-        let err = ensure_repos_area_is_real(&work).expect_err("a symlinked area must be refused");
+        let err =
+            ensure_real_dir(work.path(Area::Repos)).expect_err("a symlinked area must be refused");
         let AuditError::UnsafeArea { kind, .. } = &err else {
             panic!("expected UnsafeArea, got {err:?}");
         };
@@ -473,14 +771,14 @@ mod clone_tests {
     #[test]
     fn a_real_repos_area_passes_the_guard() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        ensure_repos_area_is_real(&work_in(tmp.path())).expect("a real directory is fine");
+        ensure_real_dir(work_in(tmp.path()).path(Area::Repos)).expect("a real directory is fine");
     }
 
     #[test]
     fn a_shallow_clone_forwards_depth_to_git() {
-        let argv = clone_command("acme/api", Path::new("/w/repos/acme/api"), true).argv_display();
-        assert_eq!(argv, "repo clone acme/api /w/repos/acme/api -- --depth=1");
-        let full = clone_command("acme/api", Path::new("/w/repos/acme/api"), false).argv_display();
+        let argv = clone_command("acme/api", Path::new("/w/stage/acme/api"), true).argv_display();
+        assert_eq!(argv, "repo clone acme/api /w/stage/acme/api -- --depth=1");
+        let full = clone_command("acme/api", Path::new("/w/stage/acme/api"), false).argv_display();
         assert!(!full.contains("--depth"), "{full}");
     }
 
@@ -490,33 +788,37 @@ mod clone_tests {
     fn a_failed_clone_leaves_nothing_behind() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dest = tmp.path().join("api");
-        let partial = partial_path(&dest);
-        std::fs::create_dir_all(partial.join(".git")).expect("half-fetched tree");
-        std::fs::write(partial.join("README.md"), b"partial").expect("write");
+        let staged = tmp.path().join("staged");
+        plant_checkout(&staged);
+        std::fs::write(staged.join("README.md"), b"partial").expect("write");
 
-        let (state, bytes) = finish_one(&dest, &partial, Err(gh_failure()));
+        let (state, bytes, _) = finish_one(&dest, &staged, Err(gh_failure()));
         assert!(matches!(state, CloneState::Failed(_)), "{state:?}");
         assert_eq!(bytes, 0);
         assert!(
             !dest.exists(),
             "a failed clone must not appear as a checkout"
         );
-        assert!(!partial.exists(), "the partial must be removed");
+        assert!(!staged.exists(), "the staged tree must be removed");
     }
 
     #[test]
     fn a_successful_clone_is_renamed_into_place() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dest = tmp.path().join("api");
-        let partial = partial_path(&dest);
-        std::fs::create_dir_all(&partial).expect("mkdir");
-        std::fs::write(partial.join("f"), b"0123456789").expect("write");
+        let staged = tmp.path().join("staged");
+        plant_checkout(&staged);
+        std::fs::write(staged.join("f"), b"0123456789").expect("write");
 
-        let (state, bytes) = finish_one(&dest, &partial, Ok(()));
+        let (state, bytes, complete) = finish_one(&dest, &staged, Ok(()));
         assert_eq!(state, CloneState::Cloned);
-        assert_eq!(bytes, 10);
-        assert!(dest.is_dir());
-        assert!(!partial.exists());
+        assert!(
+            bytes >= 10,
+            "the measured tree includes the payload: {bytes}"
+        );
+        assert!(complete);
+        assert!(dest.join(".git").is_dir());
+        assert!(!staged.exists());
     }
 
     #[test]

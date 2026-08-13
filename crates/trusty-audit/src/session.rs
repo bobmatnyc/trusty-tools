@@ -139,6 +139,30 @@ pub enum Outcome {
     Cloned(CloneReport),
 }
 
+/// Exit status for a run that succeeded but did not cover everything asked for.
+pub const EXIT_INCOMPLETE: i32 = 2;
+
+impl Outcome {
+    /// The process exit status this outcome should produce.
+    ///
+    /// Why: acquisition continues past a repository it could not clone, which
+    /// is the right behaviour for a hundred-repo sweep and the wrong thing to
+    /// report as unqualified success. The rendered text names every exclusion,
+    /// but `taudit clone $(cat repos.txt) && taudit run` reads the status, not
+    /// the text — so a partial acquisition that exits 0 chains straight into a
+    /// sweep over an incomplete set (#5215 review).
+    /// What: [`EXIT_INCOMPLETE`] when a clone report carries gaps; 0 otherwise.
+    /// The policy lives here rather than in `main.rs` so the Tauri shell reads
+    /// the same judgement rather than re-deriving it.
+    /// Test: `crate::cli::cli_tests::a_run_with_gaps_exits_non_zero`.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Outcome::Cloned(report) if !report.gaps.is_empty() => EXIT_INCOMPLETE,
+            _ => 0,
+        }
+    }
+}
+
 /// One audit engagement, rooted at a working directory.
 ///
 /// Why: the front ends share this and nothing else.
