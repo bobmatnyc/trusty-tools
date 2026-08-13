@@ -4,8 +4,11 @@ spec_refs: []
 
 # DOC-70 — Linear Project-Board Selection as a Second Audit Selection Axis
 
-**Status:** Draft. §12's six questions are decided here; §13's two are open and
-need the owner. No code has been written and no issue in §14 has been filed.
+**Status:** Draft. All eight questions are decided — §12's six at drafting, and
+§13's two by the owner on 2026-08-13. §13's Q8 was decided **against** this
+spec's own recommendation, and the constraint that produced that recommendation
+is now the constraint Q8's confidence gate exists to handle. No code has been
+written and no issue in §14 has been filed.
 **Spec ID:** `SPEC-BOARDAXIS-01~draft` … `SPEC-BOARDAXIS-14~draft`
 **Subsystem:** `trusty-audit` — the pre-sweep selection surface, the `state/`
 record, the Linear credential's lifetime; `trusty-common` — the one Linear
@@ -159,8 +162,8 @@ it cannot quietly shrink the codebase an acquirer paid to have examined.
   the read side; §9 states what the section must carry, not how it is worded.
 - Folding `crates/trusty-agents/src/ticketing/linear.rs` into the shared
   client (§6). It stays a third implementation; this spec adds no fourth.
-- Non-Linear boards. §13's first open question is whether they are ever
-  offered.
+- Whether non-Linear boards are ever offered. §13's Q7 tags the selection with
+  a provider so that answer costs no migration, and stops there.
 
 ## {#SPEC-BOARDAXIS-05~draft} 5. Optional, and Chosen Explicitly
 
@@ -195,9 +198,13 @@ subprocess.** `trusty-audit` does not link trusty-common. Its dependency set is
 anyhow, clap, serde, toml, thiserror, trusty-installer and tokio
 (`crates/trusty-audit/Cargo.toml:38-58`), and that manifest's own comment
 records that `reqwest` is deliberately absent because downloading and HTTP
-belong to `trusty-installer`. The picker calls a new `tga linear boards --json`
-subcommand and reads its stdout — the same process-boundary seam DOC-68 §5
-Seams 3 and 4 already use for the sweep and for `trusty-review report`.
+belong to `trusty-installer`. The picker calls a new
+`tga boards --provider linear --json` subcommand and reads its stdout — the same
+process-boundary seam DOC-68 §5 Seams 3 and 4 already use for the sweep and for
+`trusty-review report`. The `--provider` flag is not decoration: §13 Q7 decided
+that the selection is provider-tagged everywhere it appears, and a `tga linear
+boards` spelling would put the provider in the command name, where a second
+provider could only be added by renaming the first one's command.
 
 **Consequence for the pre-sweep order.** The board list comes from the pinned
 `tga` binary, so board selection happens after tool installation, not before
@@ -289,10 +296,14 @@ selection, so it lands in the same record — one file, one atomic write at the
 end of the pre-sweep phase, no new area and no second write path that could
 disagree with the first about whether that phase completed.
 
-The record's board block holds, per selected board: the provider tag, the
-board id, its name, and its URL. Plus the marker §5 requires, distinguishing an
-explicit "no board" from an absent field. Plus **the resolved issue-identifier
-list and the timestamp it was resolved at.**
+The record's board block holds, per selected board, a `{provider, id}` pair —
+`provider` being `"linear"` today — plus the board's name and URL. Per §13 Q7
+the pair is the schema, not a Linear-shaped `linear_project_id` field: a client
+that persists selections across restarts pays for a schema change with a
+state-file migration, and the tagged pair costs one field to avoid one. Plus
+the marker §5 requires, distinguishing an explicit "no board" from an absent
+field. Plus **the resolved issue-identifier list and the timestamp it was
+resolved at.**
 
 **That last part is what #5494's resume turns on.** A Linear project's issue
 set changes while a multi-hour sweep runs. If a resumed run re-queries the
@@ -320,16 +331,82 @@ The read side is #5405's. What this spec requires of it, and no more:
 - The corpus size and the two partition counts, and enough for them to be
   checked against each other: commits examined, commits board-linked, commits
   unlinked.
-- A detection-limits line beside the partition, in the shape DOC-67 §8 already
-  uses for `agentic_pct`. Identifier extraction is regex-based over commit
-  messages, so a squash merge that drops the identifier, or a house convention
-  that never wrote one, produces an unlinked commit that was in fact tracked.
-  A low board-linked share means "no identifiers found", not "work was
-  untracked", and the section says so rather than leaving the reader to assume
-  otherwise.
+- The linkage-mechanism shares §9.1 defines, which are what decide whether the
+  partition may be graded at all.
+- A detection-limits line, always. Below the confidence threshold or before
+  calibration it is the whole finding; above the threshold it sits beside the
+  grade.
 - When no board was selected, a Gaps & Caveats line saying that, per §5.
 
-Whether the unlinked share may additionally be **graded** is open — §13.
+### 9.1 The linkage-mechanism signal, and why the linked share alone is not it
+
+Identifier extraction is regex over the commit message
+(`ticket_regex`'s default `\b([A-Z][A-Z0-9]{0,9})-(\d+)\b`,
+`crates/trusty-git-analytics/src/core/config/mod.rs:847-861`). That limit is
+real and does not go away because the report grades the result: a squash merge
+that dropped the identifier, a hotfix path that never carried one, and a house
+convention that links by branch name instead all produce an unlinked commit for
+work that was in fact tracked.
+
+**A low board-linked share is therefore ambiguous on its own.** A client with
+house conventions and a client with genuinely untracked work produce the same
+number. Grading that number directly would state a conclusion the data does not
+carry.
+
+What separates them is whether the linking mechanism is in use at all,
+measurable without reference to the selected board. Three shares, over the same
+commits §3 says are examined:
+
+| Share | Definition | What it answers |
+|---|---|---|
+| `identifier_present` | commits whose message contains any token matching the identifier regex, resolved or not | Does this org write ticket identifiers into commit messages? |
+| `identifier_resolved` | of those, the ones naming an issue that exists in the workspace | Are the tokens real identifiers, or incidental matches like `HTTP-2`? |
+| `board_linked` | of commits examined, the ones linked into `B` — §3's partition | How much of the shipped work sits on the selected board? |
+
+`identifier_present` is the discriminator. High presence with a low
+`board_linked` share is a real finding: this org writes identifiers, and the
+work is tracked somewhere other than the selected board. Low presence means the
+mechanism is absent, tracked and untracked work are indistinguishable, and no
+threshold anywhere makes a grade defensible.
+
+`identifier_present` costs nothing extra to compute — `extract_issue_ids`
+(`crates/trusty-git-analytics/src/collect/linear/client.rs:162`) already runs
+over every collected commit message and needs no Linear call, and
+`identifier_resolved` falls out of the corpus resolution §3 already performs.
+
+**One improvement worth naming, because it moves the discriminator rather than
+the conclusion:** a squash-merge org often carries the identifier in the pull
+request title rather than the commit message, and tga already collects
+`pull_requests.title` (DOC-67 §10 lists it among the free-text columns). Reading
+the PR title as a second source raises `identifier_present` for exactly the
+population that would otherwise be misread as having no convention. It does not
+change what the grade means; it changes how often the gate opens correctly.
+
+### 9.2 Three output states, and what an uncalibrated build does
+
+**Uncalibrated — no threshold has been recorded.** The report prints the three
+shares and the detection-limits line, and grades nothing. This is the v1
+behavior, because §13 Q8's threshold does not exist yet. An uncalibrated build
+must never grade against a guessed constant: a number invented to make the
+feature look finished would carry the authority of a measured one, and an
+acquirer cannot tell the two apart on the page.
+
+**Calibrated, below threshold.** Same output, plus a line naming the threshold,
+the run's `identifier_present` share, and that the share fell below it. The
+distinction from "uncalibrated" matters for the same reason §5's explicit
+"no board" matters: they are different facts about the run, and a reader acts
+on them differently.
+
+**Calibrated, at or above threshold.** The `board_linked` share is graded on
+the report's existing RED/AMBER/GREEN scale (DOC-67 §3), with the
+detection-limits line beside it — the shape DOC-67 §8 already uses for
+`agentic_pct`, where the disclosure renders next to the number rather than
+instead of it.
+
+The threshold and the grade bands live in one recorded place that cites the
+calibration run that produced them, not as constants inside the fill logic. A
+reader who disagrees with a grade must be able to find what it was measured
+against.
 
 ## {#SPEC-BOARDAXIS-10~draft} 10. Dependency on #5219 and #5405 — Not Independent
 
@@ -363,8 +440,8 @@ lands on.
 `work_items.source` is already `'azdo' | 'jira' | 'github' | 'linear'`
 (`core/db/sql/0005_work_items.sql:8`), so §3's corpus definition does not
 collide with the other three writers #5219 will add — a run scoped to a Linear
-board writes Linear rows, and a client on JIRA is §13's first open question,
-not a conflict.
+board writes Linear rows, and the provider tag §13 Q7 puts on the selection
+uses the same vocabulary that column already does.
 
 `LinearConfig.team_keys` (`core/config/mod.rs:838-841`) already filters
 collection by team key. It stays as it is. Team filtering is strictly coarser
@@ -486,46 +563,76 @@ selection phase a producer of something the sweep owns.
 order.** §10. Implementing the axis first produces a picker whose selection has
 no observable effect.
 
-## {#SPEC-BOARDAXIS-13~draft} 13. Open Questions for the Owner
+## {#SPEC-BOARDAXIS-13~draft} 13. Decided Questions — the Two Held Open at Draft
 
-Two questions this spec is not entitled to settle. Each states the options and
-a recommendation.
+Two questions this spec drafted as open because they were not its to settle.
+**The owner decided both on 2026-08-13.** Q7 was accepted as this spec proposed
+it; **Q8 was decided against this spec's recommendation**, and the reasoning
+behind that recommendation is kept below as the constraint Q8's answer has to
+handle rather than dropped to match the ruling.
 
-**OQ1 — Is the board axis Linear-only, or is Linear the first provider of a
-general board axis?**
+**Q7 — DECIDED 2026-08-13: the selection is provider-tagged. The `state/`
+record and the CLI carry `{provider, id}`, and the subcommand is
+`tga boards --provider linear`.**
 
-It decides the `state/` record's shape and the subcommand's name — a
-`linear_project_id` field and `tga linear boards`, or a `{provider, id}` pair
-and `tga boards --provider linear`.
+*Rationale:* the tagged shape costs one field now; the untagged one costs a
+state-file migration later, in a client whose whole point is surviving a
+restart with its selection intact (§8, #5494). `work_items.source` already
+models four trackers (`core/db/sql/0005_work_items.sql:8`), so the tag reuses
+vocabulary the database has rather than inventing one. Putting the provider in
+the command name instead would mean a second provider could only arrive by
+renaming the first one's command.
 
-*Options:* (a) Linear-only, untagged. (b) Provider-tagged from the start, with
-Linear the only implementation.
+*Scope, unchanged by this decision:* whether JIRA or Azure DevOps boards are
+ever offered stays out of scope (§4). Q7 decides the shape so that answer, if
+it comes, costs no migration. It does not commit to the answer.
 
-*Recommendation: (b).* The tagged shape costs one field now; the untagged one
-costs a state-file migration later, in a client that persists across restarts.
-tga already models four trackers in `work_items.source`, so the tagged shape
-matches what the database already says. But whether JIRA or Azure DevOps boards
-are ever offered is a decision about which clients the handoff targets, and
-that is the owner's, not a shape this spec can infer.
+*Rejected — Linear-only, untagged (`linear_project_id`, `tga linear boards`):*
+one field cheaper today, one migration dearer the first time anything else is
+added, in the file that a resumed run reads.
 
-**OQ2 — May the report grade the unlinked-commit share, or only report it?**
+**Q8 — DECIDED 2026-08-13: the report grades the board-linked share, gated on
+a confidence check. Until a threshold is calibrated, the report grades
+nothing.**
 
-§3's partition makes "what fraction of shipped work was tracked on the board"
-computable, and §9 requires it to be shown. Whether it may also become a
-RED/AMBER/GREEN finding is a different question.
+This spec recommended report-only. The owner decided grading, gated. The gate
+is where the recommendation's substance goes: §9.1's regex limit is unchanged
+and unsoftened, and the gate exists precisely because of it.
 
-*Options:* (a) report the share with a detection-limits line and no grade.
-(b) fold it into the scoring as a delivery-process finding.
+*What the confidence signal is:* not the board-linked share. That share alone
+cannot separate a client with house conventions from one with genuinely
+untracked work — both produce a low number. The signal is
+`identifier_present`, the share of examined commits whose message carries any
+token matching the identifier regex, measured without reference to the selected
+board (§9.1). High identifier presence with a low board-linked share is a real
+finding about where work is tracked; low identifier presence means tracked and
+untracked work are indistinguishable and no threshold rescues a grade.
 
-*Recommendation: (a) for v1.* An acquirer reading AMBER for "untracked work"
-takes it as evidence about the target's engineering discipline, and the
-number's error bars are set by the target's commit-message conventions —
-squash merges that drop identifiers, hotfix paths that never carried one,
-mono-repo commits spanning several projects. DOC-67 §8 hit the same shape with
-`agentic_pct` and resolved it by rendering the detection limits verbatim beside
-the number rather than grading it (#5249, #5250). Whether the audit is entitled
-to make the stronger claim is the report's credibility, which is the owner's
-call and not a mechanism this spec can decide.
+*Where the threshold comes from:* calibration against real repositories, not
+this document. It is measurement work — run the two-axis sweep over
+populations with known conventions and find the `identifier_present` level
+above which `board_linked` separates them. No existing issue fits: #5250 is the
+nearest in shape (it proposes a distinct `unknown` bucket so a stripped-marker
+commit stops sharing one with a genuinely human commit) but it covers AI
+markers, not ticket linkage. §14 item 11 describes the new issue.
+
+*What an uncalibrated build does — the part that must not be left implicit:*
+report-only. Three shares plus the detection-limits line, no grade, no guessed
+constant standing in for the threshold (§9.2). Grading is what calibration
+unlocks, and shipping a placeholder number would give an invented threshold the
+authority of a measured one.
+
+*The detection-limits line renders in both branches.* Below the threshold and
+before calibration it is the whole finding; above it, it sits beside the grade,
+the shape DOC-67 §8 already uses for `agentic_pct` (#5249).
+
+*Rejected — grading on the board-linked share with no gate:* it states a
+conclusion about the target's engineering discipline that the data does not
+carry, because §9.1's ambiguity is in the number itself.
+
+*Rejected — picking a threshold in this spec:* nobody has the data for one.
+A constant written here would be indistinguishable, on the page, from a
+measured one.
 
 ## {#SPEC-BOARDAXIS-14~draft} 14. Implementation Issues That Would Follow
 
@@ -541,31 +648,54 @@ Described, not filed. Nothing below exists as an issue.
    GraphQL helper.** Keeps `extract_issue_ids`, `linear_issues` persistence and
    `ticket_regex` in tga. Enables the `tickets` feature on tga's existing
    trusty-common dependency. Rung 4; depends on 1 and 2.
-4. **tga: `tga linear boards --json`.** Lists the boards a key can reach,
-   machine-readable, no TTY, non-zero exit on an auth failure so the picker can
-   distinguish "no boards" from "the key is wrong". Depends on 1 and 3.
+4. **tga: `tga boards --provider linear --json`.** Lists the boards a key can
+   reach, machine-readable, no TTY, non-zero exit on an auth failure so the
+   picker can distinguish "no boards" from "the key is wrong". `--provider` is
+   required rather than defaulted, per §13 Q7. Depends on 1 and 3.
 5. **tga: write `work_items` from a pinned Linear corpus.** This is #5219's
    Linear half; what is new is that the corpus arrives as a pinned list rather
    than being discovered from commit references.
 6. **trusty-audit: a `Boards` command and a `SelectBoard` guided step.**
-   Ordered after `InstallTools` (§6), with a CLI arm in the same PR — DOC-68
-   §11's constraint, mechanically enforced by
+   Ordered after `InstallTools` (§6), carrying `{provider, id}` rather than a
+   bare board id, with a CLI arm in the same PR — DOC-68 §11's constraint,
+   mechanically enforced by
    `cli_tests::every_command_variant_has_a_cli_invocation`
    (`crates/trusty-audit/src/cli.rs:261`).
 7. **trusty-audit: the `state/` board block and the pinned identifier list.**
-   Coordinates with #5494, which must encode "resume does not re-query" as a
-   closure condition rather than citing §8.
+   The block is `{provider, id}`-shaped per §13 Q7, so a later provider needs no
+   state-file migration. Coordinates with #5494, which must encode "resume does
+   not re-query" as a closure condition rather than citing §8.
 8. **trusty-audit: pass the key to the `tga` child's environment**, with a test
    asserting it appears in no file anywhere under the working directory.
 9. **trusty-review / tga: the board-derived report section**, including the
-   detection-limits line and the no-board gap line (§9). Depends on #5405.
+   three linkage shares (§9.1), the detection-limits line, the no-board gap line
+   (§5), and the three output states of §9.2. Ships report-only: the grading
+   branch has no threshold to read until 11 lands, and the section must not
+   compile a placeholder constant into the fill logic in the meantime.
+   Depends on #5405.
 10. **A fixture-backed end-to-end test of the two-axis pre-sweep**, extending
     #5556's harness: recorded Linear responses behind a trait seam, no live
     workspace, consistent with DOC-68 §14 Q1.
+11. **Calibrate the confidence threshold for grading the board-linked share**
+    (§13 Q8) — the only item here that is measurement rather than
+    implementation. Run the two-axis sweep over repository populations with
+    known conventions, including at least one org that writes identifiers into
+    commit messages and one that does not, and find the `identifier_present`
+    level above which `board_linked` separates them. Outputs: the threshold, the
+    RED/AMBER/GREEN bands, and a record of the runs they came from, in one place
+    the report cites. No existing issue covers it — #5250 is the nearest in
+    shape and covers AI markers, not ticket linkage. Until this lands, 9 stays
+    report-only.
+12. **Read the PR title as a second identifier source** (§9.1), raising
+    `identifier_present` for squash-merge orgs that carry the identifier there
+    rather than in the commit message. tga already collects
+    `pull_requests.title`. Independent of 11 and worth landing before it, since
+    it changes the population the calibration measures.
 
 ---
 
 *This document is the deliverable requested by
-[#5641](https://github.com/bobmatnyc/trusty-tools/issues/5641). §12's six
-questions are decided; §13's two need the owner. No `.rs` file was changed and
-no issue in §14 has been filed.*
+[#5641](https://github.com/bobmatnyc/trusty-tools/issues/5641). All eight
+questions are decided — §12's six at drafting, §13's two by the owner on
+2026-08-13. No `.rs` file was changed and no issue in §14 has been filed,
+including item 11's calibration work, which nothing else owns.*
