@@ -129,14 +129,17 @@ pub struct RawInvestigation {
 /// terser rows via a tighter schema rather than hoping the model complies with
 /// prose alone.
 /// What: returns a [`ResponseSchema`] named `repo_investigation` whose `findings`
-/// array caps at `max_findings` items, each requiring title/severity/dimension/
-/// file/evidence_quote/description/remediation, with optional line/
-/// business_impact/cost_effort.
+/// array caps at `max_findings` items.
 /// Test: `analyze_tests::{schema_shape, schema_shrinks_on_retry}`.
+///
+/// #5675: built via [`ResponseSchema::new`], which applies `enforce_strict_mode`
+/// and so makes every declared property required. That is what OpenAI strict
+/// mode demands; the lenient providers accept it, and `RawFinding` is entirely
+/// `#[serde(default)]`, so a model that still omits a field parses unchanged.
 pub fn investigation_schema(max_findings: usize) -> ResponseSchema {
-    ResponseSchema {
-        name: "repo_investigation".to_string(),
-        schema: serde_json::json!({
+    ResponseSchema::new(
+        "repo_investigation",
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "findings": {
@@ -159,14 +162,12 @@ pub fn investigation_schema(max_findings: usize) -> ResponseSchema {
                             "business_impact": {"type": "string", "description": "One concise sentence."},
                             "remediation": {"type": "string", "description": "One concise sentence."},
                             "cost_effort": {"type": "string"}
-                        },
-                        "required": ["title", "severity", "dimension", "file", "evidence_quote", "description", "remediation"]
+                        }
                     }
                 }
-            },
-            "required": ["findings"]
+            }
         }),
-    }
+    )
 }
 
 /// The investigation system prompt — the hard grounding rules.

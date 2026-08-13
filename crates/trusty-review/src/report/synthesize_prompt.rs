@@ -64,10 +64,15 @@ const FINDINGS_CAP: usize = super::synthesize_digest::ELABORATION_TARGETS_CAP;
 /// lists more elaboration targets than that, so the model never has reason to
 /// exceed it.
 /// Test: `synthesize_tests.rs::{synthesis_schema_shape, schema_shrinks_on_retry}`.
-pub(super) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
-    ResponseSchema {
-        name: "report_synthesis".to_string(),
-        schema: serde_json::json!({
+///
+/// #5675: built via [`ResponseSchema::new`], which applies `enforce_strict_mode`.
+/// This schema previously used a struct literal and so never got that pass —
+/// `findings.items` carried no `additionalProperties`, and OpenAI strict mode
+/// (forwarded by OpenRouter for `openai/*`) rejected every synthesis call.
+pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
+    ResponseSchema::new(
+        "report_synthesis",
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "executive_summary": {
@@ -84,8 +89,7 @@ pub(super) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
                             "severity": {"type": "string", "enum": ["RED", "AMBER"]},
                             "cost": {"type": "string", "description": "Qualitative effort/cost framing; no invented figures."},
                             "apps": {"type": "string", "description": "Affected application name(s)."}
-                        },
-                        "required": ["description", "severity", "cost", "apps"]
+                        }
                     },
                     "description": "The most material RED/AMBER risks, most material first, drawn ONLY from the findings provided."
                 },
@@ -104,15 +108,13 @@ pub(super) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
                             "business_impact": {"type": "string"},
                             "remediation": {"type": "string"},
                             "cost_effort": {"type": "string"}
-                        },
-                        "required": ["app_slug", "title", "severity", "description", "remediation"]
+                        }
                     },
                     "description": "Elaboration prose EXCLUSIVELY for the findings listed under \"Findings requiring elaboration\". Leave empty when that list says none. Never add a finding not in that list, and never re-elaborate a finding tagged [verified] elsewhere in the data."
                 }
-            },
-            "required": ["executive_summary", "top_risks", "findings"]
+            }
         }),
-    }
+    )
 }
 
 /// The synthesis system prompt, built from the resolved (layered) section
