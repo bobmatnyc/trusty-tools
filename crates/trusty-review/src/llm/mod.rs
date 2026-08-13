@@ -258,6 +258,17 @@ pub async fn build_provider(
     config: &ReviewConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let (provider, bare_model) = resolve_provider_and_model(model, default_provider);
+    // #5671: no credential was found for either provider and the model carries
+    // no explicit `bedrock/` / `openrouter/` prefix, so nothing ever chose this
+    // provider. Fail naming both options rather than proceeding into an
+    // obscure AWS or 401 error.
+    if config.role_models.provider_source == crate::config::ProviderSource::NoCredential
+        && strip_provider_prefix(model) == model
+    {
+        return Err(LlmError::AccessDenied(
+            crate::config::provider_default::NO_CREDENTIAL_MESSAGE.to_string(),
+        ));
+    }
     match provider {
         Provider::Bedrock => {
             let p = BedrockProvider::new(bare_model, None).await?;
@@ -415,6 +426,57 @@ mod tests {
     }
 
     // ── Provider factory routing tests ────────────────────────────────────
+
+    /// #5671 fail-closed: with no credential detected and no explicit prefix,
+    /// `build_provider` must error naming BOTH options.
+    ///
+    /// Why: the real damage in #5671 was that the failure named Bedrock when
+    /// the operator had supplied an OpenRouter key. A resolver that instead
+    /// fell back to some provider here would be the exact fail-open shape the
+    /// issue exists to remove.
+    /// What: forces `ProviderSource::NoCredential` and asserts the error text.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn provider_factory_no_credential_names_both_options() {
+        let mut config = ReviewConfig::load(None);
+        config.role_models.provider_source = crate::config::ProviderSource::NoCredential;
+        let result = build_provider(
+            crate::llm::models::DEFAULT_REVIEWER_MODEL,
+            &Provider::Bedrock,
+            &config,
+        )
+        .await;
+        let msg = match result {
+            Ok(_) => panic!("no credential must not build a provider"),
+            Err(e) => e.to_string(),
+        };
+        assert!(msg.contains("OPENROUTER_API_KEY"), "{msg}");
+        assert!(msg.contains("Bedrock"), "{msg}");
+        assert!(msg.contains("TRUSTY_REVIEW_PROVIDER"), "{msg}");
+    }
+
+    /// #5671: an explicit `bedrock/` prefix still works with no credential
+    /// detected — the operator named the provider, so nothing is blocked.
+    #[tokio::test]
+    async fn provider_factory_explicit_prefix_survives_no_credential() {
+        let mut config = ReviewConfig::load(None);
+        config.role_models.provider_source = crate::config::ProviderSource::NoCredential;
+        // Whether this succeeds depends on whether the machine has a key; what
+        // must never happen is the no-credential gate firing on a prefixed model.
+        let result = build_provider(
+            "openrouter/anthropic/claude-haiku-4-5",
+            &Provider::Bedrock,
+            &config,
+        )
+        .await;
+        if let Err(e) = result {
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("TRUSTY_REVIEW_PROVIDER"),
+                "explicit prefix must not hit the no-credential gate: {msg}"
+            );
+        }
+    }
 
     #[test]
     fn provider_factory_prefix_routing() {

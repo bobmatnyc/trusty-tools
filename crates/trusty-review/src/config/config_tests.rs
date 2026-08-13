@@ -31,11 +31,35 @@ fn provider_fromstr() {
     assert!("unknown".parse::<Provider>().is_err());
 }
 
+/// AWS-only credentials — the pre-#5671 environment.
+///
+/// Why: before #5671 the built-in default was unconditionally Bedrock, so the
+/// legacy precedence tests must run against the credential state that keeps
+/// producing that answer; reading the real environment would make them depend
+/// on whether the developer happens to export `OPENROUTER_API_KEY`.
+/// What: `CredentialEnv { openrouter: false, aws: true }`.
+/// Test: this is test support.
+fn aws_only() -> CredentialEnv {
+    CredentialEnv {
+        openrouter: false,
+        aws: true,
+    }
+}
+
+/// OpenRouter-only credentials — the audit deliverable's environment (#5671).
+fn openrouter_only() -> CredentialEnv {
+    CredentialEnv {
+        openrouter: true,
+        aws: false,
+    }
+}
+
 #[test]
 fn role_models_precedence_defaults() {
-    // No CLI, no env, no file → built-in defaults (Bedrock as of #548).
+    // No CLI, no env, no file, AWS credentials only → Bedrock (as of #548,
+    // now conditional on AWS being the only detected credential, #5671).
     let env = RoleEnv::default();
-    let roles = RoleModels::from_env(&env);
+    let roles = RoleModels::resolve_with_credentials(None, &env, None, &aws_only());
     assert_eq!(
         roles.reviewer.model,
         crate::llm::models::DEFAULT_REVIEWER_MODEL
@@ -63,9 +87,97 @@ fn role_models_openrouter_still_selectable_via_env() {
         reviewer_model: Some("openai/gpt-5.4-mini-20260317".to_string()),
         ..Default::default()
     };
-    let roles = RoleModels::from_env(&env);
+    let roles = RoleModels::resolve_with_credentials(None, &env, None, &aws_only());
     assert_eq!(roles.reviewer.provider, Provider::OpenRouter);
     assert_eq!(roles.reviewer.model, "openai/gpt-5.4-mini-20260317");
+}
+
+/// #5671: a usable `OPENROUTER_API_KEY` selects OpenRouter with no override.
+///
+/// Why: `trusty-audit` passes its spend-capped key to the `tga audit` child as
+/// `OPENROUTER_API_KEY` (PR #5663); before this the child's reviewer still
+/// defaulted to Bedrock and the report stage failed or billed the wrong AWS
+/// account.
+/// What: no CLI, no env provider, no config file — only the key.
+/// Test: this test itself.
+#[test]
+fn role_models_openrouter_key_selects_openrouter() {
+    let env = RoleEnv::default();
+    let roles = RoleModels::resolve_with_credentials(None, &env, None, &openrouter_only());
+    assert_eq!(roles.provider_source, ProviderSource::OpenRouterKey);
+    for role in [&roles.reviewer, &roles.verifier, &roles.summarizer] {
+        assert_eq!(role.provider, Provider::OpenRouter);
+        assert!(
+            role.model.starts_with("anthropic/"),
+            "OpenRouter default {} must be a vendor slug, not a Bedrock id",
+            role.model
+        );
+    }
+}
+
+/// #5671: an existing Bedrock-only setup resolves exactly as before.
+#[test]
+fn role_models_bedrock_only_unchanged() {
+    let roles = RoleModels::resolve_with_credentials(None, &RoleEnv::default(), None, &aws_only());
+    assert_eq!(roles.provider_source, ProviderSource::AwsCredentials);
+    assert_eq!(roles.reviewer.provider, Provider::Bedrock);
+    assert_eq!(
+        roles.reviewer.model,
+        crate::llm::models::DEFAULT_REVIEWER_MODEL
+    );
+    assert_eq!(roles.verifier.provider, Provider::Bedrock);
+    assert_eq!(roles.summarizer.provider, Provider::Bedrock);
+}
+
+/// #5671: an explicit `TRUSTY_REVIEW_PROVIDER` outranks a present key.
+#[test]
+fn role_models_explicit_env_beats_openrouter_key() {
+    let env = RoleEnv {
+        provider: Some("bedrock".to_string()),
+        ..Default::default()
+    };
+    let creds = CredentialEnv {
+        openrouter: true,
+        aws: true,
+    };
+    let roles = RoleModels::resolve_with_credentials(None, &env, None, &creds);
+    assert_eq!(roles.provider_source, ProviderSource::Explicit);
+    assert_eq!(roles.reviewer.provider, Provider::Bedrock);
+    assert_eq!(
+        roles.reviewer.model,
+        crate::llm::models::DEFAULT_REVIEWER_MODEL
+    );
+}
+
+/// #5671: a config-file `provider` counts as explicit, so detection is skipped.
+#[test]
+fn role_models_config_file_provider_is_explicit() {
+    let file = FileModels {
+        reviewer: Some(RoleConfigOverride {
+            provider: Some("bedrock".to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let roles = RoleModels::resolve_with_credentials(
+        None,
+        &RoleEnv::default(),
+        Some(&file),
+        &openrouter_only(),
+    );
+    assert_eq!(roles.provider_source, ProviderSource::Explicit);
+    assert_eq!(roles.reviewer.provider, Provider::Bedrock);
+}
+
+/// #5671 fail-closed: no credential at all is reported, never papered over.
+#[test]
+fn role_models_no_credential_source() {
+    let creds = CredentialEnv {
+        openrouter: false,
+        aws: false,
+    };
+    let roles = RoleModels::resolve_with_credentials(None, &RoleEnv::default(), None, &creds);
+    assert_eq!(roles.provider_source, ProviderSource::NoCredential);
 }
 
 #[test]
@@ -76,7 +188,9 @@ fn role_models_precedence_env_wins() {
         summarizer_model: None,
         provider: None,
     };
-    let roles = RoleModels::from_env(&env);
+    // #5671: the built-in default model now depends on the detected provider,
+    // so pin the credential state that produces the Bedrock ids.
+    let roles = RoleModels::resolve_with_credentials(None, &env, None, &aws_only());
     assert_eq!(roles.reviewer.model, "openai/gpt-5.4-mini-20260317");
     // verifier and summarizer fall back to defaults.
     assert_eq!(
@@ -111,7 +225,7 @@ fn role_models_precedence_config_file_wins_over_defaults() {
         ..Default::default()
     };
     let env = RoleEnv::default();
-    let roles = RoleModels::resolve(None, &env, Some(&file));
+    let roles = RoleModels::resolve_with_credentials(None, &env, Some(&file), &aws_only());
     assert_eq!(roles.reviewer.model, "openai/gpt-5.4-nano-20260317");
     assert!((roles.reviewer.temperature - 0.5_f32).abs() < f32::EPSILON);
     // Verifier falls back to built-in.

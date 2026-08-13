@@ -17,6 +17,7 @@ pub mod constants;
 pub mod context;
 pub mod index_resolver;
 pub mod mapreduce;
+pub mod provider_default;
 pub mod role_models;
 pub mod verification;
 // Why: voice configuration loading extracted to keep config/mod.rs under the
@@ -36,6 +37,7 @@ pub use index_resolver::{
 pub use mapreduce::{DiffStats, MapMode, MapReduceConfig, ReviewPath, select_review_mode};
 
 pub use context::{ContextConfig, ContextFileConfig, InvocationSurface};
+pub use provider_default::{CredentialEnv, ProviderDefault, ProviderSource};
 pub use repo_config::find_repo_config_path;
 pub use review_template::ReviewFileConfig;
 pub use role_models::{

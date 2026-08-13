@@ -8,6 +8,28 @@
 | `TRUSTY_LLM_MODEL` | `trusty-analyze` deep pass | LLM model id for the deep-analysis narrative pass. Default: `openai/gpt-4o-mini` (OpenRouter). Set to `bedrock/<bedrock-model-id>` (e.g. `bedrock/us.anthropic.claude-sonnet-4-6`) to route through AWS Bedrock instead of OpenRouter. The `bedrock/` prefix selects the Bedrock provider; anything else routes to OpenRouter. Claude Sonnet 4.6 uses the short form without date stamp or `-v1:0` suffix. |
 | `TRUSTY_MANAGER_MODEL` | `trusty-mpm` L3 `tm manager` digest/chat (DOC-36 §3.3) | LLM model slug for the portfolio-manager digest (`GET /api/v1/manager/digest`) and chat (`POST /api/v1/manager/chat`) calls. Resolution precedence: `TRUSTY_MANAGER_MODEL` > `TRUSTY_LLM_MODEL` > `openai/gpt-4o-mini`. The slug is routed through the shared `trusty_common::inference` two-stage provider resolver (an explicit `<provider>/…` prefix selects a family when its credential resolves, else falls back to OpenRouter). When no provider credential resolves, `/digest` degrades to a clearly-marked deterministic fallback (503) and `/chat` returns a typed 503 — never a panic. |
 
+### `trusty-review` provider precedence (#5671)
+
+`trusty-review` no longer defaults to Bedrock unconditionally. When no layer
+names a provider, the built-in default is resolved from the credentials that
+are actually present:
+
+| # | Condition | Result |
+|---|---|---|
+| 1 | `--provider`, `TRUSTY_REVIEW_PROVIDER`, or a config-file `provider` is set | That provider. Detection does not run. |
+| 2 | `OPENROUTER_API_KEY` is set and not whitespace-only | OpenRouter, with OpenRouter model defaults (`anthropic/claude-sonnet-4-6` reviewer, `anthropic/claude-haiku-4-5` verifier and summarizer) |
+| 3 | AWS credentials are detectable (`AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_CONTAINER_CREDENTIALS_*`, or a `~/.aws/credentials` / `~/.aws/config` file) | Bedrock, with the existing inference-profile model ids |
+| 4 | Neither | The run fails naming **both** options and the `TRUSTY_REVIEW_PROVIDER` override |
+
+Rule 2 outranks rule 3 so the spend-capped key an audit engagement supplies is
+honoured without anyone exporting `TRUSTY_REVIEW_PROVIDER` by hand. A machine
+with both credentials that wants Bedrock must say so explicitly. Instance-metadata
+(IMDS) credentials are not detected — probing them would require a network call
+inside a synchronous config load; set `TRUSTY_REVIEW_PROVIDER=bedrock` there.
+
+A `bedrock/` or `openrouter/` prefix on a model id still routes that role
+regardless of detection, including in the rule-4 state.
+
 ## AWS / Bedrock Credentials
 
 | Variable | Required by | Purpose |
