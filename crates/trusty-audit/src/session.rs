@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::EngagementConfig;
+use crate::discover::{self, DiscoveredRepo};
 use crate::error::AuditError;
 use crate::manifest::{AuditManifest, RepositoryEntry};
 use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
@@ -50,6 +51,8 @@ pub enum Command {
     InstallTools,
     /// List the repositories the engagement is configured to audit.
     Repos,
+    /// List the repositories the recipient's `gh` credential can reach (#5487).
+    DiscoverRepos,
 }
 
 /// The working directory's layout, as reported to a front end.
@@ -118,6 +121,9 @@ pub enum Outcome {
     Installed(Vec<InstalledTool>),
     /// From [`Command::Repos`].
     Repos(Vec<RepositoryEntry>),
+    /// From [`Command::DiscoverRepos`] — what the credential can reach, not
+    /// what the engagement selected.
+    Discovered(Vec<DiscoveredRepo>),
 }
 
 /// One audit engagement, rooted at a working directory.
@@ -215,6 +221,12 @@ impl Session {
             Command::Tools => tools::status(&self.work).map(Outcome::Tools),
             Command::InstallTools => self.install_tools().await.map(Outcome::Installed),
             Command::Repos => self.repos().map(Outcome::Repos),
+            // #5487: discovery asks GitHub, so it takes nothing from the
+            // session's own state — it is on `Session` because `execute` is the
+            // only door any front end gets (#5502).
+            Command::DiscoverRepos => discover::discover(discover::DEFAULT_LIMIT)
+                .await
+                .map(Outcome::Discovered),
         }
     }
 
