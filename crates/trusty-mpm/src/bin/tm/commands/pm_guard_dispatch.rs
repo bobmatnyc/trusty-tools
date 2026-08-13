@@ -515,8 +515,9 @@ mod tests {
     #[test]
     fn allows_a_read_only_agent() {
         // Research/review dispatches share a cwd harmlessly and the PM fans
-        // them out constantly.
-        for agent in ["research", "code-critic", "qa"] {
+        // them out constantly. #5650 moved `qa` out of this list — it writes
+        // test files — while `code-critic` stays, because it only reads.
+        for agent in ["research", "code-critic", "code-analyzer"] {
             assert_eq!(
                 evaluate_shared_tree_dispatch(
                     "Agent",
@@ -527,6 +528,21 @@ mod tests {
                 None,
                 "{agent} must be allowed alongside a running engineer"
             );
+        }
+    }
+
+    #[test]
+    fn denies_a_file_writing_non_engineer_alongside_an_engineer() {
+        // #5650: these wrote into the engineer's tree with no deny at all.
+        for agent in ["documentation", "version-control", "qa", "web-qa", "api-qa"] {
+            let reason = evaluate_shared_tree_dispatch(
+                "Agent",
+                Some(&input(agent, None)),
+                Path::new("/repo"),
+                &["rust-engineer".to_string()],
+            )
+            .unwrap_or_else(|| panic!("{agent} writes files and must be denied"));
+            assert!(reason.contains("rust-engineer"), "{reason}");
         }
     }
 
