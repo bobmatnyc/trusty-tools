@@ -56,6 +56,13 @@ thiserror = { workspace = true }
 # supplies the HTTP client (`download::http_client`), which is why `reqwest` is
 # deliberately absent from this manifest.
 trusty-installer = { workspace = true }
+# #5487: the workspace's single `gh` entry point (#5475). Discovery shells out
+# to `gh repo list`, and CLAUDE.md's common-entry-point rule makes a second
+# `Command::new("gh")` here a defect — so this crate never spells one.
+trusty-common = { workspace = true, features = ["gh-cli"] }
+# Deserializing `gh --json` payloads. `GhCommand::json` hands back a typed value
+# via serde; the derive lives on this crate's own `DiscoveredRepo`.
+serde_json = { workspace = true }
 # Async runtime for the binary. `Session::execute` is async because installing
 # the pinned tools downloads; the Tauri shell will drive the same future.
 tokio = { workspace = true }

@@ -70,6 +70,8 @@ pub enum Verb {
     Install,
     /// List the repositories this engagement is configured to audit.
     Repos,
+    /// List the repositories your GitHub credential can reach.
+    Discover,
     /// Run the audit sweep over the selected repositories.
     Run,
 }
@@ -92,6 +94,7 @@ impl Cli {
             Some(Verb::Tools) => Command::Tools,
             Some(Verb::Install) => Command::InstallTools,
             Some(Verb::Repos) => Command::Repos,
+            Some(Verb::Discover) => Command::DiscoverRepos,
             Some(Verb::Run) => Command::Run,
         }
     }
@@ -220,6 +223,33 @@ pub fn render(outcome: &Outcome) -> String {
                 .map(|r| format!("{:<24} {}\n", r.name, r.path.display()))
                 .collect()
         }
+        Outcome::Discovered(repos) => {
+            // #5487: an empty result here means the credential really can see
+            // nothing — every failure is an error, never a short list — so the
+            // wording says so rather than hedging.
+            if repos.is_empty() {
+                return "Your GitHub credential can reach no repositories.\n".to_string();
+            }
+            let mut out = format!(
+                "{} your credential can reach:\n",
+                count_of(repos.len(), "repository", "repositories")
+            );
+            for repo in repos {
+                let mut marks = Vec::new();
+                if repo.is_private {
+                    marks.push("private");
+                }
+                if repo.is_archived {
+                    marks.push("archived");
+                }
+                out.push_str(&format!(
+                    "  {:<40} {}\n",
+                    repo.name_with_owner,
+                    marks.join(", ")
+                ));
+            }
+            out
+        }
         // #5555: a partial sweep must not read like a clean one. Each failure
         // is printed with its reason and its log path, and the verdict line
         // says which of the three states this run ended in.
@@ -289,6 +319,7 @@ fn describe_next(next: &NextStep) -> String {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    use crate::discover::DiscoveredRepo;
     use crate::manifest::AuditManifest;
     use crate::session::{Session, WorkDirReport};
     use crate::tools::{InstalledTool, RequiredTool, ToolStatus};
@@ -307,17 +338,19 @@ mod cli_tests {
             Command::Tools => vec!["taudit", "tools"],
             Command::InstallTools => vec!["taudit", "install"],
             Command::Repos => vec!["taudit", "repos"],
+            Command::DiscoverRepos => vec!["taudit", "discover"],
             Command::Run => vec!["taudit", "run"],
         }
     }
 
-    const ALL_COMMANDS: [Command; 7] = [
+    const ALL_COMMANDS: [Command; 8] = [
         Command::Guided,
         Command::WorkDir,
         Command::Manifest,
         Command::Tools,
         Command::InstallTools,
         Command::Repos,
+        Command::DiscoverRepos,
         Command::Run,
     ];
 
@@ -429,6 +462,41 @@ mod cli_tests {
             .expect("the config flag parses");
         assert_eq!(cli.config, Some(PathBuf::from("/pkg/engagement.toml")));
         assert_eq!(cli.to_command(), Command::InstallTools);
+    }
+
+    /// Discovery reaching nothing must not read like the manifest-backed
+    /// `repos` list, which says "run the guided flow" — here an empty list is
+    /// a fact about the credential, not a state to advance out of (#5487).
+    #[test]
+    fn rendering_an_empty_discovery_does_not_suggest_a_next_step() {
+        let text = render(&Outcome::Discovered(Vec::new()));
+        assert!(text.contains("can reach no repositories"), "{text}");
+        assert!(!text.contains("guided flow"), "{text}");
+    }
+
+    #[test]
+    fn rendering_a_discovery_marks_private_and_archived() {
+        let repos = vec![
+            DiscoveredRepo {
+                name_with_owner: "acme/api".to_owned(),
+                name: "api".to_owned(),
+                is_private: true,
+                is_archived: false,
+                url: String::new(),
+            },
+            DiscoveredRepo {
+                name_with_owner: "acme/old".to_owned(),
+                name: "old".to_owned(),
+                is_private: false,
+                is_archived: true,
+                url: String::new(),
+            },
+        ];
+        let text = render(&Outcome::Discovered(repos));
+        assert!(text.contains("2 repositories"), "{text}");
+        assert!(text.contains("acme/api"), "{text}");
+        assert!(text.contains("private"), "{text}");
+        assert!(text.contains("archived"), "{text}");
     }
 
     #[test]
