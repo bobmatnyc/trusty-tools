@@ -766,15 +766,17 @@ pub use crate::core::worktree_naming::ensure_worktrees_gitignored;
 /// What: runs `git -C <path> config --get remote.origin.url` and keeps the
 /// three outcomes git already distinguishes by exit code apart. Exit 0 yields
 /// `Ok(Some(url))`, or `Ok(None)` when the configured value is empty. Exit 1 is
-/// git-config's "the key is not set" answer and the only nonzero code that
-/// means it, so it yields `Ok(None)` — both a plain non-git directory and a
-/// repo with no `origin` land there, which is why this split changes no
-/// existing caller's behaviour on a healthy machine. Anything else — a spawn
+/// git-config's "the key is not set" answer, so it yields `Ok(None)` — both a
+/// plain non-git directory and a repo with no `origin` land there, which is why
+/// this split changes no existing caller's behaviour on a healthy machine (a
+/// multi-valued `origin`, the one working setup that could have regressed into
+/// `Err`, exits 0). Anything else — a spawn
 /// failure, or a fatal exit such as 128 for an unreadable `.git/config`, a
 /// dangling gitdir pointer, or a `safe.directory` ownership refusal — is `Err`,
 /// for the caller to fail closed on.
 /// Test: `get_origin_url_returns_none_for_non_git`,
 /// `get_origin_url_returns_none_for_repo_without_origin`,
+/// `get_origin_url_handles_a_multi_valued_origin`,
 /// `get_origin_url_errors_when_git_config_is_unreadable` (unit);
 /// `try_inproject_spawn_errors_when_git_cannot_read_the_remote`
 /// (`tests/inproject_git_failure.rs`).

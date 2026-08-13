@@ -18,16 +18,6 @@ Fixed
   missing or non-GitHub one, so the remediation they print (`tm connect`, or
   "this is not a GitHub repository") is no longer wrong advice for a repo whose
   config git declined to parse.
-
-Changed
-
-- `ColdStartError` gained `OriginUnreadable`, so a managed checkout whose remote
-  git cannot read is no longer reported as `NoOrigin` — which told the operator
-  to move or remove a directory that may be fine.
-
-Breaking
-
-- `daemon::managed_routes::inproject::get_origin_url` now returns
-  `Result<Option<String>, String>` rather than `Option<String>`, and
-  `ColdStartError` has a new variant. Callers that want the previous fail-open
-  behaviour spell it explicitly with `.ok().flatten()`.
+- A managed checkout whose remote git cannot read is no longer reported as
+  having no remote, which told the operator to move or remove a directory that
+  may be fine.

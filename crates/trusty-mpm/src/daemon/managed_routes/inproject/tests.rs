@@ -348,6 +348,56 @@ fn get_origin_url_returns_none_for_repo_without_origin() {
     );
 }
 
+/// A remote with SEVERAL urls still resolves — it must not become an error.
+///
+/// Why: the one working configuration that could plausibly be broken by #4734's
+/// exit-code split. `remote.<name>.url` is legitimately multi-valued (the
+/// push-to-several-remotes setup), and if `git config --get` answered a
+/// multi-valued key with a nonzero code, this function would newly refuse to
+/// spawn for a repo that works fine. It does not — git returns the last value
+/// with exit 0 — and this test is what keeps that assumption checked rather
+/// than assumed.
+/// What: adds a second `url` to `origin` and asserts `Ok(Some(_))`.
+/// Test: this function IS the test.
+#[test]
+fn get_origin_url_handles_a_multi_valued_origin() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(tmp.path())
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(out.status.success(), "git {args:?} failed");
+    };
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/acme/widget.git",
+    ]);
+    git(&[
+        "remote",
+        "set-url",
+        "--add",
+        "origin",
+        "https://gitlab.com/acme/widget.git",
+    ]);
+
+    let result = get_origin_url(tmp.path());
+    assert!(
+        matches!(result, Ok(Some(_))),
+        "a multi-valued origin must still resolve, got {result:?}"
+    );
+}
+
 /// A git invocation that fails outright is `Err`, never `Ok(None)` (#4734).
 ///
 /// Why: this is the fail-open the ticket is about. `try_inproject_spawn` reads
