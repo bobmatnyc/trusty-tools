@@ -60,6 +60,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{EngagementConfig, ToolPins};
 use crate::error::AuditError;
+use crate::inference;
 use crate::manifest::AuditManifest;
 use crate::tools::{self, RequiredTool};
 use crate::workdir::{Area, WorkDir};
@@ -688,6 +689,10 @@ pub const PER_REPO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// `PATH` can be reached instead. The credential goes in the environment and
 /// only there — see the module docs for what that costs.
 ///
+/// Alongside the credential the child gets the provider and per-role model ids
+/// from [`crate::inference`]: naming the key never routed anything to
+/// OpenRouter on its own, because `trusty-review` defaults to Bedrock (#5671).
+///
 /// A child that outlives `budget` is killed and recorded as a failure, so one
 /// hung repository costs that repository rather than the whole run.
 async fn spawn_tga(
@@ -708,7 +713,8 @@ async fn spawn_tga(
         source,
     })?;
 
-    let spawned = tokio::process::Command::new(&binaries.tga)
+    let mut command = tokio::process::Command::new(&binaries.tga);
+    command
         .arg("--config")
         .arg(config_path)
         .arg("audit")
@@ -721,8 +727,15 @@ async fn spawn_tga(
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(errors))
-        .kill_on_drop(true)
-        .spawn();
+        .kill_on_drop(true);
+    // #5671: the credential alone never reached OpenRouter — trusty-review
+    // defaults to Bedrock, so the provider and the three role models must be
+    // named too. Operator-set variables are absent from this list and inherited.
+    for (name, value) in inference::inference_env(config, |name| std::env::var(name).ok()) {
+        command.env(name, value);
+    }
+
+    let spawned = command.spawn();
 
     let mut child = match spawned {
         Ok(child) => child,
@@ -1327,5 +1340,52 @@ trusty-review = "0.15.1"
             assert!(run.log.starts_with(work.root()), "{:?}", run.log);
         }
         assert!(progress_path(&work).starts_with(work.root()));
+    }
+
+    /// #5671: the child must carry the provider AND all three model ids, not
+    /// just the credential. This asserts on the environment the spawned process
+    /// actually received — the stub prints its own `TRUSTY_REVIEW_*` variables —
+    /// rather than on the value this crate computed.
+    ///
+    /// Against `origin/main` the four variables are absent from the child and
+    /// every assertion below fails: `spawn_tga` set only the credential and the
+    /// two binary paths, so `trusty-review` resolved `Provider::Bedrock`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_child_environment_selects_openrouter_and_all_three_models() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        // Dump the inference environment beside the manifest the run verifies.
+        let script = format!(
+            "{}{}",
+            writes_a_manifest(None).trim_end_matches("exit 0\n"),
+            "{\n  echo \"provider=$TRUSTY_REVIEW_PROVIDER\"\n  \
+             echo \"reviewer=$TRUSTY_REVIEW_REVIEWER_MODEL\"\n  \
+             echo \"verifier=$TRUSTY_REVIEW_VERIFIER_MODEL\"\n  \
+             echo \"summarizer=$TRUSTY_REVIEW_SUMMARIZER_MODEL\"\n  \
+             echo \"key=$OPENROUTER_API_KEY\"\n} > \"$out/env.txt\"\nexit 0\n",
+        );
+        install_stubs(&work, &script);
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(&work, &config()).await.expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let dumped = std::fs::read_to_string(report.repos[0].output.join("env.txt"))
+            .expect("the stub recorded its environment");
+        for expected in [
+            format!("provider={}", inference::PROVIDER_OPENROUTER),
+            format!("reviewer={}", inference::DEFAULT_REVIEWER_MODEL),
+            format!("verifier={}", inference::DEFAULT_VERIFIER_MODEL),
+            format!("summarizer={}", inference::DEFAULT_SUMMARIZER_MODEL),
+            // #5663's credential must still be there — this widens that, not replaces it.
+            "key=sk-or-v1-not-a-real-key".to_owned(),
+        ] {
+            assert!(
+                dumped.contains(&expected),
+                "the child environment is missing `{expected}`:\n{dumped}"
+            );
+        }
     }
 }

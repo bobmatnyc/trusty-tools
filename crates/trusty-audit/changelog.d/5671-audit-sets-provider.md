@@ -1,0 +1,2 @@
+Fixed
+The `tga audit` child now carries `TRUSTY_REVIEW_PROVIDER=openrouter` and the reviewer/verifier/summarizer model ids alongside the engagement's `OPENROUTER_API_KEY`, so review inference actually reaches OpenRouter — naming the key was never enough, because `trusty-review` defaults to Bedrock. An `[models]` table in `engagement.toml` overrides the built-in slugs, and any of the four variables already set in the operator's environment is inherited rather than clobbered (#5671).
