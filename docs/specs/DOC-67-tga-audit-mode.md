@@ -5,17 +5,18 @@ spec_refs: []
 # DOC-67 — tga AUDIT Mode: Remote Codebase Analysis for Acquisition Due Diligence
 
 **Status:** APPROVED 2026-08-08. The owner signed off §3's dimension-scope
-assumption and every open question (Q1–Q6) is resolved. **Implementation is
-HELD until tm 1.3.5 ships** — owner directive, 2026-08-08: *"yes, hold off on
-building until we release 1.3.5."* Issues may be filed against §13; no code
-may be written until that release lands.
+assumption and every open question (Q1–Q6) is resolved. Implementation was
+HELD until tm 1.3.5 shipped — owner directive, 2026-08-08: *"yes, hold off on
+building until we release 1.3.5."* **The owner lifted that hold on
+2026-08-13 ([#5643](https://github.com/bobmatnyc/trusty-tools/issues/5643));
+the §13 issues may be filed and implementation may begin.**
 **Spec ID:** `SPEC-TGAUDIT-01~draft` … `SPEC-TGAUDIT-13~draft`
 **Subsystem:** `trusty-git-analytics` (tga) — orchestration, new `audit`
 subcommand, DD-manifest adapter; `trusty-review` — existing DD report
 pipeline, consumed unmodified; `trusty-analyze` — existing HTTP analysis
 surface, consumed unmodified by trusty-review, not touched by tga
 **Owner:** Bob Matsuoka
-**Last-updated:** 2026-08-08
+**Last-updated:** 2026-08-13 (implementation hold lifted, #5643)
 **DOC-N claim:** `DOC-67`, scan-before-claim per DOC-38 §4.1. Verified against
 this worktree (branched from `origin/main`): no `DOC-67` filename or
 header self-label anywhere under `docs/specs/**`; `scripts/check_doc_numbers.sh`
@@ -596,12 +597,14 @@ surface AUDIT needs exists, silently reintroducing the Q1 gap.
 surface, performance and cost declared explicit gaps in the report. Nothing
 in this spec is awaiting a decision.
 
-**One scheduling constraint replaces it.** Implementation is held until tm
-1.3.5 ships (owner, 2026-08-08). The §13 issues may be filed now; no code is
-written against them until that release lands. Milestone
+**The scheduling constraint that replaced it has since been lifted.**
+Implementation was held until tm 1.3.5 shipped (owner, 2026-08-08); the
+owner lifted that hold on 2026-08-13
+([#5643](https://github.com/bobmatnyc/trusty-tools/issues/5643)), so the
+§13 issues may now be filed and implemented. Milestone
 [#43](https://github.com/bobmatnyc/trusty-tools/milestone/43)'s 2026-08-09
-due date covers this specification, which is delivered — not the
-implementation, which is gated on a release with open readiness criteria.
+due date covered this specification's delivery, which is unaffected by
+either the hold or its lifting.
 
 ## {#SPEC-TGAUDIT-13~draft} 13. Proposed Issue Breakdown for Milestone #43
 
