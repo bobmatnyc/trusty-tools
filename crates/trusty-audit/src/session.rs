@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::clone::{self, CloneOptions, CloneReport};
 use crate::config::EngagementConfig;
 use crate::discover::{self, DiscoveredRepo};
 use crate::error::AuditError;
@@ -54,6 +55,16 @@ pub enum Command {
     Repos,
     /// List the repositories the recipient's `gh` credential can reach (#5487).
     DiscoverRepos,
+    /// Clone the named repositories into the working directory (#5215).
+    ///
+    /// Carries its argument because acquisition acts on a SELECTION — what the
+    /// picker chose, which is not derivable from the session's own state.
+    CloneRepos {
+        /// `owner/name` per repository, in the order to acquire them.
+        repos: Vec<String>,
+        /// How to clone.
+        options: CloneOptions,
+    },
     /// Run `tga audit` over the selected repositories (#5555).
     Run,
 }
@@ -127,14 +138,50 @@ pub enum Outcome {
     /// From [`Command::DiscoverRepos`] — what the credential can reach, not
     /// what the engagement selected.
     Discovered(Vec<DiscoveredRepo>),
+    /// From [`Command::CloneRepos`].
+    Cloned(CloneReport),
     /// From [`Command::Run`] — per-repository results and the sweep's verdict.
     ///
     /// A non-[`RunStatus::AllSucceeded`](crate::run::RunStatus::AllSucceeded)
     /// report is an ORDINARY `Ok` here: the sweep ran and some of it failed, and
-    /// the failures are data the front end must show. It is `crate::cli::exit_code`
+    /// the failures are data the front end must show. It is [`Outcome::exit_code`]
     /// that turns that into a non-zero process exit, so a caller cannot report
     /// success without having read the status (#5555).
     Run(RunReport),
+}
+
+/// Exit status for a run that succeeded but did not cover everything asked for.
+pub const EXIT_INCOMPLETE: i32 = 2;
+
+/// Exit status for a sweep that partly failed.
+pub const EXIT_PARTIAL: i32 = 1;
+
+impl Outcome {
+    /// The process exit status this outcome should produce.
+    ///
+    /// Why: acquisition continues past a repository it could not clone, and a
+    /// sweep continues past a repository `tga audit` failed on — both are the
+    /// right behaviour for a hundred-repo run and the wrong thing to report as
+    /// unqualified success. The rendered text names every exclusion, but
+    /// `taudit clone $(cat repos.txt) && taudit run` reads the status, not the
+    /// text — so an incomplete outcome that exits 0 chains straight into the
+    /// next stage over a set the operator never actually got (#5215 review,
+    /// #5555).
+    /// What: [`EXIT_PARTIAL`] for a [`RunReport`] that did not fully succeed;
+    /// [`EXIT_INCOMPLETE`] for a [`CloneReport`] that carries gaps; 0
+    /// otherwise. The policy lives here rather than in `main.rs` so the Tauri
+    /// shell reads the same judgement rather than re-deriving it.
+    /// Test: `crate::cli::cli_tests::a_partial_sweep_does_not_exit_zero`,
+    /// `crate::cli::cli_tests::a_run_with_gaps_exits_non_zero`.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Outcome::Run(report) if report.status != run::RunStatus::AllSucceeded => {
+                EXIT_PARTIAL
+            }
+            Outcome::Cloned(report) if !report.gaps.is_empty() => EXIT_INCOMPLETE,
+            _ => 0,
+        }
+    }
 }
 
 /// One audit engagement, rooted at a working directory.
@@ -238,6 +285,13 @@ impl Session {
             Command::DiscoverRepos => discover::discover(discover::DEFAULT_LIMIT)
                 .await
                 .map(Outcome::Discovered),
+            // #5215: acquisition writes only under `self.work`, which is what
+            // keeps `rm -rf <root>` a complete uninstall.
+            Command::CloneRepos { repos, options } => {
+                clone::clone_all(&self.work, &repos, &options)
+                    .await
+                    .map(Outcome::Cloned)
+            }
             Command::Run => self.run().await.map(Outcome::Run),
         }
     }

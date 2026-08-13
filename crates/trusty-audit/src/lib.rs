@@ -26,6 +26,7 @@
 //! | [`manifest`] | reading tga's `manifest.toml` rather than duplicating it |
 //! | [`tools`] | which pinned tools are needed, and the call that installs them |
 //! | [`discover`] | which repositories the recipient's `gh` credential can reach (#5487) |
+//! | [`clone`] | getting the selected repositories onto the recipient's disk (#5215) |
 //! | [`run`] | driving the pinned `tga audit` over the selected repositories |
 //!
 //! ## What this milestone is not
@@ -55,6 +56,7 @@
 //! Test: each module carries its own `#[cfg(test)]` tests.
 
 pub mod cli;
+pub mod clone;
 pub mod config;
 pub mod discover;
 pub mod error;
