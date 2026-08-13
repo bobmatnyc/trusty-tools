@@ -91,7 +91,12 @@ pub enum AuditError {
     /// means the installer's postcondition did not hold, which is worth an
     /// explicit refusal rather than a silent acceptance.
     /// What: names the tool, the pin, and what came back.
-    /// Test: `crate::tools::tool_tests::a_version_that_drifts_from_the_pin_is_refused`.
+    ///
+    /// It is raised on the RUN side too (#5555): install and run are separate
+    /// steps, so an engagement config bumped between them would otherwise run
+    /// the older binary and report success.
+    /// Test: `crate::tools::tool_tests::a_version_that_drifts_from_the_pin_is_refused`,
+    /// `crate::run::run_tests::a_binary_installed_at_a_different_pin_is_refused`.
     #[error(
         "{tool}: the engagement pins {pinned} but the installed binary is {installed}; \
          nothing will run at a version this engagement did not pin"
@@ -140,6 +145,29 @@ pub enum AuditError {
     NoRepositoriesSelected {
         /// The selection file that was absent or empty.
         path: PathBuf,
+    },
+
+    /// The selection file carries fewer entries than it declares.
+    ///
+    /// Why: #5555. A producer that crashes part-way through writing the file
+    /// leaves syntactically valid TOML holding a PREFIX of the entries, which
+    /// reads as a smaller-but-complete selection — and the sweep then reports
+    /// success over a subset the operator never chose. The declared count is
+    /// what makes the two distinguishable.
+    /// What: names the file, what it declared, and what it holds.
+    /// Test: `crate::run::run_tests::a_truncated_selection_is_refused`.
+    #[error(
+        "{path} declares {declared} repositories but carries {found} — it was written \
+         partially. Rewrite it (write a temporary file and rename it into place); \
+         nothing was audited"
+    )]
+    TruncatedSelection {
+        /// The selection file.
+        path: PathBuf,
+        /// The `count` the file declared.
+        declared: usize,
+        /// How many `[[repositories]]` entries it actually holds.
+        found: usize,
     },
 
     /// The run needs the pinned tools, and they are not installed.

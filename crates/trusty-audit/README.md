@@ -58,21 +58,50 @@ cloning are separate work (#5487, #5215); until they land, write the file
 yourself:
 
 ```toml
+count = 1                   # how many entries follow — REQUIRED
+
 [[repositories]]
 name = "acme-api"
 path = "repos/acme-api"     # relative paths anchor to the work-dir root
 ```
 
-Absent or empty is a refusal, not a zero-repository success.
+Write it to a temporary file in `state/` and rename it into place: a rename is
+atomic, a write is not, and a producer that crashes part-way through one leaves
+valid TOML holding a prefix of the entries. `count` is what makes that
+detectable — a file carrying fewer entries than it declares is refused, not
+treated as a smaller selection. Absent or empty is a refusal too, never a
+zero-repository success.
 
 One `tga audit` child runs per repository, so a failure is attributable to one
-repository rather than to "the run". Each child writes its output to
-`out/<repo>/`, its combined stdout and stderr to `logs/<repo>.log`, and its tga
-database to `extract/<repo>.db`. The results land in `state/run-progress.toml`.
+repository rather than to "the run". Files are stemmed `<index>-<name>` because
+sanitizing alone is not injective — `acme/api` and `acme-api` would otherwise
+share an output directory and a log file, and the second child would overwrite
+the first's evidence. Each child writes to `out/<stem>/`, `logs/<stem>.log`, and
+`extract/<stem>.db`. The results land in `state/run-progress.toml`.
+
+**A zero exit from `tga audit` is not proof anything was assessed.** Its own
+contract is to exit 0 whenever the sweep completed, failed stages included — so
+this client checks what the child produced: the manifest must exist, parse, name
+a repository, and state no failed `collect` stage. A child that exits 0 having
+written nothing is a failure. Other stated gaps (an unconfigured JIRA project, a
+repository that could not be fetched) are DOC-67 §9 named gaps: they are printed
+and recorded, and they do not fail the repository.
+
+A child that outlives four hours is killed and recorded as a timeout, so a hang
+costs one repository rather than the whole unattended run.
 
 The exit status distinguishes the three outcomes DOC-67 §9 needs: 0 when every
 repository was audited, 1 when only some were (`PARTIAL`, naming which failed),
 and 1 when none were. A partial sweep never reads as a clean one.
+
+The run uses the triple this client installed AND verified, at the version the
+engagement config pins today — a config bumped after `install` refuses the run
+rather than silently running the older binary.
+
+The engagement's `instructions` prose and an audit window are NOT yet passed to
+the child: `tga audit` takes `--weeks`, not free prose, and mapping one to the
+other is its own decision. The instructions travel with the config for the human
+reading it.
 
 The engagement's OpenRouter key reaches the `tga` child through its
 **environment** — `tga audit` spawns `trusty-review report`, which needs

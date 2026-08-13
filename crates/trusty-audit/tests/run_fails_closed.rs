@@ -52,6 +52,22 @@ impl Engagement {
         }
     }
 
+    /// A stub `tga` that writes the manifest a real one would — a zero exit
+    /// with no manifest is a FAILURE, so a test expecting success needs this.
+    fn manifest_writer(exit_for: Option<&str>) -> String {
+        let fail = match exit_for {
+            Some(pattern) => format!("case \"$*\" in *{pattern}*) exit 4;; esac\n"),
+            None => String::new(),
+        };
+        format!(
+            "#!/bin/sh\n{fail}out=\"\"\nwhile [ $# -gt 0 ]; do\n  \
+             case \"$1\" in --output) out=\"$2\"; shift;; esac\n  shift\ndone\n\
+             mkdir -p \"$out\"\n\
+             printf '[report]\\ntitle = \"Acme\"\\n\\n[[repositories]]\\n\
+             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n"
+        )
+    }
+
     /// Stand in for a verified install: three executables plus the record that
     /// says this client placed them.
     fn install_stubs(&self, script: &str) {
@@ -70,7 +86,8 @@ impl Engagement {
     }
 
     fn select(&self, entries: &[(&str, &str)]) {
-        let mut text = String::new();
+        // `count` first: the reader uses it to detect a truncated write.
+        let mut text = format!("count = {}\n\n", entries.len());
         for (name, path) in entries {
             text.push_str(&format!(
                 "[[repositories]]\nname = \"{name}\"\npath = \"{path}\"\n\n"
@@ -141,7 +158,7 @@ fn a_run_with_nothing_selected_refuses() {
 fn a_partial_sweep_exits_non_zero_and_names_the_failure() {
     let e = Engagement::new();
     // Succeed for acme-api, fail for acme-web — the config path names the repo.
-    e.install_stubs("#!/bin/sh\ncase \"$*\" in *acme-web*) exit 4;; esac\nexit 0\n");
+    e.install_stubs(&Engagement::manifest_writer(Some("acme-web")));
     e.checkout("acme-api");
     e.checkout("acme-web");
     e.select(&[
@@ -174,11 +191,24 @@ fn a_total_failure_is_reported_as_one() {
     assert!(e.progress().contains("AllFailed"), "{}", e.progress());
 }
 
+/// A zero exit that produced no manifest is a failure, from the outside.
+#[test]
+fn a_child_that_exits_zero_having_written_nothing_exits_non_zero() {
+    let e = Engagement::new();
+    e.install_stubs("#!/bin/sh\nexit 0\n");
+    e.checkout("acme-api");
+    e.select(&[("acme-api", "repos/acme-api")]);
+
+    let (stdout, _, code) = e.run();
+    assert_eq!(code, Some(1), "{stdout}");
+    assert!(stdout.contains("wrote no manifest"), "{stdout}");
+}
+
 /// The clean path, so the non-zero exits above are not vacuous.
 #[test]
 fn a_clean_sweep_exits_zero() {
     let e = Engagement::new();
-    e.install_stubs("#!/bin/sh\nexit 0\n");
+    e.install_stubs(&Engagement::manifest_writer(None));
     e.checkout("acme-api");
     e.select(&[("acme-api", "repos/acme-api")]);
 

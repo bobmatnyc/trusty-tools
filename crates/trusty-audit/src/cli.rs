@@ -236,6 +236,13 @@ pub fn render(outcome: &Outcome) -> String {
                         out.push_str(&format!("FAILED  {:<24} {reason}\n", run.repo.name))
                     }
                 }
+                // #5555: a stated gap is a dimension the sweep could not assess
+                // (DOC-67 §9). It does not fail the repository, and it must not
+                // be invisible either — an audited repo with four gaps is not
+                // the same result as one with none.
+                for gap in &run.gaps {
+                    out.push_str(&format!("  gap   {gap}\n"));
+                }
             }
             let audited = report.repos.len() - report.failures().count();
             out.push_str(&match report.status {
@@ -442,8 +449,9 @@ mod cli_tests {
                 name: "acme-api".to_owned(),
                 path: PathBuf::from("repos/acme-api"),
             },
-            output: PathBuf::from("/work/out/acme-api"),
-            log: PathBuf::from("/work/logs/acme-api.log"),
+            output: PathBuf::from("/work/out/00-acme-api"),
+            log: PathBuf::from("/work/logs/00-acme-api.log"),
+            gaps: vec!["Collection stage `jira sync` did not complete.".to_owned()],
             result,
         };
         let ok = run(RepoResult::Succeeded);
@@ -464,6 +472,8 @@ mod cli_tests {
         let text = render(&partial);
         assert!(text.contains("PARTIAL"), "{text}");
         assert!(text.contains("exited with code 3"), "{text}");
+        // A stated gap is not a failure, and not invisible either.
+        assert!(text.contains("gap   Collection stage"), "{text}");
 
         let total = Outcome::Run(RunReport::of(vec![bad]));
         assert_eq!(exit_code(&total), 1);

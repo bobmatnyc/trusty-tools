@@ -58,8 +58,9 @@ use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::EngagementConfig;
+use crate::config::{EngagementConfig, ToolPins};
 use crate::error::AuditError;
+use crate::manifest::AuditManifest;
 use crate::tools::{self, RequiredTool};
 use crate::workdir::{Area, WorkDir};
 
@@ -73,10 +74,32 @@ use crate::workdir::{Area, WorkDir};
 ///
 /// ```toml
 /// # <work-dir>/state/selected-repos.toml
+/// count = 2                   # how many entries follow — REQUIRED
+///
 /// [[repositories]]
 /// name = "acme-api"
 /// path = "repos/acme-api"     # relative paths anchor to the work-dir root
+///
+/// [[repositories]]
+/// name = "acme-web"
+/// path = "repos/acme-web"
 /// ```
+///
+/// ## Two obligations on whoever writes it
+///
+/// 1. **Write to a temporary file in the same directory and rename it into
+///    place.** A rename is atomic; a direct write is not, and a producer that
+///    crashes part-way through one leaves syntactically valid TOML holding a
+///    prefix of the entries.
+/// 2. **Declare `count` first**, before the `[[repositories]]` tables. TOML
+///    requires top-level keys to precede tables anyway, so a truncated file
+///    keeps the count and loses entries — which is exactly the direction that
+///    makes the mismatch detectable. A `count` that disagrees with the number of
+///    entries is [`AuditError::TruncatedSelection`], not a smaller selection.
+///
+/// Obligation 2 is what makes obligation 1 checkable rather than a request. A
+/// sweep that silently audits three of five repositories and reports
+/// `AllSucceeded` is the same fail-open shape as a sweep over none.
 pub const SELECTION_FILE: &str = "selected-repos.toml";
 
 /// File under `state/` recording what the last sweep did, per repository.
@@ -93,8 +116,11 @@ pub struct SelectedRepo {
 }
 
 /// The `state/selected-repos.toml` document.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// `count` is required and is the truncation check — see [`SELECTION_FILE`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Selection {
+    count: usize,
     #[serde(default)]
     repositories: Vec<SelectedRepo>,
 }
@@ -129,6 +155,14 @@ pub struct RepoRun {
     pub output: PathBuf,
     /// File under `logs/` holding the child's combined stdout and stderr.
     pub log: PathBuf,
+    /// Gaps `tga audit` stated in this repository's manifest (DOC-67 §9).
+    ///
+    /// A gap is a dimension the sweep could not assess — an unconfigured JIRA
+    /// project, a repository that could not be fetched from its remote. It is
+    /// ordinary for a successful run to state some, so a gap does not by itself
+    /// fail the repository; see [`verify_output`] for which ones do.
+    #[serde(default)]
+    pub gaps: Vec<String>,
     /// How it ended.
     pub result: RepoResult,
 }
@@ -203,14 +237,22 @@ pub fn progress_path(work: &WorkDir) -> PathBuf {
 /// state — nothing was selected — and both are a refusal rather than a
 /// zero-repository success, because a sweep that audits nothing and exits 0 is
 /// the fail-open shape this module exists to avoid.
-/// What: parses `state/`[`SELECTION_FILE`].
-/// Test: `super::run_tests::an_absent_selection_is_a_refusal`.
+///
+/// A THIRD state is a refusal too: a file whose `count` does not match the
+/// entries it carries. That is the truncated-write case a producer crashing
+/// mid-write leaves behind, and it is indistinguishable from a smaller
+/// selection unless the count says otherwise.
+/// What: parses `state/`[`SELECTION_FILE`] and checks the count.
+/// Test: `super::run_tests::an_absent_selection_is_a_refusal`,
+/// `super::run_tests::a_truncated_selection_is_refused`.
 ///
 /// # Errors
 ///
 /// [`AuditError::NoRepositoriesSelected`] when the file is absent or lists
-/// nothing, [`AuditError::Read`] when it exists but cannot be read, and
-/// [`AuditError::Parse`] when it does not match the schema.
+/// nothing, [`AuditError::TruncatedSelection`] when `count` disagrees with the
+/// entries, [`AuditError::Read`] when it exists but cannot be read, and
+/// [`AuditError::Parse`] when it does not match the schema — including when
+/// `count` is absent, since a file without it cannot be checked at all.
 pub fn load_selection(work: &WorkDir) -> Result<Vec<SelectedRepo>, AuditError> {
     let path = selection_path(work);
     let text = match std::fs::read_to_string(&path) {
@@ -228,29 +270,56 @@ pub fn load_selection(work: &WorkDir) -> Result<Vec<SelectedRepo>, AuditError> {
     if selection.repositories.is_empty() {
         return Err(AuditError::NoRepositoriesSelected { path });
     }
+    // #5555: a prefix of a crashed write parses cleanly; only the count catches it.
+    if selection.count != selection.repositories.len() {
+        return Err(AuditError::TruncatedSelection {
+            path,
+            declared: selection.count,
+            found: selection.repositories.len(),
+        });
+    }
     Ok(selection.repositories)
 }
 
-/// The pinned binaries this run drives, or a refusal naming what is missing.
+/// The three binaries a run drives, each proven to be at the engagement's pin.
 ///
-/// Why: the run must use the binaries THIS client installed and verified, never
-/// whatever `tga` happens to be on the operator's `PATH`. An unpinned tool is
-/// the version-skew mismatch #5454 cost us, and there is no fallback here on
-/// purpose — a missing pinned tool stops the run and says to install it.
+/// Why: three named fields rather than a lookup table, so the "tool not found"
+/// branch does not exist. The obvious table version needs a fallback arm at
+/// every use site, and the natural fallback — the bare binary name — is a `PATH`
+/// lookup, which is the one thing this module must never do.
+#[derive(Debug, Clone)]
+struct PinnedBinaries {
+    tga: PathBuf,
+    analyze: PathBuf,
+    review: PathBuf,
+}
+
+/// The pinned binaries this run drives, or a refusal naming what is wrong.
 ///
-/// A tool counts as usable only when the file is present AND the version record
-/// this client wrote names it. A binary someone dropped into `tools/` by hand
-/// reads as `installed` with no version, and this refuses it: unverified is not
-/// a weaker kind of installed.
-/// What: [`RequiredTool::ALL`] paired with its path under `tools/`.
+/// Why: the run must use the binaries THIS client installed and verified at the
+/// version THIS engagement pins — never whatever `tga` happens to be on the
+/// operator's `PATH`, and never a copy installed before the config was bumped.
+/// Both are the #5454 version-skew class, and there is no fallback for either.
+///
+/// Three conditions, each a refusal: the file is present, the version record
+/// this client wrote names it, and that recorded version equals the engagement's
+/// pin. The second matters because a binary someone dropped into `tools/` by
+/// hand reads as `installed` with no version — unverified is not a weaker kind
+/// of installed. The third matters because install and run are separate steps,
+/// so the config can change between them.
+/// What: reads [`tools::status`], checks all three conditions, and returns the
+/// paths by name.
 /// Test: `super::run_tests::a_run_without_the_pinned_tools_is_refused`,
-/// `super::run_tests::an_unverified_binary_does_not_count_as_installed`.
+/// `super::run_tests::an_unverified_binary_does_not_count_as_installed`,
+/// `super::run_tests::a_binary_installed_at_a_different_pin_is_refused`.
 ///
 /// # Errors
 ///
 /// [`AuditError::ToolsNotInstalled`] naming every tool that is missing or
-/// unverified, and whatever [`tools::status`] fails with.
-fn pinned_binaries(work: &WorkDir) -> Result<Vec<(RequiredTool, PathBuf)>, AuditError> {
+/// unverified, [`AuditError::VersionMismatch`] for the first tool whose recorded
+/// version is not the engagement's pin, and whatever [`tools::status`] fails
+/// with.
+fn pinned_binaries(work: &WorkDir, pins: &ToolPins) -> Result<PinnedBinaries, AuditError> {
     let statuses = tools::status(work)?;
     let missing: Vec<&'static str> = statuses
         .iter()
@@ -260,19 +329,56 @@ fn pinned_binaries(work: &WorkDir) -> Result<Vec<(RequiredTool, PathBuf)>, Audit
     if !missing.is_empty() {
         return Err(AuditError::ToolsNotInstalled { missing });
     }
-    Ok(statuses.iter().map(|s| (s.tool, s.path.clone())).collect())
+
+    let path_of = |tool: RequiredTool| -> Result<PathBuf, AuditError> {
+        let pinned = tool.pin_in(pins).version();
+        let status = statuses.iter().find(|s| s.tool == tool).ok_or_else(|| {
+            AuditError::ToolsNotInstalled {
+                missing: vec![tool.binary_name()],
+            }
+        })?;
+        // `version` is Some: the missing check above rejected every None.
+        match status.version.as_deref() {
+            Some(v) if v == pinned => Ok(status.path.clone()),
+            Some(v) => Err(AuditError::VersionMismatch {
+                tool: tool.crate_name(),
+                pinned: pinned.to_owned(),
+                installed: v.to_owned(),
+            }),
+            None => Err(AuditError::ToolsNotInstalled {
+                missing: vec![tool.binary_name()],
+            }),
+        }
+    };
+
+    Ok(PinnedBinaries {
+        tga: path_of(RequiredTool::Tga)?,
+        analyze: path_of(RequiredTool::TrustyAnalyze)?,
+        review: path_of(RequiredTool::TrustyReview)?,
+    })
 }
 
-/// A filename-safe form of a repository name.
+/// A filename-safe, collision-free stem for one repository's files.
 ///
-/// Why: the name comes from a selection file this client did not write, and it
-/// becomes a directory name and a log filename under the work-dir root. A name
-/// containing `../` or a separator would place those outside the root and break
-/// `workdir`'s deletion promise.
-/// What: keeps ASCII alphanumerics, `-`, `_` and `.`; every other byte becomes
-/// `-`. A name that reduces to nothing, or to only dots, becomes `repo`.
-/// Test: `super::run_tests::a_traversing_repository_name_cannot_escape_the_root`.
-fn slug(name: &str) -> String {
+/// Why: two things at once. The name comes from a selection file this client did
+/// not write, so `../` or a separator in it would place the output outside the
+/// work-dir root and break `workdir`'s deletion promise. And sanitizing alone is
+/// not injective — `acme/api` and `acme-api` both reduce to `acme-api`, as do
+/// `Acme` and `acme` on a case-insensitive filesystem, which macOS is by default.
+/// Two repositories sharing a stem share an output directory, a log file
+/// (`File::create` truncates), a generated config and a database: the second
+/// child overwrites the first's evidence and both report success.
+///
+/// What: the selection INDEX, which is unique by construction, prefixed to the
+/// sanitized name. Sanitizing keeps ASCII alphanumerics, `-`, `_` and `.`; every
+/// other byte becomes `-`, and a name that reduces to nothing becomes `repo`.
+/// Test: `super::run_tests::a_traversing_repository_name_cannot_escape_the_root`,
+/// `super::run_tests::names_that_sanitize_alike_do_not_share_a_log`.
+fn stem(index: usize, name: &str) -> String {
+    format!("{index:02}-{}", sanitize(name))
+}
+
+fn sanitize(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| {
@@ -324,32 +430,51 @@ struct TgaRepository {
 /// On `Ok`, every selected repository has an entry in [`RunReport::repos`] in
 /// selection order, each child's combined output is at its `log` path, and
 /// `state/`[`PROGRESS_FILE`] records the same results. [`RunReport::status`] is
-/// [`RunStatus::AllSucceeded`] only when every child exited 0. On `Err`, no
-/// claim is made about any repository.
+/// [`RunStatus::AllSucceeded`] only when every child exited 0 AND left the
+/// artifacts [`verify_output`] requires. On `Err`, no claim is made about any
+/// repository.
 ///
 /// What: checks the tools, reads the selection, then per repository writes a
 /// generated tga config under `state/`, spawns the pinned `tga audit` with the
-/// pinned `trusty-analyze`/`trusty-review` named by environment, and captures
-/// the child's combined output into `logs/`. A repository whose checkout is
-/// missing, or whose child fails to start or exits non-zero, is recorded as a
-/// failure and the sweep continues — DOC-67 §9's failed-but-continuing model.
+/// pinned `trusty-analyze`/`trusty-review` named by environment, captures the
+/// child's combined output into `logs/`, and checks what it produced. A
+/// repository whose checkout is missing, whose child fails to start, times out,
+/// exits non-zero, or exits 0 having produced nothing is recorded as a failure
+/// and the sweep continues — DOC-67 §9's failed-but-continuing model.
 /// Test: `super::run_tests`, and `crate::session::session_tests`.
 ///
 /// # Errors
 ///
-/// [`AuditError::ToolsNotInstalled`] before anything runs,
-/// [`AuditError::NoRepositoriesSelected`] when nothing is selected,
+/// [`AuditError::ToolsNotInstalled`] or [`AuditError::VersionMismatch`] before
+/// anything runs, [`AuditError::NoRepositoriesSelected`] or
+/// [`AuditError::TruncatedSelection`] when the selection is unusable, and
 /// [`AuditError::WorkDir`] when an output, log or state file cannot be written.
 /// A failing repository is NOT an error — it is a recorded failure and a
 /// non-`AllSucceeded` status.
 pub async fn sweep(work: &WorkDir, config: &EngagementConfig) -> Result<RunReport, AuditError> {
+    sweep_with_budget(work, config, PER_REPO_TIMEOUT).await
+}
+
+/// [`sweep`], with the per-repository timeout as an argument.
+///
+/// Why: the timeout arm needs a test, and a test that waits out
+/// [`PER_REPO_TIMEOUT`] is not a test. Taking the budget as an argument keeps
+/// the elapsed path provable in milliseconds — the same shape as
+/// [`crate::workdir::WorkDir::resolve`] taking the environment rather than
+/// reading it.
+/// Test: `super::run_tests::a_hung_child_is_killed_and_recorded`.
+async fn sweep_with_budget(
+    work: &WorkDir,
+    config: &EngagementConfig,
+    budget: std::time::Duration,
+) -> Result<RunReport, AuditError> {
     work.create()?;
-    let binaries = pinned_binaries(work)?;
+    let binaries = pinned_binaries(work, &config.tools)?;
     let selected = load_selection(work)?;
 
     let mut runs = Vec::with_capacity(selected.len());
-    for repo in selected {
-        runs.push(run_one(work, config, &binaries, repo).await?);
+    for (index, repo) in selected.into_iter().enumerate() {
+        runs.push(run_one(work, config, &binaries, index, repo, budget).await?);
     }
 
     let report = RunReport::of(runs);
@@ -361,26 +486,127 @@ pub async fn sweep(work: &WorkDir, config: &EngagementConfig) -> Result<RunRepor
 async fn run_one(
     work: &WorkDir,
     config: &EngagementConfig,
-    binaries: &[(RequiredTool, PathBuf)],
+    binaries: &PinnedBinaries,
+    index: usize,
     repo: SelectedRepo,
+    budget: std::time::Duration,
 ) -> Result<RepoRun, AuditError> {
-    let slug = slug(&repo.name);
-    let output = work.path(Area::Output).join(&slug);
-    let log = work.path(Area::Logs).join(format!("{slug}.log"));
+    let stem = stem(index, &repo.name);
+    let output = work.path(Area::Output).join(&stem);
+    let log = work.path(Area::Logs).join(format!("{stem}.log"));
     let checkout = absolute_checkout(work, &repo.path);
 
-    let result = match prepare(work, &output, &slug, &checkout)? {
+    let mut gaps = Vec::new();
+    let result = match prepare(work, &output, &stem, &checkout)? {
         Err(reason) => RepoResult::Failed { reason },
         Ok(config_path) => {
-            spawn_tga(binaries, config, &config_path, &output, &log, work.root()).await?
+            match spawn_tga(
+                binaries,
+                config,
+                &config_path,
+                &output,
+                &log,
+                work.root(),
+                budget,
+            )
+            .await?
+            {
+                RepoResult::Succeeded => match verify_output(&output) {
+                    Ok(stated) => {
+                        gaps = stated;
+                        RepoResult::Succeeded
+                    }
+                    Err(reason) => RepoResult::Failed { reason },
+                },
+                failed => failed,
+            }
         }
     };
     Ok(RepoRun {
         repo,
         output,
         log,
+        gaps,
         result,
     })
+}
+
+/// The gap line `tga` writes when a collection stage failed but the sweep
+/// continued (`tga::audit::gaps::sweep_gap_lines`, DOC-67 §9).
+///
+/// Why: `tga audit` exits 0 whenever the sweep COMPLETED, failed stages
+/// included — its own docs say so. The failure reaches the manifest as prose,
+/// which is the only channel tga offers today, so matching that prose is the
+/// only way this client can tell "assessed" from "assessed nothing".
+const COLLECT_FAILED_MARKER: &str = "stage `collect` did not complete";
+
+/// What a zero exit is allowed to mean.
+///
+/// Why: the finding that made this necessary. `tga audit` returns `Ok` whenever
+/// the sweep completed even with failed stages, so exit 0 alone does not say
+/// anything was assessed — a collect stage that failed on auth, a rate limit or
+/// an empty clone still exits 0. Believing that status is how the recipient gets
+/// a report assessing nothing with every signal green.
+///
+/// # Postconditions
+/// On `Ok`, `<output>/manifest.toml` exists, parses, names at least one
+/// repository, and states no failed COLLECT stage. The returned gap lines are
+/// whatever else the manifest stated. On `Err`, the string is a one-line reason
+/// safe to show the recipient.
+///
+/// What: two checks of different confidence, and the difference is deliberate.
+///
+/// - **Structural**, and reliable: the manifest is there, parses, and names a
+///   repository. A child that wrote nothing cannot pass this whatever tga's
+///   wording does.
+/// - **Textual**, and brittle: a gap line naming a failed `collect` stage. tga
+///   owns that prose and could reword it, at which point this check silently
+///   stops firing. It is a second layer over the structural check, never the
+///   only one — and every other gap is recorded on the [`RepoRun`] and rendered,
+///   so a reworded marker still reaches the operator as a stated gap rather than
+///   disappearing. The durable fix is structured per-stage status in the
+///   manifest, which is tga's to add.
+///
+/// Other failed stages (jira, dora, pr-metrics) are NOT failures here: DOC-67
+/// §9 makes them named gaps on a report that is still worth delivering, and
+/// failing on any gap would fail nearly every real engagement.
+/// Test: `super::run_tests::a_child_that_exits_zero_having_written_nothing_fails`,
+/// `super::run_tests::a_manifest_reporting_a_failed_collect_stage_fails`,
+/// `super::run_tests::ordinary_gaps_do_not_fail_the_repository`.
+fn verify_output(output: &Path) -> Result<Vec<String>, String> {
+    let manifest_path = output.join(AuditManifest::FILE_NAME);
+    let manifest = match AuditManifest::load_if_present(&manifest_path) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => {
+            return Err(format!(
+                "`tga audit` exited 0 but wrote no manifest to {} — nothing was assessed",
+                output.display()
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "`tga audit` exited 0 but its manifest at {} cannot be read: {e}",
+                manifest_path.display()
+            ));
+        }
+    };
+    if manifest.repositories.is_empty() {
+        return Err(format!(
+            "`tga audit` exited 0 but its manifest at {} names no repository — nothing was assessed",
+            manifest_path.display()
+        ));
+    }
+    if let Some(gap) = manifest
+        .report
+        .gaps
+        .iter()
+        .find(|g| g.contains(COLLECT_FAILED_MARKER))
+    {
+        return Err(format!(
+            "`tga audit` exited 0 but collection did not complete: {gap}"
+        ));
+    }
+    Ok(manifest.report.gaps)
 }
 
 /// Everything that must be true before a child is worth starting.
@@ -391,7 +617,7 @@ async fn run_one(
 fn prepare(
     work: &WorkDir,
     output: &Path,
-    slug: &str,
+    stem: &str,
     checkout: &Path,
 ) -> Result<Result<PathBuf, String>, AuditError> {
     if !checkout.is_dir() {
@@ -401,13 +627,13 @@ fn prepare(
         )));
     }
     mkdir(output)?;
-    let config_path = work.path(Area::State).join(format!("tga-{slug}.yaml"));
+    let config_path = work.path(Area::State).join(format!("tga-{stem}.yaml"));
     let document = TgaConfig {
         repositories: vec![TgaRepository {
             path: checkout.to_path_buf(),
-            name: slug.to_string(),
+            name: stem.to_string(),
         }],
-        database: work.path(Area::Extract).join(format!("{slug}.db")),
+        database: work.path(Area::Extract).join(format!("{stem}.db")),
     };
     // Infallible in practice — the document is owned strings and paths with no
     // map keys — but a serializer error must not be swallowed into a default.
@@ -438,6 +664,22 @@ fn absolute_checkout(work: &WorkDir, path: &Path) -> PathBuf {
     }
 }
 
+/// How long one repository's `tga audit` may take before it is killed.
+///
+/// Why: the child does network collection and then LLM inference, so it is
+/// legitimately slow — the epic describes an hour-scale sweep. But without a
+/// ceiling a hung child blocks the sweep forever, and because the progress
+/// record is written after every child finishes, an unattended run that hangs
+/// leaves NOTHING in `state/` describing how far it got.
+///
+/// Four hours is chosen as roughly four times the longest sweep anyone has
+/// described, so it cannot fire on a slow-but-working run — it exists to turn an
+/// indefinite hang into a recorded failure, not to bound normal work. It is
+/// per repository, not per sweep.
+/// Test: `super::run_tests::a_hung_child_is_killed_and_recorded`, which uses
+/// [`sweep_with_timeout`] rather than waiting for this value.
+pub const PER_REPO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
+
 /// Spawn the pinned `tga audit` and turn its exit into a per-repo verdict.
 ///
 /// The child inherits nothing it does not need: the three binaries are named by
@@ -445,24 +687,18 @@ fn absolute_checkout(work: &WorkDir, path: &Path) -> PathBuf {
 /// (`TRUSTY_ANALYZE_BIN`, `TRUSTY_REVIEW_BIN`), so nothing on the operator's
 /// `PATH` can be reached instead. The credential goes in the environment and
 /// only there — see the module docs for what that costs.
+///
+/// A child that outlives `budget` is killed and recorded as a failure, so one
+/// hung repository costs that repository rather than the whole run.
 async fn spawn_tga(
-    binaries: &[(RequiredTool, PathBuf)],
+    binaries: &PinnedBinaries,
     config: &EngagementConfig,
     config_path: &Path,
     output: &Path,
     log: &Path,
     cwd: &Path,
+    budget: std::time::Duration,
 ) -> Result<RepoResult, AuditError> {
-    let binary = |tool: RequiredTool| -> PathBuf {
-        binaries
-            .iter()
-            .find(|(t, _)| *t == tool)
-            .map(|(_, p)| p.clone())
-            // Unreachable: `pinned_binaries` returns one entry per
-            // `RequiredTool::ALL` or refuses, so every tool is present.
-            .unwrap_or_else(|| PathBuf::from(tool.binary_name()))
-    };
-
     let file = std::fs::File::create(log).map_err(|source| AuditError::WorkDir {
         path: log.to_path_buf(),
         source,
@@ -472,28 +708,34 @@ async fn spawn_tga(
         source,
     })?;
 
-    let status = tokio::process::Command::new(binary(RequiredTool::Tga))
+    let spawned = tokio::process::Command::new(&binaries.tga)
         .arg("--config")
         .arg(config_path)
         .arg("audit")
         .arg("--output")
         .arg(output)
         .current_dir(cwd)
-        .env(
-            crate::run::ENV_INFERENCE_CREDENTIAL,
-            config.openrouter_key.expose(),
-        )
-        .env(ENV_ANALYZE_BIN, binary(RequiredTool::TrustyAnalyze))
-        .env(ENV_REVIEW_BIN, binary(RequiredTool::TrustyReview))
+        .env(ENV_INFERENCE_CREDENTIAL, config.openrouter_key.expose())
+        .env(ENV_ANALYZE_BIN, &binaries.analyze)
+        .env(ENV_REVIEW_BIN, &binaries.review)
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(errors))
-        .status()
-        .await;
+        .kill_on_drop(true)
+        .spawn();
 
-    Ok(match status {
-        Ok(status) if status.success() => RepoResult::Succeeded,
-        Ok(status) => RepoResult::Failed {
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(source) => {
+            return Ok(RepoResult::Failed {
+                reason: format!("`tga audit` could not be started: {source}"),
+            });
+        }
+    };
+
+    Ok(match tokio::time::timeout(budget, child.wait()).await {
+        Ok(Ok(status)) if status.success() => RepoResult::Succeeded,
+        Ok(Ok(status)) => RepoResult::Failed {
             reason: format!(
                 "`tga audit` exited with {}; see {}",
                 status
@@ -502,9 +744,25 @@ async fn spawn_tga(
                 log.display()
             ),
         },
-        Err(source) => RepoResult::Failed {
-            reason: format!("`tga audit` could not be started: {source}"),
+        Ok(Err(source)) => RepoResult::Failed {
+            reason: format!("`tga audit` could not be waited on: {source}"),
         },
+        Err(_elapsed) => {
+            // Kill before returning: `kill_on_drop` would do it, but only once
+            // the handle drops, and the reason must name a child that is gone.
+            let killed = child.kill().await;
+            RepoResult::Failed {
+                reason: format!(
+                    "`tga audit` timed out after {}s and was killed{}; see {}",
+                    budget.as_secs(),
+                    match killed {
+                        Ok(()) => String::new(),
+                        Err(e) => format!(" (kill failed: {e})"),
+                    },
+                    log.display()
+                ),
+            }
+        }
     })
 }
 
@@ -593,8 +851,28 @@ trusty-review = "0.15.1"
                 path: PathBuf::from(*path),
             })
             .collect();
-        let text = toml::to_string_pretty(&Selection { repositories }).expect("render");
+        let text = toml::to_string_pretty(&Selection {
+            count: repositories.len(),
+            repositories,
+        })
+        .expect("render");
         std::fs::write(selection_path(work), text).expect("write selection");
+    }
+
+    /// A stub `tga` that writes the manifest a real one would, so a run this
+    /// test expects to succeed passes `verify_output`.
+    fn writes_a_manifest(extra_gap: Option<&str>) -> String {
+        let gaps = match extra_gap {
+            Some(gap) => format!("gaps = [\"{gap}\"]\\n"),
+            None => String::new(),
+        };
+        format!(
+            "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  \
+             case \"$1\" in --output) out=\"$2\"; shift;; esac\n  shift\ndone\n\
+             mkdir -p \"$out\"\n\
+             printf '[report]\\ntitle = \"Acme\"\\n{gaps}\\n[[repositories]]\\n\
+             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n"
+        )
     }
 
     /// Place stub binaries AND the version record, which together are what
@@ -640,12 +918,49 @@ trusty-review = "0.15.1"
     fn an_empty_selection_is_the_same_refusal() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
-        std::fs::write(selection_path(&work), "repositories = []\n").expect("write");
+        std::fs::write(selection_path(&work), "count = 0\nrepositories = []\n").expect("write");
         let err = load_selection(&work).expect_err("an empty list audits nothing");
         assert!(
             matches!(err, AuditError::NoRepositoriesSelected { .. }),
             "{err:?}"
         );
+    }
+
+    /// A producer that crashed mid-write leaves valid TOML holding a prefix.
+    /// Without the declared count that is indistinguishable from a smaller
+    /// selection, and the sweep would report success over a subset.
+    #[test]
+    fn a_truncated_selection_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        std::fs::write(
+            selection_path(&work),
+            "count = 3\n\n[[repositories]]\nname = \"acme-api\"\npath = \"repos/acme-api\"\n",
+        )
+        .expect("write");
+
+        let err = load_selection(&work).expect_err("a prefix is not a selection");
+        let AuditError::TruncatedSelection {
+            declared, found, ..
+        } = err
+        else {
+            panic!("expected TruncatedSelection, got {err:?}");
+        };
+        assert_eq!((declared, found), (3, 1));
+    }
+
+    /// A file with no count cannot be checked, so it is not a valid selection.
+    #[test]
+    fn a_selection_without_a_count_does_not_load() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        std::fs::write(
+            selection_path(&work),
+            "[[repositories]]\nname = \"acme-api\"\npath = \"repos/acme-api\"\n",
+        )
+        .expect("write");
+        let err = load_selection(&work).expect_err("count is required");
+        assert!(matches!(err, AuditError::Parse { .. }), "{err:?}");
     }
 
     #[test]
@@ -683,21 +998,70 @@ trusty-review = "0.15.1"
         for tool in RequiredTool::ALL {
             std::fs::write(tool.path_in(&work), b"stub").expect("stub");
         }
-        let err = pinned_binaries(&work).expect_err("no version record means unverified");
+        let err = pinned_binaries(&work, &config().tools)
+            .expect_err("no version record means unverified");
         let AuditError::ToolsNotInstalled { missing } = err else {
             panic!("expected ToolsNotInstalled, got {err:?}");
         };
         assert_eq!(missing.len(), RequiredTool::ALL.len());
     }
 
+    /// Install and run are separate steps, so the config can be bumped between
+    /// them. Running the older binary anyway is the #5454 skew class.
+    #[test]
+    fn a_binary_installed_at_a_different_pin_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, "#!/bin/sh\nexit 0\n"); // records tga 2.9.4
+
+        let bumped = EngagementConfig::from_toml(
+            &CONFIG.replace("tga = \"2.9.4\"", "tga = \"2.10.0\""),
+            Path::new("engagement.toml"),
+        )
+        .expect("parses");
+
+        let err = pinned_binaries(&work, &bumped.tools).expect_err("2.9.4 is not 2.10.0");
+        let AuditError::VersionMismatch {
+            tool,
+            pinned,
+            installed,
+        } = err
+        else {
+            panic!("expected VersionMismatch, got {err:?}");
+        };
+        assert_eq!(
+            (tool, pinned.as_str(), installed.as_str()),
+            ("tga", "2.10.0", "2.9.4")
+        );
+    }
+
     #[test]
     fn a_traversing_repository_name_cannot_escape_the_root() {
         let work = WorkDir::new("/work");
         for name in ["../../etc", "a/b", "..", "", "he re"] {
-            let s = slug(name);
+            let s = stem(0, name);
             let path = work.path(Area::Output).join(&s);
             assert!(path.starts_with(work.root()), "{name:?} escaped as {s:?}");
             assert!(!s.contains('/'), "{name:?} kept a separator: {s:?}");
+        }
+    }
+
+    /// Sanitizing alone is not injective. Two repositories sharing a stem share
+    /// an output directory and a log file, and `File::create` truncates — the
+    /// second child would destroy the first's evidence with both reporting
+    /// success.
+    #[test]
+    fn names_that_sanitize_alike_do_not_share_a_log() {
+        let colliding = [("acme/api", "acme-api"), ("Acme", "acme"), ("a b", "a-b")];
+        for (i, (left, right)) in colliding.iter().enumerate() {
+            let a = stem(i * 2, left);
+            let b = stem(i * 2 + 1, right);
+            assert_ne!(a, b, "{left:?} and {right:?} collided");
+            assert_ne!(
+                a.to_lowercase(),
+                b.to_lowercase(),
+                "{left:?} and {right:?} collide on a case-insensitive filesystem"
+            );
         }
     }
 
@@ -710,6 +1074,7 @@ trusty-review = "0.15.1"
             },
             output: "/o/a".into(),
             log: "/l/a.log".into(),
+            gaps: Vec::new(),
             result: RepoResult::Succeeded,
         };
         let bad = RepoRun {
@@ -769,7 +1134,7 @@ trusty-review = "0.15.1"
     async fn the_progress_record_survives_a_partial_run() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
-        install_stubs(&work, "#!/bin/sh\nexit 0\n");
+        install_stubs(&work, &writes_a_manifest(None));
         make_repo(&work, "acme-api");
         select(
             &work,
@@ -793,41 +1158,157 @@ trusty-review = "0.15.1"
         assert_eq!(recorded.status, RunStatus::Partial);
     }
 
-    /// The credential reaches the child and nothing else does — no generated
-    /// file may carry it.
+    /// Every file anywhere under the root, at any depth.
+    fn files_under(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    /// The credential reaches the child by environment, and no file this crate
+    /// writes carries it.
+    ///
+    /// Scope, stated honestly: this proves what THIS crate writes. The child's
+    /// own artifacts are tga's contract — it redacts its configured secrets out
+    /// of the manifest itself (`tga::audit::gaps`) — and with a stub standing in
+    /// for `tga` this test says nothing about the real binary's output. What it
+    /// does cover is every file under the whole root at any depth, `extract/`
+    /// included, which is where a leak from the generated config or the log
+    /// would land.
     #[cfg(unix)]
     #[tokio::test]
     async fn the_key_reaches_the_child_by_environment_and_is_never_written_down() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
-        install_stubs(
-            &work,
+        let mut script = String::from(
             "#!/bin/sh\ntest -n \"$OPENROUTER_API_KEY\" || exit 9\n\
              test -n \"$TRUSTY_REVIEW_BIN\" || exit 8\n\
-             test -n \"$TRUSTY_ANALYZE_BIN\" || exit 7\nexit 0\n",
+             test -n \"$TRUSTY_ANALYZE_BIN\" || exit 7\n",
         );
+        script.push_str(writes_a_manifest(None).trim_start_matches("#!/bin/sh\n"));
+        install_stubs(&work, &script);
         make_repo(&work, "acme-api");
         select(&work, &[("acme-api", "repos/acme-api")]);
 
         let report = sweep(&work, &config()).await.expect("the sweep completes");
         assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
 
-        // Nothing this run wrote may contain the plaintext key.
-        for area in [Area::State, Area::Logs, Area::Output] {
-            for entry in std::fs::read_dir(work.path(area))
-                .expect("read area")
-                .flatten()
-            {
-                if entry.path().is_file() {
-                    let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
-                    assert!(
-                        !text.contains("sk-or-v1-not-a-real-key"),
-                        "{} carries the key",
-                        entry.path().display()
-                    );
-                }
-            }
+        let files = files_under(work.root());
+        assert!(files.len() > 3, "the walk found almost nothing: {files:?}");
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains("sk-or-v1-not-a-real-key"),
+                "{} carries the key",
+                path.display()
+            );
         }
+    }
+
+    /// The CRITICAL arm: `tga audit` exits 0 whenever the sweep COMPLETED,
+    /// failed stages included, so a zero exit alone is not evidence anything was
+    /// assessed. A child that wrote no manifest audited nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_exits_zero_having_written_nothing_fails() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, "#!/bin/sh\nexit 0\n");
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(&work, &config()).await.expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllFailed, "{report:?}");
+        let reason = match &report.repos[0].result {
+            RepoResult::Failed { reason } => reason.clone(),
+            other => panic!("a zero exit with no manifest must not succeed: {other:?}"),
+        };
+        assert!(reason.contains("wrote no manifest"), "{reason}");
+    }
+
+    /// The half of the same arm that exit code and file existence both miss:
+    /// the manifest is there and says collection did not complete.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_manifest_reporting_a_failed_collect_stage_fails() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(
+            &work,
+            &writes_a_manifest(Some(
+                "Collection stage `collect` did not complete (401 Unauthorized) — the data \
+                 it produces is not assessed in this report.",
+            )),
+        );
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(&work, &config()).await.expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllFailed, "{report:?}");
+        let reason = match &report.repos[0].result {
+            RepoResult::Failed { reason } => reason.clone(),
+            other => panic!("a failed collect stage must not read as success: {other:?}"),
+        };
+        assert!(reason.contains("collection did not complete"), "{reason}");
+    }
+
+    /// And the other side of that line: DOC-67 §9 makes an unassessed optional
+    /// dimension a named gap on a report still worth delivering. Failing on
+    /// those would fail nearly every real engagement.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ordinary_gaps_do_not_fail_the_repository() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(
+            &work,
+            &writes_a_manifest(Some(
+                "Collection stage `jira sync` did not complete (no JIRA project configured).",
+            )),
+        );
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(&work, &config()).await.expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+        assert_eq!(report.repos[0].gaps.len(), 1, "the gap must be surfaced");
+        assert!(report.repos[0].gaps[0].contains("jira sync"));
+    }
+
+    /// A hung child must cost its repository, not the whole run — and the
+    /// progress record must still be written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hung_child_is_killed_and_recorded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, "#!/bin/sh\nsleep 600\n");
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep_with_budget(&work, &config(), std::time::Duration::from_millis(200))
+            .await
+            .expect("the sweep completes rather than hanging");
+        assert_eq!(report.status, RunStatus::AllFailed);
+        let reason = match &report.repos[0].result {
+            RepoResult::Failed { reason } => reason.clone(),
+            other => panic!("a hung child must not succeed: {other:?}"),
+        };
+        assert!(reason.contains("timed out"), "{reason}");
+        assert!(
+            read_progress(&work).expect("record reads").is_some(),
+            "an unattended run must leave a record of how far it got"
+        );
     }
 
     /// Every path this run writes stays inside the root that `rm -rf` cleans.
