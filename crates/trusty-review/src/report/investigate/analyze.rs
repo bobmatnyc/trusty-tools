@@ -152,16 +152,20 @@ pub fn investigation_schema(max_findings: usize) -> ResponseSchema {
                             "severity": {"type": "string", "enum": ["red", "amber", "green"]},
                             "dimension": {"type": "string", "description": "The DD dimension this finding addresses."},
                             "file": {"type": "string", "description": "A repository-relative path from the PROVIDED files only."},
-                            "line": {"type": "integer", "description": "Approximate 1-based line; a best guess is fine."},
+                            // #5675: strict mode requires every property in
+                            // `required`. `line` cannot say "unknown" with an
+                            // empty string, so it is nullable — the same shape
+                            // `review_response_schema` uses for its own `line`.
+                            "line": {"type": ["integer", "null"], "description": "Approximate 1-based line; a best guess is fine. null if you cannot place it."},
                             "evidence_quote": {
                                 "type": "string",
                                 "maxLength": EVIDENCE_QUOTE_MAX_CHARS,
                                 "description": "A VERBATIM snippet copied from the cited file, at most 200 characters. Must appear character-for-character (whitespace may differ). Empty for GREEN findings."
                             },
                             "description": {"type": "string", "description": "One concise sentence."},
-                            "business_impact": {"type": "string", "description": "One concise sentence."},
+                            "business_impact": {"type": "string", "description": "One concise sentence. Empty string if the code does not support one — never invent an impact to fill this field."},
                             "remediation": {"type": "string", "description": "One concise sentence."},
-                            "cost_effort": {"type": "string"}
+                            "cost_effort": {"type": "string", "description": "Qualitative cost/effort framing; no invented figures. Empty string if unknown."}
                         }
                     }
                 }
@@ -186,7 +190,7 @@ fn system_prompt() -> &'static str {
 - Cite ONLY the files provided below. Never reference a file that is not in the provided set. You may be seeing only ONE BATCH of a larger repository — do not claim a file is "absent from the codebase" just because it is not in this batch.
 - For every RED or AMBER finding, `evidence_quote` MUST be a snippet copied VERBATIM from the cited file — character for character (only whitespace may differ), AND AT MOST 200 CHARACTERS. If you cannot quote real code that short, quote the most essential fragment rather than the whole block. Fabricated or paraphrased evidence will be rejected.
 - Never invent numbers, percentages, or metrics. State only what the code shows.
-- GREEN findings are a bare title only (a healthy topic) — no evidence, description, or remediation. Use them sparingly.
+- GREEN findings are a bare title only (a healthy topic). Use them sparingly. Every field is structurally required, so emit the rest as empty strings (and `line` as null) rather than inventing content for them.
 - Set `severity` to `red` (critical), `amber` (material), or `green` (healthy topic).
 - Assign each finding a `dimension` from the checklist. Prefer depth over breadth: a few well-evidenced findings beat many shallow ones.
 - Keep every prose field (description, business_impact, remediation) to ONE concise sentence. Verbosity risks the response being cut off, which discards every finding in this batch.
