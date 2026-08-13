@@ -609,12 +609,12 @@ either the hold or its lifting.
 ## {#SPEC-TGAUDIT-13~draft} 13. Proposed Issue Breakdown for Milestone #43
 
 Proposed only. Nothing below has been filed. Titles, scope, and
-dependencies are this spec's recommendation for how to slice the work once
-the owner approves §3.
+dependencies are this spec's recommendation for how to slice the work,
+following the owner's 2026-08-08 approval of §3.
 
 | Proposed title | One-line scope | Depends on |
 |---|---|---|
-| `feat(tga): audit orchestrator command scaffold` | New `tga audit` subcommand parsing CLI flags (org/workspace, title, `--analyst`, `--client`, output dir), dispatch wiring in `main.rs`, no report generation yet, no interactivity anywhere in the path (§2) | none (can start once §3 is approved) |
+| `feat(tga): audit orchestrator command scaffold` | New `tga audit` subcommand parsing CLI flags (org/workspace, title, `--analyst`, `--client`, output dir), dispatch wiring in `main.rs`, no report generation yet, no interactivity anywhere in the path (§2) | none |
 | `feat(tga): #5217 library entry point` | **Amend #5217 in place** (owner, Q6) — not a separate issue: expose `run_full_sweep` per §7's proposed signature — no TTY, no confirmation, returns a stats struct, optionally emits to the existing progress bus. The TUI's "Run Audit" button becomes a caller of this function. | #5217 |
 | `feat(tga): DD-manifest adapter` | `report/dd_manifest.rs` — `build_dd_manifest` + TOML serialization per §6's field mapping, unit-tested against fixture `Config` values | audit orchestrator scaffold |
 | `feat(tga): audit sweep sequencing` | Wire the orchestrator to call the #5217 library entry point | #5217 library entry point |
@@ -631,4 +631,4 @@ the owner approves §3.
 *This document is the deliverable requested for milestone
 [#43](https://github.com/bobmatnyc/trusty-tools/milestone/43). No code was
 written, no `Cargo.toml` was changed, and no issue listed in §13 has been
-filed — all pending owner approval of §3.*
+filed — the owner approved §3 on 2026-08-08.*
