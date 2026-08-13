@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use crate::config::EngagementConfig;
 use crate::error::AuditError;
 use crate::manifest::{AuditManifest, RepositoryEntry};
+use crate::run::{self, RunReport};
 use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
 use crate::workdir::{Area, WorkDir};
 
@@ -50,6 +51,8 @@ pub enum Command {
     InstallTools,
     /// List the repositories the engagement is configured to audit.
     Repos,
+    /// Run `tga audit` over the selected repositories (#5555).
+    Run,
 }
 
 /// The working directory's layout, as reported to a front end.
@@ -77,7 +80,7 @@ pub enum NextStep {
     SelectRepositories,
     /// Repositories are known but tooling is missing (#5491, #5495).
     InstallTools(Vec<RequiredTool>),
-    /// Everything the scaffold can check is in place; the run itself is later work.
+    /// Repositories are selected and the pinned triple is installed; sweep (#5555).
     ReadyForRun,
 }
 
@@ -118,6 +121,14 @@ pub enum Outcome {
     Installed(Vec<InstalledTool>),
     /// From [`Command::Repos`].
     Repos(Vec<RepositoryEntry>),
+    /// From [`Command::Run`] — per-repository results and the sweep's verdict.
+    ///
+    /// A non-[`RunStatus::AllSucceeded`](crate::run::RunStatus::AllSucceeded)
+    /// report is an ORDINARY `Ok` here: the sweep ran and some of it failed, and
+    /// the failures are data the front end must show. It is `crate::cli::exit_code`
+    /// that turns that into a non-zero process exit, so a caller cannot report
+    /// success without having read the status (#5555).
+    Run(RunReport),
 }
 
 /// One audit engagement, rooted at a working directory.
@@ -215,7 +226,19 @@ impl Session {
             Command::Tools => tools::status(&self.work).map(Outcome::Tools),
             Command::InstallTools => self.install_tools().await.map(Outcome::Installed),
             Command::Repos => self.repos().map(Outcome::Repos),
+            Command::Run => self.run().await.map(Outcome::Run),
         }
+    }
+
+    /// Read the engagement's key and pins, then sweep the selected repositories.
+    ///
+    /// The config is loaded for the same reason [`Session::install_tools`] loads
+    /// it: it carries the OpenRouter key `tga audit`'s report render needs, and
+    /// an absent config is a refusal rather than a run that will fail an hour in
+    /// (#5555).
+    async fn run(&self) -> Result<RunReport, AuditError> {
+        let config = EngagementConfig::load(&self.config_path)?;
+        run::sweep(&self.work, &config).await
     }
 
     /// Read the engagement's pins, then install exactly those.

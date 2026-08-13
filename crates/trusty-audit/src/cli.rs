@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::run::{RepoResult, RunStatus};
 use crate::session::{Command, NextStep, Outcome};
 
 /// The auditor client's command line.
@@ -69,6 +70,8 @@ pub enum Verb {
     Install,
     /// List the repositories this engagement is configured to audit.
     Repos,
+    /// Run the audit sweep over the selected repositories.
+    Run,
 }
 
 impl Cli {
@@ -89,7 +92,26 @@ impl Cli {
             Some(Verb::Tools) => Command::Tools,
             Some(Verb::Install) => Command::InstallTools,
             Some(Verb::Repos) => Command::Repos,
+            Some(Verb::Run) => Command::Run,
         }
+    }
+}
+
+/// The process exit status an outcome deserves.
+///
+/// Why: #5555's fail-open guard. `Session::execute` returns `Ok` for a sweep
+/// that ran and partly failed, because the per-repo failures are data a front
+/// end must render — but a shell, a CI job, or the operator reading `$?` must
+/// not see that as success. Putting the mapping here rather than in `main.rs`
+/// keeps it in the library, where it is unit-testable and where the Tauri shell
+/// can consult the same rule.
+/// What: 0 for every outcome except a [`Outcome::Run`] whose status is not
+/// [`RunStatus::AllSucceeded`]; 1 for that.
+/// Test: `super::cli_tests::a_partial_sweep_does_not_exit_zero`.
+pub fn exit_code(outcome: &Outcome) -> i32 {
+    match outcome {
+        Outcome::Run(report) if report.status != RunStatus::AllSucceeded => 1,
+        _ => 0,
     }
 }
 
@@ -198,6 +220,41 @@ pub fn render(outcome: &Outcome) -> String {
                 .map(|r| format!("{:<24} {}\n", r.name, r.path.display()))
                 .collect()
         }
+        // #5555: a partial sweep must not read like a clean one. Each failure
+        // is printed with its reason and its log path, and the verdict line
+        // says which of the three states this run ended in.
+        Outcome::Run(report) => {
+            let mut out = String::new();
+            for run in &report.repos {
+                match &run.result {
+                    RepoResult::Succeeded => out.push_str(&format!(
+                        "ok      {:<24} {}\n",
+                        run.repo.name,
+                        run.output.display()
+                    )),
+                    RepoResult::Failed { reason } => {
+                        out.push_str(&format!("FAILED  {:<24} {reason}\n", run.repo.name))
+                    }
+                }
+            }
+            let audited = report.repos.len() - report.failures().count();
+            out.push_str(&match report.status {
+                RunStatus::AllSucceeded => format!(
+                    "\nAudited {}.\n",
+                    count_of(audited, "repository", "repositories")
+                ),
+                RunStatus::Partial => format!(
+                    "\nPARTIAL: {} audited, {} failed. The report covers only what succeeded.\n",
+                    audited,
+                    report.failures().count()
+                ),
+                RunStatus::AllFailed => format!(
+                    "\nFAILED: no repository was audited ({} attempted).\n",
+                    report.repos.len()
+                ),
+            });
+            out
+        }
     }
 }
 
@@ -218,9 +275,7 @@ fn describe_next(next: &NextStep) -> String {
                 names.join(", ")
             )
         }
-        NextStep::ReadyForRun => {
-            "everything checked here is in place; the audit run itself is later work".to_string()
-        }
+        NextStep::ReadyForRun => "run the audit sweep (`trusty-audit run`)".to_string(),
     }
 }
 
@@ -245,16 +300,18 @@ mod cli_tests {
             Command::Tools => vec!["taudit", "tools"],
             Command::InstallTools => vec!["taudit", "install"],
             Command::Repos => vec!["taudit", "repos"],
+            Command::Run => vec!["taudit", "run"],
         }
     }
 
-    const ALL_COMMANDS: [Command; 6] = [
+    const ALL_COMMANDS: [Command; 7] = [
         Command::Guided,
         Command::WorkDir,
         Command::Manifest,
         Command::Tools,
         Command::InstallTools,
         Command::Repos,
+        Command::Run,
     ];
 
     #[test]
@@ -372,6 +429,49 @@ mod cli_tests {
         assert_eq!(count_of(1, "repository", "repositories"), "1 repository");
         assert_eq!(count_of(0, "repository", "repositories"), "0 repositories");
         assert_eq!(count_of(3, "repository", "repositories"), "3 repositories");
+    }
+
+    /// The fail-open guard: a sweep that partly failed is an `Ok` outcome, and
+    /// it must still not leave the process reporting success.
+    #[test]
+    fn a_partial_sweep_does_not_exit_zero() {
+        use crate::run::{RepoRun, RunReport, SelectedRepo};
+
+        let run = |result| RepoRun {
+            repo: SelectedRepo {
+                name: "acme-api".to_owned(),
+                path: PathBuf::from("repos/acme-api"),
+            },
+            output: PathBuf::from("/work/out/acme-api"),
+            log: PathBuf::from("/work/logs/acme-api.log"),
+            result,
+        };
+        let ok = run(RepoResult::Succeeded);
+        let bad = run(RepoResult::Failed {
+            reason: "`tga audit` exited with code 3; see /work/logs/acme-api.log".to_owned(),
+        });
+
+        let clean = Outcome::Run(RunReport::of(vec![ok.clone()]));
+        assert_eq!(exit_code(&clean), 0);
+        assert!(
+            render(&clean).contains("Audited 1 repository"),
+            "{}",
+            render(&clean)
+        );
+
+        let partial = Outcome::Run(RunReport::of(vec![ok, bad.clone()]));
+        assert_eq!(exit_code(&partial), 1);
+        let text = render(&partial);
+        assert!(text.contains("PARTIAL"), "{text}");
+        assert!(text.contains("exited with code 3"), "{text}");
+
+        let total = Outcome::Run(RunReport::of(vec![bad]));
+        assert_eq!(exit_code(&total), 1);
+        assert!(
+            render(&total).contains("no repository was audited"),
+            "{}",
+            render(&total)
+        );
     }
 
     #[test]

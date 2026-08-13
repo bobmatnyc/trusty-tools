@@ -44,6 +44,10 @@ clap = { workspace = true }
 # Reading the companion engagement config and tga's `manifest.toml`.
 serde = { workspace = true }
 toml = { workspace = true }
+# #5555: `tga audit` takes its repository set from a YAML config, so driving it
+# at one repository means generating one. `serde_yaml` is the workspace-wide
+# standard for YAML (see the root Cargo.toml note).
+serde_yaml = { workspace = true }
 # Library error type.
 thiserror = { workspace = true }
 # #5495: the pinned, fail-closed download entry point. Downloading, verifying

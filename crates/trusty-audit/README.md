@@ -5,10 +5,11 @@ codebases, and returns a report. It installs the pinned tools it needs
 (`tga`, `trusty-analyze`, `trusty-review`) and drives the audit workflow —
 "really an installer runner".
 
-**Status (#5502, #5495).** The crate, its working-directory layout, the CLI
-surface, and pinned tool installation exist. The audit run, package assembly,
-signing and the desktop shell do not — they are later milestones on
-#5473 / #5477.
+**Status (#5502, #5495, #5555).** The crate, its working-directory layout, the
+CLI surface, pinned tool installation, and the audit run exist. Repository
+selection and cloning, package assembly, signing and the desktop shell do not —
+they are later milestones on #5473 / #5477. The run reads the selection those
+will write; the file and its shape are documented under "Running the sweep".
 
 ## Shape: a library with a CLI over it
 
@@ -35,6 +36,7 @@ trusty-audit repos              # repositories this engagement is configured to 
 trusty-audit tools              # which pinned tools are installed, at which versions
 trusty-audit install            # download and verify the pinned tools
 trusty-audit manifest           # engagement metadata from the companion manifest.toml
+trusty-audit run                # run `tga audit` over the selected repositories
 ```
 
 The same program is also installed as `taudit`, a shorter name for repeat use —
@@ -43,6 +45,40 @@ The same program is also installed as `taudit`, a shorter name for repeat use �
 
 Global options: `--work-dir <DIR>`, `--manifest <FILE>`, and `--config <FILE>`
 (the engagement config, default `./engagement.toml`).
+
+## Running the sweep
+
+`trusty-audit run` audits each selected repository with the `tga` this client
+installed and verified — never a `tga` on your `PATH`. If the pinned triple is
+not installed the run refuses and says to install it; there is no fallback,
+because an unpinned tool is the version skew #5454 cost us.
+
+The repositories come from `<work-dir>/state/selected-repos.toml`. Selection and
+cloning are separate work (#5487, #5215); until they land, write the file
+yourself:
+
+```toml
+[[repositories]]
+name = "acme-api"
+path = "repos/acme-api"     # relative paths anchor to the work-dir root
+```
+
+Absent or empty is a refusal, not a zero-repository success.
+
+One `tga audit` child runs per repository, so a failure is attributable to one
+repository rather than to "the run". Each child writes its output to
+`out/<repo>/`, its combined stdout and stderr to `logs/<repo>.log`, and its tga
+database to `extract/<repo>.db`. The results land in `state/run-progress.toml`.
+
+The exit status distinguishes the three outcomes DOC-67 §9 needs: 0 when every
+repository was audited, 1 when only some were (`PARTIAL`, naming which failed),
+and 1 when none were. A partial sweep never reads as a clean one.
+
+The engagement's OpenRouter key reaches the `tga` child through its
+**environment** — `tga audit` spawns `trusty-review report`, which needs
+inference. It is never written to a config file, a log line, or an error
+message. The limit of that seam: a child's environment is readable by other
+processes running as the same user on the same machine.
 
 ## The working directory — what is written where
 

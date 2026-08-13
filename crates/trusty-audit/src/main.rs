@@ -35,5 +35,12 @@ async fn main() -> Result<()> {
 
     let outcome = session.execute(cli.to_command()).await?;
     print!("{}", cli::render(&outcome));
-    Ok(())
+    // `process::exit` below skips destructors, so the buffer is flushed here.
+    std::io::Write::flush(&mut std::io::stdout()).context("cannot write to stdout")?;
+
+    // #5555: a sweep that partly failed returns `Ok` — the per-repo failures
+    // are data to render, not an error — so the process status is decided from
+    // the outcome. The rule lives in the library (`cli::exit_code`); this only
+    // applies it, so the Tauri shell reads the same verdict from the same place.
+    std::process::exit(cli::exit_code(&outcome));
 }

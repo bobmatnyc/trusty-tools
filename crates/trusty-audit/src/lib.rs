@@ -25,11 +25,14 @@
 //! | [`config`] | the engagement config that ships TO the recipient — and the key it carries |
 //! | [`manifest`] | reading tga's `manifest.toml` rather than duplicating it |
 //! | [`tools`] | which pinned tools are needed, and the call that installs them |
+//! | [`run`] | driving the pinned `tga audit` over the selected repositories |
 //!
 //! ## What this milestone is not
 //!
-//! The audit sweep, package assembly, signing and the GUI are later milestones
-//! on #5473/#5477's tree. [`tools::install`] fetches the pinned triple, but it
+//! Repository selection and cloning (#5487, #5215), package assembly, signing
+//! and the GUI are later milestones on #5473/#5477's tree. [`run::sweep`] reads
+//! the selection those will write — see [`run::SELECTION_FILE`] for the exact
+//! file and shape. [`tools::install`] fetches the pinned triple, but it
 //! contains no download implementation — it calls `trusty-installer`'s pinned,
 //! fail-closed entry point (#5491, #5495), because a second implementation here
 //! would be a defect under CLAUDE.md's common-entry-point rule.
@@ -54,6 +57,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod manifest;
+pub mod run;
 pub mod session;
 pub mod tools;
 pub mod workdir;

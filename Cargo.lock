@@ -11326,6 +11326,7 @@ dependencies = [
  "anyhow",
  "clap",
  "serde",
+ "serde_yaml",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

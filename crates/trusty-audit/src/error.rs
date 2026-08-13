@@ -125,6 +125,42 @@ pub enum AuditError {
         kind: &'static str,
     },
 
+    /// The run was asked to sweep, and nothing has been selected to sweep.
+    ///
+    /// Why: #5555. A sweep over zero repositories that exits 0 is a report the
+    /// recipient believes and that assessed nothing — the same fail-open shape
+    /// the install path refuses. Absent and empty are the same state here.
+    /// What: names the file repository selection is read from (#5487, #5215
+    /// write it).
+    /// Test: `crate::run::run_tests::an_absent_selection_is_a_refusal`.
+    #[error(
+        "no repositories are selected in {path}, so there is nothing to audit; \
+         pick them first (`trusty-audit repos`)"
+    )]
+    NoRepositoriesSelected {
+        /// The selection file that was absent or empty.
+        path: PathBuf,
+    },
+
+    /// The run needs the pinned tools, and they are not installed.
+    ///
+    /// Why: #5555 runs the binaries THIS client installed and verified, never
+    /// whatever is on `PATH` — an unpinned tool is the version skew #5454 cost
+    /// us. There is no fallback, so this refusal is the whole behaviour.
+    /// What: names each tool that is missing or that this client cannot vouch
+    /// for a version of.
+    /// Test: `crate::run::run_tests::a_run_without_the_pinned_tools_is_refused`.
+    #[error(
+        "the audit run needs the pinned tools and these are missing or unverified: {}; \
+         install them first (`trusty-audit install`) — nothing will run at a version \
+         this engagement did not pin",
+        missing.join(", ")
+    )]
+    ToolsNotInstalled {
+        /// The binary names that are not usable.
+        missing: Vec<&'static str>,
+    },
+
     /// A capability this scaffold declares but does not yet implement.
     ///
     /// Why: a half-built capability must fail closed rather than silently
