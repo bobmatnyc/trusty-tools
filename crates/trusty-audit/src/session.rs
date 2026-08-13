@@ -175,9 +175,7 @@ impl Outcome {
     /// `crate::cli::cli_tests::a_run_with_gaps_exits_non_zero`.
     pub fn exit_code(&self) -> i32 {
         match self {
-            Outcome::Run(report) if report.status != run::RunStatus::AllSucceeded => {
-                EXIT_PARTIAL
-            }
+            Outcome::Run(report) if report.status != run::RunStatus::AllSucceeded => EXIT_PARTIAL,
             Outcome::Cloned(report) if !report.gaps.is_empty() => EXIT_INCOMPLETE,
             _ => 0,
         }
