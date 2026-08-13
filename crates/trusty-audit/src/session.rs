@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::clone::{self, CloneOptions, CloneReport};
 use crate::config::EngagementConfig;
 use crate::discover::{self, DiscoveredRepo};
 use crate::error::AuditError;
@@ -53,6 +54,16 @@ pub enum Command {
     Repos,
     /// List the repositories the recipient's `gh` credential can reach (#5487).
     DiscoverRepos,
+    /// Clone the named repositories into the working directory (#5215).
+    ///
+    /// Carries its argument because acquisition acts on a SELECTION — what the
+    /// picker chose, which is not derivable from the session's own state.
+    CloneRepos {
+        /// `owner/name` per repository, in the order to acquire them.
+        repos: Vec<String>,
+        /// How to clone.
+        options: CloneOptions,
+    },
 }
 
 /// The working directory's layout, as reported to a front end.
@@ -124,6 +135,8 @@ pub enum Outcome {
     /// From [`Command::DiscoverRepos`] — what the credential can reach, not
     /// what the engagement selected.
     Discovered(Vec<DiscoveredRepo>),
+    /// From [`Command::CloneRepos`].
+    Cloned(CloneReport),
 }
 
 /// One audit engagement, rooted at a working directory.
@@ -227,6 +240,13 @@ impl Session {
             Command::DiscoverRepos => discover::discover(discover::DEFAULT_LIMIT)
                 .await
                 .map(Outcome::Discovered),
+            // #5215: acquisition writes only under `self.work`, which is what
+            // keeps `rm -rf <root>` a complete uninstall.
+            Command::CloneRepos { repos, options } => {
+                clone::clone_all(&self.work, &repos, &options)
+                    .await
+                    .map(Outcome::Cloned)
+            }
         }
     }
 

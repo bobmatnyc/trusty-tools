@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::clone::{CloneOptions, CloneState};
 use crate::session::{Command, NextStep, Outcome};
 
 /// The auditor client's command line.
@@ -71,6 +72,18 @@ pub enum Verb {
     Repos,
     /// List the repositories your GitHub credential can reach.
     Discover,
+    /// Clone the named repositories into the working directory.
+    Clone {
+        /// Repositories to clone, as owner/name.
+        #[arg(value_name = "OWNER/NAME", required = true)]
+        repos: Vec<String>,
+        /// Fetch full history instead of only the tip commit.
+        #[arg(long)]
+        full: bool,
+        /// Stop cloning once this many gigabytes are used. 0 means no limit.
+        #[arg(long, value_name = "GB")]
+        budget_gb: Option<u64>,
+    },
 }
 
 impl Cli {
@@ -84,7 +97,7 @@ impl Cli {
     /// [`Command::Guided`].
     /// Test: `super::cli_tests::every_command_variant_has_a_cli_invocation`.
     pub fn to_command(&self) -> Command {
-        match self.verb {
+        match &self.verb {
             None | Some(Verb::Guided) => Command::Guided,
             Some(Verb::Workdir) => Command::WorkDir,
             Some(Verb::Manifest) => Command::Manifest,
@@ -92,6 +105,25 @@ impl Cli {
             Some(Verb::Install) => Command::InstallTools,
             Some(Verb::Repos) => Command::Repos,
             Some(Verb::Discover) => Command::DiscoverRepos,
+            // #5215: `--budget-gb 0` is the explicit way to ask for no ceiling;
+            // omitting the flag keeps `CloneOptions`' bounded default, because
+            // the recipient who never thought about disk is the one the budget
+            // exists for.
+            Some(Verb::Clone {
+                repos,
+                full,
+                budget_gb,
+            }) => Command::CloneRepos {
+                repos: repos.clone(),
+                options: CloneOptions {
+                    shallow: !full,
+                    budget_bytes: match budget_gb {
+                        Some(0) => None,
+                        Some(gb) => Some(gb * 1024 * 1024 * 1024),
+                        None => CloneOptions::default().budget_bytes,
+                    },
+                },
+            },
         }
     }
 }
@@ -228,6 +260,49 @@ pub fn render(outcome: &Outcome) -> String {
             }
             out
         }
+        Outcome::Cloned(report) => {
+            let mut out = String::new();
+            for repo in &report.repos {
+                // #5215: a repository that is NOT in the audit has to read as
+                // excluded, never as a blank line the recipient scrolls past.
+                let state = match &repo.state {
+                    CloneState::Cloned => "cloned".to_string(),
+                    CloneState::Reused => "already present".to_string(),
+                    CloneState::Failed(why) => format!("FAILED — {why}"),
+                    CloneState::Skipped(why) => format!("SKIPPED — {why}"),
+                };
+                out.push_str(&format!("  {:<40} {state}\n", repo.name_with_owner));
+            }
+            out.push_str(&format!(
+                "{} on disk, using {}.\n",
+                count_of(
+                    report.repos.iter().filter(|r| r.state.is_usable()).count(),
+                    "repository",
+                    "repositories"
+                ),
+                human_bytes(report.total_bytes)
+            ));
+            for gap in &report.gaps {
+                out.push_str(&format!("Gap: {gap}\n"));
+            }
+            out
+        }
+    }
+}
+
+/// Bytes as something a recipient reads, not a raw count.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
@@ -257,6 +332,7 @@ fn describe_next(next: &NextStep) -> String {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    use crate::clone::{CloneReport, ClonedRepo};
     use crate::discover::DiscoveredRepo;
     use crate::manifest::AuditManifest;
     use crate::session::{Session, WorkDirReport};
@@ -277,22 +353,33 @@ mod cli_tests {
             Command::InstallTools => vec!["taudit", "install"],
             Command::Repos => vec!["taudit", "repos"],
             Command::DiscoverRepos => vec!["taudit", "discover"],
+            Command::CloneRepos { .. } => vec!["taudit", "clone", "acme/api"],
         }
     }
 
-    const ALL_COMMANDS: [Command; 7] = [
-        Command::Guided,
-        Command::WorkDir,
-        Command::Manifest,
-        Command::Tools,
-        Command::InstallTools,
-        Command::Repos,
-        Command::DiscoverRepos,
-    ];
+    /// Every capability, as values rather than a `const` — #5215's
+    /// `CloneRepos` carries data, so the list cannot be a const array. The
+    /// exhaustive match in `argv_for` is what still fails to compile when a
+    /// capability arrives without a CLI path.
+    fn all_commands() -> Vec<Command> {
+        vec![
+            Command::Guided,
+            Command::WorkDir,
+            Command::Manifest,
+            Command::Tools,
+            Command::InstallTools,
+            Command::Repos,
+            Command::DiscoverRepos,
+            Command::CloneRepos {
+                repos: vec!["acme/api".to_owned()],
+                options: CloneOptions::default(),
+            },
+        ]
+    }
 
     #[test]
     fn every_command_variant_has_a_cli_invocation() {
-        for command in ALL_COMMANDS {
+        for command in all_commands() {
             let argv = argv_for(&command);
             let cli =
                 Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"));
@@ -433,6 +520,76 @@ mod cli_tests {
         assert!(text.contains("acme/api"), "{text}");
         assert!(text.contains("private"), "{text}");
         assert!(text.contains("archived"), "{text}");
+    }
+
+    #[test]
+    fn the_clone_verb_defaults_to_a_shallow_bounded_clone() {
+        let cli = Cli::try_parse_from(["taudit", "clone", "acme/api", "acme/web"])
+            .expect("the clone verb parses");
+        let Command::CloneRepos { repos, options } = cli.to_command() else {
+            panic!("clone must route to CloneRepos");
+        };
+        assert_eq!(repos, vec!["acme/api", "acme/web"]);
+        assert!(options.shallow);
+        assert_eq!(
+            options.budget_bytes,
+            Some(crate::clone::DEFAULT_BUDGET_BYTES)
+        );
+    }
+
+    /// The ceiling comes off only when the recipient asks for it in words.
+    #[test]
+    fn only_an_explicit_zero_budget_removes_the_ceiling() {
+        let unbounded = Cli::try_parse_from(["taudit", "clone", "acme/api", "--budget-gb", "0"])
+            .expect("parses")
+            .to_command();
+        let Command::CloneRepos { options, .. } = unbounded else {
+            panic!("clone must route to CloneRepos");
+        };
+        assert_eq!(options.budget_bytes, None);
+
+        let full =
+            Cli::try_parse_from(["taudit", "clone", "acme/api", "--full", "--budget-gb", "2"])
+                .expect("parses")
+                .to_command();
+        let Command::CloneRepos { options, .. } = full else {
+            panic!("clone must route to CloneRepos");
+        };
+        assert!(!options.shallow);
+        assert_eq!(options.budget_bytes, Some(2 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn cloning_nothing_is_a_parse_error_rather_than_a_no_op_run() {
+        assert!(Cli::try_parse_from(["taudit", "clone"]).is_err());
+    }
+
+    /// A repository that is not in the audit must read as excluded.
+    #[test]
+    fn rendering_a_clone_report_names_every_exclusion() {
+        let report = CloneReport {
+            repos: vec![
+                ClonedRepo {
+                    name_with_owner: "acme/api".to_owned(),
+                    path: PathBuf::from("/w/repos/acme/api"),
+                    state: CloneState::Cloned,
+                    bytes: 2048,
+                },
+                ClonedRepo {
+                    name_with_owner: "acme/web".to_owned(),
+                    path: PathBuf::from("/w/repos/acme/web"),
+                    state: CloneState::Failed("no such repository".to_owned()),
+                    bytes: 0,
+                },
+            ],
+            total_bytes: 2048,
+            gaps: vec!["acme/web was not audited — the clone failed".to_owned()],
+        };
+        let text = render(&Outcome::Cloned(report));
+        assert!(text.contains("1 repository on disk"), "{text}");
+        assert!(text.contains("2.0 KiB"), "{text}");
+        assert!(text.contains("FAILED"), "{text}");
+        assert!(text.contains("Gap: acme/web"), "{text}");
     }
 
     #[test]
