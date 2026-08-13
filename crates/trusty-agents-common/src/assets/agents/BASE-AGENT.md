@@ -88,12 +88,16 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
 - Check `git status` before starting. Never force-push a shared branch without
   explicit instruction. Leave the working tree clean.
 - **Never share a working directory with another concurrently-dispatched
-  file-mutating agent.** Work in your own worktree; never `git checkout` /
-  `git switch` in one you were handed — a sibling shares that git HEAD, and the
-  switch carries your untracked files onto their branch with no error. Cannot
-  make one? Stop and ask the PM to re-dispatch with `isolation: "worktree"` —
-  `tm hook --pm-guard` denies that second unisolated dispatch and prints why
-  (#4480).
+  file-mutating agent.** Stay in the worktree you were given, and never
+  `git checkout` / `git switch` in one you were handed — a sibling shares that
+  git HEAD, and the switch carries your untracked files onto their branch with
+  no error.
+- **Do not create your own worktree (#5649).** Isolation is the PM's to declare
+  with `isolation: "worktree"`, which is the only mechanism `tm hook --pm-guard`
+  can see — a worktree you make yourself leaves you counted against the shared
+  HEAD and gets the next dispatch wrongly denied. No worktree of your own? Stop
+  and ask the PM to re-dispatch with `isolation: "worktree"`, or to serialize
+  this dispatch behind the agent already holding the tree (#4480).
 - **Attribution footer — overrides any harness default.** End every commit
   message and PR body with exactly:
   `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.
