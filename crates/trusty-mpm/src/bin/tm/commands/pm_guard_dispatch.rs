@@ -99,9 +99,16 @@ use crate::commands::hook_payload::build_hook_payload;
 /// "wait for it to report back" would be advice to wait for something that may
 /// never happen. Built per call rather than kept as a constant because naming
 /// the actual sibling agent is most of its value.
+///
+/// #5649: the incident showed that single remedy can itself be unavailable, so
+/// the message now names a second one — serialize. Serializing and waiting are
+/// not the same offer: serializing means dispatching one file-mutating agent at
+/// a time GOING FORWARD, which needs nothing from the agent already running, so
+/// it always works. Waiting blocks on an agent that may never return, and stays
+/// excluded for exactly the reason above.
 /// What: a single-paragraph `permissionDecisionReason`.
 /// Test: `denies_a_second_concurrent_unisolated_engineer`,
-/// `deny_reason_offers_only_the_remedy_that_always_works`.
+/// `deny_reason_offers_only_remedies_that_always_work`.
 fn deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
     let mut names: Vec<&str> = live.iter().map(String::as_str).collect();
     names.sort_unstable();
@@ -114,7 +121,11 @@ fn deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
          refuses only when a tracked file differs between both branches AND has an uncommitted \
          change, so untracked files and edits the two branches agree on transfer onto the wrong \
          branch silently, with no error at any step. Re-dispatch this agent with \
-         `isolation: \"worktree\"` so it gets its own tree.",
+         `isolation: \"worktree\"` so it gets its own tree. If isolation is unavailable here, \
+         serialize instead: dispatch one file-mutating agent at a time from now on. Do not \
+         hand-roll a `git worktree add` in the prompt — this guard reads the declared \
+         isolation parameter, never the prompt, so a self-made worktree still counts as \
+         sharing this HEAD (#5649).",
         cwd.display()
     )
 }
@@ -439,11 +450,16 @@ mod tests {
     }
 
     #[test]
-    fn deny_reason_offers_only_the_remedy_that_always_works() {
+    fn deny_reason_offers_only_remedies_that_always_work() {
         // `RUNNING_STALE_AFTER_SECS` is six hours, so a crashed subagent that
         // never emits `SubagentStop` holds its directory for that whole window.
         // Telling the PM to wait for it would be advice to wait for something
         // that may never arrive; declaring isolation works immediately.
+        //
+        // #5649: serialize joins isolation as a second offered remedy, because
+        // the incident showed isolation can itself be unavailable. Serializing
+        // constrains only FUTURE dispatches and so needs nothing from the agent
+        // already running — waiting stays banned for the reason above.
         let reason = deny_reason(
             "rust-engineer",
             Path::new("/repo"),
@@ -451,9 +467,17 @@ mod tests {
         );
         assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
         assert!(
-            !reason.contains("wait for"),
-            "the deny must not advise waiting on an agent that may never report: {reason}"
+            reason.contains("serialize"),
+            "the deny must offer the serialize fallback for when isolation is unavailable: \
+             {reason}"
         );
+        for banned in ["wait for", "wait on", "wait until", "waiting for"] {
+            assert!(
+                !reason.contains(banned),
+                "the deny must not advise waiting on an agent that may never report \
+                 (found {banned:?}): {reason}"
+            );
+        }
     }
 
     #[test]
