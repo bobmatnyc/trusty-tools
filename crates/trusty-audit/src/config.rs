@@ -164,9 +164,16 @@ pub struct ToolPins {
 /// reviewer = "anthropic/claude-sonnet-4.6"
 /// ```
 ///
-/// Test: `super::config_tests::a_models_table_loads_and_is_optional`, and
-/// `crate::inference::inference_tests::a_models_table_beats_the_built_in_slugs`.
+/// Unknown keys are REJECTED here, unlike the rest of the config. The point of
+/// the table is fixing a slug without a release; `reviewr = "…"` silently
+/// falling back to the built-in default defeats exactly that, and the operator
+/// would only learn of the typo from a surprising bill. The cost is that a
+/// newer generator adding a fifth role fails to load rather than degrading —
+/// the right trade for four keys that are all optional anyway.
+/// Test: `super::config_tests::a_models_table_loads_and_is_optional`,
+/// `super::config_tests::a_typo_in_the_models_table_is_a_parse_error`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ModelPins {
     /// Overrides the provider `trusty-review` selects (`openrouter` by default).
@@ -307,6 +314,16 @@ trusty-review = "0.15.1"
             Some("anthropic/claude-opus-4.8")
         );
         assert!(pinned.models.verifier.is_none());
+    }
+
+    /// A misspelled role must not fall back to the built-in slug in silence —
+    /// the operator would only find out from the bill.
+    #[test]
+    fn a_typo_in_the_models_table_is_a_parse_error() {
+        let text = format!("{SAMPLE}\n[models]\nreviewr = \"anthropic/claude-opus-4.8\"\n");
+        let err = EngagementConfig::from_toml(&text, Path::new("engagement.toml"))
+            .expect_err("`reviewr` is not a role");
+        assert!(matches!(err, AuditError::Parse { .. }), "{err:?}");
     }
 
     #[test]
