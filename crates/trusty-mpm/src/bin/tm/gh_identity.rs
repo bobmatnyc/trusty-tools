@@ -114,9 +114,14 @@ pub(crate) fn resolve_project_aware(
 /// is thin wiring over real cwd/git detection.
 pub(crate) fn load_gh_env() -> anyhow::Result<GhEnv> {
     let config = TrustyToolsConfig::load();
-    let origin_url = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&cwd));
+    let origin_url = std::env::current_dir().ok().and_then(|cwd| {
+        // #4734: still best-effort, but a git failure is logged instead of
+        // passing silently as "this directory has no origin remote".
+        trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&cwd)
+            .inspect_err(|e| tracing::warn!("cannot read git origin remote for gh identity: {e}"))
+            .ok()
+            .flatten()
+    });
     let env = resolve_project_aware(&config, origin_url.as_deref())?;
     if !env.is_empty() {
         // Names only — never the resolved token VALUE (which `vars()` may hold).

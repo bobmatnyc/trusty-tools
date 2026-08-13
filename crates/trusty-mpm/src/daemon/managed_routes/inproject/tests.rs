@@ -312,9 +312,71 @@ fn try_inproject_spawn_returns_none_for_non_git_path() {
 
 #[test]
 fn get_origin_url_returns_none_for_non_git() {
-    // A non-git directory should return None cleanly.
+    // A non-git directory is an ANSWER, not a failure: git-config exits 1 for a
+    // key it cannot find, and #4734 maps exactly that code to Ok(None).
     let tmp = std::env::temp_dir();
-    assert!(get_origin_url(&tmp).is_none());
+    let result = get_origin_url(&tmp);
+    assert!(
+        matches!(result, Ok(None)),
+        "non-git dir must be Ok(None), got {result:?}"
+    );
+}
+
+/// A repo with no `origin` remote is `Ok(None)` — the fall-through by design.
+///
+/// Why: #4734 splits git failures out of this function's `None`, and the split
+/// is only correct if the legitimate no-remote case stays on the `Ok` side. If
+/// it drifted to `Err`, every fall-through caller (`try_inproject_spawn`,
+/// `spawn_managed_local`, `tm launch`) would start failing repos that are
+/// merely un-remoted.
+/// What: `git init`s a repo, adds no remote, asserts `Ok(None)`.
+/// Test: this function IS the test.
+#[test]
+fn get_origin_url_returns_none_for_repo_without_origin() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(tmp.path())
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+
+    let result = get_origin_url(tmp.path());
+    assert!(
+        matches!(result, Ok(None)),
+        "repo without origin must be Ok(None), got {result:?}"
+    );
+}
+
+/// A git invocation that fails outright is `Err`, never `Ok(None)` (#4734).
+///
+/// Why: this is the fail-open the ticket is about. `try_inproject_spawn` reads
+/// `Ok(None)` as "no GitHub remote here" and spawns the session directly in the
+/// operator's live checkout — so a config git refuses to parse used to cost the
+/// session its worktree isolation, its protected base clone, and its push guard.
+/// What: `git init`s a real repo (so `.git` genuinely exists), then overwrites
+/// `.git/config` with a line git cannot parse. `git config --get` answers that
+/// with exit 128, which must surface as `Err`.
+/// Test: this function IS the test.
+#[test]
+fn get_origin_url_errors_when_git_config_is_unreadable() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(tmp.path())
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+
+    // An unterminated section header — `fatal: bad config line 1`, exit 128.
+    std::fs::write(tmp.path().join(".git/config"), "[remote \"origin\"\n")
+        .expect("write broken config");
+
+    let result = get_origin_url(tmp.path());
+    assert!(
+        result.is_err(),
+        "an unreadable git config must be Err, not a silent Ok(None): {result:?}"
+    );
 }
 
 #[test]

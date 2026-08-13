@@ -414,7 +414,12 @@ pub(crate) fn derive_project(
 ) -> Option<(String, std::path::PathBuf, std::path::PathBuf)> {
     use trusty_mpm::daemon::managed_routes::inproject;
     let git_root = usable_git_root(cwd)?;
-    let origin_url = inproject::get_origin_url(&git_root).filter(|u| is_github_remote(u))?;
+    // #4734: no project identity without a readable remote — the caller's
+    // `None` arm already refuses to treat the tree as GitHub-backed.
+    let origin_url = inproject::get_origin_url(&git_root)
+        .ok()
+        .flatten()
+        .filter(|u| is_github_remote(u))?;
     let gh = trusty_common::github_path::parse_github_path(&origin_url)?;
     let source_id = format!("{}/{}", gh.owner, gh.repo);
     let workspace = inproject::base_clone_path(&gh.owner, &gh.repo);
@@ -1229,7 +1234,11 @@ pub(crate) async fn fallback_protected(
     // NOTE: `parse_github_path` accepts *any* remote URL (not just GitHub);
     // we therefore gate on `is_github_remote` (github.com substring) to
     // distinguish GitHub from Gitea/GitLab/bare-SSH remotes.
-    let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&git_root);
+    //
+    // #4734: an unreadable remote stops here rather than joining the no-remote
+    // arm below, which would blame a repository that may be perfectly GitHub-backed.
+    let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&git_root)
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     if let Some(ref raw_url) = origin_url
         && is_github_remote(raw_url)

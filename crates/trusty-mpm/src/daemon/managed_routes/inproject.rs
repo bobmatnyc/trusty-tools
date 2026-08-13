@@ -23,7 +23,9 @@
 //! resolution away from an existing worktree dir/branch;
 //! [`ensure_worktrees_gitignored`] keeps the worktree directory out of
 //! `git status`; [`get_origin_url`] reads the remote.origin.url from a git
-//! directory. The sibling [`untracked_sync`] module (#2196) syncs an
+//! directory, keeping "no remote" and "git failed" apart so a failure cannot
+//! be mistaken for an absent remote (#4734). The sibling [`untracked_sync`]
+//! module (#2196) syncs an
 //! allowlist of untracked/secret files (e.g. `.env*`) from the operator's
 //! live checkout into a freshly-created session worktree; it is called from
 //! `lifecycle::reserve_inproject_worktree`, not from this module directly,
@@ -755,23 +757,58 @@ pub use crate::core::worktree_naming::ensure_worktrees_gitignored;
 /// Read the `remote.origin.url` from a git repository at `path`.
 ///
 /// Why: the in-project spawn path needs the remote URL to determine the
-/// `owner/repo` identity and locate the matching base clone.
-/// What: runs `git -C <path> config --get remote.origin.url` and returns the
-/// trimmed stdout on success, or `None` if git fails or there is no remote origin.
-/// Test: `get_origin_url_returns_none_for_non_git` (unit).
-pub fn get_origin_url(path: &Path) -> Option<String> {
+/// `owner/repo` identity and locate the matching base clone. Before #4734 this
+/// returned a bare `Option`, so "this repo has no `origin` remote" and "the git
+/// invocation itself failed" were the same value — and [`try_inproject_spawn`]
+/// read that value as the former, falling through to an UNISOLATED spawn in the
+/// operator's live checkout whenever git failed on a directory that provably
+/// had a `.git` entry.
+/// What: runs `git -C <path> config --get remote.origin.url` and keeps the
+/// three outcomes git already distinguishes by exit code apart. Exit 0 yields
+/// `Ok(Some(url))`, or `Ok(None)` when the configured value is empty. Exit 1 is
+/// git-config's "the key is not set" answer and the only nonzero code that
+/// means it, so it yields `Ok(None)` — both a plain non-git directory and a
+/// repo with no `origin` land there, which is why this split changes no
+/// existing caller's behaviour on a healthy machine. Anything else — a spawn
+/// failure, or a fatal exit such as 128 for an unreadable `.git/config`, a
+/// dangling gitdir pointer, or a `safe.directory` ownership refusal — is `Err`,
+/// for the caller to fail closed on.
+/// Test: `get_origin_url_returns_none_for_non_git`,
+/// `get_origin_url_returns_none_for_repo_without_origin`,
+/// `get_origin_url_errors_when_git_config_is_unreadable` (unit);
+/// `try_inproject_spawn_errors_when_git_cannot_read_the_remote`
+/// (`tests/inproject_git_failure.rs`).
+pub fn get_origin_url(path: &Path) -> Result<Option<String>, String> {
+    // #4734: a git-exec failure must not read as "no origin remote" — that
+    // collapse is what let a transient git failure downgrade worktree isolation.
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(path)
         .args(["config", "--get", "remote.origin.url"])
         .output()
-        .ok()?;
+        .map_err(|e| {
+            format!(
+                "could not run `git config --get remote.origin.url` in '{}': {e}",
+                path.display()
+            )
+        })?;
 
-    if !out.status.success() {
-        return None;
+    match out.status.code() {
+        Some(0) => {
+            let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            Ok(if url.is_empty() { None } else { Some(url) })
+        }
+        Some(1) => Ok(None),
+        Some(code) => Err(format!(
+            "`git config --get remote.origin.url` failed in '{}' (exit {code}): {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        None => Err(format!(
+            "`git config --get remote.origin.url` was killed by a signal in '{}'",
+            path.display()
+        )),
     }
-    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if url.is_empty() { None } else { Some(url) }
 }
 
 /// Main entry point for the in-project spawn path's DETECTION phase (#1706, #2032).
@@ -787,18 +824,25 @@ pub fn get_origin_url(path: &Path) -> Option<String> {
 /// (`daemon::managed_routes::lifecycle::spawn_managed_routed`) resolves the
 /// name and calls [`create_session_worktree`] itself.
 /// What: (1) checks that `path` is an existing directory with a `.git` entry;
-/// (2) reads the `remote.origin.url` — returns `Ok(None)` if absent;
+/// (2) reads the `remote.origin.url` — returns `Ok(None)` if absent, and `Err`
+/// when git could not answer at all (#4734: this step used to collapse those
+/// two into `Ok(None)`, and `Ok(None)` here is what makes the caller spawn
+/// unisolated in the live checkout);
 /// (3) parses the URL via `trusty_common::github_path::parse_github_path` —
 /// returns `Ok(None)` if unparseable; (4) calls [`ensure_base_clone`];
 /// (5) returns `Ok(Some((base_clone_path, owner, repo)))` — NOT a worktree
 /// path (that was the pre-#2032 contract). Step 4 errors propagate as `Err`.
-/// Test: `try_inproject_spawn_returns_none_for_non_git_path` (unit).
+/// Test: `try_inproject_spawn_returns_none_for_non_git_path` (unit),
+/// `try_inproject_spawn_errors_when_git_cannot_read_the_remote`
+/// (`tests/inproject_git_failure.rs`).
 pub fn try_inproject_spawn(path: &Path) -> Result<Option<(PathBuf, String, String)>, String> {
     if !path.is_dir() || !path.join(".git").exists() {
         return Ok(None);
     }
 
-    let Some(origin_url) = get_origin_url(path) else {
+    // #4734: `?` here is the fix — a git failure stops the spawn instead of
+    // reading as "no remote" and falling through to the live checkout.
+    let Some(origin_url) = get_origin_url(path)? else {
         warn!(
             path = %path.display(),
             "inproject: no remote.origin.url found; falling through to local-path spawn"
