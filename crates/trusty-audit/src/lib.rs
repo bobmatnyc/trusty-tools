@@ -25,6 +25,7 @@
 //! | [`config`] | the engagement config that ships TO the recipient — and the key it carries |
 //! | [`manifest`] | reading tga's `manifest.toml` rather than duplicating it |
 //! | [`tools`] | which pinned tools are needed, and the call that installs them |
+//! | [`discover`] | which repositories the recipient's `gh` credential can reach (#5487) |
 //!
 //! ## What this milestone is not
 //!
@@ -52,6 +53,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod discover;
 pub mod error;
 pub mod manifest;
 pub mod session;

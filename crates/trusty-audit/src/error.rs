@@ -125,6 +125,30 @@ pub enum AuditError {
         kind: &'static str,
     },
 
+    /// Listing the repositories a credential can reach failed.
+    ///
+    /// Why: #5487 routes discovery through `gh`, and every way that can fail —
+    /// no `gh` on PATH, no login, a whitespace `GH_TOKEN`, an org the token
+    /// cannot read, a `--json` payload that did not parse — must surface as a
+    /// refusal. The alternative is an empty repository list, which is
+    /// indistinguishable from "this account genuinely has no repositories" and
+    /// would let the recipient exclude repositories from the audit without ever
+    /// being told (`crate::discover`).
+    /// What: names the owner whose listing failed and keeps `trusty-common`'s
+    /// structured [`trusty_common::gh::GhError`] rather than flattening it, so a
+    /// front end can still tell "gh is not installed" from "you are not logged
+    /// in". Boxed for the same `clippy::result_large_err` reason as
+    /// [`AuditError::Install`].
+    /// Test: `crate::discover::discover_tests::one_unreadable_owner_fails_the_whole_discovery`.
+    #[error("cannot list the repositories {owner} can access: {source}")]
+    Discovery {
+        /// Whose repositories could not be listed.
+        owner: String,
+        /// The underlying `gh` failure, verbatim.
+        #[source]
+        source: Box<trusty_common::gh::GhError>,
+    },
+
     /// A capability this scaffold declares but does not yet implement.
     ///
     /// Why: a half-built capability must fail closed rather than silently
