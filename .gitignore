@@ -145,3 +145,7 @@ docs/certificates/*.cert
 docs/certificates/*.pem
 docs/certificates/*.key
 docs/certificates/*.mobileprovision
+
+# claude-mpm (unrelated Python project) leftovers — synced skills/agents, never a deliverable here
+.agents/
+.codex/
