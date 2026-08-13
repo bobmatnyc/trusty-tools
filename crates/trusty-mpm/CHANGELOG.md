@@ -6,49 +6,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [1.3.7] — 2026-08-13
-
-### Fixed
-
-- The mandatory pre-push credential scan now scopes its diff with three dots — `git diff origin/main...HEAD` — in both places that state the rule: the composed `WORKFLOW` instruction section and the `tm-workflow` skill's "Git Security Review". Two-dot diffs the two commits, so files DELETED from `main` since the branch point are reported as the branch's own additions
-  - measured, not theoretical: one session's two-dot scan returned 19 hits that belonged to another PR's deletions, where three-dot returned zero across 36 files. The same session's earlier pre-first-push scan had been accurate only because `origin/main` still equalled its branch point — correct by luck, and on a busy `main` that luck runs out silently
-  - the severity is the noise, not the wording. A credential scan that reports hits nobody owns is one reviewers learn to wave through, and a real secret arrives inside that noise
-  - both statements now carry the reason inline, so the next reader does not simplify the third dot back out
-- `tm` launch-new-session no longer fails on a host where tmux has never run (closes [#3886](https://github.com/bobmatnyc/trusty-tools/issues/3886))
-  - the #3823 server-up guard moved into `SessionManager::resolve_session_name`, adjacent to the `list-sessions` probe it protects, so the in-project launch routes (`spawn_managed_on_main`, `reserve_inproject_worktree`) that bypass `create_with_id` inherit it
-  - `tmux error:` is no longer printed twice — `names_for_serial_allocation` and `dedupe_session_name` propagate the already-typed `ManagedError` instead of re-wrapping it
-- `validate_and_repair` no longer reports `repaired: true` for a repair that
-  failed (closes [#4781](https://github.com/bobmatnyc/trusty-tools/issues/4781)).
-  The flag was set unconditionally on the repair path, so a workspace whose
-  repair was refused outright — `prepare_session_with_repo_url` returning the
-  fatal `PrepError::Instructions` (#4752) — still reported itself repaired next
-  to a populated `repair_error`. It is now derived from the re-validation:
-  `true` only when the pipeline returned no error AND the post-repair report has
-  no gaps.
-- `tm validate --repair` prints the attempt's diagnostics again. It gated them
-  on `repaired`, which under the new meaning would have silenced the error
-  message on exactly the runs that produce one; it now gates on whether the
-  pre-repair report had gaps, and says so when the repair did not restore the
-  workspace.
-- `SmMemory` and `PortfolioMemory` no longer destroy a palace's metadata when the palace exists but cannot be opened. Both `ensure_palace` implementations treated every `open_palace` failure as "the palace does not exist" and fell through to `create_palace`, which rewrites `palace.json` unconditionally — so a palace that merely could not be READ lost its `created_at` and only then re-failed against the same unreadable store. They now fall through to create only when `PalaceStore::metadata_present` definitively reports no `palace.json`, and fail closed on a probe that cannot complete (#4911).
-- `tm doctor`'s `gh_account` check no longer reports "gh is not authenticated"
-  for a working `GH_TOKEN` / `GITHUB_TOKEN` login. Its `gh auth status` probe
-  was bounded at 250 ms — a constant inherited from the statusline's render
-  path — while validating an env token takes a network round trip that measured
-  281–389 ms, so every probe timed out and the timeout rendered as a definite
-  negative. The doctor now probes under its own 5 s bound, and a probe that
-  still does not finish reports the auth state as UNKNOWN with the reason,
-  instead of claiming the account does not exist.
-- The doctor reads the active login and the logged-in list from ONE
-  `gh auth status` invocation (previously two, one of them `--active`), so the
-  check costs a single network round trip.
-- The assembled session-manager prompt told the SM to watch tcode for
-  `__HARNESS_EVENT__`; tcode emits `__OMPM_EVENT__`. The harness-understanding
-  sections now carry the emitted marker, and the prompt tests assert against
-  `trusty_agents_common::events::EVENT_LINE_PREFIX` instead of a literal — they
-  previously passed by agreeing with the wrong instruction text
-  ([#5129](https://github.com/bobmatnyc/trusty-tools/issues/5129)).
-
 ## [1.3.6] — 2026-08-12
 
 ### Added
