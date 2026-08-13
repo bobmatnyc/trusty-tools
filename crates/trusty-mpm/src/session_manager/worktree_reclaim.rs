@@ -357,17 +357,19 @@ impl PrIndex {
 /// `gh_command_runs_in_the_requested_directory`,
 /// `gh_command_strips_repository_redirecting_env`.
 fn gh_command(dir: &Path) -> Command {
-    let mut cmd = Command::new("gh");
+    // #5475: argv/binary/env come from trusty-common's single `gh` entry
+    // point; this module keeps its own kill-on-timeout runner, which is why it
+    // takes the unspawned `std::process::Command` rather than a runner method.
     // #2919: `current_dir`, NEVER `-C` — `gh` has no such flag.
-    cmd.current_dir(dir);
+    let mut cmd = trusty_common::gh::GhCommand::new(std::iter::empty::<&str>()).cwd(dir);
     for key in GH_STRIPPED_ENV {
-        cmd.env_remove(key);
+        cmd = cmd.env_remove(key);
     }
     cmd.env("GH_PAGER", "")
         .env("GH_PROMPT_DISABLED", "1")
         .env("GH_NO_UPDATE_NOTIFIER", "1")
-        .env("NO_COLOR", "1");
-    cmd
+        .env("NO_COLOR", "1")
+        .to_std_command()
 }
 
 /// The `--json` field set every `gh pr list` call in this module requests.

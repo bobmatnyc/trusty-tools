@@ -58,7 +58,7 @@ trusty-code = { workspace = true }
 #      stub. Zero added dependency weight: `aws-config`/`aws-sdk-bedrockruntime`/
 #      `aws-types` below are already unconditional direct dependencies of this
 #      crate for the existing `llm::bedrock` (Converse, non-streaming) client.
-trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memory-core", "cli-help", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds"] }
+trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memory-core", "cli-help", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "gh-cli"] }
 # Why (issue #226): trusty-agents only links `trusty_memory::MemoryMcpService` for
 #      in-process `rpc.discover` merging; it does not need the axum HTTP/SSE
 #      surface (it owns its own axum stack for the orchestrator's UI). Setting

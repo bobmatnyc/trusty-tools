@@ -87,7 +87,7 @@ clap         = { workspace = true }
 # `webhook-relay` (#5182): the console->target relay wire contract AND its
 # receive half — the durable inbox, the listener, and the hardened UDS bind
 # this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.
-trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay"] }
+trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay", "gh-cli"] }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console is
 # no longer bundled into trusty-review (single-owner-per-binary); the standalone
 # `trusty-console` crate is its sole producer.
