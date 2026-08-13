@@ -398,12 +398,185 @@ fn get_origin_url_handles_a_multi_valued_origin() {
     );
 }
 
+/// An unreadable `.git` DIRECTORY is `Err`, though git itself exits 1 (#4734).
+///
+/// Why: the exit-code split alone does not catch this. Discovery walks straight
+/// past a `.git` it cannot open, finds no repo above, reads global config, and
+/// reports the key missing — **exit 1, empty stderr**, identical to a repo with
+/// no `origin`. That is the same misdiagnosis this ticket removes for exit 128,
+/// arriving through a different filesystem fault, and no stderr matching could
+/// separate them because there is no stderr. `ensure_repo_rooted_at` is what
+/// catches it.
+/// What: `git init`s a repo, chmods `.git` to 000, asserts `Err`. The
+/// permissions are restored before the assertion so a failure does not leave an
+/// undeletable temp dir behind.
+/// Test: this function IS the test.
+#[test]
+fn get_origin_url_errors_when_the_git_dir_is_unreadable() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(tmp.path())
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+
+    let git_dir = tmp.path().join(".git");
+    std::fs::set_permissions(
+        &git_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .expect("chmod 000");
+    let result = get_origin_url(tmp.path());
+    std::fs::set_permissions(
+        &git_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("restore perms");
+
+    assert!(
+        result.is_err(),
+        "an unreadable .git must be Err — git answers exit 1 here, which is \
+         indistinguishable from 'no origin remote': {result:?}"
+    );
+}
+
+/// Discovery escaping to a PARENT repo is `Err`, not that repo's remote (#4734).
+///
+/// Why: the worst shape of the same fault. When the unreadable `.git` sits
+/// inside another git repo, discovery walks up and answers **exit 0 with the
+/// parent's origin** — so the daemon would resolve the wrong `owner/repo` and
+/// provision a managed clone of a different repository. Pre-existing, and not
+/// something the exit-code split addresses; `ensure_repo_rooted_at` closes it
+/// because it asks git which repository it actually read.
+/// What: nests a child repo inside a parent with a DIFFERENT origin, makes the
+/// child's `.git` unreadable, and asserts `Err` rather than the parent's URL.
+/// Test: this function IS the test.
+#[test]
+fn get_origin_url_errors_when_discovery_escapes_to_a_parent_repo() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let parent = tmp.path().join("parent");
+    let child = parent.join("child");
+    for (dir, origin) in [
+        (&parent, "https://github.com/PARENT/parentrepo.git"),
+        (&child, "https://github.com/CHILD/childrepo.git"),
+    ] {
+        std::fs::create_dir_all(dir).expect("mkdir");
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(dir)
+            .output()
+            .expect("git init");
+        assert!(init.status.success(), "git init failed");
+        let remote = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["remote", "add", "origin", origin])
+            .output()
+            .expect("git remote add");
+        assert!(remote.status.success(), "git remote add failed");
+    }
+
+    let child_git = child.join(".git");
+    std::fs::set_permissions(
+        &child_git,
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .expect("chmod 000");
+    let result = get_origin_url(&child);
+    std::fs::set_permissions(
+        &child_git,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("restore perms");
+
+    assert!(
+        result.is_err(),
+        "must refuse rather than answer with the PARENT repo's origin: {result:?}"
+    );
+    if let Err(msg) = &result {
+        assert!(
+            !msg.contains("parentrepo"),
+            "the error must not hand back the wrong repo's URL: {msg}"
+        );
+    }
+}
+
+/// A linked worktree resolves normally — the rooted-at guard must not break it.
+///
+/// Why: `ensure_repo_rooted_at` compares git's `--show-toplevel` against
+/// `path`, and a linked worktree's `.git` is a FILE pointing at a git dir under
+/// the MAIN checkout. Comparing git dirs instead of toplevels would reject
+/// every worktree tm creates, so this is the test that keeps that choice
+/// honest.
+/// What: builds a repo with an origin, adds a detached worktree, and asserts
+/// the worktree reports the same origin.
+/// Test: this function IS the test.
+#[test]
+fn get_origin_url_reads_a_linked_worktree() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let main = tmp.path().join("main");
+    std::fs::create_dir_all(&main).expect("mkdir");
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(out.status.success(), "git {args:?} failed");
+    };
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(&main)
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+    git(
+        &main,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widget.git",
+        ],
+    );
+    git(&main, &["config", "user.email", "test@example.com"]);
+    git(&main, &["config", "user.name", "Test"]);
+    std::fs::write(main.join("f.txt"), "v1\n").expect("write");
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "-q", "-m", "initial"]);
+
+    let linked = tmp.path().join("linked");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().expect("utf8"),
+        ],
+    );
+    assert!(
+        linked.join(".git").is_file(),
+        "fixture: .git must be a file"
+    );
+
+    let result = get_origin_url(&linked);
+    assert_eq!(
+        result.as_ref().map(|o| o.as_deref()),
+        Ok(Some("https://github.com/acme/widget.git")),
+        "a linked worktree must resolve its repo's origin, got {result:?}"
+    );
+}
+
 /// A git invocation that fails outright is `Err`, never `Ok(None)` (#4734).
 ///
 /// Why: this is the fail-open the ticket is about. `try_inproject_spawn` reads
-/// `Ok(None)` as "no GitHub remote here" and spawns the session directly in the
-/// operator's live checkout — so a config git refuses to parse used to cost the
-/// session its worktree isolation, its protected base clone, and its push guard.
+/// `Ok(None)` as "no GitHub remote here", so a config git refuses to parse used
+/// to be reported to the operator as a repo without a remote — sending them to
+/// `tm connect` to fix a checkout that is fine.
 /// What: `git init`s a real repo (so `.git` genuinely exists), then overwrites
 /// `.git/config` with a line git cannot parse. `git config --get` answers that
 /// with exit 128, which must surface as `Err`.

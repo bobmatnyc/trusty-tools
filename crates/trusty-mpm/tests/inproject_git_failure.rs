@@ -1,11 +1,11 @@
 //! Fail-open regression coverage for the in-project spawn path (#4734).
 //!
-//! Why: `try_inproject_spawn` decides whether a managed session gets worktree
-//! isolation, a protected base clone, and a push guard — or runs directly in
-//! the operator's live checkout. It made that call from a bare `Option`, so a
-//! git invocation that FAILED on a directory with a `.git` entry was
-//! indistinguishable from a repo that simply has no `origin`, and the failure
-//! took the unisolated branch. Every test here asserts the failing git call is
+//! Why: `try_inproject_spawn` decided from a bare `Option` whether the given
+//! directory is a GitHub-backed checkout, so a git invocation that FAILED on a
+//! directory with a `.git` entry was indistinguishable from a repo that simply
+//! has no `origin`. The failure took the no-remote branch, and the operator was
+//! told a repo git could not read had no GitHub remote — sent to `tm connect`
+//! for a checkout that is fine. Every test here asserts the failing git call is
 //! now an error, so a regression to the collapsed signal turns this file red.
 //!
 //! These tests deliberately touch only [`try_inproject_spawn`], whose signature
@@ -40,10 +40,10 @@ fn init_repo(dir: &std::path::Path) {
 /// An unreadable `.git/config` must stop the spawn, not downgrade it (#4734).
 ///
 /// Why: this is the ticket's exact scenario. `git config --get` exits 128 on a
-/// config it cannot parse; pre-fix that became `Ok(None)`, and `Ok(None)` is
-/// the value `lifecycle::spawn_managed_routed` reads as "not an in-project
-/// GitHub checkout" before falling through to `spawn_managed_local` — a session
-/// in the live tree with no isolation.
+/// config it cannot parse; pre-fix that became `Ok(None)`, the value
+/// `lifecycle::spawn_managed_routed` reads as "not an in-project GitHub
+/// checkout" — so the whole spawn proceeded on a misdiagnosis git had already
+/// reported.
 /// What: initialises a repo, overwrites `.git/config` with an unterminated
 /// section header, and asserts `Err`.
 /// Test: this function IS the test.
@@ -58,8 +58,8 @@ fn try_inproject_spawn_errors_when_git_cannot_read_the_remote() {
     let result = try_inproject_spawn(dir);
     assert!(
         result.is_err(),
-        "a git config git cannot read must fail the spawn, not fall through to an \
-         unisolated local spawn; got {result:?}"
+        "a git config git cannot read must fail the spawn, not fall through as \
+         though the repo had no remote; got {result:?}"
     );
 }
 
@@ -67,8 +67,8 @@ fn try_inproject_spawn_errors_when_git_cannot_read_the_remote() {
 ///
 /// Why: covers the other half of the collapsed signal — pre-fix the spawn
 /// failure was swallowed by `.output().ok()?`, so a broken or absent git
-/// binary produced the same silent isolation downgrade as an unreadable
-/// config. Exercising it needs the process-global `PATH`, hence `#[ignore]`;
+/// binary produced the same silent misdiagnosis as an unreadable config.
+/// Exercising it needs the process-global `PATH`, hence `#[ignore]`;
 /// rung 5 of the test ladder runs it via
 /// `cargo test -p trusty-mpm -- --include-ignored`.
 /// What: points `PATH` at an empty directory so `git` cannot be spawned at
@@ -101,7 +101,7 @@ fn try_inproject_spawn_errors_when_git_cannot_be_executed() {
 
     assert!(
         result.is_err(),
-        "an unspawnable git must fail the spawn, not fall through to an \
-         unisolated local spawn; got {result:?}"
+        "an unspawnable git must fail the spawn, not fall through as though \
+         the repo had no remote; got {result:?}"
     );
 }

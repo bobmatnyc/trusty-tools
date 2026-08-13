@@ -415,8 +415,11 @@ pub(crate) fn derive_project(
     use trusty_mpm::daemon::managed_routes::inproject;
     let git_root = usable_git_root(cwd)?;
     // #4734: no project identity without a readable remote — the caller's
-    // `None` arm already refuses to treat the tree as GitHub-backed.
+    // `None` arm already refuses to treat the tree as GitHub-backed. Logged
+    // because this `None` disables the whole rich picker path, so a git failure
+    // here is otherwise invisible to the operator.
     let origin_url = inproject::get_origin_url(&git_root)
+        .inspect_err(|e| tracing::warn!("cannot read git origin remote: {e}"))
         .ok()
         .flatten()
         .filter(|u| is_github_remote(u))?;
