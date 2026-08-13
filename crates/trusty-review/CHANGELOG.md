@@ -6,6 +6,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.17.0] — 2026-08-13
+
+### Fixed
+
+- **The crate could not be built with `--no-default-features`.** Two files compiled unconditionally while depending on a gated feature: `pipeline/mapreduce/reduce.rs` imported `profile::synthesizer::jaccard_similarity`, and `tests/report_investigate.rs` imported `trusty_review::report`. Both are fixed, and `cargo check -p trusty-review --no-default-features --all-targets` is now clean ([#5466](https://github.com/bobmatnyc/trusty-tools/issues/5466))
+  - this was already shipped in 0.15.0 — `cargo add trusty-review --no-default-features --features http-server,mcp` fails against the published crate, which is what `cargo-semver-checks` hit when it tried to build the 0.15.0 baseline
+  - `report_investigate.rs` now carries `#![cfg(feature = "report")]`, matching its two siblings `report_e2e.rs` and `report_analyze_e2e.rs`. Under default features all three of its tests still run
+- The built-in default provider is now resolved from the credentials that are
+  actually available instead of being hardcoded to Bedrock (#5671). Precedence:
+  an explicit `--provider` / `TRUSTY_REVIEW_PROVIDER` / config-file `provider`
+  always wins; otherwise a non-blank `OPENROUTER_API_KEY` selects OpenRouter
+  (with OpenRouter model defaults, not Bedrock inference-profile ids);
+  otherwise detectable AWS credentials select Bedrock; otherwise the run fails
+  with a message naming both options rather than defaulting into an obscure
+  failure. A blank or whitespace-only `OPENROUTER_API_KEY` does not count.
+  Behaviour change: a machine with BOTH an OpenRouter key and AWS credentials
+  and no explicit override now uses OpenRouter — set
+  `TRUSTY_REVIEW_PROVIDER=bedrock` to keep Bedrock. A machine whose only AWS
+  credential source is EC2/ECS instance metadata is not detected; set
+  `TRUSTY_REVIEW_PROVIDER=bedrock` there.
+
+### Changed
+
+- `SystemGhResolver` resolves `gh auth token` through
+  `trusty_common::gh::GhCommand`
+  ([#5475](https://github.com/bobmatnyc/trusty-tools/issues/5475)) instead of
+  its own `Command::new("gh")`. The resolution order (`GITHUB_TOKEN` →
+  `GH_TOKEN` → `gh auth token`) and the debug-log-and-return-`None` degrade are
+  unchanged; the log line now carries the entry point's classified reason.
+
+### Removed
+
+- **Contributor profiling is gone from trusty-review — it lives in `tga profile` (tga 2.19.0) now.** This removes `src/profile/` (20 files), the `profile` CLI subcommand and its `cli_profile.rs`, the default-on `profile` Cargo feature, and the `tga` + `rusqlite` dependencies that feature carried. Breaking, hence the MINOR bump to 0.16.0 (closes [#5466](https://github.com/bobmatnyc/trusty-tools/issues/5466), part of [#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468))
+  - the Cargo edge ran backwards: trusty-review declared `tga`, while at runtime `tga audit` shells out to `trusty-review`. Only one direction survives now, and it is not a manifest edge — `tga` resolves `trusty-review` from PATH ([#5236](https://github.com/bobmatnyc/trusty-tools/issues/5236), DOC-67 §6)
+  - `trusty_review::profile::synthesizer::jaccard_similarity` was public and is removed. Its one in-crate caller, the map-reduce `dedup_findings`, keeps it as a private helper in `pipeline/mapreduce/reduce.rs` with both its tests; behaviour is byte-identical
+  - dropping `profile` from the default feature set also drops a vendored libgit2 and a bundled SQLite from every default build of this crate and of anything depending on it
+
 ## [0.15.0] — 2026-08-12
 
 ### Breaking

@@ -4,7 +4,7 @@ name        = "trusty-review"
 # touches src/**. `SystemGhResolver::gh_auth_token` swaps its hand-rolled
 # `gh auth token` spawn for trusty-common's `GhCommand` entry point; the
 # trait method signature and struct are unchanged, so no public API moved.
-version     = "0.16.1"
+version     = "0.17.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

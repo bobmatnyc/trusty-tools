@@ -1,6 +1,0 @@
-Removed
-
-- **Contributor profiling is gone from trusty-review — it lives in `tga profile` (tga 2.19.0) now.** This removes `src/profile/` (20 files), the `profile` CLI subcommand and its `cli_profile.rs`, the default-on `profile` Cargo feature, and the `tga` + `rusqlite` dependencies that feature carried. Breaking, hence the MINOR bump to 0.16.0 (closes [#5466](https://github.com/bobmatnyc/trusty-tools/issues/5466), part of [#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468))
-  - the Cargo edge ran backwards: trusty-review declared `tga`, while at runtime `tga audit` shells out to `trusty-review`. Only one direction survives now, and it is not a manifest edge — `tga` resolves `trusty-review` from PATH ([#5236](https://github.com/bobmatnyc/trusty-tools/issues/5236), DOC-67 §6)
-  - `trusty_review::profile::synthesizer::jaccard_similarity` was public and is removed. Its one in-crate caller, the map-reduce `dedup_findings`, keeps it as a private helper in `pipeline/mapreduce/reduce.rs` with both its tests; behaviour is byte-identical
-  - dropping `profile` from the default feature set also drops a vendored libgit2 and a bundled SQLite from every default build of this crate and of anything depending on it
