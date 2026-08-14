@@ -253,10 +253,10 @@ equivalent is routing around a safety control. A file showing ` M` in
 discarded.
 
 Identify the owner first — `git status --porcelain` for staged-vs-unstaged, file
-mtimes, and the session log for who was alive in that window — and ask live
-peers before assuming the work is abandoned. If it is unowned, **preserve rather
-than discard**: commit it out of the way, which is permitted and destroys
-nothing.
+mtimes, and the session log for who was alive in that window — and read what a
+live peer is doing, per "Concurrent Sessions on One Repo" below, before assuming
+the work is abandoned. If it is unowned, **preserve rather than discard**: commit
+it out of the way, which is permitted and destroys nothing.
 
 ```bash
 git checkout -b orphan/main-checkout-$(date +%Y%m%d)
@@ -335,6 +335,36 @@ main checkout.
 
 Project-specific worktree hazards (binary-install caveats, code-signing caches,
 and the like) belong in the project's own reference docs, not here.
+
+## Concurrent Sessions on One Repo
+
+Another tm session may be working this repo right now. Read what it is doing
+yourself — never ask the user to relay it.
+
+1. **List, then read, before starting work that could collide.**
+   `mcp__trusty-mpm__session_list` returns every managed session with `id`,
+   `name`, `cwd`, `state`, and `source_id`. Match on `source_id` /
+   `workspace_path`, and exclude your own id.
+   `mcp__trusty-mpm__session_activity` then returns that session's raw tmux pane
+   content plus `runtime_active`, `pending_decision`, and `state` — its merged
+   commits, its running agent and elapsed time, its queued work, and its open
+   questions, without asking it anything.
+2. **Claim the work on the issue before you start.** Assign yourself, or comment
+   the claim. A claim on the tracker survives a relaunch and both sessions
+   already read it; a pane message survives neither.
+3. **Verify every `session_send`.** It types characters into a pane; it does not
+   deliver a message. A long single-line message landed as a bracketed paste
+   (`[Pasted text #1][Pasted text #2]`) and the submit never fired — the text sat
+   unsent in the target's prompt buffer and the receiving session never saw it.
+   After each send, call `session_activity` and confirm the message was submitted
+   rather than left in the buffer.
+4. **Re-read rather than wait for a reply.** Call `session_activity` again. The
+   other session may be mid-agent-run for many minutes and owes you no answer.
+
+`session_proxy_focus` / `session_proxy_message` / `session_proxy_summary` address
+a session by a stored focus key instead of an id. `session_proxy_message` is the
+same pane injection as `session_send` and carries the same defect.
+`session_proxy_summary` gives a lifecycle digest without the raw pane.
 
 ## Git Security Review (Mandatory Before Push)
 
