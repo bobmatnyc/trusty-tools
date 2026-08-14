@@ -485,7 +485,8 @@ trusty-search index add ~/Projects/myproj --name myproj
 trusty-search index list
 trusty-search index list --json    # machine-readable
 
-# The existing trusty-search index <path> command also writes the allowlist
+# Index an already-approved root. This does NOT approve one — a root the
+# table above does not approve is refused. `index add` is the approving verb.
 trusty-search index ~/Projects/myproj --name myproj
 ```
 
@@ -545,9 +546,11 @@ trusty-search service install --no-auto-discover     # macOS: bake the above int
                                                      # `--auto-discover` turns the scan back on
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]   # register + index (primary command)
-                                                     # also writes ~/.config/trusty-search/allowlist.toml
+                                                     # updates settings on an existing allowlist
+                                                     # entry; does NOT approve a new root
                                                      # auto-detects ./trusty-search.yaml
-trusty-search index add <path> [--name <id>]         # add path to allowlist + index
+trusty-search index add <path> [--name <id>]         # approve a path for indexing (the approving verb)
+       [--allow-sensitive-path]                      # …under an OS-temp / app-support prefix
 trusty-search index list [--json]                    # list all allowlisted roots
 trusty-search query <text> [--index <id>] [--top-k N] [--json]
 trusty-search status                                 # daemon + index overview (alias: health)

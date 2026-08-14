@@ -46,40 +46,23 @@ pub async fn handle_index_relocate(cli_index: &Option<String>, new_path: PathBuf
     // Call PATCH /indexes/:id
     let patch_url = format!("{base}/indexes/{index_id}");
     let body = serde_json::json!({ "root_path": canonical_new.to_string_lossy() });
-    let resp = client
-        .patch(&patch_url)
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("could not reach daemon at {base}"))?;
+    // #767: bind rather than `?`. A transport failure means the relocation did
+    // not happen either, so it owes the same rollback as a non-2xx answer —
+    // `?`-ing here left a durable `allowlist.toml` entry behind with nothing on
+    // screen. Both arms now go through `withdraw_approval`.
+    let send_result = client.patch(&patch_url).json(&body).send().await;
+    let resp = match send_result {
+        Ok(r) => r,
+        Err(e) => {
+            withdraw_approval(newly_approved, &canonical_new);
+            return Err(e).with_context(|| format!("could not reach daemon at {base}"));
+        }
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        // #767: the relocation did not happen, so withdraw the approval this
-        // command granted for it. An entry that predated this command is left
-        // alone — it is the operator's, not ours to remove.
-        if newly_approved {
-            if let Err(e) = crate::allowlist::remove_from_allowlist(&canonical_new, None) {
-                // #767: `tracing::warn!` alone is invisible here — this command
-                // talks to the operator through `println!`/`bail!`, so a
-                // tracing-only line means they see the relocate fail and never
-                // learn a stale approval was left behind. Name the path.
-                eprintln!(
-                    "{} '{}' was approved for indexing before this relocation and \
-                     could NOT be un-approved ({e:#}). It is still in the \
-                     allowlist — remove it with `trusty-search index remove {}`.",
-                    "warning:".yellow(),
-                    canonical_new.display(),
-                    canonical_new.display(),
-                );
-                tracing::warn!(
-                    path = %canonical_new.display(),
-                    error = %e,
-                    "could not withdraw the allowlist entry after a failed relocation"
-                );
-            }
-        }
+        withdraw_approval(newly_approved, &canonical_new);
         bail!("daemon returned {status} for PATCH {patch_url}: {text}");
     }
 
@@ -161,6 +144,42 @@ fn approve_destination(
         )
     })?;
     Ok(true)
+}
+
+/// Withdraw the approval [`approve_destination`] granted, if it granted one.
+///
+/// Why (#767): the relocation did not happen, so the approval that was written
+/// for it must not outlive the attempt. Every way the PATCH can fail owes this
+/// — the transport error and the non-2xx answer both. Keeping it in one
+/// function is what stops the next failure arm from quietly skipping it, which
+/// is how the transport arm came to be missing one.
+/// What: no-op when `newly_approved` is `false` — an entry that predated this
+/// command is the operator's, not ours to remove. On a removal failure, prints
+/// to STDERR as well as logging: this command talks to the operator through
+/// `println!`/`bail!`, so a tracing-only line means they see the relocate fail
+/// and never learn a stale approval was left behind.
+/// Test: `approve_destination_adds_a_missing_entry` covers the grant side;
+/// the no-op arm is asserted by
+/// `approve_destination_preserves_an_existing_entrys_settings`.
+fn withdraw_approval(newly_approved: bool, canonical_new: &std::path::Path) {
+    if !newly_approved {
+        return;
+    }
+    if let Err(e) = crate::allowlist::remove_from_allowlist(canonical_new, None) {
+        eprintln!(
+            "{} '{}' was approved for indexing before this relocation and could \
+             NOT be un-approved ({e:#}). It is still in the allowlist — remove \
+             it with `trusty-search index remove {}`.",
+            "warning:".yellow(),
+            canonical_new.display(),
+            canonical_new.display(),
+        );
+        tracing::warn!(
+            path = %canonical_new.display(),
+            error = %e,
+            "could not withdraw the allowlist entry after a failed relocation"
+        );
+    }
 }
 
 #[cfg(test)]
