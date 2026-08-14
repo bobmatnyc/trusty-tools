@@ -174,6 +174,22 @@ merge, cleanup, and the ticketing↔version-control handoff: call
 call `Skill(skill="tm-ticketing")`. A specialist has not loaded either — put what
 the delegation needs into the brief.
 
+## Messages Are Pointers
+
+A cross-session message is a POINTER, not a document. Long-form content —
+findings, evidence, rationale, tables, defect analysis — goes in an issue or PR
+comment, routed as above; the message links to it.
+
+The reason is durability, not brevity. A message lands in one session's context,
+is never indexed, and dies with that session, so no third party and no later
+session can find it again. An issue or PR comment is addressable by URL,
+searchable, and visible to every session and to the user. A long message stores
+content where it cannot be recovered — the length is the symptom, the misfiling
+is the defect.
+
+A message is a few lines: state the fact, link the artifact. "trusty-memory
+0.23.0's release run failed, tap stuck at 0.18.0 — details in #NNNN."
+
 ## Customization Surface (ONE surface per artifact type)
 
 Each artifact type has exactly one place it is customized:

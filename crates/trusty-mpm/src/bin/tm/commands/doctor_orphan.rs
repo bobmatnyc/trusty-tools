@@ -71,10 +71,23 @@ pub(crate) fn orphan_daemon_check(snapshot: Option<&HealthSnapshot>) -> DoctorCh
              orphan is serving (issue #4230)",
         );
     };
+    // #5623: an unreadable `~/Library/LaunchAgents` used to arrive here as "no
+    // unit registered", which `verdict` short-circuits to `Ok` — the check would
+    // clear a daemon it never examined. An undetermined check reports `Unknown`
+    // (#4005 precedent), same as an absent `/health` above.
+    if label == launchd_probe::DaemonLabelProbe::Undeterminable {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Unknown,
+            "`~/Library/LaunchAgents` could not be read — cannot tell whether a launchd \
+             unit owns this daemon, so orphan status is undetermined. Check the directory \
+             with `ls -ld ~/Library/LaunchAgents` (issues #4230, #5623)",
+        );
+    }
     // Only ask launchd when a daemon unit is registered; without one there is
     // nothing to compare against and `verdict` short-circuits to `Ok` anyway.
     let ownership = label
-        .as_deref()
+        .label()
         .map(launchd_probe::launchd_ownership)
         .unwrap_or(launchd_probe::LaunchdOwnership::Unavailable);
     // #4469 note: `snapshot.launchd_supervision` carries the daemon's THREE-STATE
@@ -87,7 +100,7 @@ pub(crate) fn orphan_daemon_check(snapshot: Option<&HealthSnapshot>) -> DoctorCh
     // signal's real consumer is `/health` itself, which `CLAUDE.md`'s restart
     // convention tells operators to read directly.
     verdict(
-        label.as_deref(),
+        label.label(),
         ownership,
         snapshot.pid,
         snapshot.supervised,
