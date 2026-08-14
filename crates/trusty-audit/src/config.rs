@@ -149,6 +149,43 @@ pub struct ToolPins {
     pub trusty_review: ToolPin,
 }
 
+/// Per-role model selection for the audit's review inference (#5671).
+///
+/// Why: the built-in slugs in [`crate::inference`] are Rust constants, so a
+/// model rename would otherwise need a release before an engagement could run.
+/// Naming them here lets the owner correct a slug in the file the recipient
+/// already has. Every field is optional — a config that says nothing about
+/// models gets the built-in defaults, which is the common case.
+/// What: an all-optional mirror of the four variables `trusty-review` reads.
+/// The TOML shape is a `[models]` table:
+///
+/// ```toml
+/// [models]
+/// reviewer = "anthropic/claude-sonnet-4.6"
+/// ```
+///
+/// Unknown keys are REJECTED here, unlike the rest of the config. The point of
+/// the table is fixing a slug without a release; `reviewr = "…"` silently
+/// falling back to the built-in default defeats exactly that, and the operator
+/// would only learn of the typo from a surprising bill. The cost is that a
+/// newer generator adding a fifth role fails to load rather than degrading —
+/// the right trade for four keys that are all optional anyway.
+/// Test: `super::config_tests::a_models_table_loads_and_is_optional`,
+/// `super::config_tests::a_typo_in_the_models_table_is_a_parse_error`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ModelPins {
+    /// Overrides the provider `trusty-review` selects (`openrouter` by default).
+    pub provider: Option<String>,
+    /// Overrides the reviewer role's model id.
+    pub reviewer: Option<String>,
+    /// Overrides the verifier role's model id.
+    pub verifier: Option<String>,
+    /// Overrides the summarizer role's model id.
+    pub summarizer: Option<String>,
+}
+
 /// The engagement config that travels inside the handoff package.
 ///
 /// Why: the recipient can read this file before running anything — that
@@ -168,6 +205,10 @@ pub struct EngagementConfig {
     pub instructions: String,
     /// The exact tool versions this engagement runs (#5495).
     pub tools: ToolPins,
+    /// Per-role model selection for review inference (#5671). Absent means the
+    /// built-in slugs in [`crate::inference`].
+    #[serde(default)]
+    pub models: ModelPins,
     /// Client name, when the generator recorded one.
     #[serde(default)]
     pub client: Option<String>,
@@ -255,6 +296,34 @@ trusty-review = "0.15.1"
         assert_eq!(cfg.tools.tga.version(), "2.9.4");
         assert_eq!(cfg.tools.trusty_analyze.version(), "0.9.2");
         assert_eq!(cfg.tools.trusty_review.version(), "0.15.1");
+    }
+
+    /// A model rename must be fixable in the engagement file, and a config that
+    /// says nothing about models must keep loading (#5671).
+    #[test]
+    fn a_models_table_loads_and_is_optional() {
+        let bare =
+            EngagementConfig::from_toml(SAMPLE, Path::new("engagement.toml")).expect("parses");
+        assert_eq!(bare.models, ModelPins::default());
+
+        let text = format!("{SAMPLE}\n[models]\nreviewer = \"anthropic/claude-opus-4.8\"\n");
+        let pinned =
+            EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("parses");
+        assert_eq!(
+            pinned.models.reviewer.as_deref(),
+            Some("anthropic/claude-opus-4.8")
+        );
+        assert!(pinned.models.verifier.is_none());
+    }
+
+    /// A misspelled role must not fall back to the built-in slug in silence —
+    /// the operator would only find out from the bill.
+    #[test]
+    fn a_typo_in_the_models_table_is_a_parse_error() {
+        let text = format!("{SAMPLE}\n[models]\nreviewr = \"anthropic/claude-opus-4.8\"\n");
+        let err = EngagementConfig::from_toml(&text, Path::new("engagement.toml"))
+            .expect_err("`reviewr` is not a role");
+        assert!(matches!(err, AuditError::Parse { .. }), "{err:?}");
     }
 
     #[test]

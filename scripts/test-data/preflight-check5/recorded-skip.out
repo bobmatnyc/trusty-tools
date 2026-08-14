@@ -1,0 +1,3 @@
+toolchain: rustc 1.97.1 (selected over ambient 1.94.1; the scratch resolution ignores Cargo.lock)
+SKIP trusty-mpm: excluded by scripts/semver-checks-crate-exclusions.tsv — binary-only consumer surface: installed as the `tm` executable via `cargo install trusty-mpm`, and a binary user gets a whole new executable, so library API compatibility is meaningless to them. Zero workspace packages depend on it (re-checked by the gate) and crates.io reported 0 reverse dependencies on 2026-08-12.
+semver gate: scanned (explicit); 0 crate(s) checked, 1 skipped — OK.

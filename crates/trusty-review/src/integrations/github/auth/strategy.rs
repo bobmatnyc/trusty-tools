@@ -171,20 +171,12 @@ pub struct SystemGhResolver;
 
 impl GhTokenResolver for SystemGhResolver {
     fn gh_auth_token(&self) -> Option<String> {
-        let output = std::process::Command::new("gh")
-            .args(["auth", "token"])
-            .output()
-            .map_err(|e| tracing::debug!("`gh auth token` could not be spawned: {e}"))
-            .ok()?;
-        if !output.status.success() {
-            tracing::debug!(
-                status = ?output.status.code(),
-                "`gh auth token` exited non-zero (not logged in?)"
-            );
-            return None;
-        }
-        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if token.is_empty() { None } else { Some(token) }
+        // #5475: routed through trusty-common's single `gh` entry point; the
+        // spawn/non-zero/empty triad it used to hand-roll are its combinators.
+        trusty_common::gh::GhCommand::new(["auth", "token"])
+            .nonempty_stdout_blocking()
+            .map_err(|e| tracing::debug!("`gh auth token` unusable: {e}"))
+            .ok()
     }
 }
 

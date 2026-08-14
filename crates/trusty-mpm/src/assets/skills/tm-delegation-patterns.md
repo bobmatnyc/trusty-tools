@@ -229,6 +229,16 @@ agents that modify files. Not needed for sequential agents, read-only research,
 or separate file trees. Use `run_in_background: true` for fire-and-forget
 parallel work.
 
+🔴 **`isolation: "worktree"` is the only sanctioned mechanism, and the PM never
+authors a `git worktree add` into a dispatch prompt (#5649).**
+`tm hook --pm-guard` reads the declared parameter and never the prompt, so a
+hand-rolled worktree leaves the agent counted against the shared HEAD and gets
+the next file-mutating dispatch denied for a collision that does not exist.
+
+**When `isolation` is unavailable, serialize** — one file-mutating agent at a
+time, each waited for before the next. Serializing always works. Hand-rolling to
+parallelize anyway is what this forbids.
+
 ## Cross-Workstream Coordination (memory claim drawers, DOC-53)
 
 Memory is awareness only — never a lock, never a message channel. git/GitHub

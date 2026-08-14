@@ -47,9 +47,7 @@ const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Base directory for allowlist-safe test index roots: `$HOME/.trusty-search-test-roots`.
 fn test_roots_base() -> PathBuf {
-    let home = dirs::home_dir().expect("HOME must be set to run trusty-search tests");
-    let base = home.join(".trusty-search-test-roots");
-    std::fs::create_dir_all(&base).expect("create ~/.trusty-search-test-roots");
+    let base = crate::allowlist::test_fixtures::base_dir();
     sweep_stale_entries(&base);
     base
 }
@@ -71,7 +69,10 @@ fn sweep_stale_entries(base: &Path) {
             .and_then(|modified| now.duration_since(modified).ok())
             .is_some_and(|age| age > STALE_AFTER);
         if is_stale {
+            // Per-process allowlist files live here too; `remove_dir_all`
+            // errors on a plain file, so try both.
             let _ = std::fs::remove_dir_all(entry.path());
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
@@ -90,5 +91,9 @@ pub(super) fn allowlisted_index_root(prefix: &str) -> (TempDir, PathBuf) {
         .tempdir_in(&base)
         .unwrap_or_else(|e| panic!("create tempdir under {}: {e}", base.display()));
     let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize tempdir");
+    // #767: the name is now literally true — the root is written into the
+    // per-process test allowlist so the default-deny gate admits it. A root
+    // obtained any other way is refused, exactly as in production.
+    crate::allowlist::test_fixtures::approve(&canonical);
     (dir, canonical)
 }
