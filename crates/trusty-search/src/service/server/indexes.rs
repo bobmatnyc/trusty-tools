@@ -232,7 +232,15 @@ pub(super) async fn create_index_handler(
     // the canonical mount returned zero hits.
     // Issue #829: validate_root_path is now async (uses tokio::fs::canonicalize
     // and tokio::fs::metadata to avoid blocking the executor thread).
-    let canonical_root = match validate_root_path(&req.root_path, req.allow_sensitive_path).await {
+    // #767: `validate_root_path` now also enforces the opt-in allowlist, so
+    // this is the gate for every index created over HTTP, CLI, or MCP.
+    let canonical_root = match validate_root_path(
+        &req.root_path,
+        req.allow_sensitive_path,
+        &state.allowlist_paths,
+    )
+    .await
+    {
         Ok(p) => p,
         Err(resp) => return resp,
     };

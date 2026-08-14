@@ -17,3 +17,5 @@ trusty-common	embedder-cuda	cudarc/candle-kernels build.rs panics without nvcc; 
 trusty-common	embedder-coreml	links the macOS CoreML framework; cannot build on ubuntu-latest
 trusty-embedderd	cuda	pass-through to trusty-common/embedder-cuda; cudarc + candle-kernels build.rs panic "`nvcc --version` failed" without the CUDA toolkit
 trusty-embedderd	coreml	pass-through to trusty-common/embedder-coreml; links the macOS CoreML framework, cannot build on ubuntu-latest
+trusty-search	cuda	pass-through to trusty-common/embedder-cuda + trusty-embedderd/cuda; cudarc + candle-kernels build.rs panic "`nvcc --version` failed" without the CUDA toolkit
+trusty-search	coreml	pass-through to trusty-common/embedder-coreml; links the macOS CoreML framework, cannot build on ubuntu-latest

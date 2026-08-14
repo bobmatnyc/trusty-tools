@@ -69,20 +69,11 @@ impl SessionManager {
         ephemeral: bool,
         owned: bool,
     ) -> Result<SessionRecord, ManagedError> {
-        // #3823: guarantee the tmux SERVER exists before the FIRST tmux call
-        // this flow issues (`resolve_session_name`'s name-collision
-        // `list-sessions` probe, below) — on a machine where tmux has never
-        // run, that probe is what used to 500 the whole create, long before
-        // the #3386/#3722 choke point in `create_with_resolved_name` would
-        // have started it. On the (common) case where the server is already
-        // up, `tmux start-server` is a cheap no-op round-trip — redundant
-        // with the pre-existing #3386/#3722 `ensure_server_up` call inside
-        // `core::tmux::create_managed_session` (reached a few calls later
-        // via `create_with_resolved_name` → `self.tmux.create_session()`),
-        // but accepted: correctness (never racing the FIRST tmux call
-        // against an absent socket) outweighs the cost of one extra
-        // idempotent subprocess spawn per session create.
-        self.tmux.ensure_server_up()?;
+        // #3886: the #3823 server-up guard this flow used to issue here now
+        // lives inside `resolve_session_name` (below), adjacent to the
+        // `list-sessions` probe it protects, so the in-project launch routes
+        // that bypass this function inherit it too. Nothing between here and
+        // that call touches tmux, so the guarantee is unchanged.
 
         // Never run (and therefore never recursively watch/scan) a managed
         // session in `$HOME` or a TCC-protected folder — that triggers a cascade

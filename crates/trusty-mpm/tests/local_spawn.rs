@@ -233,7 +233,7 @@ fn get_origin_url_returns_some_for_git_repo_with_origin() {
         .expect("git remote add");
     assert!(remote.status.success(), "git remote add failed");
 
-    let url = get_origin_url(dir);
+    let url = get_origin_url(dir).expect("git must succeed on a healthy repo");
     assert_eq!(
         url.as_deref(),
         Some(fake_url),
@@ -241,20 +241,24 @@ fn get_origin_url_returns_some_for_git_repo_with_origin() {
     );
 }
 
-/// `get_origin_url` returns `None` when the directory is not a git repo.
+/// `get_origin_url` returns `Ok(None)` when the directory is not a git repo.
 ///
 /// Why: the no-remote error path in `spawn_managed_local` and `tm launch` depends
-/// on `get_origin_url` returning `None` cleanly for non-git directories.
-/// What: uses a plain temp dir (no git init) and asserts None.
+/// on `get_origin_url` returning `None` cleanly for non-git directories. Since
+/// #4734 the assertion is specifically `Ok(None)`, not merely "not a URL": a
+/// plain directory is an ANSWER, and classifying it as a git failure would fail
+/// every one of those callers closed for the ordinary case.
+/// What: uses a plain temp dir (no git init) and asserts `Ok(None)`.
 /// Test: this function IS the test.
 #[test]
 fn get_origin_url_returns_none_for_non_git_dir() {
     use trusty_mpm::daemon::managed_routes::inproject::get_origin_url;
 
     let tmp = tempfile::TempDir::new().expect("temp dir");
+    let result = get_origin_url(tmp.path());
     assert!(
-        get_origin_url(tmp.path()).is_none(),
-        "get_origin_url must return None for a plain directory with no git"
+        matches!(result, Ok(None)),
+        "get_origin_url must return Ok(None) for a plain directory with no git, got {result:?}"
     );
 }
 
@@ -371,8 +375,9 @@ fn spawn_managed_local_redirects_to_managed_clone() {
     assert!(remote_add.status.success(), "git remote add failed");
 
     // Step 0 (mirrors spawn_managed_local): read the origin URL.
-    let origin_url =
-        get_origin_url(live_dir).expect("get_origin_url must return Some for a repo with remote");
+    let origin_url = get_origin_url(live_dir)
+        .expect("git must succeed on a healthy repo")
+        .expect("get_origin_url must return Some for a repo with remote");
     assert_eq!(
         origin_url, fake_origin,
         "origin URL must match what was set"
@@ -458,12 +463,14 @@ fn spawn_managed_local_errors_on_no_remote() {
         .expect("git init");
     assert!(init.status.success(), "git init failed");
 
-    // get_origin_url must return None — this is what triggers the error branch in
-    // spawn_managed_local.
+    // get_origin_url must return Ok(None) — this is what triggers the error branch
+    // in spawn_managed_local. #4734: `Ok`, specifically. A repo that simply has no
+    // `origin` is not a git failure, and turning it into one would swap this
+    // operator-actionable `tm connect` hint for a raw git error.
     let url = get_origin_url(dir);
     assert!(
-        url.is_none(),
-        "get_origin_url must return None for a git repo with no origin remote"
+        matches!(url, Ok(None)),
+        "get_origin_url must return Ok(None) for a git repo with no origin remote, got {url:?}"
     );
 
     // Reconstruct the exact error that spawn_managed_local produces for Ok(None).

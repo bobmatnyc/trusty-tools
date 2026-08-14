@@ -95,7 +95,9 @@ async fn validate_root_path_denylist_rejects_home() {
     if !home.is_dir() {
         return;
     }
-    let result = super::helpers::validate_root_path(&home, false).await;
+    let result =
+        super::helpers::validate_root_path(&home, false, &crate::allowlist::test_fixtures::paths())
+            .await;
     assert!(
         result.is_err(),
         "$HOME itself must be rejected by validate_root_path"
@@ -181,10 +183,30 @@ async fn validate_root_path_accepts_safe_project_dir() {
     .copied();
 
     if let Some(path) = candidate {
-        let result = super::helpers::validate_root_path(path, false).await;
+        // #767: the gate is now default-deny, so a safe directory is only
+        // accepted once approved. Approve it in a throwaway allowlist so this
+        // test keeps asserting exactly what it always did — that the DENYLIST
+        // does not block a legitimate project dir.
+        let fixture = tempfile::tempdir().expect("tempdir");
+        let allowlist = fixture.path().join("allowlist.toml");
+        crate::allowlist::add_to_allowlist(
+            crate::allowlist::AllowlistEntry {
+                path: path.to_path_buf(),
+                name: None,
+                exclude: Vec::new(),
+                extensions: Vec::new(),
+                skip_kg: false,
+            },
+            Some(&allowlist),
+        )
+        .expect("seed allowlist");
+        let paths = crate::allowlist::AllowlistPaths::default()
+            .with_allowlist(allowlist)
+            .with_project_paths(fixture.path().join("no-projects.json"));
+        let result = super::helpers::validate_root_path(path, false, &paths).await;
         assert!(
             result.is_ok(),
-            "expected Ok for safe directory {:?}, got Err",
+            "expected Ok for safe, approved directory {:?}, got Err",
             path
         );
     }
@@ -273,6 +295,11 @@ async fn create_index_allows_sensitive_path_when_opted_in() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let canonical_root = std::fs::canonicalize(tmp.path()).expect("canonicalize tempdir");
+    // #767: `allow_sensitive_path` relaxes the temp-dir PREFIX check, never the
+    // opt-in gate — so this test must approve the root to keep asserting what
+    // it always did. That the flag alone is NOT enough is asserted by
+    // `allow_sensitive_path_does_not_bypass_the_allowlist`.
+    crate::allowlist::test_fixtures::approve(&canonical_root);
     let state = SearchAppState::new(IndexRegistry::new());
     let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
     state.install_embedder(embedder).await;
@@ -345,7 +372,9 @@ async fn validate_root_path_denylist_blocks_symlink_to_ssh() {
     if std::os::unix::fs::symlink(&ssh, &link).is_err() {
         return; // Cannot create symlink — skip.
     }
-    let result = super::helpers::validate_root_path(&link, false).await;
+    let result =
+        super::helpers::validate_root_path(&link, false, &crate::allowlist::test_fixtures::paths())
+            .await;
     let _ = std::fs::remove_file(&link);
     assert!(
         result.is_err(),

@@ -64,10 +64,15 @@ const FINDINGS_CAP: usize = super::synthesize_digest::ELABORATION_TARGETS_CAP;
 /// lists more elaboration targets than that, so the model never has reason to
 /// exceed it.
 /// Test: `synthesize_tests.rs::{synthesis_schema_shape, schema_shrinks_on_retry}`.
-pub(super) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
-    ResponseSchema {
-        name: "report_synthesis".to_string(),
-        schema: serde_json::json!({
+///
+/// #5675: built via [`ResponseSchema::new`], which applies `enforce_strict_mode`.
+/// This schema previously used a struct literal and so never got that pass —
+/// `findings.items` carried no `additionalProperties`, and OpenAI strict mode
+/// (forwarded by OpenRouter for `openai/*`) rejected every synthesis call.
+pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
+    ResponseSchema::new(
+        "report_synthesis",
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "executive_summary": {
@@ -84,8 +89,7 @@ pub(super) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
                             "severity": {"type": "string", "enum": ["RED", "AMBER"]},
                             "cost": {"type": "string", "description": "Qualitative effort/cost framing; no invented figures."},
                             "apps": {"type": "string", "description": "Affected application name(s)."}
-                        },
-                        "required": ["description", "severity", "cost", "apps"]
+                        }
                     },
                     "description": "The most material RED/AMBER risks, most material first, drawn ONLY from the findings provided."
                 },
@@ -99,20 +103,22 @@ pub(super) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
                             "title": {"type": "string"},
                             "severity": {"type": "string", "enum": ["RED", "AMBER"]},
                             "description": {"type": "string"},
-                            "evidence": {"type": "string"},
-                            "component": {"type": "string"},
-                            "business_impact": {"type": "string"},
+                            // #5675: strict mode requires every property in
+                            // `required`, so these four can no longer be omitted.
+                            // Say empty is acceptable, or the model invents filler
+                            // to fill a key it has nothing to put in.
+                            "evidence": {"type": "string", "description": "Supporting evidence drawn from the provided data. Empty string if the data provides none."},
+                            "component": {"type": "string", "description": "Affected component or path. Empty string if the data does not identify one."},
+                            "business_impact": {"type": "string", "description": "Business-impact framing. Empty string if the data does not support one — never invent an impact to fill this field."},
                             "remediation": {"type": "string"},
-                            "cost_effort": {"type": "string"}
-                        },
-                        "required": ["app_slug", "title", "severity", "description", "remediation"]
+                            "cost_effort": {"type": "string", "description": "Qualitative effort/cost framing; no invented figures. Empty string if unknown."}
+                        }
                     },
                     "description": "Elaboration prose EXCLUSIVELY for the findings listed under \"Findings requiring elaboration\". Leave empty when that list says none. Never add a finding not in that list, and never re-elaborate a finding tagged [verified] elsewhere in the data."
                 }
-            },
-            "required": ["executive_summary", "top_risks", "findings"]
+            }
         }),
-    }
+    )
 }
 
 /// The synthesis system prompt, built from the resolved (layered) section
@@ -155,6 +161,7 @@ fn synthesis_system_prompt(
 - If a provided value carries an "(approx)" marker, preserve that marker verbatim.
 - Write prose for RED and AMBER findings ONLY. Do not mention, elaborate, or infer GREEN/positive findings — none are provided, and none should appear.
 - Be concise, specific, and deal-relevant: what an acquirer must act on.
+- Every finding field is structurally required. Emit an empty string for any you have nothing grounded to say in — never fill one with invented content.
 
 ## Output
 Populate the structured response:
