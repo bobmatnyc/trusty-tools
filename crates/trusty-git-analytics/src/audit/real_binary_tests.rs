@@ -11,7 +11,9 @@
 //!
 //! What: two runs of the guard against `target/<profile>/trusty-analyze` — the
 //! refusal arm (trusty-search unreachable) and the success arm (trusty-search
-//! reachable).
+//! reachable) — plus the same treatment for the two other contracts that live in
+//! `trusty-search`'s binary: the indexing CLI the repository pass builds, and the
+//! `start --foreground` / `/health` pair [`super::search_daemon`] rests on.
 //!
 //! Both are `#[ignore]`d because they need that binary built, which
 //! `cargo test -p tga` does not do, and the success arm additionally needs a
@@ -331,4 +333,68 @@ async fn the_real_search_binary_exits_non_zero_for_an_unknown_index() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+/// `start --foreground` is still the CLI the search guard spawns.
+///
+/// Why this cannot be checked in-crate: `super::search_daemon::start_args` is a
+/// vector a stub accepts whatever it contains, so every stub test would still
+/// pass if trusty-search renamed or dropped the flag. Without `--foreground` the
+/// child re-spawns itself and the process the guard detached exits at once, which
+/// reads to the readiness poll exactly like a daemon that will not start.
+///
+/// `--help` mutates nothing and needs no daemon, so this arm costs one process
+/// spawn.
+#[ignore = "needs `cargo build -p trusty-search`; run with --include-ignored"]
+#[test]
+fn the_real_search_binary_still_takes_start_foreground() {
+    let binary = real_search_binary();
+    let output = std::process::Command::new(&binary)
+        .args(["start", "--help"])
+        .output()
+        .expect("run `trusty-search start --help`");
+    assert!(output.status.success(), "`start --help` exited non-zero");
+
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("--foreground"),
+        "`--foreground` is what stops the child re-spawning itself:\n{help}"
+    );
+}
+
+/// The fast path, end to end: a running trusty-search satisfies the preflight at
+/// the address the shared layout resolves, without anything being spawned.
+///
+/// This is the half no stub can stand in for. It checks three facts the guard
+/// assumes separately — that `DaemonAddrLayout::TRUSTY_SEARCH.resolve_base_url()`
+/// finds the daemon an operator actually started, that its `/health` answers 2xx
+/// rather than the `degraded` 503 the analyze daemon reports, and that
+/// [`super::SearchGuard::from_env`] therefore returns a guard that passes. The
+/// binary is a path that cannot exist, so any spawn attempt would fail the test.
+///
+/// The spawn arm is deliberately NOT exercised against the real binary: starting
+/// a second `trusty-search` would contend with the operator's daemon for its data
+/// directory and spend ONNX model-load time in a unit-test suite. The argument
+/// vector it would use is checked above instead.
+#[ignore = "needs a running trusty-search; run with --include-ignored"]
+#[tokio::test]
+async fn the_real_search_daemon_satisfies_the_preflight_without_a_spawn() {
+    let _ = reachable_trusty_search().await;
+
+    let resolved = crate::audit::SearchGuard::from_env();
+    let guard = crate::audit::SearchGuard {
+        binary: "/nonexistent/trusty-search".to_string(),
+        startup_timeout: Duration::from_secs(2),
+        poll_interval: Duration::from_millis(200),
+        ..resolved
+    };
+    crate::audit::ensure_search_daemon_with(&guard)
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "a running trusty-search must satisfy the preflight at the resolved address \
+                 `{}`: {e}",
+                guard.url
+            )
+        });
 }

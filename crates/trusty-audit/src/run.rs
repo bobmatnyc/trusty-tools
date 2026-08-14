@@ -334,15 +334,16 @@ fn writer_tag() -> String {
     format!("{}-{}", std::process::id(), hasher.finish())
 }
 
-/// The three binaries a run drives, each proven to be at the engagement's pin.
+/// The four binaries a run drives, each proven to be at the engagement's pin.
 ///
-/// Why: three named fields rather than a lookup table, so the "tool not found"
-/// branch does not exist. The obvious table version needs a fallback arm at
-/// every use site, and the natural fallback — the bare binary name — is a `PATH`
-/// lookup, which is the one thing this module must never do.
+/// Why: named fields rather than a lookup table, so the "tool not found" branch
+/// does not exist. The obvious table version needs a fallback arm at every use
+/// site, and the natural fallback — the bare binary name — is a `PATH` lookup,
+/// which is the one thing this module must never do.
 #[derive(Debug, Clone)]
 struct PinnedBinaries {
     tga: PathBuf,
+    search: PathBuf,
     analyze: PathBuf,
     review: PathBuf,
 }
@@ -406,6 +407,7 @@ fn pinned_binaries(work: &WorkDir, pins: &ToolPins) -> Result<PinnedBinaries, Au
 
     Ok(PinnedBinaries {
         tga: path_of(RequiredTool::Tga)?,
+        search: path_of(RequiredTool::TrustySearch)?,
         analyze: path_of(RequiredTool::TrustyAnalyze)?,
         review: path_of(RequiredTool::TrustyReview)?,
     })
@@ -763,11 +765,11 @@ pub const PER_REPO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 /// Spawn the pinned `tga audit` and turn its exit into a per-repo verdict.
 ///
-/// The child inherits nothing it does not need: the three binaries are named by
+/// The child inherits nothing it does not need: the four binaries are named by
 /// absolute path or by the variables tga and trusty-review read
-/// (`TRUSTY_ANALYZE_BIN`, `TRUSTY_REVIEW_BIN`), so nothing on the operator's
-/// `PATH` can be reached instead. The credential goes in the environment and
-/// only there — see the module docs for what that costs.
+/// (`TRUSTY_SEARCH_BIN`, `TRUSTY_ANALYZE_BIN`, `TRUSTY_REVIEW_BIN`), so nothing
+/// on the operator's `PATH` can be reached instead. The credential goes in the
+/// environment and only there — see the module docs for what that costs.
 ///
 /// Alongside the credential the child gets the provider and per-role model ids
 /// from [`crate::inference`]: naming the key never routed anything to
@@ -804,6 +806,11 @@ async fn spawn_tga(
         .arg(output)
         .current_dir(cwd)
         .env(ENV_INFERENCE_CREDENTIAL, config.openrouter_key.expose())
+        // #5670: `tga audit` starts trusty-search and indexes each repository
+        // through it. On a recipient's clean machine the pinned copy in
+        // `work/tools/` is the only one there is, so without this the guard falls
+        // through to a PATH lookup and refuses the run.
+        .env(ENV_SEARCH_BIN, &binaries.search)
         .env(ENV_ANALYZE_BIN, &binaries.analyze)
         .env(ENV_REVIEW_BIN, &binaries.review)
         .stdin(Stdio::null())
@@ -865,6 +872,9 @@ async fn spawn_tga(
 /// The variable `tga audit` reads the inference credential from.
 pub const ENV_INFERENCE_CREDENTIAL: &str = "OPENROUTER_API_KEY";
 
+/// The variable `tga audit` reads its trusty-search binary from (#5670).
+const ENV_SEARCH_BIN: &str = "TRUSTY_SEARCH_BIN";
+
 /// The variable `trusty-review` reads its analyze binary from.
 const ENV_ANALYZE_BIN: &str = "TRUSTY_ANALYZE_BIN";
 
@@ -925,6 +935,7 @@ instructions = "Assess the last 52 weeks."
 
 [tools]
 tga = "2.9.4"
+trusty-search = "0.47.0"
 trusty-analyze = "0.9.2"
 trusty-review = "0.15.1"
 "#;
@@ -986,9 +997,11 @@ trusty-review = "0.15.1"
         }
         let record = format!(
             "[[tools]]\ncrate_name = \"tga\"\nversion = \"2.9.4\"\nbinary = \"{tga}\"\n\
+             [[tools]]\ncrate_name = \"trusty-search\"\nversion = \"0.47.0\"\nbinary = \"{s}\"\n\
              [[tools]]\ncrate_name = \"trusty-analyze\"\nversion = \"0.9.2\"\nbinary = \"{a}\"\n\
              [[tools]]\ncrate_name = \"trusty-review\"\nversion = \"0.15.1\"\nbinary = \"{r}\"\n",
             tga = RequiredTool::Tga.path_in(work).display(),
+            s = RequiredTool::TrustySearch.path_in(work).display(),
             a = RequiredTool::TrustyAnalyze.path_in(work).display(),
             r = RequiredTool::TrustyReview.path_in(work).display(),
         );
@@ -1361,9 +1374,14 @@ trusty-review = "0.15.1"
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
         let mut script = String::from(
+            // #5670: the search binary is checked alongside the other two — on a
+            // recipient's clean machine the pinned copy is the only one there is,
+            // and without it named here `tga audit`'s search preflight falls
+            // through to a PATH lookup and refuses the run.
             "#!/bin/sh\ntest -n \"$OPENROUTER_API_KEY\" || exit 9\n\
              test -n \"$TRUSTY_REVIEW_BIN\" || exit 8\n\
-             test -n \"$TRUSTY_ANALYZE_BIN\" || exit 7\n",
+             test -n \"$TRUSTY_ANALYZE_BIN\" || exit 7\n\
+             test -n \"$TRUSTY_SEARCH_BIN\" || exit 6\n",
         );
         script.push_str(writes_a_manifest(None).trim_start_matches("#!/bin/sh\n"));
         install_stubs(&work, &script);

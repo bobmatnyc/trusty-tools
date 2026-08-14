@@ -1643,3 +1643,282 @@ fn a_credential_in_an_index_failure_never_reaches_the_gap_line() {
         gaps[0]
     );
 }
+
+// ─── #5670: starting trusty-search, link 1 of the prerequisite chain ──────────
+
+use crate::audit::search_daemon::start_args;
+use crate::audit::{ensure_search_daemon_with, SearchGuard};
+
+/// A listener whose `/health` answers `503 Service Unavailable` while `flag` is
+/// absent and `200 OK` once it exists. Returns the port it bound.
+///
+/// The flag file stands in for "trusty-search is up". Both daemons in the
+/// ordering fixture below read the same flag, because that is the real coupling:
+/// `trusty-analyze`'s health is a function of trusty-search's live status
+/// (`crates/trusty-analyze/src/service/routes.rs`'s `health`), not of its own
+/// uptime. A file rather than an in-process flag, because the thing that flips it
+/// is a detached child process.
+async fn serve_health_gated_on(flag: std::path::PathBuf) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("read the bound address")
+        .port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let flag = flag.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                let reply: &[u8] = if flag.exists() {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
+                };
+                let _ = stream.write_all(reply).await;
+            });
+        }
+    });
+    port
+}
+
+/// A search guard pointed at `port`, with budgets short enough for a unit test.
+fn search_guard_on(port: u16, binary: &str) -> SearchGuard {
+    SearchGuard {
+        url: format!("http://127.0.0.1:{port}"),
+        binary: binary.to_string(),
+        startup_timeout: std::time::Duration::from_millis(400),
+        poll_interval: std::time::Duration::from_millis(50),
+    }
+}
+
+/// The address is trusty-search's to publish, not tga's to guess.
+///
+/// `trusty-search` binds an OS-assigned port and records it in its own discovery
+/// files, so a hard-coded `127.0.0.1:7878` here would miss every auto-ported and
+/// every `TRUSTY_DATA_DIR`-isolated daemon. This asserts the guard asks
+/// `DaemonAddrLayout::TRUSTY_SEARCH` — the resolver promoted into `trusty-common`
+/// for exactly this caller (#5670) — rather than carrying a second copy of those
+/// rules, and that the binary comes from the one resolver `repo_index` already
+/// owns, so the daemon this starts and the binary that indexes into it are the
+/// same install.
+#[test]
+fn the_search_guard_resolves_its_address_from_the_shared_layout() {
+    use trusty_common::daemon_guard::DaemonAddrLayout;
+
+    let guard = SearchGuard::from_env();
+    assert_eq!(
+        guard.url,
+        DaemonAddrLayout::TRUSTY_SEARCH.resolve_base_url()
+    );
+    assert_eq!(guard.binary, crate::audit::resolve_search_binary());
+    assert_eq!(guard.startup_timeout, crate::audit::SEARCH_STARTUP_TIMEOUT);
+}
+
+/// The argument vector is the tga→trusty-search contract, asserted without
+/// spawning anything.
+///
+/// `--foreground` is the load-bearing half: it is what trusty-search's own guard
+/// passes (`crates/trusty-search/src/commands/daemon_guard.rs`'s
+/// `spawn_daemon_with_device`), and without it `start` re-spawns itself as a
+/// background daemon and the child we detached exits immediately.
+#[test]
+fn the_search_spawn_arguments_are_start_in_the_foreground() {
+    assert_eq!(start_args(), vec!["start", "--foreground"]);
+}
+
+/// A daemon that is already up is left alone.
+///
+/// The binary is a path that cannot exist, so any spawn attempt would fail the
+/// run — passing is therefore proof the fast path returned without spawning
+/// anything, which is what keeps `tga audit` from starting a second daemon beside
+/// the operator's own.
+#[tokio::test]
+async fn a_reachable_search_daemon_is_not_restarted() {
+    let port = serve_healthy().await;
+    let guard = search_guard_on(port, "/nonexistent/trusty-search");
+    ensure_search_daemon_with(&guard)
+        .await
+        .expect("a healthy daemon must satisfy the preflight without a spawn");
+}
+
+/// #5670, the spawn-failure arm: a machine with no trusty-search installed is a
+/// refusal, not a warning the sweep proceeds past.
+///
+/// The message has to name trusty-search and the path that was tried, because on
+/// a recipient's machine the whole remedy is either installing it or pointing
+/// `TRUSTY_SEARCH_BIN` at the engagement's pinned copy.
+#[tokio::test]
+async fn an_unspawnable_search_binary_refuses_the_audit() {
+    let guard = search_guard_on(free_port(), "/nonexistent/trusty-search");
+    let err = ensure_search_daemon_with(&guard)
+        .await
+        .expect_err("a binary that cannot be spawned must stop the audit");
+
+    let msg = err.to_string();
+    for needle in [
+        "trusty-search",
+        "/nonexistent/trusty-search",
+        "TRUSTY_SEARCH_BIN",
+    ] {
+        assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+}
+
+/// #5670, the readiness arm: a spawn that succeeds is not a daemon, and the
+/// refusal must arrive at the timeout rather than hanging the one-shot sweep.
+///
+/// The stub execs and exits at once, which is what `trusty-search start` does on
+/// a host it refuses to run on — under-spec RAM, or a data directory it cannot
+/// lock. The `cause` is what separates this arm from the spawn-failure one:
+/// reaching the readiness timeout is only possible after `spawn_detached`
+/// returned a live PID.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_search_daemon_that_never_comes_up_refuses_the_audit() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let stub = stub_binary(dir.path(), "trusty-search-stub", "#!/bin/sh\nexit 1\n");
+
+    let started = std::time::Instant::now();
+    let guard = search_guard_on(free_port(), &stub);
+    let err = ensure_search_daemon_with(&guard)
+        .await
+        .expect_err("a daemon that exits at once must stop the audit");
+
+    assert!(
+        err.cause.contains("did not become ready"),
+        "expected the readiness arm, got: {}",
+        err.cause
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the refusal must be bounded by the budget, not hang: {:?}",
+        started.elapsed()
+    );
+}
+
+/// The two-daemon fixture the ordering test below drives in both directions.
+///
+/// Returns a search guard and an analyze guard sharing one "trusty-search is up"
+/// flag file. The search stub creates the flag — starting trusty-search. The
+/// analyze stub exits 1, as the real `trusty-analyze serve` does at its own
+/// trusty-search check. Both `/health` listeners answer 503 until the flag
+/// exists, which is what an analyze daemon that has been up for days does while
+/// its trusty-search is dead.
+///
+/// `budget` is the readiness budget both guards get. The caller sets it per
+/// direction: a direction that waits on a real forked process needs a real one,
+/// and a direction whose flag is never created is decided by the fixture rather
+/// than by the clock.
+#[cfg(unix)]
+async fn degraded_stack(
+    dir: &std::path::Path,
+    budget: std::time::Duration,
+) -> (SearchGuard, crate::audit::AnalyzeGuard, std::path::PathBuf) {
+    let flag = dir.join("trusty-search-is-up");
+    let search_stub = stub_binary(
+        dir,
+        "trusty-search-stub",
+        &format!(
+            "#!/bin/sh\ntouch {}\nsleep 30\n",
+            flag.to_str().expect("a UTF-8 temp path")
+        ),
+    );
+    let analyze_stub = stub_binary(dir, "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
+
+    let mut search = search_guard_on(serve_health_gated_on(flag.clone()).await, &search_stub);
+    search.startup_timeout = budget;
+    let mut analyze = guard_on(serve_health_gated_on(flag.clone()).await, &analyze_stub);
+    analyze.startup_timeout = budget;
+
+    (search, analyze, flag)
+}
+
+/// #5670, THE regression: trusty-search is down while a stale `trusty-analyze`
+/// keeps answering `503 degraded`, and only the search guard running FIRST
+/// recovers it.
+///
+/// This is the case a fresh-spawn fix misses. `trusty-analyze`'s `/health` is a
+/// function of trusty-search's LIVE status, and `probe_once` counts only a 2xx,
+/// so an analyze daemon that has been up for days on top of a trusty-search that
+/// died an hour ago fails the analyze probe every run. Its spawned replacement
+/// exits at its own search check, the original keeps answering 503, and the
+/// readiness poll refuses an audit that has nothing wrong with its analyze daemon
+/// at all.
+///
+/// The test drives BOTH orders against the same fixture. Search-then-analyze
+/// leaves both preflights satisfied without the analyze daemon being touched;
+/// analyze-then-search refuses at the analyze poll, exactly as the defect did. So
+/// the assertion is not that two guards pass — it is that the ORDER is what makes
+/// them pass. `the_audit_command_runs_the_search_guard_before_the_analyze_guard`
+/// pins that order at the call site.
+///
+/// The two directions get different readiness budgets, and the short one is not
+/// what decides the failure: the reversed direction's flag file is never created
+/// by anything, which the assertion below states outright, so waiting longer
+/// changes nothing. The forward direction waits on a real forked process, which
+/// needs a budget wide enough to survive a loaded machine.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_search_guard_recovers_a_stale_degraded_analyze_daemon() {
+    // The fixed order, as `crate::commands::audit::run` runs it.
+    let ok_dir = tempfile::tempdir().expect("create a temp dir");
+    let (search, analyze, flag) =
+        degraded_stack(ok_dir.path(), std::time::Duration::from_secs(20)).await;
+    assert!(!flag.exists(), "trusty-search starts this run down");
+
+    ensure_search_daemon_with(&search)
+        .await
+        .expect("the search guard must start trusty-search");
+    assert!(
+        flag.exists(),
+        "the search guard must have started the daemon"
+    );
+    crate::audit::ensure_analyze_daemon_with(&analyze)
+        .await
+        .expect("a stale 503 analyze daemon recovers once trusty-search is back");
+
+    // The reverse order, against an identical fixture.
+    let bad_dir = tempfile::tempdir().expect("create a temp dir");
+    let (search, analyze, flag) =
+        degraded_stack(bad_dir.path(), std::time::Duration::from_secs(2)).await;
+    let err = crate::audit::ensure_analyze_daemon_with(&analyze)
+        .await
+        .expect_err("running the analyze guard first must refuse the audit");
+    assert!(
+        err.cause.contains("did not become ready"),
+        "the analyze preflight must fail at its readiness poll against the live 503, got: {}",
+        err.cause
+    );
+    assert!(
+        !flag.exists(),
+        "nothing in the analyze preflight starts trusty-search — that is the defect"
+    );
+    ensure_search_daemon_with(&search)
+        .await
+        .expect("the search guard still works; it was simply run too late");
+}
+
+/// #5670: the call site keeps the two preflights in the order the test above
+/// proves is load-bearing.
+///
+/// The behavioural test can only show that search-then-analyze passes where
+/// analyze-then-search refuses; it cannot see which order `run` uses. This reads
+/// the source of that function and asserts the search guard is called first, so a
+/// later edit that reorders them — or drops the search guard entirely — fails
+/// here rather than on a recipient's machine.
+#[test]
+fn the_audit_command_runs_the_search_guard_before_the_analyze_guard() {
+    let source = include_str!("../commands/audit.rs");
+    let search = source
+        .find("ensure_search_daemon().await?")
+        .expect("`tga audit` must ensure trusty-search before its sweep");
+    let analyze = source
+        .find("ensure_analyze_daemon().await?")
+        .expect("`tga audit` must still ensure trusty-analyze");
+    assert!(
+        search < analyze,
+        "trusty-analyze cannot boot without trusty-search, so its guard must run second"
+    );
+}

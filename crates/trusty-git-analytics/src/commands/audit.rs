@@ -18,7 +18,7 @@ use clap::Args;
 
 use anyhow::Context as _;
 use tga::audit::{
-    ensure_analyze_daemon, ensure_repositories_indexed, index_gap_lines,
+    ensure_analyze_daemon, ensure_repositories_indexed, ensure_search_daemon, index_gap_lines,
     require_inference_credential, require_rendered_report_carries_synthesis,
     require_review_supports_required_inference, resolve_review_binary, run_full_sweep,
     run_review_report, sweep_gap_lines, AuditSweepStats, SweepOptions, SweepStage,
@@ -133,9 +133,9 @@ const DEFAULT_OUTPUT_DIR: &str = "audit-output";
 ///
 /// # Errors
 ///
-/// Propagates a missing inference credential, an unstartable `trusty-analyze`
-/// daemon (#5670), and a failure to create the output directory — all whole-run
-/// preconditions. A stage failure is reported, not propagated.
+/// Propagates a missing inference credential, an unstartable `trusty-search` or
+/// `trusty-analyze` daemon (#5670), and a failure to create the output directory
+/// — all whole-run preconditions. A stage failure is reported, not propagated.
 pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::Result<()> {
     // #5454: the report's narrative now requires inference, so a missing
     // credential is checked before ANY work — ahead of the output directory and
@@ -148,6 +148,14 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     // renderer is ordinary — and that renderer produces exactly the report this
     // ticket abolished, while exiting 0.
     require_review_supports_required_inference()?;
+
+    // #5670: link 1 of the prerequisite chain, and it must precede the analyze
+    // preflight below — `trusty-analyze serve` exits at its own trusty-search
+    // check, and an analyze daemon that is already up answers `503 degraded` for
+    // as long as trusty-search is unreachable, which the analyze probe reads as
+    // no daemon at all. Reordering these two makes the analyze preflight refuse
+    // every run on a machine whose trusty-search is down.
+    ensure_search_daemon().await?;
 
     // #5670: the third whole-run precondition. Nothing started `trusty-analyze`,
     // and DOC-67 §8 sources the findings table, the complexity distribution and

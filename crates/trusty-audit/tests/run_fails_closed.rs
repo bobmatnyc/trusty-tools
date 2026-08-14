@@ -26,6 +26,7 @@ instructions = "Assess the last 52 weeks."
 
 [tools]
 tga = "2.9.4"
+trusty-search = "0.47.0"
 trusty-analyze = "0.9.2"
 trusty-review = "0.15.1"
 "#;
@@ -67,16 +68,17 @@ impl Engagement {
         )
     }
 
-    /// Stand in for a verified install: three executables plus the record that
+    /// Stand in for a verified install: four executables plus the record that
     /// says this client placed them.
     fn install_stubs(&self, script: &str) {
-        for name in ["tga", "trusty-analyze", "trusty-review"] {
+        for name in ["tga", "trusty-search", "trusty-analyze", "trusty-review"] {
             let path = self.work.join("tools").join(name);
             std::fs::write(&path, script).expect("stub");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
         let record = format!(
             "[[tools]]\ncrate_name = \"tga\"\nversion = \"2.9.4\"\nbinary = \"{d}/tga\"\n\
+             [[tools]]\ncrate_name = \"trusty-search\"\nversion = \"0.47.0\"\nbinary = \"{d}/s\"\n\
              [[tools]]\ncrate_name = \"trusty-analyze\"\nversion = \"0.9.2\"\nbinary = \"{d}/a\"\n\
              [[tools]]\ncrate_name = \"trusty-review\"\nversion = \"0.15.1\"\nbinary = \"{d}/r\"\n",
             d = self.work.join("tools").display()
