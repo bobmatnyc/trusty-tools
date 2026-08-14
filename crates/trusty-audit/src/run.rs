@@ -282,6 +282,58 @@ pub fn load_selection(work: &WorkDir) -> Result<Vec<SelectedRepo>, AuditError> {
     Ok(selection.repositories)
 }
 
+/// Record the repositories the next sweep should audit.
+///
+/// Why: [`SELECTION_FILE`] states two obligations on whoever writes it, and
+/// #5556 found there was no writer at all — `taudit clone` acquired the
+/// checkouts, `taudit run` then refused with "nothing to audit", and every
+/// per-stage test passed throughout. The writer lives beside the reader so the
+/// atomic-rename and `count`-first obligations are one decision rather than a
+/// note each producer re-reads; #5497's picker writes through here too.
+/// What: renders `count` ahead of the entries (serde field order, and `toml`
+/// emits values before tables), writes to a uniquely-named temporary file in
+/// the same directory, and renames it into place. The unique name is what lets
+/// two writers race without either reading the other's half-written file.
+/// Test: `super::run_tests::a_saved_selection_reads_back_whole`,
+/// `super::run_tests::racing_writers_never_leave_a_torn_selection`.
+///
+/// # Errors
+///
+/// [`AuditError::WorkDir`] when the state area cannot be made, the temporary
+/// file cannot be written, or the rename fails.
+pub fn save_selection(work: &WorkDir, repos: &[SelectedRepo]) -> Result<(), AuditError> {
+    let path = selection_path(work);
+    let dir = work.path(Area::State);
+    std::fs::create_dir_all(&dir).map_err(|source| AuditError::WorkDir { path: dir, source })?;
+
+    let selection = Selection {
+        count: repos.len(),
+        repositories: repos.to_vec(),
+    };
+    let text = toml::to_string_pretty(&selection).map_err(|e| AuditError::WorkDir {
+        path: path.clone(),
+        source: std::io::Error::other(e),
+    })?;
+
+    let temp = path.with_file_name(format!("{SELECTION_FILE}.{}.tmp", writer_tag()));
+    std::fs::write(&temp, text).map_err(|source| AuditError::WorkDir {
+        path: temp.clone(),
+        source,
+    })?;
+    std::fs::rename(&temp, &path).map_err(|source| {
+        let _ = std::fs::remove_file(&temp);
+        AuditError::WorkDir { path, source }
+    })
+}
+
+/// A suffix no two concurrent writers share: process, plus thread within it.
+fn writer_tag() -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    format!("{}-{}", std::process::id(), hasher.finish())
+}
+
 /// The three binaries a run drives, each proven to be at the engagement's pin.
 ///
 /// Why: three named fields rather than a lookup table, so the "tool not found"
@@ -945,6 +997,80 @@ trusty-review = "0.15.1"
 
     fn make_repo(work: &WorkDir, name: &str) {
         std::fs::create_dir_all(work.path(Area::Repos).join(name)).expect("mkdir repo");
+    }
+
+    /// The writer's own round trip: what [`save_selection`] leaves behind is
+    /// what [`load_selection`] accepts, `count` and all.
+    #[test]
+    fn a_saved_selection_reads_back_whole() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let repos = vec![
+            SelectedRepo {
+                name: "acme/api".to_owned(),
+                path: PathBuf::from("repos/acme/api"),
+            },
+            SelectedRepo {
+                name: "acme/web".to_owned(),
+                path: PathBuf::from("repos/acme/web"),
+            },
+        ];
+        save_selection(&work, &repos).expect("the selection writes");
+
+        let text = std::fs::read_to_string(selection_path(&work)).expect("read");
+        assert!(
+            text.starts_with("count = 2"),
+            "the count must precede the entries, or a truncated write is undetectable:\n{text}"
+        );
+        assert_eq!(load_selection(&work).expect("reads back"), repos);
+    }
+
+    /// The obligation the atomic rename exists for: a reader must never see a
+    /// prefix of a write, and two writers must not build the same temporary
+    /// file. Both are exercised at once — readers run throughout, and every
+    /// read either finds no file or finds a whole one.
+    #[test]
+    fn racing_writers_never_leave_a_torn_selection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let entry = |n: usize| SelectedRepo {
+            name: format!("acme/repo-{n}"),
+            path: PathBuf::from(format!("repos/acme/repo-{n}")),
+        };
+
+        std::thread::scope(|scope| {
+            for writer in 1..=4usize {
+                let work = &work;
+                scope.spawn(move || {
+                    // Different lengths, so a torn read is a mismatched count
+                    // rather than an identical file written twice.
+                    let repos: Vec<SelectedRepo> = (0..writer * 3).map(entry).collect();
+                    for _ in 0..20 {
+                        save_selection(work, &repos).expect("a racing write still succeeds");
+                    }
+                });
+            }
+            scope.spawn(|| {
+                for _ in 0..200 {
+                    match load_selection(&work) {
+                        Ok(repos) => assert!(!repos.is_empty()),
+                        // Absent is legal only before the first rename lands.
+                        Err(AuditError::NoRepositoriesSelected { .. }) => {}
+                        Err(e) => panic!("a reader saw a torn selection: {e}"),
+                    }
+                }
+            });
+        });
+
+        let repos = load_selection(&work).expect("the last write is whole");
+        assert!([3, 6, 9, 12].contains(&repos.len()), "{repos:?}");
+        // Nothing may be left in the state area but the file itself.
+        let leftovers: Vec<PathBuf> = std::fs::read_dir(work.path(Area::State))
+            .expect("read state")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]

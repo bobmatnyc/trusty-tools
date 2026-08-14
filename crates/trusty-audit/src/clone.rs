@@ -32,13 +32,20 @@
 //! sequence aborts only when EVERY repository failed, which is the one case
 //! where continuing would produce a report about nothing.
 //!
-//! Test: `super::clone_tests`, plus the `#[ignore]`d live clone there.
+//! **Acquiring is selecting** (#5556). What lands here is what the sweep audits:
+//! [`clone_all`] records the usable checkouts in `state/`[`run::SELECTION_FILE`]
+//! so `taudit clone …` and `taudit run` are one chain rather than two stages
+//! with an unwritten file between them.
+//!
+//! Test: `super::clone_tests`, `tests/cli_end_to_end.rs`, plus the `#[ignore]`d
+//! live clone there.
 
 use std::path::{Path, PathBuf};
 
 use trusty_common::gh::{GhCommand, GhError};
 
 use crate::error::AuditError;
+use crate::run::{self, SelectedRepo};
 use crate::workdir::{Area, WorkDir};
 
 /// Directory under [`Area::State`] where in-progress clones are built.
@@ -433,6 +440,45 @@ fn summarize(repos: Vec<ClonedRepo>) -> Result<CloneReport, AuditError> {
     })
 }
 
+/// Record what was acquired as the selection the sweep will audit.
+///
+/// Why: #5556 — `taudit clone …` followed by `taudit run` was not a chain.
+/// Nothing wrote `state/`[`run::SELECTION_FILE`], so the sweep refused with
+/// "nothing to audit" over a working directory full of checkouts. On the command
+/// line the clone invocation IS the selection, which is the sense in which
+/// #5215 is one of the producers `run.rs` names.
+///
+/// Only USABLE checkouts go in. A repository that failed is already a gap, and
+/// selecting it as well would fail it a second time for one cause — as a
+/// missing checkout, in a sweep that had no way to know it was never acquired.
+/// What: maps each usable [`ClonedRepo`] onto a [`SelectedRepo`] whose path is
+/// relative to the working-directory root (the shape [`run::SELECTION_FILE`]
+/// documents), and hands it to [`run::save_selection`], which owns the write.
+/// An acquisition that produced nothing usable writes nothing, so a previous
+/// selection survives a run in which every repository failed.
+/// Test: `super::clone_tests::a_completed_clone_is_recorded_as_the_selection`,
+/// `super::clone_tests::an_empty_request_leaves_an_existing_selection_alone`,
+/// and `tests/cli_end_to_end.rs`.
+fn record_selection(work: &WorkDir, report: &CloneReport) -> Result<(), AuditError> {
+    let selected: Vec<SelectedRepo> = report
+        .repos
+        .iter()
+        .filter(|repo| repo.state.is_usable())
+        .map(|repo| SelectedRepo {
+            name: repo.name_with_owner.clone(),
+            path: repo
+                .path
+                .strip_prefix(work.root())
+                .unwrap_or(&repo.path)
+                .to_path_buf(),
+        })
+        .collect();
+    if selected.is_empty() {
+        return Ok(());
+    }
+    run::save_selection(work, &selected)
+}
+
 /// Clone every requested repository into the working directory's `repos/` area.
 ///
 /// Why: #5215 — tga must be able to take a repository it has never seen and
@@ -440,16 +486,19 @@ fn summarize(repos: Vec<ClonedRepo>) -> Result<CloneReport, AuditError> {
 /// What: guards `repos/` BEFORE creating anything, validates every name, then
 /// per repository: reuses a completed checkout, discards any leftover staged
 /// tree, clones into staging, verifies it, and renames it into place. Stops
-/// STARTING clones once the budget is spent; failures become gaps.
-/// Test: `super::clone_tests`, and `cloning_a_real_repository` (`#[ignore]`).
+/// STARTING clones once the budget is spent; failures become gaps. Finally
+/// records the usable checkouts as the sweep's selection — see
+/// [`record_selection`].
+/// Test: `super::clone_tests`, `tests/cli_end_to_end.rs`, and
+/// `cloning_a_real_repository` (`#[ignore]`).
 ///
 /// # Errors
 ///
 /// [`AuditError::UnsafeArea`] for a `repos/` area, owner directory, or
 /// destination that is not a real directory, [`AuditError::InvalidRepoName`]
 /// for anything that is not a plain `owner/name`, [`AuditError::WorkDir`] for a
-/// directory that cannot be made, and [`AuditError::AllClonesFailed`] when
-/// nothing at all could be cloned.
+/// directory that cannot be made or a selection that cannot be recorded, and
+/// [`AuditError::AllClonesFailed`] when nothing at all could be cloned.
 pub async fn clone_all(
     work: &WorkDir,
     repos: &[String],
@@ -529,7 +578,9 @@ pub async fn clone_all(
             bytes_complete: complete,
         });
     }
-    summarize(out)
+    let report = summarize(out)?;
+    record_selection(work, &report)?;
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -689,6 +740,58 @@ mod clone_tests {
         assert!(
             victim.join("f").is_file(),
             "acquiring acme/api destroyed acme/api.partial's checkout"
+        );
+    }
+
+    /// #5556: acquiring is selecting. The sweep reads what the clone recorded,
+    /// with paths relative to the working-directory root.
+    #[tokio::test]
+    async fn a_completed_clone_is_recorded_as_the_selection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        for name in ["acme/api", "acme/web"] {
+            let dest = destination(&work, name).expect("valid");
+            std::fs::create_dir_all(&dest).expect("mkdir");
+            std::fs::write(dest.join("f"), b"source").expect("write");
+        }
+
+        clone_all(
+            &work,
+            &["acme/api".to_string(), "acme/web".to_string()],
+            &CloneOptions::default(),
+        )
+        .await
+        .expect("both checkouts are present, so nothing is fetched");
+
+        let selected = run::load_selection(&work).expect("the sweep's input is there");
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].name, "acme/api");
+        assert_eq!(selected[0].path, Path::new("repos/acme/api"));
+        assert_eq!(selected[1].name, "acme/web");
+    }
+
+    /// An acquisition with nothing usable in it must not clobber the selection
+    /// an earlier one recorded — the operator's next `taudit run` still has the
+    /// set that did land. (Every repository FAILING is [`summarize`]'s abort;
+    /// this is the other empty case, an empty request.)
+    #[tokio::test]
+    async fn an_empty_request_leaves_an_existing_selection_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let dest = destination(&work, "acme/api").expect("valid");
+        std::fs::create_dir_all(&dest).expect("mkdir");
+        clone_all(&work, &["acme/api".to_string()], &CloneOptions::default())
+            .await
+            .expect("a present checkout needs no network");
+        let recorded = std::fs::read_to_string(run::selection_path(&work)).expect("read");
+
+        clone_all(&work, &[], &CloneOptions::default())
+            .await
+            .expect("an empty request is empty, not failed");
+        assert_eq!(
+            std::fs::read_to_string(run::selection_path(&work)).expect("read"),
+            recorded,
+            "an empty acquisition rewrote the selection"
         );
     }
 
