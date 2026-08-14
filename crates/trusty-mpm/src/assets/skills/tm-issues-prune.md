@@ -2,7 +2,7 @@
 name: tm-issues-prune
 description: Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred)
 user-invocable: true
-version: "1.1.0"
+version: "1.2.0"
 category: pm-workflow
 tags: [tickets, github, backlog, pm-required, triage, prioritization]
 effort: medium
@@ -64,21 +64,56 @@ PM: [presents the prune/prioritize summary, asks for confirmation before closing
 
 | Subcommand | Purpose |
 |---|---|
-| `/tm-issues-prune scan` | Survey the backlog, report prune candidates AND priority gaps without changing anything |
+| `/tm-issues-prune scan` | Survey the backlog exhaustively, report retrieved-vs-total plus prune candidates AND priority gaps, without changing anything |
 | `/tm-issues-prune close` | Prune pass — present candidates with reasons, close only after user confirmation |
 | `/tm-issues-prune organize` | Organize pass — group surviving open issues by epic/component/theme, flag orphans |
 | `/tm-issues-prune prioritize` | Prioritize pass — assess open issues, propose label changes, surface a ranked list |
 | `/tm-issues-prune suggest-next` | Suggest-next pass — recommend the top 3-7 next tasks as a selectable table |
 | `/tm-issues-prune` (no args) | Run scan, then offer to proceed with close, organize, prioritize, and/or suggest-next, in that order |
 
+## Retrieval Is Bounded — Say So (#5623)
+
+🔴 **Every phase below reasons over "the backlog", so a retrieval that silently
+stopped short makes every downstream answer wrong while reading as complete.**
+`gh issue list --limit N` truncates at N and reports nothing about what it
+dropped: at the time of writing this repo has 745 open issues, so the former
+`--limit 500` discarded ~245 of them and presented the rest as the whole
+backlog. Prune candidates, orphan detection, the ranked list, and suggest-next
+all inherit that hole.
+
+Two obligations, both required, on every retrieval in this skill:
+
+1. **Establish the total independently**, before or alongside the listing:
+   ```bash
+   gh api "search/issues?q=repo:OWNER/REPO+is:issue+is:open" --jq .total_count
+   ```
+   The search index can lag a few seconds behind a just-filed issue; a
+   discrepancy of one or two is that lag, not a truncation.
+2. **Paginate to exhaustion**, rather than picking a bigger `--limit`. `gh api
+   --paginate` follows the `Link` header until the last page:
+   ```bash
+   gh api --paginate "repos/OWNER/REPO/issues?state=open&per_page=100" \
+     --jq '.[] | select(.pull_request == null)'
+   ```
+   The `pull_request` filter matters — the REST issues endpoint returns PRs as
+   issues, which `gh issue list` hides. Count what survives that filter.
+
+**Report retrieved-vs-total in the phase output**, e.g. `scanned 745/745 open
+issues`. When they disagree, say which issues are missing from the pass and do
+not present the result as a complete backlog view. A count without its bound is
+not a finding.
+
 ## Prune Workflow
 
 1. **Delegate the survey.** Ask the `ticketing` agent to pull the open-issue
-   list for the active repo:
+   list for the active repo — exhaustively, per the section above:
    ```bash
-   gh issue list --state open --limit 500 \
-     --json number,title,updatedAt,labels,body,comments
+   gh api "search/issues?q=repo:OWNER/REPO+is:issue+is:open" --jq .total_count
+   gh api --paginate "repos/OWNER/REPO/issues?state=open&per_page=100" \
+     --jq '[.[] | select(.pull_request == null)
+            | {number, title, updated_at, labels: [.labels[].name], body}]'
    ```
+   Report the retrieved count against the total before classifying anything.
 2. **Classify candidates** against these criteria (the ticketing agent
    applies them, the PM does not re-derive them):
    - **Stale** — no activity (comments, commits, label changes) in more
@@ -109,10 +144,15 @@ PM: [presents the prune/prioritize summary, asks for confirmation before closing
 ## Prioritize Workflow
 
 1. **Delegate the assessment.** Ask the `ticketing` agent to pull open
-   issues with their current labels:
+   issues with their current labels — exhaustively, and reporting
+   retrieved-vs-total per "Retrieval Is Bounded" above:
    ```bash
-   gh issue list --state open --limit 500 --json number,title,labels,createdAt
+   gh api --paginate "repos/OWNER/REPO/issues?state=open&per_page=100" \
+     --jq '[.[] | select(.pull_request == null)
+            | {number, title, created_at, labels: [.labels[].name]}]'
    ```
+   A priority pass over a truncated set mislabels by omission: an unseen issue
+   cannot be ranked, and its absence is invisible in the output.
 2. **Classify against priority signal** (age, linked PR activity, explicit
    user/maintainer escalation, blocking relationship to other open issues,
    security/data-loss impact) and produce a proposed P0/P1/P2/… label per
@@ -231,6 +271,9 @@ next tasks:
 When running the full `/tm-issues-prune` sweep (no args, all phases), report
 back to the user in this sequence, each section clearly labeled:
 
+0. **Coverage line** — retrieved-vs-total open issues for the pass, e.g.
+   `scanned 745/745 open issues`. State it first; every section below is only
+   as complete as this number says (#5623).
 1. **Prune summary** — candidates presented, confirmations received, final
    close list with reasons (empty if nothing was closed).
 2. **Organized map** — epic → component → theme → orphans, one line per
@@ -252,6 +295,10 @@ only that section is reported.
 - **Priority label changes are additive/correctable**, not destructive, but
   still summarize proposed changes before applying them at scale (more than
   a handful of issues).
+- **Never present a truncated retrieval as the backlog.** If retrieved is below
+  total, say so and name the shortfall before any candidate list — a prune
+  decision made over an incomplete set closes issues the pass never compared
+  against their duplicates (#5623).
 - If the user has not specified a staleness window, ask before assuming a
   default N.
 - Never delegate a prune/prioritize sweep against a repo other than the
