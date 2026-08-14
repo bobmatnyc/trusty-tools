@@ -96,13 +96,20 @@ places it at the publish boundary; rungs 4–6 are named there only because they
 are the rungs that reach that boundary. A rung-4 PR does not owe a workspace test
 run to merge.
 
-**Branch protection follows from this.** The CI `Rust tests (pre-publish gate)`
-job is a pre-build / pre-publish gate, not a pre-merge one, and it is not among
-`main`'s required status contexts — the authoritative, current list is always
-`gh api repos/bobmatnyc/trusty-tools/branches/main/protection --jq
-'.required_status_checks.contexts'`, not a copy enumerated here. Merges proceed
-with `Rust tests (pre-publish gate)` still pending; a **failing** check blocks
-at every stage.
+**The pipeline follows from this.** The CI `Rust tests (pre-publish gate)` job is
+a pre-build / pre-publish gate, not a pre-merge one, and it is not among `main`'s
+required status contexts — the authoritative, current list is always `gh api
+repos/bobmatnyc/trusty-tools/branches/main/protection --jq
+'.required_status_checks.contexts'`, not a copy enumerated here. It no longer runs
+on pull requests at all: it runs on every push to `main`, and on demand via
+`workflow_dispatch` (Actions → CI → "Run workflow"). `preflight-publish.sh` CHECK 1
+refuses to publish any commit that is not `origin/main`, so the tree that gets
+published is always a tree the shards have run against.
+
+**A failing check still blocks at every stage.** Deferring *when* the workspace
+suite runs changes nothing about what a red one means. On `main` a failure opens
+or updates the `ci-red-main` tracking issue via `ci.yml`'s `notify-main-failure`
+job and fails the run.
 
 🔴 **Scoping down by stage is a claim you must be able to prove**, exactly as
 scoping down by rung is. It is never licence to make a red gate green by

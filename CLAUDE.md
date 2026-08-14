@@ -106,11 +106,26 @@ gate their expensive steps inside the job body on a `docs_only` boolean
 pending forever, which is why none of them has one. On a code PR the six settle
 in about 4 minutes; on a docs-only PR, in under one.
 
-🔴 **`Rust tests (pre-publish gate)` — the four shards — is NOT required.** It runs
-11-13.5 minutes, roughly 3x the entire required set, and is the publish-boundary
-gate the ladder above describes. Do not hold a merge for it. Read the result when
-it lands and act on a failure; waiting on it is the single largest source of dead
-time in this repo's workflow.
+🔴 **`Rust tests (pre-publish gate)` — the four shards — does not run on pull
+requests.** It runs 11-13.5 minutes per shard, roughly 3x the entire required set,
+and it is not a required context, so on a PR it is skipped outright rather than
+run-and-ignored. It runs on every push to `main` and on `workflow_dispatch`. Do
+not wait for it on a PR — there is nothing to wait for.
+
+🟡 **What a PR still proves, and what moves to `main`.** `Clippy` is required and
+runs `--workspace --all-targets`, so every test target still COMPILES on every PR.
+What defers to `main` is test EXECUTION. Run the ladder rung your change earns
+before merging — that is the coverage the shards no longer duplicate per-PR.
+
+🟡 **To run the full suite on a branch:** Actions → CI → "Run workflow" against
+that branch. Reach for it when a change is broad enough that a crate-scoped local
+run does not cover it and you would rather not find out on `main`.
+
+🟡 **A red `main` files an issue.** `ci.yml`'s `notify-main-failure` job runs on
+every push to `main`, folds every job conclusion (the shards included) through
+`scripts/classify-ci-results.sh`, and on any non-green verdict opens or comments on
+the `ci-red-main`-labelled tracking issue, then fails the run. It is a GitHub issue,
+not a page — nobody is woken up.
 
 🟡 **A `BEHIND` branch cannot merge — update it.** `gh pr merge` refuses with "the
 head branch is not up to date with the base branch" even when all six required
