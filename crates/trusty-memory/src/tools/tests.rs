@@ -3953,3 +3953,100 @@ async fn dispatch_palace_unalias_frees_a_real_collision_and_is_idempotent() {
         "nothing left to free: {again}"
     );
 }
+
+/// Why (#5053): the failure that matters is not "the delete failed" — it is a
+/// forget that reports `deleted` while a lane it could not reach still holds
+/// the text. A caller cannot tell "deleted everywhere" from "deleted where we
+/// happened to look" unless an unreachable lane is an error.
+/// What: arms the lane with no daemon behind it (the client is set directly, so
+/// this needs no process-wide env mutation), forgets a real drawer, and asserts
+/// the call fails with a message that names what may still be findable. The
+/// drawer is gone from the primary store either way, which is what makes
+/// silence here dangerous.
+/// Test: itself. Swallow `bm25_delete_document`'s error in
+/// `handle_memory_forget` and the forget reports `deleted` instead.
+#[tokio::test]
+async fn forget_fails_loudly_when_the_lexical_lane_cannot_confirm_the_delete() {
+    let (mut state, _tmp) = test_state();
+    // Unique per process: with no supervisor the lane addresses the palace's
+    // canonical socket, and a name shared with a live daemon would find one.
+    let palace = format!("nd{:x}", std::process::id() & 0xfff);
+    dispatch_tool(&state, "palace_create", json!({ "name": palace }))
+        .await
+        .expect("palace_create");
+    let remembered = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": palace,
+            "text": "zqxjunreachable rollback runbook for the staging deployment",
+            "force": true,
+        }),
+    )
+    .await
+    .expect("memory_remember");
+    let drawer_id = remembered["drawer_id"]
+        .as_str()
+        .expect("drawer_id")
+        .to_string();
+
+    // Lane on, nothing serving it. No supervisor, so no subprocess is spawned
+    // and the canonical socket for this palace has no listener.
+    state.bm25_client = Some(std::sync::Arc::new(
+        trusty_common::bm25_client::Bm25Client::for_palace(palace.clone()),
+    ));
+    state.bm25_supervisor = None;
+
+    let err = dispatch_tool(
+        &state,
+        "memory_forget",
+        json!({ "palace": palace, "drawer_id": drawer_id }),
+    )
+    .await
+    .expect_err("a forget that could not delete the lexical copy must not report success");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("lexically searchable"),
+        "the error must say what may still be findable, got: {msg}"
+    );
+}
+
+/// Why (#5053): the lexical delete must not turn `memory_forget` into a
+/// daemon-dependent call. With `TRUSTY_BM25_DAEMON` unset there is no corpus
+/// this process ever wrote, so there is nothing to delete and nothing to fail.
+/// What: the default `AppState` (no BM25 client) forgets a drawer and reports
+/// `deleted`.
+/// Test: itself. Drop the lane gate at the top of `bm25_delete_document` and
+/// this fails on every host with the lane off.
+#[tokio::test]
+async fn forget_succeeds_when_the_lexical_lane_is_disabled() {
+    let (state, _tmp) = test_state();
+    assert!(
+        state.bm25_client.is_none(),
+        "precondition: the lane must be off for this test to mean anything"
+    );
+    dispatch_tool(&state, "palace_create", json!({"name": "laneoff"}))
+        .await
+        .expect("palace_create");
+    let remembered = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "laneoff",
+            "text": "zqxjlaneoff rollback runbook for the staging deployment",
+            "force": true,
+        }),
+    )
+    .await
+    .expect("memory_remember");
+    let drawer_id = remembered["drawer_id"].as_str().expect("drawer_id");
+
+    let forgotten = dispatch_tool(
+        &state,
+        "memory_forget",
+        json!({ "palace": "laneoff", "drawer_id": drawer_id }),
+    )
+    .await
+    .expect("memory_forget with the lane off");
+    assert_eq!(forgotten["status"], "deleted", "{forgotten}");
+}
