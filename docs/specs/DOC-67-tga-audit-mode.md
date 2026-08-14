@@ -386,14 +386,29 @@ The full prerequisite chain is trusty-search → per-repository index →
 trusty-analyze, and #5670 reaches each link differently:
 
 - **trusty-analyze (link 3) — closed.** The preflight starts it or refuses.
-- **trusty-search (link 1) — hard-refused on every run.** Not only on a fresh
-  spawn. `trusty-analyze`'s own `/health` answers `503 degraded` whenever
-  trusty-search is unreachable (`crates/trusty-analyze/src/service/routes.rs`'s
-  `health`), and `probe_once` counts only a 2xx — so the preflight's opening
-  probe re-reads trusty-search's LIVE status each run. An analyze daemon that has
-  been up for days on top of a trusty-search that died an hour ago fails the
-  probe, its spawned replacement exits at its own search check, the original
-  keeps answering 503, and the readiness poll refuses the audit.
+- **trusty-search (link 1) — started by the audit, ahead of link 3.** It had to
+  be, and not only for a cold machine. `trusty-analyze`'s own `/health` answers
+  `503 degraded` whenever trusty-search is unreachable
+  (`crates/trusty-analyze/src/service/routes.rs`'s `health`), and `probe_once`
+  counts only a 2xx — so the analyze preflight re-reads trusty-search's LIVE
+  status each run. An analyze daemon up for days on top of a trusty-search that
+  died an hour ago failed that probe, its spawned replacement exited at its own
+  search check, the original kept answering 503, and the readiness poll refused
+  an audit with nothing wrong with its analyze daemon at all.
+
+  `crate::audit::search_daemon::ensure_search_daemon` now runs FIRST, before the
+  analyze preflight: it probes `/health`, spawns `<binary> start --foreground`
+  detached when there is no answer, and polls for up to 60s — trusty-search's own
+  `READY_TIMEOUT`, which covers a first-run ONNX model load. The binary is
+  `TRUSTY_SEARCH_BIN` else PATH, resolved through the one rule
+  `audit::repo_index` already owns so the daemon that gets started and the binary
+  that indexes into it are the same install. The ADDRESS is not a tga setting:
+  trusty-search binds an OS-assigned port and records it, so the guard reads
+  `trusty_common::daemon_guard::DaemonAddrLayout::TRUSTY_SEARCH`, the resolver
+  promoted into `trusty-common` for this caller. Both failure arms refuse the run,
+  as link 3's do. `trusty-audit` pins `trusty-search` as a fourth
+  `RequiredTool` and exports `TRUSTY_SEARCH_BIN` onto every `tga audit` child, so
+  an isolated run reaches the engagement's copy rather than a PATH lookup.
 - **The per-repository index (link 2) — built by the audit, and still fail-open
   per repository.** `crate::audit::repo_index::ensure_repositories_indexed` runs
   between the sweep and the manifest: it probes each repository with
