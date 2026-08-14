@@ -5409,22 +5409,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kuzu"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bf1c964fda5f292c796601a4ab221b9643a12935d42a0adbb833a1f332549bf"
-dependencies = [
- "cmake",
- "cxx",
- "cxx-build",
- "num_cpus",
- "rust_decimal",
- "rustversion",
- "time",
- "uuid",
-]
-
-[[package]]
 name = "lab"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8491,16 +8475,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust_decimal"
-version = "1.42.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c5108e3d4d903e21aac27f12ba5377b6b34f9f44b325e4894c7924169d06995"
-dependencies = [
- "arrayvec",
- "num-traits",
-]
-
-[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11449,7 +11423,6 @@ dependencies = [
  "hnsw_rs",
  "indexmap 2.14.0",
  "keyring",
- "kuzu",
  "libc",
  "lru 0.16.4",
  "ort",
@@ -11820,7 +11793,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "anyhow",
  "arc-swap",
