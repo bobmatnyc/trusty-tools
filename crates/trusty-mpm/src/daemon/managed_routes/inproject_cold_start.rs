@@ -115,6 +115,25 @@ pub enum ColdStartError {
         requested: String,
     },
 
+    /// Git could not report the existing checkout's `remote.origin.url` at all.
+    ///
+    /// Why: distinct from [`ColdStartError::NoOrigin`] since #4734 — telling an
+    /// operator whose `.git/config` is unreadable that the checkout "has no
+    /// remote.origin.url" sends them to remove a directory that is fine.
+    #[error(
+        "managed checkout {} exists but its remote could not be read, so it cannot be \
+         matched against {requested}: {reason}",
+        .path.display()
+    )]
+    OriginUnreadable {
+        /// The managed checkout that was inspected.
+        path: PathBuf,
+        /// The clone URL the caller asked for.
+        requested: String,
+        /// What git reported.
+        reason: String,
+    },
+
     /// Cloning or refreshing the base clone failed.
     #[error("{0}")]
     Provision(String),
@@ -249,11 +268,22 @@ pub fn ensure_managed_checkout_at(
 /// What: reads `remote.origin.url` via
 /// [`super::inproject::get_origin_url`] and compares it to `requested` through
 /// [`canonical_remote`], so remote spellings of the same repo agree. A
-/// checkout with no origin at all is `NoOrigin`, not a match.
+/// checkout with no origin at all is `NoOrigin`, not a match; a checkout git
+/// cannot read the remote of is `OriginUnreadable` (#4734), because "move or
+/// remove that directory" is the wrong instruction for a config git refused to
+/// parse.
 /// Test: `existing_checkout_on_a_different_remote_fails_loud`,
+/// `existing_checkout_with_an_unreadable_remote_fails_loud`,
 /// `equivalent_remote_spellings_match`.
 fn verify_remote_matches(base_path: &Path, requested: &str) -> Result<(), ColdStartError> {
-    let Some(found) = inproject::get_origin_url(base_path) else {
+    let found = inproject::get_origin_url(base_path).map_err(|reason| {
+        ColdStartError::OriginUnreadable {
+            path: base_path.to_path_buf(),
+            requested: requested.to_string(),
+            reason,
+        }
+    })?;
+    let Some(found) = found else {
         return Err(ColdStartError::NoOrigin {
             path: base_path.to_path_buf(),
             requested: requested.to_string(),

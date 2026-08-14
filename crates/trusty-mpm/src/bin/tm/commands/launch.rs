@@ -117,7 +117,10 @@ pub(crate) async fn launch(
     // 2. Derive the GitHub identity from the origin remote.
     //    Managed sessions REQUIRE a parseable GitHub remote (#1590). A missing or
     //    unparseable remote is an immediate error that points the user to `tm connect`.
+    //    #4734: a git failure gets its own error — telling the operator to run
+    //    `tm connect` because there is "no remote" would be false advice.
     let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&live_path)
+        .map_err(|e| anyhow::anyhow!(e))?
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no git origin remote found in '{live_workdir}'\n\
