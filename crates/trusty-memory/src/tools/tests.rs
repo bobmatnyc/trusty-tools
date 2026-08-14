@@ -2154,7 +2154,6 @@ async fn bm25_index_queue_drops_when_full() {
         palace: "default".to_string(),
         drawer_id: Uuid::new_v4().to_string(),
         content: "probe".to_string(),
-        data_dir: state.data_root.join("default").join("bm25"),
     };
     let probe = state.bm25_index_tx.try_send(probe_req);
     match probe {
@@ -2327,7 +2326,7 @@ async fn note_succeeds_while_state_is_warming() {
 /// Test: this test.
 #[test]
 fn bm25_hits_hydrate_from_handle_during_warmup() {
-    use trusty_common::bm25_client::BM25Hit;
+    use crate::bm25_lane::BM25Hit;
     use trusty_common::memory_core::palace::Drawer;
     use trusty_common::memory_core::store::kg::KnowledgeGraph;
     use trusty_common::memory_core::store::vector::UsearchStore;
@@ -3703,12 +3702,19 @@ fn kuzu_migrate_refuses_hot_predicates_and_passes_cold_ones() {
     }
 }
 
-/// Why (#5048 re-review): the enqueue drop was tested but the worker's own two
-/// loss paths were not, and they lose a write just as completely — a daemon
-/// that will not spawn and an index call that fails both leave the drawer out
-/// of the BM25 corpus with nothing queued to repair it.
-/// What: drives `spawn_bm25_index_worker` directly with a client pointed at a
-/// dead socket, so `client.index` fails, and asserts the palace is queued.
+/// Why (#5048 re-review): the enqueue drop was tested but the worker's own
+/// loss path was not, and it loses a write just as completely — an index call
+/// that fails leaves the drawer out of the BM25 corpus with nothing queued to
+/// repair it.
+///
+/// #5329 merged this test's sibling,
+/// `a_daemon_that_will_not_spawn_queues_the_palace_for_repair`, into it. The
+/// worker used to have TWO loss paths because a spawn sat between it and the
+/// index: the supervisor could refuse to start a daemon, or the daemon could
+/// reject the write. There is no spawn now, so there is one arm to cover.
+/// What: drives `spawn_bm25_index_worker` directly with a lane whose palace
+/// directory is blocked by a file, so `lane.index` fails, and asserts the
+/// palace is queued for repair.
 /// Test: this test itself. Delete the `dirty.insert` from the index-failure arm
 /// and the queue stays empty.
 #[tokio::test]
@@ -3717,18 +3723,25 @@ async fn a_failed_index_call_queues_the_palace_for_repair() {
     let dirty: crate::bm25_repair::DirtyPalaces = std::sync::Arc::new(dashmap::DashSet::new());
     let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
 
-    // No listener at this path, so every `index` call fails at connect.
-    let client = std::sync::Arc::new(trusty_common::bm25_client::Bm25Client::new(
-        tmp.path().join("dead.sock"),
-    ));
-    // No supervisor: this isolates the index-failure arm from the spawn arm.
-    spawn_bm25_index_worker(rx, Some(client), None, std::sync::Arc::clone(&dirty));
+    // A file where the palace's index DIRECTORY belongs, so every load fails.
+    std::fs::create_dir_all(tmp.path().join("lossy")).expect("palace dir");
+    std::fs::write(
+        tmp.path().join("lossy").join("bm25"),
+        b"a file where the index directory belongs",
+    )
+    .expect("block the index dir");
+
+    let lane = crate::bm25_lane::Bm25Lane::with_limits(tmp.path().to_path_buf(), 3, None);
+    spawn_bm25_index_worker(
+        rx,
+        Some(std::sync::Arc::clone(&lane)),
+        std::sync::Arc::clone(&dirty),
+    );
 
     tx.send(Bm25IndexRequest {
         palace: "lossy".to_string(),
         drawer_id: Uuid::new_v4().to_string(),
-        content: "content that will never reach the daemon".to_string(),
-        data_dir: tmp.path().join("bm25"),
+        content: "content that will never reach the index".to_string(),
     })
     .await
     .expect("send to worker");
@@ -3743,72 +3756,7 @@ async fn a_failed_index_call_queues_the_palace_for_repair() {
         dirty.contains("lossy"),
         "an index call that failed lost the write and must queue the palace"
     );
-}
-
-/// Why: the other worker loss path. A supervisor that cannot start a daemon
-/// makes the worker skip the request entirely, which is the same lost write.
-/// What: points the daemon locator at a path that does not exist so
-/// `ensure_running` fails, and asserts the palace is queued.
-/// Test: this test itself. Delete the `dirty.insert` from the spawn-failure arm
-/// and the queue stays empty.
-#[tokio::test]
-async fn a_daemon_that_will_not_spawn_queues_the_palace_for_repair() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let prev = std::env::var("TRUSTY_BM25_DAEMON_BIN").ok();
-    let prev_ext = std::env::var("TRUSTY_BM25_EXTERNAL").ok();
-    // SAFETY: test-only env mutation, restored below.
-    unsafe {
-        std::env::set_var("TRUSTY_BM25_DAEMON_BIN", tmp.path().join("no-such-binary"));
-        std::env::remove_var("TRUSTY_BM25_EXTERNAL");
-    }
-
-    let dirty: crate::bm25_repair::DirtyPalaces = std::sync::Arc::new(dashmap::DashSet::new());
-    let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
-    let client = std::sync::Arc::new(trusty_common::bm25_client::Bm25Client::new(
-        tmp.path().join("unused.sock"),
-    ));
-    let supervisor = std::sync::Arc::new(crate::bm25_supervisor::Bm25Supervisor::new());
-    spawn_bm25_index_worker(
-        rx,
-        Some(client),
-        Some(supervisor),
-        std::sync::Arc::clone(&dirty),
-    );
-
-    // A palace name short enough that the socket path stays inside `sun_path`.
-    let palace = format!("nz{:x}", std::process::id() & 0xfff);
-    tx.send(Bm25IndexRequest {
-        palace: palace.clone(),
-        drawer_id: Uuid::new_v4().to_string(),
-        content: "content that will never reach a daemon".to_string(),
-        data_dir: tmp.path().join("bm25"),
-    })
-    .await
-    .expect("send to worker");
-
-    for _ in 0..400 {
-        if dirty.contains(&palace) {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let queued = dirty.contains(&palace);
-
-    // SAFETY: restoring the captured prior values.
-    unsafe {
-        match prev {
-            Some(v) => std::env::set_var("TRUSTY_BM25_DAEMON_BIN", v),
-            None => std::env::remove_var("TRUSTY_BM25_DAEMON_BIN"),
-        }
-        if let Some(v) = prev_ext {
-            std::env::set_var("TRUSTY_BM25_EXTERNAL", v);
-        }
-    }
-
-    assert!(
-        queued,
-        "a daemon that will not spawn lost the write and must queue the palace"
-    );
+    lane.shutdown().await;
 }
 
 /// Why (#5048 re-review): `Full` marked the palace dirty and `Closed`, three
@@ -3836,7 +3784,6 @@ async fn a_closed_index_queue_queues_the_palace_for_repair() {
                 palace: "default".to_string(),
                 drawer_id: Uuid::new_v4().to_string(),
                 content: "probe".to_string(),
-                data_dir: state.data_root.join("default"),
             }),
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
         ),

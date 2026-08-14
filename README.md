@@ -136,7 +136,6 @@ documentation.
 
 | Crate | Description |
 |---|---|
-| `trusty-bm25-daemon` | Standalone BM25 full-text search daemon |
 | `trusty-code` | Code generation and analysis utilities |
 | `trusty-console` | Terminal UI for system monitoring |
 | `trusty-installer` | Install/upgrade orchestrator (bins: `trusty-installer`, `tctl` alias; ADR-0013) |

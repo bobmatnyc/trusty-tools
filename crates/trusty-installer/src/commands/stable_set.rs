@@ -12,7 +12,7 @@
 //! supervised daemon) and [`stable_set`] — the ordered member list:
 //! trusty-search, trusty-memory, trusty-analyze, trusty-review, tga, and
 //! trusty-console. Library crates (trusty-common, trusty-embedderd,
-//! trusty-bm25-daemon, …) are pulled in automatically as cargo dependencies of
+//! trusty-embedderd, …) are pulled in automatically as cargo dependencies of
 //! these binaries, so they are intentionally *not* listed here.
 //!
 //! Test: `tests` pins the ordered set, asserts every member's crate/binary

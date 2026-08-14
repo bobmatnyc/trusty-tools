@@ -11337,21 +11337,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trusty-bm25-daemon"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "clap",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "trusty-common",
-]
-
-[[package]]
 name = "trusty-channels"
 version = "0.1.0"
 dependencies = [
@@ -11683,7 +11668,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "trusty-bm25-daemon",
  "trusty-common",
  "uuid",
 ]

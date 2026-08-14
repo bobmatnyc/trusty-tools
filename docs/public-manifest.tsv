@@ -110,7 +110,6 @@ PAGE	tools	docs/trusty-git-analytics/README.md	/tools/trusty-git-analytics	trust
 PAGE	tools	docs/trusty-code/README.md	/tools/trusty-code	trusty-code
 PAGE	tools	docs/trusty-common/README.md	/tools/trusty-common	trusty-common
 PAGE	tools	docs/trusty-embedderd/README.md	/tools/trusty-embedderd	trusty-embedderd
-PAGE	tools	docs/trusty-bm25-daemon/README.md	/tools/trusty-bm25-daemon	trusty-bm25-daemon
 PAGE	tools	docs/trusty-console/README.md	/tools/trusty-console	trusty-console
 
 SECTION	guides	User Guides

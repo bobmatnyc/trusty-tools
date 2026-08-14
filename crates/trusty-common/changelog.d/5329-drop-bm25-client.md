@@ -1,0 +1,2 @@
+Removed
+- The `bm25_client` module and its `bm25-client` feature. It was the UDS JSON-RPC client for the `trusty-bm25-daemon` subprocess, whose sole consumer was trusty-memory; #5329 moved that index in-process, so there is no socket, no wire protocol, and no binary to locate. Consumers that enabled `bm25-client` want `bm25` instead, which is the index itself. The `uds` module and its `supervisor` submodule are untouched — trusty-console and trusty-agents supervise trusty-review and trusty-analyze through them.

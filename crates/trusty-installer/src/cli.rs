@@ -133,7 +133,7 @@ pub enum AnalyzeCoreArg {
 /// `trusty-mpm` set (owner-authorized scope extension, #2558); `Agents` → the
 /// `trusty-agents` set, i.e. `tagent` (owner-authorized scope extension,
 /// #4277); `Memory` → the `trusty-memory` set, i.e. `trusty-memory` +
-/// `trusty-bm25-daemon` + `trusty-memory-mcp-bridge`; `Analyze` → the
+/// `trusty-memory-mcp-bridge`; `Analyze` → the
 /// `trusty-analyze` set, a single binary (both owner ruling 2026-08-06).
 ///
 /// Test: `cli_tests::parse_sign` round-trips each value.
@@ -148,7 +148,7 @@ pub enum SignTargetArg {
     /// `trusty-agents` (`tagent`). (#4277)
     #[value(name = "trusty-agents")]
     Agents,
-    /// `trusty-memory` + its bundled `trusty-bm25-daemon` and the deprecated
+    /// `trusty-memory` and the deprecated
     /// `trusty-memory-mcp-bridge` shim. (owner ruling 2026-08-06)
     #[value(name = "trusty-memory")]
     Memory,

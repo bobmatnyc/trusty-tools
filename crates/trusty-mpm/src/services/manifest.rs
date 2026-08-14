@@ -60,8 +60,8 @@ pub enum PortDiscovery {
 
 /// Declaration of one service in the manifest.
 ///
-/// Why: all fields that could be absent for sidecar-only daemons (embedderd,
-/// bm25-daemon) are `Option` so the manifest does not force authors to write
+/// Why: all fields that could be absent for sidecar-only daemons (embedderd)
+/// are `Option` so the manifest does not force authors to write
 /// sentinel values. Serde `default` on each Option means absent YAML keys
 /// deserialise cleanly to `None`.
 /// What: static metadata plus optional lifecycle commands. The discovery engine
@@ -286,13 +286,15 @@ mod tests {
     fn manifest_parse_happy_path() {
         let m: ServicesManifest = serde_yaml::from_str(DEFAULT_MANIFEST_YAML).expect("parse");
         assert_eq!(m.version, 1);
-        assert_eq!(m.services.len(), 6);
+        // #5329 dropped `trusty-bm25-daemon` from the manifest: BM25 no longer
+        // runs as a separate process, so there is nothing for `tm services` to
+        // discover under that name.
+        assert_eq!(m.services.len(), 5);
         assert!(m.services.contains_key("trusty-search"));
         assert!(m.services.contains_key("trusty-analyze"));
         assert!(m.services.contains_key("trusty-mpm-daemon"));
         assert!(m.services.contains_key("trusty-memory"));
         assert!(m.services.contains_key("trusty-embedderd"));
-        assert!(m.services.contains_key("trusty-bm25-daemon"));
 
         let ts = &m.services["trusty-search"];
         assert_eq!(ts.default_port, Some(7878));

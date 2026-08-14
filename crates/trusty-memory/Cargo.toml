@@ -37,19 +37,10 @@ path = "src/main.rs"
 #      this binary without axum and failing to link `run_http_*`.
 required-features = ["axum-server"]
 
-[[bin]]
-# Why: Bundle the trusty-bm25-daemon binary into the trusty-memory install
-#      surface so `cargo install trusty-memory` produces all three binaries
-#      in one command. Users who set TRUSTY_BM25_DAEMON=1 without separately
-#      installing the daemon get silently degraded lexical recall; bundling
-#      closes that footgun. Mirrors PR #190 (trusty-embedderd in trusty-search).
-# What: thin shim — all daemon logic lives in the trusty-bm25-daemon library
-#      crate. This file just wires the tokio runtime and delegates to
-#      `trusty_bm25_daemon::run()`.
-# Test: `cargo install --path crates/trusty-memory --root /tmp/test` should
-#      produce trusty-memory AND trusty-bm25-daemon.
-name = "trusty-bm25-daemon"
-path = "src/bin/bm25_daemon.rs"
+# Why (#5329): the `trusty-bm25-daemon` `[[bin]]` shim was REMOVED. BM25 no
+# longer runs as a subprocess — `bm25_lane::Bm25Lane` owns the same
+# `trusty_common::bm25::BM25Index` in-process, the way trusty-search always has.
+# `cargo install trusty-memory` now produces one fewer binary.
 
 [[bin]]
 # Why: Compatibility shim for users who installed trusty-memory before the #914
@@ -83,14 +74,12 @@ path = "src/bin/mcp_bridge.rs"
 #      build for the binary path keeps `axum-server` on (see [features]
 #      below), so existing `cargo install` / `cargo build` flows are
 #      unaffected.
-trusty-common = { path = "../trusty-common", version = "0.33", default-features = false, features = ["mcp", "memory-core", "monitor-tui", "bm25-client", "uds-supervisor", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config"] }
+# `bm25` (#5329) replaces the retired `bm25-client`: the lexical lane now links
+# the index itself rather than a UDS client for a subprocess that holds it.
+# `uds-supervisor` is NOT dropped — trusty-console and trusty-agents still
+# depend on the shared `UdsServiceSupervisor` for trusty-review / trusty-analyze.
+trusty-common = { path = "../trusty-common", version = "0.33", default-features = false, features = ["mcp", "memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
-# Why: declaring trusty-bm25-daemon as a Cargo dependency causes `cargo install
-#      trusty-memory` to also build and install the daemon binary alongside
-#      trusty-memory — one install command, three binaries. The shim at
-#      src/bin/bm25_daemon.rs calls `trusty_bm25_daemon::run()` so all daemon
-#      logic stays in the trusty-bm25-daemon library crate.
-trusty-bm25-daemon = { workspace = true }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
 # standalone `trusty-console` crate is its sole producer.
@@ -146,12 +135,9 @@ redb = { workspace = true }
 # trusty-analyze, trusty-mpm-core, trusty-gworkspace) so this adds no new
 # lockfile churn.
 sha2 = { workspace = true }
-# Issue #193: the bm25 spawn supervisor sends a graceful SIGTERM to its
-# children before falling back to SIGKILL. tokio::process::Child does not
-# expose SIGTERM directly, so we reach into the raw PID with libc::kill.
-# libc is already a workspace dep used across the trusty-* crates; this is
-# zero lockfile churn (Unix-only — the spawn supervisor is also Unix-only
-# because the daemon protocol is UDS).
+# `commands::daemon_lock` probes a recorded pid with `libc::kill(pid, 0)` and
+# `fd_metrics` reads `RLIMIT_NOFILE` via `libc::getrlimit`. (#5329 removed the
+# other caller, the BM25 spawn supervisor's SIGTERM path.)
 libc = { workspace = true }
 # Issue #220: rolling dedup window uses Jaro-Winkler similarity to detect
 # near-duplicate memory writes within a short time window. `strsim` is
@@ -188,9 +174,9 @@ chrono = { workspace = true }
 #      in-process MCP discovery (e.g. `trusty-agents`) should not be forced to
 #      compile the axum + tower-http HTTP/SSE surface. Mirrors the
 #      `trusty-common` pattern where `axum-server` gates the same crates.
-# Defaults to `axum-server` so the `trusty-memory` / `trusty-bm25-daemon`
-# binaries — and the standard `cargo install trusty-memory` / `cargo test
-# -p trusty-memory` flows — keep building exactly as before. Consumers that
+# Defaults to `axum-server` so the `trusty-memory` binary — and the standard
+# `cargo install trusty-memory` / `cargo test -p trusty-memory` flows — keep
+# building exactly as before. Consumers that
 # want the slim library surface override with `default-features = false`.
 default = ["axum-server"]
 # Enables the axum HTTP/SSE daemon surface (`web`, `chat`, `run_http_*`,
