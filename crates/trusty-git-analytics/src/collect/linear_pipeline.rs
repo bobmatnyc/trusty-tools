@@ -94,9 +94,20 @@ pub(super) async fn fetch_and_store_linear_issues(
                     let messages: Vec<String> =
                         commits.iter().map(|(_, msg)| msg.clone()).collect();
                     let msg_refs: Vec<&str> = messages.iter().map(String::as_str).collect();
-                    let issues = client
+                    // #5665: a rejected API key used to arrive here as an empty
+                    // vec, so the run wrote zero rows and reported nothing.
+                    let issues = match client
                         .fetch_referenced_issues(&msg_refs, &linear_cfg.team_keys)
-                        .await;
+                        .await
+                    {
+                        Ok(issues) => issues,
+                        Err(e) => {
+                            stats
+                                .errors
+                                .push(format!("Linear: fetch issues failed: {e}"));
+                            return;
+                        }
+                    };
                     for issue in &issues {
                         info!(
                             id = %issue.identifier,
