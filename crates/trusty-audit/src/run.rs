@@ -60,6 +60,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{EngagementConfig, ToolPins};
 use crate::error::AuditError;
+use crate::inference;
 use crate::manifest::AuditManifest;
 use crate::tools::{self, RequiredTool};
 use crate::workdir::{Area, WorkDir};
@@ -468,13 +469,38 @@ async fn sweep_with_budget(
     config: &EngagementConfig,
     budget: std::time::Duration,
 ) -> Result<RunReport, AuditError> {
+    sweep_with_env(work, config, budget, |name| std::env::var(name).ok()).await
+}
+
+/// [`sweep_with_budget`], with the operator's environment as an argument.
+///
+/// Why: the inference selection (#5671) branches on what the operator already
+/// exported, and every branch has to be provable THROUGH the real child spawn —
+/// asserting on [`inference::inference_env`] alone would not catch a wiring
+/// mistake between it and the `Command`. Injecting the lookup makes that
+/// provable without `std::env::set_var`, which is `unsafe` in edition 2024 and
+/// races every other thread in a parallel test binary.
+/// Test: `super::run_tests::a_fully_set_operator_environment_is_left_alone`,
+/// `super::run_tests::a_partial_operator_environment_refuses_before_any_child_runs`.
+async fn sweep_with_env<F>(
+    work: &WorkDir,
+    config: &EngagementConfig,
+    budget: std::time::Duration,
+    operator: F,
+) -> Result<RunReport, AuditError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     work.create()?;
     let binaries = pinned_binaries(work, &config.tools)?;
+    // Resolved once, before any child: a half-named selection is identical for
+    // every repository, so failing per-repo would just repeat one misconfiguration.
+    let inference = inference::inference_env(config, operator)?;
     let selected = load_selection(work)?;
 
     let mut runs = Vec::with_capacity(selected.len());
     for (index, repo) in selected.into_iter().enumerate() {
-        runs.push(run_one(work, config, &binaries, index, repo, budget).await?);
+        runs.push(run_one(work, config, &binaries, &inference, index, repo, budget).await?);
     }
 
     let report = RunReport::of(runs);
@@ -483,10 +509,12 @@ async fn sweep_with_budget(
 }
 
 /// Audit one repository, recording rather than propagating its failure.
+#[allow(clippy::too_many_arguments)]
 async fn run_one(
     work: &WorkDir,
     config: &EngagementConfig,
     binaries: &PinnedBinaries,
+    inference: &[(&'static str, String)],
     index: usize,
     repo: SelectedRepo,
     budget: std::time::Duration,
@@ -503,6 +531,7 @@ async fn run_one(
             match spawn_tga(
                 binaries,
                 config,
+                inference,
                 &config_path,
                 &output,
                 &log,
@@ -688,11 +717,17 @@ pub const PER_REPO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// `PATH` can be reached instead. The credential goes in the environment and
 /// only there — see the module docs for what that costs.
 ///
+/// Alongside the credential the child gets the provider and per-role model ids
+/// from [`crate::inference`]: naming the key never routed anything to
+/// OpenRouter on its own, because `trusty-review` defaults to Bedrock (#5671).
+///
 /// A child that outlives `budget` is killed and recorded as a failure, so one
 /// hung repository costs that repository rather than the whole run.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_tga(
     binaries: &PinnedBinaries,
     config: &EngagementConfig,
+    inference: &[(&'static str, String)],
     config_path: &Path,
     output: &Path,
     log: &Path,
@@ -708,7 +743,8 @@ async fn spawn_tga(
         source,
     })?;
 
-    let spawned = tokio::process::Command::new(&binaries.tga)
+    let mut command = tokio::process::Command::new(&binaries.tga);
+    command
         .arg("--config")
         .arg(config_path)
         .arg("audit")
@@ -721,8 +757,16 @@ async fn spawn_tga(
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(errors))
-        .kill_on_drop(true)
-        .spawn();
+        .kill_on_drop(true);
+    // #5671: the credential alone never reached OpenRouter — trusty-review
+    // defaults to Bedrock, so the provider and the three role models must be
+    // named too. Resolved by `sweep_with_env`: either all four or none, never a
+    // subset that could pair one provider with another's model ids.
+    for (name, value) in inference {
+        command.env(name, value);
+    }
+
+    let spawned = command.spawn();
 
     let mut child = match spawned {
         Ok(child) => child,
@@ -1327,5 +1371,144 @@ trusty-review = "0.15.1"
             assert!(run.log.starts_with(work.root()), "{:?}", run.log);
         }
         assert!(progress_path(&work).starts_with(work.root()));
+    }
+
+    // ── #5671: what the spawned child's environment actually carries ─────────
+    //
+    // These go through the real `Command`, so they cover the wiring between
+    // `inference_env` and the child, not just the resolution rule. The operator
+    // environment is INJECTED rather than exported: `std::env::set_var` is
+    // `unsafe` in edition 2024 and races every other thread in this test binary,
+    // and `serial_test` is not a dev-dependency of this crate. Injection keeps
+    // the assertions deterministic while still exercising the real spawn.
+
+    /// A stub `tga` that writes the manifest and then records the inference
+    /// variables it was handed, so a test can read back the child's own view.
+    fn records_its_inference_env() -> String {
+        format!(
+            "{}{}",
+            writes_a_manifest(None).trim_end_matches("exit 0\n"),
+            "{\n  echo \"provider=$TRUSTY_REVIEW_PROVIDER\"\n  \
+             echo \"reviewer=$TRUSTY_REVIEW_REVIEWER_MODEL\"\n  \
+             echo \"verifier=$TRUSTY_REVIEW_VERIFIER_MODEL\"\n  \
+             echo \"summarizer=$TRUSTY_REVIEW_SUMMARIZER_MODEL\"\n  \
+             echo \"key=$OPENROUTER_API_KEY\"\n} > \"$out/env.txt\"\nexit 0\n",
+        )
+    }
+
+    /// One repository, stubs installed, ready to sweep.
+    fn one_repo_ready(work: &WorkDir) {
+        install_stubs(work, &records_its_inference_env());
+        make_repo(work, "acme-api");
+        select(work, &[("acme-api", "repos/acme-api")]);
+    }
+
+    /// The `env.txt` the stub wrote, i.e. the child's own environment.
+    fn child_env(report: &RunReport) -> String {
+        std::fs::read_to_string(report.repos[0].output.join("env.txt"))
+            .expect("the stub recorded its environment")
+    }
+
+    async fn sweep_with_operator<F>(work: &WorkDir, operator: F) -> Result<RunReport, AuditError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        sweep_with_env(work, &config(), PER_REPO_TIMEOUT, operator).await
+    }
+
+    /// #5671: the child must carry the provider AND all three model ids, not
+    /// just the credential. Asserts on the environment the spawned process
+    /// actually received, not on the value this crate computed.
+    ///
+    /// Against `origin/main` every assertion below fails: `spawn_tga` set only
+    /// the credential and the two binary paths, so `trusty-review` resolved
+    /// `Provider::Bedrock`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_child_environment_selects_openrouter_and_all_three_models() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        one_repo_ready(&work);
+
+        let report = sweep_with_operator(&work, |_| None)
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let dumped = child_env(&report);
+        for expected in [
+            format!("provider={}", inference::PROVIDER_OPENROUTER),
+            format!("reviewer={}", inference::DEFAULT_REVIEWER_MODEL),
+            format!("verifier={}", inference::DEFAULT_VERIFIER_MODEL),
+            format!("summarizer={}", inference::DEFAULT_SUMMARIZER_MODEL),
+            // #5663's credential must still be there — this widens that, not replaces it.
+            "key=sk-or-v1-not-a-real-key".to_owned(),
+        ] {
+            assert!(
+                dumped.contains(&expected),
+                "the child environment is missing `{expected}`:\n{dumped}"
+            );
+        }
+    }
+
+    /// An operator who named the whole selection keeps it: this crate writes
+    /// none of the four onto the child, so nothing of ours can contradict
+    /// theirs. The injected lookup reports all four set without exporting them,
+    /// so an emitted default would show up here as a non-empty value.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fully_set_operator_environment_is_left_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        one_repo_ready(&work);
+
+        let report = sweep_with_operator(&work, |_| Some("operator".to_owned()))
+            .await
+            .expect("a whole operator selection resolves");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let dumped = child_env(&report);
+        for role in ["provider", "reviewer", "verifier", "summarizer"] {
+            assert!(
+                dumped.contains(&format!("{role}=\n")),
+                "this crate overrode the operator's `{role}`:\n{dumped}"
+            );
+        }
+        // The credential is not part of the selection and is still delivered.
+        assert!(dumped.contains("key=sk-or-v1-not-a-real-key"), "{dumped}");
+    }
+
+    /// The HIGH finding, end to end: an operator on Bedrock who exports only
+    /// `TRUSTY_REVIEW_PROVIDER` must not have OpenRouter slugs written under it.
+    /// The sweep refuses, and refuses BEFORE spawning — the stub never runs, so
+    /// there is no `env.txt` and no partly-audited repository.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_partial_operator_environment_refuses_before_any_child_runs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        one_repo_ready(&work);
+
+        let err = sweep_with_operator(&work, |name| {
+            (name == inference::ENV_PROVIDER).then(|| "bedrock".to_owned())
+        })
+        .await
+        .expect_err("a provider without models must not be completed by guesswork");
+
+        let AuditError::SplitInferenceSelection { set, missing, .. } = &err else {
+            panic!("expected SplitInferenceSelection, got {err:?}");
+        };
+        assert_eq!(set, inference::ENV_PROVIDER);
+        assert!(
+            missing.contains("TRUSTY_REVIEW_REVIEWER_MODEL"),
+            "{missing}"
+        );
+
+        // Nothing ran: no output directory, so no child was spawned.
+        let outputs = work.path(Area::Output);
+        let spawned = std::fs::read_dir(&outputs)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(spawned, 0, "a refused selection must not spawn any child");
     }
 }
