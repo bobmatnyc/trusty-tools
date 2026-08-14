@@ -9,7 +9,7 @@
 //! Test: See kg/tests.rs for the open/assert/retract/traversal tests.
 
 use super::adjacency::{Adjacency, hydrate_adjacency};
-use super::types::{KgEdge, Triple, UndirectedSnapshot};
+use super::types::{AdjacencyDesync, KgEdge, Triple, UndirectedSnapshot};
 use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::kg_redb::KgStoreRedb;
 use crate::memory_core::store::kg_writer::KgWriter;
@@ -51,6 +51,19 @@ pub struct KnowledgeGraph {
     /// In-memory adjacency view of the active triples, hydrated on `open`
     /// and kept in sync by `assert` / `retract`. See [`Adjacency`].
     pub(super) adj: Arc<RwLock<Adjacency>>,
+    /// Set once a committed write could not be recorded in [`Self::adj`].
+    ///
+    /// Why (#5424): the adjacency lock is poisoned by any panic that unwinds
+    /// through a guard, and poisoning is permanent for the handle. Storage is
+    /// still authoritative and still accepting writes, so without a marker the
+    /// handle keeps taking mutations it cannot index and answering later
+    /// lookups from a snapshot that no longer matches redb.
+    /// What: `(operation, committed_rows)` of the FIRST commit that went
+    /// unindexed. A `OnceLock` so the first desync is the one reported and no
+    /// mutex sits on the read path; shared across handle clones via the same
+    /// `Arc` as `adj`.
+    /// Test: `retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted`.
+    pub(super) adj_desynced: Arc<std::sync::OnceLock<(&'static str, usize)>>,
 }
 
 /// Why: Callers historically pass `data_dir.join("kg.db")` (SQLite filename).
@@ -135,7 +148,85 @@ impl KnowledgeGraph {
             store,
             writer,
             adj: Arc::new(RwLock::new(adj)),
+            adj_desynced: Arc::new(std::sync::OnceLock::new()),
         })
+    }
+
+    /// Whether a committed write on this handle went unrecorded in the
+    /// in-memory adjacency (#5424).
+    ///
+    /// Why: once this is true the graph views (`neighbors`, `reachable`,
+    /// `shortest_path`, `top_degree_subgraph`, …) describe a state redb no
+    /// longer holds, and every mutation on the handle refuses. A surface that
+    /// reports KG health should say "stale, reopen the palace" rather than
+    /// present the snapshot as current.
+    /// What: reports whether [`Self::adj_desynced`] has been set. Sticky for
+    /// the life of the handle and shared by every clone of it.
+    /// Test: `poisoned_adjacency_error_downcasts_with_the_committed_row_count`.
+    pub fn adjacency_desynced(&self) -> bool {
+        self.adj_desynced.get().is_some()
+    }
+
+    /// Refuse a mutation whose adjacency update cannot possibly land (#5424).
+    ///
+    /// Why: after a desync, redb would happily accept the write and answer the
+    /// caller's follow-up read with a count that looks ordinary — a retry of a
+    /// retraction reads `Ok(0)`, which is exactly what "that fact was never
+    /// here" looks like. Stopping before the store call keeps the two apart.
+    /// What: returns [`AdjacencyDesync::HandleStale`], naming the earlier
+    /// commit that desynced the handle, or `Ok(())` when the adjacency is live.
+    /// Test: `retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted`,
+    /// `cascade_delete_after_poisoned_adjacency_is_distinguishable_from_never_deleted`.
+    pub(super) fn ensure_adjacency_live(&self, operation: &'static str) -> Result<()> {
+        // #5424: a stale index must stop the write, not serve a plausible 0.
+        match self.adj_desynced.get() {
+            None => Ok(()),
+            Some(&(earlier_operation, earlier_committed)) => {
+                Err(anyhow::Error::new(AdjacencyDesync::HandleStale {
+                    operation,
+                    earlier_operation,
+                    earlier_committed,
+                }))
+            }
+        }
+    }
+
+    /// Apply `f` to the adjacency after a storage commit already landed (#5424).
+    ///
+    /// Why: this is the one place that knows a redb transaction has closed and
+    /// the derived index has not caught up yet. Every mutation routed through
+    /// it reports that mismatch identically, so no call site can reintroduce
+    /// the bare `Err` that made a committed retraction read as one that never
+    /// happened.
+    /// What: takes the adjacency write lock and runs `f`. On a poisoned lock it
+    /// records `(operation, committed)` in [`Self::adj_desynced`], logs at
+    /// error level, and returns [`AdjacencyDesync::CommittedButStale`] carrying
+    /// the rows storage already made durable. Callers pass the row count the
+    /// storage layer reported, so the error never overstates the commit.
+    /// Test: `poisoned_adjacency_error_downcasts_with_the_committed_row_count`.
+    pub(super) fn sync_adjacency<T>(
+        &self,
+        operation: &'static str,
+        committed: usize,
+        f: impl FnOnce(&mut Adjacency) -> T,
+    ) -> Result<T> {
+        match self.adj.write() {
+            Ok(mut adj) => Ok(f(&mut adj)),
+            Err(_) => {
+                let _ = self.adj_desynced.set((operation, committed));
+                tracing::error!(
+                    operation,
+                    committed,
+                    "KG adjacency lock poisoned after a committed write — graph \
+                     views are stale until the palace is reopened (#5424)"
+                );
+                Err(anyhow::Error::new(AdjacencyDesync::CommittedButStale {
+                    operation,
+                    committed,
+                    cause: "adjacency lock poisoned",
+                }))
+            }
+        }
     }
 
     /// Assert a fact, closing any prior active interval for the same
@@ -143,21 +234,21 @@ impl KnowledgeGraph {
     ///
     /// Why: Temporal model — new assertion supersedes the prior active row
     /// instead of overwriting it, preserving history.
-    /// What: Delegates to `KgStoreRedb::assert` on the blocking pool.
+    /// What: Delegates to `KgStoreRedb::assert` on the blocking pool. Refuses
+    /// up front, and reports a committed-but-unindexed write distinctly, via
+    /// [`Self::ensure_adjacency_live`] / [`Self::sync_adjacency`] (#5424).
     /// Test: `assert_then_query_active_returns_fact`,
-    /// `second_assert_closes_prior_interval`.
+    /// `second_assert_closes_prior_interval`,
+    /// `poisoned_adjacency_error_downcasts_with_the_committed_row_count`.
     pub async fn assert(&self, triple: Triple) -> Result<()> {
+        self.ensure_adjacency_live("assert")?;
         // Route through the coalescing writer so concurrent asserts share
         // a single redb commit / fsync. The writer awaits the commit
         // before returning, preserving the "no write loss" invariant.
         self.writer.assert(triple.clone()).await?;
         // Sync the in-memory adjacency only after redb commit succeeds so a
         // failed write does not leave the cache ahead of the store.
-        {
-            let mut adj = self
-                .adj
-                .write()
-                .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
+        self.sync_adjacency("assert", 1, |adj| {
             // Closed-on-arrival triples (assert with valid_to=Some) should
             // not contribute an active edge — drop any existing edge for
             // (subject, predicate) and return.
@@ -166,7 +257,7 @@ impl KnowledgeGraph {
             } else {
                 adj.upsert_edge(&triple);
             }
-        }
+        })?;
         Ok(())
     }
 
@@ -176,9 +267,14 @@ impl KnowledgeGraph {
     /// Why: `assert` always closes-and-replaces; retract supports the
     /// prompt-facts surface (`remove_prompt_fact`) where there is no
     /// successor.
-    /// What: Delegates to `KgStoreRedb::retract` on the blocking pool.
-    /// Test: `retract_closes_active_interval`.
+    /// What: Delegates to `KgStoreRedb::retract` on the blocking pool. Shares
+    /// the #5424 commit-then-index contract with [`Self::retract_triple`]: a
+    /// committed close that cannot be indexed reports the row count it made
+    /// durable, and later mutations refuse instead of answering `Ok(0)`.
+    /// Test: `retract_closes_active_interval`,
+    /// `retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted`.
     pub async fn retract(&self, subject: &str, predicate: &str) -> Result<usize> {
+        self.ensure_adjacency_live("retract")?;
         let subject_owned = subject.to_string();
         let predicate_owned = predicate.to_string();
         // Route through the coalescing writer so a retract can land in
@@ -188,11 +284,9 @@ impl KnowledgeGraph {
             .retract(subject_owned.clone(), predicate_owned.clone())
             .await?;
         if closed > 0 {
-            let mut adj = self
-                .adj
-                .write()
-                .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
-            adj.remove_edges(&subject_owned, &predicate_owned);
+            self.sync_adjacency("retract", closed, |adj| {
+                adj.remove_edges(&subject_owned, &predicate_owned);
+            })?;
         }
         Ok(closed)
     }
