@@ -32,7 +32,7 @@ use serde::Deserialize;
 /// What: matched as a two-component path segment immediately under an approved
 /// root, never as a substring of the full path.
 /// Test: `worktree_under_approved_root_is_allowed`,
-/// `sibling_dir_under_approved_root_is_not_allowed`.
+/// `sibling_of_approved_root_is_not_allowed`.
 const WORKTREE_SEGMENTS: &[&[&str]] = &[&[".claude", "worktrees"], &[".worktrees"]];
 
 /// Which member of the allowlist union approved a root.
@@ -140,7 +140,7 @@ impl AllowlistPaths {
 /// project.
 /// What: `$TRUSTY_MPM_ROOT/project-paths.json` when that variable is set and
 /// non-empty, else `~/.trusty-mpm/project-paths.json`.
-/// Test: `default_project_paths_file_honours_env`.
+/// Test: `default_project_paths_file_ends_at_the_registry`.
 pub fn default_project_paths_file() -> PathBuf {
     let root = match std::env::var("TRUSTY_MPM_ROOT") {
         Ok(raw) if !raw.trim().is_empty() => PathBuf::from(raw),
@@ -244,8 +244,9 @@ pub fn approved_roots(paths: &AllowlistPaths) -> anyhow::Result<Vec<(PathBuf, Al
 /// NAMED `.worktrees-backup` does not qualify, and a root's ordinary
 /// subdirectory (`<root>/src`) is not approved just because its parent is.
 /// Test: `worktree_under_approved_root_is_allowed`,
-/// `sibling_dir_under_approved_root_is_not_allowed`,
-/// `nested_path_below_worktree_is_not_allowed`.
+/// `sibling_of_approved_root_is_not_allowed`,
+/// `subdirectory_of_approved_root_is_allowed` (proves an ordinary descendant
+/// reaches the containment arm rather than this one).
 fn is_provisioned_worktree_of(candidate: &Path, root: &Path) -> bool {
     let Ok(rel) = candidate.strip_prefix(root) else {
         return false;
