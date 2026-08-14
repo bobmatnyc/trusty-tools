@@ -963,9 +963,12 @@ pub(super) fn free_port() -> u16 {
 /// `SERVICE_UNAVAILABLE` + `status: "degraded"`). `probe_once` counts only a
 /// 2xx, so a 503 daemon reads to the guard exactly like no daemon.
 ///
-/// Counting replies rather than sleeping is what makes the slow-start tests
-/// deterministic — the guard's first probe is guaranteed to miss on a loaded
-/// machine, where a wall-clock delay could be overtaken.
+/// The counter advances on REPLIES, so this is deterministic only for
+/// assertions about replies — which probes missed, and what the guard concluded
+/// from them. An assertion about a side effect the stub performs, such as a
+/// spawn or a file write, is a different event: it can still be pending when
+/// the counter has already flipped the daemon to ready. Gate that on the effect
+/// itself — see `serve_health_after_spawns` (#5713).
 async fn serve_health(degraded_replies: usize) -> u16 {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1000,6 +1003,55 @@ async fn serve_health(degraded_replies: usize) -> u16 {
 /// healthy daemon. Returns the port it bound.
 async fn serve_healthy() -> u16 {
     serve_health(0).await
+}
+
+/// A listener whose `/health` answers `503 Service Unavailable` until
+/// `spawn_log` holds `required` lines, and `200 OK` from then on. Returns the
+/// port it bound.
+///
+/// Why a spawn log rather than [`serve_health`]'s reply counter (#5713): the
+/// counter flips on the Nth REQUEST, which is a different event from the spawns
+/// the concurrency test asserts on. Both guards could therefore reach `Ok` off
+/// the counter alone, before either detached stub had been scheduled to append
+/// its line — and on a loaded host they did, leaving the test reading an empty
+/// log and reporting `got []`.
+///
+/// Gating on the log inverts that: the daemon becomes ready BECAUSE the spawns
+/// happened, so a guard that returns `Ok` proves both lines are already on disk.
+/// It also fixes the opening-probe ordering for free. A guard's own spawn cannot
+/// precede its own opening probe, so the second guard's probe sees at most one
+/// line, misses, and spawns — by construction rather than by winning a race
+/// against the first guard's readiness polls.
+///
+/// A file rather than an in-process counter, because the thing that writes it is
+/// a detached child process — the same reason [`serve_health_gated_on`] uses one.
+async fn serve_health_after_spawns(spawn_log: std::path::PathBuf, required: usize) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("read the bound address")
+        .port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let spawn_log = spawn_log.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                let spawned = std::fs::read_to_string(&spawn_log)
+                    .unwrap_or_default()
+                    .lines()
+                    .count();
+                let reply: &[u8] = if spawned >= required {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
+                };
+                let _ = stream.write_all(reply).await;
+            });
+        }
+    });
+    port
 }
 
 /// An executable stub at `dir/name` running `script`, standing in for a
@@ -1217,11 +1269,16 @@ async fn two_concurrent_guards_both_resolve_against_one_slow_daemon() {
         ),
     );
 
-    // Degraded for exactly the two opening probes — one per guard — then ready.
-    // Both calls therefore miss, spawn, and find the daemon on a later poll.
-    let port = serve_health(2).await;
+    // #5713: the daemon goes ready only once BOTH spawns have appended, so
+    // readiness is caused by the spawns instead of racing them. Each guard's own
+    // spawn follows its own opening probe, so the second probe sees at most one
+    // line and misses — both calls spawn by construction, not by timing luck.
+    let port = serve_health_after_spawns(spawn_log.clone(), 2).await;
     let mut guard = guard_on(port, &stub);
-    guard.startup_timeout = std::time::Duration::from_secs(5);
+    // A ceiling, not a schedule. The happy path ends when the second stub
+    // appends, however many seconds a loaded host takes to schedule it; this
+    // only bounds a genuinely stuck run.
+    guard.startup_timeout = std::time::Duration::from_secs(60);
 
     let (first, second) = tokio::join!(
         crate::audit::ensure_analyze_daemon_with(&guard),
@@ -1235,28 +1292,13 @@ async fn two_concurrent_guards_both_resolve_against_one_slow_daemon() {
     assert_eq!(guard.url, format!("http://127.0.0.1:{port}"));
     assert_eq!(guard.binary, stub);
 
-    // The stubs are detached, so their writes land after the guards return.
-    // Poll for the expected count rather than sleeping a guessed interval —
-    // and keep polling past it, so a THIRD spawn would be seen rather than
-    // raced past.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while std::time::Instant::now() < deadline {
-        if std::fs::read_to_string(&spawn_log)
-            .unwrap_or_default()
-            .lines()
-            .count()
-            >= 2
-        {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    // Then keep waiting past the expected count, so a THIRD spawn is seen
-    // rather than raced past.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let spawns = std::fs::read_to_string(&spawn_log).unwrap_or_default();
-
-    let spawned: Vec<&str> = spawns.lines().collect();
+    // Both calls returned, and neither could have without the daemon going
+    // ready, which needs both lines on disk — so the expected two are already
+    // there and there is nothing left to wait FOR. What remains is the opposite
+    // question, the absence of a third spawn, and absence is not a condition to
+    // poll on. So wait for the count to stop changing instead of for a guessed
+    // interval: a loaded host simply takes more rounds to settle.
+    let spawned = settled_spawn_log(&spawn_log).await;
     assert_eq!(
         spawned.len(),
         2,
@@ -1269,6 +1311,39 @@ async fn two_concurrent_guards_both_resolve_against_one_slow_daemon() {
             "every spawn carries the configured port"
         );
     }
+}
+
+/// The spawn log's lines, read once its length has stopped changing.
+///
+/// #5713: a third spawn would be issued before its call returned, but the write
+/// itself is a detached child that can still be in flight — so the count is read
+/// only after it holds steady across several consecutive rounds.
+async fn settled_spawn_log(spawn_log: &std::path::Path) -> Vec<String> {
+    const STABLE_ROUNDS: usize = 4;
+    let round = std::time::Duration::from_millis(25);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+
+    let read = || -> Vec<String> {
+        std::fs::read_to_string(spawn_log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+
+    let mut lines = read();
+    let mut stable = 0usize;
+    while stable < STABLE_ROUNDS && std::time::Instant::now() < deadline {
+        tokio::time::sleep(round).await;
+        let next = read();
+        stable = if next.len() == lines.len() {
+            stable + 1
+        } else {
+            0
+        };
+        lines = next;
+    }
+    lines
 }
 
 // ─── #5670: indexing every audited repository before the render ──────────────
