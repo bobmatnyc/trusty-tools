@@ -22,6 +22,12 @@ matters because a crates.io publish is irreversible except by yank, and a gate
 that reported only after the upload would have caught #4088 with nothing left to
 do about it.
 
+A zero exit from `check_semver.sh` is **not** the mirror of that stop, and
+reading it as one is how a blind gate shipped a release
+([#5620](https://github.com/bobmatnyc/trusty-tools/issues/5620)). What CHECK 5
+concludes from a given run is in
+[Reading the gate's result](#reading-the-gates-result).
+
 The tag-push workflow is a second, independent report. In this project's
 sequence the tag is pushed *before* `cargo publish` (steps 4 then 6), so a red
 run there is still visible in time to call the release off. Same
@@ -311,6 +317,18 @@ inventory that could not be computed prints `NO INVENTORY` and is counted
 separately in the summary line, so "no inventory" never reads as "inventory
 clean".
 
+**It cannot fail the gate, but it can stop a publish**
+([#5620](https://github.com/bobmatnyc/trusty-tools/issues/5620)). Those two are
+different questions and used to be answered by the same number. `check_semver.sh`
+exits 0 on a blind inventory and still does: whether an already-breaking release
+is *permitted* is settled by its version numbers, not by an advisory run. But for
+a `0.y.z` crate every minor bump is major under Cargo's rules, so the pass/fail
+arm never fires and **the inventory is the only coverage that release ever gets**
+— and an inventory that did not run is no coverage at all. Whether to publish on
+no coverage is `preflight-publish.sh`'s question, and CHECK 5 now reads the
+gate's counts rather than its exit status alone. See
+[Reading the gate's result](#reading-the-gates-result) below.
+
 What it costs is roughly four minutes of rustdoc, on already-breaking releases
 only. What it buys is the one question the skip could not answer: did an
 unintended break ride along with the intended one?
@@ -338,9 +356,74 @@ construction — the fix #4088 asked for and deferred.
 cargo semver-checks --explain constructible_struct_adds_field
 ```
 
-There is no override flag on CHECK 5, and none is needed. Bumping the breaking
-position turns the run into an advisory inventory, so a false positive and a real
-break have the same safe remedy.
+A break has no override, and none is needed. Bumping the breaking position turns
+the run into an advisory inventory, so a false positive and a real break have the
+same safe remedy. `PREFLIGHT_SEMVER_UNVERIFIED` covers a gate that could not run,
+never one that ran and said no.
+
+## Reading the gate's result
+
+`check_semver.sh` answers "did the API break?". `preflight-publish.sh` CHECK 5
+answers "do we publish?", and those are not the same question — the gate exits 0
+both when it compared a crate and found nothing wrong and when it compared
+nothing at all. Until
+[#5620](https://github.com/bobmatnyc/trusty-tools/issues/5620) CHECK 5 read only
+that status, so the trusty-review 0.16.0 publish printed
+
+```
+[PASS] semver: semver gate: scanned (explicit); 0 crate(s) checked, 0 skipped,
+       1 inventory NOT computed — OK.
+```
+
+and proceeded. `cargo-semver-checks` had exited 101 without comparing anything:
+0.15.0 cannot be documented, because `pipeline/mapreduce/reduce.rs` imports a
+`profile`-gated item unconditionally, so rustdoc never built the baseline. The
+gate said exactly that, on its own line and in its summary. The loss was in the
+decision laid over it, where "0 examined" and "0 wrong" were rendered with the
+same word.
+
+CHECK 5 now reads the gate's counts. **`0 compared` and `[PASS]` are unreachable
+together**, and each outcome gets its own label:
+
+| Label | When | Publish |
+|---|---|---|
+| `[PASS]` | ≥ 1 crate compared — a pass/fail run or an inventory that ran — and no unbumped break | proceeds |
+| `[SKIP]` | 0 compared because no comparison was *possible*: no baseline on crates.io, no library target, or a row in `semver-checks-crate-exclusions.tsv` | proceeds |
+| `[WARN]` | 0 compared because the gate was blind, and `PREFLIGHT_SEMVER_UNVERIFIED` named a reason | proceeds |
+| `[FAIL]` | a computed break, a blind gate with no override, or a gate that malfunctioned | stops |
+
+`[PASS]` states how many crates it compared. `[SKIP]` permits without an override
+because the reason is a fact about the crate that is already recorded in a
+reviewable file — but it says `NOT VERIFIED`, because nothing looked at the API.
+
+### The override, and what it is not for
+
+```bash
+PREFLIGHT_SEMVER_UNVERIFIED="0.15.0 baseline references the profile module removed in #5611" \
+  bash scripts/preflight-publish.sh trusty-review
+```
+
+It takes a **reason, not a boolean**, echoed verbatim into the `[WARN]` line and
+into the run's final summary. `=1` would record that a publish was allowed
+without recording why, and why is the entire content of the disclosure; a stale
+reason string also reads as obviously stale where a stale `1` reads as normal.
+Set with no reason, it is refused rather than honoured.
+
+**A permanent capability gap is not what it is for.** When a machine class can
+never build a crate's feature set — no CUDA for `trusty-search`'s `cuda` feature,
+no libdbus — the lever is a row in
+`scripts/semver-checks-feature-exclusions.tsv`: durable, reviewable in a diff,
+greppable a year later. Route a standing gap through the environment variable and
+within a week it lives in a Makefile target or a shell profile and the `[WARN]`
+scrolls past every publish. An override that is always set is not an override.
+
+This does loosen one arm. A gate that fails for an environmental reason
+([#5440](https://github.com/bobmatnyc/trusty-tools/issues/5440): libdbus absent,
+`cargo-semver-checks` aborts, exit 3) used to block unconditionally — the wrong
+reason, but a safe outcome. It is now override-able, so such a machine can
+publish with a `[WARN]` and an unverified delta. The trade: a gate that blocks
+good publishes for reasons the operator cannot fix gets routed around eventually,
+and a disclosed `[WARN]` beats an undisclosed workaround.
 
 ## Running it locally
 
@@ -364,6 +447,17 @@ gh workflow run semver-checks.yml -f crate=trusty-common
 ```
 
 ## Self-test
+
+Two files, one per side of the seam. `scripts/check_semver_selftest.sh` drives
+the gate over captured `cargo-semver-checks` output;
+`scripts/preflight-check5-selftest.sh` drives CHECK 5's *decision* over captured
+gate output. The second exists because the decision was the half that had no test
+— running the real gate costs four minutes of rustdoc per case — and the half
+that was wrong in #5620. Its twelve cases pin every way the gate can conclude
+against the label and the permit/stop it must produce, including the
+trusty-review 0.16.0 run verbatim as case 3. `PREFLIGHT_SELFTEST_SCRIPT` points
+it at another revision of `preflight-publish.sh`, which is how the red-then-green
+is shown: against `main` before the fix, case 3 permits the publish.
 
 `scripts/check_semver_selftest.sh` runs first in CI. Cases 1-4 cover the gate's
 original fail-open surfaces — an unscanned diff and an unreachable or erroring

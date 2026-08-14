@@ -136,6 +136,16 @@ pub struct FakeTmuxDriver {
     /// simulates a machine where tmux has never run and the server cannot be
     /// started (#3823).
     pub ensure_server_up_should_fail: Mutex<bool>,
+    /// When `true`, `list_sessions` fails with the EXACT cold-host stderr
+    /// from #3886 until `ensure_server_up` has been called at least once —
+    /// i.e. the socket directory exists but the socket does not, so every
+    /// tmux call that is not `start-server` errors out. Reproduces the
+    /// in-project "launch new session" failure on a fresh host.
+    pub cold_tmux_host: Mutex<bool>,
+    /// When `true`, `list_sessions` fails unconditionally with an
+    /// already-typed `ManagedError::TmuxUnavailable` — the shape that let
+    /// #3886's callers double the `tmux error:` prefix by re-wrapping it.
+    pub list_sessions_should_fail: Mutex<bool>,
 }
 
 impl FakeTmuxDriver {
@@ -160,6 +170,8 @@ impl FakeTmuxDriver {
             attached_names: Mutex::new(Vec::new()),
             ensure_server_up_calls: Mutex::new(0),
             ensure_server_up_should_fail: Mutex::new(false),
+            cold_tmux_host: Mutex::new(false),
+            list_sessions_should_fail: Mutex::new(false),
         })
     }
 }
@@ -233,7 +245,23 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             .unwrap_or_default())
     }
 
+    /// Honours the two #3886 failure simulations before answering: an
+    /// unconditional typed failure, and the cold-host socket-absent failure
+    /// that only `ensure_server_up` can clear.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        if *self.list_sessions_should_fail.lock().unwrap() {
+            return Err(ManagedError::TmuxUnavailable(
+                "protocol error: tmux list-sessions: fake failure".into(),
+            ));
+        }
+        if *self.cold_tmux_host.lock().unwrap() && *self.ensure_server_up_calls.lock().unwrap() == 0
+        {
+            return Err(ManagedError::TmuxUnavailable(
+                "protocol error: tmux list-sessions: error connecting to \
+                 /private/tmp/tmux-501/default (No such file or directory)"
+                    .into(),
+            ));
+        }
         let mut names: Vec<String> = self.sessions.lock().unwrap().keys().cloned().collect();
         // Also include seeded names (for reconcile tests that seed live sessions
         // without going through create_session).

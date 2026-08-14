@@ -18,7 +18,7 @@
 //! `verify_schema_enumerates_judgments` in `verify_prompt_tests.rs`.
 
 use crate::{
-    llm::{ChatMessage, LlmRequest, ResponseSchema, enforce_strict_mode, strip_provider_prefix},
+    llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix},
     models::Finding,
 };
 
@@ -144,7 +144,7 @@ UNVERIFIABLE) and `reason` (one short sentence)."#
 /// Test: `verify_schema_enumerates_judgments`,
 /// `verify_schema_is_openai_strict_compliant`.
 pub fn verify_response_schema() -> ResponseSchema {
-    let mut schema = serde_json::json!({
+    let schema = serde_json::json!({
         "type": "object",
         "properties": {
             "judgment": {
@@ -158,11 +158,7 @@ pub fn verify_response_schema() -> ResponseSchema {
             }
         }
     });
-    enforce_strict_mode(&mut schema);
-    ResponseSchema {
-        name: VERIFY_SCHEMA_NAME.to_string(),
-        schema,
-    }
+    ResponseSchema::new(VERIFY_SCHEMA_NAME, schema)
 }
 
 // ─── Request builder ─────────────────────────────────────────────────────────────

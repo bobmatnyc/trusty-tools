@@ -26,18 +26,24 @@
 //! A false DENY lands on the PM and halts every dispatch in the system; a false
 //! ALLOW merely reproduces the behaviour that shipped before this module. So
 //! [`agent_mutates_files`] answers `true` only for an agent this binary ships
-//! and can positively identify as engineer-tier — an unknown name, a custom
+//! and can positively identify as file-mutating — an unknown name, a custom
 //! project agent, a renamed agent, or an unparseable frontmatter all answer
 //! `false` and the dispatch proceeds.
 //!
-//! Why engineer-tier and not "every agent that could conceivably write": the
-//! narrower set is what keeps the guard from false-denying the ordinary
-//! workflow. A `version-control` agent opening a PR, a `documentation` agent
-//! editing a doc, or an `ops` agent running a build all touch files, but they
-//! routinely need to see the engineer's work in the shared tree — denying them
-//! for lack of an isolated worktree would block the normal delivery chain to
-//! prevent a race they are not the documented trigger for. The documented
-//! incident is two concurrent engineers, and that is what this classifies.
+//! What the classifier covers, and why not more: an agent counts when its own
+//! bundled definition tells it to write to the tree it is dispatched into.
+//! #4480 shipped engineer-tier alone on the theory that the adjacent tiers need
+//! to see the engineer's work in the shared tree; #5650 found that reasoning
+//! backwards for three of them. `documentation` creates and reorganises files,
+//! `git mv`s them, and commits; `version-control` branches, commits, and pushes;
+//! `qa` writes test files. Wanting to read the engineer's work does not make
+//! writing alongside it safe — a `documentation` agent dispatched next to a
+//! `rust-engineer`, both unisolated, is the same single-HEAD collision the module
+//! exists to stop, and it passed with no deny at all until #5650.
+//!
+//! A dispatch that only reads — research, code analysis, adversarial review,
+//! ticketing — still answers `false` and still parallelises freely. That is where
+//! the line sits now: writes, not proximity to writes.
 //!
 //! Test: the `#[cfg(test)]` suite below.
 
@@ -63,14 +69,40 @@ pub const ISOLATING_DISPATCH_MODES: &[&str] = &["worktree", "remote"];
 ///
 /// Why: `role:` is the declared domain every bundled agent carries, so this is a
 /// property of the agent definition rather than a name-shaped guess that a
-/// rename would silently invalidate. The set is deliberately the engineer tier
-/// alone — see the module doc for why widening it trades a rare race for a
-/// common false deny.
+/// rename would silently invalidate. A role belongs here only when EVERY bundled
+/// agent declaring it writes files; a role with a read-only member is keyed by
+/// name in [`FILE_MUTATING_NAMES`] instead.
 /// What: matched case-sensitively against [`crate::core::agent_metadata::AgentMetadata::role`].
 /// `data-engineer` is listed explicitly because it declares that role rather
-/// than plain `engineer` while still extending `base-engineer`.
-/// Test: `engineer_tier_agents_mutate_files`, `non_engineer_agents_do_not`.
-const FILE_MUTATING_ROLES: &[&str] = &["engineer", "data-engineer"];
+/// than plain `engineer` while still extending `base-engineer`. `documentation`
+/// and `version-control` each have exactly one bundled agent, and both write —
+/// docs and `git mv`s for one, branches and commits for the other.
+/// Test: `engineer_tier_agents_mutate_files`, `file_writing_non_engineer_agents_mutate_files`,
+/// `non_engineer_agents_do_not`.
+// #5650: documentation and version-control demonstrably write files; omitting
+// them let two unisolated writers share one HEAD with no deny.
+const FILE_MUTATING_ROLES: &[&str] = &[
+    "engineer",
+    "data-engineer",
+    "documentation",
+    "version-control",
+];
+
+/// Bundled agent `name:`s that mutate files but whose `role:` cannot say so.
+///
+/// Why: this list is keyed on NAME rather than role, and that is deliberate —
+/// do not fold it back into [`FILE_MUTATING_ROLES`]. All four bundled agents
+/// declaring `role: qa` also declare `extends: base-qa`, but they do not agree
+/// about writing: `qa`, `web-qa`, and `api-qa` author test files, while
+/// `code-critic` is a pure reviewer that reads code and returns a verdict
+/// (`code-critic.md` — "You did not write this code"). Adding `qa` to the role
+/// list would classify `code-critic` as mutating and deny a review dispatched
+/// alongside an engineer, which is the ordinary workflow.
+/// What: matched case-sensitively against the agent's declared `name:`.
+/// Test: `file_writing_non_engineer_agents_mutate_files`,
+/// `code_critic_is_not_file_mutating`.
+// #5650: role: qa is not homogeneous — code-critic shares it and only reviews.
+const FILE_MUTATING_NAMES: &[&str] = &["qa", "web-qa", "api-qa"];
 
 /// The `extends:` base whose descendants are engineer-tier regardless of role.
 ///
@@ -104,14 +136,16 @@ pub fn isolation_separates_working_tree(isolation: Option<&str>) -> bool {
 /// added.
 /// What: scans the compiled-in bundle for the agent whose declared `name:`
 /// equals `agent`, and reports whether its `role:` is in
-/// [`FILE_MUTATING_ROLES`] or its `extends:` is [`FILE_MUTATING_BASE`]. A name
-/// this binary does not ship — a project-local or custom agent — answers
-/// `false`, the fail-open direction this module's doc commits to.
+/// [`FILE_MUTATING_ROLES`], its `extends:` is [`FILE_MUTATING_BASE`], or its
+/// name is in [`FILE_MUTATING_NAMES`]. A name this binary does not ship — a
+/// project-local or custom agent — answers `false`, the fail-open direction
+/// this module's doc commits to.
 ///
 /// No caching and no I/O: the bundle is a compile-time table of ~40 entries and
 /// this runs once per `Agent` dispatch, which is rare compared to ordinary tool
 /// calls. A process-lifetime cache would be global state for no measurable win.
-/// Test: `engineer_tier_agents_mutate_files`, `non_engineer_agents_do_not`,
+/// Test: `engineer_tier_agents_mutate_files`,
+/// `file_writing_non_engineer_agents_mutate_files`, `non_engineer_agents_do_not`,
 /// `unknown_agent_fails_open`.
 pub fn agent_mutates_files(agent: &str) -> bool {
     if agent.is_empty() {
@@ -132,6 +166,9 @@ pub fn agent_mutates_files(agent: &str) -> bool {
                 .as_deref()
                 .is_some_and(|r| FILE_MUTATING_ROLES.contains(&r))
                 || meta.extends.as_deref() == Some(FILE_MUTATING_BASE)
+                // #5650: name-keyed because `role: qa` mixes writers with the
+                // read-only `code-critic`; see FILE_MUTATING_NAMES.
+                || FILE_MUTATING_NAMES.contains(&agent)
         })
 }
 
@@ -228,18 +265,40 @@ mod tests {
     }
 
     #[test]
+    fn file_writing_non_engineer_agents_mutate_files() {
+        // #5650: these five write files and got no isolation at all before it.
+        // `documentation` and `version-control` arrive by role; the three QA
+        // agents by name, because `role: qa` also covers `code-critic`.
+        for agent in ["documentation", "version-control", "qa", "web-qa", "api-qa"] {
+            assert!(
+                agent_mutates_files(agent),
+                "{agent} writes files and must classify as file-mutating"
+            );
+        }
+    }
+
+    #[test]
+    fn code_critic_is_not_file_mutating() {
+        // The trap FILE_MUTATING_NAMES exists to avoid. `code-critic` declares
+        // the same `role: qa` and `extends: base-qa` as the three QA writers,
+        // but it only reads code and returns a verdict. Widening by role would
+        // deny a review dispatched alongside the engineer it reviews.
+        assert!(
+            !agent_mutates_files("code-critic"),
+            "code-critic reviews and never writes; a role-based widen would misclassify it"
+        );
+    }
+
+    #[test]
     fn non_engineer_agents_do_not() {
-        // The read-only and adjacent tiers the PM dispatches in parallel
-        // routinely. Denying these would halt the ordinary workflow to prevent
-        // a race they are not the trigger for — see the module doc.
+        // The read-only tiers the PM dispatches in parallel routinely. Denying
+        // these would halt the ordinary workflow to prevent a race they are not
+        // the trigger for — see the module doc.
         for agent in [
             "research",
             "code-critic",
             "code-analyzer",
-            "qa",
             "security",
-            "documentation",
-            "version-control",
             "ticketing",
         ] {
             assert!(

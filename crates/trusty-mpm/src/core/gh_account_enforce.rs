@@ -123,22 +123,22 @@ pub fn ensure_gh_account_in_dir(
         return Ok(());
     }
 
-    let switch = std::process::Command::new("gh")
-        .args([
-            "auth",
-            "switch",
-            "--hostname",
-            host,
-            "--user",
-            expected_user,
-        ])
-        .env(GH_CONFIG_DIR_ENV, &dir)
-        .env_remove(GH_TOKEN_ENV_VARS[0])
-        .env_remove(GH_TOKEN_ENV_VARS[1])
-        .output()
-        .with_context(|| format!("failed to spawn `gh auth switch --user {expected_user}`"))?;
-    if !switch.status.success() {
-        let stderr = String::from_utf8_lossy(&switch.stderr);
+    // #5475: single `gh` entry point; the scoping env is unchanged.
+    let switch = trusty_common::gh::GhCommand::new([
+        "auth",
+        "switch",
+        "--hostname",
+        host,
+        "--user",
+        expected_user,
+    ])
+    .env(GH_CONFIG_DIR_ENV, &dir)
+    .env_remove(GH_TOKEN_ENV_VARS[0])
+    .env_remove(GH_TOKEN_ENV_VARS[1])
+    .output_blocking()
+    .with_context(|| format!("failed to spawn `gh auth switch --user {expected_user}`"))?;
+    if !switch.success {
+        let stderr = &switch.stderr;
         anyhow::bail!(
             "`gh auth switch --user {expected_user}` failed inside {dir}: {} \
              (is '{expected_user}' logged in under this GH_CONFIG_DIR? run \
@@ -171,17 +171,14 @@ pub fn ensure_gh_account_in_dir(
 fn run_gh_scoped(config_dir: &str, args: [&'static str; 2]) -> anyhow::Result<String> {
     let config_dir = config_dir.to_string();
     run_bounded(GH_ENFORCE_TIMEOUT, move || {
-        let out = std::process::Command::new("gh")
-            .args(args)
+        // #5475: single `gh` entry point.
+        let out = trusty_common::gh::GhCommand::new(args)
             .env(GH_CONFIG_DIR_ENV, &config_dir)
             .env_remove(GH_TOKEN_ENV_VARS[0])
             .env_remove(GH_TOKEN_ENV_VARS[1])
-            .output()
+            .output_blocking()
             .ok()?;
-        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-        text.push('\n');
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
-        Some(text)
+        Some(out.combined())
     })
     .ok_or_else(|| anyhow::anyhow!("`gh` did not respond within {GH_ENFORCE_TIMEOUT:?}"))
 }

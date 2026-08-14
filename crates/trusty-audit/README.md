@@ -5,10 +5,11 @@ codebases, and returns a report. It installs the pinned tools it needs
 (`tga`, `trusty-analyze`, `trusty-review`) and drives the audit workflow —
 "really an installer runner".
 
-**Status (#5502, #5495).** The crate, its working-directory layout, the CLI
-surface, and pinned tool installation exist. The audit run, package assembly,
-signing and the desktop shell do not — they are later milestones on
-#5473 / #5477.
+**Status (#5502, #5495, #5555, #5499).** The crate, its working-directory
+layout, the CLI surface, pinned tool installation, the audit run, and the return
+package exist. Content signing and the desktop shell do not — they are later
+milestones on #5473 / #5477. The run reads a selection file; its shape is
+documented under "Running the sweep".
 
 ## Shape: a library with a CLI over it
 
@@ -35,6 +36,8 @@ trusty-audit repos              # repositories this engagement is configured to 
 trusty-audit tools              # which pinned tools are installed, at which versions
 trusty-audit install            # download and verify the pinned tools
 trusty-audit manifest           # engagement metadata from the companion manifest.toml
+trusty-audit run                # run `tga audit` over the selected repositories
+trusty-audit package            # assemble the deliverable zip to send back
 ```
 
 The same program is also installed as `taudit`, a shorter name for repeat use —
@@ -43,6 +46,80 @@ The same program is also installed as `taudit`, a shorter name for repeat use �
 
 Global options: `--work-dir <DIR>`, `--manifest <FILE>`, and `--config <FILE>`
 (the engagement config, default `./engagement.toml`).
+
+## Running the sweep
+
+`trusty-audit run` audits each selected repository with the `tga` this client
+installed and verified — never a `tga` on your `PATH`. If the pinned triple is
+not installed the run refuses and says to install it; there is no fallback,
+because an unpinned tool is the version skew #5454 cost us.
+
+The repositories come from `<work-dir>/state/selected-repos.toml`. Selection and
+cloning are separate work (#5487, #5215); until they land, write the file
+yourself:
+
+```toml
+count = 1                   # how many entries follow — REQUIRED
+
+[[repositories]]
+name = "acme-api"
+path = "repos/acme-api"     # relative paths anchor to the work-dir root
+```
+
+Write it to a temporary file in `state/` and rename it into place: a rename is
+atomic, a write is not, and a producer that crashes part-way through one leaves
+valid TOML holding a prefix of the entries. `count` is what makes that
+detectable — a file carrying fewer entries than it declares is refused, not
+treated as a smaller selection. Absent or empty is a refusal too, never a
+zero-repository success.
+
+One `tga audit` child runs per repository, so a failure is attributable to one
+repository rather than to "the run". Files are stemmed `<index>-<name>` because
+sanitizing alone is not injective — `acme/api` and `acme-api` would otherwise
+share an output directory and a log file, and the second child would overwrite
+the first's evidence. Each child writes to `out/<stem>/`, `logs/<stem>.log`, and
+`extract/<stem>.db`. The results land in `state/run-progress.toml`.
+
+**A zero exit from `tga audit` is not proof anything was assessed.** Its own
+contract is to exit 0 whenever the sweep completed, failed stages included — so
+this client checks what the child produced: the manifest must exist, parse, name
+a repository, and state no failed `collect` stage. A child that exits 0 having
+written nothing is a failure. Other stated gaps (an unconfigured JIRA project, a
+repository that could not be fetched) are DOC-67 §9 named gaps: they are printed
+and recorded, and they do not fail the repository.
+
+A child that outlives four hours is killed and recorded as a timeout, so a hang
+costs one repository rather than the whole unattended run.
+
+The exit status distinguishes the three outcomes DOC-67 §9 needs: 0 when every
+repository was audited, 1 when only some were (`PARTIAL`, naming which failed),
+and 1 when none were. A partial sweep never reads as a clean one.
+
+The run uses the triple this client installed AND verified, at the version the
+engagement config pins today — a config bumped after `install` refuses the run
+rather than silently running the older binary.
+
+**What the run does not pin.** `tga` runs from its absolute path and the report
+renderer is named to the child through `TRUSTY_REVIEW_BIN`, so neither can come
+from your `PATH`. The analyze step is different: `tga audit` invokes
+`trusty-review report --analyze`, which reads metrics over HTTP from a URL
+(default `http://127.0.0.1:7879`) rather than spawning a binary — so no
+environment variable this client sets can pin it, and `TRUSTY_ANALYZE_BIN` is
+deliberately left unset because setting it would read as a guarantee it is not.
+Nothing in this chain starts a `trusty-analyze` daemon either, so today the
+analyze-derived sections come back empty through `trusty-review`'s documented
+fail-open path. That gap is tracked separately.
+
+The engagement's `instructions` prose and an audit window are NOT yet passed to
+the child: `tga audit` takes `--weeks`, not free prose, and mapping one to the
+other is its own decision. The instructions travel with the config for the human
+reading it.
+
+The engagement's OpenRouter key reaches the `tga` child through its
+**environment** — `tga audit` spawns `trusty-review report`, which needs
+inference. It is never written to a config file, a log line, or an error
+message. The limit of that seam: a child's environment is readable by other
+processes running as the same user on the same machine.
 
 ## The working directory — what is written where
 
@@ -126,6 +203,56 @@ Nothing retries through a proxy, and there is no bundled-binary fallback
 variant; whether one should exist is deferred (#5495), not solved. The remedy
 today is to allow the GitHub release-asset host, or to ask for a package built
 for that network.
+
+## Sending the deliverable back
+
+`trusty-audit package` turns what the sweep produced into one file:
+
+```
+trusty-audit package                              # <work-dir>/audit-return-package.zip
+trusty-audit package --out ~/Desktop/return.zip   # wherever you will attach it from
+```
+
+The zip carries each audited repository's report directory (`reports/<repo>/`),
+the tga extract database those reports were computed from (`extract/<repo>.db`),
+and two generated files: a `README.md` explaining what is inside, and a
+`package.toml` naming which repositories were covered and at which tool
+versions. The last line of the output is the path to send.
+
+**It is unencrypted and has no password, deliberately.** You can open it and
+read exactly what you are about to send, which is the same premise as the
+readable engagement config. Encrypting it would defend against nobody — you hold
+the plaintext either way.
+
+**What it will not send.** The engagement's OpenRouter key is never in it: every
+member's bytes are scanned for the key while the zip is written, and a match
+refuses the whole package rather than omitting one file. A symlink or a hardlink
+under `out/` or `extract/` is refused for the same reason — either would put a
+file from outside the working directory into an archive that leaves your
+network. Refusals leave no zip and no partial file.
+
+Hardlinks are checked by link count, because nothing else can see them: a
+hardlink is a second directory entry on the same file, not a link *to* anything,
+so it is indistinguishable from an ordinary file by type or by path. The cost is
+that a legitimate file with more than one link is refused too. Nothing the audit
+itself writes has one — freshly created files have a single link — so reaching
+that state takes a deliberate `ln`, `cp -l`, or a hardlink-based backup tool
+pointed into the working directory. If you hit it, copy the file instead of
+linking it.
+
+Two things it does not claim. The extract database holds no file content,
+diffs, patches, hunks or blobs — but it does hold free-text fields (commit
+messages, PR and work-item titles, classification notes), so a snippet someone
+pasted into one of those is in it. And nothing here is signed yet: content
+signing is #5481, and until it lands nothing proves the package was not altered
+after it was written.
+
+A sweep that audited nothing produces no package. A sweep that audited some
+repositories does, and it names the ones it does not cover — in the printed
+output, in `package.toml`, and in a non-zero exit status.
+
+`--out` is the one path on which this client writes outside the working
+directory, and only when you name one.
 
 ## Reading the manifest
 

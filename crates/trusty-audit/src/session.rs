@@ -22,9 +22,13 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::clone::{self, CloneOptions, CloneReport};
 use crate::config::EngagementConfig;
+use crate::discover::{self, DiscoveredRepo};
 use crate::error::AuditError;
 use crate::manifest::{AuditManifest, RepositoryEntry};
+use crate::package::{self, ReturnPackage};
+use crate::run::{self, RunReport};
 use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
 use crate::workdir::{Area, WorkDir};
 
@@ -50,6 +54,29 @@ pub enum Command {
     InstallTools,
     /// List the repositories the engagement is configured to audit.
     Repos,
+    /// List the repositories the recipient's `gh` credential can reach (#5487).
+    DiscoverRepos,
+    /// Clone the named repositories into the working directory (#5215).
+    ///
+    /// Carries its argument because acquisition acts on a SELECTION — what the
+    /// picker chose, which is not derivable from the session's own state.
+    CloneRepos {
+        /// `owner/name` per repository, in the order to acquire them.
+        repos: Vec<String>,
+        /// How to clone.
+        options: CloneOptions,
+    },
+    /// Run `tga audit` over the selected repositories (#5555).
+    Run,
+    /// Assemble the unencrypted deliverable to send back (#5499).
+    ///
+    /// Carries its argument because the recipient chooses where the file lands —
+    /// the CLI's answer to the save dialog the Tauri shell will offer. `None`
+    /// means [`crate::package::default_destination`].
+    Package {
+        /// Where to write the zip, or `None` for the default inside the work dir.
+        destination: Option<PathBuf>,
+    },
 }
 
 /// The working directory's layout, as reported to a front end.
@@ -77,8 +104,11 @@ pub enum NextStep {
     SelectRepositories,
     /// Repositories are known but tooling is missing (#5491, #5495).
     InstallTools(Vec<RequiredTool>),
-    /// Everything the scaffold can check is in place; the run itself is later work.
+    /// Repositories are selected and the pinned triple is installed; sweep (#5555).
     ReadyForRun,
+    /// A sweep has finished and audited something; assemble the return package
+    /// and send it back (#5499). The last step of the engagement.
+    ReturnPackage,
 }
 
 /// The guided flow's view of the engagement.
@@ -118,6 +148,58 @@ pub enum Outcome {
     Installed(Vec<InstalledTool>),
     /// From [`Command::Repos`].
     Repos(Vec<RepositoryEntry>),
+    /// From [`Command::DiscoverRepos`] — what the credential can reach, not
+    /// what the engagement selected.
+    Discovered(Vec<DiscoveredRepo>),
+    /// From [`Command::CloneRepos`].
+    Cloned(CloneReport),
+    /// From [`Command::Run`] — per-repository results and the sweep's verdict.
+    ///
+    /// A non-[`RunStatus::AllSucceeded`](crate::run::RunStatus::AllSucceeded)
+    /// report is an ORDINARY `Ok` here: the sweep ran and some of it failed, and
+    /// the failures are data the front end must show. It is [`Outcome::exit_code`]
+    /// that turns that into a non-zero process exit, so a caller cannot report
+    /// success without having read the status (#5555).
+    Run(RunReport),
+    /// From [`Command::Package`] — the file to send back, and what it omits.
+    Package(ReturnPackage),
+}
+
+/// Exit status for a run that succeeded but did not cover everything asked for.
+pub const EXIT_INCOMPLETE: i32 = 2;
+
+/// Exit status for a sweep that partly failed.
+pub const EXIT_PARTIAL: i32 = 1;
+
+impl Outcome {
+    /// The process exit status this outcome should produce.
+    ///
+    /// Why: acquisition continues past a repository it could not clone, and a
+    /// sweep continues past a repository `tga audit` failed on — both are the
+    /// right behaviour for a hundred-repo run and the wrong thing to report as
+    /// unqualified success. The rendered text names every exclusion, but
+    /// `taudit clone $(cat repos.txt) && taudit run` reads the status, not the
+    /// text — so an incomplete outcome that exits 0 chains straight into the
+    /// next stage over a set the operator never actually got (#5215 review,
+    /// #5555).
+    /// What: [`EXIT_PARTIAL`] for a [`RunReport`] that did not fully succeed;
+    /// [`EXIT_INCOMPLETE`] for a [`CloneReport`] that carries gaps, and for a
+    /// [`ReturnPackage`] that does not cover every repository the sweep
+    /// attempted (#5499 — the package is still worth sending, and it is still
+    /// not the whole engagement); 0 otherwise. The policy lives here rather than
+    /// in `main.rs` so the Tauri shell reads the same judgement rather than
+    /// re-deriving it.
+    /// Test: `crate::cli::cli_tests::a_partial_sweep_does_not_exit_zero`,
+    /// `crate::cli::cli_tests::a_run_with_gaps_exits_non_zero`,
+    /// `crate::cli::cli_tests::a_package_that_omits_a_repository_does_not_exit_zero`.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Outcome::Run(report) if report.status != run::RunStatus::AllSucceeded => EXIT_PARTIAL,
+            Outcome::Cloned(report) if !report.gaps.is_empty() => EXIT_INCOMPLETE,
+            Outcome::Package(package) if !package.excluded.is_empty() => EXIT_INCOMPLETE,
+            _ => 0,
+        }
+    }
 }
 
 /// One audit engagement, rooted at a working directory.
@@ -215,7 +297,56 @@ impl Session {
             Command::Tools => tools::status(&self.work).map(Outcome::Tools),
             Command::InstallTools => self.install_tools().await.map(Outcome::Installed),
             Command::Repos => self.repos().map(Outcome::Repos),
+            // #5487: discovery asks GitHub, so it takes nothing from the
+            // session's own state — it is on `Session` because `execute` is the
+            // only door any front end gets (#5502).
+            Command::DiscoverRepos => discover::discover(discover::DEFAULT_LIMIT)
+                .await
+                .map(Outcome::Discovered),
+            // #5215: acquisition writes only under `self.work`, which is what
+            // keeps `rm -rf <root>` a complete uninstall.
+            Command::CloneRepos { repos, options } => {
+                clone::clone_all(&self.work, &repos, &options)
+                    .await
+                    .map(Outcome::Cloned)
+            }
+            Command::Run => self.run().await.map(Outcome::Run),
+            Command::Package { destination } => self.package(destination).map(Outcome::Package),
         }
+    }
+
+    /// Assemble the deliverable from what the last sweep left behind.
+    ///
+    /// Why: #5499. The config is required for the same reason every other
+    /// capability requires it — it carries the engagement metadata the package
+    /// states, and the credential the member scan checks against. The progress
+    /// record is the completion signal: `run::sweep` writes it LAST, after every
+    /// child has finished, so its presence means a sweep finished rather than
+    /// one being under way.
+    /// What: loads both, then hands off to [`package::assemble`].
+    /// Test: `super::session_tests::packaging_before_any_sweep_is_refused`.
+    fn package(&self, destination: Option<PathBuf>) -> Result<ReturnPackage, AuditError> {
+        let config = EngagementConfig::load(&self.config_path)?;
+        let report =
+            run::read_progress(&self.work)?.ok_or_else(|| AuditError::NothingToPackage {
+                reason: format!(
+                    "no sweep has finished in {} — run `trusty-audit run` first",
+                    self.work.root().display()
+                ),
+            })?;
+        let destination = destination.unwrap_or_else(|| package::default_destination(&self.work));
+        package::assemble(&self.work, &config, &report, &destination)
+    }
+
+    /// Read the engagement's key and pins, then sweep the selected repositories.
+    ///
+    /// The config is loaded for the same reason [`Session::install_tools`] loads
+    /// it: it carries the OpenRouter key `tga audit`'s report render needs, and
+    /// an absent config is a refusal rather than a run that will fail an hour in
+    /// (#5555).
+    async fn run(&self) -> Result<RunReport, AuditError> {
+        let config = EngagementConfig::load(&self.config_path)?;
+        run::sweep(&self.work, &config).await
     }
 
     /// Read the engagement's pins, then install exactly those.
@@ -258,7 +389,16 @@ impl Session {
             .map(|s| s.tool)
             .collect();
 
-        let next = if !repos_known {
+        // #5499: a finished sweep that audited something is the last state the
+        // guided flow can advance from — without this the flow's final word is
+        // "run the sweep", and the recipient is left holding a working directory
+        // with no instruction to send anything back.
+        let audited = run::read_progress(&self.work)?
+            .is_some_and(|report| report.repos.iter().any(|r| r.result.succeeded()));
+
+        let next = if audited {
+            NextStep::ReturnPackage
+        } else if !repos_known {
             NextStep::SelectRepositories
         } else if !missing.is_empty() {
             NextStep::InstallTools(missing)
@@ -468,6 +608,81 @@ trusty-review = "0.0.0-never-published"
             .await
             .expect_err("an unpinned config must not install anything");
         assert!(matches!(err, AuditError::Parse { .. }), "{err:?}");
+    }
+
+    /// The completion precondition: `run::sweep` writes the progress record
+    /// last, so no record means no sweep finished — and packaging must say that
+    /// rather than produce a zip holding two generated files (#5499).
+    #[tokio::test]
+    async fn packaging_before_any_sweep_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), UNPUBLISHABLE_CONFIG);
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+
+        let err = session
+            .execute(Command::Package { destination: None })
+            .await
+            .expect_err("there is nothing to package");
+        let AuditError::NothingToPackage { reason } = &err else {
+            panic!("expected NothingToPackage, got {err:?}");
+        };
+        assert!(reason.contains("trusty-audit run"), "{reason}");
+        assert!(
+            !crate::package::default_destination(session.work_dir()).exists(),
+            "a refused package must leave no file"
+        );
+    }
+
+    /// No engagement config means no metadata and no key to scan against, so
+    /// packaging refuses for the same reason installing and running do.
+    #[tokio::test]
+    async fn packaging_without_an_engagement_config_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path());
+
+        let err = session
+            .execute(Command::Package { destination: None })
+            .await
+            .expect_err("no config, no package");
+        assert!(matches!(err, AuditError::Read { .. }), "{err:?}");
+    }
+
+    /// The guided flow's last state: once a sweep has audited something, the
+    /// step it names is sending the deliverable back (#5499).
+    #[tokio::test]
+    async fn guided_points_at_the_return_package_once_a_sweep_has_audited_something() {
+        use crate::run::{RepoResult, RepoRun, RunReport, SelectedRepo};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path());
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+        write_manifest(&session, MANIFEST);
+        let report = RunReport::of(vec![RepoRun {
+            repo: SelectedRepo {
+                name: "acme-api".to_owned(),
+                path: PathBuf::from("repos/acme-api"),
+            },
+            output: session.work_dir().path(Area::Output).join("00-acme-api"),
+            log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
+            gaps: Vec::new(),
+            result: RepoResult::Succeeded,
+        }]);
+        std::fs::write(
+            run::progress_path(session.work_dir()),
+            toml::to_string_pretty(&report).expect("render"),
+        )
+        .expect("write progress");
+
+        let Outcome::Guided(status) = session.execute(Command::Guided).await.expect("runs") else {
+            panic!("Guided command must yield a Guided outcome");
+        };
+        assert_eq!(status.next, NextStep::ReturnPackage);
     }
 
     /// The whole path against the real release host: a version that cannot
