@@ -29,7 +29,7 @@ use crate::{
         apex_context::ApexContextResult,
         search_client::SearchResult,
     },
-    llm::{ChatMessage, LlmRequest, ResponseSchema, enforce_strict_mode, strip_provider_prefix},
+    llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix},
     models::ReviewResult,
     voice::VoiceConfig,
 };
@@ -89,7 +89,7 @@ const REVIEW_SCHEMA_NAME: &str = "review_output";
 /// Test: `build_review_prompt_includes_response_schema` and
 /// `review_schema_is_openai_strict_compliant` in this module.
 pub fn review_response_schema() -> ResponseSchema {
-    let mut schema = serde_json::json!({
+    let schema = serde_json::json!({
         "type": "object",
         "properties": {
             "grade": {
@@ -180,15 +180,11 @@ pub fn review_response_schema() -> ResponseSchema {
             }
         }
     });
-    // Make every object node OpenAI strict-mode compliant in one pass. This is
-    // what adds `category` (and every other property) to `findings.items.required`
-    // for OpenAI strict mode; non-strict providers rely on the serde default
+    // `ResponseSchema::new` runs `enforce_strict_mode`, which is what adds
+    // `category` (and every other property) to `findings.items.required` for
+    // OpenAI strict mode; non-strict providers rely on the serde default
     // instead (see the `category` note above).
-    enforce_strict_mode(&mut schema);
-    ResponseSchema {
-        name: REVIEW_SCHEMA_NAME.to_string(),
-        schema,
-    }
+    ResponseSchema::new(REVIEW_SCHEMA_NAME, schema)
 }
 
 // ─── Context inputs ───────────────────────────────────────────────────────────

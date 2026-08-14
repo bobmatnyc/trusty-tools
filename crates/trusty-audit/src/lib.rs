@@ -60,6 +60,7 @@ pub mod clone;
 pub mod config;
 pub mod discover;
 pub mod error;
+pub mod inference;
 pub mod manifest;
 pub mod run;
 pub mod session;
