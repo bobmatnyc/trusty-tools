@@ -17,6 +17,7 @@ mod contrib_graph;
 // #4087: query-time guard so a corpus-failed index fails loudly instead of
 // answering HTTP 200 with an empty result set.
 mod degraded;
+mod facet_route;
 mod fanout;
 mod files;
 mod health;
@@ -41,6 +42,8 @@ mod typeahead;
 // cfg(test) sub-modules — each < 500 lines
 #[cfg(test)]
 mod collision_3993_tests;
+#[cfg(test)]
+mod facet_route_tests;
 #[cfg(test)]
 mod list_repo_identity_tests;
 #[cfg(test)]
