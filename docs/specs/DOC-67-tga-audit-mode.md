@@ -379,10 +379,27 @@ the renderer discover its absence.
 requires the repository to be indexed in trusty-search under its checkout
 basename (`analyze_adapter.rs`'s `index_served`), and nothing in the audit path
 indexes anything. A run on an unindexed repository still reaches the renderer's
-`trusty-analyze index not built` gap. The full prerequisite chain is
-trusty-search → per-repository index → trusty-analyze; #5670 closes the third
-link and makes the first two loud instead of silent. The first two are carried
-forward as their own work.
+`trusty-analyze index not built` gap.
+
+The full prerequisite chain is trusty-search → per-repository index →
+trusty-analyze, and #5670 does not reach all three:
+
+- **trusty-analyze (link 3) — closed.** The preflight starts it or refuses.
+- **trusty-search (link 1) — hard-refused on every run.** Not only on a fresh
+  spawn. `trusty-analyze`'s own `/health` answers `503 degraded` whenever
+  trusty-search is unreachable (`crates/trusty-analyze/src/service/routes.rs`'s
+  `health`), and `probe_once` counts only a 2xx — so the preflight's opening
+  probe re-reads trusty-search's LIVE status each run. An analyze daemon that has
+  been up for days on top of a trusty-search that died an hour ago fails the
+  probe, its spawned replacement exits at its own search check, the original
+  keeps answering 503, and the readiness poll refuses the audit.
+- **The per-repository index (link 2) — unchanged, and still fail-open.**
+  `AnalyzeGap::NotIndexed` is the same one-line-in-the-artifact, exit-0 gap it
+  was before #5670 (`analyze_adapter.rs`'s `fetch_named`, §9). Nothing in the
+  preflight indexes anything or checks that anything is indexed, so an
+  unindexed repository still produces a report with the three analyze-derived
+  sections empty and a gap line naming why. That link is carried forward as its
+  own work.
 
 ## {#SPEC-TGAUDIT-07~draft} 7. What AUDIT Adds Beyond Epic #5223
 
