@@ -284,12 +284,15 @@ position. A workspace `cargo check` can never catch this class of break, because
 the root `Cargo.toml` path override pairs local source with local dependency — so
 the workspace compiling clean is not evidence the published crates agree (#4088).
 
-🟡 **It does not run on PRs**, so a breaking change merges unnoticed and surfaces
-at the release that ships it. That is expected, not a problem to pre-empt — the
-release is where it gets dealt with. `#[non_exhaustive]` on public structs and
-enums is still worth reaching for, purely because it keeps the gate quiet at
-release time. To check a change yourself: `bash scripts/check_semver.sh --crate
-<crate>`. See [docs/reference/semver-gate.md](docs/reference/semver-gate.md).
+🟡 **On an ordinary PR it compares nothing.** `.github/workflows/semver-checks.yml`
+triggers on every PR, then decides inside the job whether a release is under test
+(#5311); on a PR that does not bump a crate's declared version it exits in ~15s
+having compared nothing. So a breaking change merges unnoticed and surfaces at the
+release that ships it. That is expected, not a problem to pre-empt — the release is
+where it gets dealt with. `#[non_exhaustive]` on public structs and enums is still
+worth reaching for, purely because it keeps the gate quiet at release time. To check
+a change yourself: `bash scripts/check_semver.sh --crate <crate>`. See
+[docs/reference/semver-gate.md](docs/reference/semver-gate.md).
 
 🔴 **The tag must name the commit that gets published.** Nothing bound the two
 together until `preflight-publish.sh` CHECK 6
