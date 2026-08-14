@@ -418,13 +418,43 @@ trigger chunk's RRF score.
 
 ## Opt-in index allowlist (default-deny, issue #767)
 
-As of v0.23.7, **trusty-search indexes nothing by default**. Before a path can
-be registered (via `POST /indexes`, `trusty-search index`, or any MCP tool), it
-must appear in the allowlist file at:
+**trusty-search indexes nothing by default.** Before a path can be registered
+(via `POST /indexes`, `trusty-search index`, `PATCH /indexes/:id`, a reindex
+`root_path` override, or any MCP tool), it must be APPROVED. Four things
+approve a root:
+
+| Approved because | How it gets that way |
+|---|---|
+| It is listed in `allowlist.toml` | `trusty-search index add <path>`, or edit the file |
+| It is a registered project | `tm` writes `~/.trusty-mpm/project-paths.json` |
+| It is a provisioned worktree | `<approved>/.claude/worktrees/<id>` or `<approved>/.worktrees/<id>` |
+| It sits inside an approved root | e.g. a `trusty-search.yaml` sub-root of an approved repo |
+
+Containment is deliberate and costs nothing: everything under an approved root
+is already indexable through that root, so a sub-root exposes strictly less. A
+SIBLING is not approved — approving `~/Projects/foo` says nothing about
+`~/Projects/foo-scratch`.
+
+The hand-editable member of that union lives at:
 
 ```
 ~/.config/trusty-search/allowlist.toml   # macOS / Linux (XDG config dir)
 ```
+
+An unapproved root is refused with `403` and a body carrying `root_path` and a
+`remedy` string naming the command that would approve it. Removing a root from
+the allowlist also stops it being served: warm-boot drops registry entries whose
+root is no longer approved (the on-disk data is left alone, so re-approving
+restores it on the next boot).
+
+### Upgrading an existing install
+
+On the first boot after this gate ships, a daemon with no `allowlist.toml`
+seeds one from the roots it is already serving — so nothing you have indexed
+stops being indexed. The pass runs once; an existing file, including one you
+emptied on purpose, is never rewritten. Roots the hard denylist refuses are NOT
+carried over and are logged at `warn`. Review what was seeded with
+`trusty-search index list` and prune anything you do not want indexed.
 
 ### Format
 
@@ -475,10 +505,17 @@ cannot be overridden:
 | `/.config` | System config (often contains tokens) |
 | `$HOME` itself, `~/Desktop`, `~/Downloads`, `~/Documents`, `~/Library` | Home top-level dirs |
 
-The daemon returns HTTP 403 with a `{"error": "..."}` body when a denylist
-pattern matches. The error message names the matched pattern. There is no
-environment-variable override for either the allowlist or the denylist — a
-path is registerable only by adding it to `allowlist.toml`.
+The daemon returns HTTP 400 with a `{"error": "..."}` body when a denylist
+pattern matches (a `403` means the root is safe but unapproved — a different
+refusal). The error message names the matched pattern. There is no
+environment-variable override for either the allowlist or the denylist.
+
+One narrow exception, and only for the EPHEMERAL-directory rows: a caller that
+names one specific root on purpose can set `allow_sensitive_path: true` on
+`POST /indexes` to skip the `/tmp` / `/var/folders` / `Library/Application
+Support` prefix check. It does NOT skip the credential, secret-marker, or
+home-top-level rows, and it does NOT skip the approval requirement above — such
+a root must still be allowlisted.
 
 ## CLI
 

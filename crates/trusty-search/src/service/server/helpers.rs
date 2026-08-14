@@ -45,6 +45,13 @@ use crate::core::registry::{IndexHandle, IndexId};
 /// create-index request that opted in (`CreateIndexRequest::allow_sensitive_path`);
 /// every other caller (reindex/relocate root validation) passes `false` to
 /// preserve today's behaviour exactly.
+///
+/// #767 adds step (5): the canonical path must also be APPROVED — present in
+/// `allowlist.toml`, listed by the `trusty-mpm` project registry, or a worktree
+/// provisioned under one of those. Unapproved roots get `403`. This is the one
+/// gate for `POST /indexes`, the reindex `root_path` override, and relocate;
+/// before it existed, `allowlist::check_path` had zero production callers and
+/// the default-deny control gated nothing.
 /// Test: `validate_root_path_denylist_rejects_ssh`, `_rejects_home`,
 /// `_rejects_tmp`, `_accepts_project_dir` in `tests_denylist.rs`;
 /// `create_index_allows_sensitive_path_when_opted_in`,
@@ -54,6 +61,7 @@ use crate::core::registry::{IndexHandle, IndexId};
 pub(super) async fn validate_root_path(
     path: &std::path::Path,
     allow_sensitive_path: bool,
+    allowlist_paths: &crate::allowlist::AllowlistPaths,
 ) -> Result<std::path::PathBuf, Response> {
     if path.as_os_str().is_empty() {
         return Err((
@@ -151,7 +159,76 @@ pub(super) async fn validate_root_path(
         )
             .into_response());
     }
+    // #767: default-deny. The denylist above says which roots are NEVER
+    // indexable; this says which roots ARE — an explicit `allowlist.toml`
+    // entry, a root the project registry lists, or a worktree provisioned
+    // under one of those. A root that matches none of them is refused.
+    // Deliberately AFTER the denylist so an approval can never admit a
+    // sensitive path, and deliberately NOT skipped by `allow_sensitive_path`:
+    // that flag only relaxes the temp-dir prefix check, never the opt-in gate.
+    //
+    // Calls `resolve_allow_source` rather than `check_path_with`: the denylist
+    // step ran just above with the CORRECT opt-in semantics, and re-running it
+    // here would apply the strict variant and refuse an
+    // `allow_sensitive_path: true` request that the caller legitimately opted
+    // into.
+    match crate::allowlist::sources::resolve_allow_source(&canonical, allowlist_paths) {
+        Ok(Some(source)) => {
+            tracing::debug!(
+                path = %canonical.display(),
+                %source,
+                "indexing approved (#767)"
+            );
+        }
+        Ok(None) => {
+            return Err(allowlist_refusal_response(
+                &canonical,
+                "root is not approved for indexing (default-deny)",
+            ));
+        }
+        Err(e) => {
+            // An unreadable policy is not an empty one — refuse rather than
+            // fall through to "nothing forbids it".
+            return Err(allowlist_refusal_response(
+                &canonical,
+                &format!("allowlist could not be read: {e:#}"),
+            ));
+        }
+    }
     Ok(canonical)
+}
+
+/// Build the `403` a caller gets when a root is not approved for indexing.
+///
+/// Why (#767): the refusal must be LOUD — the incident that produced this
+/// ticket was 74 indexes appearing with no operator action and no log line. It
+/// also has to be actionable, so the body names the exact command that would
+/// approve the root.
+/// What: logs at `warn` with the path and reason, and returns `403` with an
+/// `error` string plus the machine-readable `root_path` and `remedy` fields.
+/// `403` (not `400`) because the request is well-formed and the root exists —
+/// what is missing is authorization.
+/// Test: `create_index_refuses_unlisted_root`,
+/// `create_index_accepts_allowlisted_root` in `tests_allowlist_gate_767.rs`.
+fn allowlist_refusal_response(canonical: &std::path::Path, reason: &str) -> Response {
+    tracing::warn!(
+        path = %canonical.display(),
+        %reason,
+        "indexing refused: root is not on the opt-in allowlist (#767)"
+    );
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": format!("indexing refused: {reason}"),
+            "root_path": canonical.display().to_string(),
+            "remedy": format!(
+                "run `trusty-search index add {}` to approve this root, \
+                 or register it as a project with `tm`",
+                canonical.display()
+            ),
+        })),
+    )
+        .into_response()
 }
 
 /// Determine whether a chunk's stored `file` field falls within an index's

@@ -15,20 +15,36 @@
 //!    `indexes.toml` path; if that file is the daemon registry it will fail to
 //!    parse and the migration is silently skipped.
 //!
-//! Call [`check_path`] from every index-creation path before registration.
-//! Then call [`add_to_allowlist`] to keep the file in sync.
+//! The allowlist is a UNION of sources, not just that file (#767): an
+//! `[[index]]` entry the operator wrote, a root the `trusty-mpm` project
+//! registry lists, or a worktree provisioned under one of those. [`sources`]
+//! owns the union; [`check_path_with`] is the gate every index-creation path
+//! calls before registration, and [`grandfather_existing_indexes`] is what
+//! keeps switching the gate on from silently un-indexing a working install.
 //!
-//! Test: `tests.rs` (unit); `collision_tests.rs` (collision + migration).
+//! Test: `tests.rs` (unit); `collision_tests.rs` (collision + migration);
+//! `sources_tests.rs` (the union); `grandfather_tests.rs` (the migration);
+//! `tests/allowlist_gate_767.rs` (end-to-end HTTP enforcement).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+mod grandfather;
 mod migration;
+pub mod sources;
+pub use grandfather::{grandfather_existing_indexes, GrandfatherOutcome};
 pub use migration::{legacy_allowlist_path, try_migrate_legacy};
+pub use sources::{AllowSource, AllowlistPaths};
 
 #[cfg(test)]
 mod collision_tests;
+#[cfg(test)]
+mod grandfather_tests;
+#[cfg(test)]
+mod sources_tests;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 #[cfg(test)]
 mod tests;
 
@@ -337,11 +353,13 @@ pub enum AllowlistCheck {
     NotAllowlisted,
 }
 
-/// Check `path` against both the hard denylist and the allowlist.
+/// Check `path` against the hard denylist and the `allowlist.toml` file ALONE.
 ///
-/// Why: single call site for all index-creation paths (HTTP handler, CLI, MCP)
-/// so the policy is enforced uniformly and cannot be bypassed by using a
-/// different entry point.
+/// Why: kept for callers that want to ask only about the hand-maintained file —
+/// notably `trusty-search index add`, which writes that file and must not treat
+/// a root as already-approved just because the project registry vouches for it.
+/// The gate every index-creation path uses is [`check_path_with`], which asks
+/// about the whole union of sources; this narrower check is not a substitute.
 /// What: first applies `is_denied` (hard denylist); if clear, loads the
 /// allowlist config and calls `AllowlistConfig::contains`. Returns
 /// `AllowlistCheck::Denied`, `AllowlistCheck::NotAllowlisted`, or
@@ -368,6 +386,55 @@ pub fn check_path(path: &Path, allowlist_path: Option<&Path>) -> Result<Allowlis
         Ok(AllowlistCheck::Allowed)
     } else {
         Ok(AllowlistCheck::NotAllowlisted)
+    }
+}
+
+/// Verdict of the full union check, naming the source that approved a path.
+///
+/// Why: [`AllowlistCheck`] predates the union of sources introduced by #767 and
+/// cannot say WHICH member approved a root. Callers that log a refusal or an
+/// approval need that — "approved as a provisioned worktree of X" and "approved
+/// because you ran `index add`" send an operator to different places. Added
+/// alongside the older type rather than replacing it so existing callers keep
+/// compiling.
+/// What: same three outcomes as `AllowlistCheck`, with the approving
+/// [`AllowSource`] carried on the allowed arm.
+/// Test: `check_path_with_reports_project_source`,
+/// `check_path_with_denies_unlisted` in `sources_tests.rs`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AllowlistVerdict {
+    /// Path passes the denylist and is approved by the named source.
+    Allowed(AllowSource),
+    /// Path matches a hard-denylist pattern and must never be indexed.
+    Denied {
+        /// Human-readable denial reason, safe to show the caller.
+        reason: String,
+    },
+    /// Path is not sensitive, but nothing in the union approves it.
+    NotAllowlisted,
+}
+
+/// Check `path` against the hard denylist and then the full allowlist union.
+///
+/// Why (#767): the single gate every index-creation path calls. The denylist
+/// runs FIRST and unconditionally, so no allowlist entry, project registration,
+/// or worktree derivation can ever admit a sensitive root — defence-in-depth
+/// survives however a root reaches the daemon.
+/// What: (1) [`is_denied`] → `Denied`; (2) [`sources::resolve_allow_source`] →
+/// `Allowed(source)` or `NotAllowlisted`. A malformed `allowlist.toml` is
+/// propagated as an error and must be treated as a refusal by the caller — an
+/// unreadable policy is not an empty one.
+/// Test: `check_path_with_reports_project_source`,
+/// `check_path_with_denies_unlisted`,
+/// `denylist_wins_over_project_registration` in `sources_tests.rs`.
+pub fn check_path_with(path: &Path, paths: &AllowlistPaths) -> Result<AllowlistVerdict> {
+    // Hard denylist runs first — no file I/O needed, and nothing overrides it.
+    if let Some(reason) = is_denied(path) {
+        return Ok(AllowlistVerdict::Denied { reason });
+    }
+    match sources::resolve_allow_source(path, paths)? {
+        Some(source) => Ok(AllowlistVerdict::Allowed(source)),
+        None => Ok(AllowlistVerdict::NotAllowlisted),
     }
 }
 

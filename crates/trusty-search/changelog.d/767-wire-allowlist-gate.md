@@ -1,0 +1,6 @@
+Fixed
+
+- The opt-in index allowlist is now enforced. `check_path` shipped in PR #789 with zero production call sites, so a root that was never approved was registered exactly as before the control existed. `POST /indexes`, the reindex `root_path` override, and `PATCH /indexes/:id` now refuse an unapproved root with `403` and a `remedy` field naming the command that approves it (#767).
+- Warm-boot drops registry entries whose root the allowlist no longer approves, so removing a root actually stops it being indexed instead of only blocking new registrations. On-disk data is left alone; re-approving restores it on the next boot (#767).
+- A root is approved when `allowlist.toml` lists it, when the `tm` project registry lists it, when it is a worktree provisioned under one of those, or when it sits inside one. A sibling of an approved root is not approved. The hard sensitive-path denylist runs first and wins over every one of them (#767).
+- On first boot a daemon with no `allowlist.toml` seeds one from the roots it is already serving, so switching the gate on does not silently un-index a working install. The pass runs once, never rewrites an existing file, and re-checks the denylist so a sensitive root is not carried over (#767).
