@@ -9,3 +9,10 @@ Fixed
   path the finding cites; when no crate label fits, apply none. `trusty-mpm`
   is now a crate label like any other, applied only when the finding's own
   file path is under `crates/trusty-mpm/` (#5679).
+- Closed a follow-on loophole in that same rule: a live run correctly found
+  no crate applied to a `.github/workflows/ci.yml` defect, then attached
+  `trusty-mpm` anyway as a self-invented "provenance" label recording which
+  session found it. The rule now states directly that no such second label
+  axis exists — the origin of a finding is never a labeling input under any
+  name, and "no crate label fits" is final, not a fallback trigger for
+  `trusty-mpm` (#5679).

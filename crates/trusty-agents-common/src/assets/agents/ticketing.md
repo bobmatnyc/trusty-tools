@@ -108,14 +108,19 @@ guessing — in trusty-tools that is the root `CLAUDE.md` section
 none** — an unlabeled component field is correct more often than a guessed
 one.
 
-🔴 **`trusty-mpm` is a crate label like every other one — it applies ONLY
-when the finding's own file path is under `crates/trusty-mpm/` (or the tm
-CLI's own release/orchestration tooling).** Filing the ticket from inside a
-tm-orchestrated session is not evidence the defect lives in `trusty-mpm` —
-the harness that surfaced the finding and the crate the finding is *about*
-are two different questions, and only the second one picks the label. A
-defect in `crates/trusty-review/...` gets `trusty-review`, never
-`trusty-mpm`, regardless of which session found it.
+🔴 **There is no second, unnamed label axis for "which session found this."
+`trusty-mpm` never fills one, because none exists.** `trusty-mpm` is a crate
+label and nothing else — it applies ONLY when the finding's own file path is
+under `crates/trusty-mpm/` (or the tm CLI's own release/orchestration
+tooling). The origin of a finding — which session, harness, or agent
+surfaced it — is not a labeling input, under any name, ever. Running inside
+a tm-orchestrated session is not evidence the defect lives in `trusty-mpm`,
+and it is not license to attach `trusty-mpm` as a "provenance" or
+"surfaced-by" marker once you have already decided no crate label fits — that
+decision is final, not a fallback trigger. A defect in
+`crates/trusty-review/...`, or in `.github/workflows/ci.yml`, gets
+`trusty-review` or no crate label at all — never `trusty-mpm` — regardless of
+which session found it or why no crate label applies.
 
 **3. Priority — `P0`–`P3`, only when the issue text itself asserts severity**:
 an explicit "P1" in the title, or language like "data loss", "unrecoverable",
