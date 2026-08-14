@@ -124,21 +124,32 @@ pub async fn probe_once(health_url: &str) -> bool {
     )
 }
 
-/// Spawn `current_exe()` with the given arguments as a detached background
-/// process (all stdio fds null-ed).
+/// Spawn `program` with the given arguments as a detached background process
+/// (all stdio fds null-ed).
 ///
-/// Why: every daemon_guard copy spawns `<current_exe> <args>` with stdin,
-/// stdout, and stderr redirected to null so the daemon outlives the parent
-/// terminal / shell and does not pollute the user's output. Using
-/// `current_exe()` ensures a `cargo run` session boots its own debug daemon
-/// and a production install boots the production binary.
-/// What: resolves `current_exe()`, spawns it with the provided args and all
-/// stdio null-ed, returns the child PID.
-/// Test: compile-only (spawning a real process in unit tests risks port/FS
-/// side-effects; the live path is exercised by integration tests).
-pub fn spawn_current_exe(args: &[&str]) -> Result<u32> {
-    let exe = std::env::current_exe().map_err(|e| anyhow!("could not resolve current_exe: {e}"))?;
-    let child = std::process::Command::new(&exe)
+/// Why (#5670): a guard does not always boot its OWN binary. `tga audit` has to
+/// start `trusty-analyze`, a sibling it resolves by env override or PATH, and
+/// the alternative to naming that capability here is a second
+/// `Command::new(…).stdin(null)…` in another crate — the duplication the
+/// common-entry-point rule exists to prevent.
+/// What: spawns `program` with `args` and stdin/stdout/stderr all redirected to
+/// null, so the child outlives the parent terminal and writes nothing into the
+/// caller's streams, and returns the child PID.
+///
+/// The PID is proof the process STARTED, never proof it stayed up — a daemon
+/// that exits a millisecond later still yields one. Callers must follow this
+/// with [`spin_until_ready`] and treat that verdict as the real answer.
+///
+/// # Errors
+///
+/// Any spawn failure, including the not-installed case, rendered with the
+/// program and arguments that were tried.
+///
+/// Test: `spawn_detached_reports_a_missing_program`; the live path is exercised
+/// by `tga::audit`'s guard tests, which spawn a stub executable.
+pub fn spawn_detached(program: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Result<u32> {
+    let program = program.as_ref();
+    let child = std::process::Command::new(program)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -147,11 +158,27 @@ pub fn spawn_current_exe(args: &[&str]) -> Result<u32> {
         .map_err(|e| {
             anyhow!(
                 "could not spawn `{} {}`: {e}",
-                exe.display(),
+                program.to_string_lossy(),
                 args.join(" "),
             )
         })?;
     Ok(child.id())
+}
+
+/// Spawn `current_exe()` with the given arguments as a detached background
+/// process (all stdio fds null-ed).
+///
+/// Why: every daemon_guard copy spawns `<current_exe> <args>` with stdin,
+/// stdout, and stderr redirected to null so the daemon outlives the parent
+/// terminal / shell and does not pollute the user's output. Using
+/// `current_exe()` ensures a `cargo run` session boots its own debug daemon
+/// and a production install boots the production binary.
+/// What: resolves `current_exe()` and hands it to [`spawn_detached`].
+/// Test: compile-only (spawning a real process in unit tests risks port/FS
+/// side-effects; the live path is exercised by integration tests).
+pub fn spawn_current_exe(args: &[&str]) -> Result<u32> {
+    let exe = std::env::current_exe().map_err(|e| anyhow!("could not resolve current_exe: {e}"))?;
+    spawn_detached(&exe, args)
 }
 
 /// Poll `config.health_url` until the daemon is ready, printing a spinner to
@@ -236,6 +263,22 @@ mod tests {
             started.elapsed() < Duration::from_secs(6),
             "probe took too long: {:?}",
             started.elapsed()
+        );
+    }
+
+    /// Why (#5670): the not-installed case is the one `spawn_detached` failure a
+    /// caller acts on differently from "it started and died", so the error has
+    /// to name the program rather than a generic OS code.
+    /// What: spawns a path that cannot exist and asserts the message quotes it.
+    /// Test: this test.
+    #[test]
+    fn spawn_detached_reports_a_missing_program() {
+        let err = spawn_detached("/nonexistent/trusty-nothing-here", &["serve"])
+            .expect_err("a program that does not exist cannot be spawned");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/nonexistent/trusty-nothing-here") && msg.contains("serve"),
+            "the error must name the program and its arguments; got: {msg}"
         );
     }
 

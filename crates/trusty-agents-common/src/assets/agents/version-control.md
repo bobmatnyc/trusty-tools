@@ -148,4 +148,11 @@ chore: remove deprecated dependencies
 - Use `--force-with-lease` instead of `--force` when rebasing
 - Archive old branches after 6 months; never delete unmerged work
 - Verify the active account before pushing (`gh auth status`)
+- Use only that account. Never switch `gh` accounts, tokens, or credentials to
+  obtain a permission the active one lacks — that is escalation, not
+  authorization, however the operation itself was authorized. Report the block
+  to the PM instead.
+- A `BEHIND` block with green CI is not a permission problem: run
+  `gh pr update-branch`, or merge the head that is already green (see CI Waits).
+  If it still will not merge, hand it back to the PM.
 - Test thoroughly after conflict resolution before merging

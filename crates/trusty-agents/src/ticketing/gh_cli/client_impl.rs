@@ -11,7 +11,7 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::process::Command;
+use trusty_common::gh::GhCommand;
 
 use super::{
     GhCliClient, LIST_JSON_FIELDS, TICKET_JSON_FIELDS, gh_issue_to_ticket, plan_gh_issue_edit_calls,
@@ -182,11 +182,12 @@ impl TicketingClient for GhCliClient {
     }
 
     async fn list_available_tags(&self) -> Result<Vec<Tag>> {
-        let stdout = self
-            .run_with_repo(&["label", "list", "--json", "name,color,description"])
+        // #5475: `json` is the entry point's parse combinator — its failure
+        // message names the argv, which the bare `from_str` context did not.
+        let arr: Vec<Value> = GhCommand::new(["label", "list", "--json", "name,color,description"])
+            .repo(self.repo())
+            .json()
             .await?;
-        let arr: Vec<Value> =
-            serde_json::from_str(&stdout).context("failed to parse `gh label list` JSON")?;
         let out = arr
             .iter()
             .filter_map(|l| {
@@ -264,32 +265,34 @@ impl TicketingClient for GhCliClient {
         // Why subprocess-and-tolerant: `gh` may not be authed for `repo` (or
         // installed at all). Failing here would surface a noisy error in
         // every `/projects` render; instead we degrade gracefully to 0.
-        let output = Command::new("gh")
-            .args([
-                "issue", "list", "--repo", repo, "--state", "open", "--json", "number",
-            ])
-            .output()
-            .await?;
-        if !output.status.success() {
+        // #5475: routed through trusty-common's `gh` entry point; the
+        // degrade-to-0 policy stays here, where the UI contract lives.
+        let out = GhCommand::new([
+            "issue", "list", "--repo", repo, "--state", "open", "--json", "number",
+        ])
+        .output()
+        .await?;
+        if !out.success {
             return Ok(0);
         }
-        let json: Value = serde_json::from_slice(&output.stdout)?;
+        let json: Value = serde_json::from_str(&out.stdout)?;
         Ok(json.as_array().map(|a| a.len() as u32).unwrap_or(0))
     }
 
     async fn count_open_prs(&self, repo: &str) -> Result<u32> {
         // #342: companion to `count_open_issues` — same graceful-degrade
         // semantics on auth/install failure.
-        let output = Command::new("gh")
-            .args([
-                "pr", "list", "--repo", repo, "--state", "open", "--json", "number",
-            ])
-            .output()
-            .await?;
-        if !output.status.success() {
+        // #5475: routed through trusty-common's `gh` entry point; the
+        // degrade-to-0 policy stays here, where the UI contract lives.
+        let out = GhCommand::new([
+            "pr", "list", "--repo", repo, "--state", "open", "--json", "number",
+        ])
+        .output()
+        .await?;
+        if !out.success {
             return Ok(0);
         }
-        let json: Value = serde_json::from_slice(&output.stdout)?;
+        let json: Value = serde_json::from_str(&out.stdout)?;
         Ok(json.as_array().map(|a| a.len() as u32).unwrap_or(0))
     }
 

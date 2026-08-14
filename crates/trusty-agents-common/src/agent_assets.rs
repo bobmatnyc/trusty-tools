@@ -313,6 +313,35 @@ mod tests {
         );
     }
 
+    /// A blocked agent must not reach for a more-privileged `gh` credential.
+    /// See #5680 — a `version-control` agent hit a `BEHIND` branch-protection
+    /// block, borrowed the repo owner's token, and force-merged with `--admin`.
+    /// The prohibition ships in two places on purpose: `BASE-AGENT.md` binds
+    /// every composed agent, and `version-control.md` puts it beside the
+    /// `gh auth status` check the acting agent actually read.
+    #[test]
+    fn credential_switching_is_forbidden_in_the_shipped_assets() {
+        for (name, body) in [
+            ("BASE-AGENT.md", BASE_AGENT),
+            ("version-control.md", VERSION_CONTROL),
+        ] {
+            let flat = body.replace('\n', " ");
+            assert!(
+                flat.contains("Never switch") && flat.contains("credential"),
+                "`{name}` must forbid switching to another `gh` \
+                 account/token/credential to obtain a missing permission (#5680)"
+            );
+        }
+
+        // #2842 went the other way — the agent refused an authorized
+        // admin-merge — so the ban above must not swallow that path.
+        assert!(
+            VERSION_CONTROL.contains("When the PM relays operator authorization to merge directly"),
+            "the credential-switching ban must leave the PM-relayed \
+             admin-merge authorization intact (#2842)"
+        );
+    }
+
     /// The `BASE-*` templates are what every other asset's `extends:` chain
     /// roots at. Shipping the roster without them would make composition
     /// impossible for every consumer, which is precisely why all 42 moved

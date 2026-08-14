@@ -314,7 +314,7 @@ pub mod symgraph;
 /// into `trusty-common` (issue #5 phase 2d) so we ship one fewer published
 /// crate.
 /// What: Gated behind the `memory-core` feature because it pulls in heavy
-/// storage deps (`usearch`, `rusqlite`, `r2d2`, `git2`, `kuzu`). Enables
+/// storage deps (`usearch`, `rusqlite`, `r2d2`, `git2`). Enables
 /// the embedder surface automatically (memory-core → embedder).
 /// Test: `cargo test -p trusty-common --features memory-core` exercises
 /// the full surface.
@@ -901,6 +901,21 @@ pub mod catchup;
 /// defaults, and the shared `managed_session_commands` ordering guarantee.
 /// Test: `cargo test -p trusty-common -- tmux::`.
 pub mod tmux;
+
+/// The workspace's single entry point for invoking the GitHub CLI (#5475).
+///
+/// Why: `gh` was spawned from a dozen independent `Command::new("gh")` sites
+/// across four crates, each re-deriving its own missing-binary,
+/// unauthenticated, non-zero-exit and stderr policy — the exact duplication
+/// the common-entry-point rule forbids, and one more copy was about to land
+/// with #5487 / #5215.
+/// What: gated behind the `gh-cli` feature. Exposes `gh::GhCommand` (builder
+/// + blocking and tokio runners), `gh::GhOutput` (the full exit/stdout/stderr
+/// triple, with the shared policies as combinators), `gh::GhError`, and the
+/// `gh::gh_available` probe.
+/// Test: `cargo test -p trusty-common --features gh-cli -- gh::`.
+#[cfg(feature = "gh-cli")]
+pub mod gh;
 
 // ─── Re-exports preserving the pre-split public API ───────────────────────
 
