@@ -95,6 +95,32 @@ claims, and disputed results. Full rule in
 [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md)
 ("How Much Gate Output the PR Body Owes").
 
+### What CI actually gates (audited 2026-08-14)
+
+🔴 **A merge waits on six required checks, not on full green.** Branch protection
+requires exactly these contexts and nothing else: `Format check`, `Clippy`,
+`MSRV check`, `500-line file-size cap`, `trusty-search daemon smoke test`, and
+`PR version bump vs crates.io (issue #4421)`. All six trigger unconditionally and
+gate their expensive steps inside the job body on a `docs_only` boolean
+(`ci.yml:145-172`) — a `paths:` filter on a required job would leave the check
+pending forever, which is why none of them has one. On a code PR the six settle
+in about 4 minutes; on a docs-only PR, in under one.
+
+🔴 **`Rust tests (pre-publish gate)` — the four shards — is NOT required.** It runs
+11-13.5 minutes, roughly 3x the entire required set, and is the publish-boundary
+gate the ladder above describes. Do not hold a merge for it. Read the result when
+it lands and act on a failure; waiting on it is the single largest source of dead
+time in this repo's workflow.
+
+🟡 **Do not update a branch just to merge it.** `mergeStateStatus: BEHIND` does not
+block a merge here; only a genuine `CONFLICTING` does. An update re-queues every
+check and buys nothing.
+
+🟡 **`gh pr merge --admin` bypasses nothing on this repo.** The working account is
+push-only (`admin: false`), so the flag is silently ineffective — a PR merges when
+its six required checks pass, and not before. Three attempts against a PR whose
+checks had not yet reported is a failure mode that has already cost real time.
+
 ### Baseline failures — the Rust specifics
 
 <!-- Load-bearing order below: keep the if/otherwise together — see the comment in test-ladder-baseline.md for why. -->
