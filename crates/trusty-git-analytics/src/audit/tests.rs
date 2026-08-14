@@ -1270,3 +1270,376 @@ async fn two_concurrent_guards_both_resolve_against_one_slow_daemon() {
         );
     }
 }
+
+// ─── #5670: indexing every audited repository before the render ──────────────
+
+use crate::audit::repo_index::{binary_from_override as search_binary_from_override, index_args};
+use crate::audit::{
+    index_gap_lines, index_id_for, RepoIndexOutcome, RepoIndexStatus, DEFAULT_SEARCH_BIN,
+};
+use crate::report::dd_manifest::{
+    build_dd_manifest, dd_repository_entries, DdManifestOptions, DdRepositoryEntry,
+};
+
+/// One manifest entry, as `dd_repository_entries` would produce it.
+fn repo_entry(name: &str, path: &std::path::Path) -> DdRepositoryEntry {
+    DdRepositoryEntry {
+        name: name.to_string(),
+        path: path.to_path_buf(),
+    }
+}
+
+/// The same override-then-PATH rule the other two sibling binaries use. `""` is
+/// not a setting: `trusty-audit` exports the pinned-tool variables
+/// unconditionally, so a half-written export must fall back to PATH rather than
+/// try to spawn an empty program name.
+#[test]
+fn search_binary_resolution_prefers_the_env_override() {
+    assert_eq!(
+        search_binary_from_override(Some("/opt/bin/trusty-search")),
+        "/opt/bin/trusty-search"
+    );
+    assert_eq!(search_binary_from_override(Some("")), DEFAULT_SEARCH_BIN);
+    assert_eq!(search_binary_from_override(None), DEFAULT_SEARCH_BIN);
+    assert!(!crate::audit::resolve_search_binary().is_empty());
+}
+
+/// The cross-process contract, pinned as a rule.
+///
+/// trusty-review looks the index up by the checkout path's basename
+/// (`report::analyze_adapter::derive_index_id`, a `path.file_name()` mapped to a
+/// `String`). No Cargo edge joins the two crates, so this is a copy of that
+/// rule — including the two shapes that are easy to get wrong: a trailing `.`,
+/// which `Path` normalises away rather than treating as the final component, and
+/// a root path, which has no basename at all and which BOTH sides must decline.
+#[test]
+fn the_index_id_is_the_checkout_basename() {
+    use std::path::Path;
+
+    assert_eq!(
+        index_id_for(Path::new("/src/northwind-web")).as_deref(),
+        Some("northwind-web")
+    );
+    assert_eq!(
+        index_id_for(Path::new("/src/northwind-web/")).as_deref(),
+        Some("northwind-web"),
+        "a trailing separator is not a component"
+    );
+    assert_eq!(
+        index_id_for(Path::new("/src/northwind-web/.")).as_deref(),
+        Some("northwind-web"),
+        "`base_dir.join(\".\")` is what a `path: .` config entry anchors to"
+    );
+    assert_eq!(index_id_for(Path::new("/")), None);
+}
+
+/// The ids indexed are derived from the paths the renderer reads.
+///
+/// This is the whole no-op risk of #5670: index every repository under an id
+/// nobody queries and the reports stay exactly as hollow as before, with the
+/// work done and nothing to show for it. The manifest is the only channel
+/// between the two processes, so the entries handed to the indexer must be the
+/// entries the manifest carries — asserted here against `build_dd_manifest`'s
+/// own output rather than against a copy of the mapping.
+#[test]
+fn index_ids_match_the_manifest_paths_the_renderer_reads() {
+    let cfg = Config {
+        repositories: vec![
+            crate::core::config::RepositoryConfig {
+                path: std::path::PathBuf::from("/src/northwind-web"),
+                name: Some("Northwind Web".to_string()),
+                ..Default::default()
+            },
+            crate::core::config::RepositoryConfig {
+                // Relative, so the base-dir anchoring is exercised too.
+                path: std::path::PathBuf::from("checkouts/northwind-api"),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let base_dir = std::path::PathBuf::from("/work");
+
+    let entries = dd_repository_entries(&cfg, &base_dir);
+    let manifest = build_dd_manifest(
+        &cfg,
+        &DdManifestOptions {
+            title: "T".to_string(),
+            base_dir: base_dir.clone(),
+            ..Default::default()
+        },
+    )
+    .expect("builds");
+
+    assert_eq!(
+        entries, manifest.repositories,
+        "the indexer must be handed the manifest's own entries"
+    );
+    let ids: Vec<Option<String>> = entries.iter().map(|e| index_id_for(&e.path)).collect();
+    assert_eq!(
+        ids,
+        vec![
+            Some("northwind-web".to_string()),
+            Some("northwind-api".to_string())
+        ],
+        "each id is the basename of the path written into manifest.toml"
+    );
+}
+
+/// The two argument vectors, asserted without spawning anything.
+///
+/// `--name` is the load-bearing flag: without it trusty-search names the index
+/// after the directory the audit happens to be running from, while the renderer
+/// looks up the checkout basename — so the run would index the right code under
+/// the wrong id.
+#[test]
+fn the_index_invocation_names_the_path_and_the_id() {
+    use crate::audit::repo_index::probe_args;
+    use std::path::Path;
+
+    let rendered = |args: Vec<std::ffi::OsString>| {
+        args.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        rendered(index_args(Path::new("/src/acme-web"), "acme-web")),
+        vec!["index", "/src/acme-web", "--name", "acme-web"]
+    );
+    assert_eq!(
+        rendered(probe_args("acme-web")),
+        vec!["index-status", "acme-web"]
+    );
+}
+
+/// A `trusty-search` stub that logs every invocation and decides by argument.
+///
+/// `index-status <id>` exits 0 only for an id containing `served` — the real CLI
+/// exits non-zero on the daemon's 404, which is the membership signal this
+/// module reads. `index <path>` fails for a path containing `broken`.
+#[cfg(unix)]
+fn search_stub(dir: &std::path::Path, log: &std::path::Path) -> String {
+    let script = format!(
+        "#!/bin/sh\n\
+         echo \"$@\" >> {log}\n\
+         case \"$1\" in\n\
+         index-status)\n\
+         case \"$2\" in *served*) exit 0 ;; *) exit 1 ;; esac ;;\n\
+         index)\n\
+         case \"$2\" in\n\
+         *broken*) echo 'progress: walking' >&2; echo 'error: not a directory' >&2; exit 3 ;;\n\
+         *) exit 0 ;;\n\
+         esac ;;\n\
+         esac\n\
+         exit 9\n",
+        log = log.display()
+    );
+    stub_binary(dir, "trusty-search-stub", &script)
+}
+
+/// Every line the stub was invoked with, in order.
+#[cfg(unix)]
+fn stub_log(log: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The defect itself: nothing indexed the repository, so the renderer's
+/// membership check missed and three report sections came back empty over an
+/// exit 0. The audit now probes, misses, and indexes — under the id the renderer
+/// will look up.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unindexed_repository_is_indexed_before_the_render() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("invocations");
+    let stub = search_stub(dir.path(), &log);
+    let entries = vec![repo_entry("Acme Web", &dir.path().join("acme-web"))];
+
+    let outcomes = crate::audit::repo_index::ensure_repositories_indexed_with(stub, &entries).await;
+
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, RepoIndexStatus::Indexed);
+    assert_eq!(outcomes[0].index_id.as_deref(), Some("acme-web"));
+    let calls = stub_log(&log);
+    assert_eq!(calls.len(), 2, "one probe, then one index: {calls:?}");
+    assert_eq!(calls[0], "index-status acme-web");
+    assert!(
+        calls[1].starts_with("index ") && calls[1].ends_with("--name acme-web"),
+        "the index is built under the id the renderer looks up: {calls:?}"
+    );
+    assert!(
+        index_gap_lines(&outcomes, &[] as &[String]).is_empty(),
+        "an indexed repository is not a gap"
+    );
+}
+
+/// A repository trusty-search already serves must not be re-indexed: an audit
+/// over an org that is already indexed would otherwise spend its one shot
+/// re-embedding unchanged code. The probe answers, and nothing else is spawned.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_already_indexed_repository_is_not_reindexed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("invocations");
+    let stub = search_stub(dir.path(), &log);
+    // The stub answers the probe for any id containing `served`.
+    let entries = vec![repo_entry("Acme Web", &dir.path().join("acme-served"))];
+
+    let outcomes = crate::audit::repo_index::ensure_repositories_indexed_with(stub, &entries).await;
+
+    assert_eq!(outcomes[0].status, RepoIndexStatus::AlreadyServed);
+    let calls = stub_log(&log);
+    assert_eq!(
+        calls,
+        vec!["index-status acme-served".to_string()],
+        "the probe is the only invocation — no reindex: {calls:?}"
+    );
+}
+
+/// DOC-67 §9's per-repository rule, in both directions.
+///
+/// One repository that will not index must not cost the other two their audit:
+/// the run continues past it (the third repository is still indexed, after the
+/// failure), the failure is NAMED in the Gaps & Caveats lines, and the pass
+/// returns a value rather than an error — nothing here can change the exit
+/// status. The two assertions fail for opposite regressions: making the failure
+/// abort the run drops the third repository's invocation, and swallowing it
+/// drops the gap line.
+#[cfg(unix)]
+#[tokio::test]
+async fn one_repository_that_fails_to_index_does_not_stop_the_others() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("invocations");
+    let stub = search_stub(dir.path(), &log);
+    let entries = vec![
+        repo_entry("Acme Web", &dir.path().join("acme-web")),
+        repo_entry("Acme Broken", &dir.path().join("acme-broken")),
+        repo_entry("Acme API", &dir.path().join("acme-api")),
+    ];
+
+    let outcomes = crate::audit::repo_index::ensure_repositories_indexed_with(stub, &entries).await;
+
+    assert_eq!(outcomes[0].status, RepoIndexStatus::Indexed);
+    assert!(outcomes[1].failed(), "{:?}", outcomes[1]);
+    assert_eq!(
+        outcomes[2].status,
+        RepoIndexStatus::Indexed,
+        "the run must continue past the failure"
+    );
+    let calls = stub_log(&log);
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("acme-api") && c.starts_with("index ")),
+        "the repository after the failure is still indexed: {calls:?}"
+    );
+
+    let gaps = index_gap_lines(&outcomes, &[] as &[String]);
+    assert_eq!(gaps.len(), 1, "one line per distinct reason: {gaps:?}");
+    assert!(
+        gaps[0].contains("Acme Broken") && gaps[0].contains("not a directory"),
+        "the failure is named, with its cause: {}",
+        gaps[0]
+    );
+    assert!(
+        !gaps[0].contains("Acme Web") && !gaps[0].contains("Acme API"),
+        "a repository that indexed is not a gap: {}",
+        gaps[0]
+    );
+    assert!(
+        gaps[0].contains("not assessed, not clean"),
+        "an empty section must not read as a clean pass: {}",
+        gaps[0]
+    );
+}
+
+/// `trusty-search` is resolved from PATH, not from a Cargo edge, so its absence
+/// is ordinary rather than exotic. It must not panic, must not abort the audit,
+/// and must name both ways to supply the binary — an engagement that pins its
+/// tools uses the override.
+#[tokio::test]
+async fn a_missing_search_binary_is_named_and_the_run_continues() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("definitely-not-installed");
+    let entries = vec![
+        repo_entry("Acme Web", &dir.path().join("acme-web")),
+        repo_entry("Acme API", &dir.path().join("acme-api")),
+    ];
+
+    let outcomes = crate::audit::repo_index::ensure_repositories_indexed_with(
+        missing.display().to_string(),
+        &entries,
+    )
+    .await;
+
+    assert_eq!(outcomes.len(), 2, "every repository is still reported on");
+    assert!(outcomes.iter().all(RepoIndexOutcome::failed));
+
+    let gaps = index_gap_lines(&outcomes, &[] as &[String]);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "one fault affecting every repository is one line, not N: {gaps:?}"
+    );
+    assert!(
+        gaps[0].contains("Acme Web") && gaps[0].contains("Acme API"),
+        "every unassessed application is named: {}",
+        gaps[0]
+    );
+    assert!(
+        gaps[0].contains("TRUSTY_SEARCH_BIN") && gaps[0].contains("cargo install trusty-search"),
+        "the remedy names both ways to supply the binary: {}",
+        gaps[0]
+    );
+}
+
+/// A run where every repository is served adds no line — a clean run must not
+/// dilute the Gaps section with a report of its own success.
+#[test]
+fn index_gap_lines_are_empty_when_every_repository_is_served() {
+    let outcomes = vec![
+        RepoIndexOutcome {
+            repo: "Acme Web".to_string(),
+            index_id: Some("acme-web".to_string()),
+            status: RepoIndexStatus::AlreadyServed,
+        },
+        RepoIndexOutcome {
+            repo: "Acme API".to_string(),
+            index_id: Some("acme-api".to_string()),
+            status: RepoIndexStatus::Indexed,
+        },
+    ];
+    assert!(index_gap_lines(&outcomes, &[] as &[String]).is_empty());
+}
+
+/// The failure reason is a child's message, so it can quote a credential back at
+/// us — a token in an HTTPS remote URL, or in a path. It is scrubbed before it
+/// is excerpted, for the reason `gaps.rs` documents: cutting first leaves a
+/// fragment no later scrub can match, `build_dd_manifest`'s included.
+#[test]
+fn a_credential_in_an_index_failure_never_reaches_the_gap_line() {
+    let token = "ghp_averyrealisticlookingtoken0123456789";
+    let outcomes = vec![RepoIndexOutcome {
+        repo: "Acme Web".to_string(),
+        index_id: Some("acme-web".to_string()),
+        status: RepoIndexStatus::Failed(format!(
+            "failed to clone https://{token}@github.com/acme/web.git"
+        )),
+    }];
+
+    let gaps = index_gap_lines(&outcomes, &[token.to_string()]);
+    assert_eq!(gaps.len(), 1);
+    assert!(!gaps[0].contains(token), "{}", gaps[0]);
+    assert!(
+        gaps[0].contains("Acme Web"),
+        "redaction must not cost the reader the repository name: {}",
+        gaps[0]
+    );
+}
