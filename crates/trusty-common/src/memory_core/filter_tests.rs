@@ -1212,38 +1212,10 @@ fn url_shaped_prose_is_not_flagged() {
     }
 }
 
-/// Why (issue #4312 round 3): four URL-shaped prose tokens still false-positive
-/// after the narrowing, because they carry a digit or an uppercase letter and so
-/// clear the entropy floor on their own. They are **pre-existing** — all four are
-/// flagged identically on `origin/main` — and this PR fixes ten of their
-/// fourteen siblings, but the residue includes the single most common shape in
-/// this project's checkpoints: a bare GitHub issue/PR link.
-///
-/// They are NOT fixed here because the obvious blanket rule is unsafe. A
-/// userinfo-free URL can still carry a secret in its PATH — the webhook URL in
-/// `real_secrets_still_blocked_after_4312_charset_gate` is exactly that shape,
-/// and exempting bare URLs would lose it. Separating "URL path that is a path"
-/// from "URL path that is a credential" is a distinct design problem and belongs
-/// in its own change.
-/// What: pins the residue as change-detectors. If one starts passing, the
-/// follow-up landed — update this test, do not delete it.
-/// Test: itself.
-#[test]
-fn url_prose_residue_is_a_known_pre_existing_bound() {
-    for tok in [
-        "https://github.com/bobmatnyc/trusty-tools/pull/4723",
-        "https://github.com/bobmatnyc/trusty-tools/issues/4312",
-        "file:///Users/masa/trusty-tools/crates/common",
-        "mongodb://cluster0.mongodb.net/analytics-store",
-    ] {
-        assert!(
-            find_secret_token(tok).is_some(),
-            "KNOWN BOUND (#4312): this URL-shaped prose is still flagged, as it \
-             is on origin/main. If it now passes, the follow-up landed — move it \
-             into `url_shaped_prose_is_not_flagged`. Token: {tok}"
-        );
-    }
-}
+// #4312's `url_prose_residue_is_a_known_pre_existing_bound` lived here. It
+// pinned four URL-shaped prose tokens as still-flagged and instructed the
+// follow-up to move them when it landed. #5513 is that follow-up: all four now
+// store clean and are asserted in `bare_github_urls_are_not_flagged`.
 
 // ---- Issue #4312: the base64-branch charset gate + entropy floor ----
 
@@ -1332,11 +1304,10 @@ fn markdown_decorated_paths_are_not_flagged() {
 /// lowercase connection strings below are what prove that exemption carries its
 /// weight rather than being decorative.
 ///
-/// Known and deliberate: `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` (a
-/// canonical AWS *secret access key*) is NOT caught — `is_structural_token`'s
-/// slash-path branch swallows it before either gate runs. That miss is
-/// pre-existing on `origin/main`, unchanged by #4312, and out of scope here; it
-/// is asserted so the baseline is explicit rather than assumed.
+/// Fixed by #4977: `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` (a canonical AWS
+/// *secret access key*) used to be swallowed by `is_structural_token`'s
+/// slash-path branch before either gate ran, and was asserted here as a
+/// pre-existing baseline miss. It is now in the must-flag battery below.
 /// What: asserts every provider-prefix, base64, base64url, JWT, bare-blob and
 /// connection-string shape stays flagged after the narrowing.
 /// Test: itself.
@@ -1411,23 +1382,21 @@ fn real_secrets_still_blocked_after_4312_charset_gate() {
             "webhook URL with secret path",
             "https://webhook.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
         ), // pragma: allowlist secret
+        // #4977: this row asserted the OPPOSITE until this PR — it was the
+        // pinned baseline miss for the slash-path bypass, missed identically on
+        // every revision from #1667 to #5043. Branch (b) now asks whether each
+        // `/`-segment READS as a path segment instead of whether its characters
+        // could appear in one, and `wJalrXUtnFEMI` does not.
+        (
+            "AWS secret access key",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ), // pragma: allowlist secret
     ] {
         assert!(
             find_secret_token(tok).is_some(),
             "{label} must STILL be flagged after the #4312 narrowing: {tok}"
         );
     }
-
-    // Pre-existing baseline miss, asserted so it is explicit. NOT caused by
-    // #4312 — `origin/main` misses it identically via the slash-path bypass in
-    // `is_structural_token`, which runs before either new gate.
-    let aws_secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // pragma: allowlist secret
-    assert!(
-        find_secret_token(aws_secret).is_none(),
-        "baseline drift: this AWS secret-key miss is pre-existing on origin/main. \
-         If it now flags, the structural bypass changed — re-check scope. Got {:?}",
-        find_secret_token(aws_secret)
-    );
 
     // KNOWN MISS INTRODUCED BY #4312, asserted rather than left implicit.
     //
@@ -1976,33 +1945,35 @@ fn encoder_miss_count(seed: u64, n: usize, input_len: usize, url_safe: bool, pad
 /// encoder output. Two of the three defects found in review lived in shapes
 /// nobody had written into a battery.
 ///
-/// Read the ceilings as a ratchet, not as a pass mark. Most of each count is a
-/// PRE-EXISTING baseline this PR neither caused nor fixes: unpadded base64 that
-/// happens to carry no `+` or `/` never reaches the base64 branch, and
-/// `find_secret_token` trims trailing `=` off a token before classifying it, so
-/// padded base64 loses its padding too. Both fall to the mixed-case branch,
-/// which needs all three character classes present.
+/// Read the ceilings as a ratchet, not as a pass mark.
 ///
-/// Measured at this seed and N against `origin/main` (`c679c3c3`) and this
-/// branch:
+/// The #4898 explanation of what the standard-base64 rows were made of — that
+/// they are a pre-existing baseline caused by unpadded blobs never reaching the
+/// base64 branch, plus `find_secret_token` trimming trailing `=` — was
+/// **measured wrong**, and issue #4977 is the correction: that mechanism accounts
+/// for 0.5% of the misses. 96.4% were `/`-bearing blobs exempted by the
+/// slash-path branch. The rows moved when that branch was fixed, which is what a
+/// wrong explanation of a number looks like from the outside.
+///
+/// Measured at this seed and N, before and after the #4977 fix:
 ///
 /// ```text
-///                          origin/main   this branch   delta
-///   base64        15 bytes     7472          7472          0
-///   base64        16 bytes     6289          6289          0
-///   base64        20 bytes     6620          6620          0
-///   base64 padded 17 bytes     6342          6343         +1
-///   base64 padded 25 bytes     7203          7203          0
-///   base64url     15 bytes      970          1012        +42
-///   base64url     16 bytes      799           833        +34
-///   base64url     20 bytes      286           291         +5
+///                          before #4977   after #4977    delta
+///   base64        15 bytes      7472          2465       -5007
+///   base64        16 bytes      6289           556       -5733
+///   base64        20 bytes      6620           166       -6454
+///   base64 padded 17 bytes      6343           401       -5942
+///   base64 padded 25 bytes      7203            26       -7177
+///   base64url     15 bytes      1012          1012           0
+///   base64url     16 bytes       833           833           0
+///   base64url     20 bytes       291           291           0
 /// ```
 ///
-/// The base64 column is zero because `is_plus_joined_word_phrase`'s
-/// character-class-uniformity gate closed it; at 300k samples the residue is 1.
-/// The base64url column is the KNOWN RESIDUAL MISS documented on
-/// [`is_human_word_segment`], carried deliberately — see that doc for why the
-/// narrowing that would close it costs the `gapA` class this PR exists to fix.
+/// base64url is unchanged to the token, as it must be: its alphabet has no `/`,
+/// so no base64url blob ever reached the branch #4977 fixed. Those three rows
+/// remain the KNOWN RESIDUAL MISS documented on [`is_human_word_segment`] —
+/// see that doc for why the narrowing that would close it costs the `gapA` class
+/// #4898 exists to fix.
 /// What: 30k generated tokens per configuration, asserting the miss count is at
 /// or below the pinned ceiling.
 /// Test: itself.
@@ -2011,11 +1982,11 @@ fn generated_encoder_corpus_stays_flagged() {
     const N: usize = 30_000;
     const SEED: u64 = 0x4898_1234_5678_9abc;
     for (label, url_safe, input_len, pad, ceiling) in [
-        ("base64", false, 15usize, false, 7472usize),
-        ("base64", false, 16, false, 6289),
-        ("base64", false, 20, false, 6620),
-        ("base64 padded", false, 17, true, 6343),
-        ("base64 padded", false, 25, true, 7203),
+        ("base64", false, 15usize, false, 2465usize),
+        ("base64", false, 16, false, 556),
+        ("base64", false, 20, false, 166),
+        ("base64 padded", false, 17, true, 401),
+        ("base64 padded", false, 25, true, 26),
         ("base64url", true, 15, false, 1012),
         ("base64url", true, 16, false, 833),
         ("base64url", true, 20, false, 291),
@@ -2149,6 +2120,25 @@ const RECURRENCE_FALSE_POSITIVES: &[(&str, &str)] = &[
     ("#5043", "tokio::io::AsyncReadExt::read_u64"),
     ("#5043", "trusty_common::io::Sha256Hasher::finalizeInto"),
     ("#5043", "hyper::rt::Executor::execute2"),
+    // #5513 — a bare, userinfo-free URL whose path carries a digit.
+    (
+        "#5513",
+        "https://github.com/bobmatnyc/trusty-tools/issues/5511",
+    ),
+    (
+        "#5513",
+        "https://github.com/bobmatnyc/trusty-tools/pull/4723",
+    ),
+    ("#5513", "file:///Users/masa/trusty-tools/crates/common"),
+    ("#5513", "mongodb://cluster0.mongodb.net/analytics-store"),
+    // #4977 — the paths and CamelCase filenames the tightened slash-path branch
+    // must keep admitting while it stops admitting blobs.
+    ("#4977", "src/components/MyComponent.tsx"),
+    (
+        "#4977",
+        "crates/trusty-common/src/memory_core/filter_tests.rs",
+    ),
+    ("#4977", "docs/adr/0029-msrv-1-94-and-edition-policy.md"),
 ];
 
 /// Every credential shape the detector must still catch, in one table.
@@ -2221,6 +2211,27 @@ const RECURRENCE_TRUE_POSITIVES: &[(&str, &str)] = &[
     (
         "base64url blob as a `::` segment",
         "apiKey::9h6Nn6i2vJd6vmb4xEk4Qz",
+    ), // pragma: allowlist secret
+    // #4977 LOAD-BEARING: a `/`-bearing blob must not inherit the slash-path
+    // exemption. The first row is AWS's own canonical secret access key, missed
+    // by every revision of this file from #1667 to #5043.
+    (
+        "aws secret access key",
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    ), // pragma: allowlist secret
+    (
+        "base64 blob split by one slash",
+        "aGVsbG8vd29ybGRmb29iYXJsb25nYmFzZTY0Q0FGRQ",
+    ), // pragma: allowlist secret
+    // #5513 LOAD-BEARING: a userinfo-free URL whose path IS the secret must not
+    // inherit the bare-URL exemption.
+    (
+        "webhook url with secret path",
+        "https://webhook.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
+    ), // pragma: allowlist secret
+    (
+        "bare url carrying a mixed-case blob",
+        "https://example.com/callback/aBc123XyZ987uvW456QrS",
     ), // pragma: allowlist secret
 ];
 
@@ -2493,4 +2504,238 @@ fn symbol_path_keyhole_does_not_shelter_credentials() {
          the chunk-width-11 row above for what that costs, and note the \
          chunk-width-2 row will NOT have caught it."
     );
+}
+
+// ---- Issue #4977: the slash-path branch stops exempting base64 ----
+
+/// Count how many of `n` generated standard-base64 tokens that carry a `/` and
+/// no `+` the detector MISSES.
+///
+/// Why this class specifically (issue #4977): a `+` diverts the token to
+/// [`is_plus_joined_word_phrase`] and is decided there, so the tokens branch (b)
+/// actually owns are the `/`-bearing, `+`-free ones. Code-critic's measurement
+/// during the #4967 review classified all 70,736 misses in a 300k sample and
+/// found 96.4% of them in exactly this class.
+/// What: rejection-samples the encoder until `n` tokens of the class are drawn,
+/// so the denominator is the class size rather than the draw count.
+/// Test: used by `slash_bearing_base64_blobs_are_blocked`.
+fn slash_only_b64_miss_count(seed: u64, n: usize, input_len: usize) -> usize {
+    let mut rng = Xorshift(seed);
+    let alphabet = b64_alphabet(false);
+    let mut buf = vec![0u8; input_len];
+    let (mut drawn, mut misses) = (0usize, 0usize);
+    while drawn < n {
+        rng.fill(&mut buf);
+        let tok = b64_encode(&buf, &alphabet, false);
+        if !tok.contains('/') || tok.contains('+') {
+            continue;
+        }
+        drawn += 1;
+        if find_secret_token(&tok).is_none() {
+            misses += 1;
+        }
+    }
+    misses
+}
+
+/// Why (issue #4977): branch (b) of `is_structural_token` decided a `/`-bearing
+/// token on charset alone, and every `/`-separated run of a standard-base64 blob
+/// is pure alphanumeric. The blob was therefore exempted before the base64 branch
+/// of `looks_like_secret` could see it. This is the detector's largest measured
+/// gap — larger than every false-positive round in this file's history combined —
+/// and the only one so far in the losing direction.
+///
+/// Measured on this seed, 20k drawn tokens per row, against `origin/main`
+/// (`9bd0fbc5f`) and this branch:
+///
+/// ```text
+///   input bytes   origin/main   this branch
+///        15         19699          3127
+///        20         19043           162
+///        24         18704            44
+///        32         19274             1
+///        48         19166             0
+/// ```
+///
+/// The residue at 15 input bytes is the short-token case: a 20-character encoding
+/// split by a `/` leaves two ~10-character runs, and a run that happens to be
+/// case-uniform rides in on `is_human_word_segment`'s permissive arm — the same
+/// accepted bound that arm already carries elsewhere in this file. It decays to
+/// nothing as tokens lengthen, because more runs means more chances for one to
+/// carry mixed case.
+/// What: a ratchet, not a pass mark. If a row rises, something widened the
+/// structural bypass again — re-measure against `origin/main` before touching a
+/// number.
+/// Test: itself.
+#[test]
+fn slash_bearing_base64_blobs_are_blocked() {
+    const N: usize = 20_000;
+    const SEED: u64 = 0x4977_0000_0000_0001;
+    for (input_len, ceiling) in [(15usize, 3127usize), (20, 162), (24, 44), (32, 1), (48, 0)] {
+        let misses = slash_only_b64_miss_count(SEED, N, input_len);
+        assert!(
+            misses <= ceiling,
+            "#4977 ratchet: slash-bearing base64 at {input_len} input bytes missed \
+             {misses} of {N}, above the pinned ceiling {ceiling}. origin/main \
+             missed ~19k of 20k at every row; a rise means the slash-path branch \
+             is exempting blobs again."
+        );
+    }
+
+    // The hand-written half of the same claim. AWS's own canonical secret access
+    // key is the shape the issue names: three `/`-joined runs, each pure
+    // alphanumeric, so the charset test called every one of them a path segment.
+    // Flagged now, missed on origin/main.
+    for (label, tok) in [
+        (
+            "AWS secret access key",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ), // pragma: allowlist secret
+        (
+            "base64 blob split by one slash",
+            "aGVsbG8vd29ybGRmb29iYXJsb25nYmFzZTY0Q0FGRQ", // pragma: allowlist secret
+        ),
+        (
+            "key= prefixed slash blob",
+            "token=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", // pragma: allowlist secret
+        ),
+        (
+            "provider key parked in a path",
+            "hooks/ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        ),
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "#4977 ({label}) must be flagged: {tok}"
+        );
+    }
+}
+
+// ---- Issue #5513: a bare, userinfo-free URL is not a credential ----
+
+/// Why (issue #5513): storing `https://github.com/bobmatnyc/trusty-tools/issues/5511`
+/// in a drawer was rejected as `http…(53 chars)`, and the write failed — a
+/// rejected memory write is a durable fact that never exists. The `://` puts a
+/// `/` in the token, so the base64 branch owns it; the empty segment between the
+/// two slashes of `://` defeated branch (b); and the entropy floor was then
+/// satisfied by the issue number, which is the one thing every issue link has.
+///
+/// The four tokens `url_prose_residue_is_a_known_pre_existing_bound` pinned as a
+/// deliberately-deferred bound live here now — that test's own instruction was to
+/// move them when the follow-up landed, and this is that follow-up.
+/// What: asserts bare URLs store clean at the token predicate AND at the
+/// `FilterConfig::apply` gate a memory write actually hits.
+/// Test: itself.
+#[test]
+fn bare_github_urls_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    for tok in [
+        // The #5513 reproduction, verbatim.
+        "https://github.com/bobmatnyc/trusty-tools/issues/5511",
+        // The four ex-residue tokens from #4312 round 3.
+        "https://github.com/bobmatnyc/trusty-tools/pull/4723",
+        "https://github.com/bobmatnyc/trusty-tools/issues/4312",
+        "file:///Users/masa/trusty-tools/crates/common",
+        "mongodb://cluster0.mongodb.net/analytics-store",
+        // Further ordinary shapes of the same class.
+        "https://github.com/bobmatnyc/trusty-tools/pull/4967#issuecomment-1",
+        "https://github.com/bobmatnyc/trusty-tools/blob/main/README.md",
+        "https://github.com/bobmatnyc/trusty-tools/commit/9bd0fbc5f",
+        "https://docs.rs/trusty-common/0.33.0/trusty_common/memory_core",
+        "https://crates.io/crates/trusty-common/0.33.0",
+        "https://api.github.com/repos/bobmatnyc/trusty-tools/issues/5513",
+        "https://example.com/api/v2/users/12345/settings",
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#5513: a bare URL must NOT be flagged: {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+        let prose = format!("Filed the boundary defect as {tok} this afternoon");
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "#5513: the gate must ACCEPT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #5513): the loosening this issue asks for pulls against #4977 in
+/// the same function, so the URL exemption has to be a decomposition rather than
+/// a blanket rule. #4312 already recorded why: a userinfo-free URL can carry the
+/// secret in its PATH, and exempting bare URLs wholesale loses every webhook
+/// token. This is the test that holds that line.
+///
+/// The boundary, stated once: a URL is exempt when every one of its
+/// authority/path segments reads as a path segment on its own. `…/issues/5511`
+/// is a path all the way down. `…/services/T00000000/B00000000/XXXX…` is not —
+/// `T00000000` is a letter and a digit run with no word in it, and the 24-char
+/// tail exceeds the longest alphabetic run a path segment may carry.
+/// What: asserts URL-shaped credentials stay flagged, at the token predicate and
+/// the gate.
+/// Test: itself.
+#[test]
+fn url_path_secrets_are_still_blocked() {
+    let cfg = FilterConfig::default();
+    for (label, tok) in [
+        (
+            "webhook URL with secret path",
+            "https://webhook.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
+        ), // pragma: allowlist secret
+        (
+            "basic-auth URL",
+            "https://admin:Sup3rS3cret@internal.example.com/api",
+        ), // pragma: allowlist secret
+        (
+            "postgres connection string",
+            "postgres://user:password@host/database",
+        ), // pragma: allowlist secret
+        (
+            "mongodb+srv connection string",
+            "mongodb+srv://svcuser:hunterhunter@cluster.mongodb.net",
+        ), // pragma: allowlist secret
+        (
+            "bare URL carrying a mixed-case blob",
+            "https://example.com/callback/aBc123XyZ987uvW456QrS",
+        ), // pragma: allowlist secret
+        (
+            "bare URL carrying a provider key",
+            "https://example.com/hook/ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        ), // pragma: allowlist secret
+        (
+            "bare URL carrying an AWS key id",
+            "https://example.com/x/AKIAIOSFODNN7EXAMPLE",
+        ), // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "#5513 ({label}): a URL whose path IS the secret must STILL be \
+             flagged: {tok}"
+        );
+        let prose = format!("Rotate {tok} before Friday");
+        assert!(
+            matches!(
+                cfg.apply(&prose, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "#5513 ({label}): the gate must REJECT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+
+    // KNOWN MISS, carried forward unchanged from #4312 and re-pinned here because
+    // this PR is what made bare URLs exempt by shape rather than by entropy: an
+    // all-lowercase, digit-free URL path secret is indistinguishable from a slug,
+    // so `is_human_word_segment`'s permissive arm admits it exactly as the
+    // entropy floor did before. If these start flagging, the bound moved — update
+    // the doc on `is_readable_path_segment`.
+    for missed in [
+        "https://webhook.example.com/services/abcdefghij/klmnopqrst/uvwxyzabcdefghij", // pragma: allowlist secret
+        "https://hooks.example.org/t/aaaaaaaaaa/bbbbbbbbbb/cccccccccc", // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(missed).is_none(),
+            "KNOWN MISS (#4312, re-pinned by #5513): {missed}"
+        );
+    }
 }

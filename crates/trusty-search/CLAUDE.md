@@ -351,6 +351,16 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     lexical however conceptual the query was. The second field separates "off
     for this index" from "not built yet". Counterparts to the existing
     `meta.bm25_lane_degraded`.
+  - `meta.dropped` / `meta.dropped_total` (#2203): how many candidates this
+    query retrieved and then discarded, per site. Without it a short `results`
+    array was indistinguishable from a small match set. Sites:
+    `unresolved_corpus` (a ranked id with no corpus row — a fault; the durable
+    read failed or the chunk was removed mid-query, and it also increments
+    `trusty_search_dropped_unresolved_corpus_total`), `docstring_filtered` and
+    `mode_filtered` (the requested `mode`'s chunk-type and file-type filters),
+    `archived` (`exclude_archived`), and `out_of_root` (the #541 post-filter
+    that `meta.stale_index_root` already flagged as a boolean). A non-zero
+    `unresolved_corpus` is the only one that means something is wrong.
 - **Response 503** `vector_unavailable` (#5068): returned when the request
   PINNED `"stage": "semantic"` and the vector lane cannot serve it. Returning
   lexical rows under a `200` would answer a different question than the one
