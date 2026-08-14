@@ -15,7 +15,11 @@
 /// `~/Library/Application Support/trusty-search/port.lock` is missing or
 /// unreadable, and the value injected into the embedded UI when
 /// `SearchAppState::daemon_port` is `None`.
-pub const DEFAULT_PORT: u16 = 7878;
+///
+/// #5670: reads through the shared layout, which is the same value the
+/// promoted resolver falls back to. Two literals could drift; one cannot.
+pub const DEFAULT_PORT: u16 =
+    trusty_common::daemon_guard::DaemonAddrLayout::TRUSTY_SEARCH.default_port;
 
 /// Directory names that are ephemeral / session-scoped and must never be
 /// *auto*-registered as indexes.
