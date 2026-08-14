@@ -4,8 +4,7 @@
 //! the grep fallback all need the same hit-envelope shaping and a common
 //! substring scanner. Extracting them keeps `search_code.rs` focused on
 //! dispatch.
-//! What: `chunk_to_hit_json`, `compact_snippet`, `grade_from_score`, and
-//! `grep_fallback_search`.
+//! What: `chunk_to_hit_json`, `compact_snippet`, and `grep_fallback_search`.
 //! Test: Exercised via the `search_code` tool tests in `super::tests`
 //! (notably `search_code_falls_back_to_grep_when_indexer_absent`).
 
@@ -29,6 +28,13 @@ const COMPACT_CONTEXT_LINES: usize = 7;
 /// centred on the chunk's start line and emits a `match_reason` field.
 /// When false, behaves exactly like the legacy code path (full text up
 /// to `SNIPPET_MAX_CHARS`).
+///
+/// `score` is reported as-is and never thresholded into a quality tier: it
+/// arrives on two incommensurable scales (rank-only RRF from
+/// `search_hybrid`, cosine similarity from the vector-only fallback) and
+/// neither is calibrated. `match_reason` tells the caller which one it is,
+/// and array order carries the rank the RRF score encodes.
+/// Test: `compact_hit_envelope_asserts_no_letter_grade`.
 pub(super) fn chunk_to_hit_json(c: &crate::search::indexer::CodeChunk, compact: bool) -> Value {
     // Use the chunk's own match_reason when populated; fall back to "hybrid"
     // for chunks that were stored before #401 was deployed (empty string).
@@ -44,8 +50,9 @@ pub(super) fn chunk_to_hit_json(c: &crate::search::indexer::CodeChunk, compact: 
             "line": c.start_line,
             "function": c.function_name,
             "snippet": snippet,
+            // #5620: no letter grade — c.score is rank-only RRF (or a cosine
+            // on the vector fallback), so no fixed threshold reads as quality.
             "score": c.score,
-            "grade": grade_from_score(c.score),
             "match_reason": reason,
             "language": c.language,
             "end_line": c.end_line,
@@ -92,26 +99,6 @@ fn compact_snippet(
         .min(lines.len().saturating_sub(context_lines));
     let end = (start + context_lines).min(lines.len());
     lines[start..end].join("\n")
-}
-
-/// Coarse letter grade from an RRF/cosine score.
-///
-/// Why: Compact output bundles a one-character signal so callers can
-/// triage hits without parsing floats (#376 C1).
-/// What: Bucketed thresholds tuned for RRF in [0, 2/RRF_K + ε];
-/// "A" for the strongest 10% of hits, descending to "F" for noise.
-fn grade_from_score(score: f32) -> &'static str {
-    if score >= 0.025 {
-        "A"
-    } else if score >= 0.018 {
-        "B"
-    } else if score >= 0.012 {
-        "C"
-    } else if score >= 0.006 {
-        "D"
-    } else {
-        "F"
-    }
 }
 
 /// Walk `root` (depth-first), case-insensitive substring match `query` against

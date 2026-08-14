@@ -70,6 +70,33 @@ fn make_live_root(base: &Path, name: &str) -> PathBuf {
     root
 }
 
+/// Fixture allowlist under `dir` approving `roots` (#767).
+///
+/// Why: warm-boot now drops entries whose root the allowlist does not approve,
+/// and this bin test binary links the LIBRARY compiled without `cfg(test)`, so
+/// `SearchAppState::new` resolves the REAL XDG allowlist here. Injecting
+/// explicitly keeps the test off the developer's config while still reaching
+/// the restore path it measures.
+fn approving(dir: &Path, roots: &[&Path]) -> crate::allowlist::AllowlistPaths {
+    let paths = crate::allowlist::AllowlistPaths::default()
+        .with_allowlist(dir.join("test-allowlist.toml"))
+        .with_project_paths(dir.join("no-projects.json"));
+    let cfg = crate::allowlist::AllowlistConfig {
+        entries: roots
+            .iter()
+            .map(|p| crate::allowlist::AllowlistEntry {
+                path: p.to_path_buf(),
+                name: None,
+                exclude: Vec::new(),
+                extensions: Vec::new(),
+                skip_kg: false,
+            })
+            .collect(),
+    };
+    cfg.save_to(&paths.allowlist_file()).unwrap();
+    paths
+}
+
 /// Print what the boot cost, on PASS as well as on failure (#5084).
 ///
 /// Why: the wall-clock ceiling is gone as a gate, but the numbers behind it are
@@ -125,7 +152,11 @@ async fn dead_entries_do_not_consume_the_live_index_budget() {
             .try_grant()
             .unwrap();
     let started = Instant::now();
-    let _ = crate::commands::start_restore::collect_relocation_candidates(&[], &grant);
+    let _ = crate::commands::start_restore::collect_relocation_candidates(
+        &[],
+        &grant,
+        &crate::allowlist::AllowlistPaths::default(),
+    );
     let one_walk = started.elapsed();
 
     // Registry: dead entries FIRST, then the live one.
@@ -137,7 +168,8 @@ async fn dead_entries_do_not_consume_the_live_index_budget() {
     crate::service::persistence::save_index_registry(&entries).unwrap();
 
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(16));
-    let state = SearchAppState::new(IndexRegistry::new());
+    let state = SearchAppState::new(IndexRegistry::new())
+        .with_allowlist_paths(approving(data_tmp.path(), &[&live_root]));
 
     // #5084: count the boot's tracked-root walks. Armed after the reference
     // walk above so the count covers the boot and nothing else, and scoped to
@@ -213,18 +245,23 @@ async fn disabled_salvage_budget_costs_a_dead_entry_nothing_but_a_stat() {
             .try_grant()
             .unwrap();
     let started = Instant::now();
-    let _ = crate::commands::start_restore::collect_relocation_candidates(&[], &grant);
+    let _ = crate::commands::start_restore::collect_relocation_candidates(
+        &[],
+        &grant,
+        &crate::allowlist::AllowlistPaths::default(),
+    );
     let one_walk = started.elapsed();
 
     let live_root = make_live_root(work.path(), "live-index");
     let mut entries: Vec<PersistedIndex> = (0..DEAD_ENTRIES)
         .map(|i| colocated_entry(&format!("dead-{i}"), work.path().join(format!("gone-{i}"))))
         .collect();
-    entries.push(colocated_entry("live-index", live_root));
+    entries.push(colocated_entry("live-index", live_root.clone()));
     crate::service::persistence::save_index_registry(&entries).unwrap();
 
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(16));
-    let state = SearchAppState::new(IndexRegistry::new());
+    let state = SearchAppState::new(IndexRegistry::new())
+        .with_allowlist_paths(approving(data_tmp.path(), &[&live_root]));
 
     // #5084: see the sibling test — armed after the reference walk, scoped to
     // this test's tempdir.

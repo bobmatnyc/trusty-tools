@@ -364,14 +364,11 @@ where
 /// Test: covered via [`probe_gh_auth_with`]'s fake-runner tests.
 pub fn probe_gh_auth(timeout: Duration) -> GhAuthProbe {
     probe_gh_auth_with(timeout, || {
-        let out = std::process::Command::new("gh")
-            .args(["auth", "status"])
-            .output()
+        // #5475: single `gh` entry point.
+        let out = trusty_common::gh::GhCommand::new(["auth", "status"])
+            .output_blocking()
             .ok()?;
-        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-        text.push('\n');
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
-        Some(text)
+        Some(out.combined())
     })
 }
 
@@ -429,21 +426,14 @@ pub const GH_USER_ENV_VAR: &str = "GH_USER";
 pub fn gh_token_via_cli(account: &str) -> Result<String, String> {
     let owned = account.to_string();
     run_bounded(GH_ENFORCE_TIMEOUT, move || {
-        let out = std::process::Command::new("gh")
-            .args(["auth", "token", "-u", &owned])
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Some(Err(format!("`gh auth token -u {owned}` failed: {stderr}")));
-        }
-        let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if token.is_empty() {
-            return Some(Err(format!(
-                "`gh auth token -u {owned}` returned an empty token"
-            )));
-        }
-        Some(Ok(token))
+        // #5475: the non-zero and empty-output arms are the entry point's
+        // `nonempty_stdout_blocking`; the failure message stays local because
+        // it names the pinned account.
+        Some(
+            trusty_common::gh::GhCommand::new(["auth", "token", "-u", &owned])
+                .nonempty_stdout_blocking()
+                .map_err(|e| format!("`gh auth token -u {owned}` failed: {e}")),
+        )
     })
     .unwrap_or_else(|| {
         Err(format!(
@@ -534,11 +524,23 @@ pub async fn resolve_gh_account_env_for_registry(
     cwd: &std::path::Path,
 ) -> Vec<(String, String)> {
     let cwd_for_origin = cwd.to_path_buf();
-    let origin = tokio::task::spawn_blocking(move || {
+    let probe = tokio::task::spawn_blocking(move || {
         crate::daemon::managed_routes::inproject::get_origin_url(&cwd_for_origin)
     })
-    .await
-    .unwrap_or(None);
+    .await;
+    // #4734: still fail-open (see the doc above), but a git failure is now
+    // reported rather than being indistinguishable from "no origin remote".
+    let origin = match probe {
+        Ok(Ok(origin)) => origin,
+        Ok(Err(e)) => {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                "cannot read git origin remote; spawning without a pinned gh_account: {e}"
+            );
+            None
+        }
+        Err(_) => None,
+    };
     let Some(origin) = origin else {
         return Vec::new();
     };

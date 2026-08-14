@@ -95,6 +95,52 @@ claims, and disputed results. Full rule in
 [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md)
 ("How Much Gate Output the PR Body Owes").
 
+### What CI actually gates (audited 2026-08-14)
+
+🔴 **A merge waits on six required checks, not on full green.** Branch protection
+requires exactly these contexts and nothing else: `Format check`, `Clippy`,
+`MSRV check`, `500-line file-size cap`, `trusty-search daemon smoke test`, and
+`PR version bump vs crates.io (issue #4421)`. All six trigger unconditionally and
+gate their expensive steps inside the job body on a `docs_only` boolean
+(`ci.yml:145-172`) — a `paths:` filter on a required job would leave the check
+pending forever, which is why none of them has one. On a code PR the six settle
+in about 4 minutes; on a docs-only PR, in under one.
+
+🔴 **`Rust tests (pre-publish gate)` — the four shards — does not run on pull
+requests.** It runs 11-13.5 minutes per shard, roughly 3x the entire required set,
+and it is not a required context, so on a PR it is skipped outright rather than
+run-and-ignored. It runs on every push to `main` and on `workflow_dispatch`. Do
+not wait for it on a PR — there is nothing to wait for.
+
+🟡 **What a PR still proves, and what moves to `main`.** `Clippy` is required and
+runs `--workspace --all-targets`, so every test target still COMPILES on every PR.
+What defers to `main` is test EXECUTION. Run the ladder rung your change earns
+before merging — that is the coverage the shards no longer duplicate per-PR.
+
+🟡 **To run the full suite on a branch:** Actions → CI → "Run workflow" against
+that branch. Reach for it when a change is broad enough that a crate-scoped local
+run does not cover it and you would rather not find out on `main`.
+
+🟡 **A red `main` files an issue.** `ci.yml`'s `notify-main-failure` job runs on
+every push to `main`, folds every job conclusion (the shards included) through
+`scripts/classify-ci-results.sh`, and on any non-green verdict opens or comments on
+the `ci-red-main`-labelled tracking issue, then fails the run. It is a GitHub issue,
+not a page — nobody is woken up.
+
+🟡 **A `BEHIND` branch cannot merge — update it.** `gh pr merge` refuses with "the
+head branch is not up to date with the base branch" even when all six required
+contexts have passed, so run `gh pr update-branch <n>` and let them re-report; on a
+docs-only PR that costs well under a minute. The mechanism is UNCONFIRMED —
+`required_status_checks.strict` is readable only with admin access, which the working
+account does not have — so treat this as observed behaviour, not a verified setting.
+A genuine `CONFLICTING` state is a different and harder problem.
+
+🟡 **`gh pr merge --admin` bypasses nothing on this repo.** The working account is
+push-only (`admin: false`), so the flag is silently ineffective. `gh`'s own refusal
+message offers `--admin` as the remedy — following that suggestion is a dead end,
+not a fix. A PR merges when its six required contexts pass AND its branch is current
+with base.
+
 ### Baseline failures — the Rust specifics
 
 <!-- Load-bearing order below: keep the if/otherwise together — see the comment in test-ladder-baseline.md for why. -->
@@ -254,24 +300,44 @@ waits, the `tga` tag aliases (#1128), and the connection-safe daemon restart.
 > **Full release workflow, `scripts/bump-version.sh`, and Developer-ID signing
 > setup:** see [docs/reference/release-workflow.md](docs/reference/release-workflow.md).
 
-🔴 **A breaking public-API change needs a matching version bump, and the release
-path enforces it (#5050, moved to release-time by #5149).**
-`scripts/preflight-publish.sh` CHECK 5 runs `cargo-semver-checks` against the
-crate's latest crates.io release immediately before `cargo publish`, and its
-nonzero exit is the absolute stop — that is what blocks a bad upload, since
-`cargo publish` runs locally and no CI job can stop it. The tag-push workflow
+🔴 **Internal consistency is the bar — do not deliberate over external SemVer.**
+The question worth answering about a public-API change is whether every crate in
+this workspace still agrees with itself. What a third-party crates.io consumer
+would experience is not a question to weigh, hold work over, or write an
+analysis about. Pick the version that keeps the workspace consistent and move on.
+
+🔴 **That governs deliberation, not the gate (#5050, moved to release-time by
+#5149).** `scripts/preflight-publish.sh` CHECK 5 still runs `cargo-semver-checks`
+against the crate's latest crates.io release immediately before `cargo publish`,
+and its nonzero exit is still the absolute stop — `cargo publish` runs locally,
+so no CI job can stop a bad upload. Nothing above makes that gate advisory, and
+nothing above is licence to silence it with an exclusions-file row.
+
+🔴 **A zero exit is NOT the mirror of that stop (#5620).** `check_semver.sh`
+exits 0 both when it compared a crate and found nothing wrong and when it
+compared nothing at all, and CHECK 5 used to read only the status — so
+`0 crate(s) checked, 0 skipped, 1 inventory NOT computed` printed `[PASS]` and
+trusty-review 0.16.0 shipped with its public-API delta unexamined by any tool.
+CHECK 5 now reads the counts: **`0 compared` and `[PASS]` are unreachable
+together.** A recorded skip prints `[SKIP]` and permits, a blind gate prints
+`[FAIL]` and stops, and `PREFLIGHT_SEMVER_UNVERIFIED="<reason>"` downgrades a
+blind gate to `[WARN]` — a reason string, never a boolean, and never for a
+standing machine limitation (that belongs in
+`scripts/semver-checks-feature-exclusions.tsv`). The tag-push workflow
 `.github/workflows/semver-checks.yml` reports the same check independently.
 Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is the MINOR
-position. A workspace `cargo check` can never catch this class of break — the
-root `Cargo.toml` path override pairs local source with local dependency — which
-is how #4088 shipped `trusty-common` 0.22.5's required new public field on a
-patch bump and cost `trusty-analyze` 0.7.3 a yank.
+position. A workspace `cargo check` can never catch this class of break, because
+the root `Cargo.toml` path override pairs local source with local dependency — so
+the workspace compiling clean is not evidence the published crates agree (#4088).
 
-🟡 **It does not run on PRs**, so between releases a breaking change can merge
-unnoticed and will surface at the release that ships it. Prefer
-`#[non_exhaustive]` on public structs and enums so field and variant additions
-stay non-breaking by construction, and check a risky change yourself with
-`bash scripts/check_semver.sh --crate <crate>`. See
+🟡 **On an ordinary PR it compares nothing.** `.github/workflows/semver-checks.yml`
+triggers on every PR, then decides inside the job whether a release is under test
+(#5311); on a PR that does not bump a crate's declared version it exits in ~15s
+having compared nothing. So a breaking change merges unnoticed and surfaces at the
+release that ships it. That is expected, not a problem to pre-empt — the release is
+where it gets dealt with. `#[non_exhaustive]` on public structs and enums is still
+worth reaching for, purely because it keeps the gate quiet at release time. To check
+a change yourself: `bash scripts/check_semver.sh --crate <crate>`. See
 [docs/reference/semver-gate.md](docs/reference/semver-gate.md).
 
 🔴 **The tag must name the commit that gets published.** Nothing bound the two

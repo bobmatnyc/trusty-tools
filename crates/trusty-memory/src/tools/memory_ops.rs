@@ -24,7 +24,8 @@ use uuid::Uuid;
 use super::wing_ops::resolve_wing_arg;
 
 use super::bm25::{
-    bm25_hits_to_recall_results, bm25_search_optional, fuse_bm25_into_recall, serialize_recall,
+    bm25_delete_document, bm25_hits_to_recall_results, bm25_search_optional, fuse_bm25_into_recall,
+    serialize_recall,
 };
 use super::helpers::{
     apply_tier_c, attach_mcp_attribution, blocklist_gate, content_gate, dedup_gate,
@@ -560,6 +561,26 @@ pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<
     Ok(json!({ "palace": palace, "drawers": payload }))
 }
 
+/// Delete one drawer from every lane that can surface it.
+///
+/// Why (#5053): "forget" used to mean redb plus the vector store, and the
+/// lexical lane kept the text — so a drawer a user explicitly deleted went on
+/// matching BM25 queries and went on contributing to RRF fusion. A deletion
+/// that covers some of the places the content lives is not a deletion, so the
+/// BM25 document is removed here rather than left to a repair pass that only
+/// ever adds.
+/// What: parses the id, forgets through the palace handle (redb + vector +
+/// in-memory tables), then deletes the BM25 document via
+/// [`bm25_delete_document`] and propagates its failure — the caller must not
+/// read "deleted" off a call that could not finish. The BM25 delete runs
+/// whatever `forget` reported: an id already absent from redb is exactly the
+/// shape a retry after a half-completed forget takes, and skipping it there
+/// would strand the stale document forever. `handle.id`, not the requested
+/// slug, keys the lane — `open_palace` follows aliases and the writer indexed
+/// under the resolved id (#5036).
+/// Test: `tests/bm25_forget_delete.rs::a_forgotten_drawer_leaves_the_lexical_corpus`,
+/// `forget_fails_loudly_when_the_lexical_lane_cannot_confirm_the_delete`,
+/// `forget_succeeds_when_the_lexical_lane_is_disabled`.
 pub(crate) async fn handle_memory_forget(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "memory_forget")?;
     let drawer_id_str = args
@@ -570,6 +591,8 @@ pub(crate) async fn handle_memory_forget(state: &AppState, args: Value) -> Resul
         .map_err(|e| anyhow!("memory_forget: invalid drawer_id UUID: {e}"))?;
     let handle = open_palace_handle(state, &palace)?;
     let outcome = handle.forget(drawer_id).await.context("forget")?;
+    // #5053: the lexical lane is the other place this drawer's text lives.
+    bm25_delete_document(state, handle.id.as_str(), drawer_id).await?;
     // #5231: only a real deletion emits DrawerDeleted and reports "deleted".
     // A no-op used to do both, so an audit loop saw N delete events for zero
     // deletions.

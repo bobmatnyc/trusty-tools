@@ -1361,6 +1361,58 @@ fn the_honest_ban_reaches_both_prose_channels() {
 }
 
 #[test]
+fn the_asd_ste_100_layer_reaches_both_prose_channels() {
+    // The owner added ASD-STE-100 as a sentence-CONSTRUCTION layer on top of
+    // the existing stance rules, in spirit only: the ~900-word approved
+    // vocabulary is deliberately NOT adopted, because it forbids common verbs
+    // and would make trade-off discussion stilted. Both halves are asserted —
+    // the layer's presence, and the refusal that keeps a future reader from
+    // "fixing" it into literal conformance. Reaches PM prose (output styles,
+    // #2647) and agent prose (BASE-AGENT.md composition) alike, per the
+    // keep-the-two-in-step rule the section states.
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    const REQUIRED: &[&str] = &[
+        "**Sentence construction — ASD-STE-100, applied in spirit.**",
+        "approved vocabulary does NOT",
+        "Never tighten it into literal conformance with the word list.",
+        "One idea per sentence; one instruction per sentence.",
+        "No noun cluster longer than three words.",
+        // ADD, not replace: the stance rules the layer sits on top of.
+        "**No praise for the user.**",
+    ];
+
+    for style in OUTPUT_STYLES {
+        for needle in REQUIRED {
+            assert!(
+                style.content.contains(needle),
+                "{} is missing the ASD-STE-100 construction layer {needle:?}",
+                style.id
+            );
+        }
+        // The superseded bullet was FOLDED IN, not left beside the layer as a
+        // second statement of "one idea per sentence" in different words.
+        assert!(
+            !style.content.contains("Short sentences, one idea each"),
+            "{}: the old short-sentence bullet must be folded into the \
+             ASD-STE-100 layer, not duplicated beside it",
+            style.id
+        );
+    }
+
+    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let composed =
+        compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
+    for needle in REQUIRED {
+        assert!(
+            composed.contains(needle),
+            "composed agent is missing the ASD-STE-100 construction layer {needle:?}"
+        );
+    }
+}
+
+#[test]
 fn base_agent_graduated_verbosity_survives_composition() {
     // Output styles do NOT apply to subagents (they run their own system
     // prompt), so the sparse-on-success rule has to reach agents through

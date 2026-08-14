@@ -90,7 +90,6 @@ ONNX deps sit behind `embedder`. See
 | `symgraph-parser` | `symgraph` parser/emitter/editor | tree-sitter + 8 grammars, syn, petgraph, indexmap, similar, walkdir, genco | `symgraph` | `trusty-symgraph` (full) |
 | `symgraph-server` | `symgraph::server` | (axum stack) | `symgraph-parser`, `axum-server` | — |
 | `memory-core` | `memory_core` | hnsw_rs, redb, postcard, git2, dashmap, chrono, regex, petgraph, sha2, hex | `embedder`, `embedder-bundled-ort` | `trusty-memory-core` (#5 phase 2d) |
-| `memory-core-kuzu` | kuzu read path | kuzu | `memory-core` | — |
 | `usearch-migrate` | `.usearch` drain | usearch (FFI) | `memory-core` | — (#51) |
 | `sqlite-kg` | legacy SQLite KG read | rusqlite, r2d2, r2d2_sqlite | `memory-core` | — (#47) |
 | `monitor-tui` | `monitor` | ratatui, crossterm, chrono | — | `trusty-monitor-tui` (#31/#34) |
@@ -226,7 +225,6 @@ store stack behind a single `PalaceHandle`:
      ├─ store/payload_store.rs large-payload sidecar (postcard)
      ├─ store/chat_sessions.rs chat-session log (redb, #56)
      ├─ store/l1_cache.rs      pre-cached L0/L1 layer
-     ├─ store/kuzu.rs          optional kuzu read path (memory-core-kuzu)
      └─ store/concurrent_open.rs  multi-process open coordination
    Analytics surfaces (operate over the stores):
      analytics.rs (RecallLog, redb #57) · decay.rs · dream.rs ·

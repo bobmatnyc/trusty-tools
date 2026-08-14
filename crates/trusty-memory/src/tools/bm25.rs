@@ -252,6 +252,63 @@ pub(crate) fn bm25_index_enqueue(state: &AppState, palace: &str, drawer_id: Uuid
     }
 }
 
+/// Delete a forgotten drawer's document from the palace's BM25 corpus.
+///
+/// Why (#5053): forgetting a drawer removed it from redb and the vector store
+/// and left the lexical lane untouched, so the content stayed matchable by
+/// BM25 for the life of the corpus — a deletion the daemon reported as
+/// complete on one lane while another still held the text. It also kept the
+/// text resident: `PalaceBm25Index` retains every document's full string.
+/// This is the one BM25 op that does NOT go through
+/// [`bm25_index_enqueue`]'s bounded queue. The queue's drop-on-full trade is
+/// defensible for an index because [`crate::bm25_repair`] re-runs the backfill
+/// and the write lands late; backfill is additive, so nothing anywhere
+/// re-attempts a dropped DELETE. Trading a deletion for latency would put the
+/// contract back where this issue found it, and `memory_forget` is a rare,
+/// explicit user action — one loopback round-trip is the right price.
+/// What: `Ok(())` when the lane is off (`bm25_client` is `None` — the
+/// `TRUSTY_BM25_DAEMON` gate), because a lane that was never armed holds no
+/// corpus to delete from. When the lane IS armed but its daemon cannot be
+/// reached, this returns `Err` rather than the `None`-shaped shrug
+/// [`bm25_client_for_palace`] hands its search callers: an unreachable daemon
+/// means the document's fate is unknown, and reporting a deletion we could not
+/// perform is the failure this function exists to prevent. `Bm25Client::delete`
+/// is idempotent, so a caller retrying a partly-failed forget always completes.
+///
+/// Limit worth stating: with the lane disabled, a snapshot written by an
+/// earlier armed run keeps the drawer's text on disk under
+/// `<data_root>/<palace>/bm25/`. Reaching it would mean starting a daemon for
+/// a lane the operator turned off; see #5036 / #5186 for the lane-availability
+/// work that owns that case.
+/// Test: `tests/bm25_forget_delete.rs::a_forgotten_drawer_leaves_the_lexical_corpus`
+/// drives it against a real daemon;
+/// `forget_fails_loudly_when_the_lexical_lane_cannot_confirm_the_delete` and
+/// `forget_succeeds_when_the_lexical_lane_is_disabled` pin the two gates.
+pub(crate) async fn bm25_delete_document(
+    state: &AppState,
+    palace: &str,
+    drawer_id: Uuid,
+) -> anyhow::Result<()> {
+    // The lane gate, read the same way `bm25_client_for_palace` reads it: no
+    // client means no corpus was ever written for this process to delete from.
+    if state.bm25_client.is_none() {
+        return Ok(());
+    }
+    let doc_id = drawer_id.to_string();
+    let Some(client) = bm25_client_for_palace(state, palace).await else {
+        anyhow::bail!(
+            "bm25 lane is enabled but its daemon for palace '{palace}' is unreachable — \
+             drawer {doc_id} may still be lexically searchable"
+        );
+    };
+    client.delete(&doc_id).await.map_err(|e| {
+        anyhow::anyhow!(
+            "bm25 delete failed for drawer {doc_id} in palace '{palace}' — \
+             it may still be lexically searchable: {e:#}"
+        )
+    })
+}
+
 /// Optional BM25 search lane used by `memory_recall` (issue #156).
 ///
 /// Why: lets the recall handler join a BM25 future with the vector future

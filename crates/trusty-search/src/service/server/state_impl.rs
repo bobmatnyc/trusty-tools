@@ -18,6 +18,29 @@ use crate::core::registry::IndexRegistry;
 
 use super::state::{DaemonEvent, SearchAppState};
 
+/// Which files the #767 allowlist gate reads for a freshly-built state.
+///
+/// Why: production must read the operator's real allowlist and project
+/// registry. Unit tests must read NEITHER — a test's verdict cannot depend on
+/// the developer's config, and a test must never write it. Both still go
+/// through the same gate: `test_support::allowlisted_index_root` approves its
+/// fixture root in the test allowlist file, and a root it did not approve is
+/// refused exactly as in production. Tests that need something else override
+/// with [`SearchAppState::with_allowlist_paths`].
+/// What: the real XDG defaults, or the per-process test fixture paths.
+/// Test: `create_index_refuses_unlisted_root` proves the test default still
+/// denies.
+#[cfg(not(test))]
+fn default_allowlist_paths() -> crate::allowlist::AllowlistPaths {
+    crate::allowlist::AllowlistPaths::default()
+}
+
+/// Test-build counterpart of `default_allowlist_paths` — see its doc comment.
+#[cfg(test)]
+fn default_allowlist_paths() -> crate::allowlist::AllowlistPaths {
+    crate::allowlist::test_fixtures::paths()
+}
+
 impl SearchAppState {
     /// Convenience constructor for callers (`daemon`, tests) that want default
     /// reindex tracking without hand-rolling the `Arc<DashMap<…>>`. Defaults
@@ -93,6 +116,7 @@ impl SearchAppState {
             // Issue #2717: production reads the env-resolved registry path;
             // tests override via `with_registry_path` to avoid TRUSTY_DATA_DIR.
             registry_path_override: None,
+            allowlist_paths: default_allowlist_paths(),
             // Epic #3524 slice 6: populated by `install_switchable_embedder`,
             // read wait-free by `/health` via `ArcSwapOption`.
             switchable_embedder: Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -119,6 +143,21 @@ impl SearchAppState {
     #[must_use]
     pub fn with_registry_path(mut self, path: std::path::PathBuf) -> Self {
         self.registry_path_override = Some(path);
+        self
+    }
+
+    /// Builder-style: pin which files the #767 allowlist gate consults.
+    ///
+    /// Why: `POST /indexes` now refuses every root the allowlist union does not
+    /// approve, so a test that registers an index must be able to declare its
+    /// fixture root approved without touching the developer's real config. See
+    /// [`SearchAppState::allowlist_paths`].
+    /// What: replaces the default (real XDG allowlist + real project registry).
+    /// Test: `create_index_accepts_allowlisted_root` and the rest of
+    /// `tests_allowlist_gate_767.rs`.
+    #[must_use]
+    pub fn with_allowlist_paths(mut self, paths: crate::allowlist::AllowlistPaths) -> Self {
+        self.allowlist_paths = paths;
         self
     }
 

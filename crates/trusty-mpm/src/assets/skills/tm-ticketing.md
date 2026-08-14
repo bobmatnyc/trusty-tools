@@ -181,7 +181,7 @@ never summarise test results in your own words).
 
 ## Labels
 
-Four separable families. The `ticketing` agent applies them at creation and the
+Three separable families. The `ticketing` agent applies them at creation and the
 exact command form lives in the agent asset ("Label at Creation"); this is the
 model, so a delegation brief never needs to spell it out.
 
@@ -190,7 +190,15 @@ model, so a delegation brief never needs to spell it out.
 | Type | exactly one | `bug`, `enhancement`, `refactor`, `chore`, `documentation`, `epic` |
 | Owning component | one or more | The crate or subsystem the defect actually lives in |
 | Priority | optional | `P0`–`P3`, **only** when the issue text itself asserts severity. A guessed priority is noise |
-| Provenance | optional | The harness defaults: `trusty-mpm` plus `ws/<session-name>`, with `--assignee @me` |
+
+🔴 **There is no fourth family for where a finding came from.** Which session,
+harness, agent, or tool surfaced an issue is never a labeling input, under any
+name — not "provenance", not "umbrella", not "dogfooding". `trusty-mpm` is an
+owning-component label like any other: it applies only when the code at fault
+sits under `crates/trusty-mpm/` (or the tm CLI's own release tooling), never
+because the session that filed the issue happened to run under tm. When no
+component label fits, apply none — that decision is final, not a trigger to
+reach for `trusty-mpm`.
 
 🔴 **Never invent a label the repository does not carry.** Check `gh label list`
 before using one; create a genuinely missing label rather than dropping the

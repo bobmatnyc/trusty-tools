@@ -23,7 +23,10 @@ pub(crate) fn needs_first_run_clone(repo_url: &str) -> Option<(String, std::path
     if !p.is_dir() {
         return None;
     }
-    let gh = trusty_common::github_path::parse_github_path(&ip::get_origin_url(p)?)?;
+    // #4734: this only decides whether to print a "cloning…" hint, so an
+    // unreadable remote declines the hint exactly as an absent one does.
+    let origin = ip::get_origin_url(p).ok().flatten()?;
+    let gh = trusty_common::github_path::parse_github_path(&origin)?;
     let b = ip::base_clone_path(&gh.owner, &gh.repo);
     (!b.join(".git").exists()).then_some((format!("{}/{}", gh.owner, gh.repo), b))
 }

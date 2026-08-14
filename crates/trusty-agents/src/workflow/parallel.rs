@@ -7,8 +7,11 @@
 //! `ParallelSubtask` via `tokio::spawn`, collects the results (partial
 //! results are OK — failed sub-agents are logged and skipped), and returns
 //! the per-subtask outputs for downstream merging. When `use_worktrees` is
-//! true, each sub-agent gets its own git worktree via `WorktreeManager`.
-//! Test: `run_parallel_phase_collects_results` with a mock runner.
+//! true, each sub-agent gets its own git worktree via `WorktreeManager`, and
+//! a worktree that cannot be created fails the phase rather than downgrading
+//! to a shared-tree subdir (#4734).
+//! Test: `run_parallel_phase_collects_results` with a mock runner;
+//! `run_parallel_phase_fails_when_worktree_unavailable` for the error arm.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,7 +40,13 @@ pub struct ParallelPhaseResult {
 /// `runner.run(agent_name, task)`. Awaits all handles and returns one
 /// `ParallelPhaseResult` per successful sub-agent. Worktrees (if used) are
 /// removed after collection.
-/// Test: See unit test with MockAgentRunner below.
+///
+/// Returns `Err` when `use_worktrees` is set and a worktree cannot be
+/// created: the caller asked for isolation, so running the sub-agents in the
+/// shared tree instead would be the write-clobbering scenario the flag exists
+/// to prevent (#4734).
+/// Test: `run_parallel_phase_collects_results`,
+/// `run_parallel_phase_fails_when_worktree_unavailable`.
 pub async fn run_parallel_phase(
     base_task: &str,
     subtasks: &[ParallelSubtask],
@@ -62,17 +71,15 @@ pub async fn run_parallel_phase(
         let label = subtask.label.clone();
 
         let out_dir = if use_worktrees {
-            match worktree_mgr.create(&label).await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(
-                        label = %label,
-                        error = %e,
-                        "worktree creation failed; using plain subdir"
-                    );
-                    base_out_dir.join(&label)
-                }
-            }
+            // #4734: `worktree_protection` is the opt-in to isolation, so a
+            // failure here fails the phase — degrading to a shared-tree subdir
+            // would give the operator the opposite of what the flag asked for.
+            worktree_mgr.create(&label).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "worktree_protection is enabled but no isolated worktree could be created \
+                     for subtask `{label}`: {e}"
+                )
+            })?
         } else {
             base_out_dir.join(&label)
         };
@@ -206,5 +213,37 @@ mod tests {
             .await
             .unwrap();
         assert!(base.join("only").exists());
+    }
+
+    /// #4734: with `worktree_protection` on and git unable to produce a
+    /// worktree, the phase used to run anyway in a shared-tree subdir.
+    #[tokio::test]
+    async fn run_parallel_phase_fails_when_worktree_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        // base_out_dir's PARENT is where the manager roots its worktrees.
+        let base = tmp.path().join("out");
+        let label = "occupied";
+
+        // Pre-occupy the destination so `git worktree add` refuses it.
+        let wt = tmp
+            .path()
+            .join(".trusty-agents/state/worktrees")
+            .join(label);
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("squatter.txt"), b"in the way").unwrap();
+
+        let subs = vec![ParallelSubtask {
+            label: label.to_string(),
+            task_suffix: "x".to_string(),
+        }];
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner);
+        // ParallelPhaseResult isn't Debug, so unwrap the Result by hand.
+        let Err(err) = run_parallel_phase("t", &subs, "a", runner, &base, true).await else {
+            panic!("a phase that asked for worktree isolation must not run without it");
+        };
+        assert!(
+            err.to_string().contains("worktree_protection is enabled"),
+            "expected the isolation refusal, got: {err}"
+        );
     }
 }
