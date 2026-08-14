@@ -8,8 +8,3 @@ Fixed
 - `trusty-search index add` gains `--allow-sensitive-path`, which approves a root under an OS-temp or app-support prefix. The credential, secret-marker, and top-level-home denylist rows are never relaxed. `POST /indexes` with `allow_sensitive_path: true` is likewise its own per-request approval, which is what keeps tcode's bake-off working project indexable (#767, #2914).
 - An empty, relative, or `/` entry in `allowlist.toml` or the project registry no longer approves every path. Containment is decided with `starts_with`, so one malformed row previously turned default-deny into a global allow (#767).
 - Indexing no longer writes an allowlist entry. It used to create one after every successful registration, promoting derived approvals — provisioned worktrees, registered projects, sub-roots — into permanent hand-file entries, so removing the parent stopped stopping the child and every ephemeral worktree left a row behind. `index add` is the verb that approves; indexing only updates settings on an entry that already exists (#767).
-
-Changed
-
-- `trusty-search index relocate` approves the destination before calling the daemon, and withdraws that approval if the call fails. Approving afterwards meant the now-gated `PATCH /indexes/:id` refused every destination that was not already approved — the normal case for a moved repo (#767).
-- `SearchAppState` is `#[non_exhaustive]`. It gains fields regularly and each one was a breaking change purely because an external struct literal could name them all; taken alongside the `allowlist_paths` break so the next field costs nothing (#767).
