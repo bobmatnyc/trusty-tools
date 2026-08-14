@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.4.1] — 2026-08-14
+
+### Fixed
+
+- `trusty-mpm-v1.4.0` was tagged but never published: its root `Cargo.toml`
+  still pinned `trusty-common = "0.33"` at tag time, and the only `0.33.x`
+  release on crates.io (0.33.0) lacks the `gh-cli` feature that 1.4.0's
+  `get_origin_url` work depends on, so `cargo publish` failed at packaging
+  before any upload occurred. `trusty-common` 0.34.0 published after the tag,
+  and `main`'s requirement moved to `"0.34"` afterward too — both landed too
+  late for the immutable `trusty-mpm-v1.4.0` tag to pick up. 1.4.1 carries the
+  same 1.4.0 content against the now-current `trusty-common` requirement and
+  is the first version of this release actually shipped to crates.io.
+
 ## [1.4.0] — 2026-08-14
 
 This release ships a library-surface breaking change (below) as a MINOR bump.
