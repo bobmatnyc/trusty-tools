@@ -203,3 +203,43 @@ fn parses_fenced_block() {
 fn rejects_garbage() {
     assert!(parse_findings("not json at all {{{").is_none());
 }
+
+/// An explicit `"line": null` deserializes, and the newly-required prose fields
+/// accept an empty string.
+///
+/// Why: #5675 made every schema property required, so `line` became nullable to
+/// express "unknown" — and the system prompt now instructs a GREEN finding to
+/// emit exactly that. `#[serde(default)]` fills a MISSING key; it does not by
+/// itself accept an explicit `null`, so a plain integer field would reject this
+/// payload at runtime and no schema-compliance test would catch it: the schema
+/// is correct, the Rust side would be what fails. `RawFinding.line` is
+/// `Option<u64>` (`analyze.rs`), matching `LlmFinding.line: Option<u32>` on the
+/// review path, so `null` maps to `None`.
+/// What: parses one GREEN finding carrying `"line": null` plus an empty string
+/// in every field strict mode newly requires, and asserts the round trip.
+/// Test: this test itself.
+#[test]
+fn parses_explicit_null_line_and_empty_required_fields() {
+    let raw = parse_findings(
+        r#"{"findings": [{
+            "title": "Healthy topic",
+            "severity": "green",
+            "dimension": "Testing",
+            "file": "src/lib.rs",
+            "line": null,
+            "evidence_quote": "",
+            "description": "",
+            "business_impact": "",
+            "remediation": "",
+            "cost_effort": ""
+        }]}"#,
+    )
+    .expect("an explicit null line must deserialize, not fail the whole batch");
+
+    let finding = &raw.findings[0];
+    assert_eq!(finding.line, None, "null must map to None");
+    assert_eq!(finding.title, "Healthy topic");
+    assert!(finding.business_impact.is_empty());
+    assert!(finding.cost_effort.is_empty());
+    assert!(finding.evidence_quote.is_empty());
+}

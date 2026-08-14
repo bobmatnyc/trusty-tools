@@ -7,7 +7,11 @@
 #              or to the job, so required checks always report.
 #   fmt      – cargo fmt --all --check (stable)
 #   clippy   – cargo clippy --workspace --all-targets -D warnings (stable, SKIP_UI_BUILD=1)
-#   test     – cargo test --workspace (stable, SKIP_UI_BUILD=1, full clone for git tests)
+#   test-shard – cargo nextest run --workspace, split 4 ways (stable,
+#              SKIP_UI_BUILD=1, full clone for git tests). PUSH TO MAIN AND
+#              workflow_dispatch ONLY — it does not run on pull requests; see
+#              that job's `if:` for why and for how to run it on a branch.
+#   test     – roll-up over the four shards; inherits the same trigger scope
 #   msrv     – cargo check --workspace (toolchain 1.94, SKIP_UI_BUILD=1)
 #   agents-ui – cargo clippy -p trusty-agents-ui (stable, WebKit2GTK-enabled runner)
 #   embedder-cuda-check – cargo check -p trusty-common --features embedder-cuda
@@ -104,6 +108,13 @@ on:
     # (also non-default) covers a draft being marked ready.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+  # On-demand run of the whole workflow, including the `test-shard` matrix that
+  # no longer runs on `pull_request` (see that job's `if:`). Without this there
+  # is no way at all to get the workspace suite to run against a branch before
+  # it merges, and "deferred to main" would mean "unreachable until merged".
+  # `github.event.before` is empty on a dispatch, so the `changes` job's push
+  # arm falls through to its fail-closed default and the full suite runs.
+  workflow_dispatch:
 
 # PULL REQUESTS: one run per PR ref — a new push supersedes the previous run,
 # which is what saves the CI minutes this key was added for.
@@ -153,7 +164,7 @@ jobs:
   #   gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   #     --jq '.required_status_checks.contexts'
   # "Rust tests (pre-publish gate)" (the `test` aggregate below) is NOT
-  # currently required — see #5407. GitHub does
+  # required, and does not run on pull requests at all. GitHub does
   # not create check runs for a workflow its path/branch filters skipped, so a
   # required context would sit pending forever and a docs-only PR would become
   # unmergeable instead of fast — the trap #4468 calls out and the one
@@ -440,7 +451,34 @@ jobs:
     # implicit success() so the job still runs; `docs_only` then resolves to
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
-    if: ${{ !cancelled() }}
+    #
+    # NOT ON PULL REQUESTS. This matrix runs 11–13.5 minutes per leg — roughly
+    # 3x the entire required-check set, which settles in ~4 minutes — while
+    # gating nothing: it is not a required context and `docs/reference/
+    # test-ladder-baseline.md` already places `cargo test --workspace` at the
+    # publish boundary rather than at merge. Every merge to `main` still runs
+    # it in full, and `preflight-publish.sh` CHECK 1 refuses to publish any
+    # commit that is not `origin/main`, so the tree that gets published is
+    # always a tree this matrix has run against. A tag trigger would re-run the
+    # same suite over the same tree.
+    #
+    # SKIPPED, NOT STEP-GATED. The `docs_only` pattern used elsewhere in this
+    # file keeps the job running and no-ops its steps, which reports SUCCESS —
+    # correct for a REQUIRED check that must always report, and wrong here,
+    # because a green "Rust tests (pre-publish gate)" on a PR that ran no test
+    # is the fail-open shape #5407 closed. Skipping is the honest signal: the
+    # PR check list says the gate did not run. That is only safe because this
+    # job is not required; the reasoning in the `changes` job comment above
+    # (a `paths:`-filtered required check hangs forever) is untouched, and no
+    # required job gains a filter here.
+    #
+    # WHAT A PR STILL PROVES. `Clippy` is required and runs
+    # `--workspace --all-targets`, so every test target still COMPILES on every
+    # PR. What moves to `main` is test EXECUTION, not compilation.
+    #
+    # TO RUN IT ON A BRANCH: Actions → CI → "Run workflow" against that branch
+    # (the `workflow_dispatch` trigger at the top of this file).
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -1003,9 +1041,18 @@ jobs:
   # requires touching anything downstream of this job. It runs no cargo
   # command itself; it only checks that every `test-shard` leg succeeded.
   #
-  # It is NOT currently a required branch-protection context (see the
-  # `changes` job comment above for the live list) — it exists so a roll-up
-  # context is available to become required later without a workflow change.
+  # It is NOT a required branch-protection context (see the `changes` job
+  # comment above for the live list), and it can no longer become one by
+  # editing branch protection alone: it inherits `test-shard`'s
+  # `github.event_name != 'pull_request'` condition, so on a PR it is skipped
+  # rather than green. Making it required would need that condition dropped
+  # here and in `test-shard` first — i.e. reverting the deferral, which is the
+  # honest way to undo it.
+  #
+  # The condition must match `test-shard`'s exactly. Without it this job would
+  # run on PRs, read the skipped matrix as `needs.test-shard.result` ==
+  # 'skipped', and fail the "must equal success" check below on every single
+  # pull request.
   #
   # `needs.test-shard.result` is the AGGREGATE of the matrix: it is 'success'
   # only when every leg succeeded, and 'failure' / 'cancelled' / 'skipped'
@@ -1017,7 +1064,7 @@ jobs:
   test:
     name: Rust tests (pre-publish gate)
     needs: [changes, test-shard]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

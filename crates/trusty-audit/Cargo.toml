@@ -44,6 +44,10 @@ clap = { workspace = true }
 # Reading the companion engagement config and tga's `manifest.toml`.
 serde = { workspace = true }
 toml = { workspace = true }
+# #5555: `tga audit` takes its repository set from a YAML config, so driving it
+# at one repository means generating one. `serde_yaml` is the workspace-wide
+# standard for YAML (see the root Cargo.toml note).
+serde_yaml = { workspace = true }
 # Library error type.
 thiserror = { workspace = true }
 # #5495: the pinned, fail-closed download entry point. Downloading, verifying
@@ -52,9 +56,24 @@ thiserror = { workspace = true }
 # supplies the HTTP client (`download::http_client`), which is why `reqwest` is
 # deliberately absent from this manifest.
 trusty-installer = { workspace = true }
+# #5487: the workspace's single `gh` entry point (#5475). Discovery shells out
+# to `gh repo list`, and CLAUDE.md's common-entry-point rule makes a second
+# `Command::new("gh")` here a defect — so this crate never spells one.
+trusty-common = { workspace = true, features = ["gh-cli"] }
+# Deserializing `gh --json` payloads. `GhCommand::json` hands back a typed value
+# via serde; the derive lives on this crate's own `DiscoveredRepo`.
+serde_json = { workspace = true }
 # Async runtime for the binary. `Session::execute` is async because installing
 # the pinned tools downloads; the Tauri shell will drive the same future.
 tokio = { workspace = true }
+# #5499: the return package is one zip file, because the return channel is
+# manual (#5642) and a directory cannot be attached to an email.
+zip = { workspace = true }
+# #5499: walking each audited repository's output directory. Not followed
+# through symlinks — `package::collect_dir` refuses one rather than reading a
+# file from outside the working directory into a package that leaves the
+# recipient's network.
+walkdir = { workspace = true }
 
 [dev-dependencies]
 # Real directories for the working-directory creation tests.

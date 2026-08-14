@@ -1,0 +1,5 @@
+toolchain: rustc 1.97.1 (selected over ambient 1.94.1; the scratch resolution ignores Cargo.lock)
+FAIL: TOOL ERROR — could not reach the crates.io index for 'trusty-common'.
+      http://127.0.0.1:1/tr/us/trusty-common — curl failed.
+      Whether a baseline exists is UNKNOWN, so no skip may be granted.
+      This is NOT a pass (issue #5050).

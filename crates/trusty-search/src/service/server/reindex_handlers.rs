@@ -122,7 +122,10 @@ pub(super) async fn reindex_handler(
             // Issue #829: validate_root_path is now async. Reindex's root
             // override has no `allow_sensitive_path` opt-in, so this always
             // enforces the full denylist (`false`) — unchanged from before.
-            let new_root = match validate_root_path(&new_root, false).await {
+            // #767: re-pointing an index at a new root is index creation by
+            // another name, so it passes the same opt-in allowlist gate.
+            let new_root = match validate_root_path(&new_root, false, &state.allowlist_paths).await
+            {
                 Ok(canonical) => canonical,
                 Err(resp) => {
                     let (parts, body) = resp.into_parts();

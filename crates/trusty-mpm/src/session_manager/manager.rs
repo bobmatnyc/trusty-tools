@@ -983,10 +983,10 @@ impl SessionManager {
     /// `cached_all()` alternative would risk a stale serial set.
     /// Test: `manager_serial_reuses_decommissioned_gap` in tests.rs.
     pub(crate) async fn names_for_serial_allocation(&self) -> Result<Vec<String>, ManagedError> {
-        let mut names: Vec<String> = self
-            .tmux
-            .list_sessions()
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        // #3886: propagate, never re-wrap — `list_sessions` already returns a
+        // `ManagedError`, so `TmuxUnavailable(e.to_string())` doubled its own
+        // `tmux error:` prefix in the user-facing provisioning failure.
+        let mut names: Vec<String> = self.tmux.list_sessions()?;
         let records = self.store.write().await.all().await?;
         names.extend(
             records

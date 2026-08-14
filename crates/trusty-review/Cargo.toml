@@ -1,6 +1,10 @@
 [package]
 name        = "trusty-review"
-version     = "0.16.0"
+# #4421: patch bump — 0.16.0 already published on crates.io and this PR
+# touches src/**. `SystemGhResolver::gh_auth_token` swaps its hand-rolled
+# `gh auth token` spawn for trusty-common's `GhCommand` entry point; the
+# trait method signature and struct are unchanged, so no public API moved.
+version     = "0.16.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
@@ -87,7 +91,7 @@ clap         = { workspace = true }
 # `webhook-relay` (#5182): the console->target relay wire contract AND its
 # receive half — the durable inbox, the listener, and the hardened UDS bind
 # this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.
-trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay"] }
+trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay", "gh-cli"] }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console is
 # no longer bundled into trusty-review (single-owner-per-binary); the standalone
 # `trusty-console` crate is its sole producer.

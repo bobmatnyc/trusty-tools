@@ -18,7 +18,7 @@ use clap::Args;
 
 use anyhow::Context as _;
 use tga::audit::{
-    require_inference_credential, require_rendered_report_carries_synthesis,
+    ensure_analyze_daemon, require_inference_credential, require_rendered_report_carries_synthesis,
     require_review_supports_required_inference, resolve_review_binary, run_full_sweep,
     run_review_report, sweep_gap_lines, AuditSweepStats, SweepOptions, SweepStage,
     DATA_HANDLING_NOTE,
@@ -123,9 +123,9 @@ const DEFAULT_OUTPUT_DIR: &str = "audit-output";
 ///
 /// # Errors
 ///
-/// Propagates a missing inference credential and a failure to create the output
-/// directory — both whole-run preconditions. A stage failure is reported, not
-/// propagated.
+/// Propagates a missing inference credential, an unstartable `trusty-analyze`
+/// daemon (#5670), and a failure to create the output directory — all whole-run
+/// preconditions. A stage failure is reported, not propagated.
 pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::Result<()> {
     // #5454: the report's narrative now requires inference, so a missing
     // credential is checked before ANY work — ahead of the output directory and
@@ -138,6 +138,13 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     // renderer is ordinary — and that renderer produces exactly the report this
     // ticket abolished, while exiting 0.
     require_review_supports_required_inference()?;
+
+    // #5670: the third whole-run precondition. Nothing started `trusty-analyze`,
+    // and DOC-67 §8 sources the findings table, the complexity distribution and
+    // the health factors from it alone — so a machine without the daemon
+    // produced a report with those three sections empty, and exited 0. This
+    // starts it, and refuses the run when it cannot.
+    ensure_analyze_daemon().await?;
 
     let output = args
         .output
