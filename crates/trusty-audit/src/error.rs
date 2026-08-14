@@ -110,6 +110,33 @@ pub enum AuditError {
         installed: String,
     },
 
+    /// One layer named some of the four inference variables but not all four.
+    ///
+    /// Why: the provider and the three role model ids are ONE selection — a
+    /// model id only means anything in its provider's namespace. Resolving them
+    /// independently pairs, say, an operator's `TRUSTY_REVIEW_PROVIDER=bedrock`
+    /// with this crate's OpenRouter slugs, which is the HTTP 400 #5671 exists to
+    /// remove. Guessing the missing half on someone's behalf is what produces
+    /// that pairing, so a half-named selection refuses instead.
+    /// What: names the layer, what it set, and what it left unset. Raised before
+    /// any child is spawned, because the condition is identical for every
+    /// repository in the sweep.
+    /// Test: `crate::inference::inference_tests::a_partly_set_operator_environment_refuses`,
+    /// `crate::run::run_tests::a_partial_operator_environment_refuses_before_any_child_runs`.
+    #[error(
+        "review inference is half-configured by the {layer}: {set} named, but {missing} left \
+         unset. The provider and all three role models are one selection — name all four or \
+         none, so a provider is never paired with another provider's model ids"
+    )]
+    SplitInferenceSelection {
+        /// Which layer half-named the selection, for the operator to go fix.
+        layer: &'static str,
+        /// The variables (or config keys) that layer did set, comma-separated.
+        set: String,
+        /// The ones it left unset, comma-separated.
+        missing: String,
+    },
+
     /// The working directory's `tools/` area is not a real directory.
     ///
     /// Why: [`crate::workdir`] promises that `rm -rf <root>` removes everything
