@@ -254,12 +254,18 @@ waits, the `tga` tag aliases (#1128), and the connection-safe daemon restart.
 > **Full release workflow, `scripts/bump-version.sh`, and Developer-ID signing
 > setup:** see [docs/reference/release-workflow.md](docs/reference/release-workflow.md).
 
-🔴 **A breaking public-API change needs a matching version bump, and the release
-path enforces it (#5050, moved to release-time by #5149).**
-`scripts/preflight-publish.sh` CHECK 5 runs `cargo-semver-checks` against the
-crate's latest crates.io release immediately before `cargo publish`, and its
-nonzero exit is the absolute stop — that is what blocks a bad upload, since
-`cargo publish` runs locally and no CI job can stop it.
+🔴 **Internal consistency is the bar — do not deliberate over external SemVer.**
+The question worth answering about a public-API change is whether every crate in
+this workspace still agrees with itself. What a third-party crates.io consumer
+would experience is not a question to weigh, hold work over, or write an
+analysis about. Pick the version that keeps the workspace consistent and move on.
+
+🔴 **That governs deliberation, not the gate (#5050, moved to release-time by
+#5149).** `scripts/preflight-publish.sh` CHECK 5 still runs `cargo-semver-checks`
+against the crate's latest crates.io release immediately before `cargo publish`,
+and its nonzero exit is still the absolute stop — `cargo publish` runs locally,
+so no CI job can stop a bad upload. Nothing above makes that gate advisory, and
+nothing above is licence to silence it with an exclusions-file row.
 
 🔴 **A zero exit is NOT the mirror of that stop (#5620).** `check_semver.sh`
 exits 0 both when it compared a crate and found nothing wrong and when it
@@ -274,17 +280,16 @@ standing machine limitation (that belongs in
 `scripts/semver-checks-feature-exclusions.tsv`). The tag-push workflow
 `.github/workflows/semver-checks.yml` reports the same check independently.
 Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is the MINOR
-position. A workspace `cargo check` can never catch this class of break — the
-root `Cargo.toml` path override pairs local source with local dependency — which
-is how #4088 shipped `trusty-common` 0.22.5's required new public field on a
-patch bump and cost `trusty-analyze` 0.7.3 a yank.
+position. A workspace `cargo check` can never catch this class of break, because
+the root `Cargo.toml` path override pairs local source with local dependency — so
+the workspace compiling clean is not evidence the published crates agree (#4088).
 
-🟡 **It does not run on PRs**, so between releases a breaking change can merge
-unnoticed and will surface at the release that ships it. Prefer
-`#[non_exhaustive]` on public structs and enums so field and variant additions
-stay non-breaking by construction, and check a risky change yourself with
-`bash scripts/check_semver.sh --crate <crate>`. See
-[docs/reference/semver-gate.md](docs/reference/semver-gate.md).
+🟡 **It does not run on PRs**, so a breaking change merges unnoticed and surfaces
+at the release that ships it. That is expected, not a problem to pre-empt — the
+release is where it gets dealt with. `#[non_exhaustive]` on public structs and
+enums is still worth reaching for, purely because it keeps the gate quiet at
+release time. To check a change yourself: `bash scripts/check_semver.sh --crate
+<crate>`. See [docs/reference/semver-gate.md](docs/reference/semver-gate.md).
 
 🔴 **The tag must name the commit that gets published.** Nothing bound the two
 together until `preflight-publish.sh` CHECK 6
