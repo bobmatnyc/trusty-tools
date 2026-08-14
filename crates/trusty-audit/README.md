@@ -226,10 +226,19 @@ the plaintext either way.
 
 **What it will not send.** The engagement's OpenRouter key is never in it: every
 member's bytes are scanned for the key while the zip is written, and a match
-refuses the whole package rather than omitting one file. A symlink under `out/`
-or `extract/` is refused for the same reason — following one would read a file
-from outside the working directory into an archive that leaves your network.
-Both leave no zip and no partial file.
+refuses the whole package rather than omitting one file. A symlink or a hardlink
+under `out/` or `extract/` is refused for the same reason — either would put a
+file from outside the working directory into an archive that leaves your
+network. Refusals leave no zip and no partial file.
+
+Hardlinks are checked by link count, because nothing else can see them: a
+hardlink is a second directory entry on the same file, not a link *to* anything,
+so it is indistinguishable from an ordinary file by type or by path. The cost is
+that a legitimate file with more than one link is refused too. Nothing the audit
+itself writes has one — freshly created files have a single link — so reaching
+that state takes a deliberate `ln`, `cp -l`, or a hardlink-based backup tool
+pointed into the working directory. If you hit it, copy the file instead of
+linking it.
 
 Two things it does not claim. The extract database holds no file content,
 diffs, patches, hunks or blobs — but it does hold free-text fields (commit

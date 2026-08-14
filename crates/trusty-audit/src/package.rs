@@ -24,9 +24,13 @@
 //!
 //! Two refusals, both before a single byte reaches the destination:
 //!
-//! - **A symlink anywhere under `out/` or `extract/`.** Following one would read
-//!   a file outside the working directory into a package that leaves the
-//!   recipient's network. See [`AuditError::UnsafePackageEntry`].
+//! - **A link to content from elsewhere, anywhere under `out/` or `extract/`.**
+//!   Packaging one would read a file outside the working directory into an
+//!   archive that leaves the recipient's network. Symlinks and hardlinks both,
+//!   and they need different checks: a symlink says what it is in its file type,
+//!   while a hardlink is an ordinary directory entry on an inode another entry
+//!   also names, so only its link count gives it away. See
+//!   [`AuditError::UnsafePackageEntry`] and [`refuse_if_hardlinked`].
 //! - **The engagement credential, in any member.** [`crate::config::SecretKey`]
 //!   has no `Serialize`, so this crate cannot write the key into a file it
 //!   generates — but the members are files OTHER programs wrote, and no type
@@ -186,7 +190,8 @@ struct PackagedRepo {
 /// # Errors
 ///
 /// [`AuditError::NothingToPackage`] when no repository was audited,
-/// [`AuditError::UnsafePackageEntry`] for a symlink under `out/` or `extract/`,
+/// [`AuditError::UnsafePackageEntry`] for a symlink or hardlink under `out/` or
+/// `extract/`,
 /// [`AuditError::CredentialInPackage`] when a member carries the engagement key,
 /// and [`AuditError::Package`] for any read, write, or rename failure.
 pub fn assemble(
@@ -240,13 +245,76 @@ fn output_stem(run: &RepoRun) -> String {
         .unwrap_or_else(|| run.repo.name.clone())
 }
 
+/// Refuse a file that another directory entry also names.
+///
+/// Why: the symlink refusal does not cover this, and the difference is not a
+/// gap in the check but a property of the filesystem. A hardlink is not a link
+/// TO anything — it is a second directory entry on the same inode, equal in
+/// every way to the first. `is_symlink()` is false, `is_file()` is true, and
+/// `canonicalize` returns the path it was given, because there is no other path
+/// to resolve to. So containment checks on the resolved path cannot see it
+/// either: the entry genuinely IS inside the working directory, and so is its
+/// content, which is also somewhere else. The link COUNT is the only thing that
+/// distinguishes it, which is why this check is the mechanism rather than a
+/// path-based one.
+///
+/// What: refuses any regular file with more than one link.
+///
+/// The false-refusal this buys, stated plainly: a legitimate member that
+/// happens to carry `nlink > 1` is refused even though its content is
+/// perfectly in scope. Nothing in this crate's own pipeline produces one —
+/// `tga audit` creates its reports and databases fresh, and a freshly created
+/// file has exactly one link, which
+/// `ordinary_audit_output_has_one_link_and_is_not_refused` asserts. Reaching
+/// `nlink > 1` under `out/` or `extract/` takes a deliberate `ln`, `cp -l`, or
+/// a hardlink-based backup tool pointed INTO the working directory. Refusing
+/// that costs a recipient an error message they can fix by copying the file
+/// instead of linking it; accepting it puts arbitrary content into an archive
+/// that leaves their network. For a package built to be sent to someone else,
+/// the refusal is the right side to err on.
+///
+/// On a non-unix target the link count is not available and this is a no-op —
+/// acceptable because the epic scopes this client to macOS arm64 (#5473), and
+/// widening the platform means revisiting the check, not inheriting a silent
+/// hole.
+/// Test: `super::package_tests::a_hardlinked_member_under_out_is_refused`,
+/// `super::package_tests::a_hardlinked_member_under_extract_is_refused`,
+/// `super::package_tests::ordinary_audit_output_has_one_link_and_is_not_refused`.
+fn refuse_if_hardlinked(path: &Path) -> Result<(), AuditError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::symlink_metadata(path).map_err(|source| AuditError::Package {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if metadata.nlink() > 1 {
+            return Err(AuditError::UnsafePackageEntry {
+                path: path.to_path_buf(),
+                kind: "hardlink",
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// Every file under `dir`, as `(entry, source)` pairs.
 fn collect_dir(
     dir: &Path,
     prefix: &str,
     into: &mut Vec<(String, PathBuf)>,
 ) -> Result<(), AuditError> {
-    for entry in walkdir::WalkDir::new(dir).sort_by_file_name() {
+    // `follow_root_links` defaults to TRUE, which would follow `dir` itself
+    // being a symlink even though every nested one is refused below. This crate
+    // creates that directory itself (`run::run_one`), so it is not reachable
+    // through its own sweep — set explicitly rather than resting on that, since
+    // the caller that makes it reachable would be a later change, not this one.
+    for entry in walkdir::WalkDir::new(dir)
+        .follow_root_links(false)
+        .sort_by_file_name()
+    {
         let entry = entry.map_err(|e| AuditError::Package {
             path: dir.to_path_buf(),
             source: std::io::Error::other(e),
@@ -257,11 +325,13 @@ fn collect_dir(
         if entry.file_type().is_symlink() {
             return Err(AuditError::UnsafePackageEntry {
                 path: entry.path().to_path_buf(),
+                kind: "symlink",
             });
         }
         if !entry.file_type().is_file() {
             continue;
         }
+        refuse_if_hardlinked(entry.path())?;
         let relative = entry
             .path()
             .strip_prefix(dir)
@@ -308,9 +378,13 @@ fn collect_extract(
             source,
         })?;
         if kind.is_symlink() {
-            return Err(AuditError::UnsafePackageEntry { path: entry.path() });
+            return Err(AuditError::UnsafePackageEntry {
+                path: entry.path(),
+                kind: "symlink",
+            });
         }
         if kind.is_file() {
+            refuse_if_hardlinked(&entry.path())?;
             into.push((format!("{EXTRACT_PREFIX}/{name}"), entry.path()));
         }
     }
@@ -448,10 +522,18 @@ fn write_archive(
             return Err(e);
         }
     };
-    std::fs::rename(&temporary, destination).map_err(|source| AuditError::Package {
-        path: destination.to_path_buf(),
-        source,
-    })?;
+    // A failed rename leaves a COMPLETE archive at the `.part` path. Nothing
+    // lands at the destination either way, so this is tidiness rather than a
+    // leak — but a finished-looking zip sitting beside the destination is
+    // exactly the thing a recipient might find and send, so it goes the same
+    // way as the fill failure above.
+    if let Err(source) = std::fs::rename(&temporary, destination) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(AuditError::Package {
+            path: destination.to_path_buf(),
+            source,
+        });
+    }
 
     let total_bytes = files.iter().map(|f| f.bytes).sum();
     let packaged_bytes = std::fs::metadata(destination).map(|m| m.len()).unwrap_or(0);
@@ -827,6 +909,89 @@ trusty-review = "0.15.1"
             "{err:?}"
         );
         assert!(!destination.exists());
+    }
+
+    /// A hardlink is a second directory entry on the same inode, so
+    /// `is_symlink()` is false for it and the symlink refusal does not see it.
+    /// Its content is a file from outside the tree all the same.
+    #[cfg(unix)]
+    #[test]
+    fn a_hardlinked_member_under_out_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let outside = tmp.path().join("private.key");
+        std::fs::write(&outside, "not ours to send").expect("write");
+        let run = audited(&work, "00-acme-api", "acme-api");
+        std::fs::hard_link(&outside, run.output.join("linked.key")).expect("hard link");
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        let err = assemble(&work, &config(), &report, &destination)
+            .expect_err("a hardlink must not carry outside content into the package");
+        let AuditError::UnsafePackageEntry { kind, .. } = &err else {
+            panic!("expected UnsafePackageEntry, got {err:?}");
+        };
+        assert_eq!(*kind, "hardlink");
+        assert!(
+            !destination.exists(),
+            "a refused package must leave no file"
+        );
+        assert!(!destination.with_extension("zip.part").exists());
+    }
+
+    /// The same bypass through the other collector, which walks `extract/` with
+    /// its own loop rather than through `collect_dir`.
+    #[cfg(unix)]
+    #[test]
+    fn a_hardlinked_member_under_extract_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let outside = tmp.path().join("private.key");
+        std::fs::write(&outside, "not ours to send").expect("write");
+        let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
+        // Named to match the `<stem>.db` prefix, so `collect_extract` picks it up.
+        std::fs::hard_link(
+            &outside,
+            work.path(Area::Extract).join("00-acme-api.db-wal"),
+        )
+        .expect("hard link");
+        let destination = default_destination(&work);
+
+        let err = assemble(&work, &config(), &report, &destination)
+            .expect_err("a hardlink under extract/ must be refused too");
+        let AuditError::UnsafePackageEntry { kind, .. } = &err else {
+            panic!("expected UnsafePackageEntry, got {err:?}");
+        };
+        assert_eq!(*kind, "hardlink");
+        assert!(!destination.exists());
+    }
+
+    /// The other side of the refusal: ordinary audit output has one link each,
+    /// so widening the check to hardlinks must not start failing real sweeps.
+    /// `a_completed_sweep_becomes_one_openable_zip` is the same guarantee end to
+    /// end; this one states the link count the guarantee rests on.
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_audit_output_has_one_link_and_is_not_refused() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited(&work, "00-acme-api", "acme-api");
+        for path in [
+            run.output.join("manifest.toml"),
+            run.output.join("report.md"),
+            work.path(Area::Extract).join("00-acme-api.db"),
+        ] {
+            let links = std::fs::symlink_metadata(&path).expect("stat").nlink();
+            assert_eq!(links, 1, "{} has {links} links", path.display());
+        }
+        let report = RunReport::of(vec![run]);
+        assemble(&work, &config(), &report, &default_destination(&work))
+            .expect("ordinary output must still package");
     }
 
     /// A sweep in which nothing was audited must not produce a package that
