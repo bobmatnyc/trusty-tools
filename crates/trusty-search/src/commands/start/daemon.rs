@@ -362,6 +362,24 @@ pub async fn handle_start(
                 install_state
                     .prior_index_count
                     .store(prior, std::sync::atomic::Ordering::Relaxed);
+                // #767: before the first allowlist-gated restore, carry the
+                // roots this daemon is ALREADY serving into `allowlist.toml`
+                // if that file does not exist yet. Without this, switching on
+                // default-deny would silently stop indexing a working install.
+                // Runs once; an existing file (including an emptied one) is
+                // never rewritten.
+                if let Ok(registry_path) = crate::service::persistence::indexes_toml_path() {
+                    if let Err(e) = crate::allowlist::grandfather_existing_indexes(
+                        &install_state.allowlist_paths,
+                        &registry_path,
+                    ) {
+                        tracing::warn!(
+                            "allowlist: first-run grandfather pass failed: {e:#} — \
+                             already-registered roots may now be refused; \
+                             approve them with `trusty-search index add` (#767)"
+                        );
+                    }
+                }
                 // Issue #85: restore every index recorded in `indexes.toml`.
                 // Issue #3929: `no_auto_discover` must also gate the warm-boot
                 // colocated-root discovery scan, not just `auto_discover_and_index`
@@ -373,27 +391,7 @@ pub async fn handle_start(
                 // back to a full background reindex if the delta is too large).
                 // Gated by TRUSTY_NO_BOOT_RECONCILE=1.
                 crate::service::reconcile::reconcile_stale_indexes(&install_state).await;
-                // Schema migration: spawn a per-index background migration task.
-                if std::env::var("TRUSTY_DISABLE_MIGRATIONS").as_deref() != Ok("1") {
-                    let registry =
-                        std::sync::Arc::new(crate::core::migration::MigrationRegistry::new());
-                    for index_id in install_state.registry.list() {
-                        let Some(handle) = install_state.registry.get(&index_id) else {
-                            continue;
-                        };
-                        let reg = std::sync::Arc::clone(&registry);
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                crate::core::migration::run_migrations(&handle, &reg).await
-                            {
-                                tracing::warn!(
-                                    index_id = %handle.id,
-                                    "schema migration failed (index kept at current schema): {e:#}"
-                                );
-                            }
-                        });
-                    }
-                }
+                crate::core::migration::spawn_index_migrations(&install_state);
                 // Issue #41 Phase 1: prime the `trusty_index_count` gauge.
                 crate::service::metrics::set_index_count(install_state.registry.list().len());
                 // Issue #40: auto-discover Claude Code / git projects.

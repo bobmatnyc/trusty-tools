@@ -37,7 +37,7 @@ use crate::service::SearchAppState;
 /// Test: `dead_entries_do_not_consume_the_live_index_budget`.
 pub(crate) struct RelocationCandidates {
     /// Unclaimed roots holding a non-empty colocated `index.redb`.
-    roots: Vec<std::path::PathBuf>,
+    pub(crate) roots: Vec<std::path::PathBuf>,
 }
 
 /// Whether a missing-root entry may still be salvaged on this boot (#4846).
@@ -77,10 +77,21 @@ pub(crate) enum RelocationScan {
 /// `e.id != entry.id` self-exclusion the old code performed was a no-op for
 /// exactly this population — which is what makes one shared set correct rather
 /// than an approximation.
-/// Test: `dead_entries_do_not_consume_the_live_index_budget`.
+/// #767: a candidate becomes a registered, watched, PERSISTED root without any
+/// operator action, so it is an index-creation door and gets the same gate as
+/// `POST /indexes`. The filter lives HERE rather than in `try_locate_moved_root`
+/// because that function persists via `upsert_index_registry_entry` before its
+/// caller sees the result — a check downstream of it would run after the write.
+/// A denied or unapproved directory is dropped from the candidate set, so it can
+/// never be selected, and the ambiguity arithmetic (`0`/`1`/`n` below) counts
+/// only roots the daemon is allowed to index.
+/// Test: `dead_entries_do_not_consume_the_live_index_budget`,
+/// `relocation_candidates_drop_unapproved_roots`,
+/// `relocation_candidates_drop_denylisted_roots`.
 pub(crate) fn collect_relocation_candidates(
     all_entries: &[PersistedIndex],
     _grant: &SalvageGrant,
+    allowlist_paths: &crate::allowlist::AllowlistPaths,
 ) -> RelocationCandidates {
     use crate::service::colocated_storage::COLOCATED_DIR_NAME;
     use crate::service::fs_discovery::{scan_roots_for_colocated_indexes, DEFAULT_SCAN_DEPTH};
@@ -118,9 +129,55 @@ pub(crate) fn collect_relocation_candidates(
                 .unwrap_or(false)
         })
         .map(|c| c.root_path)
+        .filter(|root| relocation_candidate_is_approved(root, allowlist_paths))
         .collect();
 
     RelocationCandidates { roots }
+}
+
+/// Whether a relocation candidate may be adopted as an index root (#767).
+///
+/// Why: see `collect_relocation_candidates`. A leftover `.trusty-search/` in a
+/// personal directory must never become the unique candidate that an
+/// approved-but-missing root silently relocates onto.
+/// What: the hard denylist first (strict form — nothing here opted in), then the
+/// allowlist union. An allowlist that cannot be READ drops the candidate: unlike
+/// warm-boot restore, adopting a new root is not something to do on a policy the
+/// daemon could not read, and the entry is simply retried on the next boot.
+/// Test: `relocation_candidates_drop_unapproved_roots`,
+/// `relocation_candidates_drop_denylisted_roots`,
+/// `relocation_candidates_keep_approved_roots`.
+fn relocation_candidate_is_approved(
+    root: &std::path::Path,
+    allowlist_paths: &crate::allowlist::AllowlistPaths,
+) -> bool {
+    if let Some(reason) = crate::allowlist::is_denied(root) {
+        tracing::warn!(
+            root = %root.display(),
+            %reason,
+            "warm-boot salvage: candidate refused by the hard denylist (#767)"
+        );
+        return false;
+    }
+    match crate::allowlist::sources::resolve_allow_source(root, allowlist_paths) {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            tracing::warn!(
+                root = %root.display(),
+                "warm-boot salvage: candidate is not approved for indexing — \
+                 not adopting it as a relocated root (#767)"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!(
+                root = %root.display(),
+                "warm-boot salvage: allowlist unreadable ({e:#}) — not adopting \
+                 this candidate as a relocated root (#767)"
+            );
+            false
+        }
+    }
 }
 
 /// Attempt to locate a moved project root for a colocated index (issue #484).
@@ -166,10 +223,11 @@ pub(crate) fn try_locate_moved_root(
                 new_root.display(),
             );
             // Persist the new root_path so subsequent restarts skip the scan.
-            let updated = PersistedIndex {
-                root_path: new_root.clone(),
-                ..entry.clone()
-            };
+            // #4391: `PersistedIndex` is `#[non_exhaustive]`, so this crate (the
+            // binary, a separate crate from the library) assigns rather than
+            // using struct-update syntax. Same value, same one field overridden.
+            let mut updated = entry.clone();
+            updated.root_path = new_root.clone();
             if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
                 tracing::warn!(
                     "warm-boot: could not persist relocated root_path for '{}': {e}",
@@ -301,10 +359,9 @@ pub(crate) async fn restore_one_index(
         entry.root_path = canonical_root;
         // Persist so subsequent restarts see the canonical path immediately,
         // avoiding repeated canonicalization and keeping indexes.toml accurate.
-        let updated = PersistedIndex {
-            root_path: entry.root_path.clone(),
-            ..entry.clone()
-        };
+        // `entry.root_path` was set to `canonical_root` just above, so the old
+        // struct-update form was a verbose `entry.clone()`.
+        let updated = entry.clone();
         if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
             tracing::warn!(
                 "warm-boot: could not persist canonicalized root_path for '{}': {e}",
@@ -324,10 +381,8 @@ pub(crate) async fn restore_one_index(
             .map(|r| r.canonical())
         {
             entry.repo_identity = Some(identity.clone());
-            let updated = PersistedIndex {
-                repo_identity: Some(identity),
-                ..entry.clone()
-            };
+            // `entry.repo_identity` was set to `identity` just above.
+            let updated = entry.clone();
             if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
                 tracing::warn!(
                     "warm-boot: could not persist backfilled repo_identity for '{}': {e}",
@@ -374,10 +429,13 @@ pub(crate) async fn restore_one_index(
         .filter(|e| !e.is_empty())
         .collect();
     indexer.set_domain_terms(entry.domain_terms.clone());
-    // Issue #75: capture the current git HEAD SHA at registration so the
-    // search response can flag staleness when the working tree advances
-    // past the indexed commit. Best-effort: `None` outside a git repo.
-    let indexed_head_sha = crate::core::git::head_sha(&entry.root_path);
+    // Issue #75: the handle carries the HEAD SHA its corpus was built against so
+    // the search response can flag staleness when the working tree advances past
+    // the indexed commit.
+    // #4391: read it from `indexes.toml`, not from live git. Re-deriving it here
+    // made `reconcile_git_path` compare current HEAD against current HEAD, so no
+    // git-backed index could ever be found stale at boot.
+    let indexed_head_sha = crate::service::boot_markers::resolve_indexed_head_sha(&entry);
     let lexical_only = entry.lexical_only;
     // Issue #313: read skip_kg from the persisted entry. When true, the
     // graph stage is forced to Skipped at warm-boot regardless of on-disk
@@ -388,6 +446,8 @@ pub(crate) async fn restore_one_index(
     let skip_vector = entry.skip_vector;
     // Issue #923: read defer_embed from the persisted entry. Default `true`.
     let defer_embed = entry.defer_embed;
+    // #4390: read the marker before `entry` is consumed by the handle below.
+    let deferred_embed_pending = entry.deferred_embed_pending;
     // Issue #135: inspect the on-disk artifacts that
     // `build_indexer_from_entry` just restored and derive the staged-pipeline
     // state from them. Before this, every warm-booted index landed with
@@ -478,9 +538,152 @@ pub(crate) async fn restore_one_index(
         )),
     };
     let registered = state.registry.register(handle);
+    // #4390: an embed pass interrupted before it committed leaves the corpus
+    // silently short its most recent vectors, and warm boot reports `Ready`
+    // regardless because an older HNSW snapshot exists on disk. Re-arm it.
+    crate::service::boot_markers::rearm_deferred_embed_if_pending(
+        &registered,
+        deferred_embed_pending,
+        chunk_count,
+    )
+    .await;
     // Issue #1621 (epic #1619 WI-2): activate the filesystem watcher for this
     // warm-booted index so subsequent saves are incrementally indexed within
     // the 500ms debounce window. No-op when the watcher is disabled
     // (`TRUSTY_DISABLE_WATCHER=1`) or already watching this index.
     state.watcher_manager.spawn_for_index(&registered).await;
+}
+
+// #4390 / #4391: end-to-end warm-boot marker tests live in a sibling file so
+// this module stays under the 500-SLOC production cap.
+#[cfg(test)]
+#[path = "start_restore_markers_tests.rs"]
+mod markers_tests;
+
+// #767: the relocation gate's own tests. Inline (rather than in a sibling file)
+// because `relocation_candidate_is_approved` is private to this module.
+#[cfg(test)]
+mod relocation_gate_tests_767 {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// A candidate root that survives the strict denylist — see
+    /// `service::server::test_support`'s module doc for why `$HOME`, not
+    /// `$TMPDIR`.
+    fn home_anchored(prefix: &str) -> tempfile::TempDir {
+        let base = dirs::home_dir()
+            .expect("HOME must be set to run trusty-search tests")
+            .join(".trusty-search-test-roots");
+        std::fs::create_dir_all(&base).expect("create test-roots base");
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(&base)
+            .expect("create home-anchored candidate root")
+    }
+
+    fn approving(dir: &Path, roots: &[&Path]) -> crate::allowlist::AllowlistPaths {
+        let paths = crate::allowlist::AllowlistPaths::default()
+            .with_allowlist(dir.join("allowlist.toml"))
+            .with_project_paths(dir.join("no-projects.json"));
+        let cfg = crate::allowlist::AllowlistConfig {
+            entries: roots
+                .iter()
+                .map(|p| crate::allowlist::AllowlistEntry {
+                    path: p.to_path_buf(),
+                    name: None,
+                    exclude: Vec::new(),
+                    extensions: Vec::new(),
+                    skip_kg: false,
+                })
+                .collect(),
+        };
+        cfg.save_to(&paths.allowlist_file())
+            .expect("write allowlist");
+        paths
+    }
+
+    /// An unapproved candidate is dropped, so no approved-but-missing entry can
+    /// silently relocate onto it.
+    ///
+    /// Why (#767 CRITICAL): the salvage phase persists the adopted root via
+    /// `upsert_index_registry_entry` and starts a watcher on it, with no
+    /// operator action. Before this filter a leftover `.trusty-search/` in a
+    /// personal directory was a valid candidate.
+    #[test]
+    fn relocation_candidates_drop_unapproved_roots() {
+        let fx = tempfile::tempdir().expect("tempdir");
+        let unapproved = home_anchored("ts-767-unapproved");
+        let canonical = unapproved.path().canonicalize().expect("canonicalize");
+        let paths = approving(fx.path(), &[]);
+        assert!(!relocation_candidate_is_approved(&canonical, &paths));
+    }
+
+    /// The hard denylist drops a candidate even when it is allowlisted — the
+    /// relocation door does not get a weaker denylist than `POST /indexes`.
+    #[test]
+    fn relocation_candidates_drop_denylisted_roots() {
+        let fx = tempfile::tempdir().expect("tempdir");
+        let ssh = dirs::home_dir().expect("home").join(".ssh");
+        let paths = approving(fx.path(), &[&ssh]);
+        assert!(!relocation_candidate_is_approved(&ssh, &paths));
+
+        // An OS temp dir is denied too — this is the case the warm-boot RESTORE
+        // filter deliberately relaxes and this one deliberately does not.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp_canonical = tmp.path().canonicalize().expect("canonicalize");
+        let paths = approving(fx.path(), &[&tmp_canonical]);
+        assert!(!relocation_candidate_is_approved(&tmp_canonical, &paths));
+    }
+
+    /// An approved candidate is kept — the gate denies by policy, not by
+    /// breaking relocation.
+    #[test]
+    fn relocation_candidates_keep_approved_roots() {
+        let fx = tempfile::tempdir().expect("tempdir");
+        let approved = home_anchored("ts-767-approved");
+        let canonical = approved.path().canonicalize().expect("canonicalize");
+        let paths = approving(fx.path(), &[&canonical]);
+        assert!(relocation_candidate_is_approved(&canonical, &paths));
+    }
+
+    /// An unreadable allowlist drops the candidate. Adopting a NEW root is not
+    /// something to do on a policy the daemon could not read — unlike warm-boot
+    /// restore, which keeps what it already had.
+    #[test]
+    fn relocation_candidates_drop_when_allowlist_unreadable() {
+        let fx = tempfile::tempdir().expect("tempdir");
+        let root = home_anchored("ts-767-corrupt");
+        let canonical = root.path().canonicalize().expect("canonicalize");
+        let paths = crate::allowlist::AllowlistPaths::default()
+            .with_allowlist(fx.path().join("allowlist.toml"))
+            .with_project_paths(fx.path().join("no-projects.json"));
+        std::fs::write(paths.allowlist_file(), "not toml [[[").expect("write");
+        assert!(!relocation_candidate_is_approved(&canonical, &paths));
+    }
+
+    /// The filter runs inside `collect_relocation_candidates`, BEFORE
+    /// `try_locate_moved_root` can persist anything — a check downstream of
+    /// that function would run after `upsert_index_registry_entry`.
+    #[test]
+    fn unapproved_candidate_never_reaches_try_locate_moved_root() {
+        let fx = tempfile::tempdir().expect("tempdir");
+        let unapproved = home_anchored("ts-767-notreached");
+        let canonical = unapproved.path().canonicalize().expect("canonicalize");
+        let paths = approving(fx.path(), &[]);
+
+        // Simulate what `collect_relocation_candidates` produces after filtering.
+        let roots: Vec<PathBuf> = vec![canonical]
+            .into_iter()
+            .filter(|r| relocation_candidate_is_approved(r, &paths))
+            .collect();
+        let candidates = RelocationCandidates { roots };
+        assert!(candidates.roots.is_empty());
+
+        let mut entry = PersistedIndex::new("missing", PathBuf::from("/nonexistent-767"));
+        entry.colocated = true;
+        assert!(
+            try_locate_moved_root(&entry, &candidates).is_none(),
+            "with an empty candidate set there is nothing to adopt or persist"
+        );
+    }
 }

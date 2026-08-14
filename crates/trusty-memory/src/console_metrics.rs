@@ -180,7 +180,9 @@ fn collect_palace_stats(
             Some(handle) => {
                 let drawer_count = handle.drawers.read().len();
                 let vector_count = handle.vector_store.index_size();
-                let kg_triple_count = handle.kg.count_active_triples();
+                // #5384: same diagnostic degrade the status roll-up uses — the
+                // report has no field for "count unavailable".
+                let kg_triple_count = crate::service::helpers::kg_triple_count_or_zero(&handle);
 
                 total_drawers += drawer_count;
                 total_vectors += vector_count;
@@ -217,7 +219,7 @@ fn collect_palace_stats(
         if let Some(handle) = registry.peek(&info.id) {
             total_drawers += handle.drawers.read().len();
             total_vectors += handle.vector_store.index_size();
-            total_kg_triples += handle.kg.count_active_triples();
+            total_kg_triples += crate::service::helpers::kg_triple_count_or_zero(&handle);
             cached_palace_count += 1;
         }
     }

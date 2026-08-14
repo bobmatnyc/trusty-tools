@@ -163,7 +163,7 @@ mod tests {
     use trusty_agents_common::agents::metadata::agent_metadata_from_str;
 
     fn agents_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/agents")
+        std::path::Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR).to_path_buf()
     }
 
     fn skills_dir() -> PathBuf {

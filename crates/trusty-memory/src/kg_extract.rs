@@ -647,6 +647,39 @@ pub fn is_stop_token(tok: &str) -> bool {
     norm.chars().count() < MIN_ENTITY_TOKEN_LEN && !SHORT_ENTITY_ALLOWLIST.contains(&norm.as_str())
 }
 
+/// The cleaned spelling a stored entity term must be merged onto, or `None`
+/// when the term is already canonical.
+///
+/// Why: #4678's edge trim fixed extraction going forward and split every
+/// pre-fix entity in two — a palace holds both `` `redb` `` and `redb`, and
+/// each `kg-rebuild` over the same drawer content widens the gap (#5401).
+/// Deciding the canonical spelling next to the filter that produced the split
+/// is what stops the merge pass from inventing a second normalisation that can
+/// drift away from the extractor's.
+/// What: `Some(cleaned)` when [`clean_token`] changes `term`; `None` when it
+/// does not, or when [`is_stop_token`] rejects the term. That second arm is
+/// what keeps this disjoint from `--purge-stale-subjects`: a punctuated
+/// stopword such as `("the` is garbage the purge deletes, never a twin some
+/// real node should absorb.
+///
+/// The merge therefore inherits [`clean_token`]'s normalisation whole,
+/// dotfiles included: `.env` names `env`, `--verbose` names `verbose`, and the
+/// leading punctuation that IS the identity is collapsed with the decorative
+/// kind. That is the point of reusing `clean_token` — the extractor already
+/// emits `env` for content saying `.env`, so the merge aligns stored nodes
+/// with current extraction instead of preserving a spelling nothing produces
+/// any more. `close_active_row` keeps the punctuated row under its `hist:`
+/// key, so the original spelling is not lost.
+/// Test: `canonical_entity_names_the_cleaned_twin`.
+pub fn canonical_entity(term: &str) -> Option<&str> {
+    // #5401: the merge pass and the extractor must agree on one spelling.
+    if is_stop_token(term) {
+        return None;
+    }
+    let cleaned = clean_token(term);
+    (cleaned != term).then_some(cleaned)
+}
+
 /// Apply the pattern table to a single content blob.
 ///
 /// Why: Keeps the matching loop out of `extract_triples` so the dispatcher
@@ -1389,6 +1422,49 @@ mod tests {
             !is_stop_token("no-op"),
             "interior hyphen must survive trimming"
         );
+    }
+
+    /// Why: #5401's merge asks this function which node a stored term belongs
+    /// under, and its three answers are the pass's whole selection rule.
+    /// What: a punctuated real entity names its cleaned twin; an already-clean
+    /// term and a punctuated stopword both name nothing — the second because it
+    /// is `--purge-stale-subjects`'s to delete, not this pass's to re-point. A
+    /// name whose leading punctuation IS the identity — `.env`, `--verbose` —
+    /// names the same twin as decorative punctuation does, because the merge
+    /// inherits [`clean_token`] rather than re-deciding.
+    /// Test: This test.
+    #[test]
+    fn canonical_entity_names_the_cleaned_twin() {
+        assert_eq!(canonical_entity("`redb`"), Some("redb"));
+        assert_eq!(canonical_entity("(sled)"), Some("sled"));
+        assert_eq!(canonical_entity("*trusty-memory*"), Some("trusty-memory"));
+        assert_eq!(
+            canonical_entity("src/main.rs,"),
+            Some("src/main.rs"),
+            "only edge punctuation moves; the interior path must survive"
+        );
+
+        assert_eq!(canonical_entity("redb"), None, "a clean term is canonical");
+        assert_eq!(canonical_entity("no-op"), None);
+
+        assert_eq!(
+            canonical_entity("(\"the"),
+            None,
+            "a punctuated stopword belongs to the purge, not the merge"
+        );
+        assert_eq!(canonical_entity("`it`"), None);
+        assert_eq!(canonical_entity("---"), None);
+
+        // The dotfile class: the leading punctuation is part of the name, and
+        // it is collapsed anyway. Deliberate — today's extractor already emits
+        // `env` for a drawer that says `.env`, so the merge aligns the stored
+        // node with what extraction now produces rather than inventing a
+        // second normalisation that could drift from it.
+        assert_eq!(canonical_entity(".env"), Some("env"));
+        assert_eq!(canonical_entity(".git"), Some("git"));
+        assert_eq!(canonical_entity(".gitignore"), Some("gitignore"));
+        assert_eq!(canonical_entity("_private"), Some("private"));
+        assert_eq!(canonical_entity("--verbose"), Some("verbose"));
     }
 
     /// Why: the allowlist is the length floor's escape hatch; if an entry stops

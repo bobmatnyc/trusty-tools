@@ -62,12 +62,82 @@
 #   9, 11 and 12 fail against the pre-#5296 gate, which is what makes them
 #   regression tests rather than descriptions of current behaviour.
 #
+#   Cases 16-18 (issue #5500) pin the gate against ANSI-COLOURED tool output.
+#   Every fixture
+#   above was captured by redirecting to a file on a workstation, where
+#   cargo-semver-checks emits plain text — so `Checked` was always followed by a
+#   space and the marker matched. In GitHub Actions it is not:
+#   `dtolnay/rust-toolchain` exports CARGO_TERM_COLOR=always into $GITHUB_ENV,
+#   every later step inherits it, and the summary line arrives as
+#   `ESC[1mESC[32m     CheckedESC[0m [ 0.871s] 196 checks: ...`. The reset
+#   sequence sits between `Checked` and the space, so a marker regex anchored on
+#   `Checked<space>` sees nothing and reports a completed comparison as NO
+#   VERDICT. Both new fixtures are verbatim CI captures of that shape:
+#     16. coloured clean   — the tga run of PR #5458: exit 0, 196 pass. Reported
+#                            as "exited 0 without completing a check run".
+#     17. coloured break   — the same bytes at exit 100 through the PASS/FAIL
+#                            arm. Must still be a BREAK, so the colour fix
+#                            cannot be mistaken for a weakened gate.
+#     18. coloured inventory — the trusty-review run of PR #5458: exit 100 with
+#                            4 real failures, through the already-breaking arm.
+#                            Reported as "exited 100 without completing a run".
+#   16 and 17 ride the cases 5-8 table; 18 has its own block below. All three
+#   fail against the pre-fix gate.
+#
+#     19. private-mode CSI — pins the strip to the WHOLE ECMA-48 CSI grammar
+#                            rather than the SGR shape that was observed. Its
+#                            fixture puts `ESC[?25l` (cursor hide, emitted by
+#                            spinner renderers) between `Checked` and its space,
+#                            which a `[0-9;]*[A-Za-z]` strip leaves in place —
+#                            reintroducing this very defect. Synthetic, and
+#                            labelled so: no cargo-semver-checks 0.50.0 output
+#                            carries it. It rides the cases 5-8 table at exit
+#                            100, so it also proves a private-mode-laden BREAK
+#                            is still reported as a break rather than swallowed.
+#
+#   Cases 20-21 (issue #5440) pin the OTHER way a completed run says nothing.
+#   cargo-semver-checks skips its whole lint set when the baseline -> current
+#   delta already permits breakage, and prints
+#       Checked [   0.000s] 0 checks: 0 pass, 254 skip
+#       Summary no semver update required
+#   at exit 0. The gate keyed its verdict on the summary line EXISTING, so it
+#   read "254 lints declined" as "254 lints satisfied" and preflight-publish.sh
+#   CHECK 5 passed having verified nothing:
+#     20. zero checks / PASS-FAIL arm — must be NO VERDICT, exit 3, and must say
+#                            it executed no checks rather than blaming rustdoc.
+#     21. zero checks / INVENTORY arm — must be a BLIND inventory, never "no
+#                            breaking changes found".
+#   Case 22 pins the classification that decides WHICH arm a crate reaches:
+#   every 0.0.z bump is breaking under Cargo's rules, so `release_type` must
+#   call it major and route it to the advisory INVENTORY arm. Called `minor` it
+#   lands in the PASS/FAIL arm, where the tool runs 0 of 254 checks and the gate
+#   — correctly, per cases 20-21 — blocks the publish with an exit 3 that nothing
+#   can clear.
+#
+#   Both fail against the pre-fix gate, which exits 0 on 20 and reports an empty
+#   inventory on 21. The fixture is `all-skipped.out`, which is this file's own
+#   former `clean.out`: the case that was supposed to prove the gate can pass a
+#   crate was being satisfied by a run that checked nothing. `clean.out` is now a
+#   real 196-pass capture, so "a real pass still exits 0" is still covered.
+#
 #   Cases 13-15 pin pre-release handling. `key()` used to strip the pre-release
 #   suffix, so 1.0.0-rc1 and 1.0.0 both keyed to (1, 0, 0) and the tie went to
 #   whichever the index listed first — the reproduction on record picked
 #   1.0.0-rc1 as the baseline for a 1.0.1 release. 13 runs that exact history;
 #   14 pins that a NEARER pre-release still loses to the last stable release;
 #   15 pins that a skip caused by the exclusion names the version it refused.
+#
+#   Cases 23-24 pin the CRATE-exclusion arm
+#   (scripts/semver-checks-crate-exclusions.tsv). A skip list stops protecting
+#   silently — the day something depends on the excluded crate's library, the row
+#   is wrong and nothing says so — so the gate re-checks the premise on every
+#   run:
+#     23. honoured        — trusty-mpm is a recorded skip naming the file it came
+#                           from, and NO comparison is attempted.
+#     24. premise died    — a workspace crate depends on the excluded one, so the
+#                           skip is REFUSED (exit 3) and the dependent is named.
+#   Case 8 is the other half: a non-excluded crate still runs a full clean
+#   comparison with the real exclusions file in place.
 #
 # Usage:  bash scripts/check_semver_selftest.sh
 # Exit:   0 when every case behaves; 1 (naming the case) when one does not.
@@ -317,7 +387,11 @@ TAB="$(printf '\t')"
 VERDICT_CASES="real break${TAB}break.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT
 rustdoc build error${TAB}build-error.out${TAB}101${TAB}3${TAB}NO SEMVER VERDICT WAS COMPUTED${TAB}requires a matching version bump
 silent no-op at exit 0${TAB}silent-noop.out${TAB}0${TAB}3${TAB}NO SEMVER VERDICT WAS COMPUTED${TAB}requires a matching version bump
-clean${TAB}clean.out${TAB}0${TAB}0${TAB}crate(s) checked${TAB}NO SEMVER VERDICT"
+clean${TAB}clean.out${TAB}0${TAB}0${TAB}crate(s) checked${TAB}NO SEMVER VERDICT
+ANSI-coloured clean (case 16)${TAB}clean-colored.out${TAB}0${TAB}0${TAB}crate(s) checked${TAB}NO SEMVER VERDICT
+ANSI-coloured break (case 17)${TAB}break-colored.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT
+private-mode CSI break (case 19)${TAB}private-mode.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT
+zero checks executed (case 20)${TAB}all-skipped.out${TAB}0${TAB}3${TAB}NO SEMVER VERDICT WAS COMPUTED${TAB}requires a matching version bump"
 
 while IFS="$TAB" read -r name fixture stub_rc want_exit must_have must_not; do
   [[ -z "$name" ]] && continue
@@ -343,6 +417,27 @@ while IFS="$TAB" read -r name fixture stub_rc want_exit must_have must_not; do
     pass_case "${name} -> exit ${rc}, says '${must_have}'"
   fi
 done <<<"$VERDICT_CASES"
+
+# --- 20b. The zero-check refusal must name its own cause. "it never ran" and
+#          "it ran and skipped every lint" have different remedies, and a shared
+#          message would send whoever hits #5440 hunting a rustdoc error that
+#          does not exist.
+rc=0
+out="$(cd "$REPO_ROOT" && \
+  PATH="${STUB_DIR}:${PATH}" \
+  SEMVER_GATE_TOOLCHAIN_BIN='' \
+  SEMVER_SELFTEST_REAL_CARGO="$REAL_CARGO" \
+  SEMVER_SELFTEST_FIXTURE="${FIXTURES}/all-skipped.out" \
+  SEMVER_SELFTEST_RC=0 \
+  SEMVER_GATE_INDEX_BASE="http://127.0.0.1:${PORT}/v/${STUB_PREV}" \
+  bash "$GATE" --crate "$STUB_CRATE" 2>&1)" || rc=$?
+if [[ "$out" != *"EXECUTED NO CHECKS"* ]]; then
+  fail_case "zero-checks/diagnosis: the refusal did not say the run executed no checks, so it is indistinguishable from a rustdoc failure" "$out"
+elif [[ "$out" != *"0 checks: 0 pass, 254 skip"* ]]; then
+  fail_case "zero-checks/diagnosis: the refusal did not quote the summary line it judged" "$out"
+else
+  pass_case "a zero-check refusal names the cause and quotes the summary (#5440)"
+fi
 
 # ===========================================================================
 # 9-12. Which release is the baseline, and what happens when the bump is already
@@ -431,6 +526,39 @@ else
   pass_case "an inventory that could not run says so, in the line and in the summary"
 fi
 
+# --- 21. The inventory arm over a run that executed no checks (#5440). Exit 0
+#         with a summary, so the pre-fix gate reported "no breaking changes found
+#         against vX" from a run that examined nothing — the advisory half of the
+#         same false pass. It must land in the blind arm instead.
+rc=0
+out="$(gate_with_index "${STUB_OLD_MINOR}" "${STUB_OLD_MINOR}=all-skipped.out:0")" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "inventory/zero-checks: an advisory run must not block an already-permitted release (exit ${rc})" "$out"
+elif [[ "$out" == *"no breaking changes found"* ]]; then
+  fail_case "inventory/zero-checks: a run that executed 0 of 254 checks was reported as an empty inventory (#5440)" "$out"
+elif [[ "$out" != *"NO INVENTORY ${STUB_CRATE}"* ]]; then
+  fail_case "inventory/zero-checks: a run that examined nothing was not reported as such" "$out"
+elif [[ "$out" != *"inventory NOT computed"* ]]; then
+  fail_case "inventory/zero-checks: the summary line hid the missing inventory" "$out"
+else
+  pass_case "an inventory that executed no checks is blind, not empty (#5440)"
+fi
+
+# --- 18. The inventory arm over ANSI-coloured output. This is the trusty-review
+#         half of PR #5458 verbatim: a completed run with 4 real failures that
+#         the gate announced as "exited 100 without completing a run".
+rc=0
+out="$(gate_with_index "${STUB_OLD_MINOR}" "${STUB_OLD_MINOR}=break-colored.out:100")" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "inventory/coloured: an advisory run over coloured output must stay green (exit ${rc})" "$out"
+elif [[ "$out" == *"NO INVENTORY ${STUB_CRATE}"* ]]; then
+  fail_case "inventory/coloured: a completed run was reported as never having run — the marker did not survive the colour codes" "$out"
+elif [[ "$out" != *"breaking change(s) listed above"* ]]; then
+  fail_case "inventory/coloured: exit 0 but the breaks were never reported" "$out"
+else
+  pass_case "a coloured inventory run is recognised as completed"
+fi
+
 # ===========================================================================
 # 13-15. Pre-releases are never a baseline (code-critic on PR #5445).
 #
@@ -488,6 +616,104 @@ elif [[ "$out" == *"CHECK ${STUB_CRATE}:"* ]]; then
   fail_case "prerelease/only: the gate compared against a pre-release" "$out"
 else
   pass_case "the only-a-pre-release skip names what it refused"
+fi
+
+# ===========================================================================
+# 22. release_type() over a 0.0.z crate (#5440, code-critic on PR #5522).
+#
+# Cargo gives a 0.0.z crate no compatible range, so every 0.0.z bump is
+# breaking. Classified `minor`, such a crate lands in the PASS/FAIL arm, where
+# cargo-semver-checks reads the same pair as a permitted break and runs 0 of 254
+# checks — and since #5440 that is a correct NO VERDICT, i.e. a publish blocked
+# by an exit 3 nothing can clear. `major` routes it to the advisory INVENTORY
+# arm like every other permitted break.
+#
+# No crate in this workspace declares 0.0.z, so the end-to-end arms cannot reach
+# it. The function is lifted out of the gate BY PATTERN rather than copied here,
+# so this case exercises the shipped definition and not a stale duplicate of it.
+# ===========================================================================
+eval "$(awk '/^release_type\(\) \{/,/^\}/' "$GATE")"
+
+# baseline  current  expected
+RELEASE_TYPE_CASES="0.0.5 0.0.6 major
+0.0.5 0.1.0 major
+0.30.1 0.31.0 major
+0.31.0 0.31.1 minor
+1.3.4 2.0.0 major
+1.3.4 1.4.0 minor
+1.3.4 1.3.5 patch"
+
+rt_failed=0
+while read -r rt_base rt_cur rt_want; do
+  [[ -z "$rt_base" ]] && continue
+  rt_got="$(release_type "$rt_base" "$rt_cur")"
+  if [[ "$rt_got" != "$rt_want" ]]; then
+    fail_case "release_type/${rt_base}->${rt_cur}: expected ${rt_want}, got ${rt_got}" \
+      "A 0.0.z bump classified anything but 'major' lands in the PASS/FAIL arm, where the tool runs 0 checks and the gate blocks the publish with a NO VERDICT nothing can clear (#5440)."
+    rt_failed=1
+  fi
+done <<<"$RELEASE_TYPE_CASES"
+[[ "$rt_failed" -eq 0 ]] && pass_case "release_type calls every 0.0.z bump major, and still ranks 0.x/1.x correctly (#5440)"
+
+# ===========================================================================
+# 23-24. Crate exclusions, and the guard that keeps one from going silent.
+#
+# scripts/semver-checks-crate-exclusions.tsv skips a crate that has no LIBRARY
+# consumer to protect — trusty-mpm is installed as the `tm` binary, and a binary
+# user gets a whole new executable, so its library API compatibility protects
+# nobody. That is a claim about consumption, and a skip list is exactly the shape
+# that stops protecting silently: the day something depends on the excluded
+# crate's library, the row is wrong and nothing says so.
+#
+#   23. the exclusion is honoured — a recorded skip, and NO comparison attempted.
+#   24. the premise has died — a workspace crate depends on the excluded one, so
+#       the skip is REFUSED (exit 3) and the dependent is named. Uses
+#       trusty-agents-common, which trusty-agents, trusty-code and trusty-mpm all
+#       depend on, against a fixture exclusions file; it fails the moment the
+#       dependent check is deleted.
+#
+# Neither case reaches the network or cargo-semver-checks: the exclusion arm runs
+# before the registry probe, which is also why an exclusion cannot be satisfied
+# by a run that timed out.
+#
+# Case 8 above is the other half — a NON-excluded crate still runs a full clean
+# comparison with the real exclusions file in place, so an exclusion that leaked
+# to every crate fails there.
+# ===========================================================================
+
+# --- 23. trusty-mpm is excluded on main, and the skip attempts no comparison.
+rc=0
+out="$(cd "$REPO_ROOT" && bash "$GATE" --crate trusty-mpm 2>&1)" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "exclusion/honoured: an excluded crate must be a recorded skip (exit ${rc})" "$out"
+elif [[ "$out" != *"SKIP trusty-mpm"* || "$out" != *"semver-checks-crate-exclusions.tsv"* ]]; then
+  fail_case "exclusion/honoured: the skip did not name the crate and the file it came from" "$out"
+elif [[ "$out" == *"CHECK trusty-mpm:"* ]]; then
+  fail_case "exclusion/honoured: the gate compared a crate it had already excluded" "$out"
+else
+  pass_case "an excluded crate is skipped with its reason, and nothing is compared"
+fi
+
+# --- 24. An exclusion whose premise has died refuses the skip.
+EXCL_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/semver-selftest-excl.XXXXXX")"
+printf '# fixture\ntrusty-agents-common\tfixture row: this crate HAS workspace dependents\n' \
+  > "$EXCL_FIXTURE"
+rc=0
+out="$(cd "$REPO_ROOT" && SEMVER_GATE_CRATE_EXCLUSIONS="$EXCL_FIXTURE" \
+  bash "$GATE" --crate trusty-agents-common 2>&1)" || rc=$?
+rm -f "$EXCL_FIXTURE"
+if [[ "$rc" -eq 0 ]]; then
+  fail_case "exclusion/premise-died: the gate exited 0 over an exclusion that no longer holds — a silent coverage hole" "$out"
+elif [[ "$rc" -ne 3 ]]; then
+  fail_case "exclusion/premise-died: expected exit 3 (no verdict); got ${rc}" "$out"
+elif [[ "$out" != *"EXCLUSION NO LONGER HOLDS"* ]]; then
+  fail_case "exclusion/premise-died: exited 3 without naming the dead exclusion, so it may be failing for an unrelated reason" "$out"
+elif [[ "$out" != *"trusty-code"* ]]; then
+  fail_case "exclusion/premise-died: refused the skip without naming a dependent" "$out"
+elif [[ "$out" == *"SKIP trusty-agents-common"* ]]; then
+  fail_case "exclusion/premise-died: granted the skip anyway" "$out"
+else
+  pass_case "an exclusion contradicted by a workspace dependency refuses the skip (exit 3)"
 fi
 
 rm -rf "$STUB_DIR"

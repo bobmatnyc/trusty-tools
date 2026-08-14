@@ -27,11 +27,12 @@ use trusty_search::service::server::{build_router, SearchAppState};
 /// return its base URL.
 async fn spawn_daemon_with_cold_index(id: &str) -> String {
     let state = SearchAppState::new(IndexRegistry::new());
-    state.cold_store.register_cold_entries(vec![PersistedIndex {
-        id: id.to_string(),
-        root_path: PathBuf::from(format!("/tmp/trusty-5350-{id}")),
-        ..Default::default()
-    }]);
+    state
+        .cold_store
+        .register_cold_entries(vec![PersistedIndex::new(
+            id.to_string(),
+            PathBuf::from(format!("/tmp/trusty-5350-{id}")),
+        )]);
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

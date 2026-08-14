@@ -683,3 +683,590 @@ fn binary_resolution_prefers_the_env_override() {
     let resolved = crate::audit::resolve_review_binary();
     assert!(!resolved.is_empty(), "{resolved}");
 }
+
+// ─── #5454: inference is required ────────────────────────────────────────────
+
+/// #5454 regression. Before this change `invoke` built `report --manifest <m>
+/// --analyze --out <dir>` and never passed `--synthesize`, so `model.synthesis`
+/// was `None` on every audit that had ever run and the whole report was
+/// deterministic. Pins the flag into the argument vector, and pins the rest of
+/// the vector alongside it so a future edit cannot drop `--analyze` while
+/// "fixing" this one.
+#[test]
+fn invocation_requests_inference() {
+    use std::path::Path;
+
+    let args = super::review::report_args(Path::new("/o/manifest.toml"), Path::new("/o"));
+    let rendered: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(
+        rendered,
+        vec![
+            "report",
+            "--manifest",
+            "/o/manifest.toml",
+            "--analyze",
+            "--synthesize",
+            "--out",
+            "/o",
+        ],
+        "the audit's renderer invocation must request inference"
+    );
+}
+
+/// #5454. The credential is the one prerequisite knowable before the sweep
+/// starts, and DOC-67 §2 gives the run a single non-interactive shot — so a
+/// missing key must be named up front, with the variable and the way to set it,
+/// rather than surfacing minutes later at the render step.
+#[test]
+fn absent_credential_is_a_named_actionable_error() {
+    use super::review::credential_is_present;
+
+    assert!(!credential_is_present(None), "unset is absent");
+    assert!(!credential_is_present(Some("")), "empty is absent");
+    assert!(
+        !credential_is_present(Some("   \n")),
+        "whitespace-only is absent"
+    );
+
+    let msg = crate::audit::MissingInferenceCredential.to_string();
+    assert!(
+        msg.contains(crate::audit::ENV_INFERENCE_CREDENTIAL),
+        "names the variable: {msg}"
+    );
+    assert!(
+        msg.contains("export OPENROUTER_API_KEY="),
+        "says how to set it: {msg}"
+    );
+}
+
+/// #5454. The preflight must not stand between an operator who HAS a key and
+/// their run, and it must never copy the key anywhere — the message it can
+/// produce is a constant with no interpolation site for one.
+#[test]
+fn present_credential_passes_the_precheck() {
+    use super::review::credential_is_present;
+
+    let secret = "sk-or-v1-DEADBEEFdeadbeef";
+    assert!(credential_is_present(Some(secret)));
+
+    let msg = crate::audit::MissingInferenceCredential.to_string();
+    assert!(!msg.contains(secret), "no key material may appear: {msg}");
+    assert!(!msg.contains("sk-or"), "no key-shaped text: {msg}");
+}
+
+// ─── #5454 review: exit 0 is not evidence of a synthesis pass ────────────────
+
+/// A `ReviewRun` shaped like a clean render: the child exited 0 and printed both
+/// halves of the report pair.
+///
+/// Writes `report_json` to a real file, because the check reads the artifact the
+/// renderer wrote rather than anything the child said about it.
+fn successful_run_over(dir: &std::path::Path, report_json: &str) -> crate::audit::ReviewRun {
+    let md = dir.join("2026-08-11-acme.md");
+    let json = dir.join("2026-08-11-acme.json");
+    std::fs::write(&md, "# Acme\n").expect("write md");
+    std::fs::write(&json, report_json).expect("write json");
+    crate::audit::ReviewRun {
+        success: true,
+        code: Some(0),
+        stdout: format!("{}\n{}\n", md.display(), json.display()),
+        stderr: String::new(),
+        artifacts: vec![md, json],
+    }
+}
+
+/// The exact JSON a pre-0.15 `trusty-review` writes when its provider fails
+/// mid-render: `SynthesisStatus::Unavailable` and every prose field empty.
+const DEGRADED_0_14_REPORT: &str = r#"{
+  "title": "Acme — Technical Due Diligence",
+  "synthesis": {
+    "status": { "state": "unavailable", "reason": "provider build failed: 401 Unauthorized" },
+    "top_risks": [],
+    "findings": [],
+    "notes": []
+  }
+}"#;
+
+/// #5454 review, THE arm this guard exists for. A new `tga` beside a pre-0.15
+/// `trusty-review` is an ordinary pairing — the two are resolved through PATH,
+/// not a Cargo edge — and that renderer takes `--synthesize`, falls back to a
+/// deterministic report on any provider failure, writes it, and exits 0.
+/// `ReviewRun::success` is `output.status.success()` and nothing more, so the
+/// `if !run.success` check never fired and `tga audit` reported a clean pass over
+/// the exact narrative-free report #5454 exists to abolish.
+///
+/// Pins the failure AND its remedy: a message that says only "no narrative"
+/// leaves the operator with a symptom and no action.
+#[test]
+fn exit_zero_over_a_narrative_free_report_is_a_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let run = successful_run_over(dir.path(), DEGRADED_0_14_REPORT);
+    assert!(run.success, "the child exited 0 — that is the whole point");
+
+    let err = crate::audit::require_rendered_report_carries_synthesis(&run)
+        .expect_err("a report with no written analysis must not pass as a successful audit");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("trusty-review") && msg.contains("predates"),
+        "the message must name the stale renderer as the cause: {msg}"
+    );
+    assert!(
+        msg.contains("tctl install trusty-review"),
+        "the message must name the upgrade that fixes it: {msg}"
+    );
+
+    // The rule itself, over both narrative-free shapes: 0.14's degraded object,
+    // and a report carrying no `synthesis` key at all.
+    use crate::audit::review::json_carries_synthesis;
+    assert_eq!(json_carries_synthesis(DEGRADED_0_14_REPORT), Some(false));
+    assert_eq!(json_carries_synthesis(r#"{"title": "Acme"}"#), Some(false));
+}
+
+/// The guard must not stand between an operator and a report that DID get its
+/// narrative written — including the one arm 0.15 still allows through, where the
+/// numeric guardrail rejected the executive summary on its own and the
+/// deterministic composition (#5374) fills §2 while the top-risk rows survive.
+#[test]
+fn a_synthesized_report_passes_the_check() {
+    use crate::audit::review::json_carries_synthesis;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let full = r#"{
+      "title": "Acme",
+      "synthesis": {
+        "executive_summary": "Two of three applications carry RED findings.",
+        "top_risks": [{"description": "No tests", "severity": "RED", "cost": "high", "apps": "web"}],
+        "findings": [],
+        "notes": []
+      }
+    }"#;
+    crate::audit::require_rendered_report_carries_synthesis(&successful_run_over(dir.path(), full))
+        .expect("a synthesized report passes");
+
+    // Guardrail rejected the summary; rows survived. Still a synthesized report.
+    assert_eq!(
+        json_carries_synthesis(
+            r#"{"synthesis": {"top_risks": [{"description": "x"}], "findings": [], "notes": ["synthesis: rejected (unverified figure)"]}}"#
+        ),
+        Some(true)
+    );
+    // Only finding prose survived.
+    assert_eq!(
+        json_carries_synthesis(r#"{"synthesis": {"top_risks": [], "findings": [{"title": "x"}]}}"#),
+        Some(true)
+    );
+    // A blank summary is not prose.
+    assert_eq!(
+        json_carries_synthesis(r#"{"synthesis": {"executive_summary": "   "}}"#),
+        Some(false)
+    );
+}
+
+/// A check that cannot be performed must fail, not pass — passing on "I could not
+/// look" reopens the hole the guard closes. Covers both ways the artifact can go
+/// missing: no `.json` path printed, and a path that is not JSON.
+#[test]
+fn an_uncheckable_report_fails_rather_than_passes() {
+    use crate::audit::review::json_carries_synthesis;
+
+    let no_json = crate::audit::ReviewRun {
+        success: true,
+        code: Some(0),
+        stdout: "/o/report.md\n".to_string(),
+        stderr: String::new(),
+        artifacts: vec![std::path::PathBuf::from("/o/report.md")],
+    };
+    let err = crate::audit::require_rendered_report_carries_synthesis(&no_json)
+        .expect_err("no .json artifact means nothing can be asserted about the report");
+    assert!(err.to_string().contains("could not be checked"), "{err}");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let err = crate::audit::require_rendered_report_carries_synthesis(&successful_run_over(
+        dir.path(),
+        "not json at all",
+    ))
+    .expect_err("an unparseable report cannot be claimed to carry a narrative");
+    assert!(err.to_string().contains("could not be checked"), "{err}");
+
+    assert_eq!(json_carries_synthesis("not json at all"), None);
+}
+
+/// #5454 review. The version skew is knowable before stage 1, and DOC-67 §2 gives
+/// the sweep one non-interactive shot — so an operator learning about it only
+/// after eight stages have run learns it at the worst moment. Pins the floor, the
+/// parse, and the deliberate proceed-on-unreadable behaviour that leaves
+/// `require_rendered_report_carries_synthesis` as the thing that actually closes
+/// the hole.
+#[test]
+fn stale_renderer_is_rejected_before_the_sweep() {
+    use crate::audit::review::{parse_review_version, version_verdict};
+    use crate::audit::MIN_REVIEW_VERSION;
+
+    assert_eq!(MIN_REVIEW_VERSION, (0, 15, 0));
+
+    // The version actually on PATH when this defect was found. The message names
+    // the version found, the floor, and the upgrade that fixes it.
+    let err = version_verdict("trusty-review", "trusty-review 0.14.1\n")
+        .expect_err("a pre-0.15 renderer must not clear the preflight");
+    let msg = err.to_string();
+    for needle in ["0.14.1", "0.15.0", "tctl install trusty-review", "exits 0"] {
+        assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+
+    for ok in ["trusty-review 0.15.0", "trusty-review 0.15.1", "tr v1.0.0"] {
+        version_verdict("trusty-review", ok).unwrap_or_else(|e| panic!("{ok} must pass: {e}"));
+    }
+    // Pre-release and build suffixes read as their release core.
+    assert_eq!(
+        parse_review_version("trusty-review 0.15.0-rc.1+build.7"),
+        Some((0, 15, 0))
+    );
+
+    // Unreadable → the caller proceeds; the delivered-artifact check is what
+    // closes the hole, not this.
+    for unreadable in ["", "\n\n", "trusty-review", "trusty-review unknown"] {
+        assert_eq!(parse_review_version(unreadable), None, "{unreadable:?}");
+        version_verdict("trusty-review", unreadable)
+            .unwrap_or_else(|e| panic!("{unreadable:?} must proceed, not fail: {e}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #5670 — the analyze daemon the audit's report is built from
+// ---------------------------------------------------------------------------
+
+/// A localhost port nothing is listening on.
+///
+/// Binds port 0 so the OS picks a free one, then releases it — hard-coding a
+/// high port instead can collide with something already bound on a busy host.
+pub(super) fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("read the bound address")
+        .port();
+    drop(listener);
+    port
+}
+
+/// A listener standing in for `trusty-analyze`'s `/health`, answering
+/// `503 Service Unavailable` to its first `degraded_replies` callers and
+/// `200 OK` to every caller after that. Returns the port it bound.
+///
+/// 503 is not an arbitrary sad path: it is what the real daemon answers whenever
+/// trusty-search is unreachable
+/// (`crates/trusty-analyze/src/service/routes.rs`'s `health`, which returns
+/// `SERVICE_UNAVAILABLE` + `status: "degraded"`). `probe_once` counts only a
+/// 2xx, so a 503 daemon reads to the guard exactly like no daemon.
+///
+/// Counting replies rather than sleeping is what makes the slow-start tests
+/// deterministic — the guard's first probe is guaranteed to miss on a loaded
+/// machine, where a wall-clock delay could be overtaken.
+async fn serve_health(degraded_replies: usize) -> u16 {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("read the bound address")
+        .port();
+    let served = Arc::new(AtomicUsize::new(0));
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let served = Arc::clone(&served);
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                let nth = served.fetch_add(1, Ordering::SeqCst);
+                let reply: &[u8] = if nth < degraded_replies {
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                };
+                let _ = stream.write_all(reply).await;
+            });
+        }
+    });
+    port
+}
+
+/// A listener answering `HTTP/1.1 200 OK` to everything, standing in for a
+/// healthy daemon. Returns the port it bound.
+async fn serve_healthy() -> u16 {
+    serve_health(0).await
+}
+
+/// An executable stub at `dir/name` running `script`, standing in for a
+/// `trusty-analyze` binary without needing one on the machine.
+#[cfg(unix)]
+fn stub_binary(dir: &std::path::Path, name: &str, script: &str) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = dir.join(name);
+    std::fs::write(&stub, script).expect("write the stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stub executable");
+    stub.to_str().expect("a UTF-8 temp path").to_string()
+}
+
+/// A guard pointed at `port`, with budgets short enough for a unit test.
+fn guard_on(port: u16, binary: &str) -> crate::audit::AnalyzeGuard {
+    crate::audit::AnalyzeGuard {
+        url: format!("http://127.0.0.1:{port}"),
+        binary: binary.to_string(),
+        startup_timeout: std::time::Duration::from_millis(400),
+        poll_interval: std::time::Duration::from_millis(50),
+    }
+}
+
+/// Both overrides win when set, and an empty one is not a setting.
+///
+/// The empty case matters because `trusty-audit` exports `TRUSTY_ANALYZE_BIN`
+/// unconditionally, and a half-written export leaves it set to `""` — which must
+/// resolve to the PATH lookup rather than to an unspawnable empty program name.
+#[test]
+fn analyze_resolution_prefers_the_env_overrides() {
+    use crate::audit::analyze::{binary_from_override, url_from_override};
+    use crate::audit::{DEFAULT_ANALYZE_BIN, DEFAULT_ANALYZE_URL};
+
+    assert_eq!(
+        binary_from_override(Some("/pinned/trusty-analyze")),
+        "/pinned/trusty-analyze"
+    );
+    assert_eq!(binary_from_override(None), DEFAULT_ANALYZE_BIN);
+    assert_eq!(binary_from_override(Some("")), DEFAULT_ANALYZE_BIN);
+
+    assert_eq!(
+        url_from_override(Some("http://127.0.0.1:9999")),
+        "http://127.0.0.1:9999"
+    );
+    assert_eq!(url_from_override(None), DEFAULT_ANALYZE_URL);
+    assert_eq!(url_from_override(Some("")), DEFAULT_ANALYZE_URL);
+}
+
+/// `serve` takes `--port`, not a URL, so an operator who moved the daemon must
+/// get a daemon on the port they named — spawning on 7879 and then probing the
+/// override would burn the whole budget and refuse a correct configuration.
+#[test]
+fn the_spawn_port_comes_from_the_configured_url() {
+    use crate::audit::analyze::port_of;
+    use crate::audit::DEFAULT_ANALYZE_PORT;
+
+    assert_eq!(port_of("http://127.0.0.1:9312"), 9312);
+    assert_eq!(port_of("http://localhost:9312/"), 9312);
+    assert_eq!(port_of("https://localhost:9312"), 9312);
+    // No port, and unreadable ports, fall back rather than failing the run.
+    assert_eq!(port_of("http://localhost"), DEFAULT_ANALYZE_PORT);
+    assert_eq!(port_of("http://localhost:not-a-port"), DEFAULT_ANALYZE_PORT);
+}
+
+/// A daemon that is already up is left alone.
+///
+/// The binary is a path that cannot exist, so any spawn attempt would fail the
+/// run — passing is therefore proof the fast path returned without spawning
+/// anything, which is what keeps `tga audit` from starting a second daemon
+/// beside an operator's own.
+#[tokio::test]
+async fn a_reachable_analyze_daemon_is_not_restarted() {
+    let port = serve_healthy().await;
+    let guard = guard_on(port, "/nonexistent/trusty-analyze");
+    crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect("a healthy daemon must satisfy the preflight without a spawn");
+}
+
+/// #5670, the spawn-failure arm: a binary that will not start is a refusal, not
+/// a warning the sweep proceeds past.
+///
+/// This is the shape the defect had — `trusty-analyze` absent from the machine —
+/// and before the fix nothing looked for it at all, so the audit ran to
+/// completion and delivered a report with three empty sections.
+#[tokio::test]
+async fn an_unspawnable_analyze_binary_refuses_the_audit() {
+    let guard = guard_on(free_port(), "/nonexistent/trusty-analyze");
+    let err = crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a binary that cannot be spawned must stop the audit");
+
+    let msg = err.to_string();
+    for needle in [
+        "trusty-analyze",
+        "trusty-search",
+        "/nonexistent/trusty-analyze",
+    ] {
+        assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+}
+
+/// The argument vector is the tga→trusty-analyze contract, asserted without
+/// spawning anything — the same pure-function split `report_args` uses on the
+/// renderer side.
+#[test]
+fn the_spawn_arguments_are_serve_on_the_configured_port() {
+    use crate::audit::analyze::serve_args;
+
+    assert_eq!(serve_args(9312), vec!["serve", "--port", "9312"]);
+}
+
+/// #5670, the readiness arm: a spawn that succeeds is not a daemon.
+///
+/// `trusty-analyze serve` exits 1 when trusty-search is unreachable, so the PID
+/// a spawn returns proves nothing. This stub reproduces exactly that — it execs
+/// and exits at once — and the refusal must still happen. The `cause` is what
+/// separates this arm from the spawn-failure one above: reaching the readiness
+/// timeout is only possible after `spawn_detached` returned a live PID.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_analyze_daemon_that_never_comes_up_refuses_the_audit() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let stub = stub_binary(dir.path(), "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
+
+    let guard = guard_on(free_port(), &stub);
+    let err = crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a daemon that exits at once must stop the audit");
+
+    // The spawn itself succeeded — this is the readiness verdict, not a spawn
+    // failure wearing the same error type.
+    assert!(
+        err.cause.contains("did not become ready"),
+        "expected the readiness arm, got: {}",
+        err.cause
+    );
+
+    // And the refusal names the ordering that actually fixes it.
+    let msg = err.to_string();
+    for needle in ["trusty-search start", "reads as a clean bill of health"] {
+        assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+}
+
+/// #5670, the degraded arm: an analyze daemon that is up but whose trusty-search
+/// is down does not satisfy the preflight either.
+///
+/// This is the arm that decides how far #5670 actually reaches. `trusty-analyze`
+/// answers its own `/health` with 503 `degraded` whenever trusty-search is
+/// unreachable, and `probe_once` counts only a 2xx — so the guard's probe
+/// re-reads trusty-search's LIVE status on every `tga audit` run, not only when
+/// it has to spawn. An operator whose analyze daemon has been up for days and
+/// whose trusty-search died an hour ago is refused, with the same message.
+///
+/// The stub daemon here answers 503 forever, standing in for that daemon; the
+/// spawned replacement exits at once, as the real binary does at its own search
+/// check. The refusal must therefore come from the readiness poll — proof the
+/// guard kept probing the live 503 rather than accepting the bound port.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_degraded_analyze_daemon_refuses_the_audit() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let stub = stub_binary(dir.path(), "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
+
+    // usize::MAX degraded replies: it never recovers, exactly like an analyze
+    // daemon sitting on top of a dead trusty-search.
+    let port = serve_health(usize::MAX).await;
+    let guard = guard_on(port, &stub);
+    let err = crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a daemon answering 503 must stop the audit");
+
+    assert!(
+        err.cause.contains("did not become ready"),
+        "expected the readiness arm against a live-but-degraded daemon, got: {}",
+        err.cause
+    );
+    assert!(
+        err.to_string().contains("trusty-search start"),
+        "the refusal must name trusty-search: {err}"
+    );
+}
+
+/// #5670, the concurrency arm: two guards racing the same slow daemon both get a
+/// correct verdict, and neither observes state the other corrupted.
+///
+/// [`crate::audit::ensure_analyze_daemon_with`] holds no state between calls —
+/// its guard is a shared `&AnalyzeGuard` it only reads — so what this pins is
+/// the consequence: two overlapping calls each reach their own verdict from
+/// their own probe, and the daemon that comes up mid-flight satisfies both.
+///
+/// It also pins the spawn count at **two**, which is the honest number. There is
+/// no cross-call deduplication, in-process or otherwise, and adding one would
+/// guard a path no caller reaches: `ensure_analyze_daemon` is called once per
+/// `tga audit` process, and `trusty-audit run` audits its repositories
+/// sequentially (`crates/trusty-audit/src/run.rs`'s `run_one` loop). A second
+/// spawn is also self-limiting rather than damaging — `trusty-analyze serve`
+/// takes an exclusive redb lock on the facts store and binds a fixed port, so
+/// the loser of either race exits and the winner is the one daemon. Should a
+/// concurrent caller ever appear, this assertion is what will fail and say so.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_concurrent_guards_both_resolve_against_one_slow_daemon() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let spawn_log = dir.path().join("spawns.log");
+    let stub = stub_binary(
+        dir.path(),
+        "trusty-analyze-stub",
+        &format!(
+            "#!/bin/sh\necho \"$@\" >> {}\n",
+            spawn_log.to_str().expect("a UTF-8 temp path")
+        ),
+    );
+
+    // Degraded for exactly the two opening probes — one per guard — then ready.
+    // Both calls therefore miss, spawn, and find the daemon on a later poll.
+    let port = serve_health(2).await;
+    let mut guard = guard_on(port, &stub);
+    guard.startup_timeout = std::time::Duration::from_secs(5);
+
+    let (first, second) = tokio::join!(
+        crate::audit::ensure_analyze_daemon_with(&guard),
+        crate::audit::ensure_analyze_daemon_with(&guard),
+    );
+    first.expect("the first concurrent guard must resolve");
+    second.expect("the second concurrent guard must resolve");
+
+    // The guard both calls borrowed is unchanged: it is read-only input, and a
+    // reader that mutated it would have had to do so through a shared `&`.
+    assert_eq!(guard.url, format!("http://127.0.0.1:{port}"));
+    assert_eq!(guard.binary, stub);
+
+    // The stubs are detached, so their writes land after the guards return.
+    // Poll for the expected count rather than sleeping a guessed interval —
+    // and keep polling past it, so a THIRD spawn would be seen rather than
+    // raced past.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if std::fs::read_to_string(&spawn_log)
+            .unwrap_or_default()
+            .lines()
+            .count()
+            >= 2
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    // Then keep waiting past the expected count, so a THIRD spawn is seen
+    // rather than raced past.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let spawns = std::fs::read_to_string(&spawn_log).unwrap_or_default();
+
+    let spawned: Vec<&str> = spawns.lines().collect();
+    assert_eq!(
+        spawned.len(),
+        2,
+        "each call spawns for its own missed probe; got {spawned:?}"
+    );
+    for line in &spawned {
+        assert_eq!(
+            line.trim(),
+            format!("serve --port {port}"),
+            "every spawn carries the configured port"
+        );
+    }
+}

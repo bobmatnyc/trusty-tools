@@ -109,6 +109,111 @@ async fn add_alias_endpoint_asserts_triple_and_refreshes_cache() {
     );
 }
 
+/// Build an `AppState` with one created palace, for the direct HTTP KG routes.
+fn state_with_palace(name: &str) -> AppState {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+    let state = AppState::new(root).with_default_palace(Some(name.to_string()));
+    let palace = trusty_common::memory_core::Palace {
+        id: PalaceId::new(name),
+        name: name.to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join(name),
+    };
+    state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create palace");
+    state
+}
+
+/// Regression for [#5524](https://github.com/bobmatnyc/trusty-tools/issues/5524):
+/// a hot fact asserted through `POST /api/v1/palaces/{id}/kg` must be visible
+/// in the prompt context, not merely stored.
+///
+/// Before the fix `MemoryService::kg_assert` returned 204 without touching the
+/// prompt cache, so this assertion on `formatted` found an empty string — the
+/// fact was in the KG and invisible to every later turn. Its sibling
+/// `add_alias_endpoint_asserts_triple_and_refreshes_cache` had to seed hot
+/// facts through the alias endpoint precisely because this route could not.
+#[tokio::test]
+async fn http_kg_assert_endpoint_refreshes_prompt_cache() {
+    let state = state_with_palace("httpassert");
+    let body = json!({
+        "subject": "trusty-tools",
+        "predicate": "has_convention",
+        "object": "thiserror for libraries, anyhow for binaries",
+    });
+    let app = router().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces/httpassert/kg")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let guard = state.prompt_context_cache.read().await;
+    assert!(
+        guard
+            .formatted
+            .contains("thiserror for libraries, anyhow for binaries"),
+        "HTTP kg_assert did not reach the prompt cache; got: {:?}",
+        guard.formatted
+    );
+}
+
+/// Error arm for the same route: a Tier S refusal must answer 400 and leave
+/// both the graph and the prompt cache untouched.
+///
+/// Why this is here and not only in `kg_write::tests`: consolidation moved the
+/// gate behind a shared function, and the thing that could regress is the
+/// variant→status mapping in the handler, which only an HTTP-level test sees.
+#[tokio::test]
+async fn http_kg_assert_endpoint_rejects_over_long_tier_s_object() {
+    let state = state_with_palace("httpreject");
+    let over_long = "x".repeat(crate::prompt_facts::TIER_S_MAX_OBJECT_CHARS + 1);
+    let body = json!({
+        "subject": "trusty-tools",
+        "predicate": "has_convention",
+        "object": over_long,
+    });
+    let app = router().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces/httpreject/kg")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let handle = state
+        .registry
+        .get(&PalaceId::new("httpreject"))
+        .expect("palace handle");
+    let stored = handle.kg.query_active("trusty-tools").await.expect("query");
+    assert!(
+        stored.is_empty(),
+        "refused write reached storage: {stored:?}"
+    );
+    assert!(
+        state.prompt_context_cache.read().await.triples.is_empty(),
+        "refused write reached the prompt cache"
+    );
+}
+
 /// Why (issue #42): `GET /api/v1/kg/prompt-facts` returns the structured
 /// JSON array of every hot-predicate triple across the registry (so a
 /// dashboard can render its own table).

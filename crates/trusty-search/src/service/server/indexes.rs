@@ -232,11 +232,32 @@ pub(super) async fn create_index_handler(
     // the canonical mount returned zero hits.
     // Issue #829: validate_root_path is now async (uses tokio::fs::canonicalize
     // and tokio::fs::metadata to avoid blocking the executor thread).
-    let canonical_root = match validate_root_path(&req.root_path, req.allow_sensitive_path).await {
+    // #767: `validate_root_path` now also enforces the opt-in allowlist, so
+    // this is the gate for every index created over HTTP, CLI, or MCP.
+    let canonical_root = match validate_root_path(
+        &req.root_path,
+        req.allow_sensitive_path,
+        &state.allowlist_paths,
+    )
+    .await
+    {
         Ok(p) => p,
         Err(resp) => return resp,
     };
     req.root_path = canonical_root;
+    // #3049 round 3: hold this id's teardown-lock SHARED side across the whole
+    // registration. `create_index` writes no existing index, but it registers a
+    // SECOND GENERATION under the same id and therefore the same on-disk paths,
+    // and the existence check below is the only thing that used to stand between
+    // the two. `unregister_index` removes the hot registry entry partway through
+    // its teardown, so a create landing in that window saw `None`, registered a
+    // fresh handle, and started a reindex into a directory the delete was about
+    // to `remove_dir_all`. Taking the lock here makes the check-and-register
+    // atomic against teardown: the create parks until the delete finishes, then
+    // re-reads a registry that tells the truth. Acquired BEFORE the embedder
+    // readiness check further down so even a `503` answer is not issued about an
+    // id whose fate is still being decided.
+    let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&id).await;
     if state.registry.get(&id).is_some() {
         return Json(serde_json::json!({
             "id": req.id,
@@ -520,6 +541,13 @@ pub(super) async fn create_index_handler(
             // #4095: a freshly-created index has an existing root by
             // construction, so no ambiguity clock is running.
             ambiguous_root_since_unix: None,
+            // #4391: registration is not indexing — the corpus is empty until a
+            // reindex runs, so claiming a HEAD SHA here would tell the next boot
+            // this index is current when nothing has been walked. `finish_reindex`
+            // writes the first genuine stamp.
+            indexed_head_sha: None,
+            // #4390: no deferred-embed pass has been queued for a new index.
+            deferred_embed_pending: false,
         },
     ) {
         tracing::warn!("could not persist index registry for {}: {e}", req.id);

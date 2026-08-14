@@ -748,6 +748,12 @@ impl UsearchStore {
     /// `tests::test_view_promotes_to_mutable_on_write` exercises the
     /// view → mutable promotion when a load is followed by an upsert.
     pub async fn load_from(hnsw_path: &Path) -> Result<Option<Self>> {
+        // #2936: reap staging files a SIGKILLed process abandoned beside this
+        // snapshot. Runs FIRST, before the existence checks below, because an
+        // orphan can outlive the snapshot it was staged for. Best-effort by
+        // construction — see `reap_orphan_staging_files`.
+        super::staging_reap::reap_orphan_staging_files(hnsw_path);
+
         let sidecar = hnsw_path.with_extension("keys.json");
         if !hnsw_path.exists() || !sidecar.exists() {
             return Ok(None);

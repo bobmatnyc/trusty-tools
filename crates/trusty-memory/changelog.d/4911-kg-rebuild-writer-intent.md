@@ -1,0 +1,3 @@
+Fixed
+
+- `kg-rebuild`'s applying pass now opens palaces with `OpenIntent::Writer`. It asserts triples through the handles it opens, but built its registry with the default `ReadOnlyClient` intent, so when the daemon held the write lock it silently received a snapshot and every `kg.assert` failed into the non-fatal warn arm — the run reported success having written nothing. It now fails loud against a running daemon instead, matching what the purge pass in the same command already did. The redundant `load_palaces_from_disk` pre-open it replaces also defeated the intent, since that path opens every palace with the zero-arg `PalaceHandle::open`; palace enumeration reads from disk, so nothing observable changes for a rebuild that was already writing correctly (#4911).

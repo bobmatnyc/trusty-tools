@@ -14,6 +14,8 @@
 //! multiple investigation batches, with a scripted provider that truncates one
 //! batch — asserting the OTHER batch's finding still renders and the failed
 //! batch is named in both the report and the synthesis-prompt coverage digest.
+//! Test: this file (only compiled with the default `report` feature).
+#![cfg(feature = "report")]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -124,7 +126,7 @@ async fn investigation_renders_verified_and_rejects_unverifiable() {
     assert!(repo_inv.deps.deps.iter().any(|d| d.name == "serde"));
 
     apply_investigation(&mut model, &inv);
-    let mut synthesis = Synthesis::unavailable("narrative pass skipped in test");
+    let mut synthesis = Synthesis::default();
     merge_investigation_prose(&mut synthesis, &inv);
     model.synthesis = Some(synthesis);
 
@@ -289,7 +291,7 @@ async fn investigation_survives_one_truncated_batch_and_names_it() {
     assert!(coverage_prompt.contains("truncated/failed"));
 
     apply_investigation(&mut model, &inv);
-    let mut synthesis = Synthesis::unavailable("narrative pass skipped in test");
+    let mut synthesis = Synthesis::default();
     merge_investigation_prose(&mut synthesis, &inv);
     model.synthesis = Some(synthesis);
 

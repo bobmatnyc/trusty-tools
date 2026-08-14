@@ -695,3 +695,56 @@ async fn health_surfaces_indexes_without_embed_pool() {
         "only health-pool-missing (no set_embed_pool call) counts"
     );
 }
+
+/// #3048: a vector turn-off must reach `CodeIndexer`'s own `skip_vector`, not
+/// just the rebuilt `IndexHandle`.
+///
+/// Why: `PATCH /indexes/:id/config { "vector": false }` builds a brand-new
+/// `IndexHandle` but reuses the same `indexer` `Arc`. `CodeIndexer::index_file`
+/// — the watcher / reconciler / index-file path — reads the indexer's copy,
+/// because the watch loop holds only an `Arc<RwLock<CodeIndexer>>` and never
+/// sees a handle at all. Without this sync the toggle would flip `stages` and
+/// the handle while the watcher went on embedding until the next daemon
+/// restart: the response says the lane is off, the disk says otherwise.
+/// What: drives `apply_component_transition` directly (the synchronous half
+/// the handler runs before any catch-up spawns) for both directions and
+/// asserts the indexer's own flag followed each time. Dropping the
+/// `set_skip_vector` call from `apply_component_transition` fails the
+/// turn-off assertion.
+/// Test: this IS the test.
+#[tokio::test]
+async fn patch_vector_off_stops_index_file_from_embedding() {
+    use super::components::{apply_component_transition, resolve_component_toggle};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let indexer = CodeIndexer::new("patch-skip-vector-sync", root.clone());
+    let handle = IndexHandle::bare(
+        IndexId::new("patch-skip-vector-sync"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root,
+    );
+
+    assert!(
+        !handle.indexer.read().await.skip_vector,
+        "precondition: a fresh indexer starts with the vector lane enabled"
+    );
+
+    // Turn the vector lane OFF — the direction that must never leave the
+    // watcher embedding.
+    let off = resolve_component_toggle(None, Some(false), handle.skip_kg, handle.skip_vector);
+    apply_component_transition(&handle, &off).await;
+    assert!(
+        handle.indexer.read().await.skip_vector,
+        "a vector turn-off must reach CodeIndexer::skip_vector, or index_file \
+         keeps embedding an index the operator just disabled (#3048)"
+    );
+
+    // And back ON, so a re-enable is not left permanently suppressed.
+    let on = resolve_component_toggle(None, Some(true), off.new_skip_kg, off.new_skip_vector);
+    apply_component_transition(&handle, &on).await;
+    assert!(
+        !handle.indexer.read().await.skip_vector,
+        "a vector turn-on must clear the indexer's flag too"
+    );
+}

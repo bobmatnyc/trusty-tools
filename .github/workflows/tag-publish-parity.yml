@@ -1,0 +1,84 @@
+# Release tag / publish-commit parity gate.
+#
+# The gate itself (scripts/check-tag-publish-parity.sh) can only run where a
+# publish runs — on the maintainer's machine, wired as preflight-publish.sh
+# CHECK 6, because the fact it checks is about THAT checkout's HEAD. There is
+# nothing for CI to assert about a tag push: the workflow checkout IS the
+# tagged commit, so the comparison is true by construction and proves nothing.
+#
+# What CI can do is keep the gate able to fail. Its failing branches are the
+# whole product — a parity check that returns 0 unconditionally is exactly the
+# state the release path was already in on 2026-08-11, when tga-v2.17.0 was cut
+# at 246e4ca2 and the crate published from 7d5cf82e1 with every gate green. So
+# this job runs the self-test's fixtures, not the gate.
+#
+# Pure git + shell, no Rust toolchain, so it stays a fast standalone job.
+#
+# It carries a second preflight self-test of the same shape (#5620): CHECK 5's
+# decision, which likewise only runs where a publish runs and is likewise worth
+# nothing if it cannot fail. The workflow name stays as it is — renaming it
+# would rename the required checks — and the jobs are separate so a red one
+# names which decision broke.
+name: Tag/publish parity
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/check-tag-publish-parity.sh"
+      - "scripts/check-tag-publish-parity-selftest.sh"
+      - "scripts/preflight-publish.sh"
+      - "scripts/preflight-check5-selftest.sh"
+      - "scripts/test-data/preflight-check5/**"
+      - ".github/workflows/tag-publish-parity.yml"
+  pull_request:
+    # Explicit activity types, matching line-cap.yml: `edited` catches a
+    # base-branch retarget, which the default set does not.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+    paths:
+      - "scripts/check-tag-publish-parity.sh"
+      - "scripts/check-tag-publish-parity-selftest.sh"
+      - "scripts/preflight-publish.sh"
+      - "scripts/preflight-check5-selftest.sh"
+      - "scripts/test-data/preflight-check5/**"
+      - ".github/workflows/tag-publish-parity.yml"
+
+concurrency:
+  group: tag-publish-parity-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  selftest:
+    name: Parity gate self-test (must catch a drifted tag)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # fetch-depth: 0 brings tags with it, which case 11 of the self-test uses
+      # to run the gate against the real tga-v2.17.0. That case self-skips when
+      # the tag is absent, so a shallow clone degrades it to a skip rather than
+      # a false failure — the synthetic cases carry the coverage either way.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Tag/publish parity self-test
+        run: bash scripts/check-tag-publish-parity-selftest.sh
+
+  # Same shape, same reason, different check (#5620). CHECK 5's decision — what
+  # preflight concludes from check_semver.sh's output — can only matter where a
+  # publish runs, and its failing branches are the whole product: reading exit 0
+  # as a pass is what let trusty-review 0.16.0 ship with `0 crate(s) checked,
+  # 0 skipped, 1 inventory NOT computed`. So CI runs the fixtures, not the gate.
+  #
+  # Separate job rather than another step, so a red one names which decision
+  # broke. Pure shell over captured output: no cargo, no rustdoc, no network.
+  check5-decision:
+    name: CHECK 5 decision self-test (0 compared must never print PASS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Preflight CHECK 5 decision self-test
+        run: bash scripts/preflight-check5-selftest.sh

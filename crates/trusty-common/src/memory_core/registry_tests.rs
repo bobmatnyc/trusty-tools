@@ -111,6 +111,156 @@ fn registry_create_and_open() {
     assert_eq!(palaces[0].name, "Alpha");
 }
 
+/// Why (issue #4911): eager hydration catches a per-palace open error, logs a
+/// WARN, and skips — so the palace is simply absent from the registry
+/// afterwards, indistinguishable from one that never existed. Once a read-only
+/// open of an incompatible-format store REFUSES instead of recreating it empty,
+/// that skip became the new way to lose a palace: the bytes survive, but nothing
+/// reports that the palace exists and cannot be read. Trading data destruction
+/// for data invisibility is not a fix.
+///
+/// Failing the whole `open` is the wrong surfacing — a multi-palace root would
+/// be bricked by one unrelated bad file, and the "one corrupt palace doesn't
+/// take the registry down" contract is what `SmMemory` / `PortfolioMemory` /
+/// trusty-agents construct against. So the palace is RETAINED as an observable
+/// unopenable entry instead.
+///
+/// What: persists a healthy palace, then hand-writes a SECOND palace this
+/// process never opens — a valid `palace.json` plus a DIRECTORY where the KG
+/// store file (`kg.redb`) belongs, which fails to open at the OS layer on every
+/// platform and redb version. Building it by hand matters: the store keeps a
+/// process-wide cache of open databases keyed by path, so a palace this process
+/// already opened would be served from cache and never read the corruption.
+/// Asserts (a) `open` still succeeds, (b) the healthy palace hydrated, (c) the
+/// broken one is NOT in the handle cache, and (d) it is nonetheless observable
+/// via `unopenable()` / `unopenable_reason()` with a non-empty reason. (c) and
+/// (d) together are the point: absent from the cache but not absent from the
+/// registry's account of what exists.
+/// Test: this is the test.
+#[test]
+fn open_keeps_an_unopenable_palace_observable() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+
+    {
+        let registry = PalaceRegistry::open(data_root).unwrap();
+        let palace = Palace {
+            id: PalaceId::new("healthy"),
+            name: "healthy".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("healthy"),
+        };
+        registry.create_palace(data_root, palace).unwrap();
+    }
+
+    let broken_dir = data_root.join("broken");
+    std::fs::create_dir_all(&broken_dir).unwrap();
+    std::fs::write(
+        broken_dir.join("palace.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "id": "broken",
+            "name": "broken",
+            "description": serde_json::Value::Null,
+            "created_at": "2020-01-02T03:04:05Z",
+            "data_dir": broken_dir,
+            "schema_version": 1,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir(broken_dir.join("kg.redb")).expect("directory where the KG store belongs");
+
+    let registry = PalaceRegistry::open(data_root)
+        .expect("one unopenable palace must not fail the whole registry open");
+
+    assert!(
+        registry.get(&PalaceId::new("healthy")).is_some(),
+        "the healthy palace must still hydrate"
+    );
+    assert!(
+        registry.get(&PalaceId::new("broken")).is_none(),
+        "the unopenable palace cannot be in the handle cache — nothing opened it"
+    );
+
+    let reason = registry.unopenable_reason(&PalaceId::new("broken")).expect(
+        "a palace that exists on disk and could not be opened must stay observable, \
+             not silently vanish from the registry",
+    );
+    assert!(
+        !reason.is_empty(),
+        "the recorded reason must say why the palace could not be opened"
+    );
+
+    let ids: Vec<String> = registry
+        .unopenable()
+        .into_iter()
+        .map(|(id, _)| id.as_str().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["broken".to_string()],
+        "exactly the unopenable palace is recorded — the healthy one must not be"
+    );
+}
+
+/// Why (issue #4911): the daemon hydrates through its own walk
+/// (`AppState::load_palaces_from_disk`), not [`PalaceRegistry::open`], so it
+/// needs `record_unopenable` to file a skip. A record that outlived the
+/// condition would be worse than none — an operator would chase a palace that
+/// has been healthy since the next lazy open — so the clearing half is the
+/// property under test, not the insert.
+/// What: records a skip, asserts it is readable, then registers a real handle
+/// for that same id through `register_arc` (the sole success-path funnel) and
+/// asserts the record is gone.
+/// Test: this test itself.
+#[test]
+fn record_unopenable_is_cleared_by_a_later_success() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let id = PalaceId::new("flaky");
+
+    let registry = PalaceRegistry::new();
+    registry.record_unopenable(id.clone(), "EMFILE: too many open files".to_string());
+    assert_eq!(
+        registry.unopenable_reason(&id).as_deref(),
+        Some("EMFILE: too many open files"),
+        "a recorded skip must be readable back"
+    );
+
+    // The same palace opens fine on a later attempt — the record must not
+    // survive that.
+    registry
+        .create_palace(
+            data_root,
+            Palace {
+                id: id.clone(),
+                name: "flaky".to_string(),
+                description: None,
+                created_at: Utc::now(),
+                data_dir: data_root.join("flaky"),
+            },
+        )
+        .expect("create_palace");
+
+    assert!(
+        registry.unopenable_reason(&id).is_none(),
+        "a successful open must clear the skip record, not leave it to mislead"
+    );
+    assert!(
+        registry.unopenable().is_empty(),
+        "no unopenable palace remains"
+    );
+}
+
 /// Why: Issue #52 — payloads (drawer content) must survive a process
 /// restart. Open a registry, write a drawer with a known content string,
 /// drop everything, reopen via `PalaceRegistry::open(path)`, and assert the
@@ -820,5 +970,256 @@ fn writer_open_queue_wait_is_bounded_under_sustained_contention() {
          one bounded writer-open attempt, regardless of queue depth; got \
          {max_wait:?} (bound {OPEN_QUEUE_TIMEOUT:?} + {slack:?} slack) for \
          {WRITER_COUNT} concurrent callers (issue #3992)"
+    );
+}
+
+/// Restore a path's mode on drop, including while unwinding from a failed
+/// assertion, so a test can never leave `tempfile` an untraversable tree.
+///
+/// The mode is a field because the tests below lock two kinds of path: a
+/// regular `palace.json` (0o600) and the directory holding it (0o700), which a
+/// file's mode would leave untraversable.
+#[cfg(unix)]
+struct RestoreMode {
+    path: std::path::PathBuf,
+    mode: u32,
+}
+
+#[cfg(unix)]
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
+    }
+}
+
+/// Why (#5549, ADR-0045): `open_palace` returns `anyhow::Error`, which flattens
+/// a genuine absence together with a denied read, a transient `EIO`/`ESTALE`,
+/// undecodable metadata, an open-queue timeout, and a redb lock conflict. Every
+/// caller that mapped `Err` to "not found" therefore told its client a palace
+/// it could not read does not exist. `open_error_is_absent` is what lets a
+/// caller keep the two apart, so if it answered `true` for a denied read the
+/// callers would be exactly where they started.
+/// What: creates a palace, evicts its cached handle so the next open reads
+/// disk, strips `palace.json` to mode 000, and asserts the resulting open error
+/// is NOT classified as absence — then asserts an id that was never created IS.
+/// Panics rather than passing vacuously if the denial does not take hold.
+/// Test: this test itself.
+#[cfg(unix)]
+#[test]
+fn open_error_is_absent_only_for_a_genuine_absence() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    reg.create_palace(
+        data_root,
+        Palace {
+            id: PalaceId::new("alpha"),
+            name: "alpha".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("alpha"),
+        },
+    )
+    .expect("create palace");
+    // Drop the cached handle so the next open goes back to disk.
+    reg.remove(&PalaceId::new("alpha"));
+
+    let target = data_root.join("alpha").join("palace.json");
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Declared after `dir` so it drops first: the mode is restored before
+    // `TempDir` walks the tree, including while unwinding from a failure below.
+    let _restore = RestoreMode {
+        path: target.clone(),
+        mode: 0o600,
+    };
+
+    // Root bypasses the mode bits outright and some filesystems ignore them,
+    // so confirm the denial actually took hold. A vacuous pass here would
+    // assert nothing at all.
+    match std::fs::read(&target) {
+        Ok(_) => panic!(
+            "cannot exercise #5549: {} is still readable at mode 000. Run this suite as a \
+             non-root user on a filesystem that honours POSIX permission bits.",
+            target.display()
+        ),
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected the locked palace.json to deny reads, got {e}"
+        ),
+    }
+
+    // `PalaceHandle` is not `Debug`, so `expect_err` is unavailable here.
+    let denied = match reg.open_palace(data_root, &PalaceId::new("alpha")) {
+        Ok(_) => panic!("a palace.json that cannot be read must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        !PalaceRegistry::open_error_is_absent(&denied),
+        "a palace whose metadata could not be read was classified as absent — that is the \
+         #5549 coercion, and the HTTP callers render it as 404 'palace not found': {denied:#}"
+    );
+
+    let missing = match reg.open_palace(data_root, &PalaceId::new("never-created")) {
+        Ok(_) => panic!("an id with no palace on disk must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        PalaceRegistry::open_error_is_absent(&missing),
+        "a genuinely absent palace must still classify as absence, or every 404 the callers \
+         owe becomes a 500: {missing:#}"
+    );
+}
+
+/// Why (#5549, #5574): the sibling test above locks the FILE, so the stat
+/// probe succeeds and the read under it fails. This one locks the DIRECTORY, so
+/// the probe itself fails — the shape #5574 changed from `NotFound` to `Io` at
+/// `load_palace`. Both halves live in this crate, so the claim that the
+/// classifier carries #5574's new `Io` through as "not absence" belongs here
+/// rather than only at the HTTP callers downstream.
+/// What: creates a palace, evicts its cached handle, strips the palace's own
+/// directory to mode 000, and asserts the resulting open error is NOT
+/// classified as absence. Panics rather than passing vacuously if the denial
+/// does not take hold.
+/// Test: this test itself.
+#[cfg(unix)]
+#[test]
+fn open_error_is_not_absent_for_an_unstattable_palace_json() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    reg.create_palace(
+        data_root,
+        Palace {
+            id: PalaceId::new("alpha"),
+            name: "alpha".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("alpha"),
+        },
+    )
+    .expect("create palace");
+    reg.remove(&PalaceId::new("alpha"));
+
+    let palace_dir = data_root.join("alpha");
+    std::fs::set_permissions(&palace_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Declared after `dir` so it drops first: the mode is restored before
+    // `TempDir` walks the tree, including while unwinding from a failure below.
+    let _restore = RestoreMode {
+        path: palace_dir.clone(),
+        mode: 0o700,
+    };
+
+    let target = palace_dir.join("palace.json");
+    match target.try_exists() {
+        Ok(_) => panic!(
+            "cannot exercise #5549: {} is still stattable with its directory at mode 000. Run \
+             this suite as a non-root user on a filesystem that honours POSIX permission bits.",
+            target.display()
+        ),
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected the locked directory to deny statting palace.json, got {e}"
+        ),
+    }
+
+    // `PalaceHandle` is not `Debug`, so `expect_err` is unavailable here.
+    let denied = match reg.open_palace(data_root, &PalaceId::new("alpha")) {
+        Ok(_) => panic!("a palace.json that cannot be statted must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        !PalaceRegistry::open_error_is_absent(&denied),
+        "a palace whose metadata could not be statted was classified as absent — #5574 made \
+         that an Io error at load_palace, and this classifier read it back as absence: {denied:#}"
+    );
+}
+
+/// Why (#5592): the two tests above reach `load_palace` under the id the caller
+/// asked for, so `load_palace`'s own #5574 guard decides the answer. An ALIASED
+/// open does not: `resolve_palace_alias` probes the target itself before any of
+/// that, and while that probe used `Path::exists()` a target it was DENIED to
+/// stat read as a target that is not there. The redirect was then dropped and
+/// `load_palace` ran against the alias id's own genuinely-absent directory,
+/// returning a truthful `NotFound` for the wrong palace — so a palace that
+/// exists and merely could not be verified still reported absence, and the HTTP
+/// callers still rendered 404. That is the same coercion #5549 exists to
+/// remove, one call earlier in the same function.
+/// What: creates palace `bare-repo`, aliases `owner-repo` to it, evicts the
+/// cached handle so the next open reads disk, strips `bare-repo`'s own
+/// directory to mode 000 (the probe itself is denied, not just the read), and
+/// asserts the error from opening the ALIAS is NOT classified as absence.
+/// Panics rather than passing vacuously if the denial does not take hold.
+/// Test: this test itself.
+#[cfg(unix)]
+#[test]
+fn open_error_is_not_absent_for_an_unstattable_alias_target() {
+    use crate::memory_core::palace::Palace;
+    use crate::palace_alias::PalaceAliasStore;
+    use chrono::Utc;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    reg.create_palace(
+        data_root,
+        Palace {
+            id: PalaceId::new("bare-repo"),
+            name: "bare-repo".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("bare-repo"),
+        },
+    )
+    .expect("create palace");
+    // `palace_aliases.json` sits in `data_root`, not inside the palace
+    // directory, so locking that directory below leaves the alias map readable.
+    PalaceAliasStore::register_alias(data_root, "owner-repo", "bare-repo").expect("register alias");
+    reg.remove(&PalaceId::new("bare-repo"));
+
+    let palace_dir = data_root.join("bare-repo");
+    std::fs::set_permissions(&palace_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Declared after `dir` so it drops first: the mode is restored before
+    // `TempDir` walks the tree, including while unwinding from a failure below.
+    let _restore = RestoreMode {
+        path: palace_dir.clone(),
+        mode: 0o700,
+    };
+
+    let target = palace_dir.join("palace.json");
+    match target.try_exists() {
+        Ok(_) => panic!(
+            "cannot exercise #5592: {} is still stattable with its directory at mode 000. Run \
+             this suite as a non-root user on a filesystem that honours POSIX permission bits.",
+            target.display()
+        ),
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected the locked directory to deny statting palace.json, got {e}"
+        ),
+    }
+
+    // `PalaceHandle` is not `Debug`, so `expect_err` is unavailable here.
+    let denied = match reg.open_palace(data_root, &PalaceId::new("owner-repo")) {
+        Ok(_) => panic!("an alias whose target cannot be statted must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        !PalaceRegistry::open_error_is_absent(&denied),
+        "an aliased palace whose target could not be statted was classified as absent — \
+         resolve_palace_alias dropped the redirect and load_palace then answered for the alias \
+         id's own empty directory, so the caller renders 404 for a palace that exists: {denied:#}"
     );
 }

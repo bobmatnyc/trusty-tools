@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 
 use crate::core::chunker::{chunk_ast, RawChunk};
 use crate::core::entity::RawEntity;
-use crate::core::symbol_graph::{ChunkTuple, SymbolGraph};
+use crate::core::symbol_graph::{ChunkTuple, ContribMergeOutcome, SymbolGraph};
 
 use super::{populate_virtual_terms, CodeIndexer, ParsedBatch};
 
@@ -43,10 +43,13 @@ impl CodeIndexer {
     /// corpus is small + in-memory, so we favour simplicity over incremental
     /// maintenance.
     /// What: snapshots chunk tuples and entity lists under read locks, builds
-    /// a new `SymbolGraph`, persists it to the corpus if wired, and installs it.
+    /// a new `SymbolGraph`, persists it to the corpus if wired, and installs
+    /// it — unless the contributed-overlay merge failed, in which case the
+    /// previous serving graph is kept and the failure is returned (#5505).
     /// Test: every test that calls `add_chunk` or `index_file` exercises the
-    /// rebuild path indirectly.
-    pub(super) async fn rebuild_symbol_graph(&self) {
+    /// rebuild path indirectly; `contrib_load_failure_installs_nothing` covers
+    /// the not-installed arm.
+    pub(super) async fn rebuild_symbol_graph(&self) -> ContribMergeOutcome {
         // Issue #2162 follow-up: this function reads `self.chunks` and
         // `self.entities` directly below, but several call paths
         // (`remove_file`, `remove_chunk` from the FSEvents watcher,
@@ -147,16 +150,24 @@ impl CodeIndexer {
         // graph (best-effort, pre-merge so the derived kg_* tables never
         // absorb contributed rows), then fold the stored contributed overlay
         // back in — a reindex must not evict contributed edges from the
-        // serving graph. Both redb-bound steps run on one blocking worker;
-        // failures degrade with warnings (see `save_then_merge_contrib`).
-        let new_graph = crate::core::symbol_graph::save_then_merge_contrib(
+        // serving graph. Both redb-bound steps run on one blocking worker.
+        let (new_graph, outcome) = crate::core::symbol_graph::save_then_merge_contrib(
             new_graph,
             self.corpus.clone(),
             self.index_id.clone(),
         )
         .await;
 
-        *self.symbol_graph.write().await = new_graph;
+        // #5505: install nothing rather than a graph known to be missing the
+        // contributed overlay — the caller reports the failure instead.
+        match new_graph {
+            Some(g) => *self.symbol_graph.write().await = g,
+            None => tracing::error!(
+                index_id = %self.index_id,
+                "kg: rebuild produced no installable graph — previous serving graph retained"
+            ),
+        }
+        outcome
     }
 
     /// Add (or replace) a chunk in the corpus. If an embedder + store are
@@ -248,9 +259,36 @@ impl CodeIndexer {
     /// `CorpusStore`, so `commit_corpus_to_redb` early-returns and
     /// `staging::should_stage` is `false` — a bulk reindex on a quarantined
     /// index writes nothing durable at all.
+    /// #3048: it is also where the per-index component flags apply to an
+    /// incremental write. [`CodeIndexer::skip_vector`] suppresses the embed
+    /// call (chunks still land in BM25 + the corpus, exactly as
+    /// `parse_files_only` produces them on the batch path) and
+    /// [`CodeIndexer::skip_kg`] suppresses the trailing symbol-graph rebuild.
+    /// Before this, both ran unconditionally, so a BM25-only index kept
+    /// embedding and kept rebuilding a graph on every file save while its own
+    /// `/health` reported those stages `Skipped`.
+    /// #100: the per-index `TRUSTY_MAX_CHUNKS` cap is the second condition
+    /// that refuses rather than silently succeeding. `Ok(())` means every
+    /// chunk this file parsed into reached the corpus; if the cap dropped any
+    /// of them, this returns `Err` naming the cap and the drop count. Without
+    /// that, an index at its cap answered `"indexed": true` to every write it
+    /// discarded — permanently, since the corpus never shrinks — and a search
+    /// over the discarded content was indistinguishable from a correct empty
+    /// result. An update whose chunk ids already exist is exempt: the cap only
+    /// rejects NEW ids, so re-indexing a file already in the corpus still
+    /// succeeds at cap. A file that partly fits is committed partly and still
+    /// reported as an error, because a partially-indexed file is not the write
+    /// the caller asked for.
     /// Test: covered by every `index_file`-based test in `indexer::tests`;
     /// the quarantine branch by
-    /// `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`.
+    /// `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`;
+    /// the cap branch by `indexer::tests::chunk_cap`'s
+    /// `at_cap_index_file_is_an_error_not_a_silent_success`,
+    /// `at_cap_index_stays_an_error_for_every_later_write`, and
+    /// `at_cap_update_to_an_already_indexed_file_still_succeeds`;
+    /// the component gates by `skip_vector_index_file_never_embeds`,
+    /// `skip_vector_false_index_file_still_embeds`, and
+    /// `skip_kg_index_file_never_rebuilds_the_symbol_graph`.
     pub async fn index_file(&self, file_path: &str, content: &str) -> Result<()> {
         if self.refuse_incremental_write("index_file", file_path) {
             anyhow::bail!(
@@ -266,8 +304,23 @@ impl CodeIndexer {
 
         let chunk_contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
 
+        // #100: how many of this file's chunks the `TRUSTY_MAX_CHUNKS` cap
+        // discarded. Non-zero means the file is NOT fully indexed, and this
+        // call must report that rather than answer `Ok` — see the refusal at
+        // the end of the function for why it is deferred to there.
+        let mut dropped_by_cap = 0usize;
         if !chunks.is_empty() {
-            let embeddings = self.embed_chunks_in_batches(&chunks, None).await?;
+            // #3048: a vector-disabled index must not embed on the incremental
+            // path either. All-`None` embeddings are exactly what
+            // `parse_files_only` hands `commit_parsed_batch` on the batch
+            // reindex path, and `commit_parsed_batch` already treats that as
+            // the BM25-only case (including evicting any stale vector for a
+            // re-committed chunk id).
+            let embeddings = if self.skip_vector {
+                vec![None; chunks.len()]
+            } else {
+                self.embed_chunks_in_batches(&chunks, None).await?
+            };
             let parsed = ParsedBatch {
                 chunks,
                 embeddings,
@@ -276,7 +329,10 @@ impl CodeIndexer {
                 embed_ms: 0,
                 vector_count: 0,
             };
-            self.commit_parsed_batch(parsed, true).await?;
+            dropped_by_cap = self
+                .commit_parsed_batch(parsed, true)
+                .await?
+                .chunks_dropped_by_cap;
         }
 
         let all_entities = self
@@ -287,7 +343,40 @@ impl CodeIndexer {
             .write()
             .await
             .insert(file_path.to_string(), all_entities);
-        self.rebuild_symbol_graph().await;
+        // #3048: skip_kg parity. `finish::finish_reindex` already skips KG
+        // construction for a skip_kg index; this path did not, so every
+        // watcher save rebuilt AND persisted the full graph for an index whose
+        // whole point was not to hold one. Gated here rather than inside
+        // `rebuild_symbol_graph` — that function is the shared choke point for
+        // reindex, remove_file, and the contributed-graph ingest endpoint,
+        // whose skip_kg semantics are not this issue's to change.
+        if !self.skip_kg {
+            self.rebuild_symbol_graph().await;
+        }
+
+        // #100: the cap used to drop chunks, log a `warn!`, and still return
+        // `Ok` — so `POST /index-file` answered `"indexed": true` for a write
+        // that never landed, and an index sitting AT the cap answered that way
+        // for every write forever while accepting nothing. The cap itself
+        // stays policy; reporting a discarded write as a successful one does
+        // not. Refusal is the same choice #4122 made for the quarantine branch
+        // above, on the same reasoning: this caller has no other signal.
+        //
+        // Reported here rather than at the commit above so the entity map and
+        // symbol graph still match whatever DID land — a file that partly fit
+        // is committed as completely as the cap allows, and the error says it
+        // was not the write the caller asked for.
+        if dropped_by_cap > 0 {
+            anyhow::bail!(
+                "index '{}' is at its chunk cap ({}): {} of '{file_path}'s chunks were \
+                 dropped, so the file is NOT fully indexed. Raise TRUSTY_MAX_CHUNKS and \
+                 restart the daemon, or split this root across indexes, then re-send the \
+                 file",
+                self.index_id,
+                super::max_chunks_per_index(),
+                dropped_by_cap
+            );
+        }
         Ok(())
     }
 
@@ -365,8 +454,12 @@ impl CodeIndexer {
 
     /// Public hook for the bulk reindex orchestrator: rebuild the symbol graph
     /// once after a series of `index_files_batch_no_rebuild` calls.
-    pub async fn rebuild_symbol_graph_now(&self) {
-        self.rebuild_symbol_graph().await;
+    ///
+    /// Returns what the pass could not do (#5505) — the contributed-graph
+    /// ingest endpoint reports it; callers that only need the rebuild may
+    /// ignore it.
+    pub async fn rebuild_symbol_graph_now(&self) -> ContribMergeOutcome {
+        self.rebuild_symbol_graph().await
     }
 
     async fn index_files_batch_inner(

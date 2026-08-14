@@ -138,10 +138,14 @@ async fn session_new<B: OrchestratorBackend>(backend: &B, args: &Value) -> Resul
 /// Why: `project_dir` is required (the stdio bridge forwards no cwd); the
 /// other four fields are all optional with documented defaults.
 /// What: requires `project_dir`; reads the optional `session_id`,
-/// `tmux_window`, `all_projects` (default false), and `full` (default false).
+/// `tmux_window`, `all_projects` (default false), `full` (default false), and
+/// `sessions_offset` (default 0). A negative or non-integer `sessions_offset`
+/// reads as 0 rather than erroring — the first page is always the right answer
+/// to an unparseable one, and it is what an omitted value means (#5557).
 /// Test: `super::tests::dispatch_session_context_catchup_tool`,
 /// `super::tests::dispatch_session_context_catchup_requires_project_dir`,
-/// `super::tests::dispatch_session_context_catchup_forwards_tmux_window`.
+/// `super::tests::dispatch_session_context_catchup_forwards_tmux_window`,
+/// `super::tests::dispatch_session_context_catchup_forwards_sessions_offset`.
 async fn session_context_catchup<B: OrchestratorBackend>(
     backend: &B,
     args: &Value,
@@ -154,8 +158,19 @@ async fn session_context_catchup<B: OrchestratorBackend>(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
+    let sessions_offset = args
+        .get("sessions_offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
     backend
-        .session_context_catchup(&project_dir, session_id, tmux_window, all_projects, full)
+        .session_context_catchup(
+            &project_dir,
+            session_id,
+            tmux_window,
+            all_projects,
+            full,
+            sessions_offset,
+        )
         .await
 }
 

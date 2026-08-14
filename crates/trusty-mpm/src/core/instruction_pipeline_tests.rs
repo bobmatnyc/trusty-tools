@@ -1226,3 +1226,72 @@ fn refresh_compiled_prompt_reports_an_actionable_failure() {
     );
     assert!(msg.contains("permissions"), "must point at a remedy: {msg}");
 }
+
+/// Make `path` unreadable; `false` when the platform or privileges prevent it.
+fn deny_read_pipeline(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::set_permissions(path, fs::Permissions::from_mode(0o000)).is_err() {
+            return false;
+        }
+        fs::read_to_string(path).is_err()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+#[test]
+fn build_instructions_reports_an_unreadable_agent_file() {
+    // #5544 review: `agent_count` is what `tm session start` prints. It came
+    // from the non-reporting `resolve_roster`, so an agent file that could not
+    // be read lowered the number with nothing carried out of the pipeline to
+    // say so — the count read as a total when it was a floor.
+    let project = TempDir::new().unwrap();
+    let tier = project.path().join(".claude").join("agents");
+    fs::create_dir_all(&tier).unwrap();
+    let locked = tier.join("qa.md");
+    fs::write(&locked, "---\nname: qa\n---\n\n# Q\n").unwrap();
+    if !deny_read_pipeline(&locked) {
+        eprintln!("skipping: cannot deny read on this platform/privilege level");
+        return;
+    }
+
+    let out = build_instructions(&PipelineInput {
+        project_dir: project.path().to_path_buf(),
+        claude_md_path: project.path().join("CLAUDE.md"),
+    })
+    .expect("pipeline succeeds — the roster stays fail-open");
+
+    assert!(
+        !out.roster_is_complete(),
+        "a failed roster read must make the count self-declare as partial"
+    );
+    assert!(
+        out.unreadable_agent_paths.contains(&locked),
+        "the lost path must reach the caller: {:?}",
+        out.unreadable_agent_paths
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o600));
+    }
+}
+
+#[test]
+fn build_instructions_reports_a_complete_roster_when_nothing_failed() {
+    // The healthy path must keep saying so, or the flag above is not a signal.
+    let project = TempDir::new().unwrap();
+    let out = build_instructions(&PipelineInput {
+        project_dir: project.path().to_path_buf(),
+        claude_md_path: project.path().join("CLAUDE.md"),
+    })
+    .expect("pipeline succeeds");
+    assert!(out.roster_is_complete());
+    assert!(out.unreadable_agent_paths.is_empty());
+}

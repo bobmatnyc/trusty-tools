@@ -10,9 +10,11 @@
 //! counters and paths. Extracting them here makes each decision independently
 //! testable and keeps the monolith from growing.
 //!
-//! What: five pure helpers —
+//! What: six pure helpers —
 //! - [`reindex_outcome`] decides Ready vs. Failed from the vector/file counters
 //!   (the #601 non-empty gate), honouring the lexical-only exception.
+//! - [`override_with_producer_failure`] lets a panicked/cancelled parse-embed
+//!   producer fail a run whose counters look healthy (#1451).
 //! - [`semantic_stage_broken_reason`] decides whether the semantic stage may
 //!   honestly be published as Ready, judged against the LIVE vector store
 //!   rather than the reindex's own counters (#4707).
@@ -23,7 +25,7 @@
 //! - [`root_move_is_trusted`] decides whether a detected root move is backed by
 //!   durable, persisted config before the caller may walk/prune against it (#2178).
 //!
-//! Test: `super::validate::tests` covers every branch of all five.
+//! Test: `super::validate::tests` covers every branch of all six.
 
 use std::path::{Path, PathBuf};
 
@@ -143,6 +145,34 @@ pub(crate) fn reindex_outcome(
         };
     }
     ReindexOutcome::Ready
+}
+
+/// Let a producer-task failure override an otherwise-healthy counter verdict
+/// (#1451).
+///
+/// Why: [`reindex_outcome`] judges the run purely by its counters, and a
+/// parse/embed producer that panicked partway leaves those counters looking
+/// normal — the batches it did commit produced vectors, so the #601 zero-vector
+/// gate stays silent and the run reported `complete` while the files after the
+/// panic were never indexed. The runner already captures the `JoinError`; this
+/// is where that capture becomes the terminal verdict instead of a log line.
+/// What: returns `Failed { reason }` whenever `producer_failure` is set,
+/// otherwise the counter verdict unchanged. Feeding the single
+/// [`ReindexOutcome`] both the swap decision and the status marking already
+/// consume means one panic both rolls the staged corpus back (the partial
+/// rebuild must not be promoted over a complete live corpus) and marks the
+/// index failed — the same coupling #603 built for the zero-vector case.
+/// Test: `producer_failure_overrides_ready` and
+/// `producer_failure_absent_keeps_counter_outcome` below, plus the end-to-end
+/// `reindex_producer_panic_does_not_report_complete` in `super::tests`.
+pub(crate) fn override_with_producer_failure(
+    outcome: ReindexOutcome,
+    producer_failure: Option<String>,
+) -> ReindexOutcome {
+    match producer_failure {
+        Some(reason) => ReindexOutcome::Failed { reason },
+        None => outcome,
+    }
 }
 
 /// Issue #2211: decide whether the semantic stage may be marked `Ready`
@@ -355,6 +385,38 @@ mod tests {
     #[test]
     fn reindex_outcome_healthy_is_ready() {
         assert!(reindex_outcome(false, false, true, 42, 0, 1337).is_ready());
+    }
+
+    /// Why: #1451 — the counters after a producer panic look exactly like the
+    /// healthy path above (the batches that ran before the panic embedded
+    /// normally), so the counter verdict alone reports a run that never
+    /// finished as complete.
+    /// Test: this test.
+    #[test]
+    fn producer_failure_overrides_ready() {
+        let counters = reindex_outcome(false, false, true, 42, 0, 1337);
+        assert!(counters.is_ready(), "precondition: counters look healthy");
+        let outcome = override_with_producer_failure(
+            counters,
+            Some("parse/embed producer task panicked".to_string()),
+        );
+        assert!(!outcome.is_ready());
+        let reason = outcome.failure_reason().expect("must carry a reason");
+        assert!(
+            reason.contains("producer task panicked"),
+            "reason: {reason}"
+        );
+    }
+
+    /// Why: the override must be inert on every run whose producer finished —
+    /// including one the counter gate already failed, whose reason must survive.
+    /// Test: this test.
+    #[test]
+    fn producer_failure_absent_keeps_counter_outcome() {
+        assert!(override_with_producer_failure(ReindexOutcome::Ready, None).is_ready());
+        let failed = reindex_outcome(false, false, true, 24, 0, 0);
+        let kept = override_with_producer_failure(failed.clone(), None);
+        assert_eq!(kept, failed, "the counter verdict must pass through intact");
     }
 
     /// Why: a single embedded vector for many files is still "the embedder

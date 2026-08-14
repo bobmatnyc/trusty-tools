@@ -10,7 +10,7 @@ use crate::core::corpus::contrib::{ContribEdge, ContribGraph, ContribNode};
 use crate::core::corpus::CorpusStore;
 use crate::core::entity::EdgeKind;
 
-use super::contrib::resolve_edge_kind;
+use super::contrib::{resolve_edge_kind, ContribMergeOutcome};
 use super::graph::SymbolGraph;
 
 fn node(id: &str, kind: &str) -> ContribNode {
@@ -215,12 +215,14 @@ async fn contrib_rebuild_path_merges_after_save() {
         vec![],
         crate::core::chunker::ChunkType::Function,
     )]));
-    let merged = super::contrib::save_then_merge_contrib(
+    let (merged, outcome) = super::contrib::save_then_merge_contrib(
         derived,
         Some(Arc::clone(&corpus)),
         "test-idx".into(),
     )
     .await;
+    assert_eq!(outcome, ContribMergeOutcome::default());
+    let merged = merged.expect("a healthy pass installs a graph");
     assert_eq!(merged.node_count(), 3); // fn_a + proc + table
     assert_eq!(merged.edge_count(), 1);
 
@@ -252,12 +254,13 @@ async fn contrib_merge_happens_even_when_arc_is_shared() {
 
     let graph = Arc::new(SymbolGraph::new());
     let concurrent_snapshot = Arc::clone(&graph); // simulates snapshot_symbol_graph
-    let merged = super::contrib::save_then_merge_contrib(
+    let (merged, _) = super::contrib::save_then_merge_contrib(
         graph,
         Some(Arc::clone(&corpus)),
         "test-idx".into(),
     )
     .await;
+    let merged = merged.expect("a healthy pass installs a graph");
     assert_eq!(
         merged.node_kind("dbo.orders"),
         Some("table"),
@@ -289,15 +292,129 @@ async fn contrib_replace_per_producer_after_remerge() {
         ))
         .expect("save v2 (replaces v1)");
 
-    let merged = super::contrib::save_then_merge_contrib(
+    let (merged, _) = super::contrib::save_then_merge_contrib(
         Arc::new(SymbolGraph::new()),
         Some(Arc::clone(&corpus)),
         "test-idx".into(),
     )
     .await;
+    let merged = merged.expect("a healthy pass installs a graph");
     assert!(merged.node_kind("dbo.customers").is_some());
     assert!(
         merged.node_kind("dbo.orders").is_none(),
         "v1 contribution must be fully replaced"
+    );
+}
+
+/// Why: #5505 — a failed `load_contrib_graphs` returned the derived-only graph
+/// and logged a warning. That graph was then installed as the serving graph,
+/// dropping every contributed edge while the ingest endpoint reported success.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn contrib_load_failure_installs_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = Arc::new(CorpusStore::open(&dir.path().join("c.redb")).expect("open"));
+    corpus
+        .save_contrib_graph(&contrib(
+            "navigatsql",
+            vec![node("dbo.usp_x", "proc"), node("dbo.orders", "table")],
+            vec![edge("dbo.usp_x", "dbo.orders", "writes")],
+        ))
+        .expect("save contrib");
+    crate::core::corpus::test_support::corrupt_contrib_row(&corpus, "broken")
+        .expect("plant corrupt contrib row");
+
+    let (installed, outcome) = super::contrib::save_then_merge_contrib(
+        Arc::new(SymbolGraph::new()),
+        Some(Arc::clone(&corpus)),
+        "test-idx".into(),
+    )
+    .await;
+
+    assert!(
+        installed.is_none(),
+        "a derived-only graph is known to lack the contributed overlay — it must not be installed"
+    );
+    let reason = outcome.merge_error.expect("merge failure must be reported");
+    assert!(
+        reason.contains("contrib load failed"),
+        "reason must name the failure, got {reason:?}"
+    );
+    assert!(outcome.persist_error.is_none(), "the persist itself worked");
+    // #5505: one bad row fails the whole load, so the error must name it —
+    // otherwise a caller cannot tell whose contribution to re-send.
+    assert_eq!(
+        outcome.blocking_producer.as_deref(),
+        Some("broken"),
+        "the offending producer must survive as structured data, not prose"
+    );
+    assert!(
+        reason.contains("broken"),
+        "the reason string must name the producer too, got {reason:?}"
+    );
+}
+
+/// Why: #5505's lesser arm — a KG-persist failure costs durability, not
+/// correctness. The merge must still run (the in-memory graph is complete) and
+/// the caller must still learn that the derived tables are now stale.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn contrib_persist_failure_still_merges() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = Arc::new(CorpusStore::open(&dir.path().join("c.redb")).expect("open"));
+    corpus
+        .save_contrib_graph(&contrib(
+            "navigatsql",
+            vec![node("dbo.usp_x", "proc"), node("dbo.orders", "table")],
+            vec![edge("dbo.usp_x", "dbo.orders", "writes")],
+        ))
+        .expect("save contrib");
+    crate::core::corpus::test_support::break_kg_nodes_table(&corpus).expect("break kg_nodes");
+
+    let (installed, outcome) = super::contrib::save_then_merge_contrib(
+        Arc::new(SymbolGraph::new()),
+        Some(Arc::clone(&corpus)),
+        "test-idx".into(),
+    )
+    .await;
+
+    let merged = installed.expect("the in-memory graph is complete — install it");
+    assert_eq!(
+        merged.node_kind("dbo.orders"),
+        Some("table"),
+        "a persist failure must not skip the merge"
+    );
+    assert!(outcome.merge_error.is_none());
+    let reason = outcome
+        .persist_error
+        .expect("a silent persist failure is what #5505 is about");
+    assert!(
+        reason.contains("kg persist failed"),
+        "reason must name the failure, got {reason:?}"
+    );
+}
+
+/// Why: #5505's third arm — a lost blocking task used to install
+/// `SymbolGraph::new()`, wiping every symbol relation the daemon was serving
+/// until someone reindexed. A join error carries no information about the
+/// graph, so it is no basis for discarding one.
+/// Test: this test, driven by a real `JoinError` from a genuinely panicking
+/// blocking task.
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_merge_task_installs_nothing_rather_than_an_empty_graph() {
+    let join_err = tokio::task::spawn_blocking(|| panic!("simulated worker panic"))
+        .await
+        .expect_err("the task must have panicked");
+
+    let (installed, outcome) = super::contrib::lost_task_outcome("test-idx", &join_err);
+
+    assert!(
+        installed.is_none(),
+        "an empty graph is worse than the graph already being served"
+    );
+    let reason = outcome.merge_error.expect("the loss must be reported");
+    assert!(
+        reason.contains("did not complete"),
+        "reason must name the failure, got {reason:?}"
     );
 }

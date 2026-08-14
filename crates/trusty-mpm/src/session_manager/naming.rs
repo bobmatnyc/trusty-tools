@@ -75,8 +75,26 @@ impl SessionManager {
     /// #3707 (fixing it properly needs `-A` fail-loud semantics plus a
     /// `TmuxSessionGuard` reaper that can never kill the race winner's
     /// session).
+    ///
+    /// Server-up guarantee (#3823 contract, moved here by #3886): this
+    /// function's very first action is a `list-sessions` probe
+    /// ([`Self::names_for_serial_allocation`]). On a host where tmux has
+    /// never run the socket does not exist yet and that probe is a hard
+    /// error, so #3823 made every caller responsible for calling
+    /// `ensure_server_up()` first. Two callers never got the memo — the
+    /// in-project launch routes `spawn_managed_on_main` and
+    /// `reserve_inproject_worktree`, which deliberately bypass
+    /// `create_with_id` to reserve a name BEFORE the worktree exists (see
+    /// this module's doc) — and #3886 was the resulting cold-host failure.
+    /// The guard therefore lives HERE now, adjacent to the probe it
+    /// protects, so a third bypassing caller cannot reintroduce it. It is a
+    /// single idempotent `tmux start-server` round-trip and a no-op when the
+    /// server is already up.
     /// Test: `manager_serial_reuses_decommissioned_gap`,
-    /// `resolve_session_name_rejects_extra_collision` in `naming_tests.rs`.
+    /// `resolve_session_name_rejects_extra_collision` in `naming_tests.rs`;
+    /// the cold-host guarantee in `server_up_tests.rs`
+    /// (`resolve_session_name_ensures_server_up_before_listing_sessions`,
+    /// `resolve_session_name_succeeds_on_a_cold_tmux_host`).
     pub(crate) async fn resolve_session_name(
         &self,
         name_hint: Option<&str>,
@@ -84,6 +102,10 @@ impl SessionManager {
         cwd: &Path,
         extra_collision: impl Fn(&str) -> bool,
     ) -> Result<String, ManagedError> {
+        // #3886: guard the `list-sessions` probe below, not each caller —
+        // the in-project launch routes bypass `create_with_id`'s guard.
+        self.tmux.ensure_server_up()?;
+
         let mut existing_names = self.names_for_serial_allocation().await?;
         let leaf_hint = name_hint.map(|h| crate::core::names::leaf_slug_from_dir(Path::new(h)));
 
@@ -221,10 +243,10 @@ impl SessionManager {
         candidate: &str,
         exclude_id: Option<&ManagedSessionId>,
     ) -> Result<String, ManagedError> {
-        let live_names = self
-            .tmux
-            .list_sessions()
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        // #3886: propagate, never re-wrap — `list_sessions` already returns a
+        // `ManagedError`, so `TmuxUnavailable(e.to_string())` doubled its own
+        // `tmux error:` prefix.
+        let live_names = self.tmux.list_sessions()?;
         let records = self.list().await;
         let taken = Self::taken_name_set(&live_names, &records, exclude_id);
         Ok(Self::dedupe_name_against(candidate, &taken))

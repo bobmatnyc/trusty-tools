@@ -290,9 +290,11 @@ pub fn record_write(
 /// entry and this is called from the session-launch write path: an
 /// unconditional sweep would put thousands of `stat` calls on every launch to
 /// reclaim bytes nobody is short of.
-/// What: when the map exceeds [`PRUNE_THRESHOLD`], retains only entries whose
-/// path still exists. The entry just inserted always survives — its file was
-/// written moments earlier.
+/// What: when the map exceeds [`PRUNE_THRESHOLD`], drops entries whose path is
+/// confirmed gone and retains everything else — including an entry whose path
+/// could not be probed, since dropping an uncertain claim risks misattributing
+/// a later `.mcp.json` at the same path (#5551). The entry just inserted
+/// always survives — its file was written moments earlier.
 /// Test: `record_prunes_vanished_entries_above_the_threshold`,
 /// `record_keeps_every_entry_below_the_threshold`.
 fn prune_vanished(ledger: &mut McpProvenanceLedger) {

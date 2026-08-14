@@ -1,14 +1,31 @@
 # Environment Variables Reference
 
+## LLM & Model Selection
+
 | Variable | Required by | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | `trusty-search` `/chat`, `trusty-common` chat helpers, `trusty-analyze` deep pass (OpenRouter path) | LLM chat via OpenRouter. Pass as argument to library helpers; never read from env inside library crates. Required for `POST /analyze/deep` unless a `bedrock/<model-id>` model is selected. |
+| `OPENROUTER_API_KEY` | `trusty-search` `/chat`, `trusty-common` chat helpers, `trusty-analyze` deep pass (OpenRouter path), **`trusty-review report`**, **`tga audit`** | LLM chat via OpenRouter. Pass as argument to library helpers; never read from env inside library crates. Required for `POST /analyze/deep` unless a `bedrock/<model-id>` model is selected. **Required — not optional — for `trusty-review report` and therefore for `tga audit`, which renders through it (#5454).** Both check it before doing any work and fail with a message naming this variable; `tga audit` checks it before stage 1 so a multi-minute sweep is never spent on a run that cannot finish. `trusty-review` reads it via `trusty_common::env_vars::ENV_OPENROUTER_API_KEY` into `ReviewConfig::openrouter_api_key`. A reviewer role configured for Bedrock or Fireworks is not preflighted and fails at provider construction instead. |
 | `TRUSTY_LLM_MODEL` | `trusty-analyze` deep pass | LLM model id for the deep-analysis narrative pass. Default: `openai/gpt-4o-mini` (OpenRouter). Set to `bedrock/<bedrock-model-id>` (e.g. `bedrock/us.anthropic.claude-sonnet-4-6`) to route through AWS Bedrock instead of OpenRouter. The `bedrock/` prefix selects the Bedrock provider; anything else routes to OpenRouter. Claude Sonnet 4.6 uses the short form without date stamp or `-v1:0` suffix. |
 | `TRUSTY_MANAGER_MODEL` | `trusty-mpm` L3 `tm manager` digest/chat (DOC-36 §3.3) | LLM model slug for the portfolio-manager digest (`GET /api/v1/manager/digest`) and chat (`POST /api/v1/manager/chat`) calls. Resolution precedence: `TRUSTY_MANAGER_MODEL` > `TRUSTY_LLM_MODEL` > `openai/gpt-4o-mini`. The slug is routed through the shared `trusty_common::inference` two-stage provider resolver (an explicit `<provider>/…` prefix selects a family when its credential resolves, else falls back to OpenRouter). When no provider credential resolves, `/digest` degrades to a clearly-marked deterministic fallback (503) and `/chat` returns a typed 503 — never a panic. |
+
+## AWS / Bedrock Credentials
+
+| Variable | Required by | Purpose |
+|---|---|---|
 | `TRUSTY_AWS_REGION` | `trusty-analyze` (Bedrock deep pass) | AWS region for Bedrock `Converse` calls. Takes priority over `AWS_REGION`. Default: `us-east-1`. |
 | `AWS_REGION` | `trusty-analyze` (Bedrock deep pass) | Fallback AWS region for Bedrock calls. Overridden by `TRUSTY_AWS_REGION`. |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | `trusty-analyze` (Bedrock deep pass) | Standard AWS credentials for Bedrock access. The full AWS credential chain (env vars, `~/.aws/credentials` profiles, IAM roles, SSO) is supported. No API key is needed when using a `bedrock/` model. |
+
+## Logging
+
+| Variable | Required by | Purpose |
+|---|---|---|
 | `RUST_LOG` | all daemons | Tracing filter, e.g. `RUST_LOG=debug` or `RUST_LOG=trusty_search=debug,warn`. |
+
+## trusty-search — Indexing, Memory & GPU
+
+| Variable | Required by | Purpose |
+|---|---|---|
 | `TRUSTY_MEMORY_LIMIT_MB` | `trusty-search` | Soft RSS ceiling for indexing pipeline. Auto-tuned from system RAM; override only when needed. |
 | `TRUSTY_MAX_CHUNKS` | `trusty-search` | Hard cap on chunks per index. Auto-tuned; rarely set manually. |
 | `TRUSTY_MAX_BATCH_SIZE` | `trusty-search` | ONNX embedding batch size. Auto-tuned; set if OOM during reindex. |
@@ -18,11 +35,27 @@
 | `TRUSTY_GPU_MEM_LIMIT_MB` | `trusty-search` / `trusty-embedderd` (CUDA EP, issue #600) | CUDA `gpu_mem_limit` in megabytes (scaled by 1024²). Used only when `TRUSTY_GPU_MEM_LIMIT_BYTES` is unset/invalid. E.g. `6144` for an 8 GB card. |
 | `ORT_DYLIB_PATH` | `trusty-search` (CUDA, glibc < 2.38) | Path to `libonnxruntime.so` on hosts with glibc < 2.38 and CUDA builds. Not used by `trusty-analyze` — #5067 removed ONNX Runtime from that crate along with its unused neural embedder. |
 | `SKIP_UI_BUILD` | `trusty-search` `build.rs` | Set to `1` to skip the Svelte UI build step (CI publish flows). |
-| `TGA_AI_MARKERS` | `tga collect`, `tga backfill ai-detection-commits`, `tga audit` ([#5414](https://github.com/bobmatnyc/trusty-tools/issues/5414)) | Path to a YAML file of operator-supplied agentic markers, appended to the shipped set in `collect::ai_markers::BUILTIN`. Lets a target org's house footer be detected without a code change or a tga release. Unset (or empty) falls back to `~/.config/tga/ai-markers.yaml`; a leading `~` is expanded. Each entry is `tool` (label written to `commits.ai_tool`), `mode` (`full_agentic` or `ide_assisted`), `scope` (`trailer`, `message`, or `email`), and `pattern` (a `regex` crate expression). Operator markers are appended, never interleaved, so they can only classify commits the shipped set left unmarked — they never relabel one it already catches. A file that cannot be read, parsed, or compiled is rejected **whole**, logged at `warn!`, and named in `detection_disclosure()`; the run continues on the builtin markers rather than failing. Unknown keys and unknown `scope`/`mode` spellings are errors, not silently skipped entries. |
 | `TRUSTY_NO_KG` | `trusty-search` daemon | Machine-wide default for `skip_kg`. When set to `1`, `true`, or `yes`, every new index created via `POST /indexes` (or `trusty-search index`) has `skip_kg=true` applied automatically unless the caller explicitly sets `skip_kg: false`. Useful for CI machines or resource-constrained hosts where KG is never needed. |
 | `TRUSTY_SHUTDOWN_FLUSH_TIMEOUT_SECS` | `trusty-search` daemon (issues #874, #2922) | Explicit override for the graceful-shutdown per-index HNSW/corpus flush deadline, in seconds. When unset (the default), each index's deadline is instead scaled from its own on-disk HNSW snapshot size (`30s` floor + `1s` per 20 MB, capped at 20 minutes) so a multi-hundred-MB index gets a workable budget instead of the old flat `10s` — which was short enough to time out mid-write on large indexes before atomic tmp+rename hardening landed. Set this only to force an exact value (e.g. a constrained CI/test environment); any positive integer wins outright over size-based scaling for every index. `0` or unset falls back to size scaling. |
 | `TRUSTY_SHUTDOWN_FLUSH_CONCURRENCY` | `trusty-search` daemon (issue #2922) | Max number of indexes flushed concurrently during graceful shutdown. Default `4`. Previously all indexes flushed strictly sequentially, so total shutdown time was `N × per-index timeout`; running a bounded number in parallel keeps a fleet of small/fast indexes from queuing behind one large one while still bounding peak concurrent disk I/O. Must be a positive integer; `0` or unparseable falls back to the default. |
+
+## trusty-git-analytics (tga)
+
+| Variable | Required by | Purpose |
+|---|---|---|
+| `TGA_AI_MARKERS` | `tga collect`, `tga backfill ai-detection-commits`, `tga audit` ([#5414](https://github.com/bobmatnyc/trusty-tools/issues/5414)) | Path to a YAML file of operator-supplied agentic markers, appended to the shipped set in `collect::ai_markers::BUILTIN`. Lets a target org's house footer be detected without a code change or a tga release. Unset (or empty) falls back to `~/.config/tga/ai-markers.yaml`; a leading `~` is expanded. Each entry is `tool` (label written to `commits.ai_tool`), `mode` (`full_agentic` or `ide_assisted`), `scope` (`trailer`, `message`, or `email`), and `pattern` (a `regex` crate expression). Operator markers are appended, never interleaved, so they can only classify commits the shipped set left unmarked — they never relabel one it already catches. A file that cannot be read, parsed, or compiled is rejected **whole**, logged at `warn!`, and named in `detection_disclosure()`; the run continues on the builtin markers rather than failing. Unknown keys and unknown `scope`/`mode` spellings are errors, not silently skipped entries. |
+| `TGA_DB` | `tga::profile` contributor profiling ([#5463](https://github.com/bobmatnyc/trusty-tools/issues/5463)) | Path to the org-wide tga database that `profile::selector::resolve_db_path` reads. Profiling spans every repository a contributor touched, which is not necessarily the per-config database a given `tga collect` run writes — hence its own override rather than reusing the `database:` config field. Precedence: an explicit path argument, then this variable, then `<data-dir>/tga/tga.db` (`~/Library/Application Support/tga/tga.db` on macOS, `~/.local/share/tga/tga.db` on Linux). A leading `~` is expanded; a blank or whitespace-only value is treated as unset and falls through to the convention default rather than resolving to an empty path. |
+
+## trusty-memory
+
+| Variable | Required by | Purpose |
+|---|---|---|
 | `TRUSTY_MEMORY_PALACE` | `trusty-memory` (issue #1217) | Override for the **default** palace ID derived from project identity. When set to a non-empty value it is slugified and used verbatim as the default palace, beating every derivation source. Precedence for the default palace: (1) `TRUSTY_MEMORY_PALACE`; (2) a committed `.trusty-tools/trusty-memory.yaml` pin file (rename-stable, keeps existing palaces from being orphaned); (3) the git `owner/repo` slug from `remote.origin.url` (`bobmatnyc/trusty-tools` → `bobmatnyc-trusty-tools`); (4) the `parent/dir` slug of the project root (`Projects/trusty-tools` → `projects-trusty-tools`). Per-command `--palace` flags still take precedence over the default at their call sites. |
+
+## trusty-mpm / tm CLI
+
+| Variable | Required by | Purpose |
+|---|---|---|
 | `TRUSTY_MPM_ORPHAN_GC` | `trusty-mpm` daemon (issue #1458, epic #1452) | Toggle the orphan-GC that reaps leaked, untracked, idle managed (`tm-`/`tmpm-`/`trusty-mpm-`, issue #1955) tmux sessions. **Default ON**; set to `0`, `false`, `off`, or `no` (case-insensitive) to disable entirely. The GC is conservative and fail-closed: it only reaps a session that carries a managed prefix, is absent from BOTH the in-memory `DaemonState` registry and the `SessionManager` store, AND is genuinely idle (pane command is a bare shell with no live agent child), and only after the session has been observed orphaned on **two consecutive** sweeps (debounce). An untracked-but-active managed session is logged at `warn!` and KEPT, never killed. |
 | `TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS` | `trusty-mpm` daemon (issue #1458) | Override the orphan-GC sweep interval in seconds. Default `60`. Must be a positive integer; `0`, negative, or unparsable values fall back to the default. Because the debounce is expressed in passes, this interval also sets the effective grace window — a freshly-appeared orphan survives at least one full interval before it can be reaped. |
 | `TRUSTY_MPM_AUTO_RESUME` | `trusty-mpm` daemon | When `1`/`true`, the boot-time session-manager reconcile auto-resumes every `Stopped` session whose tmux is gone. Default off. |

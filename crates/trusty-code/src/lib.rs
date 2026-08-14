@@ -642,6 +642,11 @@ pub(crate) mod test_support {
     }
 }
 
+// #3036, #3195: keeps every spawned `tcode` child hermetic against the
+// developer's live trusty-search daemon.
+#[cfg(test)]
+mod daemon_isolation_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -54,7 +54,15 @@ impl CorpusStore {
     /// `--force` staging `index.redb.tmp` alike (`open_fresh` delegates here).
     /// The effective cache size is logged at `info` so operators can confirm
     /// the resolved value at daemon startup.
-    /// Test: `roundtrip` and `missing_db_is_empty` both exercise `open`.
+    ///
+    /// Errors: a stale redb-2.x file is recovered in place and does NOT error
+    /// (#702), but a genuinely corrupt one returns
+    /// [`crate::core::corpus_recovery::CorpusCorrupted`] after moving the
+    /// damaged bytes aside (#4227) — callers must not treat that as "no corpus
+    /// yet" and carry on.
+    /// Test: `roundtrip` and `missing_db_is_empty` exercise the success path;
+    /// `corpus_recovery::tests::corruption_returns_typed_error_after_backing_the_file_aside`
+    /// covers the failure path.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -69,6 +77,9 @@ impl CorpusStore {
         );
         // Issue #702: recovery-aware open — a stale redb-2.x `index.redb` is
         // moved aside and replaced with a fresh empty corpus (warm-boot reindex).
+        // #4227: a GENUINELY CORRUPT file is moved aside but NOT replaced — it
+        // errors instead, so the loader quarantines the index rather than
+        // serving a healthy-looking empty corpus a watcher can rebuild over.
         let db = open_corpus_db_or_recreate(path, cache_bytes)?;
         // Materialize both tables in a committed write txn so later read-only
         // transactions can `open_table` them even on a brand-new database.

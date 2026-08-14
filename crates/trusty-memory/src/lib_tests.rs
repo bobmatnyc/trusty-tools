@@ -99,8 +99,9 @@ async fn tools_list_returns_all_tools() {
     // ADR-0027 T6 (#4805) adds `room_list`, `room_create`, `room_rename`;
     // ADR-0027 T9 (#4809) adds `wing_list`, `wing_create`, `wing_rename`;
     // #4906 adds `palace_reembed`; #5005 adds `palace_unalias`;
-    // #4776 adds `kg_list_subjects`.
-    assert_eq!(tools.len(), 46);
+    // #4776 adds `kg_list_subjects`; `kg_retract_triple` adds the inverse of
+    // `kg_assert`.
+    assert_eq!(tools.len(), 47);
 }
 
 #[tokio::test]
@@ -465,6 +466,207 @@ async fn with_writer_intent_panics_on_hydrated_registry() {
     // Calling the builder on a hydrated registry must trip the debug_assert!
     // invariant guard rather than silently dropping the live handle.
     let _ = state.with_writer_intent();
+}
+
+/// A registry root holding one palace whose vector store is in an
+/// unopenable on-disk format.
+///
+/// Why: the two tests below need a condition where `OpenIntent` changes the
+/// OUTCOME of an open, not merely its concurrency behaviour — that is the fork
+/// #4911 introduced (`Writer` recovers per #702, `ReadOnlyClient` refuses).
+/// Lock contention cannot serve here: `KgStoreRedb` keeps an in-process cache
+/// keyed by canonical path, so a second open inside one test binary shares the
+/// first handle's `OpenMode` rather than contending with it.
+/// What: writes `palace.json` and a 4096-byte garbage `index.usearch.redb` —
+/// the same fixture
+/// `read_only_intent_refuses_incompatible_format_and_leaves_store_intact` uses,
+/// which that test proves really does trip `is_incompatible_format`. No store
+/// is opened here, so nothing is left in the redb cache to perturb the
+/// hydration under test. Returns `(tempdir guard, registry root, palace id,
+/// garbage store path)`.
+/// Test: `load_palaces_from_disk_honours_registry_open_intent` and
+/// `load_palaces_from_disk_records_an_unopenable_palace`.
+fn incompatible_palace_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    trusty_common::memory_core::PalaceId,
+    std::path::PathBuf,
+) {
+    use trusty_common::memory_core::store::PalaceStore;
+    use trusty_common::memory_core::{Palace, PalaceId};
+
+    const GARBAGE: [u8; 4096] = [0xABu8; 4096];
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let pid = PalaceId::new("stale-format");
+    let data_dir = root.join(pid.as_str());
+    std::fs::create_dir_all(&data_dir).expect("mkdir palace data dir");
+
+    PalaceStore::save_palace(&Palace {
+        id: pid.clone(),
+        name: "stale-format".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: data_dir.clone(),
+    })
+    .expect("persist palace metadata");
+
+    let store_path = data_dir.join("index.usearch.redb");
+    std::fs::write(&store_path, GARBAGE).expect("write incompatible-format store");
+
+    (tmp, root, pid, store_path)
+}
+
+/// Why (issue #4911): `with_writer_intent()` is what makes the #1487 guarantee
+/// real, but startup hydration is the path that opens every palace a restarting
+/// daemon already has on disk — the common case, and the one `main.rs` claims
+/// the guarantee for. While `load_palaces_from_disk` called the zero-arg
+/// `PalaceHandle::open` (hardcoded `ReadOnlyClient`), that claim was false: the
+/// daemon's registry said `Writer` and hydration opened as a read-only client
+/// anyway. The visible consequence is the #702 recovery — a daemon restarting
+/// onto a store written by an older redb IS the writer that owns that file and
+/// must rename it aside and rebuild, but hydration refused every such palace
+/// instead, so the recovery never ran on the path that needs it.
+/// What: builds the fixture twice. Phase 1 hydrates a default
+/// (`ReadOnlyClient`) `AppState` and asserts it refuses and leaves the bytes
+/// untouched (#4911's own contract, unchanged). Phase 2 hydrates a
+/// `with_writer_intent()` `AppState` over an identical fixture and asserts the
+/// palace LOADS and the stale bytes were renamed aside. Phase 2 is what fails
+/// while hydration ignores `registry.open_intent()`.
+/// Test: this test itself.
+#[tokio::test]
+async fn load_palaces_from_disk_honours_registry_open_intent() {
+    use trusty_common::memory_core::store::redb_open::INCOMPATIBLE_SUFFIX;
+    use trusty_common::memory_core::store::OpenIntent;
+
+    // Phase 1 — a read-only client must refuse and leave the store where it is.
+    let (_ro_tmp, ro_root, ro_pid, ro_store) = incompatible_palace_fixture();
+    let before = std::fs::read(&ro_store).expect("read fixture bytes");
+
+    let reader_state = AppState::new(ro_root);
+    assert_eq!(
+        reader_state.registry.open_intent(),
+        OpenIntent::ReadOnlyClient,
+        "precondition: a plain AppState is a read-only client"
+    );
+    let reader_count = reader_state
+        .load_palaces_from_disk()
+        .await
+        .expect("load_palaces_from_disk (read-only client)");
+    assert_eq!(
+        reader_count, 0,
+        "a read-only client must refuse an incompatible-format palace, not recover it"
+    );
+    assert!(
+        reader_state.registry.get(&ro_pid).is_none(),
+        "a refused palace must not be registered"
+    );
+    assert_eq!(
+        before,
+        std::fs::read(&ro_store).expect("re-read fixture bytes"),
+        "the store must be byte-identical after a refused read-only hydration"
+    );
+
+    // Phase 2 — the daemon's writer registry OWNS the file and must recover it.
+    let (_w_tmp, w_root, w_pid, w_store) = incompatible_palace_fixture();
+    let writer_state = AppState::new(w_root).with_writer_intent();
+    assert_eq!(
+        writer_state.registry.open_intent(),
+        OpenIntent::Writer,
+        "precondition: the daemon AppState is a writer"
+    );
+    let writer_count = writer_state
+        .load_palaces_from_disk()
+        .await
+        .expect("load_palaces_from_disk (writer)");
+
+    assert_eq!(
+        writer_count, 1,
+        "writer-intent hydration must run the #702 recovery and load the palace; \
+         a count of 0 means load_palaces_from_disk ignored registry.open_intent() \
+         and opened as a ReadOnlyClient"
+    );
+    assert!(
+        writer_state.registry.get(&w_pid).is_some(),
+        "the recovered palace must be registered"
+    );
+    let backup = w_store.with_file_name(format!(
+        "{}{INCOMPATIBLE_SUFFIX}",
+        w_store
+            .file_name()
+            .expect("fixture store has a file name")
+            .to_string_lossy()
+    ));
+    assert!(
+        backup.exists(),
+        "the writer must rename the stale store aside to {}",
+        backup.display()
+    );
+}
+
+/// Why (issue #4911): trading data destruction for data invisibility is not a
+/// fix. `load_palaces_from_disk` skips a palace it cannot open, leaving it
+/// absent from the registry and indistinguishable from one that never existed.
+/// Recording the skip only in `PalaceRegistry::open` would keep that record
+/// empty in every shipped binary — no production caller invokes it; the daemon
+/// hydrates through this method.
+/// What: hydrates a default `AppState` over a root holding one
+/// incompatible-format palace and one healthy palace, then asserts the skipped
+/// one is readable back out of the registry with a reason and the healthy one
+/// is not listed.
+/// Test: this test itself.
+#[tokio::test]
+async fn load_palaces_from_disk_records_an_unopenable_palace() {
+    use trusty_common::memory_core::store::PalaceStore;
+    use trusty_common::memory_core::{Palace, PalaceId};
+
+    let (_tmp, root, pid, _store) = incompatible_palace_fixture();
+
+    // A second, healthy palace alongside it: one bad palace must not hide a
+    // good one, and a good one must never be reported unopenable.
+    let good = PalaceId::new("healthy");
+    let good_dir = root.join(good.as_str());
+    std::fs::create_dir_all(&good_dir).expect("mkdir healthy palace dir");
+    PalaceStore::save_palace(&Palace {
+        id: good.clone(),
+        name: "healthy".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: good_dir,
+    })
+    .expect("persist healthy palace metadata");
+
+    let state = AppState::new(root);
+    let count = state
+        .load_palaces_from_disk()
+        .await
+        .expect("load_palaces_from_disk");
+    assert_eq!(count, 1, "only the healthy palace hydrates");
+
+    let reason = state
+        .registry
+        .unopenable_reason(&pid)
+        .expect("a palace present on disk but unopenable must stay observable");
+    assert!(
+        reason.contains("incompatible") || reason.contains("open vector store"),
+        "the recorded reason must explain the refusal; got: {reason}"
+    );
+    assert!(
+        state.registry.unopenable_reason(&good).is_none(),
+        "a palace that hydrated must never be reported unopenable"
+    );
+    let listed: Vec<String> = state
+        .registry
+        .unopenable()
+        .into_iter()
+        .map(|(id, _)| id.0)
+        .collect();
+    assert_eq!(
+        listed,
+        vec!["stale-format".to_string()],
+        "exactly the unopenable palace is listed"
+    );
 }
 
 /// Why: existing installs (and the legacy standalone `trusty-memory` repo)

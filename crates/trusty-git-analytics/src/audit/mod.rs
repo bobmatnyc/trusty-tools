@@ -21,6 +21,7 @@
 //! running it third would render a mostly empty report. The executed order is
 //! therefore data-flow order — see [`SweepStage`].
 
+mod analyze;
 mod gaps;
 mod review;
 mod stage;
@@ -29,6 +30,17 @@ mod sweep;
 #[cfg(test)]
 mod tests;
 
+/// #5670: the `--include-ignored` arm — the same guard against the real
+/// `trusty-analyze` binary rather than a stub. Unix-only: it drives the binary
+/// through a `#!/bin/sh` wrapper.
+#[cfg(all(test, unix))]
+mod real_binary_tests;
+
+pub use analyze::{
+    ensure_analyze_daemon, ensure_analyze_daemon_with, AnalyzeDaemonUnavailable, AnalyzeGuard,
+    DEFAULT_ANALYZE_BIN, DEFAULT_ANALYZE_PORT, DEFAULT_ANALYZE_URL, ENV_ANALYZE_BIN,
+    ENV_ANALYZE_URL,
+};
 /// The excerpt cap, visible to `report::dd_manifest_tests` so its
 /// boundary-straddle tests position a credential against the real value instead
 /// of a copy that can drift away from it (#5308 review).
@@ -36,8 +48,10 @@ mod tests;
 pub(crate) use gaps::MAX_REASON_CHARS;
 pub use gaps::{sweep_gap_lines, DATA_HANDLING_NOTE};
 pub use review::{
-    artifact_paths, resolve_review_binary, run_review_report, ReviewRun, ReviewRunError,
-    DEFAULT_REVIEW_BIN, ENV_REVIEW_BIN,
+    artifact_paths, require_inference_credential, require_rendered_report_carries_synthesis,
+    require_review_supports_required_inference, resolve_review_binary, run_review_report,
+    MissingInferenceCredential, ReviewBinaryTooOld, ReviewRun, ReviewRunError, UnverifiedReport,
+    DEFAULT_REVIEW_BIN, ENV_INFERENCE_CREDENTIAL, ENV_REVIEW_BIN, MIN_REVIEW_VERSION,
 };
 pub use stage::{AuditSweepStats, StageOutcome, StageStatus, StaleFetch, SweepStage};
 pub use sweep::{run_full_sweep, SweepOptions};

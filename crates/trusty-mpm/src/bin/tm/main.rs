@@ -123,6 +123,11 @@ mod tests_manager;
 #[path = "tests_project_trust_tests.rs"]
 mod tests_project_trust;
 
+// #5544: the mechanical guard that keeps `$HOME` writers out of this target.
+#[cfg(test)]
+#[path = "env_isolation_tests.rs"]
+mod env_isolation_tests;
+
 /// Lazy-loaded help configuration for "did you mean?" suggestions (issue #216).
 ///
 /// Why: the YAML help bundle is checked in as a string literal; loading it
@@ -560,6 +565,7 @@ async fn main() -> anyhow::Result<()> {
             source_id,
             current,
             all,
+            attached,
             root,
         }) => {
             if projects {
@@ -574,7 +580,7 @@ async fn main() -> anyhow::Result<()> {
                 // #3483 scope: `tm ls <term>` matches every visible column.
                 let filter = term.map(commands::session_picker::SessionFilter::visible);
                 commands::session_ls_connector::run_ls_connector(
-                    &client, &url, json, source_id, current, all, sort, filter,
+                    &client, &url, json, source_id, current, all, attached, sort, filter,
                 )
                 .await
             }

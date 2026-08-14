@@ -1,19 +1,22 @@
-//! Opt-in LLM synthesis of report narrative sections (M2, epic #2312 / #2314).
+//! Required LLM synthesis of report narrative sections (M2, epic #2312 / #2314;
+//! made mandatory by #5454).
 //!
 //! Why: M1 fills the report deterministically and leaves the narrative fields
 //! (executive summary, top-risk rationale, RED/AMBER finding prose) as honesty
-//! markers.  M2 lets an LLM write those — and ONLY those — sections, grounded
-//! strictly in the deterministic data.  The posture mirrors the pipeline's
-//! `Verdict::Unknown` convention: any provider error, timeout, truncation, or
-//! unparseable response fails CLOSED to the deterministic M1 output, and a
-//! fabricated figure is rejected field-by-field by a numeric guardrail.  Greens
-//! are excluded structurally (see [`synthesize_prompt`]), never merely by
-//! instruction.
+//! markers.  Synthesis lets an LLM write those — and ONLY those — sections,
+//! grounded strictly in the deterministic data.  #5454 made it required: a run
+//! that cannot produce verified prose now FAILS instead of quietly shipping a
+//! narrative-free report, because a reader cannot tell "the model declined" from
+//! "there was nothing to say".  A fabricated figure is still rejected
+//! field-by-field by the numeric guardrail — that is a correctness property, not
+//! a mode, and dropping one field leaves the deterministic composition (#5374) to
+//! fill it.  Greens are excluded structurally (see [`synthesize_prompt`]), never
+//! merely by instruction.
 //! What: [`Synthesizer`] holds an [`LlmProvider`] and calls it once; [`Synthesis`]
-//! is the injected result recorded on the [`ReportModel`] (its JSON twin) and read
-//! by the reporter.  [`SynthesisStatus`] carries the fail-closed reason.
+//! is the verified result recorded on the [`ReportModel`] (its JSON twin) and read
+//! by the reporter.  [`SynthesisError`] names why a pass produced nothing usable.
 //! Test: `synthesize_tests.rs` — happy-path injection, malformed-JSON and
-//! provider-error fail-closed, numeric-guardrail rejection, greens-never-sent.
+//! provider-error hard failure, numeric-guardrail rejection, greens-never-sent.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,20 +38,22 @@ const REJECTED_NOTE: &str = "synthesis: rejected (unverified figure)";
 
 // ─── Injected result types ──────────────────────────────────────────────────
 
-/// Outcome of a synthesis attempt, recorded on the [`ReportModel`].
+/// Verified narrative produced by one synthesis pass, recorded on the
+/// [`ReportModel`].
 ///
-/// Why: the reporter injects surviving prose into the narrative placeholders and
-/// renders a visible status note; serialising this onto the model keeps the JSON
-/// twin a faithful record of what synthesis did (and did not) produce.
-/// What: the overall [`SynthesisStatus`], the verified executive summary (absent
-/// when unavailable/rejected), verified top-risk rows, verified per-finding
-/// prose, and human-readable guardrail notes.
+/// Why: the reporter injects this prose into the narrative placeholders;
+/// serialising it onto the model keeps the JSON twin a faithful record of what
+/// synthesis produced.  #5454: a `Synthesis` value now exists only when a pass
+/// SUCCEEDED — the former `Unavailable` status is gone, so the type can no longer
+/// represent "we tried and shipped the report anyway".  A failed pass is a
+/// [`SynthesisError`] and no report is written.
+/// What: the verified executive summary (absent only when the numeric guardrail
+/// rejected it), verified top-risk rows, verified per-finding prose, and
+/// human-readable guardrail notes.
 /// Test: `synthesize_tests.rs::synthesize_happy_path_injects`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Synthesis {
-    /// Overall status of the synthesis attempt.
-    pub status: SynthesisStatus,
-    /// Verified executive-summary prose, or `None` when unavailable/rejected.
+    /// Verified executive-summary prose, or `None` when the guardrail rejected it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executive_summary: Option<String>,
     /// Verified top-risk rows (rejected rows are dropped).
@@ -62,26 +67,50 @@ pub struct Synthesis {
     pub notes: Vec<String>,
 }
 
-/// Overall status of a synthesis attempt.
+/// Why one synthesis pass produced no verified narrative.
 ///
-/// Why: the fail-closed contract needs a single value that says whether the
-/// narrative is trustworthy and, if not, why — surfaced verbatim in the report.
-/// What: `Available` when at least the executive summary or one row/finding
-/// survived; `Unavailable(reason)` for provider/parse/timeout failures.
-/// Test: `synthesize_tests.rs::synthesize_provider_error_fails_closed`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "state", content = "reason", rename_all = "snake_case")]
-pub enum SynthesisStatus {
-    /// Synthesis produced usable, verified prose.
-    Available,
-    /// Synthesis failed closed; the deterministic output stands.  Carries reason.
-    Unavailable(String),
-}
+/// Why: #5454 made inference required, so each of these was previously a silent
+/// degrade to a deterministic-only report.  They are separated because the
+/// remedies differ: a credential or model-id mistake is fixed before re-running,
+/// while a timeout or rate limit is fixed by re-running the same command against
+/// the manifest that is already on disk.
+/// What: one variant per failure the pass can hit, after its single built-in
+/// concise retry has been spent.
+/// Test: `synthesize_tests.rs::{synthesize_provider_error_is_a_hard_error,
+/// synthesize_malformed_json_is_a_hard_error,
+/// synthesize_still_truncated_after_retry_is_a_hard_error,
+/// synthesize_timeout_is_a_hard_error, synthesize_rejects_unverified_figure}`.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SynthesisError {
+    /// The provider did not answer inside [`DEFAULT_SYNTHESIS_TIMEOUT`].
+    #[error("the LLM provider timed out")]
+    Timeout,
 
-impl Default for SynthesisStatus {
-    fn default() -> Self {
-        SynthesisStatus::Unavailable("not attempted".to_string())
-    }
+    /// The provider returned an error (transport, auth, rate limit, model id).
+    #[error("the LLM provider failed: {0}")]
+    Provider(String),
+
+    /// The response was not the requested JSON object, fenced or bare.
+    #[error("the LLM returned a response that is not the requested JSON object")]
+    Unparseable,
+
+    /// Truncated at the output-token ceiling, and the concise retry was too.
+    #[error(
+        "the LLM response was truncated at the output-token ceiling, and the concise retry was truncated as well"
+    )]
+    Truncated,
+
+    /// The deterministic model could not be serialised to build the guardrail's
+    /// numeric allow-set — a bug in this crate, never an operator's problem.
+    #[error("internal: the report model could not be serialised for the numeric guardrail: {0}")]
+    ModelNotSerialisable(String),
+
+    /// Every field cited a figure absent from the collected data.
+    #[error(
+        "every synthesized field cited a figure absent from the collected data and was rejected by the numeric guardrail"
+    )]
+    NoVerifiableContent,
 }
 
 /// One synthesized top-risk table row (rationale for the Top Risks table).
@@ -132,44 +161,19 @@ pub struct FindingProse {
 }
 
 impl Synthesis {
-    /// A fail-closed result carrying a reason and no prose.
-    ///
-    /// Why: every failure path returns the same shape so the reporter treats
-    /// them uniformly (deterministic output + a visible status note).
-    /// What: sets `status = Unavailable(reason)` and leaves all prose empty.
-    /// Test: `synthesize_tests.rs::synthesize_provider_error_fails_closed`.
-    pub fn unavailable(reason: impl Into<String>) -> Self {
-        Synthesis {
-            status: SynthesisStatus::Unavailable(reason.into()),
-            ..Default::default()
-        }
-    }
-
-    /// True when synthesis produced usable prose.
-    ///
-    /// Why: the reporter injects prose only when the attempt is `Available`.
-    /// What: matches `SynthesisStatus::Available`.
-    /// Test: exercised by `reporter_tests.rs` synthesis cases.
-    pub fn is_available(&self) -> bool {
-        matches!(self.status, SynthesisStatus::Available)
-    }
-
     /// The visible status note lines for the rendered report.
     ///
-    /// Why: the report must surface the synthesis outcome — an `available`
-    /// banner, an `unavailable (<reason>)` fail-closed banner, or the
-    /// per-field guardrail rejections — so a reader never mistakes deterministic
-    /// fallback for synthesized analysis.
-    /// What: first line is the overall status; subsequent lines are the notes.
-    /// Test: `reporter_tests.rs::reporter_appends_unavailable_note`.
+    /// Why: the report states which fields the numeric guardrail rejected, so a
+    /// reader can tell a section written by the model from one that fell back to
+    /// the deterministic composition (#5374).  #5454 removed the
+    /// `unavailable (<reason>)` banner: a report that reaches a reader always had
+    /// a successful synthesis pass behind it, so the only news left is the
+    /// per-field rejections.
+    /// What: a leading `synthesis: available` line, then one line per note.
+    /// Test: `synthesize_tests.rs::status_lines_render_banners`.
     pub fn status_lines(&self) -> Vec<String> {
         let mut lines = Vec::with_capacity(1 + self.notes.len());
-        match &self.status {
-            SynthesisStatus::Available => lines.push("synthesis: available".to_string()),
-            SynthesisStatus::Unavailable(reason) => {
-                lines.push(format!("synthesis: unavailable ({reason})"));
-            }
-        }
+        lines.push("synthesis: available".to_string());
         lines.extend(self.notes.iter().cloned());
         lines
     }
@@ -212,35 +216,42 @@ impl Synthesizer {
         self
     }
 
-    /// Run synthesis, returning a fail-closed [`Synthesis`].
+    /// Run synthesis, returning verified prose or the reason there is none.
     ///
     /// Why: the single entry point the CLI awaits; it NEVER fabricates and NEVER
-    /// partial-trusts a malformed response — on any failure it returns an
-    /// `Unavailable` result and the deterministic output stands.  A live-QA
-    /// acceptance run found that a large, real finding count could still hit the
-    /// output-token ceiling even with the #2357-follow-up compact digest and
-    /// bounded schema; a single cheap retry (mirroring the wave-3 batch
-    /// investigation's truncation retry) asks for a shorter response before
-    /// failing closed, rather than discarding the whole narrative on the first
-    /// truncation.
+    /// partial-trusts a malformed response.  A live-QA acceptance run found that a
+    /// large, real finding count could still hit the output-token ceiling even
+    /// with the #2357-follow-up compact digest and bounded schema; a single cheap
+    /// retry (mirroring the wave-3 batch investigation's truncation retry) asks for
+    /// a shorter response before giving up, rather than discarding the whole
+    /// narrative on the first truncation.  #5454 changed only what happens when
+    /// that retry is exhausted: the failure propagates instead of degrading the
+    /// report to deterministic-only.
     /// What: builds the numeric allow-set from the deterministic model, calls the
     /// provider under a timeout; on `finish_reason = length`/`max_tokens`, retries
     /// ONCE with `retry_concise = true` (a smaller `top_risks` cap + a shorter-
-    /// paragraph directive); a still-truncated retry (or any other failure) fails
-    /// closed.  A parsed response is passed through the numeric guardrail
-    /// field-by-field, dropping any field whose prose cites a figure absent from
-    /// the source.
+    /// paragraph directive).  A parsed response is passed through the numeric
+    /// guardrail field-by-field, dropping any field whose prose cites a figure
+    /// absent from the source.
+    ///
+    /// # Errors
+    ///
+    /// [`SynthesisError`] for a provider failure, a timeout, an unparseable or
+    /// still-truncated response, or a response every field of which the numeric
+    /// guardrail rejected.
+    ///
     /// Test: `synthesize_tests.rs::{synthesize_happy_path_injects,
-    /// synthesize_malformed_json_fails_closed, synthesize_provider_error_fails_closed,
-    /// synthesize_rejects_unverified_figure, synthesize_retry_recovers_from_truncation,
-    /// synthesize_still_truncated_after_retry_fails_closed}`.
-    pub async fn synthesize(&self, model: &ReportModel) -> Synthesis {
+    /// synthesize_malformed_json_is_a_hard_error,
+    /// synthesize_provider_error_is_a_hard_error, synthesize_rejects_unverified_figure,
+    /// synthesize_retry_recovers_from_truncation,
+    /// synthesize_still_truncated_after_retry_is_a_hard_error}`.
+    pub async fn synthesize(&self, model: &ReportModel) -> Result<Synthesis, SynthesisError> {
         // Ground truth for the guardrail comes from the DETERMINISTIC model only.
         let allowed = match serde_json::to_value(model) {
             Ok(v) => allowed_numbers(&v),
             Err(e) => {
                 warn!(error = %e, "synthesis: could not serialise model for guardrail");
-                return Synthesis::unavailable("internal: model not serialisable");
+                return Err(SynthesisError::ModelNotSerialisable(e.to_string()));
             }
         };
 
@@ -250,14 +261,15 @@ impl Synthesizer {
                 warn!("synthesis: response truncated — retrying once, concise");
                 match self.try_once(model, true).await {
                     Attempt::Ok(raw) => apply_guardrail(raw, &allowed),
+                    // #5454: the retry is unchanged; only its exhaustion is now fatal.
                     Attempt::Truncated => {
-                        warn!("synthesis: still truncated after retry — failing closed");
-                        Synthesis::unavailable("truncated response")
+                        warn!("synthesis: still truncated after retry");
+                        Err(SynthesisError::Truncated)
                     }
-                    Attempt::Failed(reason) => Synthesis::unavailable(reason),
+                    Attempt::Failed(e) => Err(e),
                 }
             }
-            Attempt::Failed(reason) => Synthesis::unavailable(reason),
+            Attempt::Failed(e) => Err(e),
         }
     }
 
@@ -266,12 +278,18 @@ impl Synthesizer {
         let req = build_synthesis_prompt(model, &self.model, retry_concise);
         let resp = match tokio::time::timeout(self.timeout, self.llm.complete(req)).await {
             Err(_) => {
-                warn!("synthesis: provider timed out — failing closed");
-                return Attempt::Failed("provider timeout".to_string());
+                warn!("synthesis: provider timed out");
+                return Attempt::Failed(SynthesisError::Timeout);
             }
             Ok(Err(e)) => {
-                warn!(error = %e, "synthesis: provider error — failing closed");
-                return Attempt::Failed(format!("provider error: {e}"));
+                warn!(error = %e, "synthesis: provider error");
+                // #5454: the provider's own text reaches an operator's terminal
+                // now that this is fatal, so it is scrubbed against the same
+                // needle set the report body uses before it is carried anywhere.
+                let secrets = crate::report::redact::report_secrets();
+                return Attempt::Failed(SynthesisError::Provider(
+                    trusty_common::credentials::scrub_secrets(&e.to_string(), &secrets),
+                ));
             }
             Ok(Ok(r)) => r,
         };
@@ -287,8 +305,8 @@ impl Synthesizer {
         let raw = match parse_raw(&resp.text) {
             Some(r) => r,
             None => {
-                warn!("synthesis: unparseable response — failing closed");
-                return Attempt::Failed("unparseable response".to_string());
+                warn!("synthesis: unparseable response");
+                return Attempt::Failed(SynthesisError::Unparseable);
             }
         };
 
@@ -308,7 +326,7 @@ enum Attempt {
     /// The response was truncated at the output-token ceiling.
     Truncated,
     /// A provider/timeout/parse error — not a truncation.
-    Failed(String),
+    Failed(SynthesisError),
 }
 
 // ─── Raw (pre-guardrail) parse types ────────────────────────────────────────
@@ -348,16 +366,26 @@ fn parse_raw(text: &str) -> Option<RawSynthesis> {
 
 /// Apply the numeric guardrail to the raw synthesis, field by field.
 ///
-/// Why: this is the fail-closed core — a field whose prose cites a figure not in
-/// the source is dropped (never repaired), so the deterministic honesty marker
-/// stands and a visible rejection note is recorded.
+/// Why: a field whose prose cites a figure not in the source is dropped (never
+/// repaired), so the deterministic composition (#5374) fills that placeholder and
+/// a visible rejection note is recorded.  Per-FIELD rejection stays a correctness
+/// property under #5454's required-inference rule; what changed is that a
+/// response with nothing left after the pass is an error rather than a
+/// deterministic-only report.
 /// What: verifies the executive summary and every risk row / finding against
 /// `allowed`; keeps only clean fields.  Findings must carry a RED/AMBER severity
-/// (defence-in-depth greens exclusion).  The result is `Available` iff at least
-/// one field survived, else `Unavailable("no verifiable content")`.
+/// (defence-in-depth greens exclusion).  `Ok` iff at least one field survived.
+///
+/// # Errors
+///
+/// [`SynthesisError::NoVerifiableContent`] when every field was rejected.
+///
 /// Test: `synthesize_tests.rs::{synthesize_rejects_unverified_figure,
 /// synthesize_happy_path_injects}`.
-fn apply_guardrail(raw: RawSynthesis, allowed: &std::collections::HashSet<String>) -> Synthesis {
+fn apply_guardrail(
+    raw: RawSynthesis,
+    allowed: &std::collections::HashSet<String>,
+) -> Result<Synthesis, SynthesisError> {
     let mut out = Synthesis::default();
 
     // Executive summary.
@@ -409,12 +437,10 @@ fn apply_guardrail(raw: RawSynthesis, allowed: &std::collections::HashSet<String
         }
     }
 
-    if out.executive_summary.is_some() || !out.top_risks.is_empty() || !out.findings.is_empty() {
-        out.status = SynthesisStatus::Available;
-    } else {
-        out.status = SynthesisStatus::Unavailable("no verifiable content".to_string());
+    if out.executive_summary.is_none() && out.top_risks.is_empty() && out.findings.is_empty() {
+        return Err(SynthesisError::NoVerifiableContent);
     }
-    out
+    Ok(out)
 }
 
 /// Verify every field of a group; returns the first offending token on failure.

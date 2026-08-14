@@ -1,6 +1,10 @@
 //! Handler for `trusty-search stop`.
 
 use super::daemon_utils::daemon_port_path;
+// #2936: one `pid_alive` for the crate. This file used to carry a byte-identical
+// private copy of `service::daemon::pid_alive`; adding a third caller in
+// `core::store::staging_reap` would have made that two copies to keep in step.
+use crate::service::daemon::pid_alive;
 use anyhow::{bail, Result};
 use colored::Colorize;
 use std::time::{Duration, Instant};
@@ -240,21 +244,6 @@ fn send_signal(_pid: u32, _sig: &str) -> std::io::Result<()> {
     Err(std::io::Error::other(
         "signals unsupported on this platform",
     ))
-}
-
-#[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
-        Ok(()) => true,
-        // EPERM means the process exists but we cannot signal it.
-        Err(nix::errno::Errno::EPERM) => true,
-        Err(_) => false,
-    }
-}
-
-#[cfg(not(unix))]
-fn pid_alive(_pid: u32) -> bool {
-    true
 }
 
 #[cfg(test)]

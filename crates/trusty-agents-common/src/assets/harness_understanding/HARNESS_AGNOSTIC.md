@@ -40,7 +40,7 @@ Different harnesses show different idle prompt shapes:
 |---------|------------|-------|
 | Claude Code | `> ` (bare `>` at start of line) | Single `>` alone on the line |
 | Shell | `$ ` or `# ` | Standard Unix shell prompts |
-| tcode | No pane prompt (event-driven) | Uses `__HARNESS_EVENT__` NDJSON events |
+| tcode | No pane prompt (event-driven) | Uses `__OMPM_EVENT__` NDJSON events |
 
 An idle prompt on the **last line** of the pane (or the last non-empty line)
 is the strongest signal that a harness is Idle and waiting for input.
@@ -52,8 +52,8 @@ When a harness executes tools, the pane shows structured patterns:
 - **Claude Code**: Tool calls appear as bracketed blocks with tool name and
   arguments, followed by a result block. The `✻` glyph often appears during
   tool execution. Example: `✻ Running bash...` or `✻ Reading file...`
-- **tcode**: Emits structured NDJSON event lines prefixed with `__HARNESS_EVENT__`.
-  Example: `__HARNESS_EVENT__ {"type":"tool_use","tool":"bash","input":{...}}`
+- **tcode**: Emits structured NDJSON event lines prefixed with `__OMPM_EVENT__`.
+  Example: `__OMPM_EVENT__ {"type":"tool_use","tool":"bash","input":{...}}`
   These lines are parseable as JSON after stripping the prefix.
 - **Shell**: Raw command output; no structured wrapper.
 

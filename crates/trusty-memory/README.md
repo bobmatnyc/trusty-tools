@@ -246,7 +246,7 @@ per-palace conversation store: turns are stored verbatim and bypass the
 `memory_remember` signal/noise and dedup gates.
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **46 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
+The MCP server registers **47 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -266,8 +266,9 @@ this table is generated from it, not maintained by hand.
 | `kg_assert` | `palace`, `subject`, `predicate`, `object`, `confidence?`, `provenance?` | Assert a fact in the temporal knowledge graph. |
 | `kg_bootstrap` | `palace?`, `project_path?` | Seed the knowledge graph from well-known project files (Cargo.toml, package.json, pyproject.toml, go.mod, CLAUDE.md, .git/config). |
 | `kg_gaps` | `palace?` | List knowledge gaps detected in the memory palace graph. |
-| `kg_list_subjects` | `palace`, `limit?`, `with_counts?` | List the subjects this palace's knowledge graph actually holds, alphabetically. |
+| `kg_list_subjects` | `palace`, `limit?`, `with_counts?` | List the subjects this palace's knowledge graph actually holds, ordered by subject. |
 | `kg_query` | `palace`, `subject` | Query active knowledge-graph triples for a subject. |
+| `kg_retract_triple` | `palace`, `subject`, `predicate`, `object` | Retract one fact from the temporal knowledge graph — the inverse of kg_assert. |
 | `list_prompt_facts` | — | List every active prompt-fact triple (aliases, conventions, facts, shorthands) across all palaces. |
 | `memory_forget` | `palace`, `drawer_id` | Delete a drawer from a palace by its UUID. |
 | `memory_list` | `palace`, `limit?`, `room?`, `tag?`, `wing?` | List drawers in a palace, optionally filtered by wing, room type, or tag. |
@@ -643,8 +644,11 @@ Auto-KG extraction skips drawers tagged `cross-project-qa`, `test`, or
 `memory_forget` cascade-delete their derived triples automatically.
 
 The REST endpoint `DELETE /api/v1/palaces/{id}/kg/triples/{triple_id}` lets
-you surgically remove a single active triple; `triple_id` is the base64url
-encoding of `subject + "\0" + predicate`.
+you remove a single active triple; `triple_id` is the base64url encoding of
+`subject + "\0" + predicate + "\0" + object`. Every object at a pair is a
+separate row, so the object is what makes the id name one of them — an id
+carrying only `subject + "\0" + predicate` is rejected with `400`, because
+that form used to close every object at the pair.
 
 ### From kuzu-memory data (issue #277)
 

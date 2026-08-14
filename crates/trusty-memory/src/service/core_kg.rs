@@ -7,6 +7,7 @@
 //! verbatim from the original single impl.
 //! Test: covered by the corresponding `web::tests` / `service::tests`.
 
+use crate::kg_write::{CachePolicy, KgWriteError};
 use crate::{ActivityFilter, ActivitySource, DaemonEvent};
 use std::sync::Arc;
 use trusty_common::memory_core::dream::{DreamConfig, Dreamer, PersistedDreamStats};
@@ -62,24 +63,23 @@ impl MemoryService {
 
     /// Assert a triple in the KG.
     ///
-    /// #4888: this is the HTTP counterpart of the `kg_assert` MCP tool
-    /// (`POST /api/v1/palaces/{id}/kg`) and accepts an arbitrary predicate, so
-    /// it can write a hot predicate and must carry the same Tier S gate. It is
-    /// not a hypothetical path — `trusty-mpm`'s provisioner seeds its identity
-    /// fact through exactly this endpoint. A gate on the MCP tools alone would
-    /// read as protection while leaving the surface writable.
+    /// Assert a triple through `POST /api/v1/palaces/{id}/kg`.
+    ///
+    /// Why: #4888 — this accepts an arbitrary predicate, so it can write a hot
+    /// one and must carry the same Tier S gate as the MCP tool. Not a
+    /// hypothetical path: `trusty-mpm`'s provisioner seeds its identity fact
+    /// through exactly this endpoint. #5524 — it also owed the prompt-cache
+    /// rebuild and never ran it, so a hot fact written here was stored and then
+    /// invisible to every later turn until some unrelated write rebuilt the
+    /// cache.
+    /// What: delegates the whole admission → assert → refresh sequence to
+    /// [`crate::kg_write::assert_triple`]. The variant split is what lets this
+    /// keep answering 400 for a refused write and 500 for a failed one.
+    /// Test: `http_kg_assert_endpoint_refreshes_prompt_cache`,
+    /// `http_kg_assert_endpoint_rejects_over_long_tier_s_object` in
+    /// `web::tests::prompt_tests`.
     pub async fn kg_assert(&self, id: &str, body: KgAssertBody) -> ServiceResult<()> {
         let handle = self.open_handle(id)?;
-        // `_admission` holds the admission lock until after `kg.assert` below.
-        let _admission = crate::prompt_facts::check_tier_s_admission(
-            &self.state,
-            &handle,
-            &body.subject,
-            &body.predicate,
-            &body.object,
-        )
-        .await
-        .map_err(|e| ServiceError::bad_request(format!("{e:#}")))?;
         let triple = Triple {
             subject: body.subject,
             predicate: body.predicate,
@@ -89,35 +89,64 @@ impl MemoryService {
             confidence: body.confidence.unwrap_or(1.0),
             provenance: body.provenance,
         };
-        handle
-            .kg
-            .assert(triple)
+        // #5524: route through the shared entry point so the prompt-cache
+        // rebuild cannot be forgotten here again.
+        crate::kg_write::assert_triple(&self.state, &handle, triple, CachePolicy::Inline)
             .await
-            .map_err(|e| ServiceError::internal(format!("kg assert: {e:#}")))
+            .map(|_| ())
+            .map_err(|e| match e {
+                KgWriteError::Admission(inner) => ServiceError::bad_request(format!("{inner:#}")),
+                other => ServiceError::internal(format!("{other}")),
+            })
     }
 
-    /// Retract the single active triple identified by `(subject, predicate)`.
+    /// Close the one active triple `(subject, predicate, object)`, leaving
+    /// every sibling object at that pair active. Returns the rows closed.
     ///
     /// Why: Issue #278 — the `DELETE /kg/triples/<id>` HTTP endpoint needs a
-    /// service-layer method so the HTTP handler stays a thin adapter.
-    /// What: Opens the palace handle, calls `KnowledgeGraph::retract`, and
-    /// maps the closed count to a 204/404 signal: `Ok(true)` when at least
-    /// one interval was closed, `Ok(false)` when no active triple matched.
-    /// Test: Covered by `kg_delete_triple_returns_204_on_success` in
-    /// `web::tests`.
+    /// service-layer method so the HTTP handler stays a thin adapter. It took
+    /// no object and called the pair-level `KnowledgeGraph::retract`, whose
+    /// meaning is "close every active row at this pair", so a caller deleting
+    /// one triple lost the siblings it never named. Retraction is a soft close
+    /// — `close_active_row` copies the row to a `hist:` key first — so the
+    /// damage was recoverable, not silent data loss.
+    /// What: Opens the palace handle and calls
+    /// [`trusty_common::memory_core::store::kg::KnowledgeGraph::retract_triple`],
+    /// which keys on all three fields. Returns the closed count so the caller
+    /// can tell a retraction (`1`) from a miss (`0`); a miss is a genuine
+    /// no-op, which makes the call idempotent. Rebuilds the prompt cache when
+    /// a hot-predicate row was actually closed — otherwise a retracted Tier S
+    /// fact keeps being injected until the next write. This mirrors the
+    /// `kg_retract_triple` MCP tool so both surfaces agree.
+    /// Test: `kg_delete_triple_closes_one_object_and_keeps_siblings`,
+    /// `kg_delete_triple_returns_404_for_missing`,
+    /// `kg_delete_triple_rebuilds_prompt_cache_for_hot_predicate` in
+    /// `web::tests`. Only the third reaches the cache rebuild — the other two
+    /// retract under the predicate `is`, which is not hot.
     pub async fn kg_retract_triple(
         &self,
         id: &str,
         subject: &str,
         predicate: &str,
-    ) -> ServiceResult<bool> {
+        object: &str,
+    ) -> ServiceResult<usize> {
         let handle = self.open_handle(id)?;
         let closed = handle
             .kg
-            .retract(subject, predicate)
+            .retract_triple(subject, predicate, object)
             .await
-            .map_err(|e| ServiceError::internal(format!("kg retract: {e:#}")))?;
-        Ok(closed > 0)
+            .map_err(|e| ServiceError::internal(format!("kg retract_triple: {e:#}")))?;
+        if closed > 0 && crate::prompt_facts::is_hot_predicate(predicate) {
+            // The write landed either way and the cache is only a
+            // denormalisation, so a rebuild failure is logged, not fatal.
+            // No test drives this arm: `rebuild_prompt_cache` skips a palace
+            // it cannot read and has no other fallible step, so it cannot
+            // currently return `Err`.
+            if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(&self.state).await {
+                tracing::warn!("rebuild_prompt_cache after kg_retract_triple failed: {e:#}");
+            }
+        }
+        Ok(closed)
     }
 
     /// List distinct subjects in the KG.
@@ -158,9 +187,14 @@ impl MemoryService {
     }
 
     /// Return the count of currently-active triples.
+    ///
+    /// #5384: a failed count read is a 500, not `{"active": 0}` — the badge
+    /// this feeds cannot tell those apart.
     pub async fn kg_count(&self, id: &str) -> ServiceResult<usize> {
         let handle = self.open_handle(id)?;
-        Ok(handle.kg.count_active_triples())
+        handle.kg.count_active_triples().map_err(|e| {
+            ServiceError::internal(format!("kg count_active_triples for palace {id}: {e:#}"))
+        })
     }
 
     /// Build the per-palace visual graph payload.
@@ -202,7 +236,11 @@ impl MemoryService {
             .map_err(|e| ServiceError::internal(format!("kg list_active: {e:#}")))?;
         // #4670: compare against the true active count, not the cap, so a
         // palace sitting exactly on the cap is not falsely flagged.
-        let active_triple_count = handle.kg.count_active_triples() as u64;
+        // #5384: a failed read would come back as 0 and make `truncated` false
+        // for every payload, which is the flag's exact failure mode.
+        let active_triple_count = handle.kg.count_active_triples().map_err(|e| {
+            ServiceError::internal(format!("kg count_active_triples for palace {id}: {e:#}"))
+        })? as u64;
         let returned_triple_count = triples.len() as u64;
         Ok(KgGraphPayload {
             triples,
@@ -418,14 +456,37 @@ impl MemoryService {
     }
 
     // -----------------------------------------------------------------
-    // Internal helper — open a palace handle or return 404.
+    // Internal helper — open a palace handle, 404 only on a genuine absence.
     // -----------------------------------------------------------------
 
-    /// Open the named palace, returning `ServiceError::NotFound` on failure.
+    /// Open the named palace.
+    ///
+    /// Why (#5549, ADR-0045): this mapped every `open_palace` failure to
+    /// `NotFound`, which the HTTP layer renders as 404. A denied or transient
+    /// read of `palace.json`, undecodable metadata, an open-queue timeout, or a
+    /// redb write-lock conflict then all reported that the palace does not
+    /// exist — erasing at the caller the distinction `load_palace` draws, and
+    /// across a much wider surface than the two rename paths: every
+    /// `/api/v1/palaces/{id}/kg*` endpoint, the drawer CRUD routes, and
+    /// per-palace recall reach this one helper.
+    /// What: returns `ServiceError::NotFound` only when
+    /// `PalaceRegistry::open_error_is_absent` confirms the palace is genuinely
+    /// not there, and `ServiceError::Internal` (500) otherwise.
+    /// Test: `unreadable_palace_is_500_not_404_at_the_service_open_handle`,
+    /// `unstattable_palace_is_500_not_404_at_the_service_open_handle`,
+    /// `absent_palace_is_still_404_at_both_open_handles`.
     pub fn open_handle(&self, id: &str) -> ServiceResult<Arc<PalaceHandle>> {
         self.state
             .registry
             .open_palace(&self.state.data_root, &PalaceId::new(id))
-            .map_err(|e| ServiceError::not_found(format!("palace not found: {id} ({e:#})")))
+            .map_err(|e| {
+                // #5549: every open failure mapped to 404, so a palace that
+                // could not be read was reported as one that is not there.
+                if PalaceRegistry::open_error_is_absent(&e) {
+                    ServiceError::not_found(format!("palace not found: {id} ({e:#})"))
+                } else {
+                    ServiceError::internal(format!("palace could not be loaded: {id} ({e:#})"))
+                }
+            })
     }
 }

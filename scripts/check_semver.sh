@@ -44,6 +44,11 @@
 #
 # Baseline policy — SCOPED TO PUBLISHED CRATES, and an absent baseline is a
 #   RECORDED SKIP, never a silent one:
+#     - listed in scripts/semver-checks-crate-exclusions.tsv
+#                                    -> skip (no LIBRARY consumer to protect —
+#                                       see "Crate exclusions" below, which is
+#                                       also where the guard that keeps this row
+#                                       from going silent lives)
 #     - `publish = false`            -> skip (never reaches crates.io)
 #     - no library target            -> skip (a bin-only crate has no API surface
 #                                       cargo-semver-checks can compare)
@@ -95,10 +100,17 @@
 #   requires a matching version bump" remediation below, so a rustdoc error was
 #   presented as a SemVer verdict and the two were indistinguishable from the
 #   output. The gate now classifies on POSITIVE EVIDENCE instead: a verdict
-#   exists only when the tool printed its own per-crate `N checks:` summary line.
+#   exists only when the tool printed its own per-crate `N checks:` summary line
+#   AND that line says at least one check RAN (issue #5440 — a summary reporting
+#   `0 checks: 0 pass, 254 skip` is the tool declining to compare, and the gate
+#   used to read it as a pass).
 #   No summary line means no comparison happened, whatever the exit status was —
 #   including exit 0 — and that is reported as NO VERDICT on its own exit code.
 #   Absence of evidence is never a pass; same rule as the scan floor below.
+#   The line is matched with ANSI colour stripped (issue #5500), because CI
+#   forces colour into the middle of the marker token and the check went blind
+#   to every run — see verdict_computed below for the bytes and for PR #5458's
+#   two casualties.
 #
 # Toolchain (issue #5289): cargo-semver-checks re-resolves the dependency graph
 #   in a scratch project that IGNORES this workspace's Cargo.lock, so it can pick
@@ -110,6 +122,23 @@
 #   normal case and not an edge one. The gate therefore runs under the NEWEST
 #   rustc it can find rather than the pinned one — see select_toolchain below for
 #   why that costs no coverage and cannot manufacture a pass.
+#
+# Crate exclusions: the gate protects LIBRARY consumers, so a crate nothing
+#   links as a library has nobody to protect. trusty-mpm is installed as the `tm`
+#   executable, and a binary user gets a whole new executable on every
+#   `cargo install`, so the library API it happens to expose is not part of what
+#   they consume. Rows live in scripts/semver-checks-crate-exclusions.tsv, each
+#   with a written reason, and each is a real coverage hole.
+#
+#   A ROW IS A CLAIM ABOUT CONSUMPTION, AND CLAIMS GO STALE. A skip list is the
+#   exact shape this repo keeps getting wrong: it stops protecting and reports
+#   success. So the premise is re-checked on every run rather than trusted — the
+#   gate asks `cargo metadata` whether any workspace package depends on the
+#   excluded crate, and REFUSES the skip (exit 3, naming the dependent) when one
+#   does. What it cannot see is an out-of-repo consumer on crates.io; that stays
+#   a stated assumption, re-checkable with
+#   `curl -s https://crates.io/api/v1/crates/<crate>/reverse_dependencies`.
+#   See docs/reference/semver-gate.md, "Crate exclusions".
 #
 # Features: cargo-semver-checks' default heuristic enables every feature, which
 #   here means building CUDA and CoreML backends that no CI runner can build
@@ -137,6 +166,8 @@
 #
 #   SEMVER_GATE_TOOLCHAIN_BIN=<dir>  pin the rustc/cargo the check runs under.
 #   SEMVER_GATE_TOOLCHAIN_BIN=       (set but empty) keep the ambient toolchain.
+#   SEMVER_GATE_CRATE_EXCLUSIONS=<file>  read crate exclusions from <file>. A
+#                                    self-test seam; no caller sets it.
 #
 # Exit (#5289 split 1 from 3 — a verdict and a non-verdict are different facts):
 #   0  every checked crate is SemVer-clean, or is a recorded skip.
@@ -145,8 +176,9 @@
 #   2  usage error.
 #   3  NO VERDICT — the gate could not do its job: cargo-semver-checks never
 #      completed a check run (rustdoc build failure, baseline retrieval
-#      failure), the diff scanned nothing, the registry was unreachable, or the
-#      tool is missing. Nothing was compared, so nothing may be concluded.
+#      failure), the diff scanned nothing, the registry was unreachable, the
+#      tool is missing, or a crate exclusion's premise has died. Nothing was
+#      compared, so nothing may be concluded.
 #
 # Test: `scripts/check_semver_selftest.sh` proves every way this gate could lie
 #   — a vacuous scan, an unreachable registry, and (since #5289) a rustdoc build
@@ -158,6 +190,14 @@
 #   inventory instead of a skip. Cases 13-15 pin pre-release handling: the
 #   reproduction on record is `["0.9.9", "1.0.0-rc1", "1.0.0", "1.0.1-beta"]`
 #   declared 1.0.1, which selected 1.0.0-rc1 before the rank element existed.
+#   Cases 16-18 (#5500) replay PR #5458's own CI bytes, where forced colour hid the
+#   summary line and both a clean run and a four-failure run were reported as
+#   never having happened. Cases 20-21 (#5440) pin the zero-check false pass:
+#   a summary that says `0 checks: 0 pass, 254 skip` at exit 0 is NO VERDICT in
+#   the PASS/FAIL arm and a BLIND inventory in the advisory one. Cases 23-24 pin
+#   the crate-exclusion arm: an excluded crate is a recorded skip that attempts
+#   no comparison, and an exclusion contradicted by a workspace dependency
+#   refuses the skip rather than granting it.
 #   The catch itself is demonstrated in PR #5051 against #4088's real shape.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
@@ -174,6 +214,11 @@ PROBE_ONLY=""
 PROBE_VERSION_OVERRIDE=""
 INDEX_BASE="${SEMVER_GATE_INDEX_BASE:-https://index.crates.io}"
 EXCLUSIONS_FILE="${REPO_ROOT}/scripts/semver-checks-feature-exclusions.tsv"
+# Whole-crate exclusions, one row per crate with a written reason. Overridable so
+# check_semver_selftest.sh can drive the arm from a fixture instead of the real
+# file; the default is the only path any caller uses.
+CRATE_EXCLUSIONS_REL="scripts/semver-checks-crate-exclusions.tsv"
+CRATE_EXCLUSIONS_FILE="${SEMVER_GATE_CRATE_EXCLUSIONS:-${REPO_ROOT}/${CRATE_EXCLUSIONS_REL}}"
 
 # Exit statuses. `1` is reserved for a COMPUTED verdict that says break; every
 # way the gate can fail to compute one is `3` (#5289). Callers that only test
@@ -386,6 +431,15 @@ PY
 # versions are equal, or current is older than baseline; since #5296 the caller
 # selects a baseline STRICTLY BELOW the declared version, so `none` is now
 # unreachable from the gate and survives only as a total function's zero case.
+#
+# 0.0.z IS ALWAYS MAJOR (#5440, code-critic on PR #5522). Cargo gives a 0.0.z
+# crate NO compatible range at all — every 0.0.z bump is breaking. Classified
+# `minor`, such a crate lands in the PASS/FAIL arm, where cargo-semver-checks
+# reads the same pair as a permitted break, runs 0 of 254 checks, and the gate
+# correctly refuses the non-verdict — a publish blocked by an exit 3 that nothing
+# can clear. `major` routes it to the advisory INVENTORY arm instead, which is
+# what every other permitted break gets. Latent today: the lowest declared
+# version in this workspace is 0.1.0.
 # ---------------------------------------------------------------------------
 release_type() {
   python3 - "$1" "$2" <<'PY'
@@ -401,7 +455,11 @@ c = parse(sys.argv[2])
 if c <= b:
     print("none")
 elif b[0] == 0 and c[0] == 0:
-    print("major" if c[1] != b[1] else ("minor" if c[2] != b[2] else "none"))
+    # #5440: a 0.0.z baseline has no compatible range, so any bump off it breaks.
+    if b[1] == 0:
+        print("major")
+    else:
+        print("major" if c[1] != b[1] else ("minor" if c[2] != b[2] else "none"))
 elif c[0] != b[0]:
     print("major")
 elif c[1] != b[1]:
@@ -481,6 +539,19 @@ elif mode == "exists":
     want = sys.argv[3]
     print("yes" if any(p["name"] == want for p in meta["packages"]) else "no")
 
+elif mode == "dependents":
+    # Workspace packages that declare <want> as a dependency, one per line. A
+    # Cargo dependency IS a library dependency — nothing can depend on another
+    # crate's binary — so a non-empty answer means the crate has an in-repo
+    # library consumer, which is what a crate exclusion claims it does not.
+    # Dev- and build-dependencies count: they link the library too.
+    want = sys.argv[3]
+    for p in meta["packages"]:
+        if p["name"] == want:
+            continue
+        if any(d["name"] == want for d in p["dependencies"]):
+            print(p["name"])
+
 elif mode == "features":
     crate = sys.argv[3]
     excluded = set(filter(None, sys.argv[4].split()))
@@ -516,6 +587,14 @@ pkg_field() {
     echo "FAIL: TOOL ERROR — no workspace metadata for package '${1}' (field '${2}')." >&2
     exit "$EXIT_NO_VERDICT"
   }
+}
+
+# crate_exclusion_reason <crate> — the reason column for <crate> in the crate
+# exclusions TSV, or empty when the crate is not excluded. Keyed on the package
+# name, which is what the loop below has already resolved to.
+crate_exclusion_reason() {
+  [[ -f "$CRATE_EXCLUSIONS_FILE" ]] || return 0
+  awk -F'\t' -v c="$1" '$0 !~ /^#/ && $1 == c { print $2; exit }' "$CRATE_EXCLUSIONS_FILE"
 }
 
 # dir_to_crate <dirname> — package name for crates/<dirname>/, or empty when the
@@ -659,9 +738,33 @@ PY
 
 # ---------------------------------------------------------------------------
 # verdict_computed <output-file> — succeed only when cargo-semver-checks printed
-# its own per-crate check summary, e.g.
-#     Checked [   0.388s] 223 checks: 214 pass, 9 fail, 0 warn, 31 skip
-#     Checked [   0.000s] 0 checks: 0 pass, 254 skip
+# its own per-crate check summary AND that summary says it actually EXECUTED at
+# least one check, e.g.
+#     Checked [   0.388s] 223 checks: 214 pass, 9 fail, 0 warn, 31 skip   <- verdict
+#     Checked [   0.000s] 0 checks: 0 pass, 254 skip                      <- NOT one
+#
+# ZERO CHECKS EXECUTED IS NOT A PASS (issue #5440). The leading `N checks:` count
+#   is the number of lints the tool RAN; the trailing `N skip` is what it declined
+#   to run. When the version delta is one that permits breakage — a major bump
+#   under Cargo's rules, which for a 0.y.z crate is any change to the MINOR
+#   position — every lint is skipped, the tool prints
+#
+#       Checked [   0.000s] 0 checks: 0 pass, 254 skip
+#       Summary no semver update required
+#
+#   and exits 0. Until this fix the presence of that summary line WAS the verdict
+#   test, so the gate read "the tool declined to check anything" as "the tool
+#   found nothing wrong" and preflight-publish.sh CHECK 5 passed having verified
+#   nothing. Measured on trusty-common under rustc 1.94.1: 0 of 254 checks run,
+#   gate exit 0. It failed closed on this machine only by accident — under the
+#   newest installed toolchain the same crate crashed rustdoc, printed no summary
+#   at all, and was correctly classified NO VERDICT. Removing that toolchain
+#   would have turned the gate green for every publish.
+#
+#   Same family as `cargo test -- <name> --exact` printing `running 0 tests` and
+#   exiting 0: work not done must never read as work passed. So the count is
+#   asserted, not merely the marker. A summary whose count does not parse is also
+#   NO VERDICT — this fails closed, like every other branch here.
 #
 # Why a MARKER and not the exit status: the tool's statuses are not a contract
 #   the gate can lean on, and observation shows they collide. 101 is a rustdoc
@@ -671,12 +774,98 @@ PY
 #   that it finished comparing, so requiring it means the gate concludes only
 #   from evidence that the comparison happened.
 #
+# THE MARKER ARRIVES COLOURED IN CI, AND THE COLOUR LANDS MID-TOKEN (issue #5500).
+#   `dtolnay/rust-toolchain` writes CARGO_TERM_COLOR=always into $GITHUB_ENV
+#   when it is unset, so every step after it inherits forced colour even though
+#   this gate redirects the tool to a file. cargo-semver-checks then emits
+#
+#       ESC[1m ESC[32m     Checked ESC[0m [   0.871s] 196 checks: 196 pass, ...
+#
+#   with the reset sequence BETWEEN `Checked` and the space that follows it. A
+#   pattern anchored on `Checked<space>` therefore matches nothing, and a run
+#   that compared 196 checks is announced as one that never ran. Both halves of
+#   PR #5458 are that single defect: tga exited 0 having found no break, and
+#   trusty-review exited 100 having listed four real ones, and the gate called
+#   both "without completing a run". No exit status was misread — the exit-status
+#   handling below is correct and unchanged; only the evidence test was blind.
+#
+#   The escapes are therefore stripped before matching. Stripping is done on a
+#   COPY: the log echoed to the operator keeps its colour, and the regex keeps
+#   the exact shape #5289 gave it.
+#
+#   The strip covers the WHOLE ECMA-48 CSI grammar, not just the SGR colour
+#   sequences observed: ESC [, parameter bytes 0x30-0x3F (`0-9:;<=>?`),
+#   intermediate bytes 0x20-0x2F (` -/`), one final byte 0x40-0x7E (`@-~`).
+#   Narrowing it to `[0-9;]*[A-Za-z]` — the observed shape — would leave a
+#   private-mode sequence like `ESC[?25l` (cursor hide, emitted by spinner
+#   renderers) unstripped, and that is the same defect again: an escape between
+#   `Checked` and its space. Pinned by self-test case 19.
+#
+#   `[ -/]`, NOT `[ -\/]`. POSIX makes the backslash literal inside a bracket
+#   expression, so `[ -\/]` is the range 0x20-0x5C and deletes digits and
+#   uppercase letters: `KEEP-ME-A` strips to the empty string under it, and to
+#   `KEEPMEA` under the correct form. An over-wide strip is the one way this
+#   function could invent a marker rather than miss one.
+#
+#   Non-CSI escape families (OSC hyperlinks, two-byte sequences) are out of
+#   scope deliberately: none appears in cargo-semver-checks 0.50.0's output,
+#   and an unhandled one fails CLOSED to NO VERDICT rather than to a pass.
+#
+#   Written to a file rather than piped into `grep -q`, because `grep -q` exits
+#   at the first match and SIGPIPEs the producer — under `set -o pipefail` that
+#   turns a FOUND marker into a non-zero pipeline, i.e. a verdict reported as a
+#   non-verdict. That is the same lie in the other direction.
+#
 # Fails CLOSED by construction: if a future cargo-semver-checks renames this
 #   line, every run becomes NO VERDICT — loud and non-zero — rather than a
-#   silent green. That is the correct direction for the failure to point.
+#   silent green. That is the correct direction for the failure to point. The
+#   strip cannot manufacture a marker either: it only deletes escape sequences,
+#   so text that did not say `Checked … N checks:` still does not.
 # ---------------------------------------------------------------------------
+# Set by verdict_computed on every refusal, read by no_verdict_because. Three
+# shapes: `no-summary`, `zero-checks:<the line>`, `unparsable-count:<the line>`.
+VERDICT_REASON=""
+
 verdict_computed() {
-  grep -Eq '(^|[[:space:]])Checked[[:space:]].*[0-9]+ checks:' "$1"
+  # #5500: CARGO_TERM_COLOR=always splits `Checked` from its trailing space (PR #5458).
+  local plain="${1}.plain" summary executed
+  VERDICT_REASON="no-summary"
+  LC_ALL=C sed -E $'s/\033\\[[0-9:;<=>?]*[ -/]*[@-~]//g' "$1" > "$plain" || return 1
+
+  # `tail -1` and not `grep -q`: the header explains why a short-circuiting
+  # reader is wrong here, and the LAST summary is the conservative one to judge.
+  summary="$(grep -E '(^|[[:space:]])Checked[[:space:]].*[0-9]+ checks:' "$plain" | tail -1 || true)"
+  [[ -z "$summary" ]] && return 1
+
+  # #5440: assert on the CHECK COUNT, not merely on the summary's presence.
+  executed="$(printf '%s\n' "$summary" | sed -E 's/.*[^0-9]([0-9]+) checks:.*/\1/')"
+  if ! printf '%s\n' "$executed" | grep -Eq '^[0-9]+$'; then
+    VERDICT_REASON="unparsable-count:${summary}"
+    return 1
+  fi
+  if [[ "$executed" -lt 1 ]]; then
+    VERDICT_REASON="zero-checks:${summary}"
+    return 1
+  fi
+  VERDICT_REASON=""
+  return 0
+}
+
+# no_verdict_because — one clause naming why verdict_computed refused, so the two
+# causes never share a message. "it never ran" and "it ran and skipped every
+# lint" have different remedies, and #5440 is the second one.
+no_verdict_because() {
+  case "${VERDICT_REASON%%:*}" in
+    zero-checks)
+      printf '%s\n' "completed a run that EXECUTED NO CHECKS — '$(printf '%s' "${VERDICT_REASON#*:}" | sed 's/^[[:space:]]*//')'"
+      ;;
+    unparsable-count)
+      printf '%s\n' "printed a summary whose check count did not parse — '$(printf '%s' "${VERDICT_REASON#*:}" | sed 's/^[[:space:]]*//')'"
+      ;;
+    *)
+      printf '%s\n' "never completed a check run"
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -793,6 +982,40 @@ select_toolchain
 while IFS= read -r crate; do
   [[ -z "$crate" ]] && continue
 
+  # Crate exclusion. This gate protects LIBRARY consumers — a dependent that
+  # re-resolves a version floor on a lockfile-free `cargo install` and stops
+  # compiling (#4088). A crate nothing links as a library has nobody to protect:
+  # trusty-mpm ships as the `tm` executable, and a binary user gets a whole new
+  # executable, so its library API compatibility is not part of what they get.
+  #
+  # That is a claim about consumption, not about the API, and a skip list is the
+  # exact shape that stops protecting SILENTLY once the claim goes stale. So the
+  # premise is re-checked here instead of trusted: a workspace crate that depends
+  # on the excluded one REFUSES the skip. Nothing was compared, so this is a
+  # non-verdict rather than a break — preflight-publish.sh CHECK 5 reports it as
+  # "the gate could not run" and the publish still stops.
+  excl_reason="$(crate_exclusion_reason "$crate")"
+  if [[ -n "$excl_reason" ]]; then
+    if ! dependents="$(python3 "$PY_HELPER" dependents "$META_FILE" "$crate")"; then
+      echo "FAIL: TOOL ERROR — could not list workspace dependents of '${crate}'." >&2
+      exit "$EXIT_NO_VERDICT"
+    fi
+    if [[ -n "$dependents" ]]; then
+      {
+        echo "FAIL: EXCLUSION NO LONGER HOLDS — ${crate} is excluded from the SemVer gate"
+        echo "      because nothing depends on its library, but these workspace crates now do:"
+        printf '%s\n' "$dependents" | sed 's/^/        - /'
+        echo "      An exclusion that has stopped being true is a silent coverage hole, so the"
+        echo "      skip is REFUSED and NOTHING was compared. Delete the '${crate}' row from"
+        echo "      ${CRATE_EXCLUSIONS_REL} to restore full gating."
+      } >&2
+      exit "$EXIT_NO_VERDICT"
+    fi
+    echo "SKIP ${crate}: excluded by ${CRATE_EXCLUSIONS_REL} — ${excl_reason}"
+    skipped=$((skipped + 1))
+    continue
+  fi
+
   if [[ "$(pkg_field "$crate" publishable)" == "no" ]]; then
     echo "SKIP ${crate}: publish = false — never reaches crates.io"
     skipped=$((skipped + 1))
@@ -883,7 +1106,7 @@ while IFS= read -r crate; do
       # Loud, and counted. The release still proceeds — the permitted-break fact
       # is decided by the version numbers, not by this run — but "no inventory"
       # must never read as "inventory clean".
-      echo "NO INVENTORY ${crate}: cargo semver-checks exited ${rc} without completing a run." >&2
+      echo "NO INVENTORY ${crate}: cargo semver-checks exited ${rc} and $(no_verdict_because)." >&2
       echo "             The release is still permitted (${baseline} -> ${current} already carries the break)," >&2
       echo "             but WHAT it breaks is unknown. Fix the run above to get the list." >&2
       inventory_blind=$((inventory_blind + 1))
@@ -914,7 +1137,7 @@ while IFS= read -r crate; do
   # An exit 0 with no summary line is a no-op, not a pass, and must not reach the
   # clean branch — that is the fail-closed half of this check.
   if ! verdict_computed "$RUN_LOG"; then
-    echo "NO VERDICT ${crate}: cargo semver-checks exited ${rc} without completing a check run." >&2
+    echo "NO VERDICT ${crate}: cargo semver-checks exited ${rc} and $(no_verdict_because)." >&2
     echo "           No public API comparison against baseline ${baseline} was performed." >&2
     noverdict=$((noverdict + 1))
     continue
@@ -960,6 +1183,20 @@ known either way about this crate's public API.
 
 The tool's own output is above. The usual causes:
 
+  * IT RAN AND CHECKED NOTHING — `0 checks: 0 pass, N skip` (issue #5440). The
+    tool skips its whole lint set when IT reads the baseline -> current delta as
+    already permitting breakage. Exit 0 and "no semver update required" there
+    mean "nothing was examined", not "nothing is wrong".
+    A NORMAL 0.x MINOR BUMP DOES NOT LAND HERE. The gate classifies 0.28.1 ->
+    0.29.0 as major itself and sends it to the advisory INVENTORY arm, which
+    passes --release-type minor and gets a full lint run. Do not weaken this
+    check on the theory that a routine bump tripped it.
+    What reaches this arm is a BASELINE AT OR ABOVE the declared version: the
+    gate reads that pair as no change while the tool reads it by position and
+    calls it a permitted break. Read the baseline off the `CHECK` line above. If
+    it is not below the version you are publishing, the declared version is
+    behind the registry — preflight-publish.sh CHECK 4 is the check that says
+    so — and that is what to fix.
   * rustdoc failed to build. cargo-semver-checks resolves dependencies in a
     scratch project that IGNORES this workspace's Cargo.lock, so it can pick a
     newer transitive dependency whose `rust-version` exceeds the rustc running

@@ -132,9 +132,24 @@ pub(super) async fn apply_component_transition(
     // mirrored back onto the indexer's own flag either. Both directions are
     // handled here (`transition.new_skip_kg` is the resolved target for
     // either a turn-on or a turn-off) via a single write-lock acquisition.
-    if transition.kg_turning_on || transition.kg_turning_off {
+    // #3048: the vector lane needs the identical sync. `IndexHandle` is rebuilt
+    // on every PATCH but reuses this same `indexer` `Arc`, so the indexer's own
+    // copy is what `CodeIndexer::index_file` reads — leave it unsynced and a
+    // turn-off never reaches the watcher, which keeps embedding an index the
+    // operator just disabled. Folded into the same write-lock acquisition as
+    // the KG sync so a toggle of both components takes the lock once.
+    if transition.kg_turning_on
+        || transition.kg_turning_off
+        || transition.vector_turning_on
+        || transition.vector_turning_off
+    {
         let mut indexer = handle.indexer.write().await;
-        indexer.set_skip_kg(transition.new_skip_kg);
+        if transition.kg_turning_on || transition.kg_turning_off {
+            indexer.set_skip_kg(transition.new_skip_kg);
+        }
+        if transition.vector_turning_on || transition.vector_turning_off {
+            indexer.set_skip_vector(transition.new_skip_vector);
+        }
     }
     if transition.kg_turning_off {
         let indexer = handle.indexer.read().await;
@@ -162,15 +177,24 @@ pub(super) async fn apply_component_transition(
 /// generalised #923 deferred-embed core), which marks the semantic stage
 /// `Ready`/`Failed` itself. Both may run in the same task since only one
 /// permit exists.
+///
+/// `teardown_guard` (#3049 round 3) travels the same way and for the same
+/// reason: this task writes the corpus (`catch_up_symbol_graph`,
+/// `run_embed_catch_up`), so a `DELETE` must not be able to `remove_dir_all`
+/// underneath it. Re-acquiring here instead would leave the gap between the
+/// handler returning and the task being polled unguarded.
 /// Test: `service::server::tests_components::patch_vector_on_spawns_catch_up_and_reaches_ready`,
-/// `patch_kg_on_spawns_catch_up_and_reaches_ready`.
+/// `patch_kg_on_spawns_catch_up_and_reaches_ready`,
+/// `service::server::tests_3049::patch_index_config_waits_for_an_in_flight_teardown`.
 pub(super) fn spawn_component_catch_up(
     handle: Arc<IndexHandle>,
     transition: ComponentTransition,
     permit: tokio::sync::OwnedSemaphorePermit,
+    teardown_guard: tokio::sync::OwnedRwLockReadGuard<()>,
 ) {
     tokio::spawn(async move {
         let _permit = permit;
+        let _teardown_guard = teardown_guard;
         let index_id = handle.id.0.clone();
 
         if transition.kg_turning_on {

@@ -68,7 +68,9 @@ fn parse(args: &[&str]) -> Parsed {
         Commands::Serve { index, project, .. } => Parsed {
             global,
             subcommand: index.clone(),
-            pin: resolve_pinned_index(index, project),
+            // #5264: the pin now carries its source alongside the id; these
+            // rows assert the id, and `serve_scope_tests` asserts the source.
+            pin: resolve_pinned_index(index, project).map(|c| c.index_id),
         },
         _ => panic!("expected Commands::Serve"),
     }

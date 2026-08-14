@@ -407,9 +407,14 @@ with `curl`/`lsof`/`ps`/`netstat`.
 - `mcp__trusty-memory__memory_recall` before any research or delegation;
   `memory_remember` / `memory_note` to store findings immediately.
 - `mcp__trusty-search__search` before Read/Grep. **Omit `index_id`** — your
-  `.mcp.json` pins this session to its own index, and a guessed id fails with
-  `404 unknown index` (#1373).
-- `mcp__trusty-search__search_health` for liveness, not a shell command.
+  `.mcp.json` pins this session to its own index, and index resolution is
+  pinned-first (#5213): an explicit `index_id` wins, otherwise the pin is
+  used, and only an unpinned session with no id fans out across every index.
+  If you must pass an explicit id, call `list_indexes` first rather than
+  guess — an unresolvable id still fails with `404 unknown index` (#1373).
+- `mcp__trusty-search__search_health` for liveness, not a shell command — it
+  returns `Ok` even when the daemon is down, so branch on `healthy`, not on
+  the call succeeding.
 
 Full per-tool tables: `Skill(skill="tm-tool-usage-guide")`. A tool missing from
 your loaded list is not unavailable — load its schema with `ToolSearch` first.

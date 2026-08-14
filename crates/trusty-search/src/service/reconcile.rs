@@ -717,6 +717,12 @@ async fn apply_delta(
             };
             // Acquire and drop per-call: gives writers a window between files.
             let result = {
+                // #3049: teardown-lock read side, per call. Reconcile
+                // deliberately releases between files, so the guard is scoped
+                // the same way — a DELETE waits at most one file, not the
+                // whole reconcile pass.
+                let _teardown_guard =
+                    crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
                 let idx = handle.indexer.read().await;
                 idx.index_file(rel_path_str, &content).await
             };
@@ -734,6 +740,9 @@ async fn apply_delta(
             // Deleted: remove all chunks for this file.
             // Acquire and drop per-call so write-lock contention is bounded.
             let result = {
+                // #3049: see the index_file arm above.
+                let _teardown_guard =
+                    crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
                 let idx = handle.indexer.read().await;
                 idx.remove_file(rel_path_str).await
             };
@@ -794,8 +803,13 @@ async fn apply_delta(
 /// timestamp — the same call used by `service::reindex::stages::now_rfc3339` —
 /// so the format is consistent with the reindex pipeline and correct for all
 /// calendar dates (no hand-rolled Gregorian approximation).
-/// Test: `reconcile_stamps_head_sha_after_delta` in reconcile_tests.rs.
+/// Test: `reconcile_stamps_head_sha_after_delta` in reconcile_tests.rs;
+/// durability is covered by `service::boot_markers_tests`.
 pub(crate) async fn stamp_handle(handle: &Arc<IndexHandle>, new_sha: &str) {
+    // #4391: persist the stamp too — the in-memory copy is erased by every
+    // handle rebuild (restart, cold-park reload, selective warm boot), which is
+    // what made this module's git path unable to see pre-restore drift.
+    crate::service::boot_markers::persist_indexed_head_sha(&handle.id.0, Some(new_sha));
     *handle.indexed_head_sha.write().await = Some(new_sha.to_owned());
     *handle.last_indexed_at.write().await = Some(chrono::Utc::now().to_rfc3339());
 }

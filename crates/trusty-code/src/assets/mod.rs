@@ -32,10 +32,13 @@
 //!
 //! Four of the 28 roster agents — `qa`, `code-critic`, `code-analyzer`,
 //! `web-qa` — carry an explicit restrictive `tools:` override in their tcode
-//! copy (`assets/agents/{qa,code-critic,code-analyzer,web-qa}.md`) that is
-//! NOT present in the trusty-mpm source files they were copied from
-//! byte-for-byte in Slice E2. This is a deliberate, Bob-approved deviation
-//! from byte-parity, not drift: those four are reviewer-intent agents and get
+//! FORK (`assets/agents/{qa,code-critic,code-analyzer,web-qa}.md`) that is NOT
+//! present in the shared asset they were derived from
+//! (`trusty_agents_common::agent_assets`). These four are the only agent `.md`
+//! files trusty-code still keeps a second copy of: every other roster agent is
+//! embedded straight from the shared crate, so it cannot drift. This is a
+//! deliberate, Bob-approved deviation, not drift: those four are
+//! reviewer-intent agents and get
 //! the same read-only tool allowlist tcode's own `code-reviewer` default uses
 //! (no `write_file`/`edit`/`bash`). `documentation` and `research` stay
 //! byte-identical and unrestricted per Bob's explicit ruling — they build
@@ -64,34 +67,47 @@
 //! frame: findings plus concrete, ready-to-run recommendations (drafted
 //! scenarios, specified test cases, recommended commands) handed off to an
 //! engineer/ops/CI to execute, never executed by the agent itself.
-//! `code-critic.md` needed no prose change — its review-only body already had
-//! no execute-oriented instructions. This is an ADDITIONAL deviation from
+//! `code-critic.md` needed no prose change at the time — its review-only body
+//! had no execute-oriented instructions. This is an ADDITIONAL deviation from
 //! trusty-mpm byte-parity beyond the `tools:` line alone; the deferred E4
 //! staleness guard must whitelist the reworded prose sections in these three
 //! files too, not just the `tools:` line.
 //!
+//! `code-critic.md` gained its own reworded section later (owner ruling
+//! 2026-08-12, PR #5596): trusty-mpm's upstream copy started instructing the
+//! agent to post its verdict via `gh pr review --comment` directly. tcode's
+//! copy has no `bash`/`gh` tool, so the "Posting the Verdict" section was
+//! reworded to the same read-only frame as the three files above — it
+//! specifies the exact command for the caller to run, never runs it itself.
+//! `code-critic.md` now joins `web-qa.md`/`qa.md`/`code-analyzer.md` as a
+//! four-of-four reworded-prose deviation, not three-of-four; the E4 staleness
+//! guard whitelists it the same way (pinned-hash reconciliation, not
+//! byte-parity).
+//!
 //! ## Non-coding cross-product roster addition (#4027, epic #4021)
 //!
-//! `ticketing` was ported here from `crates/trusty-mpm/src/assets/agents/`
-//! byte-for-byte (same treatment `research` got) so trusty-agents' widened
-//! `dispatch_task` bridge (#4026) can reach ONE roster instead of growing a
-//! second dispatch leg into trusty-mpm — the owner's OQ-4 ruling. It carries
-//! no tcode-specific `tools:` restriction: it is a byte-parity copy, NOT a
-//! pinned deviation, so `check_agent_assets.sh` keeps it in lockstep with
-//! upstream automatically. Its non-coding property is enforced where the
+//! `ticketing` joined this roster (same treatment `research` got) so
+//! trusty-agents' widened `dispatch_task` bridge (#4026) can reach ONE roster
+//! instead of growing a second dispatch leg into trusty-mpm — the owner's OQ-4
+//! ruling. It carries no tcode-specific `tools:` restriction and is not a
+//! pinned deviation: it is embedded directly from the shared crate, so it stays
+//! in lockstep by construction. Its non-coding property is enforced where the
 //! owner's OQ-7 ruling put enforcement — the BRIDGE's fail-closed
 //! `NON_CODING_TARGETS` floor in
 //! `crates/trusty-agents/src/tools/cross_product.rs` — not by an asset-level
 //! allowlist that a direct `tcode run-task` invocation would bypass anyway.
 //!
-//! ## E4 staleness guard (issue #2958, `scripts/check_agent_assets.sh`)
+//! ## E4 guard (issue #2958, `scripts/check_agent_assets.sh`)
 //!
-//! CI enforcement of everything above: byte-compares the 29 non-deviated
-//! embedded copies against their trusty-mpm source, and pins the 4 deviated
-//! files' upstream SOURCE hash (`scripts/agent-asset-pins.tsv`) so an
-//! upstream edit behind one of them fails the gate for deliberate
-//! reconciliation rather than drifting unnoticed. See that script's header
-//! for the full design and `.github/workflows/agent-assets.yml` for the gate.
+//! The byte-parity half of this gate is gone because what it compared is gone:
+//! 30 duplicated `.md` files became one shared copy each, and a file cannot
+//! drift from itself. What the gate still checks is what the compiler cannot
+//! see — it pins the 4 deviated files' SHARED source hash
+//! (`scripts/agent-asset-pins.tsv`) so an edit behind one of them fails for
+//! deliberate reconciliation, and it rejects any `.md` appearing in this
+//! directory that is neither a pinned deviation nor a declared tcode-only
+//! default, which is how a deleted duplicate stays deleted. See that script's
+//! header and `.github/workflows/agent-assets.yml`.
 //!
 //! Test: `assets::tests::*` — every embedded agent `.md` parses and projects
 //! to a field-identical `AgentConfig` vs. the retired TOML fixtures (the
@@ -317,11 +333,11 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
 // their content source, resolved at load time via
 // `agents::md_loader::project_embedded_md_with_extends`. --
 
-const BASE_AGENT_MD: &str = include_str!("agents/BASE-AGENT.md");
-const BASE_ENGINEER_MD: &str = include_str!("agents/BASE-ENGINEER.md");
-const BASE_OPS_MD: &str = include_str!("agents/BASE-OPS.md");
-const BASE_QA_MD: &str = include_str!("agents/BASE-QA.md");
-const BASE_RESEARCH_MD: &str = include_str!("agents/BASE-RESEARCH.md");
+const BASE_AGENT_MD: &str = trusty_agents_common::agent_assets::BASE_AGENT;
+const BASE_ENGINEER_MD: &str = trusty_agents_common::agent_assets::BASE_ENGINEER;
+const BASE_OPS_MD: &str = trusty_agents_common::agent_assets::BASE_OPS;
+const BASE_QA_MD: &str = trusty_agents_common::agent_assets::BASE_QA;
+const BASE_RESEARCH_MD: &str = trusty_agents_common::agent_assets::BASE_RESEARCH;
 
 /// The 5 `BASE-*` extends-template names — composition bases only, never
 /// meant to be dispatched directly (issue #3465 follow-up: the Agents
@@ -349,36 +365,36 @@ pub const BASE_AGENT_NAMES: &[&str] = &[
     "base-research",
 ];
 
-const API_QA_MD: &str = include_str!("agents/api-qa.md");
+const API_QA_MD: &str = trusty_agents_common::agent_assets::API_QA;
 const CODE_ANALYZER_MD: &str = include_str!("agents/code-analyzer.md");
 const CODE_CRITIC_MD: &str = include_str!("agents/code-critic.md");
-const DART_ENGINEER_MD: &str = include_str!("agents/dart-engineer.md");
-const DATA_ENGINEER_MD: &str = include_str!("agents/data-engineer.md");
-const DOCUMENTATION_MD: &str = include_str!("agents/documentation.md");
-const GOLANG_ENGINEER_MD: &str = include_str!("agents/golang-engineer.md");
-const JAVA_ENGINEER_MD: &str = include_str!("agents/java-engineer.md");
-const JAVASCRIPT_ENGINEER_MD: &str = include_str!("agents/javascript-engineer.md");
-const LOCAL_OPS_MD: &str = include_str!("agents/local-ops.md");
-const NEXTJS_ENGINEER_MD: &str = include_str!("agents/nextjs-engineer.md");
-const ELIXIR_ENGINEER_MD: &str = include_str!("agents/elixir-engineer.md");
-const PHOENIX_ENGINEER_MD: &str = include_str!("agents/phoenix-engineer.md");
-const PHP_ENGINEER_MD: &str = include_str!("agents/php-engineer.md");
-const PROMPT_ENGINEER_MD: &str = include_str!("agents/prompt-engineer.md");
-const PYTHON_ENGINEER_MD: &str = include_str!("agents/python-engineer.md");
+const DART_ENGINEER_MD: &str = trusty_agents_common::agent_assets::DART_ENGINEER;
+const DATA_ENGINEER_MD: &str = trusty_agents_common::agent_assets::DATA_ENGINEER;
+const DOCUMENTATION_MD: &str = trusty_agents_common::agent_assets::DOCUMENTATION;
+const GOLANG_ENGINEER_MD: &str = trusty_agents_common::agent_assets::GOLANG_ENGINEER;
+const JAVA_ENGINEER_MD: &str = trusty_agents_common::agent_assets::JAVA_ENGINEER;
+const JAVASCRIPT_ENGINEER_MD: &str = trusty_agents_common::agent_assets::JAVASCRIPT_ENGINEER;
+const LOCAL_OPS_MD: &str = trusty_agents_common::agent_assets::LOCAL_OPS;
+const NEXTJS_ENGINEER_MD: &str = trusty_agents_common::agent_assets::NEXTJS_ENGINEER;
+const ELIXIR_ENGINEER_MD: &str = trusty_agents_common::agent_assets::ELIXIR_ENGINEER;
+const PHOENIX_ENGINEER_MD: &str = trusty_agents_common::agent_assets::PHOENIX_ENGINEER;
+const PHP_ENGINEER_MD: &str = trusty_agents_common::agent_assets::PHP_ENGINEER;
+const PROMPT_ENGINEER_MD: &str = trusty_agents_common::agent_assets::PROMPT_ENGINEER;
+const PYTHON_ENGINEER_MD: &str = trusty_agents_common::agent_assets::PYTHON_ENGINEER;
 const QA_MD: &str = include_str!("agents/qa.md");
-const REACT_ENGINEER_MD: &str = include_str!("agents/react-engineer.md");
-const REFACTORING_ENGINEER_MD: &str = include_str!("agents/refactoring-engineer.md");
-const RESEARCH_MD: &str = include_str!("agents/research.md");
-const RUBY_ENGINEER_MD: &str = include_str!("agents/ruby-engineer.md");
-const RUST_ENGINEER_MD: &str = include_str!("agents/rust-engineer.md");
-const SECURITY_MD: &str = include_str!("agents/security.md");
-const SVELTE_ENGINEER_MD: &str = include_str!("agents/svelte-engineer.md");
-const TAURI_ENGINEER_MD: &str = include_str!("agents/tauri-engineer.md");
+const REACT_ENGINEER_MD: &str = trusty_agents_common::agent_assets::REACT_ENGINEER;
+const REFACTORING_ENGINEER_MD: &str = trusty_agents_common::agent_assets::REFACTORING_ENGINEER;
+const RESEARCH_MD: &str = trusty_agents_common::agent_assets::RESEARCH;
+const RUBY_ENGINEER_MD: &str = trusty_agents_common::agent_assets::RUBY_ENGINEER;
+const RUST_ENGINEER_MD: &str = trusty_agents_common::agent_assets::RUST_ENGINEER;
+const SECURITY_MD: &str = trusty_agents_common::agent_assets::SECURITY;
+const SVELTE_ENGINEER_MD: &str = trusty_agents_common::agent_assets::SVELTE_ENGINEER;
+const TAURI_ENGINEER_MD: &str = trusty_agents_common::agent_assets::TAURI_ENGINEER;
 // #4027: byte-parity copy of trusty-mpm's ticketing agent.
-const TICKETING_MD: &str = include_str!("agents/ticketing.md");
-const TYPESCRIPT_ENGINEER_MD: &str = include_str!("agents/typescript-engineer.md");
+const TICKETING_MD: &str = trusty_agents_common::agent_assets::TICKETING;
+const TYPESCRIPT_ENGINEER_MD: &str = trusty_agents_common::agent_assets::TYPESCRIPT_ENGINEER;
 const WEB_QA_MD: &str = include_str!("agents/web-qa.md");
-const WEB_UI_ENGINEER_MD: &str = include_str!("agents/web-ui-engineer.md");
+const WEB_UI_ENGINEER_MD: &str = trusty_agents_common::agent_assets::WEB_UI_ENGINEER;
 
 /// The embedded tm agent catalog's raw sources (Slice E2, #2958): the 5
 /// `BASE-*` extends templates plus the 29 roster agents (the 28

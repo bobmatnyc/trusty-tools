@@ -41,6 +41,7 @@ pub mod discover;
 pub mod doctor;
 pub mod hook;
 pub mod index;
+pub(crate) mod index_action;
 pub mod index_allowlist;
 pub mod index_cwd_resolve;
 pub(crate) mod index_persist;
@@ -63,6 +64,8 @@ pub mod reindex;
 pub mod remove;
 pub mod search;
 pub mod serve;
+// #5264: working-directory index scoping for a bare `serve` MCP session.
+pub mod serve_scope;
 pub mod service;
 // #4823: reading/preserving an already-installed launchd unit so regeneration
 // does not silently discard deliberate operator configuration.

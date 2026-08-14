@@ -1,6 +1,6 @@
 [package]
 name = "trusty-common"
-version = "0.31.1"
+version = "0.33.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -170,7 +170,6 @@ futures = { workspace = true, optional = true }
 # default-features builds, so it cannot be gated behind a feature flag.
 chrono = { workspace = true }
 regex = { workspace = true, optional = true }
-kuzu = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }
 postcard = { workspace = true, optional = true }
 # Optional: enabled by the `tickets` feature (absorbed from `trusty-tickets`).
@@ -475,10 +474,10 @@ memory-core = [
     "embedder-bundled-ort",
     "credentials",
 ]
-# Optional kuzu graph DB read-only integration on top of the memory-core
-# feature. Pulls in the `kuzu` crate. Off by default because kuzu adds a
-# large native dependency.
-memory-core-kuzu = ["memory-core", "dep:kuzu"]
+# Why (#5695): the `memory-core-kuzu` feature and its `memory_core::store::kuzu`
+# module were REMOVED. Nothing enabled the feature and no bindings were ever
+# wired in, so it only made `--all-features` — the path cargo-semver-checks
+# takes — require a cmake source build of kuzu.
 # Enables the `monitor` module: the unified ratatui dashboard for the
 # trusty-search and trusty-memory daemons (formerly the `trusty-monitor-tui`
 # crate, and before that the standalone `trusty-monitor` binary). Pulls in
@@ -502,7 +501,11 @@ embedder-client = ["dep:thiserror", "embedder", "uds"]
 # JIRA, and Linear backends (absorbed from the former standalone `trusty-tickets`
 # crate). Pulls in `chrono`, `uuid`, `base64`, `thiserror`, and `toml` as
 # additional optional deps. Requires the `mcp` feature for the stdio loop.
-tickets = ["mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml"]
+tickets = ["mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml", "gh-cli"]
+# Enables the `gh` module: the workspace's single entry point for invoking the
+# GitHub CLI (#5475). Pulls in `thiserror` only — `tokio/process`, `serde` and
+# `serde_json` are already unconditional here.
+gh-cli = ["dep:thiserror"]
 # Enables the `intent_source` module: the shared intent-source resolver (ISR)
 # for the intent/method conformance gates (DOC-15, SPEC-CONFORMANCE-03, #1358).
 # Resolves the ticket method + spec method from a PR or ticket-id and applies

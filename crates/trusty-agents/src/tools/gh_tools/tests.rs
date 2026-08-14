@@ -10,7 +10,7 @@
 //! subcommand assertions, and validator rejection cases.
 //! Test: this file.
 
-use super::helpers::{enum_arg, limit_arg, plain_arg, repo_arg, run_gh, run_program};
+use super::helpers::{enum_arg, limit_arg, map_gh_outcome, plain_arg, repo_arg, run_gh};
 use super::*;
 use serde_json::json;
 
@@ -355,59 +355,54 @@ async fn gh_run_view_rejects_a_missing_run_id() {
 }
 
 // --------------------------------------------------------------------------
-// Subprocess outcome mapping — exercised via `run_program` against POSIX
-// utilities so the tolerance rule is pinned WITHOUT requiring an installed,
-// authenticated `gh` (a test that can only skip in CI proves nothing).
+// Outcome mapping — pinned deterministically against `GhOutput` values, so
+// the tolerance rule holds without an installed, authenticated `gh` (#5475;
+// a test that can only skip in CI proves nothing).
 // --------------------------------------------------------------------------
 
-#[tokio::test]
-async fn run_program_tolerates_a_nonzero_exit_when_asked() {
+fn gh_out(code: i32, stdout: &str, stderr: &str) -> trusty_common::gh::GhOutput {
+    trusty_common::gh::GhOutput::from_parts("pr checks 1", Some(code), stdout, stderr)
+}
+
+#[test]
+fn map_gh_outcome_tolerates_a_nonzero_exit_when_asked() {
     // THE rule `gh pr checks` depends on: a non-zero exit is check STATE, not
     // a tool failure. If this regresses, every red or pending PR starts
     // reading as `is_error` to the model.
-    let out = run_program("false", "hint", &root(), &[], true).await;
+    let out = map_gh_outcome(&gh_out(1, "pending\n", ""), true);
     assert!(
         !out.is_error(),
         "a tolerated non-zero exit must stay a success: {}",
         out.content()
     );
     assert!(out.content().contains("(exit 1)"), "{}", out.content());
+    assert!(out.content().contains("pending"), "{}", out.content());
 }
 
-#[tokio::test]
-async fn run_program_reports_a_nonzero_exit_as_an_error_by_default() {
-    let out = run_program("false", "hint", &root(), &[], false).await;
+#[test]
+fn map_gh_outcome_reports_a_nonzero_exit_as_an_error_by_default() {
+    let out = map_gh_outcome(&gh_out(1, "", "no such PR"), false);
     assert!(out.is_error());
     assert!(
         out.content().contains("failed (exit 1)"),
         "{}",
         out.content()
     );
+    assert!(out.content().contains("no such PR"), "{}", out.content());
 }
 
-#[tokio::test]
-async fn run_program_reports_a_missing_binary_with_the_hint() {
-    let out = run_program(
-        "trusty-no-such-binary-4170",
-        "install it first",
-        &root(),
-        &[],
-        false,
-    )
-    .await;
-    assert!(out.is_error());
-    assert!(
-        out.content().contains("install it first"),
-        "{}",
-        out.content()
-    );
-}
-
-#[tokio::test]
-async fn run_program_notes_empty_output() {
-    let out = run_program("true", "hint", &root(), &[], false).await;
+#[test]
+fn map_gh_outcome_notes_empty_output() {
+    let out = map_gh_outcome(&gh_out(0, "  \n", ""), false);
     assert!(!out.is_error());
     assert!(out.content().contains("no output"), "{}", out.content());
+}
+
+#[tokio::test]
+async fn run_gh_reports_a_missing_binary_with_the_login_hint() {
+    // The entry point's `NotInstalled` message must survive out to the model.
+    let e = trusty_common::gh::GhError::NotInstalled.to_string();
+    assert!(e.contains("gh auth login"), "{e}");
 }
 
 #[tokio::test]

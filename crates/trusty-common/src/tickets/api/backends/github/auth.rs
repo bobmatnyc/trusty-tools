@@ -14,8 +14,9 @@
 //! Test: `tests::*` cover the pure auth-selection + argv logic. The subprocess
 //! shell-out itself is environment-dependent and not exercised in unit tests.
 
-use anyhow::{Context, Result, bail};
-use tokio::process::Command;
+use anyhow::{Context, Result};
+
+use crate::gh::GhCommand;
 
 use crate::tickets::api::config::GithubConfig;
 
@@ -93,25 +94,12 @@ pub(super) async fn resolve_token(cfg: &GithubConfig) -> Result<String> {
 /// an actionable error pointing at `GITHUB_TOKEN` / `gh auth login`.
 /// Test: environment-dependent; not unit-tested.
 async fn gh_auth_token(cfg: &GithubConfig) -> Result<String> {
-    let args = gh_token_args(cfg);
-    let output = Command::new("gh")
-        .args(&args)
-        .output()
+    // #5475: routed through the workspace's single `gh` entry point; the
+    // empty-stdout rejection that used to live here is `nonempty_stdout`.
+    GhCommand::new(gh_token_args(cfg))
+        .nonempty_stdout()
         .await
-        .context("failed to spawn 'gh auth token' — is the gh CLI installed and on PATH?")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "gh auth token failed (exit {}): {} — set GITHUB_TOKEN or run 'gh auth login'",
-            output.status,
-            stderr.trim()
-        );
-    }
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if token.is_empty() {
-        bail!("gh auth token returned empty output — run 'gh auth login' to authenticate");
-    }
-    Ok(token)
+        .context("set GITHUB_TOKEN or run 'gh auth login'")
 }
 
 #[cfg(test)]

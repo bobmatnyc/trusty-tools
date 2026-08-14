@@ -23,8 +23,9 @@
 //! `send`), and (3) marks the progress status as `Failed`.
 //!
 //! Test: `reindex_guard_fires_on_early_return`,
-//! `reindex_guard_uses_captured_failure_reason`, and
-//! `reindex_guard_failure_reason_is_none_by_default` in `tests.rs`.
+//! `reindex_guard_uses_captured_failure_reason`,
+//! `reindex_guard_failure_reason_is_none_by_default`, and
+//! `reindex_guard_omits_index_id_when_never_stamped` in `tests.rs`.
 
 use std::sync::{Arc, Mutex};
 
@@ -59,7 +60,15 @@ pub(crate) type FailureReasonSlot = Arc<Mutex<Option<String>>>;
 pub(crate) struct ReindexTerminationGuard {
     progress: Arc<ReindexProgress>,
     armed: bool,
-    index_id: String,
+    /// `None` until [`ReindexTerminationGuard::with_index_id`] stamps it.
+    ///
+    /// Why: #1451 — this was a `String` defaulting to `""`, and `Drop`'s SSE
+    /// payload serialized it unconditionally, so a guard that fired before the
+    /// id was known sent `"index_id": ""`. A consumer routing on `index_id`
+    /// then had an error frame naming an index that does not exist rather than
+    /// one it could see was unattributed. `None` omits the field instead.
+    /// Test: `reindex_guard_omits_index_id_when_never_stamped`.
+    index_id: Option<String>,
     failure_reason: FailureReasonSlot,
 }
 
@@ -73,7 +82,7 @@ impl ReindexTerminationGuard {
         Self {
             progress,
             armed: true,
-            index_id: String::new(),
+            index_id: None,
             failure_reason: Arc::new(Mutex::new(None)),
         }
     }
@@ -82,10 +91,11 @@ impl ReindexTerminationGuard {
     /// the index that died. The runner knows the id; pass it in so `Drop`'s
     /// `error!` line is greppable per-index.
     /// What: builder-style setter that stamps the index id used in the `error!`
-    /// log and the SSE payload.
+    /// log and the SSE payload. Until it is called the payload carries no
+    /// `index_id` field at all (#1451).
     /// Test: `reindex_guard_uses_captured_failure_reason` asserts the id appears.
     pub fn with_index_id(mut self, index_id: impl Into<String>) -> Self {
-        self.index_id = index_id.into();
+        self.index_id = Some(index_id.into());
         self
     }
 
@@ -157,7 +167,8 @@ impl Drop for ReindexTerminationGuard {
                 );
                 poisoned.into_inner()
             })
-            .clone();
+            .as_ref()
+            .cloned();
         let detail = captured.unwrap_or_else(|| {
             "reindex task exited unexpectedly (panic or cancellation) — \
              check daemon logs for details"
@@ -171,25 +182,26 @@ impl Drop for ReindexTerminationGuard {
         // (no duplicate structured `index_id` field) so JSON log backends don't
         // double-emit it; `reindex[...]: terminated` greps still match (issue
         // #1428 review follow-up).
-        if self.index_id.is_empty() {
-            tracing::error!("reindex: terminated without a completion event — {detail}");
-        } else {
-            tracing::error!(
-                "reindex[{}]: terminated without a completion event — {detail}",
-                self.index_id,
-            );
+        match self.index_id.as_deref() {
+            None => tracing::error!("reindex: terminated without a completion event — {detail}"),
+            Some(id) => {
+                tracing::error!("reindex[{id}]: terminated without a completion event — {detail}")
+            }
         }
 
         // Set the status and push the terminal error frame. `broadcast::send`
         // is non-blocking, so this is `Drop`-safe (no `.await`).
         self.progress.status.store(ReindexStatus::Failed);
-        let msg = serde_json::json!({
-            "event": "error",
-            "index_id": self.index_id,
-            "message": detail,
-            "fatal": true,
-        })
-        .to_string();
+        // #1451: omit `index_id` entirely when it was never stamped — an empty
+        // string is a value a consumer routing on this field would act on.
+        let mut payload = serde_json::Map::new();
+        payload.insert("event".into(), "error".into());
+        if let Some(id) = self.index_id.as_deref() {
+            payload.insert("index_id".into(), id.into());
+        }
+        payload.insert("message".into(), detail.into());
+        payload.insert("fatal".into(), true.into());
+        let msg = serde_json::Value::Object(payload).to_string();
         // `send` returns Err when there are no receivers; ignore — the replay
         // buffer is updated async by `push`, but Drop cannot be async. The
         // broadcast path alone is sufficient for live subscribers; late

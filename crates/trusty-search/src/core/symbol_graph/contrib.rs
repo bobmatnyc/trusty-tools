@@ -12,7 +12,9 @@
 //! contributed nodes/edges) plus the `save_then_merge_contrib` helper that
 //! the rebuild path calls: persist the freshly-built *derived* graph first
 //! (so derived tables never absorb contributed data), then merge every
-//! stored contribution. Edge kinds resolve through the coarse contributed
+//! stored contribution. A pass that cannot merge installs NO graph and says
+//! so (`ContribMergeOutcome`, #5505) rather than quietly serving a
+//! derived-only one. Edge kinds resolve through the coarse contributed
 //! vocabulary (`reads` / `writes` / …) first, then `EdgeKind::from_tag`
 //! (Option H: `custom:*` always round-trips); unresolvable edges are counted
 //! in `unknown_edge_tags_dropped` (issue #816 semantics).
@@ -161,6 +163,35 @@ impl SymbolGraph {
     }
 }
 
+/// What a save-then-merge pass could not do, for the caller to report (#5505).
+///
+/// Why: the pass used to end every failure in a `tracing::warn!` and hand back
+/// a graph anyway, so `POST /indexes/{id}/graph` answered `200 replaced: true`
+/// with totals that excluded the contribution just ingested — success reported
+/// for an ingest no query could see.
+/// What: two independent degradations, because they have opposite blast
+/// radii. `persist_error` means the DERIVED graph did not reach the `kg_*`
+/// tables; the in-memory graph is still complete, so the merge continues and
+/// the graph is installed — only a later warm boot would read stale derived
+/// data. `merge_error` means the contributed overlay was not folded in at all,
+/// and [`save_then_merge_contrib`] then installs nothing.
+/// Test: `contrib_load_failure_installs_nothing`,
+/// `contrib_persist_failure_still_merges`,
+/// `ingest_reports_503_when_the_contributed_overlay_cannot_be_merged`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContribMergeOutcome {
+    /// The derived graph could not be persisted; the served graph is correct.
+    pub persist_error: Option<String>,
+    /// The contributed overlay was not merged; no graph was installed.
+    pub merge_error: Option<String>,
+    /// Producer whose stored row blocked the load, when one row is to blame.
+    /// `None` for a table-level fault or a lost worker — no row is implicated.
+    /// The ingest endpoint branches on it: re-sending helps only the producer
+    /// named here, because ingest replaces exactly that row (#5505).
+    pub blocking_producer: Option<String>,
+}
+
 /// Rebuild-path finalizer: persist the derived graph, then merge contrib.
 ///
 /// Why: the chunk-derived rebuild (`rebuild_symbol_graph`) constructs a graph
@@ -168,34 +199,56 @@ impl SymbolGraph {
 /// the derived `kg_*` tables never absorb contributed rows (they would
 /// double-merge on the next load). Both steps are redb-bound, so they run on
 /// one blocking worker.
-/// What: saves `graph` to `corpus` (best-effort, warn on failure), loads all
-/// stored contributions, and merges them. With no corpus or no contributions
-/// the graph passes through untouched. If the blocking task is lost to a
-/// panic (not expected — all fallible paths are `Result`s), an empty graph is
-/// installed and an error logged; the next reindex repairs it.
-/// Test: `contrib_rebuild_path_merges_after_save` in `super::tests`;
+/// What: saves `graph` to `corpus`, loads all stored contributions, and merges
+/// them. With no corpus or no contributions the graph passes through
+/// untouched. Returns the graph to install — `None` when the pass could not
+/// merge, which is the caller's instruction to keep serving the graph it
+/// already has (#5505) — alongside a [`ContribMergeOutcome`] naming what
+/// failed, so the ingest endpoint can answer with the truth instead of a
+/// `200` whose totals exclude the contribution.
+/// Test: `contrib_rebuild_path_merges_after_save`,
+/// `contrib_load_failure_installs_nothing`,
+/// `contrib_persist_failure_still_merges` in `super::contrib_tests`;
 /// exercised end-to-end by the ingest-endpoint tests.
 pub async fn save_then_merge_contrib(
     graph: Arc<SymbolGraph>,
     corpus: Option<Arc<CorpusStore>>,
     index_id: String,
-) -> Arc<SymbolGraph> {
+) -> (Option<Arc<SymbolGraph>>, ContribMergeOutcome) {
     let Some(corpus) = corpus else {
-        return graph;
+        return (Some(graph), ContribMergeOutcome::default());
     };
+    let log_id = index_id.clone();
     let join = tokio::task::spawn_blocking(move || {
+        let mut outcome = ContribMergeOutcome::default();
+        // #5505: a persist failure costs durability, not correctness — the
+        // in-memory graph is complete, so the merge continues and the caller
+        // installs it. Reported so the loss is not silent.
         if let Err(e) = graph.save_to_corpus(&corpus) {
             tracing::warn!("index '{index_id}': kg persist failed ({e}) — graph stays in memory");
+            outcome.persist_error = Some(format!("kg persist failed: {e}"));
         }
         let contribs = match corpus.load_contrib_graphs() {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("index '{index_id}': contrib load failed ({e}) — merge skipped");
-                return graph;
+                // #5505: the derived-only graph is known to be missing every
+                // contributed edge — installing it would un-answer queries the
+                // graph already being served can answer.
+                tracing::error!(
+                    "index '{index_id}': contrib load failed ({e}) — \
+                     serving graph left unchanged, contributions not merged"
+                );
+                // #5505: recover the offending producer so the endpoint can say
+                // whose row must be re-sent instead of "retry and hope".
+                outcome.blocking_producer = e
+                    .downcast_ref::<crate::core::corpus::contrib::ContribRowError>()
+                    .map(|row| row.producer.clone());
+                outcome.merge_error = Some(format!("contrib load failed: {e}"));
+                return (None, outcome);
             }
         };
         if contribs.is_empty() {
-            return graph;
+            return (Some(graph), outcome);
         }
         // Usually the sole owner (the save above only borrowed). If a
         // concurrent `snapshot_symbol_graph` raced us and holds a clone of
@@ -215,13 +268,35 @@ pub async fn save_then_merge_contrib(
             stats.edges_dangling,
             stats.edges_unknown_kind,
         );
-        Arc::new(g)
+        (Some(Arc::new(g)), outcome)
     })
     .await;
-    join.unwrap_or_else(|e| {
-        tracing::error!(
-            "kg save/merge task panicked ({e}) — installing empty graph; reindex to repair"
-        );
-        Arc::new(SymbolGraph::new())
-    })
+    join.unwrap_or_else(|e| lost_task_outcome(&log_id, &e))
+}
+
+/// Verdict when the blocking save/merge task never returns a result (#5505).
+///
+/// Why: this arm used to install `SymbolGraph::new()` — an EMPTY graph — so a
+/// panicked or cancelled worker replaced every symbol relation the daemon was
+/// serving with nothing until the next reindex. A lost task says nothing about
+/// the graph, and nothing is not a reason to discard a good one.
+/// What: installs nothing and reports the loss as a merge error, so the caller
+/// keeps the graph it is already serving and the ingest endpoint answers 503.
+/// Test: `lost_merge_task_installs_nothing_rather_than_an_empty_graph`.
+pub(super) fn lost_task_outcome(
+    index_id: &str,
+    e: &tokio::task::JoinError,
+) -> (Option<Arc<SymbolGraph>>, ContribMergeOutcome) {
+    tracing::error!(
+        "index '{index_id}': kg save/merge task did not complete ({e}) — \
+         serving graph left unchanged"
+    );
+    (
+        None,
+        ContribMergeOutcome {
+            persist_error: None,
+            merge_error: Some(format!("kg save/merge task did not complete: {e}")),
+            blocking_producer: None,
+        },
+    )
 }

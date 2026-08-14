@@ -563,15 +563,30 @@ fn read_lockfile_pid(lock_path: &Path) -> Option<u32> {
 
 /// Check whether a process with the given PID is currently alive.
 ///
-/// Why: a stale lockfile (from a SIGKILL'd or crashed daemon) records a PID
-/// that no longer exists. Treat such lockfiles as removable so the next
-/// daemon can start on the preferred port instead of bumping.
+/// Why: the crate has three separate places that must tell a live process from
+/// a dead one, and all three carry the same consequence if they get it wrong —
+/// something belonging to a live process gets treated as abandoned. A stale
+/// daemon lockfile (from a SIGKILL'd daemon) records a PID that no longer
+/// exists and must be removable so the next daemon starts on the preferred
+/// port; `commands::stop` must not report a reaped child as a straggler; and
+/// `core::store::staging_reap` must not delete a `.tmp` snapshot another live
+/// daemon is mid-write on (#2936). One implementation, three callers — the
+/// EPERM subtlety below is exactly the kind of detail that silently drifts
+/// between copies.
 ///
 /// What: on Unix, `kill(pid, 0)` returns 0 if the process exists, ESRCH if
 /// not, EPERM if it exists but is owned by another user (still alive). On
-/// non-Unix targets we conservatively assume the PID is alive.
+/// non-Unix targets we conservatively assume the PID is alive — every caller
+/// treats "alive" as the do-nothing answer, so this fails safe.
+///
+/// `pub` rather than `pub(crate)` because `commands::stop` lives in the BINARY
+/// crate, which reaches this through the library's public `service` module; a
+/// crate-private item is invisible from there and the duplicate would have had
+/// to stay. Additive only — no existing signature changes.
+/// Test: `pid_alive_current_process_is_alive` (covers both the live and the
+/// clearly-dead pid).
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
+pub fn pid_alive(pid: u32) -> bool {
     // Use nix's safe wrapper over kill(pid, 0); signal None performs no
     // action, only error checking. We accept i32 narrowing — PIDs always
     // fit on platforms we support.
@@ -584,7 +599,7 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn pid_alive(_pid: u32) -> bool {
+pub fn pid_alive(_pid: u32) -> bool {
     true
 }
 
