@@ -16,7 +16,7 @@ use crate::memory_core::community::KnowledgeGap;
 use crate::memory_core::palace::{Palace, PalaceId};
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::concurrent_open::OpenIntent;
-use crate::memory_core::store::palace_store::PalaceStore;
+use crate::memory_core::store::palace_store::{PalaceStore, PalaceStoreError};
 use crate::palace_alias::PalaceAliasStore;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -166,6 +166,24 @@ pub struct PalaceRegistry {
     /// state (which would race other tests running in parallel).
     /// Test: `registry_tests::writer_open_queue_wait_is_bounded_under_sustained_contention`.
     open_queue_timeout: Duration,
+    /// Palaces that exist on disk but failed to hydrate, with the reason.
+    ///
+    /// Why (issue #4911): [`PalaceRegistry::open`] logs a WARN and skips a
+    /// palace it cannot open, so the palace simply is not in the registry
+    /// afterwards — indistinguishable from one that was never there. Once a
+    /// read-only open of an incompatible store REFUSES instead of recreating it
+    /// empty, that skip became the new way to lose a palace: the bytes survive
+    /// but nothing reports that the palace exists and is unreadable. Trading
+    /// data destruction for data invisibility is not a fix. Recording the skip
+    /// keeps "present but unopenable" observable without letting one bad palace
+    /// fail the whole registry open, which would brick every consumer of a
+    /// multi-palace root over one unrelated file.
+    /// What: `DashMap<PalaceId, String>` holding the formatted open error.
+    /// Populated by `open`; cleared for an id whenever a later open of that id
+    /// succeeds, so the record can never outlive the condition. Read via
+    /// [`PalaceRegistry::unopenable`] / [`PalaceRegistry::unopenable_reason`].
+    /// Test: `registry_tests::open_keeps_an_unopenable_palace_observable`.
+    unopenable: Arc<DashMap<PalaceId, String>>,
 }
 
 impl Default for PalaceRegistry {
@@ -204,6 +222,7 @@ impl PalaceRegistry {
             open_intent: OpenIntent::ReadOnlyClient,
             open_locks: Arc::new(DashMap::new()),
             open_queue_timeout: crate::memory_core::timeouts::open_queue_timeout(),
+            unopenable: Arc::new(DashMap::new()),
         }
     }
 
@@ -294,6 +313,10 @@ impl PalaceRegistry {
     /// Test: Exercised by `open_palace` and `create_palace`.
     pub fn register_arc(&self, handle: Arc<PalaceHandle>) {
         let id = handle.id.clone();
+        // #4911: this is the single funnel every successfully-opened handle
+        // passes through, so clearing here keeps an "unopenable" record from
+        // outliving the condition that produced it.
+        self.unopenable.remove(&id);
         let _evicted = {
             let mut cache = self.handles.lock();
             cache.put(id, handle)
@@ -488,6 +511,34 @@ impl PalaceRegistry {
         Ok(handle)
     }
 
+    /// Does this [`Self::open_palace`] error mean the palace is genuinely not
+    /// there?
+    ///
+    /// Why (#5549, ADR-0045): `open_palace` returns `anyhow::Error`, which
+    /// flattens six unrelated failures into one opaque value — a genuinely
+    /// absent `palace.json`, a stat or read we were denied, a transient `EIO` /
+    /// `ESTALE` on a network mount, undecodable metadata, an open-queue timeout
+    /// (#3992), and a redb write-lock conflict inside
+    /// `PalaceHandle::open_with_intent`. A caller that maps that value straight
+    /// to "not found" tells its client the palace does not exist when in fact
+    /// nothing could determine whether it does, which is the same coercion
+    /// `load_palace` stopped making one layer down. This is the only place that
+    /// knows which of `open_palace`'s failure modes is absence, so the answer
+    /// lives here instead of being re-derived at each call site.
+    /// What: walks the `anyhow` chain for a [`PalaceStoreError`] and returns
+    /// `true` only for `NotFound`, whose sole production site in this crate is
+    /// `PalaceStore::load_palace`'s absence guard. Every other failure —
+    /// including `Io` and `Json` raised by that same call — returns `false`.
+    /// Test: `open_error_is_absent_only_for_a_genuine_absence` covers a denied
+    /// read; `open_error_is_not_absent_for_an_unstattable_palace_json` covers a
+    /// denied stat, the shape #5574 turned from `NotFound` into `Io`.
+    pub fn open_error_is_absent(err: &anyhow::Error) -> bool {
+        matches!(
+            err.downcast_ref::<PalaceStoreError>(),
+            Some(PalaceStoreError::NotFound(_))
+        )
+    }
+
     /// Register a `ROOMS` row for every room the palace's drawers already use.
     ///
     /// Why (ADR-0027 T2): this is the one place every palace-open path funnels
@@ -530,16 +581,37 @@ impl PalaceRegistry {
     /// deleted palace (which would just fail load anyway, but this keeps the
     /// error message about the ORIGINAL id).
     /// What: returns `palace_id` unchanged when `<data_root>/<palace_id>/palace.json`
-    /// exists. Otherwise consults [`PalaceAliasStore::resolve_alias`]; if it maps
-    /// to a `target` whose `<data_root>/<target>/palace.json` exists, returns that
+    /// is present. Otherwise consults [`PalaceAliasStore::resolve_alias`]; if it maps
+    /// to a `target` whose `<data_root>/<target>/palace.json` is present, returns that
     /// target id. In every other case returns `palace_id` unchanged so the caller
     /// surfaces the normal "metadata missing" error. Alias-map read errors are
     /// swallowed (best-effort redirect) — a broken alias file must not break
     /// resolution of palaces that DO exist.
+    ///
+    /// Presence is `try_exists`, and only `Ok(false)` counts as absent (#5592,
+    /// ADR-0045). `exists()` reported a path we are denied to stat as one that is
+    /// not there, which broke both guards in the direction that lies: an alias
+    /// whose target could not be verified lost its redirect, and `load_palace`
+    /// then answered truthfully about the alias id's own empty directory — a
+    /// `NotFound` for the wrong palace, which [`Self::open_error_is_absent`]
+    /// cannot tell from the real thing. Returning `PalaceId` rather than a
+    /// `Result` is why an undeterminable probe presumes PRESENT instead of
+    /// propagating: this cannot fail, and every path it feeds ends at
+    /// `load_palace`, which classifies the same denial correctly one call later.
+    /// That also stops a stale alias from shadowing a real palace that merely
+    /// could not be stat'd.
     /// Test: `open_palace_follows_alias`, `open_palace_ignores_alias_when_target_missing`,
-    /// `open_palace_prefers_real_palace_over_alias`.
+    /// `open_palace_prefers_real_palace_over_alias`,
+    /// `open_error_is_not_absent_for_an_unstattable_alias_target`.
     fn resolve_palace_alias(data_root: &Path, palace_id: &PalaceId) -> PalaceId {
-        let exists = |id: &str| data_root.join(id).join("palace.json").exists();
+        // #5592: `exists()` read a palace we are DENIED to stat as one that is
+        // not there. Only `Ok(false)` is a genuine absence.
+        let exists = |id: &str| {
+            !matches!(
+                data_root.join(id).join("palace.json").try_exists(),
+                Ok(false)
+            )
+        };
         if exists(palace_id.as_str()) {
             return palace_id.clone();
         }
@@ -605,7 +677,10 @@ impl PalaceRegistry {
     /// and for each persisted palace builds a `PalaceHandle` via
     /// `PalaceHandle::open` and registers it. Errors hydrating a single palace
     /// are logged and skipped so one corrupt palace doesn't take the whole
-    /// registry down. Enumeration is stricter than hydration: since #5543
+    /// registry down — but the skip is RECORDED (#4911) and readable via
+    /// [`PalaceRegistry::unopenable`], because a palace whose bytes survive and
+    /// whose contents cannot be read must stay observable rather than silently
+    /// vanish from the registry. Enumeration is stricter than hydration: since #5543
     /// `PalaceStore::list_palaces` fails rather than return a short list, so a
     /// palace missing from this warmup was skipped by `PalaceHandle::open`, not
     /// lost before it was ever seen.
@@ -630,11 +705,66 @@ impl PalaceRegistry {
                     registry.register_arc(handle);
                 }
                 Err(e) => {
+                    // #4911: record it before skipping. A skipped palace is
+                    // absent from the handle cache, so without this the palace
+                    // is indistinguishable from one that never existed.
                     tracing::warn!(palace = %palace.id, "skipping palace during registry open: {e:#}");
+                    registry
+                        .unopenable
+                        .insert(palace.id.clone(), format!("{e:#}"));
                 }
             }
         }
         Ok(registry)
+    }
+
+    /// Every palace that exists on disk but could not be opened, with its
+    /// reason.
+    ///
+    /// Why (issue #4911): [`PalaceRegistry::open`] must not fail wholesale over
+    /// one bad palace, but the palace it skips must still be observable — a
+    /// palace whose bytes survive and whose contents cannot be read is a state
+    /// an operator has to be able to see. This is the read side of that record.
+    /// What: snapshot of the skip map as `(id, reason)` pairs, in unspecified
+    /// order. Empty when every persisted palace hydrated.
+    /// Test: `registry_tests::open_keeps_an_unopenable_palace_observable`.
+    #[must_use]
+    pub fn unopenable(&self) -> Vec<(PalaceId, String)> {
+        self.unopenable
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect()
+    }
+
+    /// Why this palace could not be opened, if it was recorded as unopenable.
+    ///
+    /// Why (issue #4911): lets a caller ask about the one id it cares about
+    /// without scanning [`PalaceRegistry::unopenable`].
+    /// What: the recorded error string, or `None` when the palace hydrated
+    /// normally or was never seen by an eager `open`.
+    /// Test: `registry_tests::open_keeps_an_unopenable_palace_observable`.
+    #[must_use]
+    pub fn unopenable_reason(&self, palace_id: &PalaceId) -> Option<String> {
+        self.unopenable.get(palace_id).map(|r| r.value().clone())
+    }
+
+    /// Record that `palace_id` exists on disk but could not be opened.
+    ///
+    /// Why (issue #4911): [`PalaceRegistry::open`] is not the hydration path any
+    /// shipped binary runs — the daemon walks the registry root itself
+    /// (`AppState::load_palaces_from_disk`) so it can seed its own name cache
+    /// alongside each open. Without a way for that walk to file its skips, the
+    /// unopenable record would be populated only by a constructor nothing calls,
+    /// and "the palace stays observable" would be true of the type and false of
+    /// the daemon.
+    /// What: inserts `reason` under `palace_id`, replacing any earlier entry.
+    /// [`PalaceRegistry::register_arc`] clears it when that palace later opens,
+    /// so a record cannot outlive the condition that produced it.
+    /// Test: `registry_tests::record_unopenable_is_cleared_by_a_later_success`;
+    /// the daemon path is covered by
+    /// `trusty_memory::lib_tests::load_palaces_from_disk_records_an_unopenable_palace`.
+    pub fn record_unopenable(&self, palace_id: PalaceId, reason: String) {
+        self.unopenable.insert(palace_id, reason);
     }
 
     /// Drop every idle, unreferenced palace handle — the "idle to disk" sweep.

@@ -77,6 +77,13 @@ impl ForgetOutcome {
 /// Maximum number of drawers held in the L1 cache.
 pub(super) const L1_CAP: usize = 15;
 
+/// Re-export so `retrieval`'s call sites keep reading `super::types::…`.
+///
+/// The definition lives next to `Drawer` in `memory_core::palace` because
+/// `store::l1_cache` needs the same comparator and must not depend upward on
+/// `retrieval`. See [`crate::memory_core::palace::drawer_listing_order`].
+pub(super) use crate::memory_core::palace::drawer_listing_order;
+
 /// Options for `PalaceHandle::remember_with_options` (issue #61).
 ///
 /// Why: The signal/noise gate, the curated-fact escape hatch (`memory_note`),

@@ -35,5 +35,18 @@ async fn main() -> Result<()> {
 
     let outcome = session.execute(cli.to_command()).await?;
     print!("{}", cli::render(&outcome));
-    Ok(())
+
+    // #5215/#5555: a sweep that partly failed, or an acquisition that skipped
+    // repositories, returns `Ok` — the per-repo failures are data to render,
+    // not an error — so the process status is decided from the outcome.
+    // `taudit clone … && taudit run` reads the status, not the text. The
+    // judgement itself is `Outcome::exit_code`, in the library, so the Tauri
+    // shell reads the same verdict from the same place.
+    let code = outcome.exit_code();
+    if code == 0 {
+        return Ok(());
+    }
+    // `process::exit` does not flush Rust's stdout buffer.
+    std::io::Write::flush(&mut std::io::stdout()).context("cannot write the report")?;
+    std::process::exit(code);
 }

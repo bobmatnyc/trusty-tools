@@ -1,6 +1,11 @@
 [package]
 name = "trusty-agents-common"
-version = "0.5.0"
+# #4421: patch bump — 0.5.1 already published on crates.io and this PR
+# touches src/**. Only `src/assets/agents/BASE-AGENT.md` changed, whose
+# content backs the public `pub const BASE_AGENT: &str` — a content-only
+# change, not a type-level API change, and 0.y.z makes MINOR the breaking
+# position, so a patch here asserts no breaking change.
+version = "0.5.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

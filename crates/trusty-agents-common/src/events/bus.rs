@@ -12,7 +12,7 @@
 //! What: Defines `HarnessPayload` (the domain-tagged inner union),
 //!       `HarnessEvent` (the envelope), the process-global `EVENT_BUS`, a
 //!       monotonic `SEQ` counter, `bus`/`subscribe`/`publish`/`emit` helpers,
-//!       the `__HARNESS_EVENT__` stderr relay prefix, and a `Lag` notice with
+//!       the `__OMPM_EVENT__` stderr relay prefix, and a `Lag` notice with
 //!       `recv_with_lag` so a lagged subscriber is told how many events it
 //!       skipped and can resume instead of tearing down its stream.
 //! Test: `super::tests` covers serde round-trips of each payload arm, seq
@@ -31,16 +31,25 @@ use super::lifecycle::{HarnessSource, LifecycleEvent};
 
 /// Stderr line prefix used to relay events from a child process to its parent.
 ///
+/// THE one declaration of this wire marker. `trusty_code::events` and
+/// `trusty_agents::events` re-export it rather than declaring their own, and
+/// the harness-understanding assets in this crate document this exact value —
+/// so the producer, the parent-side parser, and the session manager's
+/// instructions cannot drift apart (#5129).
+///
 /// Why: A harness may spawn workflow / agent work in a child process whose
 ///      events must still reach the parent's bus. Reusing stderr as the IPC
 ///      channel (the parent already reads child stderr) avoids inventing a new
 ///      transport. A stable, unambiguous prefix lets the parent detect relay
 ///      lines and re-publish them rather than mirroring them to the terminal.
 /// What: Match by exact byte prefix; the payload after the space is one JSON
-///       object decodable as `HarnessEvent`.
-/// Test: `super::tests::event_line_prefix_is_stable` and
-///       `super::tests::emit_line_has_prefix_and_parses`.
-pub const EVENT_LINE_PREFIX: &str = "__HARNESS_EVENT__ ";
+///       object decodable as the emitting crate's event envelope.
+/// Test: `super::tests::event_line_prefix_is_stable`,
+///       `super::tests::emit_line_has_prefix_and_parses`, and
+///       `crate::harness_doc::tests::harness_doc_names_the_relay_prefix`.
+// #5129: value is the one tcode and tagent have always written to stderr;
+// renaming the producers would break parent/child relay across binary versions.
+pub const EVENT_LINE_PREFIX: &str = "__OMPM_EVENT__ ";
 
 /// Broadcast channel capacity for the global bus.
 ///

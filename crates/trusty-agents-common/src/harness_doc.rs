@@ -13,7 +13,8 @@
 //!       `tcode()`, `overseer()` — plus a `harness_understanding()` convenience
 //!       that concatenates all four sections for consumers that want the full doc.
 //! Test: `harness_doc::tests` verifies non-empty content, canonical marker
-//!       presence (`✻`, `__HARNESS_EVENT__`), and the structured-accessor sum
+//!       presence (`✻`, and the `events::EVENT_LINE_PREFIX` relay marker the
+//!       emitting harness actually writes), and the structured-accessor sum
 //!       equals the full-doc output.
 
 /// Harness-agnostic mental model: session lifecycle, pane/IO model, prompt
@@ -25,7 +26,7 @@
 /// What: Returns the full text of `HARNESS_AGNOSTIC.md`, compiled in at build
 ///       time via `include_str!`.
 /// Test: `agnostic_non_empty`, `agnostic_contains_claude_code_glyph`,
-///       `agnostic_contains_harness_event`.
+///       `harness_doc_names_the_relay_prefix`.
 pub fn agnostic() -> &'static str {
     include_str!("assets/harness_understanding/HARNESS_AGNOSTIC.md")
 }
@@ -42,20 +43,20 @@ pub fn mpm_session_manager() -> &'static str {
     include_str!("assets/harness_understanding/HARNESS_MPM_SM.md")
 }
 
-/// tcode-specific signals: task banners, `__HARNESS_EVENT__` NDJSON lines,
+/// tcode-specific signals: task banners, `__OMPM_EVENT__` NDJSON lines,
 /// agent-delegation patterns, and diff/edit confirmation output.
 ///
 /// Why: tcode emits structured NDJSON events that differ from Claude Code's
 ///      pane-text signals; both consumers need the tcode specifics.
 /// What: Returns the full text of `HARNESS_TCODE.md`.
-/// Test: `tcode_non_empty`, `tcode_contains_harness_event`.
+/// Test: `tcode_non_empty`, `harness_doc_names_the_relay_prefix`.
 pub fn tcode() -> &'static str {
     include_str!("assets/harness_understanding/HARNESS_TCODE.md")
 }
 
 /// Forward-looking t-code-as-overseer contract: the `Overseer` trait +
 /// `HarnessSource::Code` filter seam, event-to-decision mapping, and
-/// `__HARNESS_EVENT__` as structured overseer input.
+/// `__OMPM_EVENT__` as structured overseer input.
 ///
 /// Why: The overseer seam is already defined (`Overseer` trait,
 ///      `HarnessSource::Code`); this section codifies the behavioral contract
@@ -105,13 +106,26 @@ mod tests {
         );
     }
 
+    /// #5129: these sections are the session manager's instructions for which
+    /// stderr marker to watch, so they are pinned to the constant tcode and
+    /// tagent actually emit — never to a copy of its text, which is how the
+    /// doc and the producer drifted apart unnoticed.
     #[test]
-    fn agnostic_contains_harness_event() {
-        // __HARNESS_EVENT__ is the canonical tcode NDJSON event prefix (DOC-21 §5.2)
-        assert!(
-            agnostic().contains("__HARNESS_EVENT__"),
-            "agnostic section must document __HARNESS_EVENT__ prefix"
-        );
+    fn harness_doc_names_the_relay_prefix() {
+        let marker = crate::events::EVENT_LINE_PREFIX.trim_end();
+        let full = harness_understanding();
+        for (section, text) in [
+            ("agnostic", agnostic()),
+            ("tcode", tcode()),
+            ("overseer", overseer()),
+            ("full doc", full.as_str()),
+        ] {
+            assert!(
+                text.contains(marker),
+                "{section} must document the `{marker}` NDJSON relay prefix \
+                 (DOC-21 §5.2) — it is what the emitting harness writes"
+            );
+        }
     }
 
     #[test]
@@ -135,14 +149,6 @@ mod tests {
     }
 
     #[test]
-    fn tcode_contains_harness_event() {
-        assert!(
-            tcode().contains("__HARNESS_EVENT__"),
-            "tcode section must document __HARNESS_EVENT__ NDJSON prefix"
-        );
-    }
-
-    #[test]
     fn overseer_non_empty() {
         assert!(!overseer().trim().is_empty());
     }
@@ -159,10 +165,6 @@ mod tests {
     fn full_doc_contains_all_markers() {
         let doc = harness_understanding();
         assert!(doc.contains('✻'), "full doc must contain ✻ glyph");
-        assert!(
-            doc.contains("__HARNESS_EVENT__"),
-            "full doc must contain __HARNESS_EVENT__"
-        );
         assert!(
             doc.contains("FlagForHuman") || doc.contains("flag_for_human"),
             "full doc must contain FlagForHuman"

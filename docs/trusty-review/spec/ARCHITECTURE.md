@@ -12,7 +12,7 @@ trusty-review is the third member of the `trusty-tools` PR-review triad. It orch
 ```
 Triggers
   ├── GitHub webhook (review_requested)
-  └── CLI one-shot (run / compare / profile)
+  └── CLI one-shot (run / compare)
 
 trusty-review (crates/trusty-review/)
   ├── axum router           — service::build_router() [http-server feature]
@@ -27,7 +27,6 @@ trusty-review (crates/trusty-review/)
   │     ├── parser module   — verdict + findings extraction (fail-closed #1241) ✅
   │     └── output module   — log file writing + review footer (#728) ✅
   ├── LLM layer             — llm::LlmProvider trait (Bedrock | OpenRouter)
-  ├── Profile pipeline      — profile:: (longitudinal contributor profiling) ✅
   ├── Dedup store           — store::dedup (three-layer redb claim store) ✅
   └── Integrations          — GitHub client, search/analyze, JIRA/Confluence/Issues/conformance ✅
 
@@ -55,7 +54,7 @@ crates/trusty-review/
 └── src/
     ├── lib.rs              re-exports; crate-level docs
     ├── main.rs             binary: clap dispatch → CLI or `serve`
-    ├── cli_profile.rs      `profile` subcommand dispatch
+    (cli_profile.rs removed in 0.16.0 — contributor profiling moved to `tga profile`, see #5468)
     ├── config/
     │   ├── mod.rs          ReviewConfig, Provider enum; env+file resolution
     │   ├── constants.rs    confidence thresholds, pipeline tuning constants
@@ -116,17 +115,7 @@ crates/trusty-review/
     │       ├── pr.rs       fetch_pr_diff(), fetch_pr_files(), fetch_pr_meta(), post_review()
     │       ├── firewall.rs assert_no_push_operation() — hard-coded push firewall
     │       └── webhook.rs  webhook signature verification
-    ├── profile/
-    │   ├── mod.rs          re-exports for longitudinal profiling
-    │   ├── types/          ContributorProfile, PeriodBatch, SampledDiff, etc.
-    │   ├── selector.rs     ContributorSelector, resolve_contributor(), resolve_db_path()
-    │   ├── batch.rs        assemble_period_batches() (Window enum)
-    │   ├── diff_sampler/   DiffSamplerConfig, sample_diffs_for_batches()
-    │   ├── batch_reviewer.rs BatchReviewer — per-period LLM review calls
-    │   ├── synthesizer.rs  Synthesizer — longitudinal pattern synthesis
-    │   ├── reporter.rs     Reporter — profile output (JSON + Markdown)
-    │   ├── reporter_github.rs optional GitHub issue creation
-    │   └── error.rs        ProfileError (thiserror)
+    (src/profile/ removed in 0.16.0 — contributor profiling moved to `tga profile`, see #5468)
     ├── store/
     │   └── dedup.rs        three-layer dedup claim store (redb) ✅
     └── service/            [http-server feature only]
@@ -228,7 +217,7 @@ The same `trusty-review` binary runs in two modes selected by subcommand:
 
 | Mode | Entry | Lifecycle | Trigger |
 |------|-------|-----------|---------|
-| **CLI one-shot** | `run`, `compare`, `profile` | exits after one review | CLI args |
+| **CLI one-shot** | `run`, `compare` | exits after one review | CLI args |
 | **Webhook daemon** | `serve --port 7880` | long-lived daemon | GitHub `review_requested` webhook |
 
 Server mode differences:
@@ -240,7 +229,6 @@ Server mode differences:
 CLI one-shot differences:
 - `run --local-diff <path>` reviews a local diff file: no GitHub credentials needed, always dry-run.
 - `compare` runs the same PR across the COMPARE_CANDIDATE_MODELS set (default: Bedrock Haiku 4.5, Sonnet 4.5, Sonnet 4.6).
-- `profile` runs the longitudinal contributor-profile pipeline against a tga SQLite database.
 
 ---
 

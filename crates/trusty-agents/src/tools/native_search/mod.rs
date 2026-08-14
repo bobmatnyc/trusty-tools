@@ -31,11 +31,11 @@ mod tests {
     use serde_json::{Value, json};
     use tempfile::tempdir;
 
-    use super::helpers::grep_fallback_search;
+    use super::helpers::{chunk_to_hit_json, grep_fallback_search};
     use super::{SearchCodeTool, SearchMemoryTool, SearchSkillsTool};
     use crate::memory::store::{MemoryResult, MemoryStore, Segment};
     use crate::memory::{AgentSession, Embedder, MemoryGraph};
-    use crate::search::indexer::CodeIndexer;
+    use crate::search::indexer::{CodeChunk, CodeIndexer};
     use crate::tools::traits::{SkillResolver, ToolExecutor};
 
     // ------- Shared mock infrastructure (insertion-order search) -------
@@ -242,6 +242,61 @@ mod tests {
         // Path + snippet should be present.
         assert!(hits[0]["path"].as_str().unwrap().ends_with("lib.rs"));
         assert!(hits[0]["snippet"].as_str().unwrap().contains("hello"));
+    }
+
+    /// Why: The compact envelope used to carry a `grade` field thresholded
+    /// out of `CodeChunk::score`, and that score is rank-only RRF —
+    /// `search_hybrid` computes `alpha/(60 + rank_vec) + beta/(60 + rank_bm)`
+    /// where `classify_query` always yields `alpha + beta == 1.0`, so the
+    /// supremum of any hybrid score is `1.0/61 = 0.01639`. The old "A" cut sat
+    /// at 0.025 and "B" at 0.018, so the best possible hit in the corpus could
+    /// only ever be graded "C". The identical thresholds ran over the
+    /// vector-only fallback, whose score is a cosine in [0, 1], where a
+    /// near-orthogonal 0.03 graded "A". The letter inverted quality rather
+    /// than reporting it (#5620, same class as #4976).
+    /// What: Pins the envelope for both scales — a best-possible hybrid score
+    /// and a noise-level cosine — to carry no letter tier under any key, while
+    /// keeping the honest `score` and `match_reason` fields.
+    #[test]
+    fn compact_hit_envelope_asserts_no_letter_grade() {
+        let chunk = |score: f32, match_reason: &str| CodeChunk {
+            file: std::path::PathBuf::from("src/lib.rs"),
+            function_name: Some("hello".to_string()),
+            start_line: 1,
+            end_line: 3,
+            language: "rust".to_string(),
+            score,
+            text: "fn hello() {}\n".to_string(),
+            match_reason: match_reason.to_string(),
+        };
+
+        // Best achievable hybrid RRF score: rank 1 in both fused lists.
+        let best_hybrid = chunk(1.0 / 61.0, "hybrid");
+        // Near-orthogonal cosine from the vector-only fallback — noise.
+        let noise_cosine = chunk(0.03, "vector");
+
+        for c in [&best_hybrid, &noise_cosine] {
+            let hit = chunk_to_hit_json(c, true);
+            let obj = hit.as_object().expect("hit envelope is a JSON object");
+
+            assert!(
+                obj.get("grade").is_none(),
+                "compact envelope must not grade an uncalibrated score; got {hit}"
+            );
+            // Catch the same assertion returning under a renamed key.
+            for (k, v) in obj {
+                let is_letter_tier = v
+                    .as_str()
+                    .is_some_and(|s| matches!(s, "A" | "B" | "C" | "D" | "E" | "F"));
+                assert!(
+                    !is_letter_tier,
+                    "field {k:?} carries a letter quality tier {v}; got {hit}"
+                );
+            }
+            // The honest signals stay.
+            assert!(obj.contains_key("score"), "score must survive; got {hit}");
+            assert_eq!(hit["match_reason"], c.match_reason);
+        }
     }
 
     // ------- search_memory tests -------

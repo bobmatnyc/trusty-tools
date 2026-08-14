@@ -5,17 +5,18 @@ spec_refs: []
 # DOC-67 — tga AUDIT Mode: Remote Codebase Analysis for Acquisition Due Diligence
 
 **Status:** APPROVED 2026-08-08. The owner signed off §3's dimension-scope
-assumption and every open question (Q1–Q6) is resolved. **Implementation is
-HELD until tm 1.3.5 ships** — owner directive, 2026-08-08: *"yes, hold off on
-building until we release 1.3.5."* Issues may be filed against §13; no code
-may be written until that release lands.
+assumption and every open question (Q1–Q6) is resolved. Implementation was
+HELD until tm 1.3.5 shipped — owner directive, 2026-08-08: *"yes, hold off on
+building until we release 1.3.5."* **The owner lifted that hold on
+2026-08-13 ([#5643](https://github.com/bobmatnyc/trusty-tools/issues/5643));
+the §13 issues may be filed and implementation may begin.**
 **Spec ID:** `SPEC-TGAUDIT-01~draft` … `SPEC-TGAUDIT-13~draft`
 **Subsystem:** `trusty-git-analytics` (tga) — orchestration, new `audit`
 subcommand, DD-manifest adapter; `trusty-review` — existing DD report
 pipeline, consumed unmodified; `trusty-analyze` — existing HTTP analysis
 surface, consumed unmodified by trusty-review, not touched by tga
 **Owner:** Bob Matsuoka
-**Last-updated:** 2026-08-08
+**Last-updated:** 2026-08-13 (implementation hold lifted, #5643)
 **DOC-N claim:** `DOC-67`, scan-before-claim per DOC-38 §4.1. Verified against
 this worktree (branched from `origin/main`): no `DOC-67` filename or
 header self-label anywhere under `docs/specs/**`; `scripts/check_doc_numbers.sh`
@@ -330,7 +331,9 @@ shape.
 
 **Orchestration.** `tga audit` (proposed new subcommand,
 `crates/trusty-git-analytics/src/commands/audit.rs`, dispatched alongside the
-existing commands at `main.rs:371-399`) sequences: (1) acquisition/collection
+existing commands at `main.rs:371-399`) sequences: (0) ensure the
+`trusty-analyze` daemon step 3 fetches from is running — see the preflight
+paragraph below, (1) acquisition/collection
 via #5223's machinery, (2) `dd_manifest::build_dd_manifest` → write
 `manifest.toml` to a run-scoped output directory, (3) spawn `trusty-review
 report --manifest <path> --analyze --output <dir>` (binary resolved the same
@@ -338,6 +341,65 @@ way `SubprocessAnalyzeClient` resolves `trusty-analyze` — `TRUSTY_REVIEW_BIN`
 env override, else PATH lookup), (4) surface the child's stdout/stderr and
 exit code to the operator, (5) print the resulting `{slug}.md`/`{slug}.json`
 paths.
+
+**Who starts `trusty-analyze` (#5670) — `tga audit`, as a preflight.** Step 3
+passes `--analyze` on every invocation, and §8 sources the findings table, the
+complexity distribution and the health factors from that daemon and nowhere
+else. Nothing started it. On a machine with no daemon running, every audit
+delivered a report with those three sections empty and exited 0.
+
+`tga audit` now ensures the daemon before stage 1
+(`crates/trusty-git-analytics/src/audit/analyze.rs`): it probes `/health`,
+spawns `<binary> serve --port <port>` detached when there is no answer, and polls
+until the daemon answers. The binary is `TRUSTY_ANALYZE_BIN` else PATH, and the
+address is `PR_INTELLIGENCE_ANALYZER_URL` else `http://localhost:7879` — the same
+variable `trusty-review` reads, so the daemon that gets started and the daemon
+that gets queried are the same process by construction. The probe/spawn/poll loop
+is `trusty_common::daemon_guard`, not a second copy.
+
+`tga audit` is the right owner for three reasons. It is the only process that
+always passes `--analyze`. `trusty-audit run` reaches the daemon only through the
+`tga audit` children it spawns, so one implementation covers both entry points.
+And it already carries two whole-run preflights of exactly this shape — the
+inference credential and the renderer version — both justified by §2's single
+non-interactive shot, which applies here identically: this precondition is
+knowable in milliseconds and was previously discovered after minutes of
+collection, in the artifact.
+
+**A daemon that cannot be started refuses the run**, before the sweep, with a
+message naming `trusty-search` — `trusty-analyze serve` exits immediately when
+trusty-search is unreachable, which is the usual reason a spawn produces no
+daemon. This is a preflight, so neither arm is fail-open: a spawn failure and a
+readiness timeout both stop the run. §9's fail-open contract for
+`analyze_adapter.rs` is unchanged, and remains correct for its own callers — what
+changes is that `tga audit` now guarantees the precondition rather than letting
+the renderer discover its absence.
+
+**Still open — the daemon is necessary, not sufficient.** `try_fetch` also
+requires the repository to be indexed in trusty-search under its checkout
+basename (`analyze_adapter.rs`'s `index_served`), and nothing in the audit path
+indexes anything. A run on an unindexed repository still reaches the renderer's
+`trusty-analyze index not built` gap.
+
+The full prerequisite chain is trusty-search → per-repository index →
+trusty-analyze, and #5670 does not reach all three:
+
+- **trusty-analyze (link 3) — closed.** The preflight starts it or refuses.
+- **trusty-search (link 1) — hard-refused on every run.** Not only on a fresh
+  spawn. `trusty-analyze`'s own `/health` answers `503 degraded` whenever
+  trusty-search is unreachable (`crates/trusty-analyze/src/service/routes.rs`'s
+  `health`), and `probe_once` counts only a 2xx — so the preflight's opening
+  probe re-reads trusty-search's LIVE status each run. An analyze daemon that has
+  been up for days on top of a trusty-search that died an hour ago fails the
+  probe, its spawned replacement exits at its own search check, the original
+  keeps answering 503, and the readiness poll refuses the audit.
+- **The per-repository index (link 2) — unchanged, and still fail-open.**
+  `AnalyzeGap::NotIndexed` is the same one-line-in-the-artifact, exit-0 gap it
+  was before #5670 (`analyze_adapter.rs`'s `fetch_named`, §9). Nothing in the
+  preflight indexes anything or checks that anything is indexed, so an
+  unindexed repository still produces a report with the three analyze-derived
+  sections empty and a gap line naming why. That link is carried forward as its
+  own work.
 
 ## {#SPEC-TGAUDIT-07~draft} 7. What AUDIT Adds Beyond Epic #5223
 
@@ -596,22 +658,24 @@ surface AUDIT needs exists, silently reintroducing the Q1 gap.
 surface, performance and cost declared explicit gaps in the report. Nothing
 in this spec is awaiting a decision.
 
-**One scheduling constraint replaces it.** Implementation is held until tm
-1.3.5 ships (owner, 2026-08-08). The §13 issues may be filed now; no code is
-written against them until that release lands. Milestone
+**The scheduling constraint that replaced it has since been lifted.**
+Implementation was held until tm 1.3.5 shipped (owner, 2026-08-08); the
+owner lifted that hold on 2026-08-13
+([#5643](https://github.com/bobmatnyc/trusty-tools/issues/5643)), so the
+§13 issues may now be filed and implemented. Milestone
 [#43](https://github.com/bobmatnyc/trusty-tools/milestone/43)'s 2026-08-09
-due date covers this specification, which is delivered — not the
-implementation, which is gated on a release with open readiness criteria.
+due date covered this specification's delivery, which is unaffected by
+either the hold or its lifting.
 
 ## {#SPEC-TGAUDIT-13~draft} 13. Proposed Issue Breakdown for Milestone #43
 
 Proposed only. Nothing below has been filed. Titles, scope, and
-dependencies are this spec's recommendation for how to slice the work once
-the owner approves §3.
+dependencies are this spec's recommendation for how to slice the work,
+following the owner's 2026-08-08 approval of §3.
 
 | Proposed title | One-line scope | Depends on |
 |---|---|---|
-| `feat(tga): audit orchestrator command scaffold` | New `tga audit` subcommand parsing CLI flags (org/workspace, title, `--analyst`, `--client`, output dir), dispatch wiring in `main.rs`, no report generation yet, no interactivity anywhere in the path (§2) | none (can start once §3 is approved) |
+| `feat(tga): audit orchestrator command scaffold` | New `tga audit` subcommand parsing CLI flags (org/workspace, title, `--analyst`, `--client`, output dir), dispatch wiring in `main.rs`, no report generation yet, no interactivity anywhere in the path (§2) | none |
 | `feat(tga): #5217 library entry point` | **Amend #5217 in place** (owner, Q6) — not a separate issue: expose `run_full_sweep` per §7's proposed signature — no TTY, no confirmation, returns a stats struct, optionally emits to the existing progress bus. The TUI's "Run Audit" button becomes a caller of this function. | #5217 |
 | `feat(tga): DD-manifest adapter` | `report/dd_manifest.rs` — `build_dd_manifest` + TOML serialization per §6's field mapping, unit-tested against fixture `Config` values | audit orchestrator scaffold |
 | `feat(tga): audit sweep sequencing` | Wire the orchestrator to call the #5217 library entry point | #5217 library entry point |
@@ -628,4 +692,4 @@ the owner approves §3.
 *This document is the deliverable requested for milestone
 [#43](https://github.com/bobmatnyc/trusty-tools/milestone/43). No code was
 written, no `Cargo.toml` was changed, and no issue listed in §13 has been
-filed — all pending owner approval of §3.*
+filed — the owner approved §3 on 2026-08-08.*

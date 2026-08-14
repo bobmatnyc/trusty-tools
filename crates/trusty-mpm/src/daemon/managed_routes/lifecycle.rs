@@ -399,7 +399,9 @@ async fn spawn_managed_routed(
         // than an opt-out. Only a GitHub-remote-having local checkout can reach
         // `spawn_managed_on_main` (it needs `owner`/`repo` for the source id),
         // which mirrors `try_inproject_spawn`'s own detection.
-        if let Some(origin_url) = super::inproject::get_origin_url(local_path)
+        // #4734: the `?` propagates a git-read failure rather than letting it
+        // read as "not a GitHub checkout" and silently pick a different placement.
+        if let Some(origin_url) = super::inproject::get_origin_url(local_path)?
             && let Some(gh) = trusty_common::github_path::parse_github_path(&origin_url)
         {
             // #5274: `params.worktree` is the ONLY input here, and that is the
@@ -1155,7 +1157,8 @@ async fn spawn_managed_local(
     // provision a managed clone and operate in that clone instead of the live
     // checkout. If it does not, the managed path cannot be established — error so
     // the caller (or the operator via `tm connect`) handles the no-remote case.
-    let origin_url = super::inproject::get_origin_url(&local_dir).ok_or_else(|| {
+    // #4734: `?` first — a git failure is its own error, not "no remote".
+    let origin_url = super::inproject::get_origin_url(&local_dir)?.ok_or_else(|| {
         format!(
             "spawn failed: '{}' has no git origin remote; \
                  managed sessions require a GitHub remote. \

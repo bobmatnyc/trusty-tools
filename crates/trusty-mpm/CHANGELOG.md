@@ -6,6 +6,440 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.6] — 2026-08-12
+
+### Added
+
+- Sessions now carry their two per-project MCP pins as environment variables the
+  spawn exports: `TRUSTY_MEMORY_PALACE` (the project's palace slug) and
+  `TRUSTY_INDEX` (the confirmed trusty-search index id). A single shared
+  user-scope declaration cannot carry a per-project argument, so these replace
+  the `env` block and the `serve --index <id>` argument the deleted injectors
+  wrote. Both stay gated on the same `[mcp] trusty_memory` / `[mcp] trusty_search`
+  manifest toggles, and each is omitted rather than exported empty when the
+  toggle is off or the value cannot be derived — so a session keeps the right
+  palace (#1605) and the right index (#1373) without a workspace `.mcp.json`
+  (#4181, ADR-0042).
+- `BASE-AGENT.md` now carries the agent-facing half of the shared-working-tree
+  rule: a file-mutating agent works in its own worktree and never
+  `git checkout`/`git switch` in a directory it was handed, because a
+  concurrently-dispatched sibling shares that git HEAD. It names
+  `tm hook --pm-guard` as the enforcement so the deny message and the prose point
+  at each other (#4480).
+- `tm hook --pm-guard` now denies a second concurrent file-mutating `Agent`/`Task`
+  dispatch into a working directory that already has one, unless the dispatch
+  declares `isolation: "worktree"` (or `"remote"`). Two subagents sharing the PM's
+  directory race over one git HEAD, and git does not refuse the collision — a
+  `git checkout -b` only refuses when a tracked file differs between both branches
+  AND has an uncommitted change, so untracked files transfer onto the wrong branch
+  silently. The guard fires only for bundled engineer-tier agents and fails open
+  everywhere else: a read-only dispatch, an unknown agent name, an unresolvable
+  working directory, and an unreachable daemon all allow the dispatch (#4480).
+  - Delegation records now carry the `isolation` mode a dispatch declared, and the
+    daemon serves `POST /api/v1/sessions/{id}/delegations/shared-tree-dispatch` so
+    the guard can learn which agents are already writing in a directory rather than
+    guess from a timer.
+- the interactive session picker (bare `tm`, `tm ls`) accepts `n` to launch a new session and `n <name>` to name it (closes [#4965](https://github.com/bobmatnyc/trusty-tools/issues/4965))
+  - `n` is slot-independent: the `[N] launch new session` number shifts as sessions come and go, so there was nothing to memorize — that entry stays, and `n` is additive
+  - the token must be exactly `n`/`N`, and a name requires a whitespace separator, so `new`, `no`, `nn`, `n1` and `nauth` are all unrecognised — no n-initial typo can spawn a session
+  - `n <name>` launches as `tm-<name>-NN`, with the name kebab-cased in the CLI before it is sent (`n My Auth Fix!` → `tm-my-auth-fix-01`); sanitizing here is what keeps `n feature/auth` and `n hotfix/auth` distinct, since the daemon's own hint sanitization takes the path basename and would collapse both to `auth`
+  - a name with no usable characters (`n !!!`) is refused with a message rather than spawning under the daemon's shared `local` fallback leaf
+- Session launch now ensures the `in-progress` and `blocked` issue-lifecycle
+  labels exist, alongside the existing `ws/<session>` label, so
+  `tm-ticketing`'s Lifecycle rule works on a repo that has never seen them.
+  Fire-and-forget and non-fatal, exactly like the `ws/` ensure — a `gh`
+  failure on any label never blocks a launch or suppresses the other labels.
+  Unlike `ws/`, the two lifecycle labels are created WITHOUT `--force`, since
+  a project may already own and have styled them.
+- The resident PM `workflow` instruction section now points at that Lifecycle
+  section when work is dispatched against an issue; previously the rule was
+  only reachable if the PM happened to load the trigger-loaded skill.
+- `tm hook --pm-guard` denies whole-tree-destructive git commands — `git checkout -- <pathspec>` / `checkout .` / `checkout -f`, `git restore` in its working-tree forms, `git reset --hard|--merge|--keep`, a forced `git clean`, and `git switch --discard-changes` — when the directory they would act on is a project's main checkout rather than a worktree. It binds dispatched subagents, not only the PM, and builds the enforcement ADR-0037 deferred. Read-only git, `checkout -b`, a plain `git reset`, `git restore --staged`, a dry-run `clean`, and everything under `.claude/worktrees/**` stay allowed.
+- `tm doctor` gained a `stray_mcp_json` check for `.mcp.json` files sitting
+  ABOVE a workspace or in a temp root. Claude Code discovers `.mcp.json` by
+  walking UP from a session's cwd, so one written above real projects supplies
+  the MCP servers of every session started beneath it — agent scratchpads under
+  `/tmp` included — with nothing in the project to point at. The scan is
+  bounded to the workspace's strict ancestors up to the home directory, plus
+  `$TMPDIR` and `/tmp`; never the filesystem root, never a recursive descent
+  (PR #5371).
+- A provenance ledger at `~/.trusty-mpm/mcp-json-provenance.json` records every
+  `.mcp.json` tm writes, with a checksum of the bytes written. It is what lets
+  a repair tell tm's own output from a file the operator wrote by hand — a
+  distinction the file's contents cannot supply, since an operator may register
+  the same `trusty-*` servers themselves (PR #5371).
+- `tm doctor --fix` now quarantines stray `.mcp.json` files the ledger proves
+  tm wrote and nobody has edited since, and `tm doctor --quarantine-mcp <PATH>`
+  quarantines one the operator names explicitly. Both are DRY RUN until
+  `--yes`. Neither deletes: the file is RENAMED to
+  `.mcp.json.quarantined-<epoch>` beside itself, which is what stops the
+  upward walk finding it while keeping every byte recoverable. Unattributed
+  files, files edited after tm wrote them, symlinks, an unreadable ledger, and
+  the workspace's own `.mcp.json` are each REFUSED with the reason shown
+  (PR #5371).
+- `session_context_catchup` takes an optional `tmux_window` and resolves a
+  snapshot by the caller's tmux window id when `session_id` owns none. A Claude
+  Code relaunch mints a new harness session id inside the same window, which
+  left `resolved_snapshot` null and pushed `/tm-session-resume` back to a human
+  guessing which snapshot was theirs. The response also carries `resolved_via`
+  (`session_id` / `tmux_window` / null) so a window match is never read as an
+  exact one.
+- `tm-workflow`'s "Worktree Discipline" section now tells sessions to keep the main checkout fresh: `git fetch` then `git pull --ff-only` at session start and after a PR this session merged lands on `origin/main`. Worktrees branch off `origin/main` and stay current, but nothing refreshes the main checkout, so it drifts and inspection reads start answering from old code
+  - fast-forward only, so the refresh cannot create a merge commit or rewrite history, and a dirty tree only blocks it when the incoming commits touch the same files
+  - when `--ff-only` is blocked by another session's uncommitted changes, the rule is preserve rather than discard — commit the orphaned work to a throwaway branch, then switch back and fast-forward. Committing reaches the same clean tree as discarding, costs the same number of steps, and cannot lose anything
+  - `git stash` stays banned (repo-level, shared across every worktree), as do `git checkout --`, `restore`, `reset --hard`, and `clean` — the main-checkout guard blocks those and hunting for an unblocked equivalent is routing around a safety control. A file showing ` M` in `git status --porcelain` was never staged, so nothing recovers it once discarded
+  - stated as inspection hygiene: the main checkout stays read-only for work, all edits still happen in a worktree, and `git pull` is already on the PM's allowlist so this needs no new authority
+- The `tm ls` picker's delete accepts a name pattern: `d tm-test-*` deletes
+  every matching session in one action instead of one `d<N>` per session. The
+  pattern is a glob (`*`, `?`, `[…]`, case-insensitive) matched against the tmux
+  session name, and `d <glob> --dry-run` previews without deleting. Deletions
+  route through the same managed→local path `d<N>` and `tm session delete`
+  already use. Four guards bound the blast radius: only stopped/errored sessions
+  are ever deleted in bulk (a running match is listed as kept, and force is
+  never available in bulk); the session you are running inside is excluded by
+  tmux name even if its record reads stopped (best-effort — the driver warns
+  when that probe fails rather than implying a guard it did not apply); a
+  session with no tmux name matches no pattern at all, `*` included; and
+  confirmation is the number of `DELETE` rows typed back, not `y`, after the
+  full match set is printed. The prompt deliberately does not print that number
+  — printing it would let the batch be confirmed without reading a row. A
+  pattern matching nothing says so and exits without deleting, and a per-session
+  failure mid-batch is reported and tallied instead of aborting the run.
+  Documented for agents in the bundled `tm-cli-operations` skill.
+- `tm ls -a` / `tm ls --attached` lists only the sessions a tmux client is attached to right now
+  - "attached" is tmux's own `#{session_attached}`, surfaced by the daemon as the per-session `attached` flag — a session that is live and reported `active` with nobody connected to it is EXCLUDED, which is the whole point of the flag
+  - forces the static table for the same reason `--all` does: a session you already have a client on is the one target the picker cannot usefully connect you to
+  - matching nothing prints `no attached sessions` (or `no attached sessions for <slug>` when scoped) and exits 0 — an empty result reads as a real answer, not a failure or an empty table
+  - no effect on `--json` (the raw daemon response stays complete, matching `--all` and the filter terms) or on `--projects`; `tm sessions ls` and `tm f` are unchanged
+  - `-a` NARROWS here, inverting the `ls -a` / `docker ps -a` convention where it widens; `--all` remains long-only and the two flags are independent
+
+### Fixed
+
+- The `tm-ticketing` skill's confidence-state marker (`Observed` /
+  `Reproduced` / `Inferred` / `Speculative`) is now scoped to defect (`bug`)
+  issue bodies. It used to be required on every filed issue, which produced
+  lines like `Confidence: Observed … — accepted feature work` on feature
+  tickets — a restatement of the type label that carries no information,
+  since a feature ticket has no "reproduced vs. suspected" axis to report.
+  Bug tickets are unaffected: the marker still distinguishes a reproduced
+  defect from a suspected one there, which changes what a reader does next.
+- `standalone::trust_seed::preseed_managed_trust` now holds
+  `core::claude_json_guard::lock()` across its whole read → mutate → write
+  cycle. It was the third `.claude.json` seeder with the unguarded cycle #4072
+  fixed for the other two, and the daemon calls it once per session it
+  provisions: two overlapping cycles silently dropped one session's whole
+  `projects.<workspace>` entry, so the operator met the trust dialog the seed
+  exists to dismiss while both writes reported success. A concurrent seed of
+  320 distinct workspaces lost 278 of them before the fix and none after
+  (#4076). `mcp_config::seed_builtin_servers` already held the guard against
+  the same `<claude_config_dir>/.claude.json`, so leaving this seeder out also
+  left those two racing each other.
+- `core::claude_json_guard`'s module doc no longer claims that a cross-process
+  race "can only ever lose an update, never leave a torn file behind". That
+  was false until `trusty-common`'s `write_json_atomic` stopped sharing one
+  staging filename (#4077); it is true now, and the doc says which change
+  makes it so.
+- A relocated `tm launch` / `tm connect` now carries `CLAUDE_CODE_OAUTH_TOKEN`
+  when one is stored. On macOS the Keychain entry Claude Code reads is keyed by
+  a hash of `CLAUDE_CONFIG_DIR`, so relocating without the token produces a
+  login that succeeds and is then immediately not-logged-in. When no token
+  resolves, the commands print a one-line notice naming
+  `claude setup-token | tm auth set-token` rather than leaving the operator to
+  diagnose the loop (#2246, #4181).
+- The shared-worktree dispatch deny now offers only the remedy that always
+  works — re-dispatch with `isolation: "worktree"`. It no longer suggests waiting
+  for the running agent: a crashed subagent that never emits `SubagentStop` holds
+  its delegation for the full six-hour staleness window, so waiting could mean
+  waiting forever (#4480).
+- **A corrupt `sessions.json` is now detected, disclosed, and repairable** (closes [#5007](https://github.com/bobmatnyc/trusty-tools/issues/5007)): on 2026-08-06 the managed-session store was a complete JSON document followed by 1111 stale bytes from a longer earlier version of itself. `SessionStore::upsert` reloads before every save, so a file the daemon could not read was a file it could never rewrite — every mutation failed for an unknown period while `tm ls` kept printing a healthy fleet from the in-memory fallback, and the only fix was a human hand-truncating JSON.
+  - **Detect:** a parse failure is now `StoreError::Corrupt`, whose message names the file, the byte offset where the valid document ends, how many trailing bytes follow, and the repair command — instead of the bare `trailing characters at line 3755 column 2`. A new `session_store` check in `tm doctor` reports the same thing before anyone stumbles into it.
+  - **Recover:** `tm repair session-store` backs the file up to `sessions.json.corrupt-backup-<YYYYMMDD-HHMMSS>` and truncates it to the longest complete JSON document at its head. It refuses when the discarded bytes name a session id the recovered document does not contain (`--force` overrides, `--dry-run` shows the cut without writing).
+  - **Stop the silent mask:** the last-known-in-memory fallback stays — a transient read error must not report an empty fleet — but it is no longer silent. Corruption logs at ERROR, and `GET /api/v1/sessions/managed` carries a `store_health` field (omitted entirely when healthy) that every `tm ls`, `tm ls --json`, and picker invocation turns into a stderr warning.
+  - **Likely cause, fixed:** `save()` staged through one fixed `sessions.json.tmp` shared by every writer in every process. The rename is atomic but the staging write is not exclusive, so two concurrent savers produce a file as long as the longer document and as valid as the shorter one — the exact observed shape. Staging is now per-store-instance (`sessions.json.tmp.<pid>.<nonce>`).
+  - **One definition of "healthy":** the store, `tm doctor`, and `tm repair session-store` all validate through a single entry point against the type the daemon actually deserializes. They previously used two different schemas, so `tm doctor` reported `Ok` with a record count for files that blocked every write, and a file could be simultaneously "corrupt — run `tm repair session-store`" and "parses cleanly; nothing to repair". The diagnostic now names that command only when truncating would really leave a loadable store, and no longer reports trailing junk that is not there.
+  - **Related data-loss guard:** `read_file` answered every read error with an empty store, so a permissions failure or an EIO would have made the next `save()` write that emptiness over the whole fleet — and it emptied the orphan-GC's fail-closed `known_tmux_names` set, making every live tmux session look untracked and reapable. Only a genuinely absent file now means "fresh store".
+- Register the base checkout behind a worktree with `trusty-search`, vector lane
+  on ([#5069](https://github.com/bobmatnyc/trusty-tools/issues/5069)). Worktree
+  indexes are BM25+KG only since #5060 and nothing ever created the base-facet
+  index that owns the embedding lane, so every worktree session got lexical and
+  graph search and never semantic. Worktree creation and session launch now both
+  ensure it, on a detached thread, and report an unconfirmed registration as a
+  warning instead of leaving the absence invisible. Routing a worktree's semantic
+  query onto that index remains open.
+- Session launch writes the UNPINNED `trusty-search` MCP stub when index
+  registration was not confirmed, instead of pinning `serve --index <id>` to an
+  index the daemon never created
+  ([#5091](https://github.com/bobmatnyc/trusty-tools/issues/5091)). Previously
+  every `search`/`grep` in such a session answered `404 unknown index` for the
+  session's whole life while the `search` health check stayed green. The
+  `search_index_pin` doctor check reports the unpinned stub as a warning naming
+  the relaunch fix, and still fails on a pin that has since gone stale.
+- Two `Agent`/`Task` dispatches issued in one PM turn could both be admitted into
+  the same working directory. The `#4480` guard asked the daemon who was already
+  writing there and acted on the answer, with nothing claiming the directory in
+  between, so both could ask before either was recorded and both see an empty
+  set. `POST /api/v1/sessions/{id}/delegations/shared-tree-dispatch` now answers
+  and claims in one critical section, so the second of two simultaneous
+  dispatches finds the first and is denied. The claim is the delegation record
+  the daemon's own `PreToolUse` hook would have written a moment later — same
+  correlation key, same liveness, same staleness sweep — so nothing new has to be
+  released. Every fail-open branch is unchanged: an unreachable daemon, a
+  malformed answer, an unresolvable working directory, an unknown agent, and a
+  read-only or isolated dispatch all still allow the call and claim nothing
+  (#5324).
+- The claim POST forwards only `subagent_type`, `isolation` and `description` —
+  the fields the daemon actually reads — instead of the whole dispatch prompt.
+  The record it writes is unchanged, and the request body can no longer grow
+  past a size limit and fail the guard open on the largest dispatches (#5324).
+- `tm hook --pm-guard` now warns on stderr when the daemon reports no live
+  writers but claims nothing, which only happens when a running daemon predates
+  the `tm` on PATH and does not recognise the agent being dispatched. The
+  dispatch is still allowed — this path fails open deliberately — but the guard
+  no longer goes silently unenforced (#5324).
+- The Non-Overridable Rules section's `trusty-search` guidance now matches the
+  pinned-first, three-tier `index_id` resolution order trusty-search's own MCP
+  descriptors have documented since #5213 (explicit `index_id` wins, then the
+  session pin, then fan-out only when unpinned), and points agents at
+  `list_indexes` before guessing an explicit id instead of only warning that a
+  guess can 404 (#5337).
+- The declared version moves to an unpublished number so
+  `scripts/check-version-parity.sh` has nothing to compare against, unblocking
+  the red `main` parity check (#5344).
+- The stray-`.mcp.json` quarantine compared paths lexically, so a caller
+  holding a symlinked spelling of the workspace slipped past the guard that
+  protects the project's own `.mcp.json` and the file was renamed away. Path
+  comparisons now canonicalize both sides through one shared helper, which also
+  fixes the scan's home ceiling — a symlinked home spelling never matched, and
+  the walk ran past it to the depth cap (PR #5371).
+- The sweep classified provenance during the scan and renamed later, so a file
+  edited in that window was quarantined on a stale verdict, discarding the
+  edit. The checksum is now re-read immediately before the rename and a file
+  that changed is refused (PR #5371).
+- The provenance ledger grew one entry per distinct `.mcp.json` path and never
+  shed one. Above 512 entries it now drops records whose file no longer exists
+  (PR #5371).
+- `session_context_catchup` returned every paused session's `source_file` and
+  `tmux_window` in `sessions[]` to any caller, regardless of `session_id`. A
+  caller could read another session's window out of the response, hand it back
+  as its own, and resolve that session's snapshot — reconstructing by hand the
+  cross-session resume #5272 removed. A caller that does not own a session now
+  gets `format`, `paused_at`, `summary` and `owned: false`; `source_file`,
+  `tmux_window`, `in_progress`, `next_steps` and `git_context` are withheld.
+  The `tm session catchup` CLI digest is unchanged.
+- `core::spawn_disclaim::disclaimed_output` retries a spawn that fails with
+  `ETXTBSY` ("Text file busy") up to three times with exponential back-off,
+  instead of surfacing it as a hard error. `ETXTBSY` is raised while any
+  process holds a writable fd to the target inode, so a sibling thread that
+  forks between this process's write and close of a freshly created
+  executable can make an otherwise valid exec fail — the race that made the
+  `tmux` fake-binary tests flaky in CI. A permanently busy target still fails
+  after the third attempt (#5391, epic #3451).
+- Injected agent docs (`tm-tool-usage-guide.md`, `tm-circuit-breaker.md` CB#7, and the non-overridable "Trusty Tool Priority" rules) described `search_health` as a bare liveness check and never mentioned that a successful call no longer means the daemon is up, once PR #5534 lands. Each site now says to branch on the response's `healthy` field, not on the call succeeding, so an agent doesn't read a dead daemon as a false all-clear
+- Regenerated the three committed PM-prompt golden fixtures
+  (`pm-prompt-bundled-fallback.md`, `pm-prompt-claude-md-override.md`,
+  `pm-prompt-roster-absent.md`) that went stale when #5536 updated the
+  `search_health` liveness doc text without updating the snapshots, which left
+  `golden_bundled_fallback_prompt`, `golden_claude_md_override_prompt`, and
+  `golden_roster_absent_assembly_prompt` failing on every run.
+- Managed sessions (`tm launch`, `tm connect`, daemon spawns, `tm register/load/run`) no longer resolve the user-global `~/.claude.json` and `~/.claude/settings.json` through a path the managed session layout rewrites onto the workspace. `prepare_session` now takes the home directory as a parameter rather than deriving it from `FrameworkPaths`, whose `.claude/` paths a managed session deliberately relocates — so a session cannot drop an untracked `.claude.json` into the operator's repo, and the global `trusty-memory` hook cleanup targets the real settings file instead of silently no-opping on one that does not exist. Production behaviour is unchanged under every framework root, including an overridden `--root`/`TRUSTY_MPM_ROOT` (#5544).
+- The `tm` binary's test suite no longer repoints `$HOME` or `$CLAUDE_CONFIG_DIR` process-wide — a write that could straddle a parallel test's agent-roster scan and report a truncated roster. A mechanical guard fails the build if either comes back (#5544).
+- A delegation roster that lost agents to a failed read now says so. An agent
+  file that exists but cannot be read used to be dropped by a bare `continue`
+  with no log, and a tier that failed to enumerate returned an empty list
+  indistinguishable from an absent tier — so a PM was handed a short roster and
+  read it as the complete set. Both losses are now recorded in a `RosterScan`,
+  logged at `error!`, and rendered as a `ROSTER INCOMPLETE` banner at the top of
+  the composed `## Delegation Authority` section naming every unreadable path.
+  A roster that is empty *because* reads failed no longer degrades silently to
+  the bundled asset. Composition stays fail-open — a bad directory must not
+  block a launch — but it can no longer claim a roster it does not have
+  (#5544).
+- Every surface that publishes the roster COUNT now says when the count is a
+  floor. `tm session start` prints `at least N agents in delegation authority —
+  ROSTER INCOMPLETE: …` and names each unreadable path on stderr; `tm doctor`'s
+  `agents` check downgrades `Ok` to `Warn` and reports `at least N delegatable`
+  with the lost paths. Both took their number from the non-reporting
+  `resolve_roster`, so a failed read lowered it silently — including in
+  `tm doctor`, which is the tool the new banner tells the operator to run
+  (#5544).
+- `session_context_catchup` no longer returns an unbounded response. On this
+  repo `full: true` returned 112,096 characters — past what the harness could
+  hand back to the calling model, so it spilled the body to a file and the
+  session resuming from it had to read that instead. Measurement put `sessions`
+  at 94.7% of the payload with a 5,961-byte median record, so the count is what
+  grows, not any one field: the digest is now paged by whole records to a
+  48,000-byte budget. `sessions_offset` (new, optional, defaults to 0) selects
+  the page and the response's `sessions_next_offset` names the next one, so
+  `full: true` still delivers every snapshot in history — one readable page per
+  call. Pages are ordered with the caller's own sessions first, then newest
+  first, so page 0 always carries the entry a resume reads. Nothing is dropped
+  silently: whenever anything is withheld the response carries
+  `truncated: true`, the `sessions_total` / `recent_commits_total` /
+  `recent_memory_total` counts, and a `truncation_notice` naming the counts and
+  the exact `sessions_offset` that retrieves the rest. The one page that can
+  exceed the budget — a single record larger than a whole page, which ships
+  intact rather than being cut mid-field — reports `over_budget: true` and
+  `page_bytes`, since nothing was withheld there and `truncated` would
+  otherwise read as healthy. The offset is positional into a list rebuilt from
+  disk on each call, so a snapshot paused mid-walk can make a later page repeat
+  a record; that is stated in the tool schema and in the notice rather than
+  left to be discovered. A digest that already fits comes back byte-identical
+  (#5557).
+
+### Changed
+
+- The `Communication — Write Plainly` section of every bundled output style, and
+  the agent-facing mirror in `BASE-AGENT.md`, now state one rule where three
+  overlapped: an opener that announces a fact's significance instead of stating
+  the fact is banned however it is worded. The separate "no throat-clearing
+  openers" bullet and the "delete the framing opener" template block are folded
+  into it, and their strings survive as illustrations alongside the owner's new
+  instance, "Worth naming what just happened:". Net 6 lines shorter.
+- The four remaining read-only tmux probes (`tmux_attach::current_tmux_session_name`,
+  `statusline::branch::tmux_session_name`, `guided_inplace::read_tmux_env_managed_session_id`,
+  `core::process::tmux_pane_pid`) now route through `core::tmux`'s resolved
+  binary + TCC-disclaimed spawn primitive instead of a bare, unresolved
+  `Command::new("tmux")`, via two new `core::tmux` helpers
+  (`display_message_argv`/`show_environment_argv` +
+  `run_tmux_argv_with_bin`/`run_tmux_argv`) added alongside the existing typed
+  `TmuxCommand` path. Targeting semantics are unchanged at every site.
+- `tm launch` and `tm connect` now point the session they spawn at the tm-owned
+  `CLAUDE_CONFIG_DIR` (`~/.trusty-tools/trusty-mpm/claude-config`) and carry
+  `--setting-sources user,project,local`, matching the daemon-managed path.
+  Under ADR-0042 the MCP declaration lives once in the `user` tier of that
+  directory's `.claude.json`, and a session that neither relocates nor loads
+  `user` reads no MCP servers at all. #1269's isolation guarantee is unchanged:
+  the `user` tier now resolves to the tm-owned config home rather than the
+  operator's `~/.claude`, so the operator's global settings and hooks stay out
+  by relocation instead of by exclusion. When the home cannot be resolved,
+  both commands fall back to the previous `--setting-sources project,local`
+  with no relocation (#4181).
+- Both commands seed workspace trust into `<CLAUDE_CONFIG_DIR>/.claude.json`
+  instead of `~/.claude.json` — the file a relocated session actually reads.
+  The four framework MCP builtins enter `enabledMcpjsonServers` only when that
+  run's injector reported an actual write, carried through from the same run's
+  `PrepReport` (#3950's contract, unchanged by the move) (#4181).
+- The four framework MCP servers (`trusty-memory`, `trusty-mpm`,
+  `trusty-review`, `trusty-search`) are now declared once in the user-scope
+  `mcpServers` map of the tm-owned `.claude.json`, seeded on every launch by
+  `mcp_config::seed_builtin_servers`. Seeding is insert-if-absent: an entry the
+  operator registered under one of those names via `tm mcp add` is never
+  overwritten, reordered, or removed. This replaces the write to
+  `<CLAUDE_CONFIG_DIR>/.mcp.json`, which no session ever read — Claude Code
+  discovers a `.mcp.json` by walking up from the session's cwd, and cwd is
+  always the repo (#4181, ADR-0042).
+- Seeding never quarantines. A malformed `.claude.json`, or one whose
+  `mcpServers` is not an object, makes it warn and return without renaming or
+  writing anything; a failure of any kind is absorbed so the agent and skill
+  deploy that follows still runs. The per-launch injectors and the
+  `enabledMcpjsonServers` approval are untouched here and are deleted together
+  in the next PR of the ADR-0042 sequence.
+- `tm doctor`'s `binary_provenance` check splits a ledger/binary version disagreement by direction instead of always reporting `Fail` ([#4964](https://github.com/bobmatnyc/trusty-tools/issues/4964))
+  - running binary NEWER than cargo's record at the same path is now `Unknown` — the prebuilt installer placed it and keeps no cargo metadata, so provenance is unverifiable rather than broken
+  - running binary OLDER than cargo's record stays `Fail`, unchanged: an older binary on top of a newer install is the [#4033](https://github.com/bobmatnyc/trusty-tools/issues/4033) defect
+  - versions that cannot be ordered as semver stay `Fail`
+  - `Warn` remains the correct terminal verdict for a `cargo install --path` install per [ADR-0043](../../docs/adr/0043-cargo-bin-policy.md)
+  - the `binary_provenance` description in the bundled `tm-capabilities` skill now states the direction split instead of the retired "any version disagreement fails"
+- `tm-workflow`'s "Worktree Discipline" section now carries the rest of the checkout rules that root `CLAUDE.md` used to state, so every project deploying the skill gets them rather than only this repo
+  - the main checkout's forbidden-operation list is now explicit: any edit, any build or test run, any destructive git op (`git reset --hard`, `git checkout .`, `git stash`, `git restore .`), any file-mutating command (`sed`/`awk`/`patch`), and anything else that mutates the working tree, index, or build output
+  - a worktree is a writer and the branch is the workstream — the branch is the durable unit, a worktree is ephemeral and recreatable, and losing one loses nothing the branch does not still hold
+  - one branch and worktree per independently reviewable PR outcome, not per ticket, refactor step, or experiment
+  - the stash-first escape hatch is labelled a narrow exception, not license for routine edits from the main checkout, and project-specific worktree hazards are directed to the project's own reference docs
+- `docs/reference/worktree-discipline.md` gains this repo's Cargo/macOS specifics — installing a freshly built binary from the worktree, the `cargo install` cdhash-cache rationale with a cross-link to the release-workflow hazard, and the stash-first fallback for a post-merge install from the main checkout
+- `BASE-AGENT.md` gains a `Never Narrate a Wait` section, placed directly before `Git Workflow` so an agent reads it before it starts work ([#5019](https://github.com/bobmatnyc/trusty-tools/pull/5019))
+  - a subagent's turn ends the moment it stops emitting tool calls, and nothing re-invokes it afterward — `CLAUDE_SUBAGENT_BG_SHELL_MAX_MS` lets a subagent-owned background shell outlive the turn, but no completion event reconnects the two. Ending a turn with "I'll wait for the pull", "will resume when the monitor reports completion", or "monitoring in the background" strands the task until a human notices; observed five times in one session
+  - to await a long operation the agent stays in the turn: start it with `run_in_background`, then poll an until-loop against its output file. The loop is backgrounded too, because foreground `sleep` is blocked in this harness — a prior revision's bare "poll" advice was itself producing the parking it meant to prevent
+  - reporting unfinished state and stopping ("still pending: head SHA abc1234, 10 checks unsettled") is now stated as a correct, complete outcome; the failure is stopping while implying you will continue
+  - never re-issue a long-running command because a foreground shell call returned early at the ~120s cap and auto-backgrounded — check whether the original is still running first
+  - the now-redundant "never spawn a background monitor as a wake mechanism" bullet under `Your own gates DO block, in the foreground` collapses to a pointer at the new section
+- A decommissioned or deleted session releases its `tm ls` `NUM` after 24 hours
+  instead of 7 days (`TERMINAL_RECORD_RETENTION_DAYS`, 7 → 1).
+- The retention guard that spared a record whose workspace directory still
+  existed now spares only a record whose workspace is a session WORKTREE —
+  recognised by the `.worktrees/<leaf>` shape or a `.trusty-mpm-worktree`
+  ownership sentinel. A session launched on a project's main checkout records
+  that checkout as its workspace, and the old guard read it as a worktree to
+  protect, so such records were never evicted at any window. Records from
+  `tm launch --worktree` are protected exactly as before, at any age.
+- `tmux.alternate_screen` now defaults to `false`, so a tm-managed session has
+  working scrollback out of the box ([#5364](https://github.com/bobmatnyc/trusty-tools/issues/5364)).
+  [#5151](https://github.com/bobmatnyc/trusty-tools/issues/5151) added the knob
+  to fix missing scrollback but shipped it defaulting to `true` — tmux's factory
+  value and the pre-fix behaviour — so the original bug persisted for every
+  operator who never found the knob. A full-screen TUI draws into tmux's
+  alternate screen, and tmux does not append that output to the pane's
+  scrollback at all; `history-limit` is irrelevant in that state.
+- **Tradeoff, accepted deliberately:** `alternate-screen` is server-global and
+  every trusty-* managed session shares one tmux server, so `vim`, `less`,
+  `htop` and `man` no longer restore the terminal's prior screen on exit
+  server-wide — each leaves its final frame in the scrollback. Set
+  `tmux.alternate_screen: true` in `~/.trusty-tools/trusty-mpm/config.yaml` to
+  restore the old behaviour.
+- The `Communication — Write Plainly` section of every bundled output style, and
+  the agent-facing mirror in `BASE-AGENT.md`, now ban borrowed-metaphor
+  jargon — "load-bearing" and its category — and require the mechanism be
+  stated instead (#5372).
+- `tm-workflow` gains a `Test Scope Widens by Stage` section, placed after the Sprint/Harden doctrine it refines ([#5377](https://github.com/bobmatnyc/trusty-tools/pull/5377))
+  - unit tests run on the new or changed code only while developing, on the full test files that changed when merging, and on the full corpus only when publishing
+  - merging widens to whole files, never to the whole repository — including cases you did not edit and any normally-skipped test in those files. A change to a public interface or to shared test infrastructure makes a dependent package's test files count as changed even though the diff never opened them
+  - stated stack-agnostic, since `tm-workflow` governs every project: the section names no build-tool command
+  - stage and rigour are named as separate axes that both bind — the stage decides how wide a gate runs, the project's risk labels and test ladder decide how hard it is applied and which gates run at all
+  - a project may leave a full-corpus CI job off its required pre-merge contexts, since that job is a publish gate. A *failing* check still blocks the merge at every stage; only *pending* is tolerated
+  - the hard line is restated in place: choosing the narrower scope is a blast-radius claim you must be able to prove, never licence to make a red gate green by deleting a test, marking it skipped, gating it out of the build, or excluding it from the run
+- The ban on "honest" moved out of the composed system prompt's
+  `pm-instruction-package.json` block and into the three output styles'
+  `Communication — Write Plainly` section and both `BASE-AGENT.md` copies — the
+  channel a manual `claude` launch keeps. It now names every position the word
+  takes (adjective, adverb, heading modifier, parenthetical), so it reaches
+  `<noun>, stated honestly:` as a heading, and it absorbs `BASE-AGENT.md`'s
+  separate never-announce-your-register bullet. One copy, resident once (#5420).
+- `core::spawn_disclaim::disclaimed_output` retries `ETXTBSY` through `trusty_common::spawn_retry::retry_on_etxtbsy` instead of its own copy; the contract tests #5391 added move to trusty-common with the code, and gain async twins and a re-invocation table pinning that only `ETXTBSY` retries ([#5446](https://github.com/bobmatnyc/trusty-tools/issues/5446))
+- `code-critic` now posts its verdict (APPROVE/WARN/BLOCK) as a COMMENT-type
+  GitHub review (`gh pr review --comment`) instead of a plain PR comment, so
+  it groups under the PR's Reviews section and carries the same finding table
+  and file:line citations as before. `--approve` and `--request-changes` are
+  explicitly not used — both fail for a PR authored by the same identity the
+  agent runs as; a failed review post is now reported as a loud failure
+  rather than silently falling back to a plain comment.
+- The 42 bundled agent `.md` assets moved from `src/assets/agents/` to
+  `trusty-agents-common`, and `core::bundle` now embeds them from
+  `trusty_agents_common::agent_assets`. Every `pub const` in `core::bundle`
+  keeps its name and content, so nothing downstream changes. Edit a bundled
+  agent at `crates/trusty-agents-common/src/assets/agents/<name>.md` from now
+  on; the whole roster moved together because `extends:` resolves within a
+  single directory.
+
+### Removed
+
+- tm no longer writes MCP server declarations into a session's workspace
+  `.mcp.json`, and no longer pre-approves any MCP server name via
+  `enabledMcpjsonServers`. The five injectors, their two call sites, the
+  `.mcp.json` git-exclusion guard they needed, and the whole trust derivation
+  behind them are deleted. MCP servers are declared once in
+  `<CLAUDE_CONFIG_DIR>/.claude.json`'s user-scope `mcpServers` map — where
+  `tm mcp add` already writes and where a relocated spawn reads them with no
+  approval prompt. An approval left by an earlier version is stripped from the
+  project entry on the next launch: an approved name is what lets a repo's own
+  `.mcp.json` entry override the operator's declaration, so leaving stale ones
+  in place would keep that displacement alive (#4181, ADR-0042).
+
+### Documentation
+
+- The `tm-adr` bundled skill's numbering convention now names a claim-then-populate
+  protocol: check `docs/adr/` on `origin/main` (not a possibly-stale local
+  checkout) and any in-flight branch or open PR before picking a number, create
+  the ADR file first as a stub reserving that number, then populate it. Also
+  states what to do on discovering a collision — report it, never silently
+  renumber another author's ADR. Closes a gap two same-day collisions exposed:
+  ADR-0021 (pre-existing, out of scope here) and a same-day ADR-0038 collision
+  caught only by an alert author.
+- Corrected `prune_vanished`'s doc comment in `core/mcp_provenance.rs`, which
+  claimed the sweep "retains only entries whose path still exists"
+  ([#5551](https://github.com/bobmatnyc/trusty-tools/issues/5551)). It also
+  retains an entry it could not probe — a deliberate fail-open, since dropping
+  an uncertain provenance claim risks misattributing a later `.mcp.json` at the
+  same path. Doc-only; the behavior is unchanged.
+
 ## [1.3.5] — 2026-08-10
 
 ### Added

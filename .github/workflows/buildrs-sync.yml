@@ -1,0 +1,63 @@
+# build.rs canonical-block sync gate for the trusty-tools workspace (#5528).
+#
+# Cargo cannot share a build script as a library, so the daemon family
+# (trusty-memory, trusty-analyze, trusty-console, trusty-search — #987) and the
+# tauri-ui family (trusty-code-gui, trusty-mpm-gui, trusty-agents-ui — #4699)
+# each duplicate their canonical build.rs block by necessity. This gate fails
+# CI whenever a family's copies drift apart. See scripts/check_buildrs_sync.sh
+# for the two families' differing failure semantics.
+#
+# Pure text extraction/diff — no Rust toolchain or build needed, so this runs
+# as its own lightweight job (matches line-cap.yml / sld-lint.yml's checkout
+# style/auth).
+name: build.rs sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/trusty-memory/build.rs"
+      - "crates/trusty-analyze/build.rs"
+      - "crates/trusty-console/build.rs"
+      - "crates/trusty-search/build.rs"
+      - "crates/trusty-code-gui/build.rs"
+      - "crates/trusty-mpm-gui/build.rs"
+      - "crates/trusty-agents/ui/src-tauri/build.rs"
+      - "scripts/check_buildrs_sync.sh"
+      - ".github/workflows/buildrs-sync.yml"
+  pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks — PR #3838 did exactly that.
+    # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+    paths:
+      - "crates/trusty-memory/build.rs"
+      - "crates/trusty-analyze/build.rs"
+      - "crates/trusty-console/build.rs"
+      - "crates/trusty-search/build.rs"
+      - "crates/trusty-code-gui/build.rs"
+      - "crates/trusty-mpm-gui/build.rs"
+      - "crates/trusty-agents/ui/src-tauri/build.rs"
+      - "scripts/check_buildrs_sync.sh"
+      - ".github/workflows/buildrs-sync.yml"
+
+# Per-COMMIT concurrency group on push so a merge never cancels the previous
+# merge's verification (#4179); per-ref group on pull_request so a new push
+# still supersedes the superseded run. Matches ci.yml.
+concurrency:
+  group: buildrs-sync-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  buildrs-sync:
+    name: build.rs canonical-block sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Assert build.rs canonical blocks are in sync
+        run: bash scripts/check_buildrs_sync.sh

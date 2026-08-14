@@ -129,11 +129,31 @@ pub(crate) async fn project(
 /// `revoke`, saving only when the store actually changed.
 /// Test: `project_trust_grants_and_revokes`.
 pub(crate) fn trust_cmd(dir: Option<String>, revoke: bool) -> anyhow::Result<()> {
-    let path = resolve_dir(dir)?;
     let Some(root) = trusty_mpm::core::project_trust::trust_store_root() else {
         anyhow::bail!("cannot resolve the home directory for the project-trust store");
     };
-    let mut store = trusty_mpm::core::project_trust::ProjectTrustStore::load(&root)?;
+    trust_cmd_in(dir, revoke, &root)
+}
+
+/// [`trust_cmd`] against an explicit store root.
+///
+/// Why (#5544): the store root resolves from `$HOME`, so the only way to test
+/// the grant/revoke cycle used to be repointing the process's `$HOME` — a
+/// PROCESS-GLOBAL write every sibling test in the `tm` bin target could observe
+/// mid-flight, which is the flake class that issue tracks. `$HOME` is read
+/// transitively by `dirs::home_dir`, `FrameworkPaths`, and the three-tier agent
+/// roster scan, so the exposed readers cannot be enumerated and `#[serial]`
+/// cannot cover them. Taking the root as a parameter removes the write.
+/// What: identical to [`trust_cmd`] with `root` supplied; production resolves
+/// it from [`trusty_mpm::core::project_trust::trust_store_root`].
+/// Test: `project_trust_grants_and_revokes`.
+pub(crate) fn trust_cmd_in(
+    dir: Option<String>,
+    revoke: bool,
+    root: &std::path::Path,
+) -> anyhow::Result<()> {
+    let path = resolve_dir(dir)?;
+    let mut store = trusty_mpm::core::project_trust::ProjectTrustStore::load(root)?;
     if revoke {
         if store.revoke(&path) {
             store.save()?;

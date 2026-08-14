@@ -127,6 +127,18 @@
 #   14 pins that a NEARER pre-release still loses to the last stable release;
 #   15 pins that a skip caused by the exclusion names the version it refused.
 #
+#   Cases 23-24 pin the CRATE-exclusion arm
+#   (scripts/semver-checks-crate-exclusions.tsv). A skip list stops protecting
+#   silently — the day something depends on the excluded crate's library, the row
+#   is wrong and nothing says so — so the gate re-checks the premise on every
+#   run:
+#     23. honoured        — trusty-mpm is a recorded skip naming the file it came
+#                           from, and NO comparison is attempted.
+#     24. premise died    — a workspace crate depends on the excluded one, so the
+#                           skip is REFUSED (exit 3) and the dependent is named.
+#   Case 8 is the other half: a non-excluded crate still runs a full clean
+#   comparison with the real exclusions file in place.
+#
 # Usage:  bash scripts/check_semver_selftest.sh
 # Exit:   0 when every case behaves; 1 (naming the case) when one does not.
 #
@@ -642,6 +654,67 @@ while read -r rt_base rt_cur rt_want; do
   fi
 done <<<"$RELEASE_TYPE_CASES"
 [[ "$rt_failed" -eq 0 ]] && pass_case "release_type calls every 0.0.z bump major, and still ranks 0.x/1.x correctly (#5440)"
+
+# ===========================================================================
+# 23-24. Crate exclusions, and the guard that keeps one from going silent.
+#
+# scripts/semver-checks-crate-exclusions.tsv skips a crate that has no LIBRARY
+# consumer to protect — trusty-mpm is installed as the `tm` binary, and a binary
+# user gets a whole new executable, so its library API compatibility protects
+# nobody. That is a claim about consumption, and a skip list is exactly the shape
+# that stops protecting silently: the day something depends on the excluded
+# crate's library, the row is wrong and nothing says so.
+#
+#   23. the exclusion is honoured — a recorded skip, and NO comparison attempted.
+#   24. the premise has died — a workspace crate depends on the excluded one, so
+#       the skip is REFUSED (exit 3) and the dependent is named. Uses
+#       trusty-agents-common, which trusty-agents, trusty-code and trusty-mpm all
+#       depend on, against a fixture exclusions file; it fails the moment the
+#       dependent check is deleted.
+#
+# Neither case reaches the network or cargo-semver-checks: the exclusion arm runs
+# before the registry probe, which is also why an exclusion cannot be satisfied
+# by a run that timed out.
+#
+# Case 8 above is the other half — a NON-excluded crate still runs a full clean
+# comparison with the real exclusions file in place, so an exclusion that leaked
+# to every crate fails there.
+# ===========================================================================
+
+# --- 23. trusty-mpm is excluded on main, and the skip attempts no comparison.
+rc=0
+out="$(cd "$REPO_ROOT" && bash "$GATE" --crate trusty-mpm 2>&1)" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "exclusion/honoured: an excluded crate must be a recorded skip (exit ${rc})" "$out"
+elif [[ "$out" != *"SKIP trusty-mpm"* || "$out" != *"semver-checks-crate-exclusions.tsv"* ]]; then
+  fail_case "exclusion/honoured: the skip did not name the crate and the file it came from" "$out"
+elif [[ "$out" == *"CHECK trusty-mpm:"* ]]; then
+  fail_case "exclusion/honoured: the gate compared a crate it had already excluded" "$out"
+else
+  pass_case "an excluded crate is skipped with its reason, and nothing is compared"
+fi
+
+# --- 24. An exclusion whose premise has died refuses the skip.
+EXCL_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/semver-selftest-excl.XXXXXX")"
+printf '# fixture\ntrusty-agents-common\tfixture row: this crate HAS workspace dependents\n' \
+  > "$EXCL_FIXTURE"
+rc=0
+out="$(cd "$REPO_ROOT" && SEMVER_GATE_CRATE_EXCLUSIONS="$EXCL_FIXTURE" \
+  bash "$GATE" --crate trusty-agents-common 2>&1)" || rc=$?
+rm -f "$EXCL_FIXTURE"
+if [[ "$rc" -eq 0 ]]; then
+  fail_case "exclusion/premise-died: the gate exited 0 over an exclusion that no longer holds — a silent coverage hole" "$out"
+elif [[ "$rc" -ne 3 ]]; then
+  fail_case "exclusion/premise-died: expected exit 3 (no verdict); got ${rc}" "$out"
+elif [[ "$out" != *"EXCLUSION NO LONGER HOLDS"* ]]; then
+  fail_case "exclusion/premise-died: exited 3 without naming the dead exclusion, so it may be failing for an unrelated reason" "$out"
+elif [[ "$out" != *"trusty-code"* ]]; then
+  fail_case "exclusion/premise-died: refused the skip without naming a dependent" "$out"
+elif [[ "$out" == *"SKIP trusty-agents-common"* ]]; then
+  fail_case "exclusion/premise-died: granted the skip anyway" "$out"
+else
+  pass_case "an exclusion contradicted by a workspace dependency refuses the skip (exit 3)"
+fi
 
 rm -rf "$STUB_DIR"
 

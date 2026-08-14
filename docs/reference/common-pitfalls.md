@@ -53,6 +53,19 @@ installed, the build script fails loudly. Install pnpm or set
 `[patch]` tables inside individual crate `Cargo.toml` files; Cargo ignores
 them. All patches must live in the root `Cargo.toml`.
 
+🟡 **`default-features` cannot be disabled on a member manifest when the
+dependency is `{ workspace = true }`** — the `[workspace.dependencies]` entry
+owns `default-features`; writing `default-features = false` on the member is
+ignored if the workspace entry omits the key. Cargo warns rather than
+failing, today:
+```
+warning: `default-features` is ignored for trusty-review, since `default-features`
+was not specified for `workspace.dependencies.trusty-review`, this could become
+a hard error in the future
+```
+Put `default-features = false` on the root `[workspace.dependencies]` entry
+instead. Caught on [#5611](https://github.com/bobmatnyc/trusty-tools/pull/5611).
+
 🔴 **Growing a file past its SLOC cap instead of splitting** — the compiler does
 not stop you, but continued feature additions make the module harder to review,
 reason about, and test. Split proactively. The applicable cap is **500 SLOC for

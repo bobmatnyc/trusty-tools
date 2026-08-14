@@ -1,4 +1,4 @@
-//! Label-correct, non-destructive LaunchAgent activation (#4868).
+//! Label-correct, non-destructive LaunchAgent activation (#4919).
 //!
 //! Why: `install()` then `bootstrap()` was the whole install sequence, and it
 //! had three defects that together produced a release-time outage.
@@ -99,7 +99,7 @@ pub enum RollbackPlan {
 
 /// Decide what a failed activation should undo.
 ///
-/// Why (#4868 review, round 2): the round-1 fix stopped the bootout but still
+/// Why (#4919 review, round 2): the round-1 fix stopped the bootout but still
 /// left the service down while reporting otherwise. `LaunchdConfig::bootstrap`
 /// calls `bootout` FIRST, so by the time rollback runs on the
 /// `has_previous == false, was_loaded == true` path, the job that WAS running
@@ -184,7 +184,7 @@ pub fn execute_rollback(
 /// turns a re-run of `service install` from a one-minute gap into a no-op, and
 /// keeping the decision pure is what makes that testable without launchd.
 ///
-/// #4868 review: `force` exists because the plist is not the whole unit. A
+/// #4919 review: `force` exists because the plist is not the whole unit. A
 /// deploy replaces the BINARY behind a byte-identical plist, so content
 /// equality would have let `make deploy` finish without ever activating what it
 /// just built.
@@ -239,7 +239,7 @@ impl LaunchdConfig {
     /// reload even when the rendered unit is unchanged.
     ///
     /// Why: a deploy replaces the binary behind a byte-identical plist, so the
-    /// content-equality skip would leave launchd running the old image (#4868
+    /// content-equality skip would leave launchd running the old image (#4919
     /// review). `force` is for those paths; ordinary re-installs pass `false`.
     /// Test: `reload_needed_is_true_when_forced`.
     pub fn install_and_activate_forced(
@@ -259,7 +259,7 @@ impl LaunchdConfig {
 
         let evicted = self.evict_legacy(legacy_labels);
 
-        // #4868 review: capture liveness BEFORE `install()` overwrites the
+        // #4919 review: capture liveness BEFORE `install()` overwrites the
         // plist. launchd keeps a job registered after its plist file is
         // deleted, so "no previous plist" does NOT imply "nothing was running"
         // — rolling back on that assumption booted out a live daemon.
@@ -301,7 +301,7 @@ impl LaunchdConfig {
     /// Why: an upgrade that only bootstraps its new label leaves the old unit
     /// running — two daemons on one port (#2938). Deleting the plist as well is
     /// what stops the next `launchctl bootstrap` from resurrecting it.
-    /// #4868 review: also called from `service uninstall`. Removing only the
+    /// #4919 review: also called from `service uninstall`. Removing only the
     /// canonical plist on a not-yet-migrated host printed "nothing to do" and
     /// left the legacy unit loaded — an uninstall that uninstalls nothing.
     ///
@@ -333,7 +333,7 @@ impl LaunchdConfig {
     /// Why: `launchctl bootstrap` exiting 0 is not proof the job is loaded —
     /// #2498 recorded a bootstrap that succeeded while the daemon stayed "not
     /// running". Verifying closes the gap between "the command worked" and "the
-    /// service is up", which is the difference the whole #4868 fix turns on.
+    /// service is up", which is the difference the whole #4919 fix turns on.
     fn bootstrap_and_verify(&self) -> Result<()> {
         self.bootstrap()?;
         if !self.is_loaded() {
@@ -351,7 +351,7 @@ impl LaunchdConfig {
     ///
     /// Why: rollback runs on a path that has already failed, so its own errors
     /// must not mask the original one — but they must not be INVISIBLE either.
-    /// #4868 review: discarding the restoring `bootstrap()`'s result made the
+    /// #4919 review: discarding the restoring `bootstrap()`'s result made the
     /// caller print "the service is not left down" even when the restore had
     /// failed and it was. The outcome is returned so the message can tell the
     /// truth.
@@ -389,7 +389,7 @@ mod tests {
 
     /// Why: an unchanged plist on a loaded label must not cost a restart — the
     /// unconditional bootout in the old sequence is where the ~1 minute of
-    /// release downtime came from (#4868).
+    /// release downtime came from (#4919).
     /// What: identical rendered/installed plist plus a loaded label ⇒ no reload.
     /// Test: this is the test.
     #[test]
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(rollback_plan(true, false), RollbackPlan::RestorePrevious);
     }
 
-    /// Why (#4868 review, round 2): `bootstrap` boots out FIRST, so on this path
+    /// Why (#4919 review, round 2): `bootstrap` boots out FIRST, so on this path
     /// the job that was running is already gone before rollback runs. Round 1
     /// deleted the plist and reported "nothing was taken down" — service down,
     /// plist gone, message wrong.
@@ -514,7 +514,7 @@ mod tests {
         assert!(removed, "a unit that never came up must not be left behind");
     }
 
-    /// Why (#4868 review): the plist is not the whole unit. `make deploy`
+    /// Why (#4919 review): the plist is not the whole unit. `make deploy`
     /// replaces the BINARY behind a byte-identical plist, so without `force`
     /// the content-equality skip reported `AlreadyCurrent` and launchd kept
     /// running the old image — a deploy that never deployed.
@@ -547,7 +547,7 @@ mod tests {
     }
 
     /// Why: a label that is not loaded must be bootstrapped even when the file
-    /// on disk already matches — that is the "unloaded nothing" half of #4868,
+    /// on disk already matches — that is the "unloaded nothing" half of #4919,
     /// where the correct plist sat on disk inert.
     /// What: matching content but an unloaded label ⇒ reload.
     /// Test: this is the test.

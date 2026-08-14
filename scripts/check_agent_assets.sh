@@ -1,81 +1,73 @@
 #!/usr/bin/env bash
 #
-# check_agent_assets.sh — tcode embedded agent-asset staleness guard (issue #2958 Slice E4).
+# check_agent_assets.sh — trusty-code embedded agent-asset guard (issue #2958
+# Slice E4; reshaped when the roster consolidated onto one physical copy).
 #
-# Why: Slice E2/E3 embedded 33 of trusty-mpm's agent `.md` files (5 BASE-*
-#   templates + 28 coding-relevant roster agents) into trusty-code as
-#   `include_str!` assets under crates/trusty-code/src/assets/agents/, copied
-#   byte-for-byte from crates/trusty-mpm/src/assets/agents/ at the time of the
-#   copy. Nothing mechanically stops trusty-mpm's source files from drifting
-#   away from the tcode copies afterward — an upstream prompt tweak, a typo
-#   fix, a new tool restriction — landing in trusty-mpm/src/assets/agents/
-#   with zero signal that trusty-code's embedded copy is now stale. This gate
-#   closes that gap.
+# Why: this gate used to byte-compare 30 trusty-code agent `.md` copies against
+#   their trusty-mpm sources, because both crates shipped their own copy of the
+#   same file and nothing stopped one from drifting. That comparison is gone
+#   along with the duplication: all 42 agent assets now live once, in
+#   crates/trusty-agents-common/src/assets/agents/, and both crates embed THAT
+#   file via `trusty_agents_common::agent_assets`. One physical file consumed by
+#   two crates is a COMPILE-TIME property — strictly stronger than a CI diff,
+#   which could only report drift after it had already landed on main.
 #
-# KNOWN INTENTIONAL DEVIATIONS (Slice E3, PR #3041, Bob's 2026-07-18 ruling):
-#   four files — qa.md, code-critic.md, code-analyzer.md, web-qa.md — carry a
-#   deliberate `tools:` frontmatter restriction in their tcode copy (plus, for
-#   three of the four, reworded read-only prose) that is NOT present in the
-#   trusty-mpm source. Byte-parity is the wrong test for these four. See the
-#   "Tools-restriction deviation" / "Prose deviation follow-up" doc blocks in
-#   crates/trusty-code/src/assets/mod.rs for the full rationale.
+#   Two things a compiler still cannot see, and this script is what checks them:
 #
-# What: two check strategies, chosen per file:
-#   1. PARITY (29 files: 5 BASE-* + 24 roster agents) — the tcode copy must be
-#      byte-identical to its trusty-mpm source (same basename). A mismatch
-#      means the tcode copy silently drifted (edited without updating the
-#      copy) OR trusty-mpm's source moved on without the copy following —
-#      either way, FAIL and name the exact two paths to diff.
-#   2. PINNED DEVIATION (4 files, $DEVIATED_FILES below) — never byte-compared
-#      (they are supposed to differ). Instead this script hashes the CURRENT
-#      trusty-mpm SOURCE file and compares it against the sha256 recorded in
-#      scripts/agent-asset-pins.tsv. If upstream's source hash no longer
-#      matches the pin, upstream changed behind a deliberately-deviated copy —
-#      FAIL so a human reconciles the tcode copy on purpose (re-apply the
-#      tools: restriction / read-only prose rewrite against the new upstream
-#      content) rather than the deviation silently going stale.
-#   Four tcode-only files (engineer.md, qa-agent.md, code-reviewer.md, pm.md —
-#   tcode's own defaults, never sourced from trusty-mpm; tcode's own
-#   `engineer.md` deliberately does NOT track trusty-mpm's `engineer.md`,
-#   which is excluded from the roster specifically to avoid the name
-#   collision; `pm.md` was added for #3437 as tcode's own orchestrator
-#   default and has no trusty-mpm counterpart to track) are skipped entirely.
-#   Any other tcode `.md` file not in the parity set, the deviated set, or the
-#   tcode-only exclude list is flagged as "new roster file unaccounted" — add
-#   it to TCODE_ONLY (if genuinely tcode's own) or verify its trusty-mpm
-#   source path.
+#   1. PINNED DEVIATION (4 files, $DEVIATED_FILES) — trusty-code keeps four
+#      deliberately forked copies (qa.md, code-critic.md, code-analyzer.md,
+#      web-qa.md) carrying a restrictive `tools:` frontmatter line plus, for
+#      three of them, reworded read-only prose. They are supposed to differ, so
+#      byte-parity is the wrong test. Instead this hashes the CURRENT SHARED
+#      source file and compares it against the sha256 recorded in
+#      scripts/agent-asset-pins.tsv. If the shared source moved on behind a
+#      deliberately-deviated fork, FAIL so a human reconciles the fork on
+#      purpose rather than letting the deviation go stale. See the
+#      "Tools-restriction deviation" / "Prose deviation follow-up" doc blocks in
+#      crates/trusty-code/src/assets/mod.rs for the full rationale.
 #
-#   NOTE ON SCOPE: this only walks the tcode-side files that are tracked in
-#   git (`git ls-files`), so it cannot detect a *wholesale deletion* of an
-#   embedded copy that Rust's `include_str!` didn't already catch at compile
-#   time (a missing embedded asset fails the trusty-code build). The 4 pinned
-#   deviated files are the exception — their presence is checked explicitly
-#   (see below) since Rust's compile error alone wouldn't explain *why* they
-#   went missing.
+#   2. NO RE-COPY — the successor to the parity check. Consolidation is only
+#      durable if nobody re-adds a local copy of a shared agent. trusty-code's
+#      agents directory must therefore contain EXACTLY the 8 accounted files:
+#      the 4 pinned deviations above plus 4 tcode-only defaults ($TCODE_ONLY)
+#      that have no shared counterpart. Any other `.md` appearing there is a
+#      reintroduced duplicate — the precise regression the one-copy ruling
+#      forbids — and fails here.
 #
-#   --update       recompute the pinned sha256 for every file already listed
-#                  in scripts/agent-asset-pins.tsv, after you've deliberately
-#                  reconciled the tcode copy with new upstream content. Only
-#                  refreshes existing pins; refuses to add a new deviated
-#                  file to the pin set.
-#   --force-add    like --update but also permits adding a pin for a basename
-#                  in $DEVIATED_FILES that has no row in the pins file yet
-#                  (i.e. you just declared a NEW deliberate deviation). Escape
-#                  hatch; use sparingly and update the mod.rs doc block too.
+# What: two checks, plus a floor. Neither walks the shared roster looking for
+#   drift, because a single file cannot drift from itself; both are about
+#   trusty-code's own directory and its relationship to the shared source.
+#
+#   NOTE ON SCOPE: this only walks tcode-side files tracked in git
+#   (`git ls-files`). A wholesale deletion of a shared asset needs no check here
+#   — `include_str!` fails the build at compile time, and
+#   `trusty_agents_common::agent_assets`'s own `table_matches_the_directory`
+#   test fails if a roster file is added or removed without wiring it up.
+#
+#   --update       recompute the pinned sha256 for every file already listed in
+#                  scripts/agent-asset-pins.tsv, after you have deliberately
+#                  reconciled the trusty-code fork with new shared content. Only
+#                  refreshes existing pins; refuses to add a new deviated file.
+#                  Rewrites the file WHOLESALE from $DEVIATED_FILES — there is
+#                  no way to re-pin a subset, so rebase before running it.
+#   --force-add    like --update but also permits adding a pin for a basename in
+#                  $DEVIATED_FILES with no row yet (i.e. you just declared a NEW
+#                  deliberate deviation). Escape hatch; update the mod.rs doc
+#                  block too.
 #
 # Usage:
 #   bash scripts/check_agent_assets.sh              # check (CI mode)
 #   bash scripts/check_agent_assets.sh --update      # re-pin after reconciling
 #   bash scripts/check_agent_assets.sh --force-add   # re-pin + allow new deviations
 #
-# Test: exercised manually per Slice E4's task brief — a clean tree passes; a
-#   byte-mutated parity copy fails as "COPY DRIFTED"; a mutated pinned mpm
-#   source fails as "UPSTREAM CHANGED"; both revert cleanly. No unit-test
-#   harness (pure file/hash comparison against tracked git content, mirrors
-#   scripts/check_line_cap.sh and scripts/check_capabilities.sh conventions).
+# Test: exercised manually — a clean tree passes; a mutated shared source behind
+#   a pinned fork fails as "UPSTREAM CHANGED"; an extra `.md` dropped into
+#   trusty-code's agents dir fails as "RE-COPIED SHARED ASSET"; all revert
+#   cleanly. No unit-test harness (pure file/hash comparison against tracked git
+#   content, mirroring scripts/check_line_cap.sh and check_capabilities.sh).
 #
 # Portability: bash 3.2 (macOS) and bash 5 (Linux CI). POSIX tools only
-# (`git`, `awk`, `cmp`, `shasum`/`sha256sum`). No associative arrays.
+# (`git`, `awk`, `shasum`/`sha256sum`). No associative arrays.
 
 set -euo pipefail
 
@@ -87,21 +79,24 @@ REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 TCODE_DIR="crates/trusty-code/src/assets/agents"
-MPM_DIR="crates/trusty-mpm/src/assets/agents"
+SHARED_DIR="crates/trusty-agents-common/src/assets/agents"
 PINS="scripts/agent-asset-pins.tsv"
 
-# tcode's own defaults — never sourced from trusty-mpm.
+# tcode's own defaults — no shared counterpart, never tracked against one.
+# `engineer.md` deliberately does NOT track the shared `engineer.md`, which is
+# excluded from tcode's roster specifically to avoid that name collision;
+# `pm.md` was added for #3437 as tcode's own orchestrator default.
 TCODE_ONLY="engineer.md qa-agent.md code-reviewer.md pm.md"
 
-# #4618: the scan floor. The parity set is currently 30 files (38 tracked tcode
-# .md minus 4 tcode-only minus 4 pinned deviations); anything at or below this
-# means the enumeration broke, not that the roster shrank. A gate that examined
-# nothing must never report OK.
-MIN_PARITY_FILES=20
-
-# The 4 files with a Bob-approved deliberate deviation from byte-parity
-# (Slice E3, PR #3041). Pinned by trusty-mpm SOURCE hash, not byte-compared.
+# The 4 files with a Bob-approved deliberate deviation from the shared source
+# (Slice E3, PR #3041). Pinned by SHARED source hash, never byte-compared.
 DEVIATED_FILES="code-analyzer.md code-critic.md qa.md web-qa.md"
+
+# The exact number of `.md` files trusty-code may carry: 4 deviated + 4
+# tcode-only. A gate that examined nothing must never report OK (#4618), and
+# after consolidation this count IS the scan floor — it is exact, not a
+# minimum, because any additional file is by definition a re-copied duplicate.
+EXPECTED_TCODE_FILES=8
 
 # ---------------------------------------------------------------------------
 # Mode parsing
@@ -144,14 +139,14 @@ is_in() {
   return 1
 }
 
-# get_pinned_hash <mpm-source-path> — prints the recorded sha256, or nothing.
+# get_pinned_hash <shared-source-path> — prints the recorded sha256, or nothing.
 get_pinned_hash() {
   local path="$1"
   awk -F'\t' -v p="$path" '$0 !~ /^#/ && $1 == p { print $2 }' "$PINS" 2>/dev/null
 }
 
-# DEVIATED_FILES/TCODE_ONLY are fixed, glob-free basename lists declared
-# above — safe to word-split into arrays.
+# DEVIATED_FILES/TCODE_ONLY are fixed, glob-free basename lists declared above —
+# safe to word-split into arrays.
 # shellcheck disable=SC2206
 DEVIATED_ARR=($DEVIATED_FILES)
 # shellcheck disable=SC2206
@@ -165,48 +160,49 @@ if [ "$MODE" = "update" ]; then
   trap 'rm -f "$NEWPINS"' EXIT
 
   {
-    echo "# agent-asset-pins.tsv — pinned trusty-mpm source hashes for deliberately"
-    echo "# deviated tcode agent copies (issue #2958 Slice E4)."
+    echo "# agent-asset-pins.tsv — pinned SHARED agent-asset source hashes for"
+    echo "# deliberately deviated trusty-code copies (issue #2958 Slice E4)."
     echo "#"
-    echo "# Format: <mpm-source-relative-path><TAB><sha256-of-mpm-source-file>"
+    echo "# Format: <shared-source-relative-path><TAB><sha256-of-that-file>"
     echo "#"
-    echo "# These 4 files are the KNOWN INTENTIONAL DEVIATIONS from byte-parity"
-    echo "# documented in crates/trusty-code/src/assets/mod.rs (\"Tools-restriction"
-    echo "# deviation\" / \"Prose deviation follow-up\" doc blocks, Slice E3, PR #3041):"
-    echo "# the tcode copy carries an added \`tools:\` frontmatter line plus (for three"
-    echo "# of the four) reworded read-only prose, so it can never be byte-identical"
-    echo "# to the trusty-mpm source it was derived from."
+    echo "# These 4 files are the KNOWN INTENTIONAL DEVIATIONS documented in"
+    echo "# crates/trusty-code/src/assets/mod.rs (\"Tools-restriction deviation\" /"
+    echo "# \"Prose deviation follow-up\" doc blocks, Slice E3, PR #3041): the tcode"
+    echo "# copy carries an added \`tools:\` frontmatter line plus (for three of the"
+    echo "# four) reworded read-only prose, so it can never be byte-identical to the"
+    echo "# shared asset it was derived from."
     echo "#"
-    echo "# check_agent_assets.sh does NOT byte-compare these 4 tcode copies against"
-    echo "# their mpm source (that would always fail by design). Instead it hashes the"
-    echo "# CURRENT mpm SOURCE file and compares against the pin recorded here. If the"
-    echo "# mpm source hash no longer matches, upstream changed behind a deliberately"
-    echo "# deviated copy — the guard fails so a human reconciles the tcode copy on"
-    echo "# purpose, rather than silently drifting."
+    echo "# Every OTHER agent asset is not copied at all — trusty-mpm and trusty-code"
+    echo "# both embed the one file under crates/trusty-agents-common/src/assets/"
+    echo "# agents/ via trusty_agents_common::agent_assets, so there is nothing to"
+    echo "# pin. check_agent_assets.sh hashes the CURRENT shared source for these 4"
+    echo "# and compares against the pin here; if it no longer matches, the shared"
+    echo "# source changed behind a deliberately deviated fork and the guard fails so"
+    echo "# a human reconciles that fork on purpose."
     echo "#"
-    echo "# Regenerate a pin (only after manually reconciling the tcode copy with the"
-    echo "# new upstream content) with: scripts/check_agent_assets.sh --update"
+    echo "# Regenerate (only after manually reconciling the trusty-code fork with the"
+    echo "# new shared content) with: scripts/check_agent_assets.sh --update"
   } > "$NEWPINS"
 
   err=0
   for base in "${DEVIATED_ARR[@]}"; do
-    mpm_path="$MPM_DIR/$base"
-    if [ ! -f "$mpm_path" ]; then
-      echo "REFUSE: $mpm_path does not exist — cannot pin a missing source file." >&2
+    shared_path="$SHARED_DIR/$base"
+    if [ ! -f "$shared_path" ]; then
+      echo "REFUSE: $shared_path does not exist — cannot pin a missing source file." >&2
       err=1
       continue
     fi
-    existing="$(get_pinned_hash "$mpm_path")"
+    existing="$(get_pinned_hash "$shared_path")"
     if [ -z "$existing" ] && [ "$ALLOW_NEW" -ne 1 ]; then
-      echo "REFUSE: $mpm_path has no existing pin in $PINS (new deviation)." >&2
+      echo "REFUSE: $shared_path has no existing pin in $PINS (new deviation)." >&2
       echo "        Pass --force-add to add it deliberately, and update the" >&2
       echo "        'Tools-restriction deviation' doc block in" >&2
       echo "        crates/trusty-code/src/assets/mod.rs to document it." >&2
       err=1
       continue
     fi
-    new_hash="$(sha256_of "$mpm_path")"
-    printf '%s\t%s\n' "$mpm_path" "$new_hash" >> "$NEWPINS"
+    new_hash="$(sha256_of "$shared_path")"
+    printf '%s\t%s\n' "$shared_path" "$new_hash" >> "$NEWPINS"
   done
 
   if [ "$err" -ne 0 ]; then
@@ -230,72 +226,69 @@ if [ ! -f "$PINS" ]; then
   exit 1
 fi
 
-# --- 1. Pinned deviated files: must exist in tcode dir, and their mpm SOURCE
-#        hash must still match the pin. Never byte-compared against tcode. ---
+# --- 1. Pinned deviated files: must exist in the tcode dir, and their SHARED
+#        source hash must still match the pin. Never byte-compared. ---
 for base in "${DEVIATED_ARR[@]}"; do
   tcode_path="$TCODE_DIR/$base"
-  mpm_path="$MPM_DIR/$base"
+  shared_path="$SHARED_DIR/$base"
 
   if [ ! -f "$tcode_path" ]; then
-    echo "FAIL: MISSING COPY — $tcode_path is a declared deviated file (see" >&2
+    echo "FAIL: MISSING FORK — $tcode_path is a declared deviated file (see" >&2
     echo "      DEVIATED_FILES in scripts/check_agent_assets.sh) but does not exist." >&2
     FAIL=1
     continue
   fi
-  if [ ! -f "$mpm_path" ]; then
-    echo "FAIL: MISSING SOURCE — $mpm_path (source for the deviated copy $tcode_path)" >&2
-    echo "      no longer exists. If trusty-mpm genuinely removed this agent," >&2
-    echo "      retire the tcode copy and drop it from DEVIATED_FILES + $PINS." >&2
+  if [ ! -f "$shared_path" ]; then
+    echo "FAIL: MISSING SOURCE — $shared_path (the shared source the fork" >&2
+    echo "      $tcode_path deviates from) no longer exists. If this agent was" >&2
+    echo "      genuinely retired, drop the tcode fork too and remove it from" >&2
+    echo "      DEVIATED_FILES + $PINS." >&2
     FAIL=1
     continue
   fi
 
-  pinned="$(get_pinned_hash "$mpm_path")"
+  pinned="$(get_pinned_hash "$shared_path")"
   if [ -z "$pinned" ]; then
-    echo "FAIL: UNPINNED DEVIATION — $mpm_path has no entry in $PINS." >&2
+    echo "FAIL: UNPINNED DEVIATION — $shared_path has no entry in $PINS." >&2
     echo "      Run: scripts/check_agent_assets.sh --force-add" >&2
     FAIL=1
     continue
   fi
 
-  current="$(sha256_of "$mpm_path")"
+  current="$(sha256_of "$shared_path")"
   if [ "$current" != "$pinned" ]; then
-    echo "FAIL: UPSTREAM CHANGED BEHIND A DEVIATED COPY — $mpm_path no longer" >&2
-    echo "      matches its pin in $PINS (pinned=$pinned current=$current)." >&2
-    echo "      Reconcile $tcode_path with the new upstream content on purpose" >&2
-    echo "      (it deliberately deviates: tools: restriction + reworded prose)," >&2
+    echo "FAIL: SHARED SOURCE CHANGED BEHIND A DEVIATED FORK — $shared_path no" >&2
+    echo "      longer matches its pin in $PINS (pinned=$pinned current=$current)." >&2
+    echo "      Reconcile $tcode_path with the new content on purpose (it" >&2
+    echo "      deliberately deviates: tools: restriction + reworded prose)," >&2
     echo "      then run: scripts/check_agent_assets.sh --update" >&2
     FAIL=1
   fi
 done
 
-# --- 2. Parity files: every tracked tcode .md not in TCODE_ONLY or
-#        DEVIATED_FILES must byte-match its trusty-mpm source. ---
-# #4027: PARITY_COUNT is tallied rather than hardcoded in the summary line —
-# the roster grows (ticketing was added for epic #4021's cross-product bridge)
-# and a stale literal in a PASSING message is the kind of quiet lie this gate
-# exists to prevent.
+# --- 2. No re-copy. trusty-code's agents dir must hold ONLY the 8 accounted
+#        files; anything else is a shared asset copied back in. ---
 #
 # #4618: the enumeration is materialised into a temp file rather than consumed
 # from a `< <(git ls-files ...)` process substitution. A process substitution
-# runs in a subshell that is exempt from BOTH `set -e` and `pipefail`, so a
-# `git ls-files` that exited 128 fed the loop an empty stream and this gate
-# printed "0 byte-parity file(s) match — OK" over a genuinely drifted copy.
-# Redirecting from a file makes the exit status observable AND still runs the
-# loop body in the current shell (so PARITY_COUNT/FAIL survive it).
+# runs in a subshell exempt from BOTH `set -e` and `pipefail`, so a `git
+# ls-files` that exited 128 fed the loop an empty stream and the gate reported
+# OK over a genuinely broken scan. Redirecting from a file makes the exit status
+# observable AND still runs the loop body in the current shell.
 TCODE_LIST="$(mktemp "${TMPDIR:-/tmp}/agentassets.list.XXXXXX")"
 trap 'rm -f "$TCODE_LIST"' EXIT
 if ! git ls-files "$TCODE_DIR/*.md" > "$TCODE_LIST"; then
   echo "FAIL: TOOL ERROR — 'git ls-files $TCODE_DIR/*.md' exited non-zero." >&2
-  echo "      The file set could not be enumerated, so nothing was compared." >&2
+  echo "      The file set could not be enumerated, so nothing was checked." >&2
   echo "      This is NOT a pass (issue #4618)." >&2
   exit 1
 fi
 
-PARITY_COUNT=0
+SEEN_COUNT=0
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   base="${f##*/}"
+  SEEN_COUNT=$((SEEN_COUNT + 1))
 
   if is_in "$base" "${TCODE_ONLY_ARR[@]}"; then
     continue
@@ -304,36 +297,23 @@ while IFS= read -r f; do
     continue
   fi
 
-  mpm_path="$MPM_DIR/$base"
-  if [ ! -f "$mpm_path" ]; then
-    echo "FAIL: NEW ROSTER FILE UNACCOUNTED — $f has no trusty-mpm source at" >&2
-    echo "      $mpm_path and is not declared tcode-only (TCODE_ONLY in" >&2
-    echo "      scripts/check_agent_assets.sh). Either add it to TCODE_ONLY (if it" >&2
-    echo "      is genuinely tcode's own, not copied from trusty-mpm) or restore" >&2
-    echo "      the trusty-mpm source path." >&2
-    FAIL=1
-    continue
-  fi
-
-  PARITY_COUNT=$((PARITY_COUNT + 1))
-  if ! cmp -s "$f" "$mpm_path"; then
-    echo "FAIL: COPY DRIFTED — $f no longer byte-matches $mpm_path." >&2
-    echo "      Either restore byte-parity (unintentional edit), or if this is a" >&2
-    echo "      deliberate new deviation: add '$base' to DEVIATED_FILES in" >&2
-    echo "      scripts/check_agent_assets.sh, pin it with --force-add, and" >&2
-    echo "      document it in the 'Tools-restriction deviation' doc block in" >&2
-    echo "      crates/trusty-code/src/assets/mod.rs." >&2
-    FAIL=1
-  fi
+  echo "FAIL: RE-COPIED SHARED ASSET — $f is neither a declared tcode-only" >&2
+  echo "      default (TCODE_ONLY) nor a pinned deviation (DEVIATED_FILES)." >&2
+  echo "      Agent assets live ONCE, in $SHARED_DIR, and are embedded through" >&2
+  echo "      trusty_agents_common::agent_assets by every consumer. Delete this" >&2
+  echo "      file and reference the shared const instead. If it genuinely is" >&2
+  echo "      tcode's own new agent with no shared counterpart, add it to" >&2
+  echo "      TCODE_ONLY and raise EXPECTED_TCODE_FILES." >&2
+  FAIL=1
 done < "$TCODE_LIST"
 
-# --- 3. Scan floor (#4618). Assert we actually examined something. ---
-if [ "$PARITY_COUNT" -lt "$MIN_PARITY_FILES" ]; then
-  echo "FAIL: SCAN FLOOR — only ${PARITY_COUNT} byte-parity file(s) were examined," >&2
-  echo "      below the declared minimum of ${MIN_PARITY_FILES}. Either the roster genuinely" >&2
-  echo "      shrank (lower MIN_PARITY_FILES in scripts/check_agent_assets.sh on" >&2
-  echo "      purpose) or the enumeration broke. A gate that scans nothing cannot" >&2
-  echo "      fail, so this is a failure, not an OK (issue #4618)." >&2
+# --- 3. Exact-count floor (#4618). Assert we examined what we expected to. ---
+if [ "$SEEN_COUNT" -ne "$EXPECTED_TCODE_FILES" ]; then
+  echo "FAIL: FILE COUNT — examined ${SEEN_COUNT} trusty-code agent file(s), expected" >&2
+  echo "      exactly ${EXPECTED_TCODE_FILES} (4 pinned deviations + 4 tcode-only defaults)." >&2
+  echo "      Fewer means a fork or default was deleted, or the enumeration broke;" >&2
+  echo "      more means a shared asset was copied back in. A gate that scans" >&2
+  echo "      nothing cannot fail, so this is a failure, not an OK (issue #4618)." >&2
   FAIL=1
 fi
 
@@ -342,5 +322,6 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "agent-assets: scanned ${PARITY_COUNT} byte-parity file(s) (floor ${MIN_PARITY_FILES}), all match; ${#DEVIATED_ARR[@]} pinned deviation(s) match upstream — OK."
+echo "agent-assets: ${SEEN_COUNT} trusty-code agent file(s), all accounted; ${#DEVIATED_ARR[@]} pinned deviation(s) match the shared source — OK."
+echo "agent-assets: the other 42 assets are single-copy in $SHARED_DIR (no drift possible)."
 exit 0

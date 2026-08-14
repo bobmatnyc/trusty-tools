@@ -7,8 +7,8 @@
 //! them, and [`render_markdown`] is the renderer, exposed on its own so a
 //! caller can render without touching the filesystem.
 //!
-//! The GitHub issue upsert from the trusty-review original is deliberately
-//! absent — it lands in #5465, which owns the GitHub write path.
+//! The GitHub issue upsert lives next door in [`super::reporter_github`]
+//! (#5465), which posts exactly what [`Reporter::render`] produces here.
 //!
 //! Test: `reporter_tests.rs`.
 
@@ -56,6 +56,7 @@ impl std::str::FromStr for ReportFormat {
 pub struct Reporter {
     output_dir: PathBuf,
     format: ReportFormat,
+    coverage_note: Option<String>,
 }
 
 impl Reporter {
@@ -64,6 +65,42 @@ impl Reporter {
         Self {
             output_dir: output_dir.into(),
             format,
+            coverage_note: None,
+        }
+    }
+
+    /// Prepend `note` to the rendered Markdown.
+    ///
+    /// Why (#5465): a run where the provider failed on some periods produces a
+    /// report that looks complete — same sections, fewer findings. The caller
+    /// knows which periods were skipped (`PeriodRunSummary::coverage_note`) and
+    /// this is how that reaches the file and the GitHub issue, rather than
+    /// stopping at the terminal the run happened in.
+    /// What: stores the note; [`Self::render`] places it directly under the
+    /// header, ahead of the quality trend it qualifies.
+    /// Test: `reporter_markdown_carries_the_coverage_note`.
+    pub fn with_coverage_note(mut self, note: impl Into<String>) -> Self {
+        self.coverage_note = Some(note.into());
+        self
+    }
+
+    /// Render the Markdown this reporter writes.
+    ///
+    /// Why: the GitHub issue body must be byte-identical to the `.md` on disk,
+    /// including any coverage note — two renderers would drift.
+    /// What: [`render_markdown`] with the coverage note spliced in after the
+    /// header block.
+    /// Test: `reporter_markdown_carries_the_coverage_note`.
+    pub fn render(&self, profile: &ContributorProfile) -> String {
+        let body = render_markdown(profile);
+        let Some(note) = &self.coverage_note else {
+            return body;
+        };
+        // The header block ends at the first blank line following the metadata;
+        // splicing before the first `## ` keeps the note above every section.
+        match body.find("\n## ") {
+            Some(idx) => format!("{}\n{note}{}", &body[..idx], &body[idx + 1..]),
+            None => format!("{body}\n{note}"),
         }
     }
 
@@ -95,7 +132,7 @@ impl Reporter {
 
         if matches!(self.format, ReportFormat::Markdown | ReportFormat::Both) {
             let md_path = self.output_dir.join(format!("{stem}.md"));
-            std::fs::write(&md_path, render_markdown(profile))?;
+            std::fs::write(&md_path, self.render(profile))?;
             info!(path = %md_path.display(), "profile Markdown written");
             written.push(md_path);
         }

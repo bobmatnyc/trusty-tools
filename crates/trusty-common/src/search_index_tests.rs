@@ -258,6 +258,205 @@ fn index_files_inner_skips_gracefully_when_daemon_down() {
     // means there is nothing further to observe from this call.
 }
 
+/// `index_files_best_effort` DROPS a batch — observably — once the shared
+/// bounded pool is saturated, instead of spawning another thread (#2798).
+///
+/// Why: the pre-fix implementation called `std::thread::spawn` per batch, so
+/// there was no saturation point at all: this test could not fail because a
+/// submission could never be refused. It is the end-to-end half of the bound;
+/// the pool's own boundary and concurrency ceiling are pinned deterministically
+/// in `index_dispatch`'s tests.
+/// What: occupies every worker with a job that blocks until released, fills the
+/// queue by submitting no-ops until one is refused, then calls
+/// `index_files_best_effort` and asserts the process-wide rejection counter
+/// advanced by exactly one — i.e. THIS batch was the one dropped. Filling by
+/// "submit until refused" rather than by a fixed count keeps the test honest if
+/// a sibling test ever shares the pool. The blocked workers are released before
+/// returning so the queued no-ops drain.
+/// Test: this test.
+#[test]
+fn index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated() {
+    use crate::index_dispatch::{INDEX_QUEUE_CAPACITY, MAX_INDEX_WORKERS, global};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    let wait = Duration::from_secs(30);
+    let (started_tx, started_rx) = channel();
+    let mut releases = Vec::with_capacity(MAX_INDEX_WORKERS);
+    for _ in 0..MAX_INDEX_WORKERS {
+        let (release_tx, release_rx) = channel::<()>();
+        releases.push(release_tx);
+        let started = started_tx.clone();
+        assert!(
+            global().try_submit(Box::new(move || {
+                let _ = started.send(());
+                let _ = release_rx.recv_timeout(wait);
+            })),
+            "the shared pool refused a job before every worker was even busy"
+        );
+    }
+    for i in 0..MAX_INDEX_WORKERS {
+        started_rx
+            .recv_timeout(wait)
+            .unwrap_or_else(|e| panic!("blocker {i} never started: {e}"));
+    }
+
+    // Fill the queue until a submission is actually refused.
+    let mut filled = 0usize;
+    while global().try_submit(Box::new(|| {})) {
+        filled += 1;
+        assert!(
+            filled <= INDEX_QUEUE_CAPACITY,
+            "the queue accepted {filled} jobs, more than its {INDEX_QUEUE_CAPACITY}-slot capacity"
+        );
+    }
+
+    let before = global().rejected();
+    index_files_best_effort(Path::new("/nonexistent-2798"), &[PathBuf::from("main.rs")]);
+    let after = global().rejected();
+    let stats = index_drop_stats();
+
+    for release in &releases {
+        let _ = release.send(());
+    }
+
+    assert_eq!(
+        after,
+        before + 1,
+        "a batch submitted to a saturated pool must be dropped and counted"
+    );
+    assert_eq!(
+        stats.dropped_batches, after,
+        "the public stats must read the same counter the pool increments"
+    );
+    assert!(
+        stats
+            .seconds_since_last_drop
+            .is_some_and(|since| since <= 60),
+        "a drop that just happened must be reported as recent, got {:?}",
+        stats.seconds_since_last_drop
+    );
+}
+
+/// The per-batch time budget stops the loop at the cap, not one file past it.
+///
+/// Why: a `write_files` batch has no size limit, so the only thing keeping one
+/// large write from pinning a pool worker for minutes is this budget — and the
+/// queue-drain reasoning behind the pool sizing depends on the exact boundary.
+/// What: asserts the predicate is false just under the cap and true at and past
+/// it. The predicate is pure so the boundary is testable without a daemon or a
+/// 30-second wait.
+/// Test: this test.
+#[test]
+fn batch_budget_is_exhausted_at_and_past_the_cap() {
+    use std::time::Duration;
+    assert!(!batch_budget_exhausted(Duration::from_secs(0)));
+    assert!(!batch_budget_exhausted(
+        BATCH_INDEX_BUDGET - Duration::from_millis(1)
+    ));
+    assert!(batch_budget_exhausted(BATCH_INDEX_BUDGET));
+    assert!(batch_budget_exhausted(
+        BATCH_INDEX_BUDGET + Duration::from_secs(600)
+    ));
+}
+
+/// Stopping a batch on the budget is COUNTED, and lands in a different field
+/// from a pool rejection (#2798 round-3 review).
+///
+/// Why: the budget's `break` was a `warn!` and nothing else. That is the exact
+/// single-reader blind spot the drop counter was added to close — an episode
+/// where every batch is ACCEPTED and then repeatedly truncated leaves files
+/// unindexed batch after batch while `GET /health` reports
+/// `dropped_batches: 0` forever. Against the code before this fix the second
+/// half of this test fails: `truncated_batches` never moves off `0`.
+/// What: drives `stop_batch_for_budget` — the loop's ONLY interaction with the
+/// budget, so there is no reachable path that stops without recording — past
+/// the cap, against the SHARED pool `index_drop_stats` reads. It must return
+/// `true`, advance `truncated_batches` by exactly one, and report the age as
+/// recent. Deliberately the shared pool and a delta rather than an isolated
+/// instance: that is what proves a truncation lands in the counter `GET /health`
+/// publishes, and this is the shared truncation counter's only test writer, so
+/// no sibling can perturb the delta. That a truncation leaves the DROP counters
+/// untouched is pinned absolutely, on an isolated pool, by
+/// `a_truncation_is_counted_apart_from_a_rejection`.
+/// Test: this test.
+#[test]
+fn a_truncated_batch_is_counted_separately_from_a_dropped_one() {
+    let before = index_drop_stats().truncated_batches;
+
+    assert!(
+        stop_batch_for_budget(
+            crate::index_dispatch::global(),
+            BATCH_INDEX_BUDGET,
+            "idx",
+            3,
+            10
+        ),
+        "a batch that has spent its budget must be stopped"
+    );
+
+    let after = index_drop_stats();
+    assert_eq!(
+        after.truncated_batches,
+        before + 1,
+        "stopping on the budget must be counted, not only logged"
+    );
+    assert!(
+        after
+            .seconds_since_last_truncation
+            .is_some_and(|since| since <= 60),
+        "a truncation that just happened must be reported as recent, got {:?}",
+        after.seconds_since_last_truncation
+    );
+}
+
+/// A batch that finishes INSIDE its budget records no truncation at all.
+///
+/// Why: the negative leg of the counter. Nothing else catches an over-counting
+/// regression — recording unconditionally instead of only past the cap — and
+/// that failure is worse than the under-counting one it guards the other side
+/// of: every healthy batch would report as truncated, so an operator watching
+/// `GET /health` learns nothing from a number that is always climbing.
+/// What: runs `stop_batch_for_budget` under the cap against a FRESH isolated
+/// pool, so the assertions are absolute rather than a delta — `truncated()`
+/// exactly `0` and `last_truncation_unix_secs()` exactly `None`, which no
+/// ordering against a sibling test can satisfy accidentally. Asserting `== 0`
+/// on the process-wide pool would be unpinnable: a sibling increments it.
+/// Test: this test.
+#[test]
+fn an_unexhausted_budget_records_no_truncation() {
+    use crate::index_dispatch::BoundedDispatcher;
+    use std::time::Duration;
+
+    let pool = BoundedDispatcher::new(1, 1);
+
+    assert!(
+        !stop_batch_for_budget(&pool, Duration::from_secs(0), "idx", 0, 10),
+        "a batch that has spent none of its budget must not be stopped"
+    );
+    assert!(
+        !stop_batch_for_budget(
+            &pool,
+            BATCH_INDEX_BUDGET - Duration::from_millis(1),
+            "idx",
+            9,
+            10
+        ),
+        "a batch one millisecond inside its budget must not be stopped"
+    );
+
+    assert_eq!(
+        pool.truncated(),
+        0,
+        "a batch that was never stopped must not be counted as truncated"
+    );
+    assert_eq!(
+        pool.last_truncation_unix_secs(),
+        None,
+        "with no truncation the stamp must stay unset, never a misleading epoch"
+    );
+}
+
 /// `relative_index_path` strips the project root prefix so the posted
 /// path matches the corpus's existing `file` field convention.
 ///

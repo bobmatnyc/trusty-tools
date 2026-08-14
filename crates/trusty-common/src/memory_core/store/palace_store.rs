@@ -258,6 +258,33 @@ impl PalaceStore {
         Ok(palaces)
     }
 
+    /// Whether `<data_dir>/palace.json` is present, distinguishing "absent"
+    /// from "cannot tell".
+    ///
+    /// Why (issue #4911): an open-or-create caller must only create when the
+    /// palace is genuinely absent. `create_palace` rewrites `palace.json`
+    /// unconditionally, so creating against a palace that merely could not be
+    /// OPENED destroys its `created_at`. Callers were each spelling this probe
+    /// as `data_dir.join("palace.json").exists()`, which carries the #5549 /
+    /// ADR-0045 defect in the direction that loses data: a stat we are DENIED
+    /// reports `false`, so an unreadable palace reads as absent and gets
+    /// overwritten. One entry point keeps that reasoning in a single place.
+    /// What: `try_exists()` on the metadata path. `Ok(false)` means genuinely
+    /// absent; `Ok(true)` means present; `Err` means the probe itself failed
+    /// and the caller must NOT infer absence from it.
+    /// Test: `metadata_present_distinguishes_absent_from_present`. The caller
+    /// contract this exists for is covered cross-crate, in
+    /// `crates/trusty-mpm/src/core/sm/memory_tests.rs`, by
+    /// `ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_palace`
+    /// — named in prose because `scripts/check_test_pointers.sh` resolves a
+    /// cited name only within the citing crate.
+    pub fn metadata_present(data_dir: &Path) -> Result<bool> {
+        let target = data_dir.join(PALACE_JSON);
+        target
+            .try_exists()
+            .map_err(|e| PalaceStoreError::io(&target, e))
+    }
+
     /// Persist the identity (L0) text for a palace.
     ///
     /// Why: L0 identity is read on every palace open; storing it as a plain
@@ -702,6 +729,46 @@ mod tests {
     /// there at all. Uses no permission bits, so it exercises the arm under any
     /// uid.
     /// Test: This test.
+    /// Why (issue #4911): this probe is what an open-or-create caller branches
+    /// on before it may run `create_palace`, and `create_palace` rewrites
+    /// `palace.json`. Only a definite `Ok(false)` may authorise that, so the
+    /// two definite answers have to be right.
+    /// What: asserts `Ok(false)` for a directory holding no `palace.json` and
+    /// for a directory that does not exist, and `Ok(true)` once metadata is
+    /// saved. The denied-stat arm is not exercised here — it needs permission
+    /// bits and is uid-dependent; `try_exists` is the primitive that carries it.
+    /// Test: This test.
+    #[test]
+    fn metadata_present_distinguishes_absent_from_present() {
+        let tmp = tempdir().unwrap();
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(
+            !PalaceStore::metadata_present(&empty).expect("probe succeeds"),
+            "a directory with no palace.json holds no metadata"
+        );
+
+        let missing = tmp.path().join("does-not-exist");
+        assert!(
+            !PalaceStore::metadata_present(&missing).expect("probe succeeds"),
+            "a missing directory holds no metadata"
+        );
+
+        let palace = Palace {
+            id: PalaceId::new("probe"),
+            name: "Probe".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: tmp.path().join("probe"),
+        };
+        PalaceStore::save_palace(&palace).unwrap();
+        assert!(
+            PalaceStore::metadata_present(&palace.data_dir).expect("probe succeeds"),
+            "a saved palace must report its metadata as present"
+        );
+    }
+
     #[test]
     fn load_palace_missing_returns_not_found() {
         let tmp = tempdir().unwrap();
