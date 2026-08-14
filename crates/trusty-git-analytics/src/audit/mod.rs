@@ -23,6 +23,7 @@
 
 mod analyze;
 mod gaps;
+mod repo_index;
 mod review;
 mod stage;
 mod sweep;
@@ -46,7 +47,11 @@ pub use analyze::{
 /// of a copy that can drift away from it (#5308 review).
 #[cfg(test)]
 pub(crate) use gaps::MAX_REASON_CHARS;
-pub use gaps::{sweep_gap_lines, DATA_HANDLING_NOTE};
+pub use gaps::{index_gap_lines, sweep_gap_lines, DATA_HANDLING_NOTE};
+pub use repo_index::{
+    ensure_repositories_indexed, index_id_for, resolve_search_binary, RepoIndexOutcome,
+    RepoIndexStatus, DEFAULT_SEARCH_BIN, ENV_SEARCH_BIN,
+};
 pub use review::{
     artifact_paths, require_inference_credential, require_rendered_report_carries_synthesis,
     require_review_supports_required_inference, resolve_review_binary, run_review_report,
