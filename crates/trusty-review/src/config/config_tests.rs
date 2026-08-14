@@ -416,5 +416,87 @@ fn no_repo_config_preserves_pre_2995_env_over_file_precedence() {
     );
 }
 
+// ─── Provider precedence: unparsable-value fall-through (#5679) ──────────────
+
+#[test]
+fn role_models_unparsable_cli_provider_falls_through_to_env() {
+    // #5679: `--provider garbage` must not occupy the slot TRUSTY_REVIEW_PROVIDER owns.
+    let cli = RoleCliOverrides {
+        provider: Some("garbage".to_string()),
+        ..Default::default()
+    };
+    let env = RoleEnv {
+        provider: Some("openrouter".to_string()),
+        ..Default::default()
+    };
+    let roles = RoleModels::resolve(Some(&cli), &env, None);
+    assert_eq!(
+        roles.reviewer.provider,
+        Provider::OpenRouter,
+        "an unparsable CLI provider must fall through to the env layer, not to the default"
+    );
+    assert_eq!(roles.verifier.provider, Provider::OpenRouter);
+    assert_eq!(roles.summarizer.provider, Provider::OpenRouter);
+}
+
+#[test]
+fn role_models_valid_cli_provider_still_beats_env() {
+    // Guards the #5679 fix against over-correcting: a parsable CLI value still wins.
+    let cli = RoleCliOverrides {
+        provider: Some("openrouter".to_string()),
+        ..Default::default()
+    };
+    let env = RoleEnv {
+        provider: Some("bedrock".to_string()),
+        ..Default::default()
+    };
+    let roles = RoleModels::resolve(Some(&cli), &env, None);
+    assert_eq!(roles.reviewer.provider, Provider::OpenRouter);
+}
+
+#[test]
+fn role_models_unparsable_cli_and_env_provider_fall_through_to_config_file() {
+    let cli = RoleCliOverrides {
+        provider: Some("garbage".to_string()),
+        ..Default::default()
+    };
+    let env = RoleEnv {
+        provider: Some("also-garbage".to_string()),
+        ..Default::default()
+    };
+    let file = FileModels {
+        reviewer: Some(RoleConfigOverride {
+            provider: Some("openrouter".to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let roles = RoleModels::resolve(Some(&cli), &env, Some(&file));
+    assert_eq!(roles.reviewer.provider, Provider::OpenRouter);
+    // The verifier has no `[models.verifier]` table, so it exhausts the chain.
+    assert_eq!(roles.verifier.provider, Provider::Bedrock);
+}
+
+#[test]
+fn role_models_unparsable_provider_at_every_layer_falls_back_to_default() {
+    let cli = RoleCliOverrides {
+        provider: Some("garbage".to_string()),
+        ..Default::default()
+    };
+    let env = RoleEnv {
+        provider: Some("also-garbage".to_string()),
+        ..Default::default()
+    };
+    let file = FileModels {
+        reviewer: Some(RoleConfigOverride {
+            provider: Some("still-garbage".to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let roles = RoleModels::resolve(Some(&cli), &env, Some(&file));
+    assert_eq!(roles.reviewer.provider, Provider::Bedrock);
+}
+
 // resolve_index and wiring-path tests are in the sibling file to stay under
 // the 500-line cap (#610).  See `config_resolve_index_tests.rs`.
