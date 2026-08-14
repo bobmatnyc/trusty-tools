@@ -13,8 +13,10 @@
 //! `probe_once` and `spin_until_ready` together implement the full guard loop.
 //! `spawn_current_exe` is the shared process-spawn helper.
 //! `DaemonAddrLayout` answers the question that comes BEFORE the guard loop —
-//! which `host:port` is this service listening on? — for any service, from its
-//! on-disk discovery files (#5670).
+//! which `host:port` is this service listening on? — from the service's
+//! on-disk discovery files (#5670). A new service gets a new associated const
+//! here, in this crate: `#[non_exhaustive]` means a downstream crate cannot
+//! construct a layout of its own, not even with functional-update syntax.
 //!
 //! STDOUT hygiene: like `mcp::daemon_bridge`, this module NEVER writes to
 //! stdout. All user-visible output (spinner, ready/timeout messages) goes to
@@ -217,9 +219,9 @@ impl DaemonAddrLayout {
     /// shared instance (#3545).
     /// What: returns `http://{host}:{port}`, no trailing slash. The address
     /// file is trusted only when it is readable, non-blank, AND TCP-reachable
-    /// within [`ADDR_PROBE_TIMEOUT`] — a file left behind by a SIGKILL'd daemon
+    /// within `ADDR_PROBE_TIMEOUT` — a file left behind by a SIGKILL'd daemon
     /// names a dead address (#117). On every other outcome the port file
-    /// decides the port, paired with [`ADDR_FALLBACK_HOST`], and when THAT
+    /// decides the port, paired with `ADDR_FALLBACK_HOST`, and when THAT
     /// address is reachable the address file is refreshed so the next caller
     /// skips the probe. The refresh is best-effort: no `$HOME`, or a read-only
     /// filesystem, is not an error here.
