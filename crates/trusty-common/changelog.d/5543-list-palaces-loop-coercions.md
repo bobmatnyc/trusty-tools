@@ -1,3 +1,0 @@
-Fixed
-
-- `PalaceStore::list_palaces` no longer returns a short list and reports success when it cannot classify an entry. A denied stat on a registry child, a `palace.json` it cannot stat, an undecodable `palace.json`, and a directory entry that fails mid-enumeration now propagate an error naming the offending path instead of dropping that palace from the listing. Genuine absence — a subdirectory holding no `palace.json`, a dangling symlink, an entry unlinked mid-walk — still skips silently. The destructive callers (`purge_palaces`, `rebuild_palaces`, `merge_palaces`) already propagate, so they no longer report a clean pass over a palace they never read (#5543).
