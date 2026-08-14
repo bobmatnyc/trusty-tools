@@ -511,28 +511,24 @@ refusal). The error message names the matched pattern. There is no
 environment-variable override for either the allowlist or the denylist.
 
 One narrow exception, and only for the EPHEMERAL-directory rows (`/tmp`,
-`/private/tmp`, `/var/folders`, `Library/Application Support`). A caller that
-names one specific root on purpose can opt in, two ways:
+`/private/tmp`, `/var/folders`, `Library/Application Support`). Approve such a
+root with:
 
 ```bash
-# Approve a scratch root by hand — durable, shows up in `index list`
 trusty-search index add /var/folders/../scratch-repo --allow-sensitive-path
 ```
 
-```jsonc
-// Or per request: POST /indexes with the opt-in. This is its OWN approval —
-// the root does not need an allowlist entry. Used by tcode for a bake-off
-// working project (#2914).
-{ "id": "scratch", "root_path": "/var/folders/…/scratch", "allow_sensitive_path": true }
-```
+`POST /indexes` also accepts `"allow_sensitive_path": true`, but **it is not an
+approval** — it relaxes the ephemeral-prefix rows and nothing else. A request
+that sets it still needs the root approved by the table above, or it gets `403`.
+Approval and denylist relaxation are separate axes:
 
-The request-level form is not a general way around default-deny. The flag
-defaults to `false`, so every automatic path (cwd probe, query-referenced path,
-transient worktree, test fixture) is unaffected; it writes nothing durable, so
-it cannot accumulate approvals; the credential, secret-marker, and
-home-top-level rows above still refuse it; and it confers no privilege a caller
-lacks, since the daemon is loopback-only and unauthenticated. Every use is
-logged at `warn`.
+| Root approved? | `allow_sensitive_path` | Temp-prefix root |
+|---|---|---|
+| no | `false` | `403` (not approved) |
+| no | `true` | `403` (not approved) |
+| yes | `false` | `400` (prefix denylist) |
+| yes | `true` | registers |
 
 ## CLI
 

@@ -179,6 +179,42 @@ fn grandfather_does_not_reseed_after_the_allowlist_is_deleted() {
     );
 }
 
+/// An UNREADABLE registry must not burn the one-time pass.
+///
+/// Why: the stamp means "the pass has had its turn", and a boot whose registry
+/// could not be read never got one — a misdirected `TRUSTY_DATA_DIR` is the
+/// likely cause and it is transient. Stamping there would make the next GOOD
+/// boot grandfather nothing, and warm-boot would then silently drop every
+/// previously-served root. The pass must retry.
+#[test]
+fn grandfather_does_not_stamp_when_the_registry_cannot_be_read() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = fixture(dir.path());
+    let registry = dir.path().join("indexes.toml");
+    // Not valid TOML — `load_index_registry_at` returns Err rather than empty.
+    std::fs::write(&registry, "this is not toml [[[").expect("write");
+
+    let first = grandfather_existing_indexes(&paths, &registry).expect("first pass");
+    assert!(
+        first.seeded.is_empty() && !first.skipped_existing,
+        "{first:?}"
+    );
+    assert!(
+        !paths.allowlist_file().exists(),
+        "nothing to write when the registry is unreadable"
+    );
+
+    // The registry becomes readable — the pass must still be available.
+    let root = safe_root("retry-after-unreadable");
+    write_registry(&registry, &[("a", &root)]);
+    let second = grandfather_existing_indexes(&paths, &registry).expect("second pass");
+    assert_eq!(
+        second.seeded,
+        vec![root],
+        "the pass must retry after a failed read, not be permanently burned"
+    );
+}
+
 /// A fresh install stamps too, so a later registry gaining entries plus a
 /// missing allowlist cannot resurrect a seed pass.
 #[test]

@@ -73,21 +73,29 @@ pub fn grandfather_existing_indexes(
     let entries = match crate::service::persistence::load_index_registry_at(registry_path) {
         Ok(e) => e,
         Err(e) => {
-            // Warn BEFORE any early return — an unreadable registry means the
-            // pass grandfathers nothing, and a silent no-op here reads exactly
-            // like a fresh install right up until indexing stops.
+            // Do NOT stamp here. The stamp means "the pass has had its turn",
+            // and this boot never got one — the registry was unreadable or the
+            // path was wrong (a misdirected `TRUSTY_DATA_DIR` is the likely
+            // cause, and it is transient). Stamping would permanently burn the
+            // one-time pass on a boot that grandfathered nothing, and the next
+            // GOOD boot would then seed nothing while warm-boot silently
+            // dropped every previously-served root. Return without stamping so
+            // the next boot retries.
             tracing::warn!(
                 "allowlist: could not read the index registry at {} ({e:#}) — \
-                 nothing was grandfathered, so already-registered roots may now \
-                 be refused. Approve them with `trusty-search index add` (#767)",
+                 nothing was grandfathered this boot and the one-time pass is \
+                 NOT marked done, so it retries on the next start. If roots stop \
+                 being indexed, approve them with `trusty-search index add` (#767)",
                 registry_path.display()
             );
-            Vec::new()
+            return Ok(GrandfatherOutcome::default());
         }
     };
     if entries.is_empty() {
-        // Still stamp: a fresh install has decided, and a later `index add`
-        // followed by a file deletion must not resurrect a seed pass.
+        // A successfully-read but EMPTY registry is a real decision: a fresh
+        // install has nothing to grandfather, and the pass is done. Stamping
+        // here is what stops a later `index add` plus a file deletion from
+        // resurrecting a seed pass.
         write_stamp(&stamp);
         return Ok(GrandfatherOutcome::default());
     }

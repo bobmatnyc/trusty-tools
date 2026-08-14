@@ -69,28 +69,6 @@ pub enum AllowSource {
         /// The approved root that contains this path.
         parent: PathBuf,
     },
-    /// The request itself named this exact root and opted in
-    /// (`CreateIndexRequest::allow_sensitive_path`).
-    ///
-    /// Why (#767 + #2914): `tcode`'s working project is a directory the USER
-    /// bound it to, and it can legitimately be a bake-off scratch root under an
-    /// OS-temp prefix. Nothing can put such a root into `allowlist.toml` from
-    /// inside `trusty-common` (which cannot depend on `trusty-search`), so
-    /// without this the shipped #2914 behaviour would be `403` forever.
-    ///
-    /// This is NOT a general default-deny bypass, for four reasons: the flag
-    /// defaults to `false`, so every automatic path #767 names — cwd probe,
-    /// query-referenced path, transient worktree, test fixture — is unaffected;
-    /// the denylist rows for credential directories, secret file names, and
-    /// top-level home directories are still enforced (only the ephemeral-prefix
-    /// rows relax); the approval is per-request and writes nothing durable, so
-    /// it cannot accumulate or outlive the call; and it confers no privilege a
-    /// caller lacks, since the daemon is loopback-only and unauthenticated, so
-    /// any process that can set the flag can equally write `allowlist.toml`.
-    /// Every use is logged at `warn`.
-    /// Test: `create_index_accepts_explicit_sensitive_path_optin`,
-    /// `allow_sensitive_path_still_obeys_the_credential_denylist`.
-    ExplicitRequest,
 }
 
 impl std::fmt::Display for AllowSource {
@@ -103,9 +81,6 @@ impl std::fmt::Display for AllowSource {
             }
             AllowSource::WithinApproved { parent } => {
                 write!(f, "inside approved root {}", parent.display())
-            }
-            AllowSource::ExplicitRequest => {
-                write!(f, "explicit opted-in single-root request")
             }
         }
     }

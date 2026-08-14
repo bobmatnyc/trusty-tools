@@ -164,30 +164,28 @@ pub(super) async fn validate_root_path(
     // entry, a root the project registry lists, or a worktree provisioned
     // under one of those. A root that matches none of them is refused.
     // Deliberately AFTER the denylist so an approval can never admit a
-    // sensitive path, and deliberately NOT skipped by `allow_sensitive_path`:
-    // that flag only relaxes the temp-dir prefix check, never the opt-in gate.
+    // sensitive path, and deliberately NOT skipped by `allow_sensitive_path`.
+    //
+    // That flag relaxes `SENSITIVE_PATH_PREFIXES` and NOTHING ELSE. It is not
+    // an approval: a caller that sets it still needs the root approved by
+    // `resolve_allow_source`. An earlier revision of this PR let the flag stand
+    // in for approval, which made `POST /indexes {root_path: "$HOME/Writing",
+    // allow_sensitive_path: true}` succeed against an empty allowlist —
+    // default-deny defeated for every ordinary directory, which is the exact
+    // population #767 exists because of. `trusty-code` passes the flag
+    // unconditionally, so that hole needed no operator action to reach.
+    // Approving such a root is `trusty-search index add --allow-sensitive-path`.
     //
     // Calls `resolve_allow_source` rather than `check_path_with`: the denylist
     // step ran just above with the CORRECT opt-in semantics, and re-running it
-    // here would apply the strict variant and refuse an
-    // `allow_sensitive_path: true` request that the caller legitimately opted
-    // into.
+    // here would apply the strict variant and refuse the prefix relaxation the
+    // caller legitimately opted into.
     match crate::allowlist::sources::resolve_allow_source(&canonical, allowlist_paths) {
         Ok(Some(source)) => {
             tracing::debug!(
                 path = %canonical.display(),
                 %source,
                 "indexing approved (#767)"
-            );
-        }
-        // #767 + #2914: an explicit, opted-in, caller-named single root is its
-        // own approval — see `AllowSource::ExplicitRequest` for why this is not
-        // a general bypass. Logged at `warn`, never persisted.
-        Ok(None) if allow_sensitive_path => {
-            tracing::warn!(
-                path = %canonical.display(),
-                "indexing approved by an explicit opted-in single-root request \
-                 (allow_sensitive_path) — not from the allowlist (#767)"
             );
         }
         Ok(None) => {

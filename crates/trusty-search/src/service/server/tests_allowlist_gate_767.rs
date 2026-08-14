@@ -272,16 +272,18 @@ async fn denylist_still_wins_over_an_allowlist_entry() {
     );
 }
 
-/// `allow_sensitive_path: true` is an explicit, caller-named single-root
-/// request, and is its own approval (#2914 — `tcode`'s bake-off working project
-/// under `/var/folders`).
+/// `allow_sensitive_path` relaxes `SENSITIVE_PATH_PREFIXES` and NOTHING ELSE.
+/// It is not an approval.
 ///
-/// Why this is not a general bypass: the flag defaults to `false`, so every
-/// automatic path #767 names leaves it false; nothing durable is written; and
-/// the credential/home denylist rows below still refuse. See
-/// `AllowSource::ExplicitRequest`.
+/// Why this test exists: an earlier revision of this PR treated the flag as its
+/// own approval source, which made this exact call succeed against an EMPTY
+/// allowlist. `trusty-code` passes the flag unconditionally for every session's
+/// project, so that hole was reachable with no operator action — default-deny
+/// defeated for every ordinary directory, the population #767 exists because
+/// of. The root here is an ordinary temp dir: not a credential directory, not a
+/// home top-level, so ONLY the allowlist stands between it and indexing.
 #[tokio::test]
-async fn create_index_accepts_explicit_sensitive_path_optin() {
+async fn allow_sensitive_path_does_not_bypass_the_allowlist() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
     let fx = tempfile::tempdir().expect("tempdir");
@@ -294,35 +296,50 @@ async fn create_index_accepts_explicit_sensitive_path_optin() {
     let (status, json) = body_json(resp).await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "explicit opt-in must register: {json}"
+        StatusCode::FORBIDDEN,
+        "opting past the temp-dir prefix must not opt past the allowlist: {json}"
     );
 
-    // Nothing durable was written: an ephemeral scratch root must not leave a
-    // permanent row behind (the finding-6 rule, applied here too).
-    let cfg = AllowlistConfig::load_from(&allow.allowlist_file()).expect("load");
+    // Reaching `create_index_handler`'s body at all is the leak: it calls
+    // `roots_registry::upsert_root`, `colocated_storage::ensure_gitignored`,
+    // and the colocated `.trusty-search/` builder. Assert none of it happened.
     assert!(
-        cfg.entries.is_empty(),
-        "the opt-in is per-request, never persisted: {cfg:?}"
+        state
+            .registry
+            .get(&crate::core::registry::IndexId::new(
+                "sensitive-optin".to_string()
+            ))
+            .is_none(),
+        "refused root must not be registered"
     );
+    let cfg = AllowlistConfig::load_from(&allow.allowlist_file()).expect("load");
+    assert!(cfg.entries.is_empty(), "{cfg:?}");
 }
 
-/// WITHOUT the flag, the same temp root is refused — the opt-in is what changes
-/// the answer, not the daemon being lax about temp dirs.
+/// The one thing the flag DOES do: an APPROVED root under a temp prefix
+/// registers with it, and is refused by the prefix denylist without it.
 #[tokio::test]
-async fn temp_root_without_the_optin_is_still_refused() {
+async fn allow_sensitive_path_relaxes_only_the_prefix_denylist() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
     let fx = tempfile::tempdir().expect("tempdir");
-    let state = state_with(fixture(fx.path(), &[])).await;
+    let state = state_with(fixture(fx.path(), &[&root])).await;
 
+    // Approved but no opt-in → the prefix denylist refuses it (400).
     let resp = create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("no-optin", root)),
+        Json(create_req("no-optin", root.clone())),
     )
     .await;
     let (status, json) = body_json(resp).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+    // Approved AND opted in → registers.
+    let mut req = create_req("with-optin", root);
+    req.allow_sensitive_path = true;
+    let resp = create_index_handler(State(Arc::clone(&state)), Json(req)).await;
+    let (status, json) = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
 }
 
 /// The opt-in relaxes the EPHEMERAL-prefix rows only. A credential directory is
