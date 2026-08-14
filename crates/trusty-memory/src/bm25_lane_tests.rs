@@ -254,10 +254,12 @@ async fn flush_persists_a_pending_write() {
     lane.shutdown().await;
 }
 
-/// Why: replaces `shutdown_with_no_children_is_noop` and the e2e test's
-/// reap-and-unlink assertion. The exit path must persist everything and must
-/// tolerate being called twice — `run_http_on` calls it, and a test harness may
-/// call it again.
+/// Why: replaces `bm25_supervisor_tests.rs`'s idempotent-shutdown coverage and
+/// the e2e test's reap-and-unlink assertion. (trusty-common's own
+/// `shutdown_with_no_children_is_noop` is untouched — it covers the shared
+/// supervisor, which this PR does not change.) The exit path must persist
+/// everything and must tolerate being called twice — `run_http_on` calls it,
+/// and a test harness may call it again.
 /// Test: this test itself.
 #[tokio::test]
 async fn shutdown_flushes_and_is_idempotent() {

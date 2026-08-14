@@ -67,7 +67,7 @@ impl Aliased {
 
         let state = AppState::new(data_root.clone()).with_bm25_lane_from_env();
         assert!(
-            state.bm25.is_some(),
+            state.bm25_lane().is_some(),
             "the lexical lane must be armed, or this test proves nothing"
         );
 
@@ -114,7 +114,7 @@ impl Aliased {
 
     /// Flush the lane's snapshots and stop its ticker.
     pub async fn shutdown(&self) {
-        if let Some(lane) = self.state.bm25.as_ref() {
+        if let Some(lane) = self.state.bm25_lane() {
             lane.shutdown().await;
         }
     }

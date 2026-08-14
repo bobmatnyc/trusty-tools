@@ -456,8 +456,18 @@ pub struct AppState {
     /// code path that uses it is gated on `is_some()` and falls back to
     /// vector-only recall otherwise, so a deployment that never set the gate —
     /// which is every shipped deployment (#5186) — sees no behavioural change.
-    /// Test: `bm25_lane_disabled_by_default`, `bm25_lane_enabled_when_env_set`.
-    pub bm25: Option<Arc<bm25_lane::Bm25Lane>>,
+    ///
+    /// 🔴 `pub(crate)`, not `pub`, and that is load-bearing. Installing a lane
+    /// also has to rebuild the indexer worker, because `AppState::new` spawns it
+    /// before any lane exists. Assigning this field on its own produces a state
+    /// whose READS use the lane and whose WRITES the placeholder worker
+    /// discards — silently, with no error anywhere. [`Self::with_bm25_lane`] is
+    /// the only way to set it and does both halves; keeping the field private
+    /// makes the broken half-installed state unrepresentable outside this crate
+    /// rather than merely documented. Read it with [`Self::bm25_lane`].
+    /// Test: `bm25_lane_disabled_by_default`, `bm25_lane_enabled_when_env_set`,
+    /// `writes_through_the_tool_surface_survive_eviction`.
+    pub(crate) bm25: Option<Arc<bm25_lane::Bm25Lane>>,
     /// Per-palace write serialisation locks (issue #230).
     ///
     /// Why: the dedup gate in `tools.rs` previously read a snapshot of
@@ -791,6 +801,17 @@ impl AppState {
         self.bm25_index_tx = tx;
         self.bm25 = Some(lane);
         self
+    }
+
+    /// The BM25 lane, if one is installed.
+    ///
+    /// Why: the read half of the `pub(crate)` field above. Callers outside this
+    /// crate — the integration tests, and anything that wants to flush or query
+    /// the lane directly — need to reach it without being able to swap it for
+    /// one the indexer worker has never heard of.
+    /// Test: `tests/bm25_lane_concurrency.rs`, `tests/bm25_alias_write.rs`.
+    pub fn bm25_lane(&self) -> Option<&Arc<bm25_lane::Bm25Lane>> {
+        self.bm25.as_ref()
     }
 
     /// Scan the palace registry directory and re-register every persisted

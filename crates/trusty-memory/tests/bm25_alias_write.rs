@@ -75,7 +75,7 @@ async fn an_aliased_write_indexes_into_the_resolved_palaces_corpus() {
         .unwrap_or_else(|| panic!("the write was skipped, not stored: {payload}"))
         .to_string();
 
-    let lane = fx.state.bm25.as_ref().expect("the lane is armed");
+    let lane = fx.state.bm25_lane().expect("the lane is armed");
     let indexed = poll_corpus_for(lane, &fx.canonical, token).await;
     assert!(
         indexed.contains(&drawer_id),

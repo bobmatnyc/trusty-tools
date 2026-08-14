@@ -33,8 +33,9 @@ use trusty_memory::AppState;
 ///
 /// Why: `with_bm25_lane_from_env` reads process-global env, which sibling tests
 /// race on. `with_bm25_lane` pins the cap this file needs without touching the
-/// environment at all — and, unlike assigning `state.bm25` directly, it rebuilds
-/// the indexer worker so writes actually reach the lane.
+/// environment at all, and it is now the only way in — `AppState::bm25` is
+/// `pub(crate)` precisely so a caller cannot install a lane without also
+/// rebuilding the indexer worker that writes to it.
 fn state_with_lane(cap: usize) -> (AppState, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = AppState::new(tmp.path().to_path_buf()).with_bm25_lane(Bm25Lane::with_limits(
@@ -55,7 +56,7 @@ fn state_with_lane(cap: usize) -> (AppState, tempfile::TempDir) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writers_for_one_palace_converge_on_one_index() {
     let (state, _tmp) = state_with_lane(3);
-    let lane = Arc::clone(state.bm25.as_ref().expect("lane armed"));
+    let lane = Arc::clone(state.bm25_lane().expect("lane armed"));
 
     let mut tasks = Vec::new();
     for i in 0..32 {
@@ -100,7 +101,7 @@ async fn a_fanout_holds_the_cap_and_loses_no_write() {
     const DOCS: usize = 3;
 
     let (state, _tmp) = state_with_lane(CAP);
-    let lane = Arc::clone(state.bm25.as_ref().expect("lane armed"));
+    let lane = Arc::clone(state.bm25_lane().expect("lane armed"));
 
     let mut tasks = Vec::new();
     for p in 0..PALACES {
@@ -198,7 +199,7 @@ async fn writes_through_the_tool_surface_survive_eviction() {
         expected.push((palace, token, drawer_id));
     }
 
-    let lane = state.bm25.as_ref().expect("lane armed");
+    let lane = state.bm25_lane().expect("lane armed");
     for (palace, token, drawer_id) in &expected {
         // The write path is asynchronous by design (#231), so poll rather than
         // assume the indexer worker has drained.

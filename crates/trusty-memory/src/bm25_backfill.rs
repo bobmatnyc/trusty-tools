@@ -41,18 +41,28 @@
 //! `upsert_document` is keyed by `doc_id`, so a re-run overwrites rather than
 //! duplicating.
 //!
-//! #5329 removed the per-operation RPC timeout and the `missing_docs` request
-//! chunking. Both existed because each call crossed a socket: the timeout
-//! bounded a wedged peer, the chunking bounded a newline-framed JSON request.
-//! An in-process call has no peer to wedge and no frame to bound, so keeping
-//! them would be ceremony around a function call. [`PALACE_BUDGET`] stays,
-//! because a slow disk under a large corpus is still real.
+//! #5329 removed the per-operation RPC timeout (`OP_TIMEOUT`) and the
+//! `missing_docs` request chunking. Both existed because each call crossed a
+//! socket: the timeout bounded a wedged peer, the chunking bounded a
+//! newline-framed JSON request. An in-process call has no peer to wedge and no
+//! frame to bound. [`PALACE_BUDGET`] stays, because a slow disk under a large
+//! corpus is still real.
+//!
+//! 🟡 That trade narrowed what this module can promise, and the promise below
+//! is scoped to match. `PALACE_BUDGET` is checked BETWEEN documents, so it
+//! bounds a run that is merely slow — not one that is stuck. A single
+//! `lane.index()` blocked inside a hung filesystem read has nothing to
+//! interrupt it and will hold the startup sweep open indefinitely. Restoring a
+//! per-operation bound means wrapping the blocking snapshot I/O, not the async
+//! call; deliberately left out of #5329 rather than fixed badly.
 //!
 //! Repair after a drop is handled by [`crate::bm25_repair`], which consumes the
 //! dirty flags `bm25_index_enqueue` sets when it drops on a full queue.
 //!
 //! Fail-open: every failure mode degrades to a reported status, never an error
-//! that propagates into a caller's request path and never an unbounded wait.
+//! that propagates into a caller's request path. A run that is slow is bounded
+//! by [`PALACE_BUDGET`]; a single operation that blocks is not — see the note
+//! above.
 //!
 //! Test: `bm25_backfill_tests.rs` (unit) and `tests/bm25_backfill_e2e.rs`.
 

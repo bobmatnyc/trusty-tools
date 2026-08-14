@@ -181,8 +181,6 @@ crates/trusty-code/src/session/transcript.rs	get_transcript_returns_stored_recor
 crates/trusty-code/src/skills/mod.rs	load_skill_body_io_error
 crates/trusty-code/src/tools/registry.rs	register_panics_on_duplicate_in_debug
 crates/trusty-code/src/tools/registry.rs	register_then_dispatch_succeeds
-crates/trusty-common/src/bm25_client.rs	locate_bm25_daemon_binary_prefers_sibling
-crates/trusty-common/src/bm25_client.rs	request_serialises_as_jsonrpc_2_0
 crates/trusty-common/src/catchup/mpm_registry.rs	default_registry_path_under_home
 crates/trusty-common/src/catchup/mpm_session.rs	roundtrip_partial_json
 crates/trusty-common/src/catchup/session_finder.rs	parse_trusty_mpm_session_extracts_sections
