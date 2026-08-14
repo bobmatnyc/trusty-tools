@@ -18,14 +18,17 @@ use clap::Args;
 
 use anyhow::Context as _;
 use tga::audit::{
-    ensure_analyze_daemon, require_inference_credential, require_rendered_report_carries_synthesis,
+    ensure_analyze_daemon, ensure_repositories_indexed, index_gap_lines,
+    require_inference_credential, require_rendered_report_carries_synthesis,
     require_review_supports_required_inference, resolve_review_binary, run_full_sweep,
     run_review_report, sweep_gap_lines, AuditSweepStats, SweepOptions, SweepStage,
     DATA_HANDLING_NOTE,
 };
 use tga::core::config::Config;
 use tga::core::db::Database;
-use tga::report::dd_manifest::{build_dd_manifest, configured_secrets, DdManifestOptions};
+use tga::report::dd_manifest::{
+    build_dd_manifest, configured_secrets, dd_repository_entries, DdManifestOptions,
+};
 
 /// Arguments for `tga audit`.
 ///
@@ -109,7 +112,14 @@ const DEFAULT_OUTPUT_DIR: &str = "audit-output";
 /// order here is exactly the second implementation DOC-67 §5 forbids, and it
 /// would drift from the TUI's "Run Audit" path.
 /// What: creates the output directory, prints the engagement header, calls
-/// [`run_full_sweep`], then prints one line per stage.
+/// [`run_full_sweep`], prints one line per stage, indexes every repository the
+/// report is about to be built from (#5670), and renders.
+///
+/// The indexing pass sits between the sweep and the manifest for two reasons:
+/// clone-on-demand (#5215) is what guarantees a repository is on disk, so it
+/// cannot run earlier; and a repository that would not index owes a Gaps &
+/// Caveats line, which the manifest carries, so it cannot run later. It never
+/// fails the run — see [`ensure_repositories_indexed`].
 ///
 /// Exit status is `Ok` whenever the sweep completed, even with failed stages —
 /// DOC-67 §9's one-shot rule makes a failed stage a *named gap*, not a reason
@@ -177,6 +187,19 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     // against the same needles the manifest builder uses.
     let secrets = configured_secrets(&config);
     let mut gaps = sweep_gap_lines(&stats, &secrets);
+
+    // #5236: the renderer resolves a relative repository path against the
+    // MANIFEST's directory, not ours; anchoring here is what keeps it pointed at
+    // the checkout tga actually collected from.
+    let base_dir = std::env::current_dir().unwrap_or_default();
+
+    // #5670: index each repository before the renderer looks for its index.
+    // After the sweep, because clone-on-demand (#5215) is what puts a repository
+    // on disk, and before the manifest is built, because a repository that could
+    // not be indexed owes a gap line and the manifest is where gap lines go.
+    let indexed = ensure_repositories_indexed(&dd_repository_entries(&config, &base_dir)).await;
+    gaps.extend(index_gap_lines(&indexed, &secrets));
+
     gaps.push(DATA_HANDLING_NOTE.to_string());
     let manifest = build_dd_manifest(
         &config,
@@ -185,10 +208,7 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
             analyst: args.analyst.clone(),
             client: args.client.clone(),
             gaps,
-            // #5236: the renderer resolves a relative repository path against
-            // the MANIFEST's directory, not ours; anchoring here is what keeps
-            // it pointed at the checkout tga actually collected from.
-            base_dir: std::env::current_dir().unwrap_or_default(),
+            base_dir,
         },
     )?;
 

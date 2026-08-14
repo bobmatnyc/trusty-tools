@@ -375,14 +375,15 @@ readiness timeout both stop the run. §9's fail-open contract for
 changes is that `tga audit` now guarantees the precondition rather than letting
 the renderer discover its absence.
 
-**Still open — the daemon is necessary, not sufficient.** `try_fetch` also
-requires the repository to be indexed in trusty-search under its checkout
-basename (`analyze_adapter.rs`'s `index_served`), and nothing in the audit path
-indexes anything. A run on an unindexed repository still reaches the renderer's
-`trusty-analyze index not built` gap.
+**The daemon is necessary, not sufficient.** `try_fetch` also requires the
+repository to be indexed in trusty-search under its checkout basename
+(`analyze_adapter.rs`'s `index_served`). Nothing in the audit path indexed
+anything, so a run on an unindexed repository reached the renderer's
+`trusty-analyze index not built` gap and rendered three empty sections over an
+exit 0.
 
 The full prerequisite chain is trusty-search → per-repository index →
-trusty-analyze, and #5670 does not reach all three:
+trusty-analyze, and #5670 reaches each link differently:
 
 - **trusty-analyze (link 3) — closed.** The preflight starts it or refuses.
 - **trusty-search (link 1) — hard-refused on every run.** Not only on a fresh
@@ -393,13 +394,17 @@ trusty-analyze, and #5670 does not reach all three:
   been up for days on top of a trusty-search that died an hour ago fails the
   probe, its spawned replacement exits at its own search check, the original
   keeps answering 503, and the readiness poll refuses the audit.
-- **The per-repository index (link 2) — unchanged, and still fail-open.**
-  `AnalyzeGap::NotIndexed` is the same one-line-in-the-artifact, exit-0 gap it
-  was before #5670 (`analyze_adapter.rs`'s `fetch_named`, §9). Nothing in the
-  preflight indexes anything or checks that anything is indexed, so an
-  unindexed repository still produces a report with the three analyze-derived
-  sections empty and a gap line naming why. That link is carried forward as its
-  own work.
+- **The per-repository index (link 2) — built by the audit, and still fail-open
+  per repository.** `crate::audit::repo_index::ensure_repositories_indexed` runs
+  between the sweep and the manifest: it probes each repository with
+  `trusty-search index-status <id>` and, on a miss, runs `trusty-search index
+  <path> --name <id>`, with the id derived from the same manifest entry
+  `derive_index_id` reads. `analyze_adapter.rs` is untouched, so
+  `AnalyzeGap::NotIndexed` remains what it was — but the run now has to fail
+  before the renderer can reach it. A repository that will not index is excluded
+  and named in Gaps & Caveats by `index_gap_lines`, and the audit continues at
+  the same exit status, which is §9's per-repository rule rather than the
+  whole-run refusal link 3 gets.
 
 ## {#SPEC-TGAUDIT-07~draft} 7. What AUDIT Adds Beyond Epic #5223
 

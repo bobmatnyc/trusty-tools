@@ -239,3 +239,96 @@ async fn the_real_analyze_binary_satisfies_the_preflight_end_to_end() {
         .await
         .expect("a daemon this guard just started must satisfy the next run without a spawn");
 }
+
+// ─── The trusty-search CLI facts the indexing pass rests on (#5670) ───────────
+
+/// The built `trusty-search` binary, or a panic naming the command that builds
+/// it. `TRUSTY_SEARCH_BIN` wins when set, mirroring [`real_analyze_binary`].
+fn real_search_binary() -> PathBuf {
+    if let Some(pinned) = std::env::var_os(crate::audit::ENV_SEARCH_BIN) {
+        let pinned = PathBuf::from(pinned);
+        assert!(
+            pinned.exists(),
+            "TRUSTY_SEARCH_BIN={} does not exist",
+            pinned.display()
+        );
+        return pinned;
+    }
+    let exe = std::env::current_exe().expect("resolve the test executable");
+    let candidate = exe
+        .parent()
+        .and_then(Path::parent)
+        .map(|profile| profile.join("trusty-search"))
+        .expect("a target/<profile>/deps layout");
+    assert!(
+        candidate.exists(),
+        "{} is not built — run `cargo build -p trusty-search` before \
+         `cargo test -p tga -- --include-ignored`, or point TRUSTY_SEARCH_BIN at a copy",
+        candidate.display()
+    );
+    candidate
+}
+
+/// `index <path> --name <id>` is still the CLI this module builds.
+///
+/// Why this cannot be checked in-crate: `super::repo_index::index_args` is a
+/// `Vec<OsString>` a stub happily accepts whatever it contains, so every stub
+/// test would still pass if trusty-search renamed the flag or dropped the
+/// positional path. Asking the real binary's own parser is the only check that
+/// fails when the contract moves.
+///
+/// `--help` mutates nothing and needs no daemon, so this arm costs one process
+/// spawn.
+#[ignore = "needs `cargo build -p trusty-search`; run with --include-ignored"]
+#[test]
+fn the_real_search_binary_still_takes_index_path_and_name() {
+    let binary = real_search_binary();
+    let output = std::process::Command::new(&binary)
+        .args(["index", "--help"])
+        .output()
+        .expect("run `trusty-search index --help`");
+    assert!(output.status.success(), "`index --help` exited non-zero");
+
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("--name"),
+        "`--name` is what binds the index to the id trusty-review looks up:\n{help}"
+    );
+    assert!(
+        help.contains("[PATH]") || help.contains("<PATH>"),
+        "the positional checkout path is still the first argument:\n{help}"
+    );
+}
+
+/// An unknown index id exits non-zero — the membership signal the cheap path
+/// reads.
+///
+/// Why this cannot be checked in-crate: the stub answers by pattern, so it
+/// proves only that this module reads the exit status, never that `index-status`
+/// still SETS it. The real command 404s at the daemon and turns that into a
+/// non-zero exit; if it ever started exiting 0 with a "not found" message, every
+/// repository would be treated as already served and the audit would render
+/// exactly the hollow report #5670 is about.
+///
+/// Read-only against the operator's daemon: one `GET
+/// /indexes/<random>/status` for an id that cannot exist.
+#[ignore = "needs `cargo build -p trusty-search` and a running trusty-search; run with --include-ignored"]
+#[tokio::test]
+async fn the_real_search_binary_exits_non_zero_for_an_unknown_index() {
+    let binary = real_search_binary();
+    let _ = reachable_trusty_search().await;
+
+    let unknown = format!("tga-audit-no-such-index-{}", std::process::id());
+    let args = super::repo_index::probe_args(&unknown);
+    let output = std::process::Command::new(&binary)
+        .args(&args)
+        .output()
+        .expect("run `trusty-search index-status <unknown>`");
+
+    assert!(
+        !output.status.success(),
+        "an unknown index must not report success — stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
