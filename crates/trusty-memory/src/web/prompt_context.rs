@@ -21,6 +21,7 @@ use trusty_common::memory_core::community::KnowledgeGap;
 use trusty_common::memory_core::palace::PalaceId;
 use trusty_common::memory_core::store::kg::Triple;
 
+use crate::kg_write::{CachePolicy, KgWriteError};
 use crate::AppState;
 
 use super::error::{open_handle, ApiError};
@@ -76,8 +77,8 @@ pub(super) struct KgGapsQuery {
 /// What: Resolves the palace from the optional `palace` query arg (falling
 /// back to the daemon's `default_palace`, then erroring with 400 if neither
 /// is set). Returns `[]` when the cache has no entry yet — the dream cycle
-/// simply hasn't populated it. Returns 404 only when the palace name is
-/// unknown to the registry (handle.open failed).
+/// simply hasn't populated it. Returns 404 only when the palace is genuinely
+/// absent; an open that could not be completed is 500 (#5549, ADR-0045).
 /// Test: `kg_gaps_endpoint_returns_cached_gaps`,
 /// `kg_gaps_endpoint_returns_empty_when_uncached`.
 pub(super) async fn kg_gaps_handler(
@@ -220,9 +221,9 @@ pub(super) async fn prompt_context_handler(
 /// Why: HTTP counterpart to the `add_alias` MCP tool — lets the admin UI
 /// (or an external automation) register aliases without speaking JSON-RPC.
 /// What: Resolves the target palace (request body → daemon default), opens
-/// the palace handle, asserts the alias triple, and rebuilds the prompt
-/// cache so subsequent `GET /api/v1/kg/prompt-context` calls reflect the
-/// write immediately.
+/// the palace handle, and hands the triple to [`crate::kg_write::assert_triple`],
+/// which gates on Tier S and rebuilds the prompt cache so subsequent
+/// `GET /api/v1/kg/prompt-context` calls reflect the write immediately.
 /// Test: `add_alias_endpoint_asserts_triple_and_refreshes_cache`.
 pub(super) async fn add_alias_handler(
     State(state): State<AppState>,
@@ -237,18 +238,6 @@ pub(super) async fn add_alias_handler(
         .or_else(|| state.default_palace.clone())
         .ok_or_else(|| ApiError::bad_request("missing 'palace' (no default palace configured)"))?;
     let handle = open_handle(&state, &palace_name)?;
-    // #4888: the HTTP alias endpoint writes `is_alias_for` directly, so it
-    // needs the same Tier S gate as the `add_alias` MCP tool it mirrors.
-    // `_admission` holds the admission lock until after `kg.assert` below.
-    let _admission = crate::prompt_facts::check_tier_s_admission(
-        &state,
-        &handle,
-        &req.short,
-        "is_alias_for",
-        &req.full,
-    )
-    .await
-    .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
     let triple = Triple {
         subject: req.short.clone(),
         predicate: "is_alias_for".to_string(),
@@ -258,14 +247,14 @@ pub(super) async fn add_alias_handler(
         confidence: 1.0,
         provenance: Some("add_alias_http".to_string()),
     };
-    handle
-        .kg
-        .assert(triple)
+    // #5524: the shared entry point carries the #4888 Tier S gate and the
+    // rebuild this handler used to run itself.
+    crate::kg_write::assert_triple(&state, &handle, triple, CachePolicy::Inline)
         .await
-        .map_err(|e| ApiError::internal(format!("kg.assert failed: {e:#}")))?;
-    if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(&state).await {
-        tracing::warn!("rebuild_prompt_cache after HTTP add_alias failed: {e:#}");
-    }
+        .map_err(|e| match e {
+            KgWriteError::Admission(inner) => ApiError::bad_request(format!("{inner:#}")),
+            other => ApiError::internal(format!("{other}")),
+        })?;
     Ok(Json(json!({
         "subject": req.short,
         "predicate": "is_alias_for",

@@ -506,7 +506,6 @@ Compiled only under the `http-server` feature (default ON).
 | `run <owner> <repo> <pr>` | One-shot review of a live GitHub PR | `--reviewer-model`, `--provider`, `--no-log` |
 | `run --local-diff <path>` | Review a local unified diff file (no GitHub, always dry-run) | `--reviewer-model`, `--provider` |
 | `compare <owner> <repo> <pr>` | Run same PR across multiple models; print comparison table | `--models <slug,...>`, `--provider`, `--local-diff` |
-| `profile` | Generate longitudinal contributor profile | see §10 |
 
 **Model flag conventions:**
 - `--reviewer-model us.anthropic.claude-sonnet-4-6` — bare ID, uses default/selected provider
@@ -520,31 +519,19 @@ Compiled only under the `http-server` feature (default ON).
 
 ---
 
-## 10. Contributor profile pipeline (`src/profile/`)
+## 10. Contributor profiling — removed, moved to tga
 
-**Purpose:** Longitudinal per-contributor code quality profiling. Aggregates commit history from a tga SQLite database into time-period batches, samples representative diffs, uses an LLM to identify recurring findings and write a narrative profile.
-
-**Submodules:**
-
-| Module | Responsibility |
-|--------|----------------|
-| `types/` | `ContributorProfile`, `PeriodBatch`, `SampledDiff`, `LongitudinalFinding`, `TokenCostSummary`, `Trajectory`, `TrendTag`, `PROFILE_VERSION` |
-| `selector.rs` | `ContributorSelector`, `resolve_contributor()`, `resolve_db_path()` — identity resolution from tga DB |
-| `batch.rs` | `assemble_period_batches()`, `Window` enum — period assembly |
-| `diff_sampler/` | `DiffSamplerConfig`, `sample_diffs_for_batches()` — representative diff sampling |
-| `batch_reviewer.rs` | `BatchReviewer` — per-period LLM review calls |
-| `synthesizer.rs` | `Synthesizer` — longitudinal pattern synthesis across periods |
-| `reporter.rs` | `Reporter` — profile output (JSON `profile.json` + Markdown `profile.md`) |
-| `reporter_github.rs` | Optional GitHub issue creation per contributor |
-| `error.rs` | `ProfileError` (thiserror) |
-
-**CLI entry:** `trusty-review profile` (dispatched via `cli_profile::cmd_profile()`).
-
-**Dependencies:** `tga` crate (database, identity resolution, `AuthorPeriodSummary`, diff_for_commit), `rusqlite` (direct SQL queries in selector/diff_sampler).
-
-**Status:** Implemented in v0.1 (commits #576–#579). The verification pass in `batch_reviewer.rs` is a known TODO (tracked in #552 / #558 context).
-
-**Personalization from profile:** Per-PR review personalization informed by the contributor's profile (#569) is designed but not yet implemented (blocked on #552 full pipeline).
+Longitudinal per-contributor code quality profiling (`src/profile/`,
+`cli_profile.rs`, the `tga`/`rusqlite`/`git2` dependencies they needed) was
+removed from trusty-review in 0.16.0
+([#5466](https://github.com/bobmatnyc/trusty-tools/issues/5466)). By owner
+ruling, contributor profiling is entirely tga's domain; trusty-review must not
+depend on tga. The equivalent pipeline — identity resolution, period batching,
+diff sampling, per-period LLM review, cross-period synthesis, reporting, and
+GitHub issue publishing — now lives at `tga profile`
+([#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)); see the
+[tga README](../../../crates/trusty-git-analytics/README.md#tga-profile) for
+its CLI surface.
 
 ---
 

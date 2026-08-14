@@ -12,6 +12,8 @@
 //! (graceful termination of all running children).
 //! Test: Unit tests exercise register/load round-trip, mark_completed state
 //! transitions, and cleanup_stale removing fake (dead) PIDs.
+//! `tests/process_tracker_fail_open.rs` covers the load error arm and proves
+//! no entry point rewrites the tracker from a load it could not perform.
 
 #![allow(dead_code)]
 
@@ -65,12 +67,26 @@ impl ProcessTracker {
     /// Load all tracked entries from disk.
     ///
     /// Why: Callers read-modify-write; returning an empty map when the file
-    /// is absent makes first-run and steady-state paths uniform.
-    /// What: Reads and parses the JSON. Missing file → empty map. Malformed
-    /// JSON returns an error.
-    /// Test: `test_register_and_load` — registers a PID, reloads, asserts present.
+    /// is absent makes first-run and steady-state paths uniform. But "absent"
+    /// and "I could not find out" are different answers, and every caller
+    /// writes the result back over `processes.json`. Collapsing the second
+    /// into the first turns one transient probe failure — `EIO`, `ETIMEDOUT`,
+    /// `ESTALE` on a network mount — into a tracker rewritten from an empty
+    /// map, which forgets every live PID and leaves those children unreapable
+    /// by `cleanup_stale` and unkillable by `shutdown_all` (ADR-0045, #5552).
+    /// What: Reads and parses the JSON. A genuine `NotFound` (including a
+    /// missing parent directory, the first-run case) → empty map. An
+    /// undeterminable probe, and malformed JSON, return an error.
+    /// Test: `test_register_and_load` — registers a PID, reloads, asserts
+    /// present. The error arm and its blast radius live in
+    /// `tests/process_tracker_fail_open.rs`.
     pub async fn load(&self) -> Result<HashMap<u32, ProcessEntry>> {
-        if !fs::try_exists(&self.tracker_path).await.unwrap_or(false) {
+        // #5552: an undeterminable probe must not read as "file absent" — every
+        // caller writes the loaded map straight back over the tracker.
+        let present = fs::try_exists(&self.tracker_path)
+            .await
+            .with_context(|| format!("probing {}", self.tracker_path.display()))?;
+        if !present {
             return Ok(HashMap::new());
         }
         let bytes = fs::read(&self.tracker_path)
@@ -113,9 +129,18 @@ impl ProcessTracker {
     /// succeeds; the entry must be on disk before we yield control so a
     /// simultaneous crash can't orphan the child.
     /// What: Inserts a `Running` `ProcessEntry` with the current timestamp.
-    /// Test: `test_register_and_load`.
+    /// Returns the load error rather than registering into an empty map: the
+    /// only way to add one PID without dropping the rest is to have read the
+    /// rest first (#5552).
+    /// Test: `test_register_and_load`;
+    /// `register_leaves_previously_tracked_pids_intact_when_the_probe_fails`.
     pub async fn register(&self, pid: u32, agent_name: &str, task_id: &str) -> Result<()> {
-        let mut entries = self.load().await.unwrap_or_default();
+        // #5552: registering into `unwrap_or_default()` would save a one-entry
+        // map over every PID the failed load could not see.
+        let mut entries = self
+            .load()
+            .await
+            .with_context(|| format!("registering pid {pid} in {}", self.tracker_path.display()))?;
         entries.insert(
             pid,
             ProcessEntry {
@@ -135,10 +160,18 @@ impl ProcessTracker {
     /// `--check-orphans` can show the difference between running and dead)
     /// but will not be re-killed or reported as orphans.
     /// What: Updates `status` to `Completed` if the PID is present; no-op
-    /// otherwise.
-    /// Test: `test_mark_completed`.
+    /// otherwise. A failed load propagates instead of degrading to a map with
+    /// only this PID in it, which would drop every other entry (#5552).
+    /// Test: `test_mark_completed`;
+    /// `mark_completed_propagates_and_leaves_the_tracker_intact`.
     pub async fn mark_completed(&self, pid: u32) -> Result<()> {
-        let mut entries = self.load().await.unwrap_or_default();
+        // #5552: a failed load here would silently discard the other entries.
+        let mut entries = self.load().await.with_context(|| {
+            format!(
+                "marking pid {pid} completed in {}",
+                self.tracker_path.display()
+            )
+        })?;
         if let Some(entry) = entries.get_mut(&pid) {
             entry.status = ProcessStatus::Completed;
             self.save(&entries).await?;
@@ -152,17 +185,55 @@ impl ProcessTracker {
     /// phantom orphans. Entries whose PIDs are still alive are left alone
     /// (they'll be cleaned up by the owning process).
     /// What: Walks the map, checks `kill -0 <pid>`, and drops any `Running`
-    /// entry whose PID is dead. Returns the number removed.
-    /// Test: `test_cleanup_stale_removes_dead_pids`.
+    /// entry whose PID is dead. Returns the number removed. A failed load
+    /// propagates: "I cannot tell what is tracked" must not be reported to
+    /// startup as the `Ok(0)` that means "nothing needed reaping" (#5552).
+    /// Test: `test_cleanup_stale_removes_dead_pids`;
+    /// `cleanup_stale_propagates_rather_than_reporting_zero_reaped`;
+    /// `cleanup_stale_keeps_a_live_pid_when_the_liveness_probe_cannot_run`.
     pub async fn cleanup_stale(&self) -> Result<usize> {
-        let mut entries = self.load().await.unwrap_or_default();
+        self.cleanup_stale_via(KILL_BIN).await
+    }
+
+    /// `cleanup_stale` with the liveness-probe binary injected.
+    ///
+    /// Why: the probe is the destructive input here — a live PID that reads as
+    /// dead is deleted from the tracker and can never be reaped again. Taking
+    /// the binary as a parameter lets a test force a spawn failure without
+    /// touching `PATH`, which is process-global and races parallel tests.
+    /// What: as `cleanup_stale`, but a probe that cannot run keeps its entry
+    /// and then aborts before `save`, so nothing derived from an unanswered
+    /// probe is written.
+    /// Test: `cleanup_stale_keeps_a_live_pid_when_the_liveness_probe_cannot_run`.
+    async fn cleanup_stale_via(&self, kill_bin: &str) -> Result<usize> {
+        // #5552: `Ok(0)` from an unread tracker is indistinguishable from a
+        // clean reap, and startup logs it as success.
+        let mut entries = self
+            .load()
+            .await
+            .with_context(|| format!("reaping stale pids in {}", self.tracker_path.display()))?;
         let before = entries.len();
+        let mut probe_failure: Option<(u32, std::io::Error)> = None;
         entries.retain(|pid, entry| {
             if entry.status != ProcessStatus::Running {
                 return true;
             }
-            is_pid_alive(*pid)
+            match is_pid_alive_via(kill_bin, *pid) {
+                Ok(alive) => alive,
+                // #5552: a probe that could not run is not evidence of death,
+                // and dropping the entry is the irreversible half.
+                Err(e) => {
+                    probe_failure.get_or_insert((*pid, e));
+                    true
+                }
+            }
         });
+        if let Some((pid, e)) = probe_failure {
+            return Err(anyhow::Error::new(e).context(format!(
+                "could not determine whether pid {pid} is alive; left {} unchanged",
+                self.tracker_path.display()
+            )));
+        }
         let removed = before - entries.len();
         if removed > 0 {
             self.save(&entries).await?;
@@ -176,11 +247,38 @@ impl ProcessTracker {
     /// a chance to flush logs / close files before being force-killed.
     /// What: Sends SIGTERM via `kill -TERM <pid>`, waits up to 5 seconds for
     /// the process to exit, then SIGKILL (`kill -KILL <pid>`) the stragglers.
-    /// Updates each entry's status to `Killed`.
-    /// Test: Not unit-tested — requires live children; covered by manual
-    /// Ctrl-C during workflow runs.
+    /// Updates each entry's status to `Killed`. A failed load propagates: an
+    /// empty map here signals nobody and returns `Ok(())`, so the caller
+    /// exits believing every child was terminated (#5552).
+    /// Test: The signalling path needs live children and is covered by manual
+    /// Ctrl-C during workflow runs;
+    /// `shutdown_all_propagates_rather_than_signalling_nobody` pins the
+    /// failed-load arm and
+    /// `shutdown_all_escalates_to_sigkill_when_the_liveness_probe_cannot_run`
+    /// the failed-probe arm.
     pub async fn shutdown_all(&self) -> Result<()> {
-        let mut entries = self.load().await.unwrap_or_default();
+        self.shutdown_all_via(KILL_BIN).await
+    }
+
+    /// `shutdown_all` with the liveness-probe binary injected.
+    ///
+    /// Why: both probe sites here decide how hard to try. An unanswered probe
+    /// read as "already exited" cuts the grace period short and skips the
+    /// SIGKILL, leaving exactly the orphan this module exists to prevent, so
+    /// both treat it as "still alive" (#5552). The parameter exists so a test
+    /// can force the spawn failure without mutating `PATH`.
+    /// What: as `shutdown_all`. The statuses are saved first — the signals
+    /// really were sent and that record must survive — and the probe failure
+    /// is returned afterwards, because a shutdown that could not confirm
+    /// liveness must not report as verified.
+    /// Test: `shutdown_all_escalates_to_sigkill_when_the_liveness_probe_cannot_run`.
+    async fn shutdown_all_via(&self, kill_bin: &str) -> Result<()> {
+        // #5552: signalling an empty map and returning Ok(()) reports a
+        // complete shutdown over children we never looked at.
+        let mut entries = self
+            .load()
+            .await
+            .with_context(|| format!("shutting down pids in {}", self.tracker_path.display()))?;
         let running: Vec<u32> = entries
             .iter()
             .filter(|(_, e)| e.status == ProcessStatus::Running)
@@ -191,10 +289,21 @@ impl ProcessTracker {
             let _ = send_signal(*pid, "TERM");
         }
 
+        let mut probe_failure: Option<(u32, std::io::Error)> = None;
+        // #5552: an unanswerable probe counts as alive, so a broken probe
+        // spends the full grace period rather than cutting it short.
+        let mut alive_or_unknown = |pid: u32| match is_pid_alive_via(kill_bin, pid) {
+            Ok(alive) => alive,
+            Err(e) => {
+                probe_failure.get_or_insert((pid, e));
+                true
+            }
+        };
+
         // Poll up to 5s for each process to exit.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let any_alive = running.iter().any(|pid| is_pid_alive(*pid));
+            let any_alive = running.iter().any(|pid| alive_or_unknown(*pid));
             if !any_alive || std::time::Instant::now() >= deadline {
                 break;
             }
@@ -202,14 +311,23 @@ impl ProcessTracker {
         }
 
         for pid in &running {
-            if is_pid_alive(*pid) {
+            // #5552: skipping SIGKILL because the probe failed leaves the
+            // orphan; sending it to a process that already exited is harmless.
+            if alive_or_unknown(*pid) {
                 let _ = send_signal(*pid, "KILL");
             }
             if let Some(entry) = entries.get_mut(pid) {
                 entry.status = ProcessStatus::Killed;
             }
         }
-        self.save(&entries).await
+        self.save(&entries).await?;
+        if let Some((pid, e)) = probe_failure {
+            return Err(anyhow::Error::new(e).context(format!(
+                "shut down {} but could not confirm pid {pid} exited",
+                self.tracker_path.display()
+            )));
+        }
+        Ok(())
     }
 
     /// Path to the backing `processes.json` (for logs / debugging).
@@ -218,21 +336,31 @@ impl ProcessTracker {
     }
 }
 
-/// Return `true` if `kill -0 <pid>` succeeds (process exists and we can signal it).
+/// The liveness probe binary. Parameterized at the two call sites so tests can
+/// force a spawn failure without mutating `PATH`.
+const KILL_BIN: &str = "kill";
+
+/// Report whether `kill -0 <pid>` succeeds — process exists and we can signal it.
 ///
 /// Why: Checking liveness via subprocess avoids pulling in `nix`/`libc` for a
-/// single syscall. `kill -0` is POSIX and present on both macOS and Linux.
-/// What: Runs `kill -0 <pid>`; exit code 0 = alive, non-zero = dead/unreachable.
-/// Test: `test_cleanup_stale_removes_dead_pids` exercises the false path with
-/// a very high PID that's guaranteed not to exist.
-fn is_pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
+/// single syscall. `kill -0` is POSIX and present on both macOS and Linux. The
+/// return is `Result<bool>`, not `bool`, because "the process is dead" and "the
+/// probe could not run" are different answers and `cleanup_stale` deletes on
+/// the first one (#5552).
+/// What: Runs `<kill_bin> -0 <pid>`. Exit 0 → `Ok(true)`; non-zero exit →
+/// `Ok(false)`, a real answer meaning dead or unreachable; a failure to spawn
+/// the binary at all → `Err`.
+/// Test: `test_cleanup_stale_removes_dead_pids` covers the `Ok(false)` path
+/// with a PID guaranteed not to exist;
+/// `cleanup_stale_keeps_a_live_pid_when_the_liveness_probe_cannot_run` covers
+/// the `Err` path.
+fn is_pid_alive_via(kill_bin: &str, pid: u32) -> std::io::Result<bool> {
+    std::process::Command::new(kill_bin)
         .args(["-0", &pid.to_string()])
         .stderr(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 /// Send a POSIX signal by name (e.g., `"TERM"`, `"KILL"`) to a PID.
@@ -327,6 +455,100 @@ mod tests {
         let removed = tracker.cleanup_stale().await.unwrap();
         assert_eq!(removed, 0);
         assert_eq!(tracker.load().await.unwrap().len(), 1);
+    }
+
+    /// A path that cannot be spawned, so `Command::status()` fails with ENOENT
+    /// rather than returning a non-zero exit. No `PATH` mutation, which is
+    /// process-global and would race the other tests in this binary.
+    const UNSPAWNABLE: &str = "/nonexistent/definitely-not-a-kill-binary";
+
+    /// Why (#5552): `is_pid_alive` ended in `.unwrap_or(false)`, so a probe
+    /// that could not be spawned read as "this process is dead" and
+    /// `cleanup_stale` deleted the entry and rewrote the file. That is the
+    /// same blast radius as the `load` defect by a different route — the PID
+    /// is live, the child is still running, and nothing can reap it again.
+    /// What: seeds a genuinely live PID (our own) alongside a dead one, runs
+    /// the reap with an unspawnable probe, and asserts both entries survive in
+    /// `processes.json`. The surviving live PID is the assertion that matters;
+    /// the returned `Err` alone would not prove the file was left alone.
+    /// Test: this test.
+    #[tokio::test]
+    async fn cleanup_stale_keeps_a_live_pid_when_the_liveness_probe_cannot_run() {
+        let tmp = TempDir::new().unwrap();
+        let tracker = make_tracker(&tmp);
+        let live = std::process::id();
+        tracker.register(live, "engineer", "live").await.unwrap();
+        tracker
+            .register(9_999_997, "engineer", "dead")
+            .await
+            .unwrap();
+
+        let err = tracker
+            .cleanup_stale_via(UNSPAWNABLE)
+            .await
+            .expect_err("a reap that could not probe liveness must not report a clean run");
+        assert!(
+            format!("{err:#}").contains("could not determine whether pid"),
+            "the error should name the undeterminable probe, got: {err:#}"
+        );
+
+        let entries = tracker.load().await.unwrap();
+        assert!(
+            entries.contains_key(&live),
+            "the live PID was reaped off a probe that never ran — its child is now \
+             an unreapable orphan"
+        );
+        assert!(
+            entries.contains_key(&9_999_997),
+            "the unprobed entry must be left alone too; nothing derived from a \
+             failed probe may be written"
+        );
+        assert_eq!(entries.len(), 2);
+    }
+
+    /// Why (#5552): both liveness probes in `shutdown_all` decide how hard to
+    /// try. Reading an unanswered probe as "already exited" cut the grace
+    /// period to zero and skipped the SIGKILL escalation, leaving the orphan
+    /// this module exists to prevent.
+    /// What: runs shutdown with an unspawnable probe and asserts the poll loop
+    /// spent the full grace period (it treated the PID as alive) and the error
+    /// surfaced, while the `Killed` statuses still persisted — the signals were
+    /// really sent and that record must survive.
+    /// Test: this test.
+    #[tokio::test]
+    async fn shutdown_all_escalates_to_sigkill_when_the_liveness_probe_cannot_run() {
+        let tmp = TempDir::new().unwrap();
+        let tracker = make_tracker(&tmp);
+        tracker.register(9_999_996, "engineer", "t").await.unwrap();
+
+        let started = std::time::Instant::now();
+        let err = tracker
+            .shutdown_all_via(UNSPAWNABLE)
+            .await
+            .expect_err("a shutdown that could not confirm exit must not report as verified");
+        let elapsed = started.elapsed();
+
+        assert!(
+            format!("{err:#}").contains("could not confirm pid"),
+            "the error should name the pid it could not confirm, got: {err:#}"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_secs(4),
+            "the poll loop treated an unanswered probe as 'already exited' and cut the \
+             grace period short after {elapsed:?}"
+        );
+        assert_eq!(
+            tracker
+                .load()
+                .await
+                .unwrap()
+                .get(&9_999_996)
+                .unwrap()
+                .status,
+            ProcessStatus::Killed,
+            "the signals were sent, so their record must persist even though the \
+             probe failed"
+        );
     }
 
     #[tokio::test]

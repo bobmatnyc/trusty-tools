@@ -234,6 +234,43 @@ pub(crate) fn is_foundation_file(stem: &str) -> bool {
 /// `file_without_name_frontmatter_is_excluded_from_the_roster`,
 /// `scan_empty_dir`
 pub fn scan_agents(agents_dir: &Path) -> Vec<AgentSummary> {
+    scan_agents_reporting(agents_dir).agents
+}
+
+/// A roster scan's full result: what was found AND what was lost finding it.
+///
+/// Why (#5544): every roster scan is fail-open — an unreadable tier and an
+/// unreadable agent file both degrade to "this file contributes nothing", which
+/// is byte-identical to "the tier legitimately holds no agent". A caller that
+/// only receives `Vec<AgentSummary>` therefore cannot tell a complete roster
+/// from a truncated one, and a PM handed the truncated one routes around agents
+/// that exist. Carrying the losses alongside the finds is what makes the
+/// difference expressible at all.
+/// What: `agents` is the same list [`scan_agents`] has always returned;
+/// `unreadable` names every path that was present but could not be read — an
+/// individual agent file, or the tier directory itself when enumeration failed
+/// for any reason other than "not found".
+/// Test: `an_unreadable_agent_file_is_reported_not_silently_dropped`,
+/// `an_unreadable_tier_directory_is_reported_not_silently_dropped`.
+#[derive(Debug, Default, Clone)]
+#[non_exhaustive]
+pub struct RosterScan {
+    /// Agents successfully parsed, name-sorted.
+    pub agents: Vec<AgentSummary>,
+    /// Paths that exist but could not be read, and so are MISSING from `agents`.
+    pub unreadable: Vec<PathBuf>,
+}
+
+/// [`scan_agents`], additionally reporting what the scan could not read.
+///
+/// Why: see [`RosterScan`] — this is the variant that keeps a truncated roster
+/// distinguishable from a short one.
+/// What: identical scanning and admission rules; a non-`NotFound` `read_dir`
+/// failure records the DIRECTORY, and a per-file read failure records the FILE,
+/// each at `error!` rather than being dropped in silence.
+/// Test: `an_unreadable_agent_file_is_reported_not_silently_dropped`,
+/// `an_unreadable_tier_directory_is_reported_not_silently_dropped`.
+pub fn scan_agents_reporting(agents_dir: &Path) -> RosterScan {
     // An ABSENT tier is normal (not every launch mode populates every tier) and
     // stays silent. Any OTHER enumeration failure — permissions, a bad mount, an
     // I/O fault — is NOT normal and must never be indistinguishable from "empty"
@@ -243,17 +280,22 @@ pub fn scan_agents(agents_dir: &Path) -> Vec<AgentSummary> {
     // directory) but never fail quiet.
     let entries = match std::fs::read_dir(agents_dir) {
         Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return RosterScan::default(),
         Err(err) => {
-            tracing::warn!(
+            // #5544: a warn alone left the loss invisible to the composed prompt.
+            tracing::error!(
                 dir = %agents_dir.display(),
                 %err,
-                "agent tier could not be enumerated; the delegation roster may be incomplete"
+                "agent tier could not be enumerated; the delegation roster is incomplete"
             );
-            return Vec::new();
+            return RosterScan {
+                agents: Vec::new(),
+                unreadable: vec![agents_dir.to_path_buf()],
+            };
         }
     };
 
+    let mut unreadable: Vec<PathBuf> = Vec::new();
     let mut summaries: Vec<AgentSummary> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
@@ -288,8 +330,19 @@ pub fn scan_agents(agents_dir: &Path) -> Vec<AgentSummary> {
             continue;
         }
 
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            continue;
+        // #5544: this was a bare `else { continue }` — a readable-but-failing
+        // agent file left the roster one entry short with no signal anywhere.
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                tracing::error!(
+                    file = %path.display(),
+                    %err,
+                    "agent file could not be read; it is MISSING from the delegation roster"
+                );
+                unreadable.push(path.clone());
+                continue;
+            }
         };
         let fm = parse_frontmatter(&raw);
         // #4711: a roster entry must be DISPATCHABLE, and Claude Code dispatches
@@ -323,7 +376,11 @@ pub fn scan_agents(agents_dir: &Path) -> Vec<AgentSummary> {
 
     // Deterministic order so the rendered section is stable across runs.
     summaries.sort_by_key(|a| a.name.clone());
-    summaries
+    unreadable.sort();
+    RosterScan {
+        agents: summaries,
+        unreadable,
+    }
 }
 
 /// Build a base-first inheritance chain from a single `extends` parent.
@@ -371,7 +428,47 @@ fn build_extends_chain(extends: Option<&str>, name: &str) -> Vec<String> {
 /// `generate_authority_omits_self_referential_lines`,
 /// `generate_authority_omits_the_harness_supplied_description`
 pub fn generate_authority(agents: &[AgentSummary]) -> String {
+    generate_authority_reporting(agents, &[])
+}
+
+/// The banner [`generate_authority_reporting`] prepends when the scan lost
+/// entries. Asserted on by name so the wording can change without the gate
+/// silently stopping to check anything.
+pub const ROSTER_INCOMPLETE_MARKER: &str = "ROSTER INCOMPLETE";
+
+/// [`generate_authority`], rendering an explicit incompleteness banner when the
+/// scan could not read one or more paths.
+///
+/// Why (#5544): the composed prompt is the artifact whose truncation is
+/// invisible — a PM handed a short roster reads it as the complete set and
+/// routes around agents that exist. A `tracing::error!` records the loss where
+/// nobody reading the prompt will see it, so the loss has to appear IN the
+/// prompt. This is deliberately still fail-open: a launch must not be blocked by
+/// one bad directory, but it must never claim a roster it does not have.
+/// What: prepends a banner naming every unreadable path above the agent list,
+/// then renders exactly as [`generate_authority`]. With `unreadable` empty the
+/// output is byte-identical to the previous behaviour.
+/// Test: `an_unreadable_agent_file_is_reported_not_silently_dropped`,
+/// `an_unreadable_tier_directory_is_reported_not_silently_dropped`,
+/// `generate_authority_is_unchanged_when_nothing_was_lost`.
+pub fn generate_authority_reporting(agents: &[AgentSummary], unreadable: &[PathBuf]) -> String {
     let mut out = String::from("## Delegation Authority\n\n");
+
+    if !unreadable.is_empty() {
+        let paths: Vec<String> = unreadable
+            .iter()
+            .map(|p| format!("`{}`", p.display()))
+            .collect();
+        out.push_str(&format!(
+            "> **{marker} ({count} path(s) unreadable).** {paths} could not be read, so any \
+             agent they hold is ABSENT from the list below. Treat a missing agent as \
+             UNAVAILABLE, not nonexistent — run `tm doctor` before concluding it does not \
+             exist. See issue #5544.\n\n",
+            marker = ROSTER_INCOMPLETE_MARKER,
+            count = unreadable.len(),
+            paths = paths.join(", "),
+        ));
+    }
 
     if agents.is_empty() {
         out.push_str(
@@ -480,15 +577,33 @@ pub fn deployed_agent_dirs_from(
 /// Test: `roster_from_dirs_dedupes_with_first_dir_winning`,
 /// `roster_from_dirs_dedup_is_case_insensitive`.
 pub fn roster_from_dirs(dirs: &[PathBuf]) -> Vec<AgentSummary> {
+    roster_from_dirs_reporting(dirs).agents
+}
+
+/// [`roster_from_dirs`], additionally reporting what the union could not read.
+///
+/// Why: see [`RosterScan`]. The union is where a per-tier loss stops being
+/// attributable — one tier failing shrinks the merged roster by however many
+/// agents only that tier carried, and nothing downstream can tell.
+/// What: same first-tier-wins, case-insensitive dedup; concatenates every
+/// tier's `unreadable` paths.
+/// Test: `an_unreadable_tier_directory_is_reported_not_silently_dropped`.
+pub fn roster_from_dirs_reporting(dirs: &[PathBuf]) -> RosterScan {
     let mut by_name: BTreeMap<String, AgentSummary> = BTreeMap::new();
+    let mut unreadable: Vec<PathBuf> = Vec::new();
     for dir in dirs {
-        for agent in scan_agents(dir) {
+        let scan = scan_agents_reporting(dir);
+        unreadable.extend(scan.unreadable);
+        for agent in scan.agents {
             by_name
                 .entry(agent.name.to_ascii_lowercase())
                 .or_insert(agent);
         }
     }
-    by_name.into_values().collect()
+    RosterScan {
+        agents: by_name.into_values().collect(),
+        unreadable,
+    }
 }
 
 /// THE agent roster for `project_dir`. Every consumer calls this one function.
@@ -508,7 +623,27 @@ pub fn roster_from_dirs(dirs: &[PathBuf]) -> Vec<AgentSummary> {
 /// This function consults machine-global tiers, so it has no hermetic direct
 /// test of its own.
 pub fn resolve_roster(project_dir: &Path) -> Vec<AgentSummary> {
-    roster_from_dirs(&deployed_agent_dirs(project_dir))
+    resolve_roster_reporting(project_dir).agents
+}
+
+/// [`resolve_roster`], additionally reporting what the resolution could not read.
+///
+/// Why (#5544 review): `resolve_roster` returns a bare `Vec`, so the two
+/// consumers that publish its LENGTH — `tm session start`'s
+/// `"Instructions: N agents in delegation authority"` (via
+/// [`crate::core::instruction_pipeline::PipelineOutput::agent_count`]) and
+/// `tm doctor`'s `agents` check — had no way to know the number was short. That
+/// made `tm doctor` report a truncated roster as authoritative, which is the
+/// remedy the composed prompt's `ROSTER INCOMPLETE` banner points the operator
+/// at. Every surface that publishes the count now resolves through here.
+/// What: unions [`deployed_agent_dirs`] via [`roster_from_dirs_reporting`],
+/// carrying each tier's unreadable paths alongside the merged roster.
+/// Test: `session_start_roster_line_declares_an_incomplete_roster`
+/// (`commands/session/start.rs`), `agents_check_is_not_ok_when_a_roster_read_failed`
+/// (`doctor_fs_checks.rs`), `build_instructions_reports_an_unreadable_agent_file`
+/// (`instruction_pipeline_tests.rs`).
+pub fn resolve_roster_reporting(project_dir: &Path) -> RosterScan {
+    roster_from_dirs_reporting(&deployed_agent_dirs(project_dir))
 }
 
 /// Render the LIVE deployed roster for a project, or `None` when none is found.
@@ -533,22 +668,51 @@ pub fn resolve_roster(project_dir: &Path) -> Vec<AgentSummary> {
 /// (the rendered output reaching the delivered prompt). This function itself
 /// consults machine-global tiers, so it has no hermetic direct test.
 pub fn deployed_roster_section(project_dir: &Path) -> Option<String> {
-    let agents = resolve_roster(project_dir);
-    if agents.is_empty() {
-        // Reverting to the bundled asset must be an OBSERVABLE event, not an
-        // invisible one — this is the state #4069 describes, and if it recurs
-        // (every tier empty, or every tier unreadable per `scan_agents`'s warn)
-        // the operator needs a thread to pull rather than a silently stale
-        // 8-name prompt that looks healthy.
+    let dirs = deployed_agent_dirs(project_dir);
+    let section = roster_section_from_dirs(&dirs);
+    if section.is_none() {
+        // #5544 review (LOW): the tier-only seam cannot name the project, and
+        // dropping that field made the fallback event unattributable across
+        // concurrent sessions. The project-aware entry point owns this log.
         tracing::info!(
             project = %project_dir.display(),
-            tiers = deployed_agent_dirs(project_dir).len(),
+            tiers = dirs.len(),
             "no deployed agents found in any tier; delegation section falls back to the \
              bundled asset alone"
         );
+    }
+    section
+}
+
+/// [`deployed_roster_section`] with the tiers supplied, so it can be tested.
+///
+/// Why (#5544): the shipped entry point resolves `$CLAUDE_CONFIG_DIR` and the
+/// caller's home directory, which makes every one of its behaviours — including
+/// the new incompleteness banner — untestable except by mutating process-global
+/// state. Taking the tier list is the seam that removes that coupling; the
+/// public function is the same three lines with the tiers resolved.
+/// What: scans `dirs` via [`roster_from_dirs_reporting`] and renders through
+/// [`generate_authority_reporting`]. Returns `None` ONLY when the scan both
+/// found nothing and lost nothing — an all-empty roster that lost paths still
+/// renders, because "nothing is deployed" and "nothing could be read" must not
+/// collapse into the same silent answer.
+/// Test: `an_unreadable_tier_directory_is_reported_not_silently_dropped`,
+/// `a_roster_that_is_empty_because_reads_failed_still_renders_a_section`,
+/// `roster_section_from_dirs_is_none_when_nothing_is_deployed`.
+pub fn roster_section_from_dirs(dirs: &[PathBuf]) -> Option<String> {
+    let scan = roster_from_dirs_reporting(dirs);
+    let agents = scan.agents;
+    if agents.is_empty() && scan.unreadable.is_empty() {
+        // Reverting to the bundled asset must be an OBSERVABLE event, not an
+        // invisible one — this is the state #4069 describes, and if it recurs
+        // the operator needs a thread to pull rather than a silently stale
+        // 8-name prompt that looks healthy. `deployed_roster_section` logs it,
+        // because only it knows the project. #5544 split the unreadable case
+        // out of this branch: an empty roster caused by failed reads now
+        // renders a section carrying the banner instead of degrading to `None`.
         return None;
     }
-    Some(generate_authority(&agents))
+    Some(generate_authority_reporting(&agents, &scan.unreadable))
 }
 
 #[cfg(test)]

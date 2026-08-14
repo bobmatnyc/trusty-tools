@@ -2,7 +2,7 @@
 //! bundled agent *source* directory (`~/.trusty-mpm/framework/agents/`) —
 //! issue #4840.
 //!
-//! Why: `crates/trusty-mpm/src/assets/agents/*.md` is compiled into the binary
+//! Why: `crates/trusty-agents-common/src/assets/agents/*.md` is compiled into the binary
 //! (`bundle::ALL`), but the ONLY code path that ever wrote it to disk was the
 //! separate, manual `tm install`. Rebuilding the binary did not trigger it;
 //! starting a session did not trigger it. So a merged, compiled-in instruction

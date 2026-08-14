@@ -1,0 +1,3 @@
+Fixed
+
+- `PalaceRegistry::resolve_palace_alias` probed for `palace.json` with `Path::exists()`, so an alias target it was denied to stat read as a target that is not there. The redirect was dropped and `load_palace` then ran against the alias id's own genuinely-absent directory, returning `NotFound` for the wrong palace — which `open_error_is_absent` classifies as absence, so an aliased palace that exists and merely could not be verified still reached the HTTP callers as 404. The probe is now `try_exists`, with only `Ok(false)` counting as absent; an undeterminable target keeps its redirect and `load_palace` classifies the denial one call later (#5592, ADR-0045).

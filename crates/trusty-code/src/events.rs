@@ -51,8 +51,15 @@ use tokio::sync::broadcast;
 /// channel that already carries `__OMPM_PROGRESS__` (the legacy 2s-poll
 /// path) avoids inventing yet another IPC mechanism.
 /// What: Match by exact byte prefix; payload after the space is one JSON
-/// object decodable as `Event`.
-pub const EVENT_LINE_PREFIX: &str = "__OMPM_EVENT__ ";
+/// object decodable as `Event`. Re-exported, not declared — the marker is a
+/// cross-crate wire format, so it has exactly one declaration, in
+/// `trusty_agents_common::events`, which the harness-understanding assets
+/// document and the session-manager prompt is built from.
+/// Test: `events_tests::event_line_prefix_is_stable` and
+/// `events_tests::sm_harness_doc_documents_the_prefix_tcode_emits`.
+// #5129: a second copy here is what let the documented marker drift off the
+// emitted one; a re-export makes that divergence impossible to write.
+pub use trusty_agents_common::events::EVENT_LINE_PREFIX;
 
 /// Capacity of the broadcast channel. Larger than `bus`'s 256 because event
 /// volume is much higher (every PM thought, every agent line). 1024 keeps
@@ -1253,12 +1260,33 @@ pub fn publish(envelope: SessionEventEnvelope) {
 /// writes one NDJSON line to stderr prefixed with `__OMPM_EVENT__ `. The
 /// parent's stderr reader (in `api::server::run_task`) detects the prefix
 /// and re-publishes on its own bus.
-/// Test: Indirect — exercised by the workflow integration path.
+/// Test: `events_tests::sm_harness_doc_documents_the_prefix_tcode_emits`
+/// covers the wire line via `format_event_line`; the stderr write itself is
+/// exercised by the workflow integration path.
 pub fn emit(envelope: SessionEventEnvelope) {
-    publish(envelope.clone());
-    if let Ok(line) = serde_json::to_string(&envelope) {
-        eprintln!("{EVENT_LINE_PREFIX}{line}");
+    let line = format_event_line(&envelope);
+    publish(envelope);
+    if let Some(line) = line {
+        eprintln!("{line}");
     }
+}
+
+/// Format the single stderr relay line `emit` writes for `envelope`, or `None`
+/// if it cannot be serialised.
+///
+/// Why: the relay line is a cross-process wire format, and the session
+/// manager's harness-understanding doc tells an operator which prefix to look
+/// for. Splitting formatting out of `emit` lets a test compare the REAL
+/// emitted line against that doc instead of against a copy of the literal —
+/// the divergence #5129 recorded was invisible precisely because every test
+/// pinned a constant to itself.
+/// What: returns `EVENT_LINE_PREFIX` concatenated with the compact JSON of the
+/// envelope; `None` only on the (practically impossible) serde failure.
+/// Test: `events_tests::sm_harness_doc_documents_the_prefix_tcode_emits`.
+pub fn format_event_line(envelope: &SessionEventEnvelope) -> Option<String> {
+    serde_json::to_string(envelope)
+        .ok()
+        .map(|json| format!("{EVENT_LINE_PREFIX}{json}"))
 }
 
 /// Truncate a string to at most `max` characters, appending an ellipsis

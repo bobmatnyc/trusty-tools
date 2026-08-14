@@ -340,7 +340,7 @@ fn walk(root: &std::path::Path) -> Vec<PathBuf> {
 /// no-op — this fails first.
 #[test]
 fn the_bundled_base_agent_carries_the_composition_marker() {
-    let base = include_str!("../../assets/agents/BASE-AGENT.md");
+    let base = trusty_agents_common::agent_assets::BASE_AGENT;
     let heading = base
         .lines()
         .find(|l| l.starts_with("# "))
@@ -361,7 +361,8 @@ fn the_bundled_base_agent_carries_the_composition_marker() {
 /// extends nothing would deploy without the preamble and become unsweepable.
 #[test]
 fn every_bundled_agent_roots_at_base_agent() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/agents");
+    let dir =
+        std::path::Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR).to_path_buf();
     let entries: Vec<_> = std::fs::read_dir(&dir)
         .expect("the bundled agent source directory must exist")
         .flatten()

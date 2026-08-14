@@ -22,7 +22,40 @@ use crate::formatters::banner::{
     fallback_session_name, normalize_workdir, print_launch_banner,
     print_launch_banner_reconnecting, terminal_width,
 };
-use crate::formatters::session::{deploy_summary_line, short_id};
+use crate::formatters::session::{delegation_roster_line, deploy_summary_line, short_id};
+
+#[test]
+fn session_start_roster_line_is_plain_when_the_roster_is_whole() {
+    // The healthy path must be byte-identical to what `tm session start` has
+    // always printed — the incompleteness wording costs nothing when nothing
+    // was lost.
+    assert_eq!(
+        delegation_roster_line(38, &[]),
+        "Instructions: 38 agents in delegation authority"
+    );
+}
+
+#[test]
+fn session_start_roster_line_declares_an_incomplete_roster() {
+    // #5544: `agent_count` is a FLOOR once a roster read fails. Printing the
+    // bare number let `tm session start` publish a truncated roster as if it
+    // were the whole set — the same shape the composed prompt's banner exists
+    // to remove, one layer up.
+    let line = delegation_roster_line(38, &[std::path::PathBuf::from("/p/.claude/agents/qa.md")]);
+
+    assert!(
+        line.contains("ROSTER INCOMPLETE"),
+        "the line must declare itself incomplete: {line}"
+    );
+    assert!(
+        line.contains("at least 38"),
+        "the count must not read as a total: {line}"
+    );
+    assert!(
+        line.contains("qa.md"),
+        "the lost path must be named: {line}"
+    );
+}
 
 #[test]
 fn deploy_summary_line_formats_counts() {

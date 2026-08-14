@@ -124,7 +124,7 @@ pub mod bin_resolve;
 pub mod launchd;
 
 /// Label-correct LaunchAgent activation with legacy eviction and rollback
-/// (#4868). macOS-only, like [`launchd`] itself.
+/// (#4919). macOS-only, like [`launchd`] itself.
 ///
 /// Why: `install()` + `bootstrap()` could write one plist and activate a
 /// different unit, bounced daemons that had not changed, and left the service
@@ -135,7 +135,7 @@ pub mod launchd;
 #[cfg(target_os = "macos")]
 pub mod launchd_activate;
 
-/// Canonical launchd labels for every trusty-* LaunchAgent (#4868).
+/// Canonical launchd labels for every trusty-* LaunchAgent (#4919).
 ///
 /// Why: each daemon crate, the installer's mirror table, the Makefiles, and
 /// the install scripts each restated their own label literal, so they drifted
@@ -314,7 +314,7 @@ pub mod symgraph;
 /// into `trusty-common` (issue #5 phase 2d) so we ship one fewer published
 /// crate.
 /// What: Gated behind the `memory-core` feature because it pulls in heavy
-/// storage deps (`usearch`, `rusqlite`, `r2d2`, `git2`, `kuzu`). Enables
+/// storage deps (`usearch`, `rusqlite`, `r2d2`, `git2`). Enables
 /// the embedder surface automatically (memory-core → embedder).
 /// Test: `cargo test -p trusty-common --features memory-core` exercises
 /// the full surface.
@@ -591,6 +591,21 @@ pub use project_index_id::{ProjectIdentity, derive_project_index_id};
 /// Test: `cargo test -p trusty-common --features search-index -- search_index::tests`.
 #[cfg(feature = "search-index")]
 pub mod search_index;
+
+/// Bounded worker pool behind [`search_index::index_files_best_effort`] (issue
+/// #2798), gated behind `search-index` alongside its only caller.
+///
+/// Why: the incremental index hook used to spawn one detached OS thread per
+/// write with no cap, so a degraded-but-reachable trusty-search daemon — whose
+/// per-file POSTs can each take ~6.2s — let threads accumulate faster than they
+/// drained. Crate-private: it is an implementation detail of the hook, not a
+/// general-purpose pool for other crates to reach for.
+/// What: a fixed-size worker pool with a bounded queue; a submission that finds
+/// both full is rejected (never blocked) and counted, and the caller logs what
+/// it dropped.
+/// Test: `cargo test -p trusty-common --features search-index -- index_dispatch`.
+#[cfg(feature = "search-index")]
+pub(crate) mod index_dispatch;
 
 /// Shared trusty-search index READINESS probe (issue #2784), gated behind the
 /// `search-index` feature alongside the warming helper it complements.
@@ -886,6 +901,21 @@ pub mod catchup;
 /// defaults, and the shared `managed_session_commands` ordering guarantee.
 /// Test: `cargo test -p trusty-common -- tmux::`.
 pub mod tmux;
+
+/// The workspace's single entry point for invoking the GitHub CLI (#5475).
+///
+/// Why: `gh` was spawned from a dozen independent `Command::new("gh")` sites
+/// across four crates, each re-deriving its own missing-binary,
+/// unauthenticated, non-zero-exit and stderr policy — the exact duplication
+/// the common-entry-point rule forbids, and one more copy was about to land
+/// with #5487 / #5215.
+/// What: gated behind the `gh-cli` feature. Exposes `gh::GhCommand` (builder
+/// + blocking and tokio runners), `gh::GhOutput` (the full exit/stdout/stderr
+/// triple, with the shared policies as combinators), `gh::GhError`, and the
+/// `gh::gh_available` probe.
+/// Test: `cargo test -p trusty-common --features gh-cli -- gh::`.
+#[cfg(feature = "gh-cli")]
+pub mod gh;
 
 // ─── Re-exports preserving the pre-split public API ───────────────────────
 

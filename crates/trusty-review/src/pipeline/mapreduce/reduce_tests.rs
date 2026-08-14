@@ -7,7 +7,7 @@
 //! What: drives `reduce` with hand-built `MapOutcome` vectors.
 //! Test: this is the test module.
 
-use super::reduce;
+use super::{jaccard_similarity, reduce};
 use crate::config::mapreduce::MapReduceConfig;
 use crate::models::{Effort, Finding, Verdict};
 use crate::pipeline::mapreduce::outcome::{MapOutcome, TokenUsage};
@@ -384,4 +384,31 @@ fn reduce_sums_output_tokens() {
         "cost must sum, got {}",
         reduced.tokens.cost_usd
     );
+}
+
+// ── Jaccard similarity (#5466: moved here from the removed `profile` module) ──
+
+/// Why: Jaccard similarity between identical strings must be 1.0.
+/// What: calls `jaccard_similarity` with two identical strings.
+/// Test: this test itself.
+#[test]
+fn jaccard_similarity_basic() {
+    assert!(
+        (jaccard_similarity("error handling in async", "error handling in async") - 1.0).abs()
+            < 1e-10
+    );
+    assert!(jaccard_similarity("error handling", "completely different concept") < 0.5);
+    assert!((jaccard_similarity("", "") - 1.0).abs() < 1e-10);
+    assert!((jaccard_similarity("foo", "") - 0.0).abs() < 1e-10);
+}
+
+/// Why: similar descriptions must yield a Jaccard ≥ threshold.
+/// What: two descriptions that share most tokens must score ≥ 0.6.
+/// Test: this test itself.
+#[test]
+fn jaccard_similarity_similar_descriptions() {
+    let a = "missing error propagation in async function";
+    let b = "missing error propagation async function handler";
+    let sim = jaccard_similarity(a, b);
+    assert!(sim >= 0.6, "similar descriptions: sim={sim:.3}");
 }

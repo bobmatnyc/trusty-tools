@@ -418,13 +418,43 @@ trigger chunk's RRF score.
 
 ## Opt-in index allowlist (default-deny, issue #767)
 
-As of v0.23.7, **trusty-search indexes nothing by default**. Before a path can
-be registered (via `POST /indexes`, `trusty-search index`, or any MCP tool), it
-must appear in the allowlist file at:
+**trusty-search indexes nothing by default.** Before a path can be registered
+(via `POST /indexes`, `trusty-search index`, `PATCH /indexes/:id`, a reindex
+`root_path` override, or any MCP tool), it must be APPROVED. Four things
+approve a root:
+
+| Approved because | How it gets that way |
+|---|---|
+| It is listed in `allowlist.toml` | `trusty-search index add <path>`, or edit the file |
+| It is a registered project | `tm` writes `~/.trusty-mpm/project-paths.json` |
+| It is a provisioned worktree | `<approved>/.claude/worktrees/<id>` or `<approved>/.worktrees/<id>` |
+| It sits inside an approved root | e.g. a `trusty-search.yaml` sub-root of an approved repo |
+
+Containment is deliberate and costs nothing: everything under an approved root
+is already indexable through that root, so a sub-root exposes strictly less. A
+SIBLING is not approved — approving `~/Projects/foo` says nothing about
+`~/Projects/foo-scratch`.
+
+The hand-editable member of that union lives at:
 
 ```
 ~/.config/trusty-search/allowlist.toml   # macOS / Linux (XDG config dir)
 ```
+
+An unapproved root is refused with `403` and a body carrying `root_path` and a
+`remedy` string naming the command that would approve it. Removing a root from
+the allowlist also stops it being served: warm-boot drops registry entries whose
+root is no longer approved (the on-disk data is left alone, so re-approving
+restores it on the next boot).
+
+### Upgrading an existing install
+
+On the first boot after this gate ships, a daemon with no `allowlist.toml`
+seeds one from the roots it is already serving — so nothing you have indexed
+stops being indexed. The pass runs once; an existing file, including one you
+emptied on purpose, is never rewritten. Roots the hard denylist refuses are NOT
+carried over and are logged at `warn`. Review what was seeded with
+`trusty-search index list` and prune anything you do not want indexed.
 
 ### Format
 
@@ -455,7 +485,8 @@ trusty-search index add ~/Projects/myproj --name myproj
 trusty-search index list
 trusty-search index list --json    # machine-readable
 
-# The existing trusty-search index <path> command also writes the allowlist
+# Index an already-approved root. This does NOT approve one — a root the
+# table above does not approve is refused. `index add` is the approving verb.
 trusty-search index ~/Projects/myproj --name myproj
 ```
 
@@ -475,10 +506,30 @@ cannot be overridden:
 | `/.config` | System config (often contains tokens) |
 | `$HOME` itself, `~/Desktop`, `~/Downloads`, `~/Documents`, `~/Library` | Home top-level dirs |
 
-The daemon returns HTTP 403 with a `{"error": "..."}` body when a denylist
-pattern matches. The error message names the matched pattern. There is no
-environment-variable override for either the allowlist or the denylist — a
-path is registerable only by adding it to `allowlist.toml`.
+The daemon returns HTTP 400 with a `{"error": "..."}` body when a denylist
+pattern matches (a `403` means the root is safe but unapproved — a different
+refusal). The error message names the matched pattern. There is no
+environment-variable override for either the allowlist or the denylist.
+
+One narrow exception, and only for the EPHEMERAL-directory rows (`/tmp`,
+`/private/tmp`, `/var/folders`, `Library/Application Support`). Approve such a
+root with:
+
+```bash
+trusty-search index add /var/folders/../scratch-repo --allow-sensitive-path
+```
+
+`POST /indexes` also accepts `"allow_sensitive_path": true`, but **it is not an
+approval** — it relaxes the ephemeral-prefix rows and nothing else. A request
+that sets it still needs the root approved by the table above, or it gets `403`.
+Approval and denylist relaxation are separate axes:
+
+| Root approved? | `allow_sensitive_path` | Temp-prefix root |
+|---|---|---|
+| no | `false` | `403` (not approved) |
+| no | `true` | `403` (not approved) |
+| yes | `false` | `400` (prefix denylist) |
+| yes | `true` | registers |
 
 ## CLI
 
@@ -495,9 +546,11 @@ trusty-search service install --no-auto-discover     # macOS: bake the above int
                                                      # `--auto-discover` turns the scan back on
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]   # register + index (primary command)
-                                                     # also writes ~/.config/trusty-search/allowlist.toml
+                                                     # updates settings on an existing allowlist
+                                                     # entry; does NOT approve a new root
                                                      # auto-detects ./trusty-search.yaml
-trusty-search index add <path> [--name <id>]         # add path to allowlist + index
+trusty-search index add <path> [--name <id>]         # approve a path for indexing (the approving verb)
+       [--allow-sensitive-path]                      # …under an OS-temp / app-support prefix
 trusty-search index list [--json]                    # list all allowlisted roots
 trusty-search query <text> [--index <id>] [--top-k N] [--json]
 trusty-search status                                 # daemon + index overview (alias: health)
@@ -525,7 +578,7 @@ this table is generated from it, not maintained by hand.
 |---|---|---|
 | `chat` | `index_id`, `api_key?`, `history?`, `message?`, `model?`, `question?`, `top_k?` | Ask a natural-language question about the indexed codebase. |
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
-| `create_index` | `id`, `root_path`, `follow_links?` | Register a new (empty) index |
+| `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
 | `delete_index` | `index_id` | Delete a registered index and all its data |
 | `get_call_chain` | `index_id`, `entry_point`, `direction?`, `include_source?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `glob?`, `index_id?`, `invert_match?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |

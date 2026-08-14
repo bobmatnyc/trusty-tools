@@ -99,7 +99,7 @@ the predecessor, the code wins.
 | **Individual contributor / tech lead** | A defensible picture of their own contribution mix (feature vs. KTLO vs. maintenance) for reviews. | `tga author <email>` drill-down: effort histogram + PR metrics + commit summary. |
 | **CTO / director** | Org-level DORA posture and quality trend to report upward; portfolio coverage confidence. | `tga dora` + `repository_coverage` / `unresolved_authors` fields guard against undercounting. |
 | **Platform / data engineer** | A clean, reproducible SQLite/CSV feed into a warehouse (e.g. CTO analytics DuckDB). | Single `tga.db` file + `comprehensive_export_{date}.json`; deterministic effort scores; push-down columns (`top_level_category`, `effort_tshirt`, `fact_weekly_quality`) so no re-derivation is needed downstream. |
-| **Code-review system (trusty-review)** | Per-contributor diff text, period roll-up stats, and quality/effort history for LLM-backed longitudinal review profiles (#558). | `diff_for_commit()` + `query_author_period_trends()` as stable library APIs; `fact_weekly_quality` for cross-period quality trends. |
+| **Engineering manager / tech lead (contributor profiling)** | A defensible longitudinal narrative of one contributor's work — recurring findings, trend, and coverage across periods. | `tga profile <contributor>` — identity resolution + period batching + LLM-backed review/synthesis + JSON/Markdown report, optionally posted to a GitHub issue thread. |
 
 ---
 
@@ -241,11 +241,18 @@ Detailed source: [`../requirements/database-schema.md`](../requirements/database
 | DB7 | Migrations `0001`–`0019` (requirements doc stops at `0013`). | ✅ |
 | DB8 | `requirements/database-schema.md` migration list (`0001`–`0013`) is stale vs. on-disk SQL (`0001`–`0019`). | 🟡 (doc drift — see COMPONENTS §Database) |
 
-### 4.10 Contributor-profile data pipeline — library API (#558)
+### 4.10 Contributor profiling — owned end-to-end by tga ([#558](https://github.com/bobmatnyc/trusty-tools/issues/558), reversed by [#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468))
 
-The longitudinal per-contributor profiling epic (#558) required two new public
-library functions in the `tga` crate so `trusty-review` can assemble
-LLM-backed review profiles without duplicating git/DB logic.
+The longitudinal per-contributor profiling epic ([#558](https://github.com/bobmatnyc/trusty-tools/issues/558)) originally shipped as a
+data-supply-only pair of library functions in `tga`, consumed by `trusty-review`.
+[Epic #5468](https://github.com/bobmatnyc/trusty-tools/issues/5468) **reverses that
+by owner ruling** — not as a drift correction, but a deliberate domain-boundary
+call ("trusty review should not depend on tga" / "all contributor profiling lives
+in tga"). Contributor profiling — identity resolution, period batching, diff
+sampling, the LLM-backed batch review and synthesis passes, reporting, and the
+`profile` CLI subcommand — now lives entirely in `tga`. `trusty-review` no longer
+depends on tga, has no `profile` subcommand, and no profiling code
+([#5466](https://github.com/bobmatnyc/trusty-tools/issues/5466)).
 
 | # | Requirement | Status |
 |---|---|---|
@@ -254,12 +261,13 @@ LLM-backed review profiles without duplicating git/DB logic.
 | CP3 | `AuthorPeriodSummary` — `serde::Serialize + Deserialize` struct carrying `period_label`, `since/until`, `commit_count`, `categories`, `effort_histogram`, `quality_score`, `ticketed_pct`, `pr_metrics`, `repositories`; exported from `tga::report`. | ✅ |
 | CP4 | `PrMetrics` adds `Serialize + Deserialize` derives so it embeds in `AuthorPeriodSummary` without serde errors. | ✅ |
 | CP5 | `period_trends` submodule split into `model.rs` / `query.rs` / `tests.rs` under `report/period_trends/` to stay within the 500-line file cap. | ✅ |
+| CP6 | `src/profile/` — ported batch reviewer, synthesizer, and reporter from `trusty-review` ([#5463](https://github.com/bobmatnyc/trusty-tools/issues/5463)); CP1/CP2 are now consumed internally rather than across a crate boundary. | ✅ |
+| CP7 | Profile's LLM narrative pass routed through `trusty_common::inference` ([#5464](https://github.com/bobmatnyc/trusty-tools/issues/5464)). | ✅ |
+| CP8 | `profile::reporter_github` — GitHub issue write methods for publishing a profile to a per-contributor issue thread; `tga profile <contributor>` CLI subcommand ([#5465](https://github.com/bobmatnyc/trusty-tools/issues/5465)). | ✅ |
 
-> **Note.** tga's role in the contributor-profile epic is data supply only. The
-> LLM-backed profiling logic (batch_reviewer, synthesizer, reporter, `profile`
-> CLI subcommand) lives in `trusty-review` (#561–#568, currently BLOCKED-ON-MVP).
-> tga has no `profile` subcommand; trusty-review calls `diff_for_commit` and
-> `query_author_period_trends` directly as library functions.
+> **Note.** `diff_for_commit` and `query_author_period_trends` remain public
+> library functions (any consumer may call them directly), but their primary
+> caller is now `tga profile` itself, not `trusty-review`.
 
 ### 4.11 AI co-authorship attribution — `collect/ai_attribution.rs` (#445 batch A)
 
@@ -300,5 +308,5 @@ LLM-backed review profiles without duplicating git/DB logic.
 | OQ5 | Parquet / DuckDB columnar export. | `rust-architecture.md` Future Improvements |
 | OQ6 | Reconcile / refresh the `requirements/` docs (taxonomy, DB migration list, tier naming) to match the spec, or formally demote them to "predecessor parity" reference. | DB8 / this PRD |
 | OQ7 | gitoxide migration once its diff API stabilizes. | ADR backlog |
-| OQ8 | trusty-review contributor-profile LLM pipeline (#561–#568) — tga data-supply layer (CP1–CP5) is complete; blocked on trusty-review MVP. | #558 |
+| OQ8 | ~~trusty-review contributor-profile LLM pipeline (#561–#568)~~ — superseded; the LLM-backed profiling pipeline now lives entirely in tga (CP1–CP8), not trusty-review. | [#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468) |
 | OQ9 | Per-repo effort percentile datasets — `effort_percentile_thresholds` currently stores a single `"default"` dataset; per-repo or per-team percentile breakpoints are possible without schema changes but not yet implemented. | `core/effort_percentile.rs` §Design |

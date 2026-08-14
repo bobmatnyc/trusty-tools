@@ -1,8 +1,7 @@
 //! `trusty-review` CLI entry point.
 //!
-//! Why: provides the user-facing interface for running, comparing, inspecting
-//! PR reviews, generating longitudinal contributor profiles, and running the
-//! calibration harness (#1422).
+//! Why: provides the user-facing interface for running, comparing and
+//! inspecting PR reviews, and running the calibration harness (#1422).
 //!
 //! What: parses flags via clap-derive, resolves config, and dispatches to the
 //! appropriate subcommand handler.  All heavy logic lives in `commands/`.
@@ -11,8 +10,6 @@
 //! Test: `cargo run -p trusty-review -- --help` must succeed; each subcommand
 //! is tested in its own module under `commands/`.
 
-#[cfg(feature = "profile")]
-mod cli_profile;
 #[cfg(feature = "report")]
 mod cli_report;
 mod cli_verify;
@@ -119,19 +116,6 @@ enum Commands {
     /// Graceful shutdown on SIGTERM/SIGINT (in-flight requests are drained).
     #[cfg(feature = "http-server")]
     Serve(ServeArgs),
-
-    /// Generate a longitudinal contributor-quality profile.
-    ///
-    /// Aggregates commit history from a tga SQLite DB into period batches,
-    /// samples representative diffs, and uses an LLM to identify recurring
-    /// findings and write a narrative.  Output: profile.json + profile.md.
-    ///
-    /// Always dry-run safe: never posts PR comments.  Use --github-issue to
-    /// opt-in to creating/updating a per-contributor GitHub issue thread.
-    ///
-    /// Requires the `profile` Cargo feature (enabled by default).
-    #[cfg(feature = "profile")]
-    Profile(cli_profile::ProfileArgs),
 
     /// Generate a deterministic technical due-diligence report from a manifest.
     ///
@@ -242,8 +226,6 @@ async fn async_main(cli: Cli) -> Result<()> {
         Commands::Compare(args) => cmd_compare(config, args).await,
         #[cfg(feature = "http-server")]
         Commands::Serve(args) => cmd_serve(config, args).await,
-        #[cfg(feature = "profile")]
-        Commands::Profile(args) => cli_profile::cmd_profile(config, args).await,
         #[cfg(feature = "report")]
         Commands::Report(args) => cli_report::cmd_report(config, args).await,
         Commands::Calibrate(args) => cmd_calibrate(config, args).await,

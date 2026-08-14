@@ -750,3 +750,71 @@ fn stuck_unwalked_clears_once_a_walk_has_started() {
          that found nothing is an empty corpus, not a stuck one"
     );
 }
+
+/// Why (#5336): `index_is_stuck_mid_walk` fires on exactly one shape — lexical
+/// `InProgress`, a walk that started, and no task driving the index. Every other
+/// combination is either healthy or already owned by #4680, and flagging one of
+/// them would put the daemon at `degraded` over an index that is fine.
+/// What: the true case, then each of the three signals negated in turn.
+/// Test: this test.
+#[test]
+fn stuck_mid_walk_matches_only_an_abandoned_started_walk() {
+    use crate::core::registry::StageStatus;
+    use crate::service::warm_boot::index_is_stuck_mid_walk;
+
+    assert!(
+        index_is_stuck_mid_walk(StageStatus::InProgress, true, false),
+        "a started walk with no driver left is the whole defect"
+    );
+    assert!(
+        !index_is_stuck_mid_walk(StageStatus::InProgress, true, true),
+        "a task holding the index permit IS the reindex the stage claims"
+    );
+    assert!(
+        !index_is_stuck_mid_walk(StageStatus::InProgress, false, false),
+        "a never-walked lane is #4680's, which also owns its recovery"
+    );
+    for other in [
+        StageStatus::Pending,
+        StageStatus::Ready,
+        StageStatus::Skipped,
+        StageStatus::Failed,
+    ] {
+        assert!(
+            !index_is_stuck_mid_walk(other, true, false),
+            "{other:?} makes no claim about a walk in progress"
+        );
+    }
+}
+
+/// Why (#5336): the two predicates are reported as separate `/health` counters,
+/// so an index must never land in both — a reader summing them would double-count
+/// one broken index, and a reader comparing them could not tell which cohort it
+/// belonged to.
+/// What: for every stage status, asserts at most one of the two fires, at both
+/// values of `walk_started`, with no driver in flight (the only case where either
+/// can fire).
+/// Test: this test.
+#[test]
+fn stuck_mid_walk_and_stuck_unwalked_partition_the_in_progress_lane() {
+    use crate::core::registry::StageStatus;
+    use crate::service::warm_boot::{index_is_stuck_mid_walk, index_is_stuck_unwalked};
+
+    for status in [
+        StageStatus::Pending,
+        StageStatus::InProgress,
+        StageStatus::Ready,
+        StageStatus::Skipped,
+        StageStatus::Failed,
+    ] {
+        for walk_started in [false, true] {
+            let unwalked = index_is_stuck_unwalked(status, walk_started);
+            let mid_walk = index_is_stuck_mid_walk(status, walk_started, false);
+            assert!(
+                !(unwalked && mid_walk),
+                "{status:?} / walk_started={walk_started} was counted by both \
+                 stuck predicates"
+            );
+        }
+    }
+}

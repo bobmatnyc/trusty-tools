@@ -509,9 +509,21 @@ fn extract_section(text: &str, header: &str) -> Option<String> {
 /// Parse a timestamp from the `YYYYMMDD-HHMMSS` portion of a session filename.
 ///
 /// Why: lets us sort native sessions by pause time even when no timestamp header
-/// exists in the file body.
-/// What: expects input like `20260627-142030`; parses it as UTC.
-/// Test: covered by `parse_filename_timestamp_roundtrip`.
+/// exists in the file body. Session filenames are not always machine-generated
+/// (#5072 explicitly accommodates hand-written snapshots like
+/// `session-20260730-bounce.md`), so this must reject malformed input rather
+/// than assume a fixed byte layout.
+/// What: expects input like `20260627-142030`; parses it as UTC. The `len()`
+/// guards below check BYTE length, not char count, so a stem containing a
+/// multi-byte UTF-8 character can satisfy them while still landing a
+/// fixed-byte-offset slice mid-character — the `is_ascii_digit` check that
+/// follows rules that out before any slicing happens (#5294: `stem =
+/// "123é456-142030"` is 15 bytes and its parts are 8/6 bytes, but slicing
+/// `&date_part[0..4]` used to panic since byte offset 4 falls inside 'é').
+/// Once every byte is confirmed an ASCII digit, byte offsets and char offsets
+/// coincide and the slices are safe.
+/// Test: `parse_filename_timestamp_roundtrip`,
+/// `parse_filename_timestamp_rejects_non_ascii_without_panicking`.
 fn parse_filename_timestamp(stem: &str) -> Option<DateTime<Utc>> {
     // stem is like "20260627-142030"
     if stem.len() != 15 {
@@ -519,6 +531,12 @@ fn parse_filename_timestamp(stem: &str) -> Option<DateTime<Utc>> {
     }
     let (date_part, time_part) = stem.split_once('-')?;
     if date_part.len() != 8 || time_part.len() != 6 {
+        return None;
+    }
+    // #5294: guard ASCII-digit-only before any byte-offset slicing.
+    if !date_part.bytes().all(|b| b.is_ascii_digit())
+        || !time_part.bytes().all(|b| b.is_ascii_digit())
+    {
         return None;
     }
     let s = format!(

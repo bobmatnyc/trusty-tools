@@ -1,4 +1,4 @@
-//! Canonical launchd labels for every trusty-* LaunchAgent (#4868).
+//! Canonical launchd labels for every trusty-* LaunchAgent (#4919).
 //!
 //! Why: there was no single definition of what a service's launchd label IS.
 //! Each daemon crate declared its own `LAUNCHD_LABEL` literal, the installer
@@ -93,7 +93,7 @@ pub const ANALYZE: &str = agent!("analyze");
 
 /// The trusty-search daemon.
 ///
-/// #4868: was `com.trusty.trusty-search` in
+/// #4919: was `com.trusty.trusty-search` in
 /// `trusty-search::commands::service::LAUNCHD_LABEL`, which is not the label
 /// launchd has loaded on any host — see this module's header.
 pub const SEARCH: &str = agent!("search");
@@ -103,7 +103,7 @@ pub const SEARCH_LOGROTATE: &str = agent!("search", "logrotate");
 
 /// The trusty-console dashboard daemon.
 ///
-/// #4868: was `com.trusty.trusty-console` in code while the loaded unit is
+/// #4919: was `com.trusty.trusty-console` in code while the loaded unit is
 /// `com.trusty.console` — the same divergence as [`SEARCH`], so `console
 /// service status` queried a label that does not exist.
 pub const CONSOLE: &str = agent!("console");
@@ -173,7 +173,7 @@ pub const SERVICES: &[Service] = &[
         member: "trusty-search",
         sub_unit: None,
         label: SEARCH,
-        // `com.trusty.trusty-search` is what the pre-#4868 Rust installer wrote
+        // `com.trusty.trusty-search` is what the pre-#4919 Rust installer wrote
         // and what #2938 found stranded beside the live unit;
         // `com.bobmatnyc.trusty-search` is the trusty-search Makefile's third
         // family. Both must be evicted or an install leaves two units behind.
@@ -256,7 +256,7 @@ pub fn legacy_labels_for(label: &str) -> &'static [&'static str] {
 /// Whether a string is a CANONICAL launchd label this workspace installs.
 ///
 /// Why: deliberately excludes legacy aliases. A legacy label appearing as a
-/// literal in production source is not "a known label", it is the #4868 defect
+/// literal in production source is not "a known label", it is the #4919 defect
 /// — `trusty-search::commands::service::LAUNCHD_LABEL` was exactly such a
 /// literal, and a membership test that accepted it would have passed while the
 /// installer bootstrapped a unit launchd does not have.

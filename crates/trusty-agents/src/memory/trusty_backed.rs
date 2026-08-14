@@ -27,6 +27,7 @@ use uuid::Uuid;
 use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
 use trusty_common::memory_core::registry::PalaceRegistry;
 use trusty_common::memory_core::retrieval::PalaceHandle;
+use trusty_common::memory_core::store::PalaceStore;
 use trusty_common::memory_core::store::payload_store::PayloadStore;
 use trusty_common::memory_core::store::vector::VectorStore;
 
@@ -175,8 +176,12 @@ impl TrustyBackedMemoryStore {
         }
 
         let palace_dir = self.data_root.join(palace_id.as_str());
-        // Try open-from-disk first; if no metadata exists, create a fresh one.
-        if palace_dir.join("palace.json").exists() {
+        // Try open-from-disk first; only a definitively absent `palace.json`
+        // may fall through to create, which rewrites metadata and destroys
+        // `created_at`. #4911: routed through the one entry point that makes
+        // that call, so a stat we are DENIED no longer reads as "absent" the
+        // way the previous `exists()` did (#5549 / ADR-0045 family).
+        if !matches!(PalaceStore::metadata_present(&palace_dir), Ok(false)) {
             return self
                 .registry
                 .open_palace(&self.data_root, &palace_id)

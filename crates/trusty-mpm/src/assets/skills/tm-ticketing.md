@@ -107,9 +107,11 @@ disposition in `code-review-standards`. A reviewer marking `Promote` has
 recommended, not filed — the finding still has to clear the criteria above, and
 an APPROVE verdict never files a ticket on its own.
 
-### 3. Label the confidence state
+### 3. Label the confidence state — defects only
 
-Every filed issue states which of these it is, in the body:
+This distinguishes a reproduced defect from a suspected one, which changes
+what a reader does next: a `bug`-typed issue states which of these it is, in
+the body.
 
 | State | Meaning | Default disposition |
 |---|---|---|
@@ -121,6 +123,12 @@ Every filed issue states which of these it is, in the body:
 If your own draft says "not confirmed", "possible", or "same risk class", the
 state is Inferred or Speculative — keep it on the parent unless severity
 justifies escalation.
+
+🔴 **A feature, task, epic, or spec issue carries no confidence line.** The
+table above is written in defect language (behaviour, reproduction, risk) and
+has nothing to distinguish on a feature: the type label already says why the
+issue exists, and a line like "Confidence: Observed — accepted feature work"
+restates the type label under a different name. Omit it there entirely.
 
 ### 4. Size issues by outcome, not by finding
 
@@ -149,9 +157,11 @@ Ticket Bodies") — no structured headings, point rather than restate, cite file
 and symbol rather than line numbers, and stop when the body fills a short screen.
 Most tickets do all of it in under ten lines.
 
-Alongside the closure conditions a reader must be able to tell the confidence
-state (§3) and the relationship to parent work, including the search/dispatch
-outcome. Those are facts to convey, not headings to fill in.
+Alongside the closure conditions, a **defect** ticket must let the reader tell
+the confidence state (§3); a feature, task, epic, or spec ticket carries none.
+Every ticket, defect or not, conveys its relationship to parent work,
+including the search/dispatch outcome — a fact about the issue, not a heading
+to fill in.
 
 **Bounded exceptions.** Three shapes may exceed the short-body form, and only
 these:
@@ -171,7 +181,7 @@ never summarise test results in your own words).
 
 ## Labels
 
-Four separable families. The `ticketing` agent applies them at creation and the
+Three separable families. The `ticketing` agent applies them at creation and the
 exact command form lives in the agent asset ("Label at Creation"); this is the
 model, so a delegation brief never needs to spell it out.
 
@@ -180,7 +190,15 @@ model, so a delegation brief never needs to spell it out.
 | Type | exactly one | `bug`, `enhancement`, `refactor`, `chore`, `documentation`, `epic` |
 | Owning component | one or more | The crate or subsystem the defect actually lives in |
 | Priority | optional | `P0`–`P3`, **only** when the issue text itself asserts severity. A guessed priority is noise |
-| Provenance | optional | The harness defaults: `trusty-mpm` plus `ws/<session-name>`, with `--assignee @me` |
+
+🔴 **There is no fourth family for where a finding came from.** Which session,
+harness, agent, or tool surfaced an issue is never a labeling input, under any
+name — not "provenance", not "umbrella", not "dogfooding". `trusty-mpm` is an
+owning-component label like any other: it applies only when the code at fault
+sits under `crates/trusty-mpm/` (or the tm CLI's own release tooling), never
+because the session that filed the issue happened to run under tm. When no
+component label fits, apply none — that decision is final, not a trigger to
+reach for `trusty-mpm`.
 
 🔴 **Never invent a label the repository does not carry.** Check `gh label list`
 before using one; create a genuinely missing label rather than dropping the

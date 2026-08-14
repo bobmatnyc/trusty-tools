@@ -43,13 +43,9 @@ pub mod review_template;
 // and concurrency concerns live in their own module, separate from the
 // pipeline.  Always compiled — no feature gate (no axum/HTTP dependency).
 pub mod store;
-// Why: longitudinal contributor profiling (epic #558) requires a dedicated
-// module for data models, identity resolution, period assembly, and diff
-// sampling.  Gated behind the `profile` feature because it pulls in tga and
-// rusqlite (heavy deps with vendored C libraries) that users who only need the
-// core review pipeline should not have to compile.
-#[cfg(feature = "profile")]
-pub mod profile;
+// #5466: the `profile` module (longitudinal contributor profiling, epic #558)
+// was REMOVED. Contributor profiling is tga's domain now — `tga profile` — so
+// trusty-review no longer takes a Cargo edge on tga or rusqlite. See #5468.
 
 // Why: deterministic technical-DD report generation (epic #2312 / M1 #2313)
 // lives in its own module.  Gated behind the `report` feature (default-on) so

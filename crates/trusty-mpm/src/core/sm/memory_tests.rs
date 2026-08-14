@@ -31,6 +31,116 @@ fn sm_memory() -> (SmMemory, TempDir) {
     (mem, dir)
 }
 
+/// Read `created_at` out of a palace's `palace.json`.
+///
+/// Why: `created_at` is the field `create_palace` destroys when it is reached
+/// for a palace that already exists — it stamps `Utc::now()` on every save.
+/// Reading it directly makes the assertion name the thing that is lost.
+/// What: parses the metadata file and returns the `created_at` string.
+/// Test: used by
+/// `ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_palace`.
+fn created_at_of(metadata: &std::path::Path) -> String {
+    let raw = std::fs::read_to_string(metadata).expect("read palace.json");
+    let json: serde_json::Value = serde_json::from_str(&raw).expect("parse palace.json");
+    json["created_at"]
+        .as_str()
+        .expect("palace.json carries created_at")
+        .to_string()
+}
+
+/// Materialise a palace on disk that exists but cannot be opened, WITHOUT this
+/// process ever opening it.
+///
+/// Why: two traps make the obvious fixture (create a palace, then corrupt it)
+/// silently vacuous. The store keeps a process-wide cache of open redb
+/// databases keyed by path, so a palace this process already opened is served
+/// from that cache and never touches the filesystem — the corruption is never
+/// read. And `PalaceHandle` opens `<dir>/kg.db` through
+/// `KnowledgeGraph::open_with_intent`, which rewrites the extension, so the
+/// bytes that actually matter live at `kg.redb`. Hand-writing the metadata
+/// avoids the first trap; naming `kg.redb` avoids the second.
+/// What: writes a valid `palace.json` carrying `created_at`, then puts a
+/// DIRECTORY where the KG store file belongs. Opening a directory as a database
+/// file fails at the OS layer on every platform and every redb version, so the
+/// failure is deterministic — no lock, no race, no format dependence. Returns
+/// the palace directory.
+/// Test: used by
+/// `ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_palace`.
+fn seed_unopenable_palace_on_disk(
+    data_root: &std::path::Path,
+    palace_id: &str,
+) -> std::path::PathBuf {
+    let palace_dir = data_root.join(palace_id);
+    std::fs::create_dir_all(&palace_dir).expect("create palace dir");
+    let metadata = serde_json::json!({
+        "id": palace_id,
+        "name": palace_id,
+        "description": serde_json::Value::Null,
+        "created_at": "2020-01-02T03:04:05Z",
+        "data_dir": palace_dir,
+        "schema_version": 1,
+    });
+    std::fs::write(
+        palace_dir.join("palace.json"),
+        serde_json::to_vec_pretty(&metadata).expect("serialise palace.json"),
+    )
+    .expect("write palace.json");
+    std::fs::create_dir(palace_dir.join("kg.redb")).expect("directory where the KG store belongs");
+    palace_dir
+}
+
+/// Why (issue #4911): `ensure_palace` treated EVERY `open_palace` failure as
+/// "the palace does not exist" and fell through to `create_palace`, which
+/// rewrites `palace.json` unconditionally via `PalaceStore::save_palace` — so a
+/// palace that merely could not be READ lost its `created_at` and only then
+/// re-failed against the same unreadable store. Making a read-only open of an
+/// incompatible-format store refuse (rather than silently recreate it empty)
+/// turned that latent path into a live one, which is how a fix for data
+/// destruction reintroduced data destruction one layer out.
+/// What: seeds a present-but-unopenable SM palace on disk (see
+/// `seed_unopenable_palace_on_disk`), records its `created_at`, then constructs
+/// an `SmMemory` against that root. Asserts the construction fails AND that
+/// `palace.json` is byte-identical. The byte-identity assertion is what proves
+/// `create_palace` was never reached: reaching it rewrites the file with a fresh
+/// `created_at`, so this test cannot pass while that call happens.
+/// Test: this is the test.
+#[test]
+fn ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_palace() {
+    seed_shared_embedder_with_mock();
+    let dir = TempDir::new().expect("tempdir");
+    let cfg = SmMemoryConfig::default();
+
+    let palace_dir = seed_unopenable_palace_on_disk(dir.path(), &cfg.palace);
+    let metadata = palace_dir.join("palace.json");
+    let created_at_before = created_at_of(&metadata);
+    let metadata_before = std::fs::read(&metadata).expect("read palace.json");
+
+    // `SmMemory` is not `Debug`, so `expect_err` is unavailable here.
+    let err = match SmMemory::open(dir.path(), &cfg) {
+        Ok(_) => {
+            panic!("opening a present-but-unopenable palace must fail, not silently recreate it")
+        }
+        Err(e) => e,
+    };
+
+    assert_eq!(
+        created_at_before,
+        created_at_of(&metadata),
+        "created_at was rewritten, so `ensure_palace` fell through to \
+         `create_palace` for a palace that exists but could not be read; the \
+         open error was: {err}"
+    );
+    assert_eq!(
+        metadata_before,
+        std::fs::read(&metadata).expect("read palace.json"),
+        "palace.json must be byte-identical — any rewrite means `create_palace` ran"
+    );
+    assert!(
+        palace_dir.join("kg.redb").is_dir(),
+        "the unopenable store must be left exactly as it is, not recovered destructively"
+    );
+}
+
 /// Why: idempotency is the headline SM-4 guarantee — ensuring the palace twice
 /// (here: a second `SmMemory::open` against the same root) must NOT create a
 /// duplicate or wipe the first; exactly one palace must persist.

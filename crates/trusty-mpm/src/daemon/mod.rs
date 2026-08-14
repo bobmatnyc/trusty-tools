@@ -14,6 +14,8 @@ pub mod audit;
 pub mod bug_report;
 /// The peer message bus (DOC-60 §5.3) — envelope, pub/sub, instance registry.
 pub mod bus;
+/// Response-size bound for the `session_context_catchup` digest (#5557).
+pub mod catchup_bounds;
 pub mod claude_config;
 pub mod coordinator;
 /// Delegation query routes merged into the main router (#4480).

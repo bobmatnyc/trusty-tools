@@ -126,24 +126,45 @@ impl WorkDir {
         Self { root: root.into() }
     }
 
-    /// Decide the root from the flag, then the environment, then the default.
+    /// Decide the root from the flag, then the environment, then the default,
+    /// and anchor it to `cwd` when it is relative.
     ///
     /// Why: the caller (`main.rs`) reads the process environment once and passes
     /// it in, which keeps this function pure — resolution order is provable
     /// without `std::env::set_var` and its cross-test races.
+    ///
+    /// Anchoring is what makes the root usable by a CHILD process (#5672).
+    /// `run::sweep` spawns `tga audit` with the root as the child's working
+    /// directory, and a relative program path is resolved against the CHILD's
+    /// cwd, not the parent's — so `--work-dir w` named `w/tools/tga` to a child
+    /// already sitting in `w`, and the spawn failed with `os error 2`. Every
+    /// path this crate hands a child descends from the root, so anchoring the
+    /// root once here fixes the tool binaries, the generated tga config, the
+    /// output directory and the extract database together.
+    ///
     /// What: `explicit` wins; else `env_value` (the value of [`WORKDIR_ENV`]);
-    /// else `cwd/`[`DEFAULT_WORKDIR_NAME`]. An empty env value is ignored, since
+    /// else [`DEFAULT_WORKDIR_NAME`]; then `cwd.join(...)`, which returns an
+    /// absolute choice unchanged. An empty env value is ignored, since
     /// `TRUSTY_AUDIT_WORKDIR=` is far more likely to be an unset shell variable
     /// than a request to use the filesystem root.
-    /// Test: `super::layout_tests::resolution_order_is_flag_then_env_then_default`.
+    ///
+    /// This joins rather than calling `std::fs::canonicalize`, deliberately.
+    /// The root normally does not exist yet — [`WorkDir::create`] makes it — and
+    /// `canonicalize` fails on a path that is not already on disk, so it cannot
+    /// run at this boundary at all. It would also resolve symlinks, which would
+    /// print a root the recipient never typed and weaken the README's
+    /// `rm -rf <root>` instruction. Joining needs no I/O and cannot fail.
+    /// Test: `super::layout_tests::resolution_order_is_flag_then_env_then_default`,
+    /// `super::layout_tests::a_relative_choice_is_anchored_to_the_cwd`.
     pub fn resolve(explicit: Option<PathBuf>, env_value: Option<&str>, cwd: &Path) -> Self {
-        if let Some(path) = explicit {
-            return Self::new(path);
-        }
-        if let Some(value) = env_value.filter(|v| !v.trim().is_empty()) {
-            return Self::new(value);
-        }
-        Self::new(cwd.join(DEFAULT_WORKDIR_NAME))
+        let chosen = explicit
+            .or_else(|| {
+                env_value
+                    .filter(|v| !v.trim().is_empty())
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_WORKDIR_NAME));
+        Self::new(cwd.join(chosen))
     }
 
     /// The root of everything this crate writes.
@@ -152,8 +173,12 @@ impl WorkDir {
     }
 
     /// Path of one layout area.
+    ///
+    /// This computes a path; it does not check what is at it. A pre-planted
+    /// symlink at an area would send writes outside the root and survive the
+    /// delete — `tools::install` refuses that before installing (#5495), and
+    /// repo cloning owes the same check when it lands (#5215).
     pub fn path(&self, area: Area) -> PathBuf {
-        // #5495: a pre-planted symlink here is inert until #5491 installs and repo cloning write through it.
         self.root.join(area.dir_name())
     }
 
@@ -201,6 +226,19 @@ mod layout_tests {
 
         let default = WorkDir::resolve(None, None, cwd);
         assert_eq!(default.root(), Path::new("/engagement/trusty-audit-work"));
+    }
+
+    /// #5672: a relative choice from either source becomes absolute, because
+    /// `run::sweep` hands these paths to a child running in a different cwd.
+    #[test]
+    fn a_relative_choice_is_anchored_to_the_cwd() {
+        let cwd = Path::new("/engagement");
+
+        let flag = WorkDir::resolve(Some(PathBuf::from("w")), None, cwd);
+        assert_eq!(flag.root(), Path::new("/engagement/w"));
+
+        let env = WorkDir::resolve(None, Some("w"), cwd);
+        assert_eq!(env.root(), Path::new("/engagement/w"));
     }
 
     #[test]

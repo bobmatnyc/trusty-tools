@@ -222,7 +222,6 @@ crates/trusty-common/src/memory_core/store/kg_redb/write_ops.rs	cascade_delete_r
 crates/trusty-common/src/memory_core/store/kg_writer.rs	writer_reports_error_per_op
 crates/trusty-common/src/memory_core/store/kg/ops.rs	cascade_delete_removes_triples_for_drawer
 crates/trusty-common/src/memory_core/store/kg/ops.rs	palace_handle_read_only_when_kg_snapshotted
-crates/trusty-common/src/memory_core/store/palace_store.rs	load_palace_missing_returns_not_found
 crates/trusty-common/src/rpc/client.rs	parse_args
 crates/trusty-common/src/rpc/transport/http.rs	http_transport_roundtrip
 crates/trusty-common/src/rpc/transport/stdio.rs	stdio_transport_echo
@@ -422,7 +421,6 @@ crates/trusty-mpm/src/control/registry.rs	registry_with_classifier_builds_actor_
 crates/trusty-mpm/src/core/auto_resume.rs	effective_from_env_parses_truthy
 crates/trusty-mpm/src/core/compress.rs	caveman_summary_contains_tool_and_size
 crates/trusty-mpm/src/core/compress.rs	strip_ansi_leaves_plain_text
-crates/trusty-mpm/src/core/deploy_validate/mod.rs	repair_reports_error_when_prepare_session_fails
 crates/trusty-mpm/src/core/manifest/schema.rs	instruction_layers_roundtrip
 crates/trusty-mpm/src/core/manifest/schema.rs	mcp_servers_roundtrip
 crates/trusty-mpm/src/core/manifest/schema.rs	model_tiers_roundtrip
@@ -723,7 +721,6 @@ crates/trusty-review/src/pipeline/verify.rs	verify_one_confirmed
 crates/trusty-review/src/pipeline/verify.rs	verify_one_model_unavailable_emits_signal
 crates/trusty-review/src/pipeline/verify.rs	verify_one_refuted
 crates/trusty-review/src/pipeline/voice_config.rs	build_voice_config_principles_on
-crates/trusty-review/src/profile/reporter.rs	reporter_markdown_output
 crates/trusty-review/src/report/analyze_adapter.rs	http_source_maps_from_mock
 crates/trusty-review/src/report/investigate/mod.rs	investigation_survives_one_truncated_batch_of_three
 crates/trusty-review/src/report/investigate/mod.rs	render_tests

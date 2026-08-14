@@ -235,6 +235,7 @@ targeting via mutually-exclusive `--weeks` / `--week` / `--from`+`--to`.
 | `report` | Stage 3 — reports (`--author <email>` #324, `--anonymize`). | `commands/report.rs` |
 | `author` | Per-engineer drill-down (effort + PRs + commits, #325). | `commands/author.rs` |
 | `pr-metrics` | Weekly PR-metrics aggregation. | `commands/pr_metrics.rs` |
+| `profile` | Longitudinal per-contributor quality profile — identity resolution, period batching, LLM review, synthesis, report, optional GitHub issue publish ([#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)). | `commands/profile.rs`, `profile/` |
 | `aliases` | Identity CRUD + LLM-assisted `suggest` (#347/#348). | `commands/aliases/` |
 | `backfill` | Retroactive maintenance ops: `ticket-id` / `revert-flags` / `effort` / `reachability` / `complexity` / `ticketed` / `ai-detection` / `ai-detection-commits` / `top-level` / `effort-tshirt` / `quality` (`--dry-run`, `--repos`, `--weeks`, `--since`, `--until`). | `commands/backfill.rs` |
 | `override` | Manual Tier-0 classification overrides. | `commands/override_cmd.rs` |

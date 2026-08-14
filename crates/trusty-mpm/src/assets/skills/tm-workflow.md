@@ -220,6 +220,10 @@ git worktree add -b <feature-or-fix-branch> \
 cd .claude/worktrees/<dirname>
 ```
 
+🟡 **This is for the PM or a human working directly. It is NOT the dispatch
+mechanism** — a subagent dispatch declares `isolation: "worktree"` instead, per
+"Worktree Discipline" below and `tm-delegation-patterns`.
+
 Always `git fetch origin main` first and branch off `origin/main`, never local
 `main` — local `main` can be stale and branching from it has caused lost commits.
 
@@ -249,10 +253,10 @@ equivalent is routing around a safety control. A file showing ` M` in
 discarded.
 
 Identify the owner first — `git status --porcelain` for staged-vs-unstaged, file
-mtimes, and the session log for who was alive in that window — and ask live
-peers before assuming the work is abandoned. If it is unowned, **preserve rather
-than discard**: commit it out of the way, which is permitted and destroys
-nothing.
+mtimes, and the session log for who was alive in that window — and read what a
+live peer is doing, per "Concurrent Sessions on One Repo" below, before assuming
+the work is abandoned. If it is unowned, **preserve rather than discard**: commit
+it out of the way, which is permitted and destroys nothing.
 
 ```bash
 git checkout -b orphan/main-checkout-$(date +%Y%m%d)
@@ -285,10 +289,30 @@ and keeps bundled in that same worktree and PR.
 **Experiments stay session-local.** Promote an experiment to a branch and
 worktree only once its result is accepted for implementation.
 
-Every subagent dispatch must name the exact worktree path it is confined to, and
-must forbid leaving it into the main checkout, `git reset --hard`,
-`git checkout .`, and `git stash` against main. QA agents get their own worktree
-(e.g. `.claude/worktrees/qa-<ticket-or-pass>`), same as engineering agents.
+🔴 **A file-mutating subagent dispatch declares `isolation: "worktree"`. That is
+the only sanctioned mechanism, and the PM never authors a `git worktree add` into
+a dispatch prompt (#5649).** The harness provisions the tree and puts the agent
+in it. A hand-rolled worktree is invisible to `tm hook --pm-guard`, which reads
+the declared `isolation` parameter and never the prompt — so an agent that made
+its own tree still counts as occupying the shared HEAD, and the next
+file-mutating dispatch is denied for a collision that does not exist.
+
+**When `isolation` is unavailable, the PM serializes.** Dispatch one
+file-mutating agent, wait for it, dispatch the next. Serializing is always
+available and always correct. Hand-rolling a worktree in order to parallelize
+anyway is what this rule forbids.
+
+The dispatch still forbids leaving the assigned tree into the main checkout, and
+forbids `git reset --hard`, `git checkout .`, and `git stash` against main.
+
+**Who counts as file-mutating** (#5650): every engineer-tier agent, plus
+`documentation`, `version-control`, and the three QA agents that author tests —
+`qa`, `web-qa`, `api-qa`. Each gets its own worktree, same as an engineer. A
+dispatch that only reads does not: `research`, `code-analyzer`, `ticketing`, and
+`code-critic`, which shares `role: qa` with the QA writers but recommends rather
+than edits. The guard reads this from the bundled agent's own frontmatter
+(`dispatch_isolation.rs`), so a custom or project-local agent it does not ship is
+never denied — declare `isolation: "worktree"` for one that writes.
 
 Clean up after merge with `git worktree remove --force <path>` (which deletes the
 worktree directory and never the main checkout), then `git branch -D <branch>`
@@ -312,11 +336,46 @@ main checkout.
 Project-specific worktree hazards (binary-install caveats, code-signing caches,
 and the like) belong in the project's own reference docs, not here.
 
+## Concurrent Sessions on One Repo
+
+Another tm session may be working this repo right now. Read what it is doing
+yourself — never ask the user to relay it.
+
+1. **List, then read, before starting work that could collide.**
+   `mcp__trusty-mpm__session_list` returns every managed session with `id`,
+   `name`, `cwd`, `state`, and `source_id`. Match on `source_id` /
+   `workspace_path`, and exclude your own id.
+   `mcp__trusty-mpm__session_activity` then returns that session's raw tmux pane
+   content plus `runtime_active`, `pending_decision`, and `state` — its merged
+   commits, its running agent and elapsed time, its queued work, and its open
+   questions, without asking it anything.
+2. **Claim the work on the issue before you start.** Assign yourself, or comment
+   the claim. A claim on the tracker survives a relaunch and both sessions
+   already read it; a pane message survives neither.
+3. **Verify every `session_send`.** It types characters into a pane; it does not
+   deliver a message. A long single-line message landed as a bracketed paste
+   (`[Pasted text #1][Pasted text #2]`) and the submit never fired — the text sat
+   unsent in the target's prompt buffer and the receiving session never saw it.
+   After each send, call `session_activity` and confirm the message was submitted
+   rather than left in the buffer.
+4. **Re-read rather than wait for a reply.** Call `session_activity` again. The
+   other session may be mid-agent-run for many minutes and owes you no answer.
+
+`session_proxy_focus` / `session_proxy_message` / `session_proxy_summary` address
+a session by a stored focus key instead of an id. `session_proxy_message` is the
+same pane injection as `session_send` and carries the same defect.
+`session_proxy_summary` gives a lifecycle digest without the raw pane.
+
 ## Git Security Review (Mandatory Before Push)
 
 Before any `git push`, delegate a credential scan to the `security` agent:
 
-1. `git diff origin/main HEAD` — the diff about to be pushed.
+1. `git diff origin/main...HEAD` — the diff about to be pushed. Three-dot,
+   because it diffs from the merge base and shows only what YOUR branch changed.
+   Two-dot compares the two commits, so files DELETED from `main` since your
+   branch point come back as your additions: a measured run reported 19 hits
+   that were another PR's deletions where three-dot reported zero across 36
+   files. A scan people learn to wave through is where a real secret hides.
 2. `security` scans it for API keys, passwords, private keys, and tokens, and
    returns either clean or the list of blocked items.
 3. **Block the push if secrets are detected.** A leaked credential in git history

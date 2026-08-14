@@ -18,6 +18,12 @@ pub mod models;
 pub mod openrouter;
 pub mod schema;
 
+// #5675: strict-mode compliance for the whole set of sent schemas, kept here
+// (not beside any one builder) so a new schema cannot be added without it.
+#[cfg(test)]
+#[path = "all_schemas_tests.rs"]
+mod all_schemas_tests;
+
 pub use bedrock::BedrockProvider;
 pub use error::LlmError;
 pub use fireworks::FireworksProvider;
@@ -71,6 +77,34 @@ pub struct ResponseSchema {
     pub name: String,
     /// JSON Schema object describing the expected response structure.
     pub schema: serde_json::Value,
+}
+
+impl ResponseSchema {
+    /// Build a schema spec, making it OpenAI strict-mode compliant on the way in.
+    ///
+    /// Why: #1235 added [`enforce_strict_mode`] but left applying it to each
+    /// schema builder's own discipline, so `synthesis_schema` and
+    /// `investigation_schema` were written by hand and never called it — the
+    /// same defect shipped a second time as #5675 (`report_synthesis` rejected
+    /// with `'additionalProperties' is required to be supplied and to be
+    /// false`). Routing construction through one constructor makes compliance
+    /// the default a new schema inherits rather than a step it must remember.
+    /// What: applies [`enforce_strict_mode`] to `schema` — recursively setting
+    /// `additionalProperties: false` and listing every property in `required`
+    /// on each object node, including objects under an array's `items` — then
+    /// stores it alongside `name`. Idempotent, so an already-strict schema is
+    /// unchanged.
+    /// Test: `every_sent_schema_is_openai_strict_compliant`,
+    /// `synthesis_findings_items_is_strict`, and
+    /// `schema_enumeration_is_complete_and_nothing_bypasses_new` in
+    /// `llm/all_schemas_tests.rs`.
+    pub fn new(name: impl Into<String>, mut schema: serde_json::Value) -> Self {
+        schema::enforce_strict_mode(&mut schema);
+        Self {
+            name: name.into(),
+            schema,
+        }
+    }
 }
 
 // ─── Request / response types ─────────────────────────────────────────────────

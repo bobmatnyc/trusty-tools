@@ -621,11 +621,52 @@ async fn stage_one(
         });
     }
 
+    // #5495: place executables only. Release tarballs also ship `LICENSE` and
+    // `README.md`, and since every crate in this workspace ships the same
+    // filenames, a multi-tool set collided on `tools/LICENSE` and could never
+    // install — found by running `taudit install` against the real
+    // tga/trusty-analyze/trusty-review triple. Filtering here rather than in the
+    // collision check keeps a genuine two-binaries-one-name conflict an error.
+    let placeable = executables_among(&extract_dir, &binary_names);
+
     Ok(Staged {
         tool: tool.clone(),
         extract_dir,
-        binary_names,
+        binary_names: placeable,
     })
+}
+
+/// Narrow an extracted archive's files to the ones worth installing.
+///
+/// Why: `fetch::extract_binaries` returns every regular file in the archive, so
+/// its result names documentation as well as binaries. Installing a directory of
+/// executables does not want `LICENSE`, and two tools shipping one both breaks
+/// the set (#5495).
+///
+/// What: on unix, the files carrying an execute bit. Elsewhere the mode is not
+/// available, so every file is kept and the pre-existing behaviour stands —
+/// the pinned path is macOS/Linux-facing today (#5473 scopes the consumer to
+/// macOS arm64), and a Windows collision would still fail closed rather than
+/// mis-install.
+///
+/// Test: `tests::documentation_files_are_not_installed`.
+fn executables_among(dir: &Path, names: &[String]) -> Vec<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        names
+            .iter()
+            .filter(|name| {
+                std::fs::metadata(dir.join(name)).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+            })
+            .cloned()
+            .collect()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        names.to_vec()
+    }
 }
 
 /// One staged tool copied into the install directory under temporary names,

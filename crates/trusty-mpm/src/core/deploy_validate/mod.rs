@@ -300,11 +300,13 @@ fn validate_settings(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
 /// Why: callers (the spawn/resume gate, `tm validate --repair`) need to know
 /// not just the final state but whether a repair was attempted and whether it
 /// actually closed the gaps found before it ran.
-/// What: the pre-repair and post-repair [`ValidationReport`]s, whether a
-/// repair attempt ran at all, and the repair error (if any).
+/// What: the pre-repair and post-repair [`ValidationReport`]s, whether the
+/// repair succeeded, and the repair error (if any). Whether a repair was
+/// ATTEMPTED is `!before.is_complete()` — an attempt runs exactly when the
+/// pre-repair report had gaps.
 /// Test: `repair_closes_gaps_on_incomplete_workspace`,
 /// `repair_is_a_noop_on_already_complete_workspace`,
-/// `repair_reports_error_when_prepare_session_fails`.
+/// `repair_is_not_reported_when_the_pipeline_fails_fatally`.
 #[derive(Debug)]
 pub struct RepairOutcome {
     /// Validation result before any repair attempt.
@@ -312,7 +314,11 @@ pub struct RepairOutcome {
     /// Validation result after the repair attempt (equals `before` when no
     /// repair ran).
     pub after: ValidationReport,
-    /// Whether a repair attempt actually ran (only when `before` was incomplete).
+    /// Whether the repair SUCCEEDED — it ran, the pipeline returned no error,
+    /// and it left the workspace complete.
+    ///
+    /// #4781: this used to mean "an attempt ran", set unconditionally on the
+    /// repair path, so a fatally-refused repair still reported `true`.
     pub repaired: bool,
     /// The repair pipeline's error, if [`crate::core::session_launch::prepare_session_with_repo_url`]
     /// returned `Err`. A repair that ran but left gaps (a partial repair) is
@@ -349,9 +355,12 @@ impl RepairOutcome {
 /// `repaired: false`. Otherwise calls
 /// [`crate::core::session_launch::prepare_session_with_repo_url`]`(fw,
 /// workspace, repo_url)` (the #2149 roster/output-style/hooks pipeline),
-/// re-validates, and returns both reports plus any repair error.
+/// re-validates, and returns both reports plus any repair error. `repaired` is
+/// derived from the re-validation, so it is `true` only when the repair left no
+/// error and no gaps (#4781).
 /// Test: `repair_closes_gaps_on_incomplete_workspace`,
-/// `repair_is_a_noop_on_already_complete_workspace`.
+/// `repair_is_a_noop_on_already_complete_workspace`,
+/// `repair_is_not_reported_when_the_pipeline_fails_fatally`.
 pub fn validate_and_repair(
     fw: &FrameworkPaths,
     workspace: &Path,
@@ -375,10 +384,14 @@ pub fn validate_and_repair(
         };
 
     let after = validate_workspace(fw);
+    // #4781: `repaired` is a statement about the OUTCOME, never about the
+    // attempt — a fatally-refused repair left the workspace exactly as broken
+    // as it found it.
+    let repaired = repair_error.is_none() && after.is_complete();
     RepairOutcome {
         before,
         after,
-        repaired: true,
+        repaired,
         repair_error,
     }
 }

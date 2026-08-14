@@ -22,6 +22,12 @@ matters because a crates.io publish is irreversible except by yank, and a gate
 that reported only after the upload would have caught #4088 with nothing left to
 do about it.
 
+A zero exit from `check_semver.sh` is **not** the mirror of that stop, and
+reading it as one is how a blind gate shipped a release
+([#5620](https://github.com/bobmatnyc/trusty-tools/issues/5620)). What CHECK 5
+concludes from a given run is in
+[Reading the gate's result](#reading-the-gates-result).
+
 The tag-push workflow is a second, independent report. In this project's
 sequence the tag is pushed *before* `cargo publish` (steps 4 then 6), so a red
 run there is still visible in time to call the release off. Same
@@ -129,6 +135,7 @@ installs the same pinned version as a prebuilt binary.
 | Condition | Behaviour |
 |---|---|
 | `cargo-semver-checks` not installed | **hard failure** |
+| listed in `scripts/semver-checks-crate-exclusions.tsv` | skip — no library consumer to protect; see below |
 | `publish = false` | skip — never reaches crates.io |
 | no library target | skip — a bin-only crate has no API surface to compare |
 | crates.io returns 404 | skip — never published, so no baseline exists |
@@ -144,6 +151,58 @@ malformed index entry exits non-zero and names `TOOL ERROR`.
 
 Every skip prints its reason, and the final line reports how many crates were
 checked versus skipped, so a run that verified nothing says so.
+
+### Crate exclusions, and the assumption each one rests on
+
+`scripts/semver-checks-crate-exclusions.tsv` names crates the gate must not
+compare, one per row, each carrying a written reason. It is keyed by package
+name (`tga`), not the `crates/` directory name.
+
+| Crate | Reason |
+|---|---|
+| `trusty-mpm` | binary-only consumer surface — installed as the `tm` executable via `cargo install trusty-mpm` |
+
+The gate protects **library** consumers: a dependent that re-resolves a version
+floor on a lockfile-free `cargo install` and stops compiling. That is #4088, and
+it mattered because `trusty-common` has 17 in-repo consumers. A binary user gets
+a whole new executable on every install, so the library API `trusty-mpm` happens
+to expose is not part of what they consume, and comparing it protects nobody.
+
+The row is therefore a claim about consumption, not about the API: **no crate
+depends on `trusty-mpm` as a library.** Verified from the manifests via
+`cargo metadata --no-deps` — zero of the 29 workspace packages declare it as a
+dependency, in any dependency table — and crates.io reported 0 reverse
+dependencies on 2026-08-12.
+
+Every row is a coverage hole, so a reason has to be a fact about how the crate is
+consumed. "It is slow", "it always fails", and "we are mid-refactor" are not
+reasons; the remedy for a firing gate is still to bump the breaking position.
+
+**The gate re-checks the assumption before it honours the skip.** It asks
+`cargo metadata` whether any workspace package declares a dependency on the
+excluded crate. One does, and the skip is refused: the run exits 3 (`NO VERDICT`)
+naming the dependent, so `preflight-publish.sh` CHECK 5 stops the publish rather
+than approving one it verified nothing about. Removing the row restores full
+gating and is the intended fix.
+
+```
+FAIL: EXCLUSION NO LONGER HOLDS — trusty-mpm is excluded from the SemVer gate
+      because nothing depends on its library, but these workspace crates now do:
+        - trusty-code
+```
+
+What that guard cannot see is an **out-of-repo consumer**: a crate on crates.io
+depending on `trusty-mpm` as a library is invisible to a workspace-local check,
+and nothing here detects one appearing. That is a stated assumption, re-checkable
+in one command:
+
+```bash
+curl -s https://crates.io/api/v1/crates/trusty-mpm/reverse_dependencies | head -c 200
+```
+
+Pinned by `check_semver_selftest.sh` cases 23-24: an excluded crate is skipped
+without attempting a comparison, and an exclusion whose premise has died refuses
+the skip instead of granting it.
 
 ## A build failure is not a verdict (#5289)
 
@@ -188,7 +247,7 @@ different remedies.
 | 0 | every checked crate is clean, or is a recorded skip |
 | 1 | a verdict was computed **and it says break** — the only status that means "the API changed" |
 | 2 | usage error |
-| 3 | **no verdict** — rustdoc build failure, a run that executed zero checks, unreachable registry, missing tool, or a diff that scanned nothing. Nothing was compared, so nothing may be concluded. |
+| 3 | **no verdict** — rustdoc build failure, a run that executed zero checks, unreachable registry, missing tool, a diff that scanned nothing, or a crate exclusion whose premise has died. Nothing was compared, so nothing may be concluded. |
 
 `scripts/preflight-publish.sh` CHECK 5 and `.github/workflows/semver-checks.yml`
 both report exit 3 separately from exit 1. Both still stop the publish: a
@@ -258,6 +317,18 @@ inventory that could not be computed prints `NO INVENTORY` and is counted
 separately in the summary line, so "no inventory" never reads as "inventory
 clean".
 
+**It cannot fail the gate, but it can stop a publish**
+([#5620](https://github.com/bobmatnyc/trusty-tools/issues/5620)). Those two are
+different questions and used to be answered by the same number. `check_semver.sh`
+exits 0 on a blind inventory and still does: whether an already-breaking release
+is *permitted* is settled by its version numbers, not by an advisory run. But for
+a `0.y.z` crate every minor bump is major under Cargo's rules, so the pass/fail
+arm never fires and **the inventory is the only coverage that release ever gets**
+— and an inventory that did not run is no coverage at all. Whether to publish on
+no coverage is `preflight-publish.sh`'s question, and CHECK 5 now reads the
+gate's counts rather than its exit status alone. See
+[Reading the gate's result](#reading-the-gates-result) below.
+
 What it costs is roughly four minutes of rustdoc, on already-breaking releases
 only. What it buys is the one question the skip could not answer: did an
 unintended break ride along with the intended one?
@@ -285,9 +356,74 @@ construction — the fix #4088 asked for and deferred.
 cargo semver-checks --explain constructible_struct_adds_field
 ```
 
-There is no override flag on CHECK 5, and none is needed. Bumping the breaking
-position turns the run into an advisory inventory, so a false positive and a real
-break have the same safe remedy.
+A break has no override, and none is needed. Bumping the breaking position turns
+the run into an advisory inventory, so a false positive and a real break have the
+same safe remedy. `PREFLIGHT_SEMVER_UNVERIFIED` covers a gate that could not run,
+never one that ran and said no.
+
+## Reading the gate's result
+
+`check_semver.sh` answers "did the API break?". `preflight-publish.sh` CHECK 5
+answers "do we publish?", and those are not the same question — the gate exits 0
+both when it compared a crate and found nothing wrong and when it compared
+nothing at all. Until
+[#5620](https://github.com/bobmatnyc/trusty-tools/issues/5620) CHECK 5 read only
+that status, so the trusty-review 0.16.0 publish printed
+
+```
+[PASS] semver: semver gate: scanned (explicit); 0 crate(s) checked, 0 skipped,
+       1 inventory NOT computed — OK.
+```
+
+and proceeded. `cargo-semver-checks` had exited 101 without comparing anything:
+0.15.0 cannot be documented, because `pipeline/mapreduce/reduce.rs` imports a
+`profile`-gated item unconditionally, so rustdoc never built the baseline. The
+gate said exactly that, on its own line and in its summary. The loss was in the
+decision laid over it, where "0 examined" and "0 wrong" were rendered with the
+same word.
+
+CHECK 5 now reads the gate's counts. **`0 compared` and `[PASS]` are unreachable
+together**, and each outcome gets its own label:
+
+| Label | When | Publish |
+|---|---|---|
+| `[PASS]` | ≥ 1 crate compared — a pass/fail run or an inventory that ran — and no unbumped break | proceeds |
+| `[SKIP]` | 0 compared because no comparison was *possible*: no baseline on crates.io, no library target, or a row in `semver-checks-crate-exclusions.tsv` | proceeds |
+| `[WARN]` | 0 compared because the gate was blind, and `PREFLIGHT_SEMVER_UNVERIFIED` named a reason | proceeds |
+| `[FAIL]` | a computed break, a blind gate with no override, or a gate that malfunctioned | stops |
+
+`[PASS]` states how many crates it compared. `[SKIP]` permits without an override
+because the reason is a fact about the crate that is already recorded in a
+reviewable file — but it says `NOT VERIFIED`, because nothing looked at the API.
+
+### The override, and what it is not for
+
+```bash
+PREFLIGHT_SEMVER_UNVERIFIED="0.15.0 baseline references the profile module removed in #5611" \
+  bash scripts/preflight-publish.sh trusty-review
+```
+
+It takes a **reason, not a boolean**, echoed verbatim into the `[WARN]` line and
+into the run's final summary. `=1` would record that a publish was allowed
+without recording why, and why is the entire content of the disclosure; a stale
+reason string also reads as obviously stale where a stale `1` reads as normal.
+Set with no reason, it is refused rather than honoured.
+
+**A permanent capability gap is not what it is for.** When a machine class can
+never build a crate's feature set — no CUDA for `trusty-search`'s `cuda` feature,
+no libdbus — the lever is a row in
+`scripts/semver-checks-feature-exclusions.tsv`: durable, reviewable in a diff,
+greppable a year later. Route a standing gap through the environment variable and
+within a week it lives in a Makefile target or a shell profile and the `[WARN]`
+scrolls past every publish. An override that is always set is not an override.
+
+This does loosen one arm. A gate that fails for an environmental reason
+([#5440](https://github.com/bobmatnyc/trusty-tools/issues/5440): libdbus absent,
+`cargo-semver-checks` aborts, exit 3) used to block unconditionally — the wrong
+reason, but a safe outcome. It is now override-able, so such a machine can
+publish with a `[WARN]` and an unverified delta. The trade: a gate that blocks
+good publishes for reasons the operator cannot fix gets routed around eventually,
+and a disclosed `[WARN]` beats an undisclosed workaround.
 
 ## Running it locally
 
@@ -311,6 +447,17 @@ gh workflow run semver-checks.yml -f crate=trusty-common
 ```
 
 ## Self-test
+
+Two files, one per side of the seam. `scripts/check_semver_selftest.sh` drives
+the gate over captured `cargo-semver-checks` output;
+`scripts/preflight-check5-selftest.sh` drives CHECK 5's *decision* over captured
+gate output. The second exists because the decision was the half that had no test
+— running the real gate costs four minutes of rustdoc per case — and the half
+that was wrong in #5620. Its twelve cases pin every way the gate can conclude
+against the label and the permit/stop it must produce, including the
+trusty-review 0.16.0 run verbatim as case 3. `PREFLIGHT_SELFTEST_SCRIPT` points
+it at another revision of `preflight-publish.sh`, which is how the red-then-green
+is shown: against `main` before the fix, case 3 permits the publish.
 
 `scripts/check_semver_selftest.sh` runs first in CI. Cases 1-4 cover the gate's
 original fail-open surfaces — an unscanned diff and an unreachable or erroring
@@ -345,6 +492,14 @@ changes found". Both fail against the pre-fix gate, which exits 0 on the first
 and reports an empty inventory on the second. Their fixture, `all-skipped.out`,
 is the former `clean.out` — the case that was supposed to prove the gate can pass
 a crate was itself being satisfied by a run that checked nothing.
+
+Cases 23-24 pin the crate-exclusion arm: `trusty-mpm` must be skipped with its
+reason on the line and no comparison attempted, and an exclusion listing a crate
+that a workspace package actually depends on must refuse the skip and exit 3.
+Case 24 uses `trusty-agents-common` — which three crates do depend on — against a
+fixture exclusions file, so it fails the moment the dependent check is removed.
+Case 8 is what keeps the exclusion from leaking: it runs a non-excluded crate
+through a full clean comparison against the real exclusions file.
 
 Those four replace only the `cargo semver-checks` subprocess, via a stub `cargo`
 on `PATH` that forwards everything else to the real one — so crate resolution,

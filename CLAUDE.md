@@ -95,11 +95,60 @@ claims, and disputed results. Full rule in
 [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md)
 ("How Much Gate Output the PR Body Owes").
 
+### What CI actually gates (audited 2026-08-14)
+
+🔴 **A merge waits on six required checks, not on full green.** Branch protection
+requires exactly these contexts and nothing else: `Format check`, `Clippy`,
+`MSRV check`, `500-line file-size cap`, `trusty-search daemon smoke test`, and
+`PR version bump vs crates.io (issue #4421)`. All six trigger unconditionally and
+gate their expensive steps inside the job body on a `docs_only` boolean
+(`ci.yml:145-172`) — a `paths:` filter on a required job would leave the check
+pending forever, which is why none of them has one. On a code PR the six settle
+in about 4 minutes; on a docs-only PR, in under one.
+
+🔴 **`Rust tests (pre-publish gate)` — the four shards — does not run on pull
+requests.** It runs 11-13.5 minutes per shard, roughly 3x the entire required set,
+and it is not a required context, so on a PR it is skipped outright rather than
+run-and-ignored. It runs on every push to `main` and on `workflow_dispatch`. Do
+not wait for it on a PR — there is nothing to wait for.
+
+🟡 **What a PR still proves, and what moves to `main`.** `Clippy` is required and
+runs `--workspace --all-targets`, so every test target still COMPILES on every PR.
+What defers to `main` is test EXECUTION. Run the ladder rung your change earns
+before merging — that is the coverage the shards no longer duplicate per-PR.
+
+🟡 **To run the full suite on a branch:** Actions → CI → "Run workflow" against
+that branch. Reach for it when a change is broad enough that a crate-scoped local
+run does not cover it and you would rather not find out on `main`.
+
+🟡 **A red `main` files an issue.** `ci.yml`'s `notify-main-failure` job runs on
+every push to `main`, folds every job conclusion (the shards included) through
+`scripts/classify-ci-results.sh`, and on any non-green verdict opens or comments on
+the `ci-red-main`-labelled tracking issue, then fails the run. It is a GitHub issue,
+not a page — nobody is woken up.
+
+🟡 **A `BEHIND` branch cannot merge — update it.** `gh pr merge` refuses with "the
+head branch is not up to date with the base branch" even when all six required
+contexts have passed, so run `gh pr update-branch <n>` and let them re-report; on a
+docs-only PR that costs well under a minute. The mechanism is UNCONFIRMED —
+`required_status_checks.strict` is readable only with admin access, which the working
+account does not have — so treat this as observed behaviour, not a verified setting.
+A genuine `CONFLICTING` state is a different and harder problem.
+
+🟡 **`gh pr merge --admin` bypasses nothing on this repo.** The working account is
+push-only (`admin: false`), so the flag is silently ineffective. `gh`'s own refusal
+message offers `--admin` as the remedy — following that suggestion is a dead end,
+not a fix. A PR merges when its six required contexts pass AND its branch is current
+with base.
+
 ### Baseline failures — the Rust specifics
 
+<!-- Load-bearing order below: keep the if/otherwise together — see the comment in test-ladder-baseline.md for why. -->
 🔴 **Never turn a red gate green by `#[ignore]`-ing, `cfg`-gating, or
-`--exclude`-ing a failing test** — prove your diff touches zero files in the
-failing crate instead (`git diff --name-only origin/main...HEAD -- <crate>/`).
+`--exclude`-ing a failing test — prove the failure is pre-existing instead.**
+If the failing crate depends on nothing you changed, prove it with an empty
+`git diff --name-only origin/main...HEAD -- <crate>/`; otherwise that diff
+proves nothing and you must reproduce the failure on `origin/main` instead.
 For the known-environmental flaky tests on this machine (the `trusty-search`
 filesystem-watcher tests, `execute_doctor_against_test_daemon`'s timing), the
 five-step protocol for telling a pre-existing red from one you caused, and the
@@ -168,9 +217,24 @@ All other tracked `.rs` files are **production files**, capped at 500 SLOC.
 tests to a 460-SLOC module without splitting it. Only that exact shape is
 excluded — `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on an
 `fn`/`impl`/`use`, and predicates like `all(test, …)` or `any(test, …)` are all
-still counted, as is any test module whose brace balance is skewed by a brace
-inside a string literal. The matcher is line-based and fails closed: it can
-raise a false cap violation, never silently drop production code.
+still counted. Braces inside string, byte-string, raw-string, and `'{'` char
+literals do NOT skew the region any more; they are blanked before balancing.
+
+🔴 **That region detector is SHARED, and a new consumer inherits its failure
+modes.** It lives in `scripts/lib/sloc_awk.sh` and is used by
+`scripts/check_line_cap.sh` (to skip test bodies when counting) and
+`scripts/check_teardown_guard.sh` (to skip test-only call sites, via
+`emit_skip=1`). It is line-based, not a Rust parser, and it fails CLOSED: an
+unrecognised spelling leaves the region COUNTED, never silently dropped.
+
+Read that as a per-consumer question before reusing it, because one bias has
+two consequences. For the cap, a missed region is a false cap violation —
+noise. For the teardown gate, a missed region reported ten test fixtures as
+unguarded production writers, and the only way to silence one is a row in
+`scripts/teardown-guard-manifest.tsv` — a durable claim that a real write is
+exempt, which outlives the mistake and reads later as a considered decision.
+A consumer that would fail OPEN on a missed region must not use this detector
+as its only check.
 
 🟡 **No standalone SLOC-cap fix.** Never open a PR whose only purpose is bringing
 a file back under cap — the split ships inside the PR that next adds to that
@@ -236,25 +300,57 @@ waits, the `tga` tag aliases (#1128), and the connection-safe daemon restart.
 > **Full release workflow, `scripts/bump-version.sh`, and Developer-ID signing
 > setup:** see [docs/reference/release-workflow.md](docs/reference/release-workflow.md).
 
-🔴 **A breaking public-API change needs a matching version bump, and the release
-path enforces it (#5050, moved to release-time by #5149).**
-`scripts/preflight-publish.sh` CHECK 5 runs `cargo-semver-checks` against the
-crate's latest crates.io release immediately before `cargo publish`, and its
-nonzero exit is the absolute stop — that is what blocks a bad upload, since
-`cargo publish` runs locally and no CI job can stop it. The tag-push workflow
+🔴 **Internal consistency is the bar — do not deliberate over external SemVer.**
+The question worth answering about a public-API change is whether every crate in
+this workspace still agrees with itself. What a third-party crates.io consumer
+would experience is not a question to weigh, hold work over, or write an
+analysis about. Pick the version that keeps the workspace consistent and move on.
+
+🔴 **That governs deliberation, not the gate (#5050, moved to release-time by
+#5149).** `scripts/preflight-publish.sh` CHECK 5 still runs `cargo-semver-checks`
+against the crate's latest crates.io release immediately before `cargo publish`,
+and its nonzero exit is still the absolute stop — `cargo publish` runs locally,
+so no CI job can stop a bad upload. Nothing above makes that gate advisory, and
+nothing above is licence to silence it with an exclusions-file row.
+
+🔴 **A zero exit is NOT the mirror of that stop (#5620).** `check_semver.sh`
+exits 0 both when it compared a crate and found nothing wrong and when it
+compared nothing at all, and CHECK 5 used to read only the status — so
+`0 crate(s) checked, 0 skipped, 1 inventory NOT computed` printed `[PASS]` and
+trusty-review 0.16.0 shipped with its public-API delta unexamined by any tool.
+CHECK 5 now reads the counts: **`0 compared` and `[PASS]` are unreachable
+together.** A recorded skip prints `[SKIP]` and permits, a blind gate prints
+`[FAIL]` and stops, and `PREFLIGHT_SEMVER_UNVERIFIED="<reason>"` downgrades a
+blind gate to `[WARN]` — a reason string, never a boolean, and never for a
+standing machine limitation (that belongs in
+`scripts/semver-checks-feature-exclusions.tsv`). The tag-push workflow
 `.github/workflows/semver-checks.yml` reports the same check independently.
 Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is the MINOR
-position. A workspace `cargo check` can never catch this class of break — the
-root `Cargo.toml` path override pairs local source with local dependency — which
-is how #4088 shipped `trusty-common` 0.22.5's required new public field on a
-patch bump and cost `trusty-analyze` 0.7.3 a yank.
+position. A workspace `cargo check` can never catch this class of break, because
+the root `Cargo.toml` path override pairs local source with local dependency — so
+the workspace compiling clean is not evidence the published crates agree (#4088).
 
-🟡 **It does not run on PRs**, so between releases a breaking change can merge
-unnoticed and will surface at the release that ships it. Prefer
-`#[non_exhaustive]` on public structs and enums so field and variant additions
-stay non-breaking by construction, and check a risky change yourself with
-`bash scripts/check_semver.sh --crate <crate>`. See
+🟡 **On an ordinary PR it compares nothing.** `.github/workflows/semver-checks.yml`
+triggers on every PR, then decides inside the job whether a release is under test
+(#5311); on a PR that does not bump a crate's declared version it exits in ~15s
+having compared nothing. So a breaking change merges unnoticed and surfaces at the
+release that ships it. That is expected, not a problem to pre-empt — the release is
+where it gets dealt with. `#[non_exhaustive]` on public structs and enums is still
+worth reaching for, purely because it keeps the gate quiet at release time. To check
+a change yourself: `bash scripts/check_semver.sh --crate <crate>`. See
 [docs/reference/semver-gate.md](docs/reference/semver-gate.md).
+
+🔴 **The tag must name the commit that gets published.** Nothing bound the two
+together until `preflight-publish.sh` CHECK 6
+(`scripts/check-tag-publish-parity.sh`): `check-publish-ready.sh` GUARD 2 asks
+only whether the tag is an ANCESTOR of `origin/main`, and CHECK 1 asks only
+whether HEAD EQUALS `origin/main`, so a tag several commits behind HEAD passes
+both. That is where a release lands whenever `main` moves and the run is
+fast-forwarded to satisfy CHECK 1 — which shipped `tga-v2.17.0` tagged at
+`246e4ca2` against a published `.cargo_vcs_info.json` of `7d5cf82e1` on
+2026-08-11, all gates green. **Fast-forwarded after tagging? Re-tag before
+publishing.** After `cargo publish`, run `make publish-verify CRATE=<crate>`.
+See [release-workflow.md](docs/reference/release-workflow.md#tagpublish-commit-parity-guard).
 
 🔴 **CRITICAL macOS note:** never use `cp` to install a release binary on
 macOS — always `cargo install`. A plain `cp` over an on-PATH binary leaves a
@@ -418,7 +514,7 @@ For extended explanations, see [docs/reference/common-pitfalls.md](docs/referenc
 - **SLOC cap:** respect 500/3000 SLOC limits (prod/test); use `bash scripts/check_line_cap.sh`
 - **UI build:** install pnpm or set `SKIP_UI_BUILD=1` before `cargo build`
 - **Patch tables:** put all `[patch.crates-io]` in root `Cargo.toml` only
-- **Workspace deps:** shared external crates are declared once in `[workspace.dependencies]` and referenced as `dep = { workspace = true }` — never pin locally if already in the workspace table
+- **Workspace deps:** shared external crates are declared once in `[workspace.dependencies]` and referenced as `dep = { workspace = true }` — never pin locally if already in the workspace table; `default-features` is likewise owned by the root entry — `default-features = false` on a member is ignored unless the root entry sets it too (see common-pitfalls.md)
 - **Internal deps:** reference sibling crates as `trusty-common = { workspace = true }`; the workspace manifest owns the path, so every member resolves from in-tree source
 - **No global state:** helpers are free functions or small structs — no `lazy_static!` / `once_cell::sync::Lazy` except the tracing subscriber, which uses `try_init` to stay idempotent across test binaries
 - **MSRV drift:** prefer stable channel toolchains; don't break `rust-version = "1.94"`

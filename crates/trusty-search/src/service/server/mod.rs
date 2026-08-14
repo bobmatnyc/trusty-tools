@@ -22,6 +22,9 @@ mod files;
 mod health;
 pub(crate) mod helpers;
 mod index_config;
+// #5349: the single resolve-or-lazy-load path every index-scoped endpoint that
+// can restore a cold-parked index routes through.
+mod index_resolve;
 mod indexes;
 mod indexes_relocate;
 mod reindex_handlers;
@@ -50,6 +53,8 @@ mod tests_2336;
 mod tests_2984;
 #[cfg(test)]
 mod tests_3304;
+#[cfg(test)]
+mod tests_allowlist_gate_767;
 // #3049: DELETE must quiesce in-flight writers and report what it actually did.
 #[cfg(test)]
 mod tests_3049;
@@ -69,6 +74,10 @@ mod tests_4951;
 // rather than degrade to "trusted".
 #[cfg(test)]
 mod tests_5357;
+// #5349: a write against a cold-parked index drives the load the read path
+// drives, and a load that fails refuses the write instead of absorbing it.
+#[cfg(test)]
+mod tests_5349;
 // #4250: timeout-parked index recovery and the /health un-latch.
 #[cfg(test)]
 mod tests_4250;

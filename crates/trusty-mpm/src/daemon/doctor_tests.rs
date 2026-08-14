@@ -4,8 +4,9 @@
 //! `hooks_foreign_conflict` probes).
 //! What: exercises `index_present`, the memory/search reachability probes,
 //! the managed-workspace-scoped `agents` probe, the full `run_doctor` check
-//! roster, the `gh_account` / `oauth_token` advisory checks, and the
-//! worktree-orphan scan.
+//! roster, the `oauth_token` advisory check, and the worktree-orphan scan.
+//! The `gh_account` check has its own suite in `doctor_gh_account_tests.rs`
+//! (#5032).
 //! Test: this module IS the test suite for `super`.
 
 use super::*;
@@ -201,59 +202,6 @@ async fn run_doctor_produces_thirty_two_checks() {
     // Count derived from the list above, never a standalone literal:
     // adding a check is then a one-line edit here (#4090 review LOW-1).
     assert_eq!(report.checks.len(), expected.len());
-}
-
-#[test]
-fn build_gh_account_check_single_ok() {
-    // A single clear active account is healthy (Ok), naming the login.
-    let check =
-        build_gh_account_check(Some("bobmatnyc".to_string()), vec!["bobmatnyc".to_string()]);
-    assert_eq!(check.status, CheckStatus::Ok);
-    assert_eq!(check.name, "gh_account");
-    assert!(check.message.contains("bobmatnyc"));
-}
-
-#[test]
-fn build_gh_account_check_multi_warn() {
-    // Multiple logged-in accounts is the ambiguity that hid the admin-merge
-    // bug: Warn, name both accounts, and point at `gh auth switch`.
-    let check = build_gh_account_check(
-        Some("bob-duetto".to_string()),
-        vec!["bob-duetto".to_string(), "bobmatnyc".to_string()],
-    );
-    assert_eq!(check.status, CheckStatus::Warn);
-    assert!(check.message.contains("bob-duetto"));
-    assert!(check.message.contains("bobmatnyc"));
-    assert!(check.message.contains("gh auth switch"));
-}
-
-#[test]
-fn build_gh_account_check_unauthenticated_warn() {
-    // No account at all: Warn (advisory), not Fail, pointing at `gh auth login`.
-    let check = build_gh_account_check(None, Vec::new());
-    assert_eq!(check.status, CheckStatus::Warn);
-    assert!(check.message.contains("not authenticated"));
-    assert!(check.message.contains("gh auth login"));
-}
-
-#[test]
-fn gh_account_check_is_advisory_only() {
-    // Every branch must be advisory — never a hard Fail.
-    for check in [
-        build_gh_account_check(Some("a".to_string()), vec!["a".to_string()]),
-        build_gh_account_check(
-            Some("a".to_string()),
-            vec!["a".to_string(), "b".to_string()],
-        ),
-        build_gh_account_check(None, Vec::new()),
-        build_gh_account_check(None, vec!["a".to_string()]),
-    ] {
-        assert_ne!(
-            check.status,
-            CheckStatus::Fail,
-            "gh_account must never Fail"
-        );
-    }
 }
 
 #[test]

@@ -570,3 +570,94 @@ fn test_preseed_managed_trust_strips_a_stale_mcp_approval() {
     assert_eq!(entry["lastSessionId"], serde_json::json!("abc-123"));
     assert_eq!(entry["projectOnboardingSeenCount"], serde_json::json!(4));
 }
+
+/// Writer threads the #4076 concurrency regression drives, and how many
+/// distinct workspaces each one seeds.
+///
+/// Why: a lost update only manifests when two read → mutate → write cycles
+/// actually interleave, and every seed must target a DIFFERENT workspace key —
+/// re-seeding one key in a loop makes a clobber self-healing, because the next
+/// round re-adds what the last one dropped and the final state converges.
+/// Production writes each entry exactly once (one workspace, one session), so a
+/// clobber there is permanent; distinct keys reproduce that. 8 × 40 = 320
+/// one-shot cycles over one file failed on every observed pre-fix run while
+/// keeping the test well under a second — the same shape and constants as
+/// `session_launch::tests_claude_json_concurrency_4072`, which covers the two
+/// seeders #4072 fixed.
+const CONCURRENT_WRITERS: usize = 8;
+const CONCURRENT_ROUNDS: usize = 40;
+
+/// Why (issue #4076): `preseed_managed_trust` was the third `.claude.json`
+/// seeder carrying the unguarded load → mutate → store cycle that #4072 fixed
+/// for the other two. The daemon calls it once per session it provisions, from
+/// independent tokio tasks, so two overlapping cycles silently drop one
+/// session's whole `projects.<workspace>` entry — the operator then meets the
+/// trust dialog this function exists to dismiss, with both writes reporting
+/// success and nothing logged.
+///
+/// What: drives the REAL seeder against ONE managed `.claude.json` from
+/// multiple threads, which is the only way to prove the fix — single-threaded
+/// coverage of this function passes both before and after the guard exists.
+#[test]
+fn concurrent_managed_seeds_preserve_every_workspace_entry() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().to_path_buf();
+
+    // Each workspace is a REAL directory: `prune_stale_project_entries` drops
+    // pure seeder entries whose path is definitively absent, so keys that never
+    // existed on disk would be pruned by a later round and misread as a lost
+    // update that no guard could have prevented.
+    let workspaces: Vec<std::path::PathBuf> = (0..CONCURRENT_WRITERS)
+        .flat_map(|writer| {
+            let cfg = cfg.clone();
+            (0..CONCURRENT_ROUNDS).map(move |round| cfg.join(format!("ws-w{writer}-s{round}")))
+        })
+        .collect();
+    for ws in &workspaces {
+        std::fs::create_dir_all(ws).expect("workspace dir");
+    }
+
+    std::thread::scope(|scope| {
+        for writer in 0..CONCURRENT_WRITERS {
+            let (cfg, workspaces) = (&cfg, &workspaces);
+            scope.spawn(move || {
+                for round in 0..CONCURRENT_ROUNDS {
+                    let ws = &workspaces[writer * CONCURRENT_ROUNDS + round];
+                    preseed_managed_trust(cfg, ws).expect("a managed trust seed must not fail");
+                }
+            });
+        }
+    });
+
+    let projects = read_projects(&cfg);
+    let lost: Vec<String> = workspaces
+        .iter()
+        .map(|ws| ws.to_string_lossy().to_string())
+        .filter(|key| !projects.contains_key(key))
+        .collect();
+    assert!(
+        lost.is_empty(),
+        "concurrent managed trust seeds lost {} of {} workspace entries — a \
+         read-modify-write cycle stored a snapshot taken before a sibling's store \
+         (issue #4076). Lost: {lost:?}",
+        lost.len(),
+        workspaces.len()
+    );
+
+    // Every surviving entry must carry its full payload, not merely its key.
+    for ws in &workspaces {
+        let entry = &projects[&ws.to_string_lossy().to_string()];
+        assert_eq!(
+            entry["hasTrustDialogAccepted"],
+            serde_json::json!(true),
+            "{} lost its trust acceptance",
+            ws.display()
+        );
+        assert_eq!(
+            entry["hasCompletedProjectOnboarding"],
+            serde_json::json!(true),
+            "{} lost its onboarding acceptance",
+            ws.display()
+        );
+    }
+}

@@ -190,6 +190,22 @@ jobs:
         if: steps.crate.outputs.have_work == 'true'
         uses: dtolnay/rust-toolchain@stable
 
+      # #5440: trusty-common's `keyring-store` feature pulls in libdbus-sys,
+      # whose build.rs shells out to `pkg-config dbus-1`. That package is
+      # absent on the ubuntu-latest runner image, so building rustdoc for
+      # trusty-common under `--only-explicit-features` (which includes every
+      # non-excluded feature, keyring-store among them — see feature_args() in
+      # scripts/check_semver.sh) aborted before cargo-semver-checks ever
+      # compared an API. That is a NO VERDICT (exit 3), not a pass and not a
+      # confirmed-unchanged API — see the "Enforce public-API SemVer" step
+      # below. libdbus-1-dev supplies the `dbus-1` pkg-config package this
+      # build.rs looks for.
+      - name: Install system dependencies (libdbus for keyring-store)
+        if: steps.crate.outputs.have_work == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev
+
       # A prebuilt binary, PINNED. `cargo install cargo-semver-checks` compiles
       # ~2 minutes of tool before a single crate is checked. install-action
       # downloads a release artifact instead, and pinning the version keeps a

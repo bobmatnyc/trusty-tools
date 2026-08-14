@@ -55,6 +55,8 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0042](0042-mcp-configuration-is-static-and-persistent.md) | Static persistent MCP configuration | Accepted | MCP declarations live once in user scope and are not injected into workspaces. | `trusty-mpm`, `trusty-search` |
 | [0043](0043-cargo-bin-policy.md) | Traceable `$CARGO_HOME/bin` provenance | Proposed | Registry installs, prebuilt placements, and user-managed files are classified explicitly; path installs are forbidden. | Workspace |
 | [0044](0044-main-checkout-write-boundary-and-agent-worktree-ownership.md) | Main-checkout write boundary | Accepted | Main-checkout sessions write only docs/config, and the harness—not trusty-mpm—owns agent worktree creation. | `trusty-mpm` |
+| [0045](0045-distinguish-absent-from-undeterminable-on-destructive-paths.md) | Absent vs undeterminable on destructive paths | Proposed | A probe feeding a destructive, enumerating, or operator-reporting operation propagates every error but `NotFound`. | Workspace |
+| [0046](0046-client-declared-search-modes-replace-the-fused-score.md) | Client-declared search modes | Proposed | The client declares the search mode, RRF fusion and the fused score are removed, and BM25 and KG return as separate paged sets. | `trusty-search` |
 
 ## Notes
 

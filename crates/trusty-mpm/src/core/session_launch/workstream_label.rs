@@ -508,8 +508,8 @@ impl GhLabelRunner for RealGhRunner {
         let color = color.to_string();
         let description = description.to_string();
         run_bounded(GH_LABEL_TIMEOUT, move || {
-            let mut cmd = std::process::Command::new("gh");
-            cmd.args([
+            // #5475: single `gh` entry point.
+            let mut argv: Vec<&str> = vec![
                 "label",
                 "create",
                 &name,
@@ -519,11 +519,14 @@ impl GhLabelRunner for RealGhRunner {
                 &color,
                 "--description",
                 &description,
-            ]);
+            ];
             if force {
-                cmd.arg("--force");
+                argv.push("--force");
             }
-            cmd.output().ok().map(|out| out.status.success())
+            trusty_common::gh::GhCommand::new(argv)
+                .output_blocking()
+                .ok()
+                .map(|out| out.success)
         })
         .unwrap_or(false)
     }

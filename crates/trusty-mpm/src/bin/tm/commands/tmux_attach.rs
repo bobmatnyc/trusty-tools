@@ -208,7 +208,8 @@ fn tmux_pane_id_from_env(value: Option<String>) -> Option<String> {
 /// window/pane index, not the session's NAME, so the name has to come from
 /// tmux itself.
 /// What: returns `None` immediately when [`inside_tmux`] is `false` (no
-/// session to query). Otherwise runs `tmux display-message -p '#S'` and
+/// session to query). Otherwise runs `tmux display-message -p '#S'` (via
+/// `core::tmux::display_message_argv`/`run_tmux_argv_with_bin` — #2414) and
 /// returns the trimmed, non-empty stdout, or `None` on any I/O failure,
 /// non-zero exit, or empty output.
 /// Test: I/O path, not unit-tested (requires a live tmux server); the guard's
@@ -218,10 +219,11 @@ pub(crate) fn current_tmux_session_name() -> Option<String> {
     if !inside_tmux() {
         return None;
     }
-    let output = std::process::Command::new("tmux")
-        .args(["display-message", "-p", "#S"])
-        .output()
-        .ok()?;
+    // #2414: routes through the shared tmux binary-resolution + TCC-disclaim
+    // spawn primitive instead of a bare, unresolved `Command::new("tmux")`.
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    let argv = trusty_mpm::core::tmux::display_message_argv(None, "#S");
+    let output = trusty_mpm::core::tmux::run_tmux_argv_with_bin(&tmux_bin, &argv).ok()?;
     if !output.status.success() {
         return None;
     }

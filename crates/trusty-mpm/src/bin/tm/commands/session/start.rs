@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::cli::SessionAction;
 use crate::commands::project::resolve_dir;
-use crate::formatters::session::deploy_summary_line;
+use crate::formatters::session::{delegation_roster_line, deploy_summary_line};
 
 /// `session start` — launch a session, routed through protected-path segregation
 /// for a recognized GitHub-backed git repo (#1916).
@@ -92,7 +92,7 @@ pub(crate) async fn start_session(
     // Not a recognized GitHub-backed remote: no live source tree to protect —
     // preserve the original in-place deploy-and-start behavior.
     let fw = trusty_mpm::core::paths::FrameworkPaths::default();
-    start_session_in_place(client, url, &path, &fw).await
+    start_session_in_place(client, url, &path, &fw, dirs::home_dir().as_deref()).await
 }
 
 /// Refuse a launch from a directory that belongs to no git project (#4832).
@@ -150,12 +150,21 @@ async fn start_session_in_place(
     url: &str,
     path: &std::path::Path,
     fw: &trusty_mpm::core::paths::FrameworkPaths,
+    // #5544: the USER-GLOBAL home `prepare_session` seeds `~/.claude.json` and
+    // `~/.claude/settings.json` under. Production passes `dirs::home_dir()`; the
+    // test passes a tempdir, which is what lets it stop repointing the process's
+    // `$HOME` — a write every sibling test in this binary would observe.
+    home: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     // Prepare the custom instructions Claude Code reads at startup:
     // deploy composed agents to `~/.claude/agents/` and merge the
     // project CLAUDE.md. This shared prep is what makes a plain
     // `claude` process behave as a trusty-mpm session.
-    match trusty_mpm::core::session_launch::prepare_session(fw, path) {
+    // Same real version probe `prepare_session` performs; only the home is
+    // supplied explicitly (#5544).
+    let native = trusty_mpm::core::output_style::claude_supports_native_output_style();
+    match trusty_mpm::core::session_launch::prepare_session_with_home(fw, path, None, native, home)
+    {
         Ok(report) => {
             println!(
                 "{}",
@@ -178,10 +187,21 @@ async fn start_session_in_place(
             if report.instructions.claude_md_created {
                 println!("  Created CLAUDE.md stub in {}", path.display());
             }
+            // #5544: the count is a floor when a roster read failed; say so.
             println!(
-                "Instructions: {} agents in delegation authority",
-                report.instructions.agent_count
+                "{}",
+                delegation_roster_line(
+                    report.instructions.agent_count,
+                    &report.instructions.unreadable_agent_paths,
+                )
             );
+            for path in &report.instructions.unreadable_agent_paths {
+                eprintln!(
+                    "error: agent roster incomplete: {} could not be read; \
+                     any agent it holds is undelegatable this session",
+                    path.display()
+                );
+            }
             println!(
                 "  Merged instructions written to {}",
                 report.stash.display()

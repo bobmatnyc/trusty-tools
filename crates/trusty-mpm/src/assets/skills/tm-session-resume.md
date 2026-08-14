@@ -93,7 +93,8 @@ mcp__trusty-mpm__session_context_catchup(
   session_id: <the current session id — the first thing resolved_snapshot is tried against>,
   tmux_window: <your own `tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'`>,
   all_projects: false,   # true also scans machine-wide registered projects
-  full: false             # true ignores the watermark, returns full history
+  full: false,            # true ignores the watermark, returns full history
+  sessions_offset: 0      # which page of the ordered session list to read — yours first, then newest
 )
 ```
 
@@ -111,8 +112,17 @@ The tool returns:
 {
   "sessions": [{ "format", "paused_at", "summary", "in_progress", "next_steps",
                  "git_context", "tmux_window", "source_file", "owned" }],
+  "sessions_total": 31,
+  "sessions_offset": 0,
+  "sessions_next_offset": 6,
   "recent_commits": [{ "sha", "msg", "author", "ts" }],
+  "recent_commits_total": 50,
   "recent_memory": [{ "title", "tags" }],
+  "recent_memory_total": 0,
+  "truncated": true,
+  "over_budget": false,
+  "page_bytes": 47812,
+  "truncation_notice": "<what was withheld and how to get it, or null>",
   "resolved_snapshot": "<path or null>",
   "resolved_via": "session_id" | "tmux_window" | null,
   "undatable_sessions_dropped": 0,
@@ -125,6 +135,24 @@ work, next steps, git context — confirm which session to resume from if more
 than one is listed, restore the todo state from it, and confirm with the user
 before continuing work. Cross-check `recent_commits` against your own
 knowledge of the repo state if anything looks stale.
+
+> **`sessions` is a page, and `truncated` says so.** The response is fitted to
+> a size you can read in one tool result, so on a project with a long pause
+> history `sessions` holds a page rather than all of them (#5557). When
+> `truncated` is `true`, `truncation_notice` names what was withheld and the
+> `sessions_offset` that retrieves it — re-call with that value to walk the
+> rest. This does not weaken `full: true`: full history is paged, never
+> dropped, and `sessions_next_offset` is `null` once you have all of it. Page 0
+> is ordered with the sessions you own first, so it carries your own entry;
+> that is why a resume normally needs only page 0.
+>
+> Two things the page does NOT promise. `over_budget: true` means nothing was
+> withheld but one record is larger than a whole page — it ships intact, and
+> `page_bytes` says how big the response got; no offset can shrink it. And the
+> offset is positional into a list rebuilt from disk on each call, so if a
+> session pauses while you are walking pages, a later page can repeat a record
+> you already have — de-duplicate on `source_file` or `paused_at` if you are
+> collecting them. Neither is a dropped record.
 
 > **`sessions` and `resolved_snapshot` answer different questions** and
 > legitimately disagree under a recent watermark: `sessions` is "what paused

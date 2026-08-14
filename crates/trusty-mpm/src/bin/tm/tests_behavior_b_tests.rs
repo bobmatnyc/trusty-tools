@@ -13,7 +13,9 @@
 use clap::Parser;
 
 use crate::cli::{AuthAction, Cli, Command, RepairAction, ServicesAction, SessctlAction};
-use crate::commands::session::compose_session_instructions;
+use crate::commands::session::{
+    compose_session_instructions, compose_session_instructions_with_roster,
+};
 
 #[test]
 fn cli_parses_attach() {
@@ -308,6 +310,47 @@ fn cli_parses_services_restart() {
 // display exactly what it stashes and what the live launch prompt is.
 // ------------------------------------------------------------------
 
+/// A fixture agent roster, rendered exactly as the live tiers would render it.
+///
+/// Why (#5544, #4937): the two convergence tests below compare two independently
+/// composed prompts, and each composition rescanned the agent roster from tiers
+/// rooted in `$HOME` and `$CLAUDE_CONFIG_DIR` — machine-global mutable state, so
+/// the two scans could legitimately disagree and the `assert_eq!` failed with a
+/// message indistinguishable from a real prompt regression. On this workstation
+/// `~/.claude/agents` is the only tier carrying `copyeditor`, `pangram-editor`,
+/// `proofreader`, `writer` and `writing-critic`, which is why the diff was
+/// always those exact five names and why CI — which has no ambient tier at all —
+/// never reproduced it.
+///
+/// The previous revision pinned `$HOME` and `$CLAUDE_CONFIG_DIR` around the test
+/// and took `#[serial]`. That treated the symptom with the disease: a process
+/// env write is visible to EVERY test in this binary for its whole duration, and
+/// `#[serial]` excludes only other `#[serial]` tests. Injecting one roster into
+/// both sides of the comparison removes the shared global entirely, so these
+/// tests neither write env nor need serialising.
+/// What: seeds one agent into a tempdir tier and renders it through
+/// `roster_section_from_dirs` — the same function the live path uses — returning
+/// the rendered `## Delegation Authority` block. The `TempDir` is returned so the
+/// caller keeps it alive.
+/// Test: used by `compose_session_instructions_display_matches_live_prompt` and
+/// `compose_session_instructions_display_matches_live_prompt_with_override`.
+fn fixture_roster_section() -> (tempfile::TempDir, String) {
+    let tiers = tempfile::tempdir().expect("fixture tier root");
+    let agents = tiers.path().join("agents");
+    std::fs::create_dir_all(&agents).expect("fixture tier");
+    // One agent, so the roster-present composer path is the one under test —
+    // the same branch the ambient roster used to select.
+    std::fs::write(
+        agents.join("engineer.md"),
+        "---\nname: engineer\nrole: engineer\nmodel: sonnet\n---\n\n# Engineer\n",
+    )
+    .expect("seed fixture agent");
+
+    let section = trusty_mpm::core::delegation_authority::roster_section_from_dirs(&[agents])
+        .expect("a seeded tier renders a roster section");
+    (tiers, section)
+}
+
 #[test]
 fn compose_session_instructions_display_matches_stash() {
     // Why: the #382 bug was that `tm session instructions` printed
@@ -340,21 +383,34 @@ fn compose_session_instructions_display_matches_live_prompt() {
     // `build_system_prompt_for`, which calls `resolve_pm_prompt`. If
     // `compose_session_instructions` ever returns something different from
     // `build_system_prompt_for`, the stash would again diverge from reality.
-    // What: runs `compose_session_instructions` and `build_system_prompt_for`
-    // on the same empty project directory and asserts the outputs match.
+    // What: runs both composers on the same empty project directory with the
+    // SAME injected roster and asserts the outputs match.
+    // #5544: the roster is injected rather than rescanned per side — see
+    // `fixture_roster_section`. No process env is touched, so this test needs
+    // no `#[serial]`.
     // Test: any future change that re-introduces the #382 divergence will
     // break this test immediately.
+    let (_tiers, roster) = fixture_roster_section();
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path();
 
     let (display, _output, _stash) =
-        compose_session_instructions(project).expect("compose succeeds");
+        compose_session_instructions_with_roster(project, Some(roster.clone()))
+            .expect("compose succeeds");
 
-    let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
+    let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_roster(
+        project,
+        Some(roster),
+    );
 
     assert_eq!(
         display, live_prompt,
         "tm session instructions output must match the live launch prompt (issue #382)"
+    );
+    assert!(
+        display.contains("### engineer"),
+        "the injected fixture roster must reach the composed prompt, or this \
+         test is no longer comparing the roster-present composer path"
     );
 }
 
@@ -367,8 +423,10 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
     // `.trusty-mpm/WORKFLOW.md` file this used to write is no longer read),
     // then asserts the display and the live prompt both include it (and don't
     // include the bundled heading).
+    // #5544: one injected roster feeds both sides — see the test above.
     // Test: if `compose_session_instructions` stops reading overrides for the
     // display path, this test fails.
+    let (_tiers, roster) = fixture_roster_section();
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path();
 
@@ -381,9 +439,13 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
     .unwrap();
 
     let (display, _output, _stash) =
-        compose_session_instructions(project).expect("compose succeeds");
+        compose_session_instructions_with_roster(project, Some(roster.clone()))
+            .expect("compose succeeds");
 
-    let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
+    let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_roster(
+        project,
+        Some(roster),
+    );
 
     assert_eq!(
         display, live_prompt,
