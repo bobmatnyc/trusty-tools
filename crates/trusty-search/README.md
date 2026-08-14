@@ -510,12 +510,29 @@ pattern matches (a `403` means the root is safe but unapproved — a different
 refusal). The error message names the matched pattern. There is no
 environment-variable override for either the allowlist or the denylist.
 
-One narrow exception, and only for the EPHEMERAL-directory rows: a caller that
-names one specific root on purpose can set `allow_sensitive_path: true` on
-`POST /indexes` to skip the `/tmp` / `/var/folders` / `Library/Application
-Support` prefix check. It does NOT skip the credential, secret-marker, or
-home-top-level rows, and it does NOT skip the approval requirement above — such
-a root must still be allowlisted.
+One narrow exception, and only for the EPHEMERAL-directory rows (`/tmp`,
+`/private/tmp`, `/var/folders`, `Library/Application Support`). A caller that
+names one specific root on purpose can opt in, two ways:
+
+```bash
+# Approve a scratch root by hand — durable, shows up in `index list`
+trusty-search index add /var/folders/../scratch-repo --allow-sensitive-path
+```
+
+```jsonc
+// Or per request: POST /indexes with the opt-in. This is its OWN approval —
+// the root does not need an allowlist entry. Used by tcode for a bake-off
+// working project (#2914).
+{ "id": "scratch", "root_path": "/var/folders/…/scratch", "allow_sensitive_path": true }
+```
+
+The request-level form is not a general way around default-deny. The flag
+defaults to `false`, so every automatic path (cwd probe, query-referenced path,
+transient worktree, test fixture) is unaffected; it writes nothing durable, so
+it cannot accumulate approvals; the credential, secret-marker, and
+home-top-level rows above still refuse it; and it confers no privilege a caller
+lacks, since the daemon is loopback-only and unauthenticated. Every use is
+logged at `warn`.
 
 ## CLI
 
