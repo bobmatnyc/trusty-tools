@@ -16,9 +16,14 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! `no_run`: type-checks the real API against a config path that need not
+//! exist — running it would either fail to find `config.yaml` or, in a repo
+//! that has one, call `std::process::exit`, so it is validated but not
+//! executed. // #5460: was `ignore`, which `--include-ignored` forces to run
+//! ```no_run
 //! use tga::core::config::{Config, ConfigValidator};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let cfg = Config::load(std::path::Path::new("config.yaml"))?;
 //! let errors = ConfigValidator::new(&cfg).validate();
 //! if !errors.is_empty() {
@@ -27,6 +32,8 @@
 //!     }
 //!     std::process::exit(1);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::path::Path;
