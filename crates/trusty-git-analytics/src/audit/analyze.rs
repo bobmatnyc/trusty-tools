@@ -23,7 +23,8 @@
 //! Nothing here is fail-open. Both failure arms — the binary would not spawn,
 //! and the daemon never answered — return `Err`, because a report missing those
 //! sections reads as a clean pass rather than as an outage.
-//! Test: `super::tests`.
+//! Test: `super::tests` against stubs; `super::real_binary_tests` (`#[ignore]`d)
+//! against the real `trusty-analyze` binary.
 //!
 //! # Spec References
 //! - [`SPEC-TGAUDIT-06~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-06~draft)
@@ -218,6 +219,18 @@ pub async fn ensure_analyze_daemon() -> Result<(), AnalyzeDaemonUnavailable> {
 /// serve` exits 1 when trusty-search is unreachable, so the readiness poll — not
 /// the PID — is what decides the verdict.
 ///
+/// A daemon that is up but answering `503 degraded` — which is what
+/// `trusty-analyze` returns while trusty-search is unreachable — is not a pass
+/// either, because [`probe_once`] counts only a 2xx. That is what makes the
+/// audit's trusty-search dependency hard on every run rather than only on a
+/// fresh spawn.
+///
+/// Concurrent calls are safe and independent: the guard is read-only shared
+/// input, and nothing is cached between calls, so each reaches its own verdict
+/// from its own probe. There is no cross-call spawn deduplication — see
+/// `super::tests::two_concurrent_guards_both_resolve_against_one_slow_daemon`
+/// for why none is owed.
+///
 /// # Errors
 ///
 /// [`AnalyzeDaemonUnavailable`] carrying the spawn error, or the readiness
@@ -225,7 +238,10 @@ pub async fn ensure_analyze_daemon() -> Result<(), AnalyzeDaemonUnavailable> {
 ///
 /// Test: `super::tests::{a_reachable_analyze_daemon_is_not_restarted,
 /// an_unspawnable_analyze_binary_refuses_the_audit,
-/// an_analyze_daemon_that_never_comes_up_refuses_the_audit}`.
+/// an_analyze_daemon_that_never_comes_up_refuses_the_audit,
+/// a_degraded_analyze_daemon_refuses_the_audit,
+/// two_concurrent_guards_both_resolve_against_one_slow_daemon}`, and
+/// `super::real_binary_tests` end to end.
 pub async fn ensure_analyze_daemon_with(
     guard: &AnalyzeGuard,
 ) -> Result<(), AnalyzeDaemonUnavailable> {

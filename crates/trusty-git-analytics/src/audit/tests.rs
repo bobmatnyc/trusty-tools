@@ -943,7 +943,7 @@ fn stale_renderer_is_rejected_before_the_sweep() {
 ///
 /// Binds port 0 so the OS picks a free one, then releases it — hard-coding a
 /// high port instead can collide with something already bound on a busy host.
-fn free_port() -> u16 {
+pub(super) fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
     let port = listener
         .local_addr()
@@ -953,9 +953,23 @@ fn free_port() -> u16 {
     port
 }
 
-/// A listener answering `HTTP/1.1 200 OK` to everything, standing in for a
-/// healthy daemon. Returns the port it bound.
-async fn serve_healthy() -> u16 {
+/// A listener standing in for `trusty-analyze`'s `/health`, answering
+/// `503 Service Unavailable` to its first `degraded_replies` callers and
+/// `200 OK` to every caller after that. Returns the port it bound.
+///
+/// 503 is not an arbitrary sad path: it is what the real daemon answers whenever
+/// trusty-search is unreachable
+/// (`crates/trusty-analyze/src/service/routes.rs`'s `health`, which returns
+/// `SERVICE_UNAVAILABLE` + `status: "degraded"`). `probe_once` counts only a
+/// 2xx, so a 503 daemon reads to the guard exactly like no daemon.
+///
+/// Counting replies rather than sleeping is what makes the slow-start tests
+/// deterministic — the guard's first probe is guaranteed to miss on a loaded
+/// machine, where a wall-clock delay could be overtaken.
+async fn serve_health(degraded_replies: usize) -> u16 {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind an ephemeral port");
@@ -963,17 +977,42 @@ async fn serve_healthy() -> u16 {
         .local_addr()
         .expect("read the bound address")
         .port();
+    let served = Arc::new(AtomicUsize::new(0));
     tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
+            let served = Arc::clone(&served);
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt as _;
-                let _ = stream
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                    .await;
+                let nth = served.fetch_add(1, Ordering::SeqCst);
+                let reply: &[u8] = if nth < degraded_replies {
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                };
+                let _ = stream.write_all(reply).await;
             });
         }
     });
     port
+}
+
+/// A listener answering `HTTP/1.1 200 OK` to everything, standing in for a
+/// healthy daemon. Returns the port it bound.
+async fn serve_healthy() -> u16 {
+    serve_health(0).await
+}
+
+/// An executable stub at `dir/name` running `script`, standing in for a
+/// `trusty-analyze` binary without needing one on the machine.
+#[cfg(unix)]
+fn stub_binary(dir: &std::path::Path, name: &str, script: &str) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = dir.join(name);
+    std::fs::write(&stub, script).expect("write the stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stub executable");
+    stub.to_str().expect("a UTF-8 temp path").to_string()
 }
 
 /// A guard pointed at `port`, with budgets short enough for a unit test.
@@ -1085,15 +1124,10 @@ fn the_spawn_arguments_are_serve_on_the_configured_port() {
 #[cfg(unix)]
 #[tokio::test]
 async fn an_analyze_daemon_that_never_comes_up_refuses_the_audit() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let dir = tempfile::tempdir().expect("create a temp dir");
-    let stub = dir.path().join("trusty-analyze-stub");
-    std::fs::write(&stub, "#!/bin/sh\nexit 1\n").expect("write the stub");
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
-        .expect("make the stub executable");
+    let stub = stub_binary(dir.path(), "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
 
-    let guard = guard_on(free_port(), stub.to_str().expect("a UTF-8 temp path"));
+    let guard = guard_on(free_port(), &stub);
     let err = crate::audit::ensure_analyze_daemon_with(&guard)
         .await
         .expect_err("a daemon that exits at once must stop the audit");
@@ -1110,5 +1144,129 @@ async fn an_analyze_daemon_that_never_comes_up_refuses_the_audit() {
     let msg = err.to_string();
     for needle in ["trusty-search start", "reads as a clean bill of health"] {
         assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+}
+
+/// #5670, the degraded arm: an analyze daemon that is up but whose trusty-search
+/// is down does not satisfy the preflight either.
+///
+/// This is the arm that decides how far #5670 actually reaches. `trusty-analyze`
+/// answers its own `/health` with 503 `degraded` whenever trusty-search is
+/// unreachable, and `probe_once` counts only a 2xx — so the guard's probe
+/// re-reads trusty-search's LIVE status on every `tga audit` run, not only when
+/// it has to spawn. An operator whose analyze daemon has been up for days and
+/// whose trusty-search died an hour ago is refused, with the same message.
+///
+/// The stub daemon here answers 503 forever, standing in for that daemon; the
+/// spawned replacement exits at once, as the real binary does at its own search
+/// check. The refusal must therefore come from the readiness poll — proof the
+/// guard kept probing the live 503 rather than accepting the bound port.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_degraded_analyze_daemon_refuses_the_audit() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let stub = stub_binary(dir.path(), "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
+
+    // usize::MAX degraded replies: it never recovers, exactly like an analyze
+    // daemon sitting on top of a dead trusty-search.
+    let port = serve_health(usize::MAX).await;
+    let guard = guard_on(port, &stub);
+    let err = crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a daemon answering 503 must stop the audit");
+
+    assert!(
+        err.cause.contains("did not become ready"),
+        "expected the readiness arm against a live-but-degraded daemon, got: {}",
+        err.cause
+    );
+    assert!(
+        err.to_string().contains("trusty-search start"),
+        "the refusal must name trusty-search: {err}"
+    );
+}
+
+/// #5670, the concurrency arm: two guards racing the same slow daemon both get a
+/// correct verdict, and neither observes state the other corrupted.
+///
+/// [`crate::audit::ensure_analyze_daemon_with`] holds no state between calls —
+/// its guard is a shared `&AnalyzeGuard` it only reads — so what this pins is
+/// the consequence: two overlapping calls each reach their own verdict from
+/// their own probe, and the daemon that comes up mid-flight satisfies both.
+///
+/// It also pins the spawn count at **two**, which is the honest number. There is
+/// no cross-call deduplication, in-process or otherwise, and adding one would
+/// guard a path no caller reaches: `ensure_analyze_daemon` is called once per
+/// `tga audit` process, and `trusty-audit run` audits its repositories
+/// sequentially (`crates/trusty-audit/src/run.rs`'s `run_one` loop). A second
+/// spawn is also self-limiting rather than damaging — `trusty-analyze serve`
+/// takes an exclusive redb lock on the facts store and binds a fixed port, so
+/// the loser of either race exits and the winner is the one daemon. Should a
+/// concurrent caller ever appear, this assertion is what will fail and say so.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_concurrent_guards_both_resolve_against_one_slow_daemon() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let spawn_log = dir.path().join("spawns.log");
+    let stub = stub_binary(
+        dir.path(),
+        "trusty-analyze-stub",
+        &format!(
+            "#!/bin/sh\necho \"$@\" >> {}\n",
+            spawn_log.to_str().expect("a UTF-8 temp path")
+        ),
+    );
+
+    // Degraded for exactly the two opening probes — one per guard — then ready.
+    // Both calls therefore miss, spawn, and find the daemon on a later poll.
+    let port = serve_health(2).await;
+    let mut guard = guard_on(port, &stub);
+    guard.startup_timeout = std::time::Duration::from_secs(5);
+
+    let (first, second) = tokio::join!(
+        crate::audit::ensure_analyze_daemon_with(&guard),
+        crate::audit::ensure_analyze_daemon_with(&guard),
+    );
+    first.expect("the first concurrent guard must resolve");
+    second.expect("the second concurrent guard must resolve");
+
+    // The guard both calls borrowed is unchanged: it is read-only input, and a
+    // reader that mutated it would have had to do so through a shared `&`.
+    assert_eq!(guard.url, format!("http://127.0.0.1:{port}"));
+    assert_eq!(guard.binary, stub);
+
+    // The stubs are detached, so their writes land after the guards return.
+    // Poll for the expected count rather than sleeping a guessed interval —
+    // and keep polling past it, so a THIRD spawn would be seen rather than
+    // raced past.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if std::fs::read_to_string(&spawn_log)
+            .unwrap_or_default()
+            .lines()
+            .count()
+            >= 2
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    // Then keep waiting past the expected count, so a THIRD spawn is seen
+    // rather than raced past.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let spawns = std::fs::read_to_string(&spawn_log).unwrap_or_default();
+
+    let spawned: Vec<&str> = spawns.lines().collect();
+    assert_eq!(
+        spawned.len(),
+        2,
+        "each call spawns for its own missed probe; got {spawned:?}"
+    );
+    for line in &spawned {
+        assert_eq!(
+            line.trim(),
+            format!("serve --port {port}"),
+            "every spawn carries the configured port"
+        );
     }
 }
