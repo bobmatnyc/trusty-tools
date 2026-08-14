@@ -303,9 +303,16 @@ available and always correct. Hand-rolling a worktree in order to parallelize
 anyway is what this rule forbids.
 
 The dispatch still forbids leaving the assigned tree into the main checkout, and
-forbids `git reset --hard`, `git checkout .`, and `git stash` against main. QA
-agents get their own worktree (e.g. `.claude/worktrees/qa-<ticket-or-pass>`),
-same as engineering agents.
+forbids `git reset --hard`, `git checkout .`, and `git stash` against main.
+
+**Who counts as file-mutating** (#5650): every engineer-tier agent, plus
+`documentation`, `version-control`, and the three QA agents that author tests —
+`qa`, `web-qa`, `api-qa`. Each gets its own worktree, same as an engineer. A
+dispatch that only reads does not: `research`, `code-analyzer`, `ticketing`, and
+`code-critic`, which shares `role: qa` with the QA writers but recommends rather
+than edits. The guard reads this from the bundled agent's own frontmatter
+(`dispatch_isolation.rs`), so a custom or project-local agent it does not ship is
+never denied — declare `isolation: "worktree"` for one that writes.
 
 Clean up after merge with `git worktree remove --force <path>` (which deletes the
 worktree directory and never the main checkout), then `git branch -D <branch>`

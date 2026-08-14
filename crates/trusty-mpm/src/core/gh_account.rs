@@ -524,11 +524,23 @@ pub async fn resolve_gh_account_env_for_registry(
     cwd: &std::path::Path,
 ) -> Vec<(String, String)> {
     let cwd_for_origin = cwd.to_path_buf();
-    let origin = tokio::task::spawn_blocking(move || {
+    let probe = tokio::task::spawn_blocking(move || {
         crate::daemon::managed_routes::inproject::get_origin_url(&cwd_for_origin)
     })
-    .await
-    .unwrap_or(None);
+    .await;
+    // #4734: still fail-open (see the doc above), but a git failure is now
+    // reported rather than being indistinguishable from "no origin remote".
+    let origin = match probe {
+        Ok(Ok(origin)) => origin,
+        Ok(Err(e)) => {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                "cannot read git origin remote; spawning without a pinned gh_account: {e}"
+            );
+            None
+        }
+        Err(_) => None,
+    };
     let Some(origin) = origin else {
         return Vec::new();
     };
