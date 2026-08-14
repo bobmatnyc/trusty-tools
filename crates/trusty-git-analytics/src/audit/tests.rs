@@ -934,3 +934,181 @@ fn stale_renderer_is_rejected_before_the_sweep() {
             .unwrap_or_else(|e| panic!("{unreadable:?} must proceed, not fail: {e}"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// #5670 — the analyze daemon the audit's report is built from
+// ---------------------------------------------------------------------------
+
+/// A localhost port nothing is listening on.
+///
+/// Binds port 0 so the OS picks a free one, then releases it — hard-coding a
+/// high port instead can collide with something already bound on a busy host.
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("read the bound address")
+        .port();
+    drop(listener);
+    port
+}
+
+/// A listener answering `HTTP/1.1 200 OK` to everything, standing in for a
+/// healthy daemon. Returns the port it bound.
+async fn serve_healthy() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("read the bound address")
+        .port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            });
+        }
+    });
+    port
+}
+
+/// A guard pointed at `port`, with budgets short enough for a unit test.
+fn guard_on(port: u16, binary: &str) -> crate::audit::AnalyzeGuard {
+    crate::audit::AnalyzeGuard {
+        url: format!("http://127.0.0.1:{port}"),
+        binary: binary.to_string(),
+        startup_timeout: std::time::Duration::from_millis(400),
+        poll_interval: std::time::Duration::from_millis(50),
+    }
+}
+
+/// Both overrides win when set, and an empty one is not a setting.
+///
+/// The empty case matters because `trusty-audit` exports `TRUSTY_ANALYZE_BIN`
+/// unconditionally, and a half-written export leaves it set to `""` — which must
+/// resolve to the PATH lookup rather than to an unspawnable empty program name.
+#[test]
+fn analyze_resolution_prefers_the_env_overrides() {
+    use crate::audit::analyze::{binary_from_override, url_from_override};
+    use crate::audit::{DEFAULT_ANALYZE_BIN, DEFAULT_ANALYZE_URL};
+
+    assert_eq!(
+        binary_from_override(Some("/pinned/trusty-analyze")),
+        "/pinned/trusty-analyze"
+    );
+    assert_eq!(binary_from_override(None), DEFAULT_ANALYZE_BIN);
+    assert_eq!(binary_from_override(Some("")), DEFAULT_ANALYZE_BIN);
+
+    assert_eq!(
+        url_from_override(Some("http://127.0.0.1:9999")),
+        "http://127.0.0.1:9999"
+    );
+    assert_eq!(url_from_override(None), DEFAULT_ANALYZE_URL);
+    assert_eq!(url_from_override(Some("")), DEFAULT_ANALYZE_URL);
+}
+
+/// `serve` takes `--port`, not a URL, so an operator who moved the daemon must
+/// get a daemon on the port they named — spawning on 7879 and then probing the
+/// override would burn the whole budget and refuse a correct configuration.
+#[test]
+fn the_spawn_port_comes_from_the_configured_url() {
+    use crate::audit::analyze::port_of;
+    use crate::audit::DEFAULT_ANALYZE_PORT;
+
+    assert_eq!(port_of("http://127.0.0.1:9312"), 9312);
+    assert_eq!(port_of("http://localhost:9312/"), 9312);
+    assert_eq!(port_of("https://localhost:9312"), 9312);
+    // No port, and unreadable ports, fall back rather than failing the run.
+    assert_eq!(port_of("http://localhost"), DEFAULT_ANALYZE_PORT);
+    assert_eq!(port_of("http://localhost:not-a-port"), DEFAULT_ANALYZE_PORT);
+}
+
+/// A daemon that is already up is left alone.
+///
+/// The binary is a path that cannot exist, so any spawn attempt would fail the
+/// run — passing is therefore proof the fast path returned without spawning
+/// anything, which is what keeps `tga audit` from starting a second daemon
+/// beside an operator's own.
+#[tokio::test]
+async fn a_reachable_analyze_daemon_is_not_restarted() {
+    let port = serve_healthy().await;
+    let guard = guard_on(port, "/nonexistent/trusty-analyze");
+    crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect("a healthy daemon must satisfy the preflight without a spawn");
+}
+
+/// #5670, the spawn-failure arm: a binary that will not start is a refusal, not
+/// a warning the sweep proceeds past.
+///
+/// This is the shape the defect had — `trusty-analyze` absent from the machine —
+/// and before the fix nothing looked for it at all, so the audit ran to
+/// completion and delivered a report with three empty sections.
+#[tokio::test]
+async fn an_unspawnable_analyze_binary_refuses_the_audit() {
+    let guard = guard_on(free_port(), "/nonexistent/trusty-analyze");
+    let err = crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a binary that cannot be spawned must stop the audit");
+
+    let msg = err.to_string();
+    for needle in [
+        "trusty-analyze",
+        "trusty-search",
+        "/nonexistent/trusty-analyze",
+    ] {
+        assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+}
+
+/// The argument vector is the tga→trusty-analyze contract, asserted without
+/// spawning anything — the same pure-function split `report_args` uses on the
+/// renderer side.
+#[test]
+fn the_spawn_arguments_are_serve_on_the_configured_port() {
+    use crate::audit::analyze::serve_args;
+
+    assert_eq!(serve_args(9312), vec!["serve", "--port", "9312"]);
+}
+
+/// #5670, the readiness arm: a spawn that succeeds is not a daemon.
+///
+/// `trusty-analyze serve` exits 1 when trusty-search is unreachable, so the PID
+/// a spawn returns proves nothing. This stub reproduces exactly that — it execs
+/// and exits at once — and the refusal must still happen. The `cause` is what
+/// separates this arm from the spawn-failure one above: reaching the readiness
+/// timeout is only possible after `spawn_detached` returned a live PID.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_analyze_daemon_that_never_comes_up_refuses_the_audit() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let stub = dir.path().join("trusty-analyze-stub");
+    std::fs::write(&stub, "#!/bin/sh\nexit 1\n").expect("write the stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stub executable");
+
+    let guard = guard_on(free_port(), stub.to_str().expect("a UTF-8 temp path"));
+    let err = crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a daemon that exits at once must stop the audit");
+
+    // The spawn itself succeeded — this is the readiness verdict, not a spawn
+    // failure wearing the same error type.
+    assert!(
+        err.cause.contains("did not become ready"),
+        "expected the readiness arm, got: {}",
+        err.cause
+    );
+
+    // And the refusal names the ordering that actually fixes it.
+    let msg = err.to_string();
+    for needle in ["trusty-search start", "reads as a clean bill of health"] {
+        assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+}
