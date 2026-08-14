@@ -157,7 +157,7 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     // every run on a machine whose trusty-search is down.
     ensure_search_daemon().await?;
 
-    // #5670: the third whole-run precondition. Nothing started `trusty-analyze`,
+    // #5670: the fourth whole-run precondition. Nothing started `trusty-analyze`,
     // and DOC-67 §8 sources the findings table, the complexity distribution and
     // the health factors from it alone — so a machine without the daemon
     // produced a report with those three sections empty, and exited 0. This

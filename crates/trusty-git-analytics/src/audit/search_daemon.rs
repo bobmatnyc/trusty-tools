@@ -199,7 +199,7 @@ pub async fn ensure_search_daemon() -> Result<(), SearchDaemonUnavailable> {
 /// Test: `super::tests::{a_reachable_search_daemon_is_not_restarted,
 /// an_unspawnable_search_binary_refuses_the_audit,
 /// a_search_daemon_that_never_comes_up_refuses_the_audit,
-/// the_search_guard_starts_the_daemon_the_analyze_preflight_then_needs}`.
+/// the_search_guard_recovers_a_stale_degraded_analyze_daemon}`.
 pub async fn ensure_search_daemon_with(guard: &SearchGuard) -> Result<(), SearchDaemonUnavailable> {
     let health = health_url(&guard.url);
     if probe_once(&health).await {
