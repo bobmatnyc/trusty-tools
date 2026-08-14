@@ -163,7 +163,10 @@ pub fn index_id_for(path: &Path) -> Option<String> {
 /// asks — so a repository that would satisfy the renderer is not re-indexed.
 /// Building the vector in a pure function is what lets a test assert it without
 /// spawning anything, as [`super::review::report_args`] does.
-/// Test: `super::tests::the_probe_asks_for_the_index_by_id`.
+/// Test: `super::tests::the_index_invocation_names_the_path_and_the_id` and
+/// `super::tests::an_already_indexed_repository_is_not_reindexed` — the first
+/// asserts the vector without spawning, the second that a served repository is
+/// probed with `index-status <id>` and nothing else is spawned.
 pub(super) fn probe_args(index_id: &str) -> Vec<OsString> {
     vec!["index-status".into(), index_id.into()]
 }
