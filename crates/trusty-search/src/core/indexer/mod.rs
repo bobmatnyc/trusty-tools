@@ -83,6 +83,7 @@ pub(crate) use helpers::{
 };
 
 // Re-export types so callers outside this module see the same paths.
+pub use search::drops::SearchDrops;
 pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};
 pub(crate) use types::ChunkSnapshot;
 pub use types::{CodeChunk, CommitTimings, ParsedBatch, SearchMode, SearchQuery, SearchStage};

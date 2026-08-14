@@ -484,7 +484,10 @@ pub(super) async fn search_handler(
     handle.search_pressure.notify_one();
     let started = std::time::Instant::now();
     let indexer = handle.indexer.read().await;
-    let mut results = indexer.search(&query).await.map_err(|_| {
+    // #2203: `search_with_drops`, not `search` — the tally is what lets a
+    // caller tell "3 results because 3 matched" from "3 results because 7 were
+    // dropped". Published as `meta.dropped` below.
+    let (mut results, mut dropped) = indexer.search_with_drops(&query).await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "internal search error" })),
@@ -503,6 +506,10 @@ pub(super) async fn search_handler(
     let before = results.len();
     results.retain(|r| file_is_within_root(&r.file, &root));
     let filtered_out = before.saturating_sub(results.len());
+    // #2203: the fifth drop site. `stale_index_root` already flagged it as a
+    // boolean; the count joins the other four so `meta.dropped` accounts for
+    // every row the pipeline removed.
+    dropped.out_of_root = filtered_out;
     // Issue #3683 code-critic review finding 3 (HIGH): read the degraded
     // flag while the indexer read-guard is still held (it's about to be
     // dropped below) so the response reflects THIS query's lane state, not
@@ -584,6 +591,16 @@ pub(super) async fn search_handler(
             // normal case (no drops); `true` means the operator should run
             // `trusty-search index <path>` to re-register with a fresh root.
             "stale_index_root": filtered_out > 0,
+            // #2203: how many candidates this query retrieved and then
+            // discarded, per drop site. Without it a short `results` array was
+            // indistinguishable from a small match set — `top_k: 10` returning
+            // 3 rows read the same whether 3 matched or 7 were deleted on the
+            // way out, which is how #2203 presented as "search is broken" on an
+            // intact corpus. `unresolved_corpus` is the fault case (the corpus
+            // could not be read); the rest are the requested `mode` /
+            // `exclude_archived` / root scope doing their job.
+            "dropped": dropped,
+            "dropped_total": dropped.total(),
             // Issue #3683 code-critic review finding 3 (HIGH): `true` means
             // this query's lexical lane (BM25 and/or grep-fallback) degraded
             // to empty/partial because the detached corpus rehydrate hadn't
