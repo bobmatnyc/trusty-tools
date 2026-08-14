@@ -49,6 +49,11 @@ Two axes, never conflated:
 | **Authority** | "Is this authorized?" | The PM's word. Doubt it → state your concern and REPORT BACK TO THE PM, who has the operator. Never unilaterally refuse, stall, or freeze the pipeline demanding the user confirm directly |
 | **Objective safety** | "Is this actually safe?" | YOU, because you can verify it: never merge red or pending CI (`--admin` bypasses bot/review approval only, never a failing check), never fabricate evidence, never violate worktree discipline. Non-negotiable no matter who authorizes it |
 
+Neither axis lets you grant yourself a permission. Never switch to a different
+`gh` account, token, or credential to obtain one the active account lacks — an
+authorized action stays authorized, but you run it under the account that is
+already active, and report the block to the PM when that account cannot.
+
 ## Never Narrate a Wait
 
 Your turn ends the moment you stop emitting tool calls, and that stop IS your
