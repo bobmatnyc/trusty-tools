@@ -62,6 +62,63 @@ always compiles local source against the local dependency, and those always
 agree. The break is only visible against the registry, which is what this gate
 compares to.
 
+## What it does not compare: types
+
+`cargo-semver-checks` 0.50.0 **compares no types**. Its lints ask whether an item
+still exists at its path, whether its kind still matches, whether its parameter
+and generic *counts* still match, and what its attributes and trait impls are.
+Substitute any type and the item still exists, with the same name and the same
+arity, so every lint passes. Its only return-type lints concern the `()`
+boundary specifically.
+
+Measured against a 9-break probe crate at `--release-type patch`, the strictest
+setting the tool has: **2 caught, 7 missed**. The two it caught were a removed
+`pub fn` and an added enum variant. All seven misses were type substitutions —
+method return, method parameter, free-fn return, free-fn parameter, struct field,
+`pub const`, trait-method return.
+
+The instance on record is `trusty-common` 0.32.0 → 0.33.0, which changed
+`KgStoreRedb::count_active_triples` from `u64` to `Result<u64>` and the
+`KnowledgeGraph` wrapper from `usize` to `Result<usize>`:
+
+```
+$ bash scripts/check_semver.sh --crate trusty-common
+     Checked [   0.133s] 196 checks: 196 pass, 58 skip
+     Summary no semver update required
+```
+
+Both items are `visibility: public`, in a fully public module chain, with
+`memory-core` enabled and no exclusion touching either. The tool had the delta in
+its rustdoc JSON and had no lint that looks at it.
+
+### The differ that does compare them
+
+`scripts/check_semver_types.sh` reads the rustdoc JSON `cargo-semver-checks`
+already cached under `target/semver-checks/` and compares the types: every public
+fn/method parameter and return, struct and enum-variant fields, `const` and
+`static` types, `type` aliases, and associated consts and types. It builds
+nothing — a cold cache is a `NO VERDICT`, never a pass.
+
+```
+$ bash scripts/check_semver_types.sh --crate trusty-common
+CHANGED fn trusty_common::…::KgStoreRedb::count_active_triples -> : u64 -> Result<u64>
+```
+
+It is **not wired into CHECK 5**, so it blocks nothing on its own. What CHECK 5
+does carry is the disclosure: its `[PASS]` line states that no type was compared
+and names this script. Run it before a release whose diff touched a signature.
+
+Two things it does not cover, both deliberate:
+
+- **Added and removed items** are counted and never failed on. That is
+  `cargo-semver-checks`' half of the job, and it does that half correctly.
+- **A behavioural change under an unchanged signature.** A function whose
+  precondition moved — `latest_trusty_mpm_snapshot` is the shape on record —
+  renders identically on both sides. No static differ can see it, this one
+  included.
+
+Self-test: `scripts/check_semver_types_selftest.sh`.
+
 ## What runs
 
 For the named crate, the gate resolves the **previous release** — the greatest
@@ -446,9 +503,23 @@ To run it in CI without cutting a release, dispatch the workflow:
 gh workflow run semver-checks.yml -f crate=trusty-common
 ```
 
+The type differ takes the same two forms, and needs the cache the command above
+warms:
+
+```bash
+bash scripts/check_semver_types.sh --crate trusty-common
+bash scripts/check_semver_types.sh --baseline-json <a.json> --current-json <b.json>
+```
+
 ## Self-test
 
-Two files, one per side of the seam. `scripts/check_semver_selftest.sh` drives
+Three files. `scripts/check_semver_types_selftest.sh` covers the type differ: the
+seven substitutions `cargo-semver-checks` misses are each asserted by name
+against the probe crate's real rustdoc JSON, and every way the differ can fail to
+understand a document is pinned to exit 3.
+
+The other two are one per side of the CHECK 5 seam.
+`scripts/check_semver_selftest.sh` drives
 the gate over captured `cargo-semver-checks` output;
 `scripts/preflight-check5-selftest.sh` drives CHECK 5's *decision* over captured
 gate output. The second exists because the decision was the half that had no test
