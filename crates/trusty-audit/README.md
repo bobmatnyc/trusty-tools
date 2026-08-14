@@ -5,11 +5,11 @@ codebases, and returns a report. It installs the pinned tools it needs
 (`tga`, `trusty-analyze`, `trusty-review`) and drives the audit workflow —
 "really an installer runner".
 
-**Status (#5502, #5495, #5555).** The crate, its working-directory layout, the
-CLI surface, pinned tool installation, and the audit run exist. Repository
-selection and cloning, package assembly, signing and the desktop shell do not —
-they are later milestones on #5473 / #5477. The run reads the selection those
-will write; the file and its shape are documented under "Running the sweep".
+**Status (#5502, #5495, #5555, #5499).** The crate, its working-directory
+layout, the CLI surface, pinned tool installation, the audit run, and the return
+package exist. Content signing and the desktop shell do not — they are later
+milestones on #5473 / #5477. The run reads a selection file; its shape is
+documented under "Running the sweep".
 
 ## Shape: a library with a CLI over it
 
@@ -37,6 +37,7 @@ trusty-audit tools              # which pinned tools are installed, at which ver
 trusty-audit install            # download and verify the pinned tools
 trusty-audit manifest           # engagement metadata from the companion manifest.toml
 trusty-audit run                # run `tga audit` over the selected repositories
+trusty-audit package            # assemble the deliverable zip to send back
 ```
 
 The same program is also installed as `taudit`, a shorter name for repeat use —
@@ -202,6 +203,47 @@ Nothing retries through a proxy, and there is no bundled-binary fallback
 variant; whether one should exist is deferred (#5495), not solved. The remedy
 today is to allow the GitHub release-asset host, or to ask for a package built
 for that network.
+
+## Sending the deliverable back
+
+`trusty-audit package` turns what the sweep produced into one file:
+
+```
+trusty-audit package                              # <work-dir>/audit-return-package.zip
+trusty-audit package --out ~/Desktop/return.zip   # wherever you will attach it from
+```
+
+The zip carries each audited repository's report directory (`reports/<repo>/`),
+the tga extract database those reports were computed from (`extract/<repo>.db`),
+and two generated files: a `README.md` explaining what is inside, and a
+`package.toml` naming which repositories were covered and at which tool
+versions. The last line of the output is the path to send.
+
+**It is unencrypted and has no password, deliberately.** You can open it and
+read exactly what you are about to send, which is the same premise as the
+readable engagement config. Encrypting it would defend against nobody — you hold
+the plaintext either way.
+
+**What it will not send.** The engagement's OpenRouter key is never in it: every
+member's bytes are scanned for the key while the zip is written, and a match
+refuses the whole package rather than omitting one file. A symlink under `out/`
+or `extract/` is refused for the same reason — following one would read a file
+from outside the working directory into an archive that leaves your network.
+Both leave no zip and no partial file.
+
+Two things it does not claim. The extract database holds no file content,
+diffs, patches, hunks or blobs — but it does hold free-text fields (commit
+messages, PR and work-item titles, classification notes), so a snippet someone
+pasted into one of those is in it. And nothing here is signed yet: content
+signing is #5481, and until it lands nothing proves the package was not altered
+after it was written.
+
+A sweep that audited nothing produces no package. A sweep that audited some
+repositories does, and it names the ones it does not cover — in the printed
+output, in `package.toml`, and in a non-zero exit status.
+
+`--out` is the one path on which this client writes outside the working
+directory, and only when you name one.
 
 ## Reading the manifest
 

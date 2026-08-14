@@ -90,6 +90,16 @@ pub enum Verb {
     },
     /// Run the audit sweep over the selected repositories.
     Run,
+    /// Assemble the unencrypted deliverable zip to send back.
+    Package {
+        /// Where to write the zip (default: <work-dir>/audit-return-package.zip).
+        ///
+        /// The CLI's answer to a save dialog: name a path here and the file
+        /// lands where you will attach it from. This is the one path on which
+        /// this client writes outside the working directory.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
 }
 
 impl Cli {
@@ -134,6 +144,9 @@ impl Cli {
                 },
             },
             Some(Verb::Run) => Command::Run,
+            Some(Verb::Package { out }) => Command::Package {
+                destination: out.clone(),
+            },
         }
     }
 }
@@ -364,6 +377,32 @@ pub fn render(outcome: &Outcome) -> String {
             }
             out
         }
+        // #5499 closure condition 3: the recipient has to be able to find the
+        // file. The path is the first and last line, and everything between is
+        // what they can check before sending it.
+        Outcome::Package(package) => {
+            let mut out = format!("Return package: {}\n", package.path.display());
+            out.push_str(&format!(
+                "  {} in {}, unencrypted — open it and read what you are sending\n",
+                count_of(package.files.len(), "file", "files"),
+                human_bytes(package.packaged_bytes)
+            ));
+            for file in &package.files {
+                out.push_str(&format!(
+                    "  {:>10}  {}\n",
+                    human_bytes(file.bytes),
+                    file.entry
+                ));
+            }
+            for line in &package.excluded {
+                out.push_str(&format!("Not included: {line}\n"));
+            }
+            out.push_str(&format!(
+                "\nSend this file back: {}\n",
+                package.path.display()
+            ));
+            out
+        }
     }
 }
 
@@ -401,6 +440,9 @@ fn describe_next(next: &NextStep) -> String {
             )
         }
         NextStep::ReadyForRun => "run the audit sweep (`trusty-audit run`)".to_string(),
+        NextStep::ReturnPackage => {
+            "assemble the deliverable and send it back (`trusty-audit package`)".to_string()
+        }
     }
 }
 
@@ -410,6 +452,7 @@ mod cli_tests {
     use crate::clone::{CloneReport, ClonedRepo};
     use crate::discover::DiscoveredRepo;
     use crate::manifest::AuditManifest;
+    use crate::package::{PackagedFile, ReturnPackage};
     use crate::session::EXIT_INCOMPLETE;
     use crate::session::{Session, WorkDirReport};
     use crate::tools::{InstalledTool, RequiredTool, ToolStatus};
@@ -431,6 +474,7 @@ mod cli_tests {
             Command::DiscoverRepos => vec!["taudit", "discover"],
             Command::CloneRepos { .. } => vec!["taudit", "clone", "acme/api"],
             Command::Run => vec!["taudit", "run"],
+            Command::Package { .. } => vec!["taudit", "package"],
         }
     }
 
@@ -452,6 +496,7 @@ mod cli_tests {
                 options: CloneOptions::default(),
             },
             Command::Run,
+            Command::Package { destination: None },
         ]
     }
 
@@ -789,6 +834,75 @@ mod cli_tests {
             render(&total).contains("no repository was audited"),
             "{}",
             render(&total)
+        );
+    }
+
+    /// #5499 closure condition 3: the path has to be findable in the output,
+    /// and the recipient has to be told the file is theirs to inspect.
+    #[test]
+    fn rendering_a_package_names_the_file_to_send_and_its_members() {
+        let package = ReturnPackage {
+            path: PathBuf::from("/work/audit-return-package.zip"),
+            files: vec![
+                PackagedFile {
+                    entry: "README.md".to_owned(),
+                    source: None,
+                    bytes: 900,
+                },
+                PackagedFile {
+                    entry: "extract/00-acme-api.db".to_owned(),
+                    source: Some(PathBuf::from("/work/extract/00-acme-api.db")),
+                    bytes: 3 * 1024 * 1024,
+                },
+            ],
+            total_bytes: 900 + 3 * 1024 * 1024,
+            packaged_bytes: 1024 * 1024,
+            excluded: Vec::new(),
+        };
+        let text = render(&Outcome::Package(package));
+        assert!(text.contains("/work/audit-return-package.zip"), "{text}");
+        assert!(text.contains("Send this file back"), "{text}");
+        assert!(text.contains("unencrypted"), "{text}");
+        assert!(text.contains("extract/00-acme-api.db"), "{text}");
+        assert!(text.contains("3.0 MiB"), "{text}");
+    }
+
+    /// A package covering four of five repositories is still worth sending and
+    /// is still not the whole engagement — `taudit package && mail …` must not
+    /// read the first half of that sentence only.
+    #[test]
+    fn a_package_that_omits_a_repository_does_not_exit_zero() {
+        let package = |excluded: Vec<String>| ReturnPackage {
+            path: PathBuf::from("/work/audit-return-package.zip"),
+            files: Vec::new(),
+            total_bytes: 0,
+            packaged_bytes: 0,
+            excluded,
+        };
+        assert_eq!(Outcome::Package(package(Vec::new())).exit_code(), 0);
+
+        let partial = Outcome::Package(package(vec![
+            "acme-web is not in this package — `tga audit` exited with code 3".to_owned(),
+        ]));
+        assert_eq!(exit_code(&partial), EXIT_INCOMPLETE);
+        assert!(
+            render(&partial).contains("Not included: acme-web"),
+            "{}",
+            render(&partial)
+        );
+    }
+
+    /// The save-dialog equivalent: the recipient names where the file lands.
+    #[test]
+    fn the_package_destination_is_choosable_from_the_command_line() {
+        let cli =
+            Cli::try_parse_from(["taudit", "package", "--out", "/Users/x/Desktop/return.zip"])
+                .expect("the out flag parses");
+        assert_eq!(
+            cli.to_command(),
+            Command::Package {
+                destination: Some(PathBuf::from("/Users/x/Desktop/return.zip"))
+            }
         );
     }
 
