@@ -526,7 +526,11 @@ pub(crate) fn emit_top_level_alias_notice() {
 /// not in a git repo or the remote URL is not a GitHub URL.
 /// Test: `derive_source_id_from_cwd_returns_none_without_git` (unit).
 fn derive_source_id_from_path(dir: &std::path::Path) -> Option<String> {
-    let url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(dir)?;
+    // #4734: a `--current` filter has nothing to fall back to either way, so an
+    // unreadable remote and an absent one both yield no filter here.
+    let url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(dir)
+        .ok()
+        .flatten()?;
     let gh = trusty_common::github_path::parse_github_path(&url)?;
     Some(format!("{}/{}", gh.owner, gh.repo))
 }

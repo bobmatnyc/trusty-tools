@@ -77,7 +77,15 @@ use crate::project::resolver::resolve_project_by_repo_url;
 /// and `validate_deliverable_scope_ssh_repo_url_*`.
 fn github_identity_for_repo_url(repo_url: &str) -> Option<GithubPath> {
     if super::is_local_workdir(repo_url) {
-        let origin = super::inproject::get_origin_url(std::path::Path::new(repo_url))?;
+        // #4734: an unreadable remote is not the same as an absent one; both
+        // yield no identity here (the caller falls back to an exact-string
+        // project match), but the failure gets said out loud.
+        let origin = super::inproject::get_origin_url(std::path::Path::new(repo_url))
+            .inspect_err(|e| {
+                tracing::warn!(repo_url, "deliverable scope: cannot read git remote: {e}");
+            })
+            .ok()
+            .flatten()?;
         parse_github_path(&origin)
     } else {
         parse_github_path(repo_url)

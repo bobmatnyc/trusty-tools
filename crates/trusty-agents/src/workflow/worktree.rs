@@ -5,12 +5,12 @@
 //! worktree` keeps the base checkout clean and lets us merge results later.
 //! What: `WorktreeManager` creates detached-HEAD worktrees under
 //! `base_dir/<label>`, removes them by path, and can clean up stale dirs on
-//! startup. Falls back to a plain subdirectory (with a logged warning) when
-//! `git worktree` is unavailable — the workflow still runs, just without
-//! isolation.
+//! startup. `create` either returns a real worktree or an error — it never
+//! substitutes a plain subdirectory, because that would hand the caller a
+//! shared-tree path while it believes it owns an isolated one (#4734).
 //! Test: Worktree ops require a live git repo + `git` binary; unit tests cover
-//! the path construction and cleanup stub. End-to-end flow exercised via
-//! workflow integration.
+//! the path construction, the git-failure error arm, and the cleanup stub.
+//! End-to-end flow exercised via workflow integration.
 
 use std::path::{Path, PathBuf};
 
@@ -37,12 +37,28 @@ impl WorktreeManager {
     /// reference that needs cleanup. Each parallel sub-agent gets its own
     /// filesystem view so writes don't race.
     /// What: Shells out to `git worktree add --detach <path> <HEAD-commit>`.
-    /// Falls back to a plain `mkdir -p` subdirectory (with a warning) when
-    /// the git command fails — the caller can still proceed without
-    /// isolation.
-    /// Test: Requires a live git repo; covered by workflow integration.
+    /// An `Ok` return is a real worktree, always: every git failure — a
+    /// missing binary, an unreadable HEAD, a refused `worktree add`, a path
+    /// git cannot express — is an `Err`, never a plain directory in the
+    /// shared tree.
+    /// Test: `create_errors_when_git_worktree_add_fails`,
+    /// `create_errors_on_non_utf8_path`.
     pub async fn create(&self, label: &str) -> anyhow::Result<PathBuf> {
         let path = self.base_dir.join(label);
+
+        // #4734: resolve the path before creating anything — `git worktree
+        // add` takes a string argument, and a lossy conversion here used to
+        // become `.`, pointing git at the caller's own checkout.
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "worktree path is not valid UTF-8 and cannot be passed to git: {}",
+                    path.display()
+                )
+            })?
+            .to_string();
+
         tokio::fs::create_dir_all(&self.base_dir).await?;
 
         // Get current HEAD commit so the new worktree starts from the same
@@ -50,40 +66,37 @@ impl WorktreeManager {
         let head = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .output()
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to run `git rev-parse HEAD`: {e}"))?;
 
-        if !head.status.success() {
-            tracing::warn!(
-                label = %label,
-                "git rev-parse HEAD failed; falling back to plain subdir (no isolation)"
-            );
-            tokio::fs::create_dir_all(&path).await?;
-            return Ok(path);
-        }
+        // #4734: a failed HEAD read used to become a plain subdir with only a
+        // warn! — the caller then wrote into the shared tree believing it was
+        // isolated.
+        anyhow::ensure!(
+            head.status.success(),
+            "`git rev-parse HEAD` failed for worktree {label}: {}",
+            String::from_utf8_lossy(&head.stderr).trim()
+        );
 
         let commit = String::from_utf8_lossy(&head.stdout).trim().to_string();
 
         // Create worktree at detached HEAD.
-        let path_str = path.to_str().unwrap_or(".").to_string();
-        let status = Command::new("git")
+        let out = Command::new("git")
             .args(["worktree", "add", "--detach", &path_str, &commit])
-            .status()
-            .await;
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to run `git worktree add` for {label}: {e}"))?;
 
-        match status {
-            Ok(s) if s.success() => {
-                tracing::debug!(label = %label, path = %path.display(), "created worktree");
-                Ok(path)
-            }
-            Ok(_) | Err(_) => {
-                tracing::warn!(
-                    label = %label,
-                    "git worktree add failed; falling back to plain subdir (no isolation)"
-                );
-                tokio::fs::create_dir_all(&path).await?;
-                Ok(path)
-            }
-        }
+        // #4734: same fail-open as above — a refused `worktree add` must fail
+        // the caller, not silently hand back an unisolated directory.
+        anyhow::ensure!(
+            out.status.success(),
+            "`git worktree add --detach {path_str} {commit}` failed for {label}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+
+        tracing::debug!(label = %label, path = %path.display(), "created worktree");
+        Ok(path)
     }
 
     /// Remove a worktree by path.
@@ -135,6 +148,57 @@ mod tests {
     fn worktree_manager_new_stores_base_dir() {
         let mgr = WorktreeManager::new(PathBuf::from("/tmp/x"));
         assert_eq!(mgr.base_dir, PathBuf::from("/tmp/x"));
+    }
+
+    /// #4734: a path git cannot be handed used to degrade to `.` and then to a
+    /// plain subdir. Needs no git binary and no repo — the guard runs first.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_errors_on_non_utf8_path() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        // A `&str` label is always valid UTF-8, so the bad byte has to come
+        // from base_dir. 0x80 is a lone continuation byte — never valid UTF-8.
+        let base = std::env::temp_dir()
+            .join(format!("trusty-agents-worktree-{}", uuid::Uuid::new_v4()))
+            .join(OsString::from_vec(vec![b'b', 0x80, b'd']));
+
+        let mgr = WorktreeManager::new(base);
+        let err = mgr
+            .create("sub")
+            .await
+            .expect_err("a path git cannot be handed must not degrade to a plain subdir");
+        assert!(
+            err.to_string().contains("not valid UTF-8"),
+            "expected a UTF-8 rejection, got: {err}"
+        );
+    }
+
+    /// #4734: the fail-open regression guard. A destination git refuses used to
+    /// come back as `Ok(plain_subdir)` with only a `warn!` to witness it.
+    #[tokio::test]
+    async fn create_errors_when_git_worktree_add_fails() {
+        let base = std::env::temp_dir().join(format!(
+            "trusty-agents-worktree-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let label = "occupied";
+        // Pre-occupy the destination: `git worktree add` refuses a path that
+        // already exists, so this fails the git step without touching cwd.
+        std::fs::create_dir_all(base.join(label)).unwrap();
+        std::fs::write(base.join(label).join("squatter.txt"), b"in the way").unwrap();
+
+        let mgr = WorktreeManager::new(base.clone());
+        let result = mgr.create(label).await;
+
+        let _ = std::fs::remove_dir_all(&base);
+        let err = result.expect_err("git worktree add must not degrade to a plain subdir");
+        assert!(
+            err.to_string().contains("git worktree add")
+                || err.to_string().contains("git rev-parse"),
+            "expected a git failure to propagate, got: {err}"
+        );
     }
 
     #[tokio::test]
