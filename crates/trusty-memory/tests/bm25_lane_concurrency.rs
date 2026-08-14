@@ -32,12 +32,16 @@ use trusty_memory::AppState;
 /// Build an `AppState` with the lane armed at an explicit residency cap.
 ///
 /// Why: `with_bm25_lane_from_env` reads process-global env, which sibling tests
-/// race on. Constructing the lane directly pins the cap this file needs without
-/// touching the environment at all.
+/// race on. `with_bm25_lane` pins the cap this file needs without touching the
+/// environment at all — and, unlike assigning `state.bm25` directly, it rebuilds
+/// the indexer worker so writes actually reach the lane.
 fn state_with_lane(cap: usize) -> (AppState, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let mut state = AppState::new(tmp.path().to_path_buf());
-    state.bm25 = Some(Bm25Lane::with_limits(tmp.path().to_path_buf(), cap, None));
+    let state = AppState::new(tmp.path().to_path_buf()).with_bm25_lane(Bm25Lane::with_limits(
+        tmp.path().to_path_buf(),
+        cap,
+        None,
+    ));
     (state, tmp)
 }
 

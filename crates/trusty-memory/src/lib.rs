@@ -751,32 +751,45 @@ impl AppState {
     /// unchanged when the var is unset or set to anything other than `1`.
     /// Test: `bm25_lane_disabled_by_default`, `bm25_lane_enabled_when_env_set`.
     #[must_use]
-    pub fn with_bm25_lane_from_env(mut self) -> Self {
+    pub fn with_bm25_lane_from_env(self) -> Self {
         // #5329: the gate keeps its daemon-era name so an operator who set it
         // does not silently lose the lane this change exists to preserve.
-        if std::env::var("TRUSTY_BM25_DAEMON").as_deref() == Ok("1") {
-            let lane = bm25_lane::Bm25Lane::new(self.data_root.clone());
-            // Issue #231: rebuild the bounded indexer channel + worker so the
-            // worker holds the now-populated lane. The placeholder worker
-            // installed by `AppState::new` (with `None`) drained the channel
-            // into the void — replacing the sender here closes the placeholder
-            // receiver and that worker exits cleanly.
-            let (tx, rx) = tokio::sync::mpsc::channel::<tools::Bm25IndexRequest>(
-                tools::BM25_INDEX_QUEUE_CAPACITY,
-            );
-            tools::spawn_bm25_index_worker(
-                rx,
-                Some(Arc::clone(&lane)),
-                Arc::clone(&self.bm25_dirty),
-            );
-            self.bm25_index_tx = tx;
-            tracing::info!(
-                max_resident = lane.max_resident(),
-                text_budget_bytes = ?lane.text_budget_bytes(),
-                "in-process BM25 lane enabled (TRUSTY_BM25_DAEMON=1)"
-            );
-            self.bm25 = Some(lane);
+        if std::env::var("TRUSTY_BM25_DAEMON").as_deref() != Ok("1") {
+            return self;
         }
+        let lane = bm25_lane::Bm25Lane::new(self.data_root.clone());
+        tracing::info!(
+            max_resident = lane.max_resident(),
+            text_budget_bytes = ?lane.text_budget_bytes(),
+            "in-process BM25 lane enabled (TRUSTY_BM25_DAEMON=1)"
+        );
+        self.with_bm25_lane(lane)
+    }
+
+    /// Builder-style: install an explicit BM25 lane, bypassing the env gate.
+    ///
+    /// Why: setting `bm25` on its own is a footgun. `AppState::new` spawns the
+    /// indexer worker with no lane, so a caller that assigns the field and
+    /// nothing else gets a state whose reads use the lane and whose WRITES are
+    /// silently discarded by the placeholder worker — which is exactly what
+    /// `writes_through_the_tool_surface_survive_eviction` caught. Every path
+    /// that installs a lane goes through here so the two cannot drift apart.
+    /// What: rebuilds the bounded indexer channel + worker so the worker holds
+    /// the lane, then stores it. The placeholder worker installed by
+    /// `AppState::new` exits cleanly when the replaced sender closes its
+    /// receiver. Tests use this to pin explicit limits without mutating
+    /// process-global env vars.
+    /// Test: `tests/bm25_lane_concurrency.rs`, `bm25_lane_enabled_when_env_set`.
+    #[must_use]
+    pub fn with_bm25_lane(mut self, lane: Arc<bm25_lane::Bm25Lane>) -> Self {
+        // Issue #231: the bounded channel is what keeps a write burst from
+        // growing an unbounded task queue; rebuilding it here is what points
+        // its single worker at the lane.
+        let (tx, rx) =
+            tokio::sync::mpsc::channel::<tools::Bm25IndexRequest>(tools::BM25_INDEX_QUEUE_CAPACITY);
+        tools::spawn_bm25_index_worker(rx, Some(Arc::clone(&lane)), Arc::clone(&self.bm25_dirty));
+        self.bm25_index_tx = tx;
+        self.bm25 = Some(lane);
         self
     }
 
