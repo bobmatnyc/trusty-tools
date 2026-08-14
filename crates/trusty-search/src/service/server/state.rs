@@ -64,7 +64,15 @@ pub enum DaemonEvent {
 }
 
 /// Shared state injected into every axum handler.
+///
+/// `#[non_exhaustive]` (#767): this struct gains fields regularly — `#767` added
+/// `allowlist_paths`, `#2717` added `registry_path_override` — and each one was a
+/// breaking change purely because an external struct literal could name every
+/// field. Taken here alongside the `allowlist_paths` break that already forces
+/// `0.46.0 → 0.47.0`, so the NEXT field costs nothing. Construct with
+/// [`SearchAppState::new`] plus the `with_*` builders.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct SearchAppState {
     pub registry: IndexRegistry,
     /// Cold index store for lazy warm-boot (issue #993).

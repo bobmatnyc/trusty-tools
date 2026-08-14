@@ -69,6 +69,28 @@ pub enum AllowSource {
         /// The approved root that contains this path.
         parent: PathBuf,
     },
+    /// The request itself named this exact root and opted in
+    /// (`CreateIndexRequest::allow_sensitive_path`).
+    ///
+    /// Why (#767 + #2914): `tcode`'s working project is a directory the USER
+    /// bound it to, and it can legitimately be a bake-off scratch root under an
+    /// OS-temp prefix. Nothing can put such a root into `allowlist.toml` from
+    /// inside `trusty-common` (which cannot depend on `trusty-search`), so
+    /// without this the shipped #2914 behaviour would be `403` forever.
+    ///
+    /// This is NOT a general default-deny bypass, for four reasons: the flag
+    /// defaults to `false`, so every automatic path #767 names — cwd probe,
+    /// query-referenced path, transient worktree, test fixture — is unaffected;
+    /// the denylist rows for credential directories, secret file names, and
+    /// top-level home directories are still enforced (only the ephemeral-prefix
+    /// rows relax); the approval is per-request and writes nothing durable, so
+    /// it cannot accumulate or outlive the call; and it confers no privilege a
+    /// caller lacks, since the daemon is loopback-only and unauthenticated, so
+    /// any process that can set the flag can equally write `allowlist.toml`.
+    /// Every use is logged at `warn`.
+    /// Test: `create_index_accepts_explicit_sensitive_path_optin`,
+    /// `allow_sensitive_path_still_obeys_the_credential_denylist`.
+    ExplicitRequest,
 }
 
 impl std::fmt::Display for AllowSource {
@@ -81,6 +103,9 @@ impl std::fmt::Display for AllowSource {
             }
             AllowSource::WithinApproved { parent } => {
                 write!(f, "inside approved root {}", parent.display())
+            }
+            AllowSource::ExplicitRequest => {
+                write!(f, "explicit opted-in single-root request")
             }
         }
     }
@@ -218,19 +243,54 @@ pub fn project_roots(path: &Path) -> Vec<PathBuf> {
 /// Test: `approved_roots_prefers_explicit_over_project`.
 pub fn approved_roots(paths: &AllowlistPaths) -> anyhow::Result<Vec<(PathBuf, AllowSource)>> {
     let cfg = super::AllowlistConfig::load_from(&paths.allowlist_file())?;
-    let mut out: Vec<(PathBuf, AllowSource)> = cfg
-        .entries
-        .into_iter()
-        .map(|e| (super::canonicalise(&e.path), AllowSource::Explicit))
-        .collect();
+    let mut out: Vec<(PathBuf, AllowSource)> = Vec::new();
+    for entry in cfg.entries {
+        let canonical = super::canonicalise(&entry.path);
+        if !is_usable_root(&canonical, "allowlist.toml") {
+            continue;
+        }
+        out.push((canonical, AllowSource::Explicit));
+    }
     for root in project_roots(&paths.project_paths_file()) {
         let canonical = super::canonicalise(&root);
+        if !is_usable_root(&canonical, "project registry") {
+            continue;
+        }
         if out.iter().any(|(p, _)| *p == canonical) {
             continue;
         }
         out.push((canonical, AllowSource::Project));
     }
     Ok(out)
+}
+
+/// Reject an approved-root value that would make containment match everything.
+///
+/// Why: `resolve_allow_source` decides containment with `Path::starts_with`, and
+/// `Path::new("/Users/me/.ssh").starts_with("")` is `true` — as is
+/// `starts_with("/")`. `canonicalise` falls back to the input on failure, so a
+/// single malformed row (`[[index]] path = ""`, or `path = "/"`) would turn the
+/// whole allowlist into a global allow. That is a one-typo total defeat of
+/// default-deny, so it is rejected at the source rather than guarded at each
+/// comparison.
+/// What: a usable root is absolute and has more than one component — which
+/// excludes `""`, a relative path, and the filesystem root itself. Each rejected
+/// row is logged at `warn` naming the file it came from; silently dropping it
+/// would leave an operator wondering why their entry does nothing.
+/// Test: `empty_allowlist_entry_does_not_approve_everything`,
+/// `filesystem_root_entry_does_not_approve_everything`,
+/// `relative_allowlist_entry_is_rejected`.
+fn is_usable_root(canonical: &Path, source: &str) -> bool {
+    if canonical.is_absolute() && canonical.components().count() > 1 {
+        return true;
+    }
+    tracing::warn!(
+        path = %canonical.display(),
+        %source,
+        "allowlist: ignoring an approved-root entry that is empty, relative, or \
+         the filesystem root — such a value would approve every path (#767)"
+    );
+    false
 }
 
 /// Whether `candidate` is a system-provisioned worktree of `root`.

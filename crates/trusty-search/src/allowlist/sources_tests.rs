@@ -307,3 +307,60 @@ fn malformed_allowlist_is_an_error_not_an_empty_list() {
     let root = safe_root("verdict-corrupt");
     assert!(check_path_with(&root, &paths).is_err());
 }
+
+// ── malformed approved-root values (#767, finding 5) ─────────────────────────
+
+/// An empty `path` row must not approve everything.
+///
+/// Why: containment uses `Path::starts_with`, and every path starts with `""`.
+/// `canonicalise("")` falls back to `""`, so one malformed row would turn
+/// default-deny into a global allow — a one-typo total defeat of the control.
+#[test]
+fn empty_allowlist_entry_does_not_approve_everything() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = fixture(dir.path());
+    write_allowlist(&paths, &[Path::new("")]);
+    let victim = safe_root("empty-entry-victim");
+    assert_eq!(resolve_allow_source(&victim, &paths).expect("check"), None);
+    assert!(
+        super::sources::approved_roots(&paths)
+            .expect("roots")
+            .is_empty(),
+        "an empty entry must not become an approved root"
+    );
+}
+
+/// A `path = "/"` row must not approve everything either — every absolute path
+/// starts with the filesystem root.
+#[test]
+fn filesystem_root_entry_does_not_approve_everything() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = fixture(dir.path());
+    write_allowlist(&paths, &[Path::new("/")]);
+    let victim = safe_root("root-entry-victim");
+    assert_eq!(resolve_allow_source(&victim, &paths).expect("check"), None);
+}
+
+/// A relative row is rejected: it cannot be compared meaningfully against a
+/// canonical absolute candidate, and `canonicalise` leaves it relative when the
+/// path does not resolve.
+#[test]
+fn relative_allowlist_entry_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = fixture(dir.path());
+    write_allowlist(&paths, &[Path::new("relative/project")]);
+    assert!(super::sources::approved_roots(&paths)
+        .expect("roots")
+        .is_empty());
+}
+
+/// The same guard applies to the project-registry member, not just the file.
+#[test]
+fn empty_project_registry_entry_does_not_approve_everything() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = fixture(dir.path());
+    let file = paths.project_paths_file();
+    std::fs::write(&file, r#"[{"alias":"bad","path":"/"}]"#).expect("write");
+    let victim = safe_root("project-root-victim");
+    assert_eq!(resolve_allow_source(&victim, &paths).expect("check"), None);
+}

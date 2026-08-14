@@ -39,6 +39,30 @@ pub async fn handle_index_relocate(cli_index: &Option<String>, new_path: PathBuf
         .canonicalize()
         .with_context(|| format!("new path does not exist: {}", new_path.display()))?;
 
+    // #767: approve the destination BEFORE the PATCH. `PATCH /indexes/:id` is
+    // now gated by the opt-in allowlist, and the normal relocate case — a repo
+    // moved to a sibling path — names a destination nothing has approved yet.
+    // Approving afterwards, as this did, meant the PATCH returned 403 and the
+    // CLI bailed before the allowlist was ever written: permanently broken, not
+    // intermittently. `add_to_allowlist` still applies the strict denylist, so
+    // this grants nothing the operator could not grant with `index add`.
+    let already_approved = crate::allowlist::AllowlistConfig::load()
+        .map(|cfg| cfg.contains(&canonical_new))
+        .unwrap_or(false);
+    let allowlist_entry = crate::allowlist::AllowlistEntry {
+        path: canonical_new.clone(),
+        name: None,
+        exclude: Vec::new(),
+        extensions: Vec::new(),
+        skip_kg: false,
+    };
+    crate::allowlist::add_to_allowlist(allowlist_entry, None).with_context(|| {
+        format!(
+            "could not approve '{}' for indexing before relocating",
+            canonical_new.display()
+        )
+    })?;
+
     // Call PATCH /indexes/:id
     let patch_url = format!("{base}/indexes/{index_id}");
     let body = serde_json::json!({ "root_path": canonical_new.to_string_lossy() });
@@ -52,6 +76,18 @@ pub async fn handle_index_relocate(cli_index: &Option<String>, new_path: PathBuf
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+        // #767: the relocation did not happen, so withdraw the approval this
+        // command granted for it. An entry that predated this command is left
+        // alone — it is the operator's, not ours to remove.
+        if !already_approved {
+            if let Err(e) = crate::allowlist::remove_from_allowlist(&canonical_new, None) {
+                tracing::warn!(
+                    path = %canonical_new.display(),
+                    error = %e,
+                    "could not withdraw the allowlist entry after a failed relocation"
+                );
+            }
+        }
         bail!("daemon returned {status} for PATCH {patch_url}: {text}");
     }
 
@@ -64,24 +100,10 @@ pub async fn handle_index_relocate(cli_index: &Option<String>, new_path: PathBuf
         .and_then(|v| v.as_str())
         .unwrap_or(canonical_new.to_str().unwrap_or("(new path)"));
 
-    // Best-effort: update the allowlist entry (old path → new path).
-    // The allowlist needs to carry the new path so future registrations work.
-    // We do NOT remove the old path if the update fails — the daemon is already
-    // pointing at the new location.
-    let allowlist_entry = crate::allowlist::AllowlistEntry {
-        path: canonical_new.clone(),
-        name: None,
-        exclude: Vec::new(),
-        extensions: Vec::new(),
-        skip_kg: false,
-    };
-    if let Err(e) = crate::allowlist::add_to_allowlist(allowlist_entry, None) {
-        tracing::warn!(
-            path = %canonical_new.display(),
-            error = %e,
-            "could not update allowlist to new path after relocation"
-        );
-    }
+    // The allowlist entry for the new path was written above, before the PATCH.
+    // The OLD path's entry is deliberately left in place: this command does not
+    // know whether the operator still wants that root approved, and
+    // `trusty-search index remove <old>` is the verb that withdraws it.
 
     println!(
         "{} Index '{}' relocated to {}",

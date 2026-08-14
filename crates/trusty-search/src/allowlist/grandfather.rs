@@ -57,16 +57,38 @@ pub fn grandfather_existing_indexes(
     registry_path: &Path,
 ) -> anyhow::Result<GrandfatherOutcome> {
     let allowlist_file = paths.allowlist_file();
-    if allowlist_file.exists() {
+    let stamp = stamp_path(&allowlist_file);
+    // #767: "the allowlist file is missing" is NOT on its own evidence that the
+    // pass has never run. Deleting `allowlist.toml` is a plausible "reset to
+    // default-deny" gesture, and without a durable stamp the next start would
+    // re-seed every registered root as a standing approval — undoing exactly
+    // what the operator just did. Both conditions must hold.
+    if allowlist_file.exists() || stamp.exists() {
         return Ok(GrandfatherOutcome {
             skipped_existing: true,
             ..Default::default()
         });
     }
 
-    let entries =
-        crate::service::persistence::load_index_registry_at(registry_path).unwrap_or_default();
+    let entries = match crate::service::persistence::load_index_registry_at(registry_path) {
+        Ok(e) => e,
+        Err(e) => {
+            // Warn BEFORE any early return — an unreadable registry means the
+            // pass grandfathers nothing, and a silent no-op here reads exactly
+            // like a fresh install right up until indexing stops.
+            tracing::warn!(
+                "allowlist: could not read the index registry at {} ({e:#}) — \
+                 nothing was grandfathered, so already-registered roots may now \
+                 be refused. Approve them with `trusty-search index add` (#767)",
+                registry_path.display()
+            );
+            Vec::new()
+        }
+    };
     if entries.is_empty() {
+        // Still stamp: a fresh install has decided, and a later `index add`
+        // followed by a file deletion must not resurrect a seed pass.
+        write_stamp(&stamp);
         return Ok(GrandfatherOutcome::default());
     }
 
@@ -102,7 +124,28 @@ pub fn grandfather_existing_indexes(
         outcome.seeded.push(root);
     }
 
-    cfg.save_to(&allowlist_file)?;
+    // #767: create-new, not save-over. `exists()` above and a plain write here
+    // are a check-then-write: an `index add` racing this pass between the two
+    // would be clobbered by the seed. `create_new(true)` makes the concurrent
+    // writer win — we lose the seed rather than lose their approval, and the
+    // stamp below still records that the pass has had its turn.
+    match create_new_toml(&allowlist_file, &cfg) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            tracing::info!(
+                "allowlist: {} appeared while the grandfather pass was running — \
+                 keeping that file and discarding the seed (#767)",
+                allowlist_file.display()
+            );
+            write_stamp(&stamp);
+            return Ok(GrandfatherOutcome {
+                skipped_existing: true,
+                ..Default::default()
+            });
+        }
+        Err(e) => return Err(e.into()),
+    }
+    write_stamp(&stamp);
 
     for root in &outcome.seeded {
         tracing::info!(
@@ -132,4 +175,62 @@ pub fn grandfather_existing_indexes(
         outcome.denied.len(),
     );
     Ok(outcome)
+}
+
+/// Path of the durable "the grandfather pass has run" stamp.
+///
+/// Why: the pass must be one-time in fact, not merely one-time while the file it
+/// writes survives — see [`grandfather_existing_indexes`]. A sibling of
+/// `allowlist.toml` keeps the two together, so moving a config directory moves
+/// both and a genuinely fresh install has neither.
+/// What: `<allowlist.toml's dir>/.grandfathered`.
+/// Test: `grandfather_does_not_reseed_after_the_allowlist_is_deleted`.
+fn stamp_path(allowlist_file: &Path) -> std::path::PathBuf {
+    match allowlist_file.parent() {
+        Some(dir) => dir.join(".grandfathered"),
+        None => std::path::PathBuf::from(".grandfathered"),
+    }
+}
+
+/// Record that the pass has run.
+///
+/// Best-effort: failing to write the stamp must not fail a daemon start, and the
+/// worst case is one extra pass that `allowlist.toml`'s own existence blocks.
+fn write_stamp(stamp: &Path) {
+    if let Some(dir) = stamp.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(
+        stamp,
+        b"trusty-search: the #767 allowlist grandfather pass has run; \
+delete this file to let it seed again\n",
+    ) {
+        tracing::warn!(
+            "allowlist: could not write the grandfather stamp {} ({e}) — the pass \
+             may run again if allowlist.toml is deleted (#767)",
+            stamp.display()
+        );
+    }
+}
+
+/// Write `cfg` to `path`, failing with `AlreadyExists` when someone beat us.
+///
+/// Why: `AllowlistConfig::save_to` writes a temp file and renames over whatever
+/// is there, which is right for an update and wrong for a first-run seed racing
+/// a concurrent `index add` — the rename would silently discard that approval.
+/// `create_new(true)` is what makes the other writer win instead.
+/// What: serialises to TOML, then opens with `create_new(true)` and writes.
+/// Test: `grandfather_yields_to_a_concurrently_created_allowlist`.
+fn create_new_toml(path: &Path, cfg: &AllowlistConfig) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let toml_str = toml::to_string_pretty(cfg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    f.write_all(toml_str.as_bytes())
 }

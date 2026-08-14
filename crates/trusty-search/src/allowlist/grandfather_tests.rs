@@ -147,3 +147,98 @@ fn grandfather_skips_roots_the_project_registry_already_approves() {
     let outcome = grandfather_existing_indexes(&paths, &registry).expect("grandfather");
     assert_eq!(outcome.seeded, vec![plain]);
 }
+
+// ── one-time-ness and concurrency (#767, finding 4) ──────────────────────────
+
+/// Deleting `allowlist.toml` must NOT re-seed on the next start.
+///
+/// Why: deleting that file is a plausible "reset to default-deny" gesture. The
+/// pass keyed only on the file's absence, so the next start would re-seed every
+/// registered root as a standing approval — undoing exactly what the operator
+/// just did. The durable stamp is what makes the pass one-time in fact.
+#[test]
+fn grandfather_does_not_reseed_after_the_allowlist_is_deleted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = fixture(dir.path());
+    let registry = dir.path().join("indexes.toml");
+    let root = safe_root("reseed");
+    write_registry(&registry, &[("a", &root)]);
+
+    let first = grandfather_existing_indexes(&paths, &registry).expect("first pass");
+    assert_eq!(first.seeded, vec![root.clone()]);
+
+    // The operator resets to default-deny.
+    std::fs::remove_file(paths.allowlist_file()).expect("delete allowlist");
+
+    let second = grandfather_existing_indexes(&paths, &registry).expect("second pass");
+    assert!(second.skipped_existing, "{second:?}");
+    assert!(second.seeded.is_empty(), "{second:?}");
+    assert!(
+        !paths.allowlist_file().exists(),
+        "a deleted allowlist must stay deleted"
+    );
+}
+
+/// A fresh install stamps too, so a later registry gaining entries plus a
+/// missing allowlist cannot resurrect a seed pass.
+#[test]
+fn grandfather_stamps_even_on_a_fresh_install() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = fixture(dir.path());
+    let registry = dir.path().join("indexes.toml");
+
+    let first = grandfather_existing_indexes(&paths, &registry).expect("first pass");
+    assert!(first.seeded.is_empty() && !first.skipped_existing);
+
+    let root = safe_root("fresh-stamped");
+    write_registry(&registry, &[("a", &root)]);
+    let second = grandfather_existing_indexes(&paths, &registry).expect("second pass");
+    assert!(
+        second.skipped_existing,
+        "the stamp must block a later seed: {second:?}"
+    );
+}
+
+/// An allowlist created concurrently wins; the seed is discarded rather than
+/// clobbering it.
+///
+/// Why: `exists()` then `save_to` is a check-then-write, and `save_to` renames
+/// over whatever is there — so an `index add` landing inside that window would
+/// be silently lost. `create_new(true)` inverts which side loses.
+#[test]
+fn grandfather_yields_to_a_concurrently_created_allowlist() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = fixture(dir.path());
+    let registry = dir.path().join("indexes.toml");
+    let seeded_root = safe_root("concurrent-seed");
+    let raced_root = safe_root("concurrent-add");
+    write_registry(&registry, &[("a", &seeded_root)]);
+
+    // Stand in for the racing writer: the file exists by the time the pass
+    // would write it. The `exists()` pre-check and the write are the two ends
+    // of the window; this asserts the WRITE end refuses.
+    let mut raced = AllowlistConfig::default();
+    raced.upsert(super::AllowlistEntry {
+        path: raced_root.clone(),
+        name: None,
+        exclude: Vec::new(),
+        extensions: Vec::new(),
+        skip_kg: false,
+    });
+    raced
+        .save_to(&paths.allowlist_file())
+        .expect("racing write");
+
+    let outcome = grandfather_existing_indexes(&paths, &registry).expect("pass");
+    assert!(outcome.seeded.is_empty(), "{outcome:?}");
+
+    let cfg = AllowlistConfig::load_from(&paths.allowlist_file()).expect("load");
+    assert!(
+        cfg.contains(&raced_root),
+        "the racing approval must survive"
+    );
+    assert!(
+        !cfg.contains(&seeded_root),
+        "the seed must not clobber the racing writer"
+    );
+}

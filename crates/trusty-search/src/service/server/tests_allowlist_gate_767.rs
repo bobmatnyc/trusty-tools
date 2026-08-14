@@ -272,14 +272,21 @@ async fn denylist_still_wins_over_an_allowlist_entry() {
     );
 }
 
-/// `allow_sensitive_path` relaxes the temp-dir PREFIX check only. It must not
-/// become a hole in the opt-in gate: an un-approved temp root is still refused.
+/// `allow_sensitive_path: true` is an explicit, caller-named single-root
+/// request, and is its own approval (#2914 — `tcode`'s bake-off working project
+/// under `/var/folders`).
+///
+/// Why this is not a general bypass: the flag defaults to `false`, so every
+/// automatic path #767 names leaves it false; nothing durable is written; and
+/// the credential/home denylist rows below still refuse. See
+/// `AllowSource::ExplicitRequest`.
 #[tokio::test]
-async fn allow_sensitive_path_does_not_bypass_the_allowlist() {
+async fn create_index_accepts_explicit_sensitive_path_optin() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
     let fx = tempfile::tempdir().expect("tempdir");
-    let state = state_with(fixture(fx.path(), &[])).await;
+    let allow = fixture(fx.path(), &[]);
+    let state = state_with(allow.clone()).await;
 
     let mut req = create_req("sensitive-optin", root);
     req.allow_sensitive_path = true;
@@ -287,8 +294,56 @@ async fn allow_sensitive_path_does_not_bypass_the_allowlist() {
     let (status, json) = body_json(resp).await;
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
-        "opting past the temp-dir prefix must not opt past the allowlist: {json}"
+        StatusCode::OK,
+        "explicit opt-in must register: {json}"
+    );
+
+    // Nothing durable was written: an ephemeral scratch root must not leave a
+    // permanent row behind (the finding-6 rule, applied here too).
+    let cfg = AllowlistConfig::load_from(&allow.allowlist_file()).expect("load");
+    assert!(
+        cfg.entries.is_empty(),
+        "the opt-in is per-request, never persisted: {cfg:?}"
+    );
+}
+
+/// WITHOUT the flag, the same temp root is refused — the opt-in is what changes
+/// the answer, not the daemon being lax about temp dirs.
+#[tokio::test]
+async fn temp_root_without_the_optin_is_still_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    let fx = tempfile::tempdir().expect("tempdir");
+    let state = state_with(fixture(fx.path(), &[])).await;
+
+    let resp = create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("no-optin", root)),
+    )
+    .await;
+    let (status, json) = body_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+}
+
+/// The opt-in relaxes the EPHEMERAL-prefix rows only. A credential directory is
+/// still refused with it set — that is what keeps it from being a skeleton key.
+#[tokio::test]
+async fn allow_sensitive_path_still_obeys_the_credential_denylist() {
+    let ssh = dirs::home_dir().expect("home").join(".ssh");
+    if !ssh.is_dir() {
+        return;
+    }
+    let fx = tempfile::tempdir().expect("tempdir");
+    let state = state_with(fixture(fx.path(), &[])).await;
+
+    let mut req = create_req("ssh-optin", ssh);
+    req.allow_sensitive_path = true;
+    let resp = create_index_handler(State(Arc::clone(&state)), Json(req)).await;
+    let (status, json) = body_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the opt-in must never reach a credential directory: {json}"
     );
 }
 

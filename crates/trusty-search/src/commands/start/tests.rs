@@ -405,6 +405,48 @@ fn make_populated_ts(root: &std::path::Path) {
     std::fs::write(ts_dir.join("index.redb"), b"notempty").unwrap();
 }
 
+/// A relocation-candidate root that survives the hard denylist (#767).
+///
+/// Why: `collect_relocation_candidates` now applies the strict denylist, and
+/// `tempdir()` lands under `/var/folders` — a denylisted prefix. A root anchored
+/// at `$HOME` is the one place that passes regardless of `$TMPDIR` and of where
+/// the checkout lives; see `service::server::test_support`'s module doc.
+fn home_anchored_root(prefix: &str) -> tempfile::TempDir {
+    let base = dirs::home_dir()
+        .expect("HOME must be set to run trusty-search tests")
+        .join(".trusty-search-test-roots");
+    std::fs::create_dir_all(&base).expect("create test-roots base");
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(&base)
+        .expect("create home-anchored test root")
+}
+
+/// Fixture allowlist under `dir` approving `roots` (#767).
+fn approving(
+    dir: &std::path::Path,
+    roots: &[&std::path::Path],
+) -> crate::allowlist::AllowlistPaths {
+    let paths = crate::allowlist::AllowlistPaths::default()
+        .with_allowlist(dir.join("reloc-allowlist.toml"))
+        .with_project_paths(dir.join("no-projects.json"));
+    let cfg = crate::allowlist::AllowlistConfig {
+        entries: roots
+            .iter()
+            .map(|p| crate::allowlist::AllowlistEntry {
+                path: p.to_path_buf(),
+                name: None,
+                exclude: Vec::new(),
+                extensions: Vec::new(),
+                skip_kg: false,
+            })
+            .collect(),
+    };
+    cfg.save_to(&paths.allowlist_file())
+        .expect("write allowlist");
+    paths
+}
+
 /// Why: the core relocation contract — a colocated index with a dead root_path
 /// and exactly one candidate tracked root containing a populated .trusty-search/
 /// must be relinked to that candidate.
@@ -416,8 +458,11 @@ fn make_populated_ts(root: &std::path::Path) {
 #[serial]
 fn restore_moved_colocated_index_relinks_unique_candidate() {
     let data_tmp = tempdir().unwrap();
-    let new_root = tempdir().unwrap();
+    // #767: home-anchored so the strict denylist in the candidate filter does
+    // not drop it for being under `/var/folders`.
+    let new_root = home_anchored_root("ts-reloc-unique");
     make_populated_ts(new_root.path());
+    let allow = approving(data_tmp.path(), &[&new_root.path().canonicalize().unwrap()]);
 
     // Point TRUSTY_DATA_DIR at our tempdir so roots.toml is isolated.
     unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path()) };
@@ -437,7 +482,7 @@ fn restore_moved_colocated_index_relinks_unique_candidate() {
     // the once-per-boot `collect_relocation_candidates`, so the test performs
     // it explicitly. The relocation DECISION under test is unchanged.
     let grant = salvage_grant();
-    let candidates = collect_relocation_candidates(&[], &grant);
+    let candidates = collect_relocation_candidates(&[], &grant, &allow);
     let result = try_locate_moved_root(&entry, &candidates);
     unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 
@@ -476,7 +521,8 @@ fn restore_missing_root_with_no_candidate_returns_none() {
     // the once-per-boot `collect_relocation_candidates`, so the test performs
     // it explicitly. The relocation DECISION under test is unchanged.
     let grant = salvage_grant();
-    let candidates = collect_relocation_candidates(&[], &grant);
+    let candidates =
+        collect_relocation_candidates(&[], &grant, &crate::allowlist::AllowlistPaths::default());
     let result = try_locate_moved_root(&entry, &candidates);
     unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 
@@ -502,10 +548,19 @@ fn restore_missing_root_with_no_candidate_returns_none() {
 #[serial]
 fn restore_missing_root_with_ambiguous_candidates_returns_none() {
     let data_tmp = tempdir().unwrap();
-    let root_a = tempdir().unwrap();
-    let root_b = tempdir().unwrap();
+    // #767: home-anchored and BOTH approved, so this still asserts ambiguity
+    // rather than passing because the candidate filter emptied the set.
+    let root_a = home_anchored_root("ts-reloc-amb-a");
+    let root_b = home_anchored_root("ts-reloc-amb-b");
     make_populated_ts(root_a.path());
     make_populated_ts(root_b.path());
+    let allow = approving(
+        data_tmp.path(),
+        &[
+            &root_a.path().canonicalize().unwrap(),
+            &root_b.path().canonicalize().unwrap(),
+        ],
+    );
 
     unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path()) };
     crate::service::roots_registry::upsert_root(root_a.path().to_path_buf()).unwrap();
@@ -522,7 +577,12 @@ fn restore_missing_root_with_ambiguous_candidates_returns_none() {
     // the once-per-boot `collect_relocation_candidates`, so the test performs
     // it explicitly. The relocation DECISION under test is unchanged.
     let grant = salvage_grant();
-    let candidates = collect_relocation_candidates(&[], &grant);
+    let candidates = collect_relocation_candidates(&[], &grant, &allow);
+    assert_eq!(
+        candidates.roots.len(),
+        2,
+        "both roots must survive the #767 filter so ambiguity is genuine"
+    );
     let result = try_locate_moved_root(&entry, &candidates);
     unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 

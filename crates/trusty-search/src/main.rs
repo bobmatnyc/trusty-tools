@@ -1055,6 +1055,7 @@ enum IndexAction {
     /// Examples:
     ///   trusty-search index add ~/Projects/my-repo
     ///   trusty-search index add .   # adds the current directory
+    ///   trusty-search index add /var/folders/../scratch-repo --allow-sensitive-path
     Add {
         /// Directory to approve for indexing
         path: std::path::PathBuf,
@@ -1062,6 +1063,21 @@ enum IndexAction {
         /// Optional human-readable name for the index
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Approve a path under an OS-temp or app-support prefix (issue #767)
+        ///
+        /// Relaxes ONLY the ephemeral-prefix denylist rows (`/tmp`,
+        /// `/private/tmp`, `/var/folders`, `Library/Application Support`) — the
+        /// rows for credential directories (`~/.ssh`, `~/.aws`), secret file
+        /// names (`.env`), and top-level home directories (`~/Desktop`) are
+        /// never relaxed and still refuse the path.
+        ///
+        /// Use this for a scratch or bake-off project that genuinely lives
+        /// under a temp prefix. Without it there is no way to approve such a
+        /// root, which is what made the daemon's own `allow_sensitive_path`
+        /// opt-in unreachable.
+        #[arg(long)]
+        allow_sensitive_path: bool,
     },
 
     /// List all paths currently in the allowlist (issue #767)
@@ -1341,8 +1357,14 @@ async fn run() -> Result<()> {
             Some(IndexAction::Add {
                 path: add_path,
                 name: add_name,
+                allow_sensitive_path: add_allow_sensitive,
             }) => {
-                commands::index_allowlist::handle_allowlist_add(add_path, add_name).await?;
+                commands::index_allowlist::handle_allowlist_add(
+                    add_path,
+                    add_name,
+                    add_allow_sensitive,
+                )
+                .await?;
             }
             Some(IndexAction::List { json }) => {
                 commands::index_allowlist::handle_allowlist_list(json).await?;

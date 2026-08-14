@@ -105,18 +105,21 @@ fn retain_approved_entries(
     entries
         .into_iter()
         .filter(|entry| {
-            if let Some(reason) =
-                crate::allowlist::is_denied_allowing_sensitive_path(&entry.root_path)
-            {
+            // Canonicalise ONCE and use it for both checks. Every other gate
+            // runs on the canonical form (`validate_root_path` canonicalises
+            // before either check), so testing the raw stored path here would
+            // let a symlinked root answer differently than it does at creation.
+            let canonical = crate::service::warm_boot::canonicalize_best_effort(&entry.root_path);
+            if let Some(reason) = crate::allowlist::is_denied_allowing_sensitive_path(&canonical) {
                 tracing::warn!(
                     id = %entry.id,
-                    root = %entry.root_path.display(),
+                    root = %canonical.display(),
                     %reason,
                     "warm-boot: skipping index — its root is on the hard denylist (#767)"
                 );
                 return false;
             }
-            match crate::allowlist::sources::resolve_allow_source(&entry.root_path, paths) {
+            match crate::allowlist::sources::resolve_allow_source(&canonical, paths) {
                 Ok(Some(_)) => true,
                 Ok(None) => {
                     tracing::warn!(
@@ -577,8 +580,11 @@ async fn salvage_missing_root_entries(
     // `read_dir` + `canonicalize`, not async work.
     let all_entries = crate::service::persistence::load_index_registry().unwrap_or_default();
     let started = std::time::Instant::now();
+    // #767: adopting a relocated root registers, watches, and PERSISTS it with
+    // no operator action, so the candidate set is gated like `POST /indexes`.
+    let allowlist_paths = state.allowlist_paths.clone();
     let candidates = match tokio::task::spawn_blocking(move || {
-        collect_relocation_candidates(&all_entries, &grant)
+        collect_relocation_candidates(&all_entries, &grant, &allowlist_paths)
     })
     .await
     {

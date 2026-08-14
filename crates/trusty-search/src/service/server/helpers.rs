@@ -180,6 +180,16 @@ pub(super) async fn validate_root_path(
                 "indexing approved (#767)"
             );
         }
+        // #767 + #2914: an explicit, opted-in, caller-named single root is its
+        // own approval — see `AllowSource::ExplicitRequest` for why this is not
+        // a general bypass. Logged at `warn`, never persisted.
+        Ok(None) if allow_sensitive_path => {
+            tracing::warn!(
+                path = %canonical.display(),
+                "indexing approved by an explicit opted-in single-root request \
+                 (allow_sensitive_path) — not from the allowlist (#767)"
+            );
+        }
         Ok(None) => {
             return Err(allowlist_refusal_response(
                 &canonical,

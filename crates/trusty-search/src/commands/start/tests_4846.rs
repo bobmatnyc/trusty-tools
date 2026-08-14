@@ -152,7 +152,11 @@ async fn dead_entries_do_not_consume_the_live_index_budget() {
             .try_grant()
             .unwrap();
     let started = Instant::now();
-    let _ = crate::commands::start_restore::collect_relocation_candidates(&[], &grant);
+    let _ = crate::commands::start_restore::collect_relocation_candidates(
+        &[],
+        &grant,
+        &crate::allowlist::AllowlistPaths::default(),
+    );
     let one_walk = started.elapsed();
 
     // Registry: dead entries FIRST, then the live one.
@@ -241,7 +245,11 @@ async fn disabled_salvage_budget_costs_a_dead_entry_nothing_but_a_stat() {
             .try_grant()
             .unwrap();
     let started = Instant::now();
-    let _ = crate::commands::start_restore::collect_relocation_candidates(&[], &grant);
+    let _ = crate::commands::start_restore::collect_relocation_candidates(
+        &[],
+        &grant,
+        &crate::allowlist::AllowlistPaths::default(),
+    );
     let one_walk = started.elapsed();
 
     let live_root = make_live_root(work.path(), "live-index");
