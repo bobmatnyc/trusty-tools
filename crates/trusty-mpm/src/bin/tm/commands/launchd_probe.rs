@@ -15,8 +15,11 @@
 //! What: [`daemon_launchd_label_in`] resolves WHICH launchd label owns the
 //! daemon on a given host (the #4230 review narrowed this from "any
 //! `com.trusty.mpm*` plist" — the supervisor plist does not own a daemon), and
-//! [`mpm_launchd_plist_exists`] reduces it to the boolean the older guards
-//! consume. [`compute_supervised`], [`compute_no_spawn`] and
+//! [`launchd_may_own_daemon`] reduces it to the boolean the older guards
+//! consume. That resolution is THREE-state ([`DaemonLabelProbe`]) since #5623:
+//! an unreadable `~/Library/LaunchAgents` is not a host without a launchd unit,
+//! and the boolean resolves it toward the guard rather than past it (ADR-0045).
+//! [`compute_supervised`], [`compute_no_spawn`] and
 //! [`compute_daemon_refuse`] are pure functions over that boolean (plus, for
 //! supervision, [`trusty_common::update::is_launchd_supervised`]).
 //! [`launchd_ownership`] asks launchd which PID it actually runs, so the
@@ -44,6 +47,63 @@
 /// from the canonical registry, which the installer and every daemon also read.
 pub(crate) const DAEMON_LAUNCHD_LABEL: &str = trusty_common::launchd_labels::MPM;
 
+/// What a `LaunchAgents` scan established about daemon ownership — three states,
+/// not two.
+///
+/// Why (#5623): the scan used to answer `Option<String>`, so an unreadable
+/// `~/Library/LaunchAgents` and an empty one were both `None`. Every spawn gate
+/// in this crate reads that `None` as "launchd does not own the daemon" and
+/// proceeds to spawn one — the #2486/#4230 orphan, which serves the port without
+/// the plist's `EnvironmentVariables` and which `launchctl bootout` cannot
+/// remove. The dangerous direction is therefore the fail-OPEN one, so the
+/// unanswered case gets a state of its own and [`may_own_daemon`] keeps it on
+/// the refusing side. ADR-0045 is the class.
+///
+/// [`may_own_daemon`]: DaemonLabelProbe::may_own_daemon
+/// What: `Registered` names the unit that positively owns the daemon;
+/// `NotRegistered` is a completed scan that found none; `Undeterminable` is a
+/// scan that could not complete (`EACCES` on the directory, an unreadable entry).
+/// Test: `daemon_label_undeterminable_for_an_unreadable_launchagents`,
+/// `probe_undeterminable_may_own_the_daemon`, `daemon_label_none_for_an_empty_home`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DaemonLabelProbe {
+    /// A daemon-owning launchd unit is registered under this label.
+    Registered(String),
+    /// The scan completed and found no daemon-owning unit.
+    NotRegistered,
+    /// The scan could not complete, so neither answer is established.
+    Undeterminable,
+}
+
+impl DaemonLabelProbe {
+    /// The label, when one was positively resolved.
+    ///
+    /// Why: remediation text may only name a unit that genuinely exists — the
+    /// #4230 review's finding. `Undeterminable` yields `None` for exactly that
+    /// reason, so no caller can invent a label out of an unanswered scan.
+    /// What: `Some` only for [`DaemonLabelProbe::Registered`].
+    /// Test: `probe_undeterminable_has_no_label`.
+    pub(crate) fn label(&self) -> Option<&str> {
+        match self {
+            Self::Registered(l) => Some(l),
+            Self::NotRegistered | Self::Undeterminable => None,
+        }
+    }
+
+    /// Fail-closed: could launchd own this host's daemon?
+    ///
+    /// Why (#5623): the spawn guards need "is it safe to spawn", and an
+    /// unanswered scan is not a safe one. Reading `Undeterminable` as `true` is
+    /// what keeps an unreadable `LaunchAgents` from standing the #4230 guard
+    /// down.
+    /// What: `true` for everything except a completed scan that found nothing.
+    /// Test: `probe_undeterminable_may_own_the_daemon`,
+    /// `probe_not_registered_may_not_own_the_daemon`.
+    pub(crate) fn may_own_daemon(&self) -> bool {
+        !matches!(self, Self::NotRegistered)
+    }
+}
+
 /// Resolve the launchd label of a registered trusty-mpm DAEMON unit, given a
 /// home directory.
 ///
@@ -65,12 +125,12 @@ pub(crate) const DAEMON_LAUNCHD_LABEL: &str = trusty_common::launchd_labels::MPM
 /// `com.trusty.*mpm*.plist`, excluding `supervisor`/`gui` names, which that
 /// script documents as "distinct services" — and, since the round-2 review, only
 /// when that drifted plist's `ProgramArguments` actually run `daemon` (see
-/// [`plist_runs_daemon`]). `None` when neither is present.
+/// [`plist_runs_daemon`]). `NotRegistered` when neither is present.
 ///
 /// The canonical `com.trusty.mpm.plist` short-circuit is deliberately NOT gated on
 /// [`plist_runs_daemon`]: that label is the daemon's by definition, and the
 /// failure modes are asymmetric. A false negative there would make
-/// [`mpm_launchd_plist_exists`] report `false` on a correctly installed host,
+/// [`launchd_may_own_daemon`] report `false` on a correctly installed host,
 /// standing the #4230 spawn guard down and reintroducing the very orphan this
 /// issue is about. The contents check exists to stop a SIBLING unit being
 /// promoted on the strength of its filename, which is a drift-path-only risk.
@@ -80,18 +140,44 @@ pub(crate) const DAEMON_LAUNCHD_LABEL: &str = trusty_common::launchd_labels::MPM
 /// `daemon_label_accepts_a_drifted_label`,
 /// `daemon_label_ignores_a_gui_plist`,
 /// `daemon_label_ignores_a_decoy_sibling_unit`.
-pub(crate) fn daemon_launchd_label_in(home: &std::path::Path) -> Option<String> {
+///
+/// #5623: the answer is three-state. The previous `Option<String>` collapsed
+/// "`~/Library/LaunchAgents` could not be read" into the same `None` as "no unit
+/// is registered", and every spawn-gating caller reads `None` as permission to
+/// spawn — which is the #2486/#4230 orphan. See ADR-0045.
+pub(crate) fn daemon_launchd_label_in(home: &std::path::Path) -> DaemonLabelProbe {
     let agents = home.join("Library/LaunchAgents");
+    // Not gated on `plist_runs_daemon`, per the paragraph above. A stat error
+    // here needs no arm of its own: it also fails the `read_dir` below, which
+    // is where the undeterminable answer is produced.
     if agents
         .join(format!("{DAEMON_LAUNCHD_LABEL}.plist"))
         .exists()
     {
-        return Some(DAEMON_LAUNCHD_LABEL.to_string());
+        return DaemonLabelProbe::Registered(DAEMON_LAUNCHD_LABEL.to_string());
     }
-    let entries = std::fs::read_dir(&agents).ok()?;
-    let mut drifted: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter_map(|e| e.file_name().into_string().ok())
+    // #5623: `NotFound` keeps its benign meaning (ADR-0045 §3) — a home with no
+    // `LaunchAgents` directory genuinely has no unit. Every other error is an
+    // unanswered question, not a negative answer.
+    let entries = match std::fs::read_dir(&agents) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return DaemonLabelProbe::NotRegistered;
+        }
+        Err(_) => return DaemonLabelProbe::Undeterminable,
+    };
+    // #5623: an entry that cannot be read is a hole in the listing, so the
+    // listing cannot support "no daemon unit is here".
+    let mut names = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(e) => names.push(e.file_name()),
+            Err(_) => return DaemonLabelProbe::Undeterminable,
+        }
+    }
+    let mut drifted: Vec<String> = names
+        .into_iter()
+        .filter_map(|name| name.into_string().ok())
         .filter_map(|name| name.strip_suffix(".plist").map(str::to_owned))
         .filter(|label| {
             label.starts_with("com.trusty.")
@@ -111,7 +197,10 @@ pub(crate) fn daemon_launchd_label_in(home: &std::path::Path) -> Option<String> 
     // Sort so a home with several drifted labels resolves deterministically
     // rather than depending on directory-iteration order.
     drifted.sort();
-    drifted.into_iter().next()
+    match drifted.into_iter().next() {
+        Some(label) => DaemonLabelProbe::Registered(label),
+        None => DaemonLabelProbe::NotRegistered,
+    }
 }
 
 /// Does this plist's `ProgramArguments` actually run a `daemon` subcommand?
@@ -153,29 +242,38 @@ fn plist_runs_daemon(path: &std::path::Path) -> bool {
 ///
 /// Why: the live wrapper over [`daemon_launchd_label_in`]; separated so the
 /// resolution rules are unit-testable against a temp home.
-/// What: applies [`daemon_launchd_label_in`] to `$HOME`, or `None` when `$HOME`
-/// cannot be resolved (e.g. a stripped-down CI sandbox) — treated the same as
-/// "no unit registered" by callers.
+/// What: applies [`daemon_launchd_label_in`] to `$HOME`.
 /// Test: the pure resolver is tested below; this wrapper is a thin `$HOME` lookup.
-pub(crate) fn daemon_launchd_label() -> Option<String> {
-    daemon_launchd_label_in(&dirs::home_dir()?)
+pub(crate) fn daemon_launchd_label() -> DaemonLabelProbe {
+    match dirs::home_dir() {
+        Some(home) => daemon_launchd_label_in(&home),
+        // intentional fail-open: an unresolvable `$HOME` (no `HOME`, no passwd
+        // entry) means there is no per-user launchd agent domain to own a daemon
+        // either, so there is nothing to be uncertain about. Reading it as
+        // undeterminable instead would refuse `tm start` in every HOME-less
+        // container — a far wider blast radius than the #5623 defect (ADR-0045 §3).
+        None => DaemonLabelProbe::NotRegistered,
+    }
 }
 
-/// Returns `true` when a trusty-mpm DAEMON launchd unit is registered.
+/// Returns `true` when launchd may own this host's daemon.
 ///
 /// Why: the presence of a daemon plist is the operator's declared intent that
 /// launchd should own the daemon's lifecycle; the health-supervision signal, the
 /// bridge's no-spawn decision, and the `tm start`/`tm restart` refusal all key
-/// off this one fact.
-/// What: `true` when [`daemon_launchd_label`] resolves a label. Narrowed by the
-/// #4230 review from "any `com.trusty.mpm*` plist" — see
+/// off this one fact. #5623 renamed it from `mpm_launchd_plist_exists`, because
+/// it no longer asserts a plist was seen — an unreadable `LaunchAgents` answers
+/// `true` here without any plist having been found, and the old name would have
+/// made that read as a lie at each call site.
+/// What: [`DaemonLabelProbe::may_own_daemon`] over [`daemon_launchd_label`].
+/// Narrowed by the #4230 review from "any `com.trusty.mpm*` plist" — see
 /// [`daemon_launchd_label_in`] for why the supervisor plist does not count. This
 /// also removes a latent false refusal in the #4397 child guard and a latent
 /// false `no_spawn` in the #2486 bridge guard on supervisor-only hosts.
 /// Test: exercised via [`daemon_launchd_label_in`]'s tests; the pure decisions
 /// that consume this boolean are unit-tested below.
-pub(crate) fn mpm_launchd_plist_exists() -> bool {
-    daemon_launchd_label().is_some()
+pub(crate) fn launchd_may_own_daemon() -> bool {
+    daemon_launchd_label().may_own_daemon()
 }
 
 /// The command that correctly restarts the daemon on this host, given the
@@ -203,7 +301,7 @@ pub(crate) fn daemon_restart_command_for(label: Option<&str>) -> String {
 /// What: applies [`daemon_restart_command_for`] to [`daemon_launchd_label`].
 /// Test: the pure resolver is tested below.
 pub(crate) fn daemon_restart_command() -> String {
-    daemon_restart_command_for(daemon_launchd_label().as_deref())
+    daemon_restart_command_for(daemon_launchd_label().label())
 }
 
 /// Pure decision: is this daemon process in a hazardous unsupervised state?
@@ -281,6 +379,51 @@ pub(crate) fn cli_spawn_refusal_hint(label: &str) -> String {
          `tm daemon --force`.",
         daemon_restart_command_for(Some(label))
     )
+}
+
+/// Operator guidance printed when `tm start`/`tm restart` refuses to spawn
+/// because the launchd scan could not complete (issue #5623).
+///
+/// Why: the refusal has to name a next step, and [`cli_spawn_refusal_hint`]
+/// cannot be reused — it names a label, and an undeterminable scan resolved
+/// none. Naming `com.trusty.mpm` here anyway would repeat the #4230-review
+/// defect of prescribing a unit that may not exist on this host.
+/// What: states that `~/Library/LaunchAgents` could not be read, gives the `ls`
+/// that reproduces it, and names the same `tm daemon --force` opt-in.
+/// Test: `undeterminable_refusal_names_the_directory_and_force`.
+pub(crate) fn undeterminable_spawn_refusal_hint() -> String {
+    "refusing to spawn: `~/Library/LaunchAgents` could not be read, so whether launchd \
+     owns this daemon is unknown — spawning on that reading is how the unsupervised \
+     orphan of issue #2486/#4230 gets created, and `launchctl bootout` cannot remove it. \
+     Check the directory with `ls -ld ~/Library/LaunchAgents` and re-run. To start an \
+     unsupervised daemon on purpose, run `tm daemon --force`."
+        .to_string()
+}
+
+/// The message `tm start` / `tm restart` must bail with, or `None` when spawning
+/// is safe.
+///
+/// Why (#5623): both spawn sites previously matched on the probe themselves, so
+/// the fail-closed decision would have had to be repeated at each — and a third
+/// spawn site added later would have inherited whichever version its author
+/// copied. One decision point is what keeps the `Undeterminable` arm from being
+/// dropped on one path.
+/// What: the label-naming hint when a unit is registered, the directory hint when
+/// the scan could not complete, `None` only for a completed scan that found no
+/// unit.
+/// Test: `spawn_refusal_none_when_no_unit_is_registered` covers the pure mapping
+/// via [`DaemonLabelProbe`]; the two hint strings have their own tests.
+pub(crate) fn cli_spawn_refusal_for(probe: &DaemonLabelProbe) -> Option<String> {
+    match probe {
+        DaemonLabelProbe::Registered(label) => Some(cli_spawn_refusal_hint(label)),
+        DaemonLabelProbe::Undeterminable => Some(undeterminable_spawn_refusal_hint()),
+        DaemonLabelProbe::NotRegistered => None,
+    }
+}
+
+/// [`cli_spawn_refusal_for`] against this host.
+pub(crate) fn cli_spawn_refusal() -> Option<String> {
+    cli_spawn_refusal_for(&daemon_launchd_label())
 }
 
 /// What launchd will say about a daemon unit — three states, not two.
@@ -578,7 +721,7 @@ mod tests {
             home_with_bodies(&[("com.trusty.mpm.logrotate.plist", plist_running("logrotate"))]);
         assert_eq!(
             daemon_launchd_label_in(home.path()),
-            None,
+            DaemonLabelProbe::NotRegistered,
             "a sibling unit that does not run `daemon` must not become the daemon label"
         );
     }
@@ -593,7 +736,7 @@ mod tests {
             ("com.trusty.zzz-mpm.plist", plist_running("daemon")),
         ]);
         assert_eq!(
-            daemon_launchd_label_in(home.path()).as_deref(),
+            daemon_launchd_label_in(home.path()).label(),
             Some("com.trusty.zzz-mpm")
         );
     }
@@ -644,11 +787,92 @@ mod tests {
         );
     }
 
+    /// #5623 / ADR-0045: the error arm. An unreadable `LaunchAgents` is an
+    /// unanswered question, and answering it "no unit registered" is what lets
+    /// `tm start` spawn the #4230 orphan. Fails against the pre-fix commit,
+    /// which returned `None` here — indistinguishable from an empty home.
+    #[test]
+    fn daemon_label_undeterminable_for_an_unreadable_launchagents() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = home_with(&["com.trusty.mpm.plist"]);
+        let agents = home.path().join("Library/LaunchAgents");
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let got = daemon_launchd_label_in(home.path());
+        // Restore before the assert so a failure still leaves a removable tempdir.
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o755)).expect("restore");
+        assert_eq!(got, DaemonLabelProbe::Undeterminable);
+        assert!(
+            got.may_own_daemon(),
+            "an unanswered scan must keep the spawn guard up"
+        );
+    }
+
+    /// The ADR-0045 §3 boundary at this site: absence stays benign. A first-run
+    /// or Linux home has no `LaunchAgents` at all, and turning that into
+    /// `Undeterminable` would refuse `tm start` everywhere.
+    #[test]
+    fn daemon_label_not_registered_when_launchagents_is_absent() {
+        let bare = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            daemon_launchd_label_in(bare.path()),
+            DaemonLabelProbe::NotRegistered
+        );
+    }
+
+    #[test]
+    fn probe_undeterminable_may_own_the_daemon() {
+        assert!(DaemonLabelProbe::Undeterminable.may_own_daemon());
+        assert!(DaemonLabelProbe::Registered("com.trusty.mpm".into()).may_own_daemon());
+    }
+
+    #[test]
+    fn probe_not_registered_may_not_own_the_daemon() {
+        assert!(!DaemonLabelProbe::NotRegistered.may_own_daemon());
+    }
+
+    /// An undeterminable scan resolved no label, so nothing downstream may name
+    /// one — the #4230-review rule that remediation must name a real unit.
+    #[test]
+    fn probe_undeterminable_has_no_label() {
+        assert_eq!(DaemonLabelProbe::Undeterminable.label(), None);
+        assert_eq!(DaemonLabelProbe::NotRegistered.label(), None);
+        assert_eq!(
+            DaemonLabelProbe::Registered("com.trusty.mpm".into()).label(),
+            Some("com.trusty.mpm")
+        );
+    }
+
+    /// Spawn is permitted only by a completed scan that found nothing.
+    #[test]
+    fn spawn_refusal_none_when_no_unit_is_registered() {
+        assert_eq!(
+            cli_spawn_refusal_for(&DaemonLabelProbe::NotRegistered),
+            None
+        );
+        assert!(cli_spawn_refusal_for(&DaemonLabelProbe::Undeterminable).is_some());
+        assert!(
+            cli_spawn_refusal_for(&DaemonLabelProbe::Registered("com.trusty.mpm".into())).is_some()
+        );
+    }
+
+    /// The undeterminable refusal must not invent a label, and must still leave
+    /// the operator a next step in both directions.
+    #[test]
+    fn undeterminable_refusal_names_the_directory_and_force() {
+        let msg = undeterminable_spawn_refusal_hint();
+        assert!(msg.contains("~/Library/LaunchAgents"), "message was: {msg}");
+        assert!(msg.contains("tm daemon --force"), "message was: {msg}");
+        assert!(
+            !msg.contains("launchctl kickstart"),
+            "must not prescribe a unit no scan resolved: {msg}"
+        );
+    }
+
     #[test]
     fn daemon_label_prefers_the_canonical_plist() {
         let home = home_with(&["com.trusty.mpm.plist", "com.trusty.mpm.dogfood.plist"]);
         assert_eq!(
-            daemon_launchd_label_in(home.path()).as_deref(),
+            daemon_launchd_label_in(home.path()).label(),
             Some("com.trusty.mpm")
         );
     }
@@ -661,20 +885,29 @@ mod tests {
     #[test]
     fn daemon_label_ignores_a_supervisor_only_home() {
         let home = home_with(&["com.trusty.mpm.supervisor.plist"]);
-        assert_eq!(daemon_launchd_label_in(home.path()), None);
+        assert_eq!(
+            daemon_launchd_label_in(home.path()),
+            DaemonLabelProbe::NotRegistered
+        );
         // And therefore the whole guard chain stands down on such a host.
         assert!(!compute_no_spawn(
-            daemon_launchd_label_in(home.path()).is_some()
+            daemon_launchd_label_in(home.path()).may_own_daemon()
         ));
     }
 
     #[test]
     fn daemon_label_none_for_an_empty_home() {
         let home = home_with(&[]);
-        assert_eq!(daemon_launchd_label_in(home.path()), None);
+        assert_eq!(
+            daemon_launchd_label_in(home.path()),
+            DaemonLabelProbe::NotRegistered
+        );
         // A home with no LaunchAgents directory at all must not panic either.
         let bare = tempfile::tempdir().expect("tempdir");
-        assert_eq!(daemon_launchd_label_in(bare.path()), None);
+        assert_eq!(
+            daemon_launchd_label_in(bare.path()),
+            DaemonLabelProbe::NotRegistered
+        );
     }
 
     /// Mirrors `install-trusty-mpm-signed.sh`'s drift glob: a non-canonical
@@ -683,7 +916,7 @@ mod tests {
     fn daemon_label_accepts_a_drifted_label() {
         let home = home_with(&["com.trusty.dogfood-mpm.plist"]);
         assert_eq!(
-            daemon_launchd_label_in(home.path()).as_deref(),
+            daemon_launchd_label_in(home.path()).label(),
             Some("com.trusty.dogfood-mpm")
         );
     }
@@ -691,7 +924,10 @@ mod tests {
     #[test]
     fn daemon_label_ignores_a_gui_plist() {
         let home = home_with(&["com.trusty.mpm.gui.plist"]);
-        assert_eq!(daemon_launchd_label_in(home.path()), None);
+        assert_eq!(
+            daemon_launchd_label_in(home.path()),
+            DaemonLabelProbe::NotRegistered
+        );
     }
 
     #[test]

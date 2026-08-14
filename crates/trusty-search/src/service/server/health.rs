@@ -67,10 +67,10 @@ pub(super) struct HealthResponse {
     /// What: the same `QUEUE_DEPTH` gauge `defer_embed_queue` maintains,
     /// fleet-wide rather than per index. Additive field; every existing
     /// consumer parses this response with optional/ignored unknown fields.
-    /// Test: none dedicated yet — `tests_stall.rs`'s `HealthResponse`
-    /// fixtures set this field to a literal `0` without exercising the live
-    /// `reindex::deferred_embed_queue_depth()` wiring end to end. This is a
-    /// coverage gap, not a claim of tested behavior; see #5523.
+    /// Test: `health_reports_the_deferred_embed_queue_depth_end_to_end` in
+    /// `tests_stall` — drives a real queued job through
+    /// `spawn_deferred_embed_pass` and asserts `/health` reports it, both
+    /// enqueued and drained.
     pub(super) deferred_embed_queue_depth: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) update_available: Option<String>,
@@ -544,12 +544,21 @@ pub(super) async fn health_handler(
     // already calling `/health` — no new background task) and recompute.
     // See `recompute_warm_boot_degraded` for exactly what does/doesn't heal.
     let current_defer_embed_epoch = crate::service::reindex::deferred_embed_completion_epoch();
-    let last_seen_defer_embed_epoch = state.last_seen_defer_embed_epoch.swap(
-        current_defer_embed_epoch,
-        std::sync::atomic::Ordering::AcqRel,
-    );
+    let last_seen_defer_embed_epoch = state
+        .last_seen_defer_embed_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
     if current_defer_embed_epoch != last_seen_defer_embed_epoch {
-        recompute_warm_boot_degraded(&state);
+        // #5633: consume the drain edge only once the scan behind it was
+        // conclusive. Committing the epoch after an inconclusive scan spends
+        // the one trigger this recompute gets, which is what made it a
+        // one-shot with no re-scan; leaving it armed costs a cheap re-derive
+        // on the next poll and lets a contended handle resolve itself.
+        if recompute_warm_boot_degraded(&state) {
+            state.last_seen_defer_embed_epoch.store(
+                current_defer_embed_epoch,
+                std::sync::atomic::Ordering::Release,
+            );
+        }
     }
     // Issue #873: surface the warm-boot summary so a post-`cargo install` FDA
     // regression (`indexes:2` instead of `~102`) is visible without tailing logs.
@@ -915,14 +924,21 @@ pub(super) async fn health_handler(
 /// uses for `indexes_corpus_failed`). Persists the result back into
 /// `state.warmboot_summary` (not just a per-request clone) and logs the
 /// old -> new transition.
+///
+/// Returns whether the scan was CONCLUSIVE — i.e. every handle's `stages` was
+/// readable (#5633). A contended handle proves nothing about that index, so an
+/// inconclusive scan preserves the previous flag instead of clearing it, and the
+/// caller leaves the drain edge armed so the next poll re-derives.
 /// Test: `warm_boot_degraded_recomputes_to_false_once_catch_up_drains_cleanly`,
 /// `warm_boot_degraded_recompute_keeps_a_genuinely_failed_embed_degraded`,
-/// `recompute_does_not_flag_an_in_progress_tail_job_as_degraded` in
+/// `recompute_does_not_flag_an_in_progress_tail_job_as_degraded`,
+/// `recompute_does_not_clear_degraded_when_a_stages_read_is_contended`,
+/// `recompute_reports_whether_its_scan_was_conclusive` in
 /// `tests_health_degraded.rs`.
-pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) {
+pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) -> bool {
     let (degraded_by_tcc, old) = match state.warmboot_summary.lock() {
         Ok(summary) => (summary.indexes_skipped_tcc > 0, summary.warm_boot_degraded),
-        Err(_) => return,
+        Err(_) => return false,
     };
     // #4250: this used to read the FROZEN boot-time `indexes_skipped_timeout`,
     // on the stated premise that "a scan timeout genuinely CANNOT heal without
@@ -939,16 +955,51 @@ pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) {
         .load(std::sync::atomic::Ordering::Relaxed);
     let handles = state.registry.list_handles();
     let degraded_by_count = prior_count > 0 && handles.len() < prior_count * 4 / 5;
-    let any_stage_failed = handles
-        .iter()
-        .any(|h| h.stages.try_read().map(|s| s.any_failed()).unwrap_or(false));
-    let new = degraded_by_tcc || degraded_by_timeout || degraded_by_count || any_stage_failed;
+    // #5633: separate what the scan PROVED from what it could not read. The
+    // `/health` poll above folds a contended `try_read` into "did not fail" and
+    // says why that is safe there — "the next 2 s poll re-scans". Nothing
+    // re-scans behind THIS one: it is edge-triggered on the catch-up queue's
+    // drain and it WRITES the sticky flag, so the same undercount clears a real
+    // degraded signal until the daemon restarts. tokio's `RwLock` is fair, so a
+    // merely QUEUED writer already fails `try_read` — and `reindex/defer_embed.rs`
+    // and `reindex/stages.rs` take `stages.write()` on exactly the handles this
+    // recompute's own trigger has been moving.
+    let mut any_stage_failed = false;
+    let mut unreadable = 0usize;
+    for handle in handles.iter() {
+        match handle.stages.try_read() {
+            Ok(stages) => any_stage_failed |= stages.any_failed(),
+            Err(_) => unreadable += 1,
+        }
+    }
+    let conclusive = unreadable == 0;
+    // An unreadable handle blocks only the CLEARING of the flag — the direction
+    // that discards evidence. It never manufactures a failure: a clean scan
+    // still clears, and a proven failure still sets. Defaulting the other way
+    // would be this same defect with the sign flipped.
+    let new = degraded_by_tcc
+        || degraded_by_timeout
+        || degraded_by_count
+        || any_stage_failed
+        || (!conclusive && old);
 
     if let Ok(mut summary) = state.warmboot_summary.lock() {
         summary.warm_boot_degraded = new;
     }
 
-    if new != old {
+    // Report WHY, not just the value: "nothing failed" and "N handles could not
+    // be read" must not reach an operator as the same line.
+    if !conclusive {
+        tracing::warn!(
+            unreadable,
+            handles = handles.len(),
+            warm_boot_degraded = new,
+            "warm_boot_degraded recompute could not read {unreadable} handle(s)' stages \
+             (lock contended) — the scan proves nothing about those indexes, so the \
+             previous value is preserved rather than cleared, and the drain edge stays \
+             armed for the next poll (#5633)"
+        );
+    } else if new != old {
         tracing::info!(
             "warm_boot_degraded recompute (deferred-embed catch-up drained): {old} -> {new}"
         );
@@ -957,6 +1008,7 @@ pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) {
             "warm_boot_degraded recompute (deferred-embed catch-up drained): unchanged at {new}"
         );
     }
+    conclusive
 }
 
 /// Request body for `POST /upgrade` (issue #537).
