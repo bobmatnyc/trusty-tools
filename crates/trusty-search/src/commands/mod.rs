@@ -41,6 +41,7 @@ pub mod discover;
 pub mod doctor;
 pub mod hook;
 pub mod index;
+pub(crate) mod index_action;
 pub mod index_allowlist;
 pub mod index_cwd_resolve;
 pub(crate) mod index_persist;

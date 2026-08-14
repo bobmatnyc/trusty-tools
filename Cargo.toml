@@ -318,7 +318,6 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.33"
 tiktoken-rs = "0.5"
 git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }
-kuzu = "0.9"
 
 # Embedded assets (trusty-memory, trusty-agents).
 rust-embed = { version = "8", features = ["include-exclude", "interpolate-folder-path"] }
