@@ -15,10 +15,14 @@
 //! outranked an isolated instance on every later call.
 //!
 //! What: two pure path resolvers, one async TCP probe, and one delegation.
-//! Test: `trusty_common::daemon_guard::addr_tests` covers the resolution
-//! paths; `daemon_base_url_falls_back_when_http_addr_dead` and
+//! Test: `daemon_base_url_falls_back_when_http_addr_dead` and
 //! `daemon_base_url_prefers_isolated_instance_over_stale_default_cache` below
-//! prove this crate's binding still satisfies the #117 / #3545 contracts.
+//! prove this crate's binding still satisfies the #117 / #3545 contracts. The
+//! resolution paths themselves moved to trusty-common with the resolver
+//! (#5670) and are covered there by `trusty_common::daemon_guard::addr_tests`.
+//! That name stays in prose rather than in the citation list above, because
+//! `scripts/check_test_pointers.sh` resolves a `Test:` pointer only within the
+//! citing file's own crate.
 
 use std::time::Duration;
 
