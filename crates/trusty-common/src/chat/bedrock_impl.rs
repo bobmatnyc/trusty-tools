@@ -70,18 +70,35 @@ pub const DEFAULT_BEDROCK_REGION: &str = "us-east-1";
 /// Why: allows per-deployment region override without code changes.
 /// What: returns the first non-empty value of `TRUSTY_AWS_REGION` >
 ///       `AWS_REGION` > `"us-east-1"`.
-/// Test: covered by `bedrock_provider_new_uses_region`.
+/// Test: `bedrock_region_resolution`.
 pub fn resolve_bedrock_region(explicit: Option<&str>) -> String {
-    if let Some(r) = explicit.filter(|s| !s.is_empty()) {
-        return r.to_string();
-    }
-    for var in [ENV_REGION_TRUSTY, ENV_REGION_AWS] {
-        let val = std::env::var(var).unwrap_or_default();
-        if !val.is_empty() {
-            return val;
-        }
-    }
-    DEFAULT_BEDROCK_REGION.to_string()
+    // #5652: read the env once here so the precedence walk itself stays pure
+    // and testable without mutating process-wide env vars.
+    let trusty_env = std::env::var(ENV_REGION_TRUSTY).ok();
+    let aws_env = std::env::var(ENV_REGION_AWS).ok();
+    resolve_region_from(explicit, trusty_env.as_deref(), aws_env.as_deref())
+}
+
+/// Pick the first non-empty region among the four precedence tiers.
+///
+/// Why (#5652): [`resolve_bedrock_region`] reads process-wide env vars, so a
+/// test of its precedence either inherits the ambient `AWS_REGION` or has to
+/// mutate global state and race every other test in the binary. Taking the two
+/// env tiers as arguments makes the ordering provable with neither hazard.
+/// What: returns `explicit` > `trusty_env` > `aws_env` > [`DEFAULT_BEDROCK_REGION`],
+/// treating an empty string at any tier as unset.
+/// Test: `bedrock_region_resolution`.
+fn resolve_region_from(
+    explicit: Option<&str>,
+    trusty_env: Option<&str>,
+    aws_env: Option<&str>,
+) -> String {
+    [explicit, trusty_env, aws_env]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_BEDROCK_REGION)
+        .to_string()
 }
 
 /// AWS Bedrock `ConverseStream` API provider implementing [`ChatProvider`].
@@ -447,25 +464,52 @@ mod tests {
     /// AWS_REGION > default.
     ///
     /// Why: operators use different env vars in different deployment contexts;
-    /// the precedence order must be stable and tested.
-    /// What: checks each resolution path in isolation.
-    /// Test: pure env-var logic, no network.
+    /// the precedence order must be stable and tested. #5652: the previous
+    /// version called `resolve_bedrock_region` directly and asserted that an
+    /// empty explicit region reaches the default — which skips the two env
+    /// tiers and fails outright whenever `AWS_REGION` is set in the ambient
+    /// environment.
+    /// What: drives the pure `resolve_region_from` walk with the env tiers
+    /// passed as arguments, so every case is deterministic and nothing in this
+    /// test binary can race it. The one `resolve_bedrock_region` assertion left
+    /// exercises the tier that is env-independent by construction.
+    /// Test: this test.
     #[test]
     fn bedrock_region_resolution() {
         assert_eq!(
+            resolve_region_from(Some("eu-west-1"), Some("ap-south-1"), Some("us-west-2")),
+            "eu-west-1",
+            "explicit should win over both env tiers"
+        );
+        assert_eq!(
+            resolve_region_from(Some(""), Some("ap-south-1"), Some("us-west-2")),
+            "ap-south-1",
+            "empty explicit should fall through to TRUSTY_AWS_REGION"
+        );
+        assert_eq!(
+            resolve_region_from(None, None, Some("us-west-2")),
+            "us-west-2",
+            "AWS_REGION should be used when TRUSTY_AWS_REGION is unset"
+        );
+        assert_eq!(
+            resolve_region_from(Some(""), None, None),
+            DEFAULT_BEDROCK_REGION,
+            "empty explicit with no env should reach the default"
+        );
+        assert_eq!(
+            resolve_region_from(None, None, None),
+            DEFAULT_BEDROCK_REGION,
+            "None with no env should reach the default"
+        );
+        assert_eq!(
+            resolve_region_from(Some(""), Some(""), Some("")),
+            DEFAULT_BEDROCK_REGION,
+            "an env var set to the empty string counts as unset"
+        );
+        assert_eq!(
             resolve_bedrock_region(Some("eu-west-1")),
             "eu-west-1",
-            "explicit should win"
-        );
-        assert_eq!(
-            resolve_bedrock_region(Some("")),
-            DEFAULT_BEDROCK_REGION,
-            "empty explicit should fall through to default"
-        );
-        assert_eq!(
-            resolve_bedrock_region(None),
-            DEFAULT_BEDROCK_REGION,
-            "None should return default"
+            "the public wrapper's explicit tier ignores the environment"
         );
     }
 
