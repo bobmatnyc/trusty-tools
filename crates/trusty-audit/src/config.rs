@@ -132,7 +132,7 @@ impl ToolPin {
 /// "latest" reintroduces that from the install side, so the versions are
 /// engagement data rather than a build-time constant, and the report package
 /// records which triple produced it.
-/// What: three REQUIRED fields. Serde rejects a config that omits one, which is
+/// What: four REQUIRED fields. Serde rejects a config that omits one, which is
 /// the fail-closed behaviour — there is no default to silently fall back to.
 /// The TOML keys are the crate names, hyphenated.
 /// Test: `super::config_tests::a_config_missing_one_pin_does_not_load`.
@@ -141,6 +141,10 @@ impl ToolPin {
 pub struct ToolPins {
     /// The audit sweep itself.
     pub tga: ToolPin,
+    /// The search daemon `trusty-analyze` and the indexing pass both need
+    /// (#5670). `tga audit` starts it, so an engagement pins it like the rest.
+    #[serde(rename = "trusty-search")]
+    pub trusty_search: ToolPin,
     /// Static analysis feeding the scorecard.
     #[serde(rename = "trusty-analyze")]
     pub trusty_analyze: ToolPin,
@@ -282,6 +286,7 @@ client = "Acme"
 
 [tools]
 tga = "2.9.4"
+trusty-search = "0.47.0"
 trusty-analyze = "0.9.2"
 trusty-review = "0.15.1"
 "#;

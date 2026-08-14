@@ -169,6 +169,7 @@ The versions come from the engagement config, which is required — there is no
 ```toml
 [tools]
 tga = "2.9.4"
+trusty-search = "0.47.0"
 trusty-analyze = "0.9.2"
 # Pin the artifact's bytes as well as its version, when the handoff was built
 # with a recorded digest.

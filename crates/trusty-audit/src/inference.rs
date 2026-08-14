@@ -229,6 +229,7 @@ instructions = "Assess the last 52 weeks."
 
 [tools]
 tga = "2.9.4"
+trusty-search = "0.47.0"
 trusty-analyze = "0.9.2"
 trusty-review = "0.15.1"
 "#;

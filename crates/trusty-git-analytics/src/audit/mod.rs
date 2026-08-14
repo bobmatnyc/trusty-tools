@@ -25,6 +25,7 @@ mod analyze;
 mod gaps;
 mod repo_index;
 mod review;
+mod search_daemon;
 mod stage;
 mod sweep;
 
@@ -57,6 +58,12 @@ pub use review::{
     require_review_supports_required_inference, resolve_review_binary, run_review_report,
     MissingInferenceCredential, ReviewBinaryTooOld, ReviewRun, ReviewRunError, UnverifiedReport,
     DEFAULT_REVIEW_BIN, ENV_INFERENCE_CREDENTIAL, ENV_REVIEW_BIN, MIN_REVIEW_VERSION,
+};
+/// #5670: link 1 of the prerequisite chain — the daemon `trusty-analyze` itself
+/// refuses to boot without, and reports `503 degraded` for as long as it is gone.
+pub use search_daemon::{
+    ensure_search_daemon, ensure_search_daemon_with, SearchDaemonUnavailable, SearchGuard,
+    SEARCH_STARTUP_TIMEOUT,
 };
 pub use stage::{AuditSweepStats, StageOutcome, StageStatus, StaleFetch, SweepStage};
 pub use sweep::{run_full_sweep, SweepOptions};
