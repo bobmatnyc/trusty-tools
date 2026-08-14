@@ -112,14 +112,19 @@ gate the ladder above describes. Do not hold a merge for it. Read the result whe
 it lands and act on a failure; waiting on it is the single largest source of dead
 time in this repo's workflow.
 
-🟡 **Do not update a branch just to merge it.** `mergeStateStatus: BEHIND` does not
-block a merge here; only a genuine `CONFLICTING` does. An update re-queues every
-check and buys nothing.
+🟡 **A `BEHIND` branch cannot merge — update it.** `gh pr merge` refuses with "the
+head branch is not up to date with the base branch" even when all six required
+contexts have passed, so run `gh pr update-branch <n>` and let them re-report; on a
+docs-only PR that costs well under a minute. The mechanism is UNCONFIRMED —
+`required_status_checks.strict` is readable only with admin access, which the working
+account does not have — so treat this as observed behaviour, not a verified setting.
+A genuine `CONFLICTING` state is a different and harder problem.
 
 🟡 **`gh pr merge --admin` bypasses nothing on this repo.** The working account is
-push-only (`admin: false`), so the flag is silently ineffective — a PR merges when
-its six required checks pass, and not before. Three attempts against a PR whose
-checks had not yet reported is a failure mode that has already cost real time.
+push-only (`admin: false`), so the flag is silently ineffective. `gh`'s own refusal
+message offers `--admin` as the remedy — following that suggestion is a dead end,
+not a fix. A PR merges when its six required contexts pass AND its branch is current
+with base.
 
 ### Baseline failures — the Rust specifics
 
