@@ -451,7 +451,14 @@ Distributable crates **must** have a GitHub Actions workflow that:
 4. **Computes SHA256** hashes for each asset and includes them in the release notes or a companion file
 5. **Publishes to crates.io** (if applicable; libraries skip this; UI-embedding crates use `SKIP_UI_BUILD=1`)
 
-See `crates/trusty-git-analytics/.github/workflows/release.yml` for a worked example.
+This repo's distributable crates share ONE data-driven workflow rather than a
+per-crate copy: `.github/workflows/release.yml` (`Binary Release`, triggered on
+`*-v*` tag pushes). See its `trusty-git-analytics` branch of the per-crate
+`CRATE_CONFIG` table (in the `Resolve per-crate config` step) for a worked
+example of requirements 1–4. Requirement 5, publishing to crates.io, is a
+separate manual step run by a human — see `Skill(skill="cargo-publish")` and
+[docs/reference/release-workflow.md](../reference/release-workflow.md) — not
+something this workflow does itself.
 
 ---
 
@@ -459,7 +466,7 @@ See `crates/trusty-git-analytics/.github/workflows/release.yml` for a worked exa
 
 ### When Adding a New Distributable Crate
 
-1. Create a GitHub Actions release workflow (copy from `tga` and customize).
+1. Add a config branch for the new crate to the shared `.github/workflows/release.yml` `CRATE_CONFIG` table (see that file's own "TO ADD A NEW CRATE" comment) — do not create a separate per-crate workflow.
 2. Add an entry to the **Placeholder Values** table above.
 3. Create the crate-specific **Prerequisites** section if needed.
 4. Add the crate to the "Distributable binary crates" list in the Scope section.
