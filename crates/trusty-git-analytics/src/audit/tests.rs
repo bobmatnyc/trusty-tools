@@ -963,9 +963,12 @@ pub(super) fn free_port() -> u16 {
 /// `SERVICE_UNAVAILABLE` + `status: "degraded"`). `probe_once` counts only a
 /// 2xx, so a 503 daemon reads to the guard exactly like no daemon.
 ///
-/// Counting replies rather than sleeping is what makes the slow-start tests
-/// deterministic — the guard's first probe is guaranteed to miss on a loaded
-/// machine, where a wall-clock delay could be overtaken.
+/// The counter advances on REPLIES, so this is deterministic only for
+/// assertions about replies — which probes missed, and what the guard concluded
+/// from them. An assertion about a side effect the stub performs, such as a
+/// spawn or a file write, is a different event: it can still be pending when
+/// the counter has already flipped the daemon to ready. Gate that on the effect
+/// itself — see `serve_health_after_spawns` (#5713).
 async fn serve_health(degraded_replies: usize) -> u16 {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
