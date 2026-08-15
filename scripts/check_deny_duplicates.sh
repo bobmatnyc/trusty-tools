@@ -89,7 +89,25 @@ else
   # the default set, the extra 34 being candle/gemm/pulp copies from backends
   # that are never on at the same time. Counting those would make the ratchet
   # track an artifact nobody builds.
-  cargo deny check bans > "$TMP_OUT" 2>&1 || DENY_RC=$?
+  # `--color never` because this output is PARSED, not read. The pre-publish
+  # workflow sets CARGO_TERM_COLOR=always (inherited from ci.yml's env block),
+  # and cargo-deny honours it: its verdict line arrives as
+  # `bans \e[32mok\e[0m`, so an anchored `^bans ok` match fails and the
+  # vacuous-scan refusal below fires on a run that actually succeeded. That is
+  # what happened on the gate's first real execution (run 31858449749, Gate 3).
+  # The refusal behaved correctly — it declined to report a count it could not
+  # trust — but the gate was unusable until the colour was turned off.
+  cargo deny --color never check bans > "$TMP_OUT" 2>&1 || DENY_RC=$?
+fi
+
+# Strip any ANSI escape sequences that survived, so every match below reads
+# plain text. Belt and braces alongside `--color never`: a future cargo-deny
+# that colours on a different switch, or a caller passing captured colourised
+# output to --from-output, must not silently turn a real verdict into a refusal.
+if command -v perl >/dev/null 2>&1; then
+  perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' "$TMP_OUT" > "${TMP_OUT}.plain" && mv "${TMP_OUT}.plain" "$TMP_OUT"
+else
+  sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' "$TMP_OUT" > "${TMP_OUT}.plain" && mv "${TMP_OUT}.plain" "$TMP_OUT"
 fi
 
 # A hard violation (a banned crate, a wildcard requirement) is cargo-deny's own
