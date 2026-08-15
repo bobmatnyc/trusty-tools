@@ -188,7 +188,31 @@ impl KgStoreRedb {
     /// propagate — `open_table` cannot mean "not written yet" because
     /// `open_with_intent` creates every table on open.
     /// Test: `count_active_triples_returns_live_only`,
-    /// `count_active_triples_surfaces_read_failure`.
+    /// `count_active_triples_surfaces_read_failure`,
+    /// `contract_count_active_triples_zero_means_empty_not_failed`.
+    ///
+    /// # Code Contract
+    /// Preconditions:
+    /// - The store is open. No table need be populated —
+    ///   `open_with_intent` creates every table on open, so a missing table is
+    ///   a real failure and never means "not written yet".
+    ///
+    /// Postconditions:
+    /// - `Ok(n)` means the read COMPLETED and `n` is the number of currently
+    ///   active triples. `Ok(0)` therefore means the graph is empty, and only
+    ///   that (#5384). Before 0.33.0 this returned a bare `u64` and a failed
+    ///   read also produced `0`, which `kg_query` reported as
+    ///   `graph_state: "graph_empty"` — the false claim #4775 exists to prevent.
+    /// - `Err` means the count is UNKNOWN. It never means zero, and a caller
+    ///   must not substitute one.
+    /// - Every read step propagates: `begin_read`, `open_table`, `iter`, and
+    ///   each per-row read.
+    ///
+    /// Invariants:
+    /// - Read-only: opens a read transaction and writes nothing.
+    /// - Counts only ACTIVE triples — a superseded or retracted triple is
+    ///   excluded even though its history row survives.
+    /// - The sum saturates rather than overflowing `u64`.
     pub fn count_active_triples(&self) -> Result<u64> {
         // #5384: propagate instead of returning 0 — a failed read must not be
         // reportable as an empty graph.

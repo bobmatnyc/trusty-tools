@@ -70,7 +70,27 @@ pub const DEFAULT_BEDROCK_REGION: &str = "us-east-1";
 /// Why: allows per-deployment region override without code changes.
 /// What: returns the first non-empty value of `TRUSTY_AWS_REGION` >
 ///       `AWS_REGION` > `"us-east-1"`.
-/// Test: `bedrock_region_resolution`.
+/// Test: `bedrock_region_resolution`,
+/// `contract_resolve_region_from_precedence_is_total`.
+///
+/// # Code Contract
+/// Preconditions:
+/// - None. `explicit` may be `None`, `Some("")`, or any string; an empty
+///   string at ANY tier is treated as unset rather than as a chosen region.
+///
+/// Postconditions:
+/// - Returns the first non-empty value in the strict order `explicit` >
+///   `TRUSTY_AWS_REGION` > `AWS_REGION` > [`DEFAULT_BEDROCK_REGION`] (#5652).
+/// - Never returns an empty string, because the last tier is a non-empty
+///   constant.
+/// - Total: there is no input for which this fails or panics.
+///
+/// Invariants:
+/// - Reads the environment but never writes it, and never caches — a region
+///   changed between two calls is observed by the second.
+/// - The precedence walk itself is pure; the env read is lifted to the single
+///   call site here so [`resolve_region_from`] stays provable without mutating
+///   process-wide state.
 pub fn resolve_bedrock_region(explicit: Option<&str>) -> String {
     // #5652: read the env once here so the precedence walk itself stays pure
     // and testable without mutating process-wide env vars.
@@ -473,7 +493,54 @@ mod tests {
     /// passed as arguments, so every case is deterministic and nothing in this
     /// test binary can race it. The one `resolve_bedrock_region` assertion left
     /// exercises the tier that is env-independent by construction.
-    /// Test: this test.
+    /// Test: `bedrock_region_resolution`.
+    ///
+    /// The Code Contract test below (#5724, ADR-0047) proves the same
+    /// precedence exhaustively rather than by example; this one stays as the
+    /// readable statement of the intended order.
+    ///
+    /// Why: the contract on [`super::resolve_bedrock_region`] states the order
+    /// AND totality. A table over every combination of the three tiers proves
+    /// both, with no ambient-environment dependency to race.
+    /// What: for all 3^3 combinations of {absent, empty, set}, the result is the
+    /// first non-empty tier and is never empty.
+    /// Test: itself.
+    #[test]
+    fn contract_resolve_region_from_precedence_is_total() {
+        let tiers = [None, Some(""), Some("R")];
+        for (i, explicit) in tiers.iter().enumerate() {
+            for (j, trusty) in tiers.iter().enumerate() {
+                for (k, aws) in tiers.iter().enumerate() {
+                    // Distinct values per tier so the winner is identifiable.
+                    let e = explicit.map(|s| if s.is_empty() { "" } else { "explicit-r" });
+                    let t = trusty.map(|s| if s.is_empty() { "" } else { "trusty-r" });
+                    let a = aws.map(|s| if s.is_empty() { "" } else { "aws-r" });
+
+                    let got = resolve_region_from(e, t, a);
+
+                    // Postcondition: first non-empty tier wins, in this order.
+                    let want = [e, t, a]
+                        .into_iter()
+                        .flatten()
+                        .find(|s| !s.is_empty())
+                        .unwrap_or(DEFAULT_BEDROCK_REGION);
+                    assert_eq!(got, want, "combination ({i},{j},{k})");
+
+                    // Postcondition: never empty, because the last tier is a
+                    // non-empty constant.
+                    assert!(!got.is_empty(), "combination ({i},{j},{k}) returned empty");
+                }
+            }
+        }
+
+        // Postcondition: the default is the last tier, reached only when every
+        // other tier is unset or empty.
+        assert_eq!(
+            resolve_region_from(Some(""), Some(""), Some("")),
+            DEFAULT_BEDROCK_REGION
+        );
+    }
+
     #[test]
     fn bedrock_region_resolution() {
         assert_eq!(

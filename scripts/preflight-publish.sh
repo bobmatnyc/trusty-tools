@@ -540,7 +540,18 @@ check5_semver() {
 #   that number is zero. Four outcomes, four labels, so a reader can always tell
 #   "nothing was wrong" from "nothing was examined":
 #
-#     [PASS] >= 1 crate compared, no unbumped break. The only verified outcome.
+#     [PASS] >= 1 crate compared, and every lint that RAN passed. Narrower than
+#            it reads, and the line says so: cargo-semver-checks 0.50.0 checks
+#            existence, kind, parameter and generic COUNTS, attributes and trait
+#            impls — it compares NO TYPES. Substitute any type and the item still
+#            exists with the same name and arity, so every lint passes. Measured
+#            against a 9-break probe crate at --release-type patch: 2 caught, 7
+#            missed, all 7 type substitutions. trusty-common 0.32.0 -> 0.33.0
+#            changed KgStoreRedb::count_active_triples from u64 to Result<u64>
+#            and this gate reported `196 checks: 196 pass`.
+#            scripts/check_semver_types.sh compares the types; it is not wired
+#            into this decision, and the PASS line names it so a clean run points
+#            at what it did not look at.
 #     [SKIP] 0 compared because no comparison was POSSIBLE — no baseline on
 #            crates.io, no library target, or a row in
 #            semver-checks-crate-exclusions.tsv. A fact about the crate, already
@@ -645,7 +656,12 @@ semver_decide() {
   if [ -z "$blind_why" ]; then
     compared=$((checked + inventoried))
     if [ "$compared" -ge 1 ]; then
-      echo "[PASS] semver: ${compared} crate(s) compared against their previous crates.io release — ${summary}" >&2
+      echo "[PASS] semver: ${compared} crate(s) compared against their previous crates.io release." >&2
+      echo "       Every existence-and-shape lint passed. NO TYPE WAS COMPARED —" >&2
+      echo "       cargo-semver-checks 0.50.0 has no lint that reads one, so a return" >&2
+      echo "       type changing u64 -> Result<u64> passes here. For that:" >&2
+      echo "         bash scripts/check_semver_types.sh --crate ${pkg}" >&2
+      echo "       ${summary}" >&2
       return 0
     fi
 

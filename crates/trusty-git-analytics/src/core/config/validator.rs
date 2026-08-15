@@ -38,7 +38,7 @@
 
 use std::path::Path;
 
-use super::{expand_path, Config};
+use super::{expand_path, Config, GithubConfig};
 
 /// A single configuration validation failure.
 ///
@@ -115,6 +115,25 @@ pub enum ConfigError {
         /// Forwarded error text from `AzureDevOpsConfig::validate`.
         message: String,
     },
+}
+
+/// Decide whether GitHub PR fetching is enabled with no token available.
+///
+/// Why (#5313): the enclosing check read `GITHUB_TOKEN` inline, so the only way
+/// to test the missing-token branch was to remove that variable process-wide —
+/// `unsafe` under the 2024 edition, and a race against every other thread
+/// `cargo test` runs in parallel. Taking the env value as an argument makes
+/// every branch provable without touching global state, the same shape #5308
+/// used for `binary_from_override`.
+/// What: returns `true` only when `fetch_prs` is on and neither the config
+/// `token` nor `env_token` holds a non-whitespace value.
+/// Test: `github_token_required_when_fetch_prs`.
+fn github_token_missing(gh: &GithubConfig, env_token: Option<&str>) -> bool {
+    if !gh.fetch_prs {
+        return false;
+    }
+    let non_empty = |s: &str| !s.trim().is_empty();
+    !gh.token.as_deref().is_some_and(non_empty) && !env_token.is_some_and(non_empty)
 }
 
 /// Runs a battery of validation checks against a [`Config`].
@@ -212,18 +231,10 @@ impl<'a> ConfigValidator<'a> {
         let Some(gh) = self.config.github.as_ref() else {
             return;
         };
-        if gh.fetch_prs {
-            let token_present = gh
-                .token
-                .as_deref()
-                .map(|t| !t.trim().is_empty())
-                .unwrap_or(false);
-            let env_present = std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false);
-            if !token_present && !env_present {
-                errors.push(ConfigError::MissingGitHubToken);
-            }
+        // #5313: read the env here so the decision itself stays pure.
+        let env_token = std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN).ok();
+        if github_token_missing(gh, env_token.as_deref()) {
+            errors.push(ConfigError::MissingGitHubToken);
         }
     }
 

@@ -181,8 +181,20 @@ jobs:
       # 4. Cache cargo registry + build artefacts, under a key prefix scoped
       #    to this job's dependency graph (tree-sitter grammars, usearch, …).
       # ------------------------------------------------------------------
-      - name: Cache cargo registry and build artefacts
-        uses: actions/cache@v4
+      # Split into restore/save because `actions/cache@v4` has no `save-if`
+      # input — the guard `Swatinem/rust-cache` offers natively has to be
+      # spelled as an `if:` on a separate save step here.
+      #
+      # Save only from main: a cache saved on a PR ref is readable by that PR
+      # alone but still counts against the repo-wide 10 GB quota, and this repo
+      # was over it — see the note on the test-shard cache in ci.yml. This
+      # entry is the single largest in the repo at 2.32 GB (22% of quota), and
+      # this workflow DOES trigger on pull_request (path-filtered to
+      # trusty-search / trusty-embedderd / trusty-common), so every PR touching
+      # those crates could mint another 2.32 GB copy that no other PR can read.
+      - name: Restore cargo registry and build artefacts
+        id: al2023-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry/index/
@@ -260,3 +272,18 @@ jobs:
           cargo build -p trusty-search \
             --no-default-features \
             --features load-dynamic
+
+      # The `save-if` half of the split above. `cache-hit` is true only on an
+      # exact key match, so a run that restored via `restore-keys` (a stale
+      # lockfile prefix) still saves under the current key and the entry keeps
+      # up with Cargo.lock.
+      - name: Save cargo registry and build artefacts
+        if: github.ref == 'refs/heads/main' && steps.al2023-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: al2023-1.94-search-${{ hashFiles('Cargo.lock') }}

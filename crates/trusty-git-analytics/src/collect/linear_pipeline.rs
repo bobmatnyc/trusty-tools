@@ -8,7 +8,10 @@
 //! Linear client which referenced issues exist, and persists them into both
 //! `linear_issues` and, since #5219, the source-agnostic `work_items` /
 //! `commit_work_items` pair that correlation and DOC-70's board axis read.
-//! Every failure is non-fatal and lands in `stats.errors`.
+//! Every failure is non-fatal to the run and lands in `stats.errors`. Since
+//! #5655 each one is recorded as a stage failure — every arm here means the
+//! Linear corpus is absent, not that one issue was skipped — so `tga collect`
+//! exits non-zero after finishing its remaining stages.
 //! Test: this module's own `tests` cover the `work_items` projection; the
 //! client half is unit-tested in `crate::collect::linear`, and the
 //! orchestration is exercised end-to-end by the gated integration tests.
@@ -43,12 +46,14 @@ const LINEAR_ITEM_TYPE: &str = "Issue";
 /// every `(sha, message)` pair, calls `fetch_referenced_issues`, and stores the
 /// result into BOTH `linear_issues` and the source-agnostic `work_items` /
 /// `commit_work_items` pair. Every failure — client init, query, either store —
-/// is pushed into `stats.errors` and returns without aborting the surrounding
-/// run.
+/// is recorded on `stats` as a stage failure and returns without aborting the
+/// surrounding run. The command turns that into a non-zero exit at the end
+/// (#5655); nothing here decides the exit code itself.
 /// Test: `persist_work_items_writes_linear_rows`,
 /// `persist_work_items_links_commits`, `persist_work_items_is_idempotent`,
-/// `persist_work_items_reports_write_failure`; the client half is unit-tested
-/// in `crate::collect::linear`.
+/// `persist_work_items_reports_write_failure`,
+/// `linear_stage_faults_are_recorded_as_stage_failures`; the client half is
+/// unit-tested in `crate::collect::linear`.
 pub(super) async fn fetch_and_store_linear_issues(
     db: &mut Database,
     config: &Config,
@@ -67,9 +72,7 @@ pub(super) async fn fetch_and_store_linear_issues(
                         let mut stmt = match conn.prepare("SELECT sha, message FROM commits") {
                             Ok(s) => s,
                             Err(e) => {
-                                stats
-                                    .errors
-                                    .push(format!("Linear: query commits failed: {e}"));
+                                stats.fail_stage(format!("Linear: query commits failed: {e}"));
                                 return;
                             }
                         };
@@ -78,9 +81,7 @@ pub(super) async fn fetch_and_store_linear_issues(
                         }) {
                             Ok(r) => r,
                             Err(e) => {
-                                stats
-                                    .errors
-                                    .push(format!("Linear: read commits failed: {e}"));
+                                stats.fail_stage(format!("Linear: read commits failed: {e}"));
                                 return;
                             }
                         };
@@ -122,9 +123,7 @@ pub(super) async fn fetch_and_store_linear_issues(
                             stats.linear_issues_fetched += n;
                         }
                         Err(e) => {
-                            stats
-                                .errors
-                                .push(format!("Linear: store issues failed: {e}"));
+                            stats.fail_stage(format!("Linear: store issues failed: {e}"));
                         }
                     }
 
@@ -141,14 +140,14 @@ pub(super) async fn fetch_and_store_linear_issues(
                             );
                         }
                         Err(e) => {
-                            stats
-                                .errors
-                                .push(format!("Linear: store work_items failed: {e}"));
+                            // #5655: this Err is why the exit code exists — a
+                            // dropped work_items write must not report success.
+                            stats.fail_stage(format!("Linear: store work_items failed: {e}"));
                         }
                     }
                 }
                 Err(e) => {
-                    stats.errors.push(format!("Linear client init failed: {e}"));
+                    stats.fail_stage(format!("Linear client init failed: {e}"));
                 }
             }
         }
@@ -422,6 +421,39 @@ mod tests {
             linear_row_count(&db),
             0,
             "the issue upsert that already succeeded must roll back with the transaction"
+        );
+    }
+
+    /// #5655: every fault this pipeline records is a stage failure — each arm
+    /// means the Linear corpus is absent, not that one issue was skipped. The
+    /// dropped-`commits` query is the arm reachable without a Linear API round
+    /// trip; `store work_items failed` is built by the same constructor.
+    #[tokio::test]
+    async fn linear_stage_faults_are_recorded_as_stage_failures() {
+        use crate::core::config::LinearConfig;
+
+        let mut db = Database::open_in_memory().expect("db");
+        db.connection()
+            .execute("DROP TABLE commits", [])
+            .expect("drop commits");
+
+        let config = Config {
+            linear: Some(LinearConfig {
+                api_key: Some("test-key".to_string()),
+                fetch_on_reference: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut stats = CollectionStats::default();
+        fetch_and_store_linear_issues(&mut db, &config, &mut stats).await;
+
+        assert_eq!(stats.errors.len(), 1, "one fault: {:?}", stats.errors);
+        assert_eq!(
+            stats.stage_failures().len(),
+            1,
+            "a Linear stage that never wrote must reach the exit code: {:?}",
+            stats.errors
         );
     }
 
