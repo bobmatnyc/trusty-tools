@@ -7,7 +7,8 @@
 //! reference them without depending on the full `trusty-agents` binary crate.
 //! Moved to `trusty-agents-common` in Wave 2 (issue #867, refs #830/#832).
 //! What: Defines the four portable value types:
-//! - `TokenUsage` — per-LLM-call token counter (prompt/completion/cache)
+//! - `TokenUsage` — per-LLM-call token counter (prompt/completion/cache), also
+//!   used in `AgentOutput`
 //! - `PhaseRecord` — per-phase duration + token snapshot
 //! - `PerfTotals` — rolled-up totals across all phases in a run
 //! - `PerfRecord` — full run record (persisted to `docs/performance/runs/`)

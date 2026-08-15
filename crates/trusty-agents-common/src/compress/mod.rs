@@ -1,7 +1,8 @@
 //! Portable tool-output compression surface, shared across harnesses.
 //!
 //! Why: `trusty-agents`'s own LLM tool loop and `trusty-mpm`'s `tm compress`
-//! subcommand (Option 0 spike, issue #1956) both need
+//! subcommand (the `tm hook` `PreToolUse` Bash rewrite, Option 0 spike, issue
+//! #1956) both need
 //! `compress_tool_output_async` but must not pull in the full `trusty-agents`
 //! binary crate to get it. Hoisted here in issue #1959, mirroring the
 //! `OutputStyle`-style hoists already established for this crate (Wave 1/2,
