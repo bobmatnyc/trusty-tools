@@ -629,9 +629,11 @@ assert_eq "no gate in semver-checks branches on the activity type" "0" \
 # keyring-store feature): Install stable toolchain, Install system dependencies
 # (libdbus for keyring-store), Install cargo-semver-checks (pinned prebuilt),
 # Cache cargo artifacts, SemVer gate selftest, Enforce public-API SemVer against
-# crates.io. All six belong behind have_work — none of them has a reason to run
-# when nothing is being released.
-assert_eq "semver-checks gates its costly steps on there being work" "6" \
+# crates.io. The seventh is the type-differ selftest, which is cheap — it reads
+# two committed rustdoc JSON documents — but its --crate cases need
+# `cargo metadata`, and the toolchain step above is itself gated. All seven
+# belong behind have_work: none has a reason to run when nothing is released.
+assert_eq "semver-checks gates its costly steps on there being work" "7" \
   "$(grep -c "if: steps.crate.outputs.have_work == 'true'" .github/workflows/semver-checks.yml || true)"
 
 echo
