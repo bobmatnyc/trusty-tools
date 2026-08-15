@@ -117,9 +117,12 @@ pub fn upsert_pr(conn: &Connection, pr: &AdoPullRequest, repository: &str) -> Co
     };
 
     conn.execute(
+        // #5734: `source_branch` was parsed from `sourceRefName` but never
+        // persisted. It is the same `refs/heads/...` value `branch_ticket_key`
+        // normalizes, so storing it makes the branch harvest work on ADO.
         "INSERT OR REPLACE INTO pull_requests \
-         (provider, repository, pr_number, title, author, state, created_at, merged_at, commit_shas) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (provider, repository, pr_number, title, author, state, created_at, merged_at, commit_shas, head_ref) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             "azdo",
             repository,
@@ -130,6 +133,7 @@ pub fn upsert_pr(conn: &Connection, pr: &AdoPullRequest, repository: &str) -> Co
             pr.created_at.to_rfc3339(),
             pr.closed_at.map(|t| t.to_rfc3339()),
             commit_shas,
+            pr.source_branch,
         ],
     )?;
 

@@ -29,6 +29,7 @@ on:
       - "scripts/check-tag-publish-parity-selftest.sh"
       - "scripts/preflight-publish.sh"
       - "scripts/preflight-check5-selftest.sh"
+      - "scripts/preflight-check8-selftest.sh"
       - "scripts/test-data/preflight-check5/**"
       - ".github/workflows/tag-publish-parity.yml"
   pull_request:
@@ -41,6 +42,7 @@ on:
       - "scripts/check-tag-publish-parity-selftest.sh"
       - "scripts/preflight-publish.sh"
       - "scripts/preflight-check5-selftest.sh"
+      - "scripts/preflight-check8-selftest.sh"
       - "scripts/test-data/preflight-check5/**"
       - ".github/workflows/tag-publish-parity.yml"
 
@@ -82,3 +84,23 @@ jobs:
 
       - name: Preflight CHECK 5 decision self-test
         run: bash scripts/preflight-check5-selftest.sh
+
+  # Third instance of the same shape, third check (#5755). CHECK 8 decides
+  # whether the release gate actually ran against the commit being published,
+  # and it used to key on `head_sha` — which, once #5741 let a dispatch pin an
+  # older commit, stopped naming the commit a run examined. Run 31874835425
+  # gated 020c139d and records `head_sha` 3f39b79f, so a preflight at 3f39b79f
+  # counted it as evidence for a commit it never opened. That is CHECK 6's
+  # failure in a new place, so it gets CHECK 6's treatment: fixtures in CI.
+  #
+  # Separate job rather than another step, so a red one names which decision
+  # broke. Pure shell over captured API output: no gh, no network, no cargo.
+  check8-decision:
+    name: CHECK 8 decision self-test (a run's head_sha is not what it gated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Preflight CHECK 8 decision self-test
+        run: bash scripts/preflight-check8-selftest.sh

@@ -1,0 +1,29 @@
+{
+  "format_version": 999,
+  "root": 0,
+  "index": {
+    "0": {
+      "id": 0,
+      "crate_id": 0,
+      "name": "demo",
+      "visibility": "public",
+      "docs": null,
+      "inner": { "module": { "is_crate": true, "is_stripped": false, "items": [1] } }
+    },
+    "1": {
+      "id": 1,
+      "crate_id": 0,
+      "name": "f",
+      "visibility": "public",
+      "docs": "Why: fixture for check_contracts_selftest.sh.\nWhat: no-op.\nTest: none.\n\n# Code Contract\nPreconditions:\n- x is positive\nPostconditions:\n- returns x doubled\n",
+      "inner": {
+        "function": {
+          "generics": { "params": [], "where_predicates": [] },
+          "has_body": true,
+          "header": { "abi": "Rust", "is_async": false, "is_const": false, "is_unsafe": false },
+          "sig": { "inputs": [], "is_c_variadic": false, "output": { "primitive": "u64" } }
+        }
+      }
+    }
+  }
+}

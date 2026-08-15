@@ -149,6 +149,13 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "jira_ingestion",
         sql: include_str!("../sql/0023_jira_ingestion.sql"),
     },
+    // #5734: a PR's source branch and its body-declared issue ref, so branch
+    // names and PR bodies feed the same ticket extraction as commit subjects.
+    Migration {
+        version: 24,
+        name: "pull_requests_head_ref_and_body_ticket",
+        sql: include_str!("../sql/0024_pull_requests_head_ref_and_body_ticket.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
@@ -201,12 +208,29 @@ pub(super) fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>
 /// Returns [`TgaError::MigrationError`] if a migration's SQL fails. The
 /// transaction guarantees partial application cannot occur.
 pub fn run(conn: &mut Connection) -> Result<()> {
+    run_through(conn, i64::MAX)
+}
+
+/// Apply migrations up to and including `max_version`.
+///
+/// Why: `run` always migrates to the newest version, so nothing could build a
+/// database at an OLDER schema — and without that, no test can prove an
+/// existing database survives a new migration. #5734 adds a column to
+/// `pull_requests`, which every deployed database already has rows in.
+/// What: the body `run` used to have, with a ceiling. `run` passes
+/// [`i64::MAX`], so its behaviour is unchanged.
+/// Test: `tests::migration_v24_preserves_an_existing_v23_database`.
+///
+/// # Errors
+///
+/// Returns [`TgaError::MigrationError`] if a migration's SQL fails.
+fn run_through(conn: &mut Connection, max_version: i64) -> Result<()> {
     ensure_migrations_table(conn)?;
     let current = current_version(conn)?;
     debug!(current_version = current, "running migrations");
 
     for m in MIGRATIONS {
-        if m.version <= current {
+        if m.version <= current || m.version > max_version {
             continue;
         }
         info!(version = m.version, name = m.name, "applying migration");
@@ -466,6 +490,92 @@ mod tests {
             updated_state, "merged",
             "REPLACE must update fields in place"
         );
+    }
+
+    /// Why: #5734 adds two columns to `pull_requests`, a table every deployed
+    /// database already has rows in. A migration that dropped or invalidated
+    /// those rows would be silent — the collector would simply re-fetch and
+    /// nobody would see the loss.
+    /// What: builds a genuine v23 database (the schema shipped before #5734),
+    /// writes a PR row through the OLD column set, then migrates to the head
+    /// and asserts the row survives byte-for-byte, its new columns read as the
+    /// documented "no claim" defaults, and the new columns are writable.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v24_preserves_an_existing_v23_database() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        super::run_through(&mut conn, 23).expect("migrate to v23");
+
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .expect("read version");
+        assert_eq!(version, 23, "the fixture must be a real pre-#5734 database");
+
+        // A row written the way the v23 collector wrote it — no head_ref, no
+        // body_ticket_id, because neither column existed.
+        conn.execute(
+            "INSERT INTO pull_requests \
+             (provider, repository, pr_number, title, author, state, created_at, \
+              merged_at, commit_shas, fetched_at) \
+             VALUES ('github','acme/widgets',7,'Old PR','ada','merged', \
+                     '2026-01-01T00:00:00Z','2026-01-02T00:00:00Z','[\"deadbeef\"]', \
+                     '2026-01-02T00:00:01Z')",
+            [],
+        )
+        .expect("insert v23-era pr");
+
+        // The upgrade every existing database performs on next open.
+        super::run(&mut conn).expect("migrate to head");
+
+        let (title, shas, fetched, head_ref, body_key): (
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT title, commit_shas, fetched_at, head_ref, body_ticket_id \
+                 FROM pull_requests WHERE pr_number = 7",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .expect("the pre-migration row must still be readable");
+
+        assert_eq!(title, "Old PR", "existing data must survive untouched");
+        assert_eq!(shas, "[\"deadbeef\"]");
+        assert_eq!(fetched, "2026-01-02T00:00:01Z");
+        assert_eq!(head_ref, "", "the documented default for an existing row");
+        assert_eq!(body_key, None);
+
+        // #5734: and the new columns are writable on the upgraded database.
+        conn.execute(
+            "UPDATE pull_requests SET head_ref = 'feature/PROJ-1-x', \
+             body_ticket_id = '#42' WHERE pr_number = 7",
+            [],
+        )
+        .expect("write the new columns");
+        let round_trip: String = conn
+            .query_row(
+                "SELECT head_ref FROM pull_requests WHERE pr_number = 7",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read back");
+        assert_eq!(round_trip, "feature/PROJ-1-x");
+
+        // Re-running is a no-op, per the runner's idempotence contract.
+        super::run(&mut conn).expect("re-run is idempotent");
     }
 
     // Migration v20 tests live in `v20.rs`.

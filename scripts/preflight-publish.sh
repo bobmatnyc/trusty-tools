@@ -154,9 +154,18 @@
 #     `make -C crates/<crate> release-prep` then commit the regenerated bundle.
 #
 #   CHECK 8 (the pre-publish gate ran and was green for THIS commit):
-#     queries the GitHub Actions API for a `Pre-publish gate` workflow run whose
-#     head SHA is the commit about to be published, and requires one to have
-#     concluded `success`.
+#     enumerates recent `Pre-publish gate` workflow runs, asks each one which
+#     commit it ACTUALLY gated, and requires a run that names the commit about
+#     to be published to have concluded `success`.
+#
+#     IT DOES NOT ASK `head_sha`, AND THAT IS THE WHOLE POINT (#5755). It used
+#     to. `head_sha` is the dispatched ref's tip at dispatch time, and the `sha`
+#     input added in #5741 deliberately decouples the gated commit from that
+#     tip — run 31874835425 records `head_sha` 3f39b79f having gated 020c139d.
+#     So the old query counted a green run as evidence for a commit that run
+#     never examined, which is CHECK 6's failure in a new place. The commit a
+#     run gated comes from the run's own `resolve-sha` job, read back through
+#     its `::notice title=Pre-publish gate target::` annotation.
 #
 #     WHY A LOCAL SCRIPT HAS TO ASK THIS. `.github/workflows/pre-publish.yml`
 #     runs `cargo doc` (broken intra-doc links), `cargo audit`, `cargo deny`, the
@@ -167,13 +176,23 @@
 #     SemVer to CI. A gate nobody is required to consult is a gate that gets
 #     consulted right up until the release that matters.
 #
-#     IT FAILS CLOSED, and the two failing states are DIFFERENT FACTS reported
-#     differently. No run at all for this SHA is [FAIL] "never ran" — not a
+#     IT FAILS CLOSED, and the failing states are DIFFERENT FACTS reported
+#     differently. No run attributable to this SHA is [FAIL] "never ran" — not a
 #     pass, because "we did not check" and "we checked and it was fine" are the
 #     conflation this repo has been bitten by twice (#5620, #5723). A run that
-#     exists and concluded anything other than success is [FAIL] "red gate".
-#     An unreachable API is [FAIL] too: an answer this check could not obtain is
-#     not a green one.
+#     gated this SHA and concluded anything other than success — a still-running
+#     one included — is [FAIL] "red gate". An unreachable API is [FAIL] too: an
+#     answer this check could not obtain is not a green one. A run whose target
+#     resolved but could not be read back is the same: unknown, not green.
+#
+#     DISPATCH IT WITH AN EXPLICIT SHA. The remedy this check prints is
+#
+#         gh workflow run pre-publish.yml --ref <branch> -f sha=$(git rev-parse HEAD)
+#
+#     because without `-f sha` the run gates whatever the ref tip is when the
+#     job starts, and `main` moving mid-release is exactly how the two commits
+#     drift apart. Pinned that way, the run's own report names this commit and
+#     this check finds it.
 #
 #     THE OVERRIDE TAKES A REASON, NEVER A BOOLEAN, matching
 #     PREFLIGHT_SEMVER_UNVERIFIED:
@@ -952,18 +971,190 @@ check7_ui_bundle() {
 }
 
 # ===========================================================================
-# CHECK 8 — the pre-publish gate ran, and was green, for this exact commit
+# CHECK 8 — the pre-publish gate ran, and was green, for THIS exact commit
 # ===========================================================================
 # Delegated to `gh` rather than curl because the Actions API needs
 # authentication and `gh` already holds the credential CHECK 2 just validated.
 #
-# The SHA compared is HEAD, which CHECK 1 has already established is
-# origin/main (or has WARNed that it is not). Asking about a different commit
-# than the one being published would make this check decorative.
+# THE DEFECT THIS SHAPE EXISTS TO PREVENT (#5755). This check used to ask the
+# Actions API for runs whose `head_sha` is HEAD. `head_sha` is the dispatched
+# ref's tip AT DISPATCH TIME, which since #5741 is no longer the commit a run
+# gated: the `sha` input tells `resolve-sha` to check out an older commit, and
+# every other job follows it. Measured on run 31874835425 — `head_sha`
+# 3f39b79f, commit actually examined 020c139d. Keying on `head_sha` is
+# therefore wrong in BOTH directions at once. It credits HEAD with a green run
+# that examined some other commit, and it hides the run that did examine HEAD
+# because that run's `head_sha` is a later tip.
+#
+# The first direction is the one that ships a bad release, and it is the same
+# class as CHECK 6: a green result attributed to a commit nobody looked at is
+# how `tga-v2.17.0` went out mis-tagged with every gate green.
+#
+# WHAT IT ASKS INSTEAD. Every `resolve-sha` job emits
+# `::notice title=Pre-publish gate target::Verified commit <sha>` carrying the
+# commit it resolved and verified — on both of its arms, so every run is
+# attributable. That notice is readable as a check-run annotation. So this
+# check enumerates recent runs, asks each one which commit IT says it gated,
+# and counts only the runs that answer HEAD.
+#
+# IT STILL FAILS CLOSED, and the failing states stay DIFFERENT FACTS reported
+# differently. No run attributable to HEAD is [FAIL] "never ran". A run
+# attributable to HEAD that concluded anything but success — including one
+# still in progress — is [FAIL] "red gate". A run whose `resolve-sha` job
+# SUCCEEDED but whose target could not be read is neither: it is the absence
+# of an answer, and it routes to gate_unverified. A run whose `resolve-sha`
+# job did not succeed gated no commit at all and is ignored outright rather
+# than counted as evidence in either direction.
+#
+# THE OVERRIDE TAKES A REASON, NEVER A BOOLEAN — unchanged, see the header.
 GATE_NOT_VERIFIED=""
+GATE_REPO="bobmatnyc/trusty-tools"
+
+# How far back to look, and how many runs to open. The window is anchored to
+# HEAD's own commit date because a run cannot have gated a commit that did not
+# yet exist; two days of slack covers clock skew and a release that sits over a
+# weekend. The cap bounds the API cost — each candidate costs two calls — and
+# binding it is reported, never silently swallowed.
+GATE_SCAN_DAYS=2
+GATE_SCAN_CAP=40
+
+# ---------------------------------------------------------------------------
+# gate_run_target <run-id> — which commit did this run ACTUALLY gate?
+#
+# Prints exactly one of:
+#   <40-hex sha>  the run's own resolve-sha job reported this commit
+#   NOGATE        the resolve-sha job is absent or did not succeed, so this run
+#                 never got as far as choosing a commit. Not evidence.
+#   UNREADABLE    resolve-sha SUCCEEDED but its target could not be read.
+#                 An answer that could not be obtained, which is not a green one.
+#
+# The job is matched by its display name ("Resolve target commit", the `name:`
+# in pre-publish.yml) because that is what the jobs API returns — the YAML key
+# `resolve-sha` never appears there.
+# ---------------------------------------------------------------------------
+gate_run_target() {
+  local run_id="$1" job job_id concl msg
+
+  job="$(gh api "repos/${GATE_REPO}/actions/runs/${run_id}/jobs?per_page=100" \
+    --jq '[.jobs[] | select(.name == "Resolve target commit")] | first // empty' 2>/dev/null)" \
+    || { printf 'UNREADABLE\n'; return 0; }
+
+  if [ -z "$job" ]; then printf 'NOGATE\n'; return 0; fi
+
+  concl="$(printf '%s' "$job" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("conclusion") or "")' 2>/dev/null || echo "")"
+  job_id="$(printf '%s' "$job" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id") or "")' 2>/dev/null || echo "")"
+
+  if [ "$concl" != "success" ] || [ -z "$job_id" ]; then printf 'NOGATE\n'; return 0; fi
+
+  msg="$(gh api "repos/${GATE_REPO}/check-runs/${job_id}/annotations" \
+    --jq '[.[] | select(.title == "Pre-publish gate target") | .message] | first // empty' 2>/dev/null)" \
+    || { printf 'UNREADABLE\n'; return 0; }
+
+  msg="$(printf '%s' "$msg" | sed -n 's/^Verified commit \([0-9a-fA-F]\{40\}\)$/\1/p' | head -n1)"
+  if [ -z "$msg" ]; then printf 'UNREADABLE\n'; return 0; fi
+  printf '%s\n' "$msg"
+}
+
+# ---------------------------------------------------------------------------
+# gate_decide <head-sha> <scan-was-capped> — turn the attributed-run table on
+# stdin into a publish decision. Returns 0 to permit, 1 to stop.
+#
+# Separated from check8_prepublish_gate for the same reason semver_decide is:
+# the decision is the part that was wrong, and exercising it against the real
+# API needs a release-shaped history nobody can conjure on demand. Split out, it
+# is driven over captured API output by scripts/preflight-check8-selftest.sh —
+# including the verbatim run-31874835425 attribution this function exists
+# because of.
+#
+# Input is one PIPE-separated line per candidate run:
+#     <target>|<status>|<conclusion>|<html_url>
+# where <target> is gate_run_target's output for that run.
+#
+# PIPE, NOT TAB, and this is load-free but not arbitrary: tab is IFS whitespace,
+# so `read` collapses a RUN of tabs into one delimiter and an empty field
+# silently vanishes. A queued or in-progress run has an empty `conclusion`, so
+# with a tab delimiter its html_url shifted left into $concl and $url came back
+# empty — measured on run 31878535281, which printed `in_progress/<the url>`.
+# A non-whitespace delimiter preserves empty fields. No field can contain `|`:
+# targets are hex or a keyword, statuses and conclusions are a fixed vocabulary,
+# and a GitHub run URL has no pipe in it.
+#
+# THE INVARIANT: a [PASS] means a run said, in its own output, that it gated
+# THIS commit — and no count of runs that merely mention it can substitute.
+# ---------------------------------------------------------------------------
+gate_decide() {
+  local head="$1" capped="${2:-0}"
+  local target status concl url
+  local green=0 other=0 unreadable=0 attributed=0 matched=""
+
+  # `|| [ -n "$target" ]` so a final row with no trailing newline is still
+  # processed: read returns nonzero at EOF even when it filled the variables,
+  # and silently dropping the last run would drop the newest one — the run the
+  # operator just dispatched.
+  while IFS='|' read -r target status concl url || [ -n "$target" ]; do
+    [ -n "$target" ] || continue
+    case "$target" in
+      NOGATE) continue ;;
+      UNREADABLE) unreadable=$((unreadable + 1)); continue ;;
+    esac
+    attributed=$((attributed + 1))
+    [ "$target" = "$head" ] || continue
+    matched="${matched}       ${status}/${concl:-<none>}  ${url}"$'\n'
+    if [ "$status" = "completed" ] && [ "$concl" = "success" ]; then
+      green=$((green + 1))
+    else
+      other=$((other + 1))
+    fi
+  done
+
+  if [ "$green" -ge 1 ]; then
+    echo "[PASS] prepublish-gate: ${green} green 'Pre-publish gate' run(s) gated ${head}." >&2
+    echo "       Attributed by each run's own resolve-sha report, not by head_sha" >&2
+    echo "       (#5755) — so a green run that examined a different commit cannot" >&2
+    echo "       be counted here." >&2
+    return 0
+  fi
+
+  if [ "$other" -ge 1 ]; then
+    echo "[FAIL] prepublish-gate: 'Pre-publish gate' HAS run against ${head}, but NO" >&2
+    echo "       run that gated it concluded 'success':" >&2
+    printf '%s' "$matched" >&2
+    echo "       Publishing over a red release gate is the CHECK 5 mistake in a new" >&2
+    echo "       place: the gate ran, said no, and the upload happened anyway." >&2
+    echo "       Fix what it found and re-run it. A still-running gate is not a" >&2
+    echo "       green one — wait for it." >&2
+    return 1
+  fi
+
+  if [ "$unreadable" -ge 1 ]; then
+    gate_unverified "${unreadable} 'Pre-publish gate' run(s) resolved a target commit that could not be read back, so whether any of them gated ${head} is unknown"
+    return $?
+  fi
+
+  if [ "$capped" != "0" ]; then
+    gate_unverified "the scan stopped at its ${GATE_SCAN_CAP}-run cap before attributing every recent run, so 'no run gated ${head}' is a limit of the search, not a finding"
+    return $?
+  fi
+
+  echo "[FAIL] prepublish-gate: NO 'Pre-publish gate' run gated ${head}." >&2
+  echo "       ${attributed} recent run(s) were attributed to a commit; none named" >&2
+  echo "       this one. The broken-link, cargo-audit, cargo-deny, ignored-test and" >&2
+  echo "       contract gates have never executed against this tree. That is not the" >&2
+  echo "       same as them passing, and this script will not treat it as such." >&2
+  echo "       Remedy — dispatch it AT THIS COMMIT and wait for it:" >&2
+  echo "         gh workflow run pre-publish.yml --ref \$(git rev-parse --abbrev-ref HEAD) \\" >&2
+  echo "           -f sha=\$(git rev-parse HEAD)" >&2
+  echo "       The explicit -f sha is what pins the run to this commit even after" >&2
+  echo "       main moves underneath it; without it the run gates whatever the ref" >&2
+  echo "       tip happens to be when the job starts." >&2
+  echo "       If it genuinely cannot run for this release, record why:" >&2
+  echo "         PREFLIGHT_GATE_UNVERIFIED=\"<why>\" scripts/preflight-publish.sh ${PKG_NAME}" >&2
+  return 1
+}
 
 check8_prepublish_gate() {
-  local sha runs count green rc=0
+  local sha runs cutoff head_date table="" capped=0 examined=0 rc=0
+  local run_id created status concl url target
 
   if ! command -v gh >/dev/null 2>&1; then
     gate_unverified "the 'gh' CLI is not installed, so the gate's status could not be read"
@@ -974,44 +1165,44 @@ check8_prepublish_gate() {
 
   # `|| rc=$?` rather than a bare call: a network failure must reach the
   # unverified path below, not abort the script under `set -e`.
-  runs="$(gh api "repos/bobmatnyc/trusty-tools/actions/runs?head_sha=${sha}&per_page=100" \
-    --jq '[.workflow_runs[] | select(.name == "Pre-publish gate")
-           | {conclusion, status, html_url}]' 2>/dev/null)" || rc=$?
+  runs="$(gh api "repos/${GATE_REPO}/actions/workflows/pre-publish.yml/runs?per_page=100" \
+    --jq '.workflow_runs[] | [(.id|tostring), .created_at, .status, (.conclusion // ""), .html_url] | join("|")' 2>/dev/null)" || rc=$?
 
-  if [ "$rc" -ne 0 ] || [ -z "$runs" ]; then
+  if [ "$rc" -ne 0 ]; then
     gate_unverified "the GitHub Actions API could not be reached (gh exited ${rc})"
     return $?
   fi
 
-  count="$(printf '%s' "$runs" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)"
-  if [ "$count" -eq 0 ]; then
-    echo "[FAIL] prepublish-gate: NO 'Pre-publish gate' run exists for ${sha}." >&2
-    echo "       The broken-link, cargo-audit, cargo-deny, ignored-test and contract" >&2
-    echo "       gates have never executed against this tree. That is not the same" >&2
-    echo "       as them passing, and this script will not treat it as such." >&2
-    echo "       Remedy — dispatch it against this commit and wait for it:" >&2
-    echo "         gh workflow run pre-publish.yml --ref \$(git rev-parse --abbrev-ref HEAD)" >&2
-    echo "       If it genuinely cannot run for this release, record why:" >&2
-    echo "         PREFLIGHT_GATE_UNVERIFIED=\"<why>\" scripts/preflight-publish.sh ${PKG_NAME}" >&2
-    return 1
-  fi
+  # A run cannot have gated a commit that did not exist when it started, so
+  # anchor the window to HEAD's own date. An unparseable date yields an empty
+  # cutoff, which disables the filter — scanning too much is the safe failure.
+  head_date="$(TZ=UTC0 git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD 2>/dev/null || echo "")"
+  cutoff="$(python3 -c '
+import datetime, sys
+d = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+print((d - datetime.timedelta(days=int(sys.argv[2]))).strftime("%Y-%m-%dT%H:%M:%SZ"))
+' "$head_date" "$GATE_SCAN_DAYS" 2>/dev/null || echo "")"
 
-  green="$(printf '%s' "$runs" \
-    | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(1 for r in d if r.get("status")=="completed" and r.get("conclusion")=="success"))' 2>/dev/null || echo 0)"
+  while IFS='|' read -r run_id created status concl url; do
+    [ -n "$run_id" ] || continue
+    if [ -n "$cutoff" ] && [[ "$created" < "$cutoff" ]]; then continue; fi
+    if [ "$examined" -ge "$GATE_SCAN_CAP" ]; then capped=1; break; fi
+    examined=$((examined + 1))
+    target="$(gate_run_target "$run_id")"
+    table="${table}${target}|${status}|${concl}|${url}"$'\n'
+    # Newest-first from the API, so the run just dispatched is normally the
+    # first one opened. Stop there rather than paying two API calls per run for
+    # a verdict that cannot change.
+    if [ "$target" = "$sha" ] && [ "$status" = "completed" ] && [ "$concl" = "success" ]; then
+      break
+    fi
+  done <<< "$runs"
 
-  if [ "$green" -ge 1 ]; then
-    echo "[PASS] prepublish-gate: ${green} green 'Pre-publish gate' run(s) for ${sha}." >&2
-    return 0
-  fi
-
-  echo "[FAIL] prepublish-gate: 'Pre-publish gate' has run for ${sha} but NO run" >&2
-  echo "       concluded 'success':" >&2
-  printf '%s\n' "$runs" | sed 's/^/       /' >&2
-  echo "       Publishing over a red release gate is the CHECK 5 mistake in a new" >&2
-  echo "       place: the gate ran, said no, and the upload happened anyway." >&2
-  echo "       Fix what it found and re-run it. A still-running gate is not a" >&2
-  echo "       green one — wait for it." >&2
-  return 1
+  # Here-string, NOT a pipe: gate_decide can reach gate_unverified, which sets
+  # GATE_NOT_VERIFIED for the final summary, and a pipeline would run it in a
+  # subshell where that assignment is discarded — a publish that bypassed the
+  # gate would then print no disclosure at the line an operator actually reads.
+  gate_decide "$sha" "$capped" <<< "$table"
 }
 
 # gate_unverified <why> — the gate's status could not be READ (no gh, no
