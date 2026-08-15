@@ -1084,15 +1084,17 @@ pub struct GithubConfig {
     /// Whether to fetch the GitHub issues referenced by commit messages and
     /// write them into `work_items`.
     ///
-    /// Defaults to `false` (#5219), unlike `linear.fetch_on_reference` and
-    /// `pm.azure_devops.fetch_on_reference`, which default to `true`. GitHub is
-    /// configured in nearly every `tga` config for pull requests alone, and
-    /// `#N` is the commonest reference shape there is — defaulting this on
-    /// would spend a token's hourly budget on issue lookups nobody asked for,
-    /// for every user who had configured GitHub for something else. Linear and
-    /// ADO carry no such risk: configuring either is already a statement that
-    /// its board is the one this repository's commits reference.
-    #[serde(default)]
+    /// Defaults to `true` (#5219), as all four providers do — Linear and
+    /// Azure DevOps already did. Uniformity is the point of routing every
+    /// provider through one abstraction, and #5219 was reopened precisely
+    /// because `github.ticket_regex` validated cleanly while affecting no
+    /// output; a writer that ships off by default reproduces that.
+    ///
+    /// Known cost, accepted rather than overlooked: an upgrade starts issuing
+    /// one issue lookup per detected `#N` on the first `tga collect`, against
+    /// the token's hourly budget, for every user who had configured GitHub for
+    /// pull requests alone. Set this to `false` to opt out.
+    #[serde(default = "default_true")]
     pub fetch_on_reference: bool,
 }
 
@@ -1246,13 +1248,15 @@ pub struct JiraConfig {
     /// Whether to fetch the JIRA issues referenced by commit messages and
     /// write them into `work_items`.
     ///
-    /// Defaults to `false` (#5219), unlike `linear.fetch_on_reference` and
-    /// `pm.azure_devops.fetch_on_reference`, which default to `true`. A JIRA
-    /// config already drives `tga jira sync`, a separate and explicitly
-    /// invoked path that populates the transition and comment tables — so
-    /// having JIRA configured says nothing about wanting a reference-driven
-    /// issue pull inside `tga collect`, which is all this flag governs.
-    #[serde(default)]
+    /// Defaults to `true` (#5219), as all four providers do — see
+    /// [`GithubConfig::fetch_on_reference`] for the reasoning and the accepted
+    /// cost. This flag governs only the reference-driven pull inside
+    /// `tga collect`; `tga jira sync` is a separate, explicitly invoked path
+    /// that populates the transition and comment tables and is unaffected.
+    ///
+    /// Known cost: an upgrade starts issuing one issue lookup per detected key
+    /// on the first `tga collect`. Set this to `false` to opt out.
+    #[serde(default = "default_true")]
     pub fetch_on_reference: bool,
 }
 

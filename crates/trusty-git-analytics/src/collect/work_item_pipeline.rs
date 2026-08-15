@@ -33,15 +33,18 @@ use crate::core::db::{Database, WorkItemRow};
 
 /// Whether reference-driven fetching is enabled for `source`.
 ///
-/// Why: a `tga collect` run must not start calling a provider's issue API
-/// because that provider happens to be configured for something else. GitHub is
-/// configured in nearly every config for pull requests alone, so the opt-in is
-/// what keeps this pull off by default. Linear returns `false` unconditionally:
+/// Why: configuring a provider is what enables its pull — all four flags
+/// default on (#5219), so the section's presence is the consent. An operator
+/// who configured GitHub for pull requests alone opts out by setting the flag
+/// to `false`. Linear returns `false` unconditionally instead:
 /// [`crate::collect::linear_pipeline`] owns its rows and running both would
 /// write them twice.
 /// What: reads the per-provider `fetch_on_reference` flag; `false` when the
 /// provider is unconfigured.
-/// Test: `linear_is_never_fetched_here`, `providers_are_opt_in`.
+/// Test: `linear_is_never_fetched_here`,
+/// `omitting_fetch_on_reference_in_yaml_enables_all_four_providers`,
+/// `setting_fetch_on_reference_false_opts_a_provider_out`,
+/// `an_unconfigured_provider_is_never_fetched`.
 fn fetch_on_reference(config: &Config, source: PmSource) -> bool {
     match source {
         PmSource::Jira => config.jira.as_ref().is_some_and(|c| c.fetch_on_reference),
@@ -554,42 +557,90 @@ mod tests {
         assert!(!fetch_on_reference(&config, PmSource::Linear));
     }
 
-    /// Configuring a provider is not consent to call its issue API — GitHub is
-    /// configured for pull requests in nearly every config.
+    /// #5219: a YAML config that names a provider but omits the flag fetches on
+    /// reference, for all four alike. This is the user-visible default and the
+    /// decision the owner made — the earlier revision of this test asserted the
+    /// opposite for GitHub and JIRA, so pin it rather than leave it flippable.
+    ///
+    /// It parses YAML rather than calling `Default::default()` on purpose:
+    /// `#[serde(default = "default_true")]` governs deserialization only, and
+    /// the derived `Default` still yields `false` — see
+    /// `derived_default_is_not_the_yaml_default`.
     #[test]
-    fn providers_are_opt_in() {
-        let off = Config {
-            github: Some(GithubConfig::default()),
-            jira: Some(JiraConfig::default()),
-            pm: Some(PmConfig {
-                azure_devops: Some(AzureDevOpsConfig {
-                    fetch_on_reference: false,
-                    ..unauthenticated_azdo()
-                }),
-            }),
-            ..Default::default()
-        };
-        assert!(!fetch_on_reference(&off, PmSource::GitHub));
-        assert!(!fetch_on_reference(&off, PmSource::Jira));
-        assert!(!fetch_on_reference(&off, PmSource::AzureDevOps));
+    fn omitting_fetch_on_reference_in_yaml_enables_all_four_providers() {
+        let yaml = r#"
+github:
+  repo: "o/r"
+jira:
+  url: "https://example.atlassian.net"
+linear:
+  api_key: "k"
+pm:
+  azure_devops:
+    organization_url: "https://dev.azure.com/myorg"
+    pat: "x"
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("yaml parses");
+        assert!(fetch_on_reference(&cfg, PmSource::GitHub), "github");
+        assert!(fetch_on_reference(&cfg, PmSource::Jira), "jira");
+        assert!(fetch_on_reference(&cfg, PmSource::AzureDevOps), "azdo");
+        assert!(
+            cfg.linear.expect("linear parsed").fetch_on_reference,
+            "linear's own flag defaults on; its pipeline reads it directly"
+        );
+    }
 
-        let on = Config {
-            github: Some(GithubConfig {
-                fetch_on_reference: true,
-                ..Default::default()
-            }),
-            jira: Some(JiraConfig {
-                fetch_on_reference: true,
-                ..Default::default()
-            }),
-            pm: Some(PmConfig {
-                azure_devops: Some(unauthenticated_azdo()),
-            }),
-            ..Default::default()
-        };
-        assert!(fetch_on_reference(&on, PmSource::GitHub));
-        assert!(fetch_on_reference(&on, PmSource::Jira));
-        assert!(fetch_on_reference(&on, PmSource::AzureDevOps));
+    /// The opt-out still works, and is the only way to turn a provider off.
+    #[test]
+    fn setting_fetch_on_reference_false_opts_a_provider_out() {
+        let yaml = r#"
+github:
+  repo: "o/r"
+  fetch_on_reference: false
+jira:
+  url: "https://example.atlassian.net"
+  fetch_on_reference: false
+pm:
+  azure_devops:
+    organization_url: "https://dev.azure.com/myorg"
+    pat: "x"
+    fetch_on_reference: false
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("yaml parses");
+        assert!(!fetch_on_reference(&cfg, PmSource::GitHub));
+        assert!(!fetch_on_reference(&cfg, PmSource::Jira));
+        assert!(!fetch_on_reference(&cfg, PmSource::AzureDevOps));
+    }
+
+    /// A provider absent from the config is never fetched, whatever the flag
+    /// defaults to — the section has to exist for there to be a client at all.
+    #[test]
+    fn an_unconfigured_provider_is_never_fetched() {
+        let cfg = Config::default();
+        assert!(!fetch_on_reference(&cfg, PmSource::GitHub));
+        assert!(!fetch_on_reference(&cfg, PmSource::Jira));
+        assert!(!fetch_on_reference(&cfg, PmSource::AzureDevOps));
+    }
+
+    /// The trap behind the two tests above: `#[serde(default = "default_true")]`
+    /// is a Deserialize attribute, so the derived `Default` — which `serde` never
+    /// consults — still produces `false`. `LinearConfig` has carried this same
+    /// split since before #5219. A test that reaches for `GithubConfig::default()`
+    /// is therefore asserting nothing about what a user's YAML does.
+    #[test]
+    fn derived_default_is_not_the_yaml_default() {
+        assert!(
+            !GithubConfig::default().fetch_on_reference,
+            "derived Default gives bool::default()"
+        );
+        assert!(!JiraConfig::default().fetch_on_reference);
+        assert!(!LinearConfig::default().fetch_on_reference);
+
+        let from_yaml: GithubConfig = serde_yaml::from_str("repo: o/r").expect("parses");
+        assert!(
+            from_yaml.fetch_on_reference,
+            "the YAML path is the one that carries the decision"
+        );
     }
 
     /// #5219: the ADO fetch failure that used to be swallowed reaches the exit
