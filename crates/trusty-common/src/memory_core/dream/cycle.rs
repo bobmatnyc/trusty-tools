@@ -344,8 +344,14 @@ pub struct RoomConsolidationStats {
 /// `SemanticConsolidator`.
 /// Test: exercised via `dream_cycle_semantic_consolidation_no_inference`
 /// (`Ok(None)` path), `dream_cycle_semantic_consolidation_invalid_model_disables_once`
-/// (`Err` path), and the production daemon.
-fn build_consolidator_from_config(
+/// (`Err` path), and the production daemon; the env-tier read itself is pinned
+/// by `dream::tests::dedup_only_config_ignores_an_ambient_openrouter_key`.
+///
+/// `pub(super)` only so that last test can call it directly — reaching it
+/// through `dream_cycle` cannot distinguish "no backend was built" from "a
+/// backend was built and its network call failed", which is the whole
+/// distinction that test exists to pin. Still private to `dream`.
+pub(super) fn build_consolidator_from_config(
     config: &DreamConfig,
 ) -> Result<Option<Arc<SemanticConsolidator>>> {
     if !config.semantic.enabled {

@@ -427,7 +427,17 @@ mod tests {
     /// usable as a needle set — never that a particular provider is
     /// configured, which depends on the machine running the test.
     /// Test: itself.
+    ///
+    /// [`resolved_secret_values`] calls `load_env_local_once`, which folds the
+    /// machine's real `.env.local` into the PROCESS environment. Held no lock
+    /// until now, so it raced `credentials::resolver::tests`: firing the loader
+    /// between that test's `remove_var` and its `load_env_from_path` republished
+    /// the real `OPENROUTER_API_KEY`, `dotenvy` then declined to override it,
+    /// and the assertion printed a live key into test output. Join the same
+    /// `dotenv_credential_env` group as every other test that reads or writes a
+    /// credential env var — this test is a WRITER of them, via the loader.
     #[test]
+    #[serial_test::serial(dotenv_credential_env)]
     fn resolved_secret_values_are_scrubbable_by_scrub_secrets() {
         let values = resolved_secret_values();
         assert!(
