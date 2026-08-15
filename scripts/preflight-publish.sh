@@ -506,7 +506,7 @@ check5_semver() {
   # target/semver-checks/ — it builds nothing, so ordering is the whole cost.
   # Its outcome never changes `decision`; see semver_types_decide for why that
   # is chosen rather than incidental.
-  semver_types_advisory "$PKG_NAME"
+  semver_types_advisory "$PKG_NAME" "$SEMVER_GATE_COMPARED"
 
   return "$decision"
 }
@@ -531,7 +531,38 @@ check5_semver() {
 # here is that it EXECUTES against a real crate every release and prints what it
 # found; escalating it to a blocker is a separate decision with its own evidence.
 semver_types_advisory() {
-  local pkg="$1" log rc=0
+  local pkg="$1" gate_compared="${2:-0}" log rc=0
+
+  # --- THE CACHE MUST BE ONE THIS RUN BUILT. Every SKIP branch in
+  #     check_semver.sh `continue`s BEFORE invoking cargo-semver-checks, so a
+  #     skipped crate gets no fresh rustdoc — TSV exclusion, publish = false, no
+  #     library target, no baseline on crates.io, all seven of them. The differ
+  #     reads target/semver-checks/ off the filesystem and cannot tell a
+  #     directory this run wrote from one an out-of-band invocation left behind
+  #     at the same version string. trusty-mpm is the live case: TSV-excluded and
+  #     published through this very path, so a stale local-trusty_mpm-<ver>-*/
+  #     would be diffed against source that is not HEAD and reported as [PASS].
+  #
+  #     This is a CALL-SITE CONDITION, not a filesystem heuristic — no mtime, no
+  #     content hash, nothing to tune or go subtly wrong. The gate already knows
+  #     whether it compared this crate; an mtime guard would be a second, weaker
+  #     answer to a question already answered exactly. A run that compared
+  #     nothing declines to read any cache at all.
+  if [ "$gate_compared" -lt 1 ] 2>/dev/null || [ -z "$gate_compared" ]; then
+    SEMVER_TYPES_ADVISORY="the type differ was not run — the gate compared nothing this run"
+    echo "[WARN] semver-types: NOT RUN — the gate compared 0 crate(s) this run, so no" >&2
+    echo "       rustdoc was built for ${pkg} and any cache on disk is left over from" >&2
+    echo "       an earlier invocation. Reading it would compare source that is not" >&2
+    echo "       HEAD and report the answer as though it were this release's." >&2
+    echo "       Nothing is known about whether a type moved. Not a clean result, and" >&2
+    echo "       not a blocker — CHECK 5 above already said what it did or did not" >&2
+    echo "       verify, and its [SKIP]/[WARN] line is the one to read." >&2
+    echo "       A TSV-excluded crate (scripts/semver-checks-crate-exclusions.tsv)" >&2
+    echo "       can never produce a cache through the gate; comparing its types" >&2
+    echo "       needs two rustdoc JSON documents built by hand and passed with" >&2
+    echo "         bash scripts/check_semver_types.sh --baseline-json <a> --current-json <b>" >&2
+    return 0
+  fi
 
   log="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.semvertypes.XXXXXX")"
   bash "${REPO_ROOT}/scripts/check_semver_types.sh" --crate "$pkg" > "$log" 2>&1 || rc=$?
@@ -702,6 +733,11 @@ SEMVER_NOT_VERIFIED=""
 # summary line from reading as though nothing was outstanding.
 SEMVER_TYPES_ADVISORY=""
 
+# How many crates the gate actually COMPARED this run, set by semver_decide.
+# The type differ reads it to decide whether a cache exists that THIS run built.
+# Starts at 0 so a semver_decide that never reached the count leaves it refusing.
+SEMVER_GATE_COMPARED=0
+
 semver_decide() {
   local rc="$1" log="$2" pkg="$3" version="$4"
   local summary checked skipped inventoried blind compared blind_why
@@ -767,6 +803,7 @@ semver_decide() {
   #     advice. Either one examined the API.
   if [ -z "$blind_why" ]; then
     compared=$((checked + inventoried))
+    SEMVER_GATE_COMPARED="$compared"
     if [ "$compared" -ge 1 ]; then
       echo "[PASS] semver: ${compared} crate(s) compared against their previous crates.io release." >&2
       echo "       Every existence-and-shape lint passed. NO TYPE WAS COMPARED HERE —" >&2

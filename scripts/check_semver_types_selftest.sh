@@ -330,7 +330,12 @@ fi
 #     that nothing contradicts — which is the shape of the defect this file's
 #     format-61 case exists to document.
 # ===========================================================================
-declared="$(sed -n 's/^SUPPORTED_FORMAT_VERSIONS = (\(.*\))$/\1/p' "$DIFFER" | tr -d ' ,' | fold -w2 | sort -u | tr '\n' ' ')"
+# Split on the real delimiter. `fold -w2` was correct only while every value
+# happened to be two digits — a 3-digit format version would have been read as a
+# 2-digit and a 1-digit one, and this case would have gone on passing while
+# guaranteeing nothing. That is the same shape as the bug the file exists for.
+declared="$(sed -n 's/^SUPPORTED_FORMAT_VERSIONS = (\(.*\))$/\1/p' "$DIFFER" \
+  | tr ',' '\n' | tr -d ' ' | grep -v '^$' | sort -u | tr '\n' ' ')"
 covered="$(python3 - "$BASE" "$BASE61" <<'PY'
 import json, sys
 print(" ".join(sorted({str(json.load(open(p))["format_version"]) for p in sys.argv[1:]})))

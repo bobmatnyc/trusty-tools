@@ -109,6 +109,16 @@ CHANGED fn trusty_common::…::KgStoreRedb::count_active_triples -> : u64 -> Res
 output line. It is **advisory and cannot block the publish** — a type change
 prints `[WARN]` and the publish proceeds.
 
+It runs **only when the gate actually compared the crate that run**. Every SKIP
+branch in `check_semver.sh` returns before `cargo-semver-checks` is invoked, so a
+skipped crate gets no fresh rustdoc — and a `target/semver-checks/` directory
+left by an earlier out-of-band run at the same version string would otherwise be
+diffed against source that is not HEAD. `trusty-mpm` is the live case: excluded
+by `semver-checks-crate-exclusions.tsv` and published through this path. A run
+that compared nothing prints `[WARN] semver-types: NOT RUN` and reads no cache.
+For a permanently-excluded crate the only route is two hand-built documents
+passed to `--baseline-json` / `--current-json`.
+
 That is a deliberate posture, not an oversight. The differ compares *rendered*
 types, so a lifetime rename or a re-export path shift is a real signature
 difference no caller has to care about. Giving that a veto over `cargo publish`

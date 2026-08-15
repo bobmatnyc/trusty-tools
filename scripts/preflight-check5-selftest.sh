@@ -181,6 +181,10 @@ run_decision() {
     # break-remedy text; PKG_NAME/VERSION are the crate under test.
     PKG_NAME="stub-crate"
     VERSION="9.9.9"
+    # Mirrors the shipped globals: semver_decide sets this, semver_types_advisory
+    # reads it. Initialised to 0 here for the same reason it is there — a run
+    # that never reached the count must refuse, not inherit a stale number.
+    SEMVER_GATE_COMPARED=0
     MANIFEST="crates/stub-crate/Cargo.toml"
     REPO_ROOT="$SCRATCH"
     TMP_SEMVER="$(mktemp "${SCRATCH}/log.XXXXXX")"
@@ -331,12 +335,12 @@ fi
 # run_types <types-fixture> <types-rc> — hold the gate at a clean pass and vary
 # only the differ, so what these cases read is the differ's own arm.
 run_types() {
-  local types_fixture="$1" types_rc="$2"
+  local types_fixture="$1" types_rc="$2" gate_fixture="${3:-checked-clean.out}"
   (
     SELFTEST_TYPES_FIXTURE="${FIXTURES}/${types_fixture}"
     SELFTEST_TYPES_RC="$types_rc"
     export SELFTEST_TYPES_FIXTURE SELFTEST_TYPES_RC
-    run_decision checked-clean.out 0
+    run_decision "$gate_fixture" 0
   )
 }
 
@@ -401,6 +405,29 @@ elif [[ "$body" != *"[WARN] semver-types: NO VERDICT"* ]]; then
   fail_case "types/no-marker: expected NO VERDICT when the differ printed no count" "$body"
 else
   pass_case "differ exit 0 with no compared: marker -> NO VERDICT, not a pass"
+fi
+
+# --- 17. A gate run that compared NOTHING must not let the differ read a cache.
+#         Every SKIP branch in check_semver.sh continues before cargo-semver-
+#         checks runs, so a skipped crate gets no fresh rustdoc — and a stale
+#         directory left at the same version string by an earlier out-of-band
+#         run would be diffed against source that is not HEAD. trusty-mpm is the
+#         live case: TSV-excluded and published through this path. The stub
+#         differ here would happily return a clean verdict, which is the point:
+#         what must stop it is the call-site condition, not the differ.
+raw="$(run_types types-clean.out 0 recorded-skip.out)"
+status="$(printf '%s\n' "$raw" | sed -n 1p)"
+body="$(printf '%s\n' "$raw" | sed '1d')"
+if [[ "$status" != "0" ]]; then
+  fail_case "types/gate-skipped: must not block (got ${status})" "$body"
+elif [[ "$body" == *"[PASS] semver-types:"* ]]; then
+  fail_case "types/gate-skipped: read a cache this run did not build and called it a PASS" "$body"
+elif [[ "$body" != *"[WARN] semver-types: NOT RUN"* ]]; then
+  fail_case "types/gate-skipped: expected a NOT RUN line naming the uncompared gate" "$body"
+elif [[ "$body" != *"left over from"* ]]; then
+  fail_case "types/gate-skipped: did not say why the on-disk cache cannot be trusted" "$body"
+else
+  pass_case "gate compared nothing -> differ NOT RUN, no cache read"
 fi
 
 echo

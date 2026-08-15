@@ -717,6 +717,19 @@ for p in meta["packages"]:
   shopt -u nullglob
 
   pick_one "${CUR_MATCHES[@]:-}"
+  # The remedy above is a dead end for a crate check_semver.sh SKIPS: every skip
+  # branch `continue`s before invoking cargo-semver-checks, so re-running the
+  # gate builds nothing and the operator loops. Say so rather than let them find
+  # out by repeating the command.
+  cold_cache_caveat() {
+    echo "            If that command reports SKIP for ${PKG}, it will never populate"
+    echo "            this cache — a TSV-excluded crate, one with publish = false, no"
+    echo "            library target, or no baseline on crates.io is skipped before any"
+    echo "            rustdoc is built. Comparing its types needs two documents built"
+    echo "            by hand and passed directly:"
+    echo "              bash ${0##*/} --baseline-json <a.json> --current-json <b.json>"
+  }
+
   if [[ "$PICK_COUNT" -eq 0 ]]; then
     {
       echo "NO VERDICT: no cached rustdoc JSON for ${PKG} ${PKG_VERSION} under"
@@ -724,6 +737,7 @@ for p in meta["packages"]:
       echo "            Nothing was compared. Build the cache first — it is the same"
       echo "            rustdoc the existing gate needs anyway:"
       echo "              bash scripts/check_semver.sh --crate ${PKG}"
+      cold_cache_caveat
     } >&2
     exit "$EXIT_NO_VERDICT"
   fi
@@ -739,6 +753,7 @@ for p in meta["packages"]:
       echo "            ${CACHE_ROOT}/cache/"
       echo "            Nothing was compared. Build the cache first:"
       echo "              bash scripts/check_semver.sh --crate ${PKG}"
+      cold_cache_caveat
     } >&2
     exit "$EXIT_NO_VERDICT"
   fi

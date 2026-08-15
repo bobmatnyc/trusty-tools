@@ -1,7 +1,7 @@
 TYPES trusty-common 0.34.0
   baseline: /repo/target/semver-checks/cache/trusty_common-0_33_0-aarch64_apple_darwin-347ed244453a3272.json
   current:  /repo/target/semver-checks/local-trusty_common-0_34_0-aarch64_apple_darwin-14a22f5588f32ee6/target/doc/trusty_common.json
-NO VERDICT: baseline rustdoc JSON /repo/target/semver-checks/cache/trusty_common-0_33_0-aarch64_apple_darwin-347ed244453a3272.json has format_version 61; this differ understands [57]. Add the version to SUPPORTED_FORMAT_VERSIONS only after checking the node shapes it changed.
+NO VERDICT: baseline rustdoc JSON /repo/target/semver-checks/cache/trusty_common-0_33_0-aarch64_apple_darwin-347ed244453a3272.json has format_version 62; this differ understands [57, 61]. Add the version to SUPPORTED_FORMAT_VERSIONS only after checking the node shapes it changed.
 
 NO TYPE VERDICT WAS COMPUTED for trusty-common 0.34.0. This is NOT a pass: nothing is known
 either way about whether a type moved.
