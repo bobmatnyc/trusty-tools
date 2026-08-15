@@ -1,17 +1,15 @@
 [package]
 name        = "trusty-review"
-# #5762: MINOR bump — for a 0.y.z crate the breaking position is MINOR, and the
-# public API of the `report` module broke since 0.16.0: `ReportSection` and
-# `ReportModel` each gained a required field (`ticketing`), and `ReportError`
-# gained three variants (`MetricsSchema`, `Ticketing`, `TicketingSchema`).
-# 0.16.1 was tagged for that delta and is wrong; the three types now carry
-# `#[non_exhaustive]` so the same additions are non-breaking from here on.
+# MINOR bump — 0.17.0 is already published, and this change edits `src/**`, so
+# the `PR version bump vs crates.io` gate (#4421) requires the bump here. MINOR
+# by the owner's standing decision; nothing in the public API changed, and the
+# three `report` types that broke at 0.17.0 now carry `#[non_exhaustive]`
+# (#5762), so field and variant additions stay non-breaking from here on.
 #
-# #4421: patch bump — 0.17.0 already published on crates.io and this PR
-# touches src/**. The only hunk (config/mod.rs) removes a stale doc comment
-# on a #[cfg(test)] mod declaration (#5754) — no item signature or behavior
-# changed.
-version     = "0.17.1"
+# #4421: this PR (#5754) additionally converts config/mod.rs's module doc to
+# the inner `//!`-only standard — a doc-comment-only change, so it lands under
+# the 0.18.0 above with no further bump needed.
+version     = "0.18.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
