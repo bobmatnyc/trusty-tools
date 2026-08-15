@@ -135,7 +135,18 @@ jobs:
           # is a legitimate green.
           green="$(printf '%s' "${runs}" | jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length')"
           if [ "${green}" -eq 0 ]; then
-            echo "::error::CI has run for ${SHA} but no run concluded 'success'. A release gate cannot pass over a red or still-running CI. Conclusions above."
+            # STILL RUNNING and CONCLUDED RED are different facts and get
+            # different messages. On the gate's first real run the only CI run
+            # for the SHA was `queued` — the gate was dispatched ~20 s after the
+            # merge landed — and a message about a "red CI" would have sent
+            # someone hunting a failure that did not exist. Both still FAIL:
+            # an unfinished CI has not proved anything yet.
+            pending="$(printf '%s' "${runs}" | jq '[.[] | select(.status != "completed")] | length')"
+            if [ "${pending}" -gt 0 ]; then
+              echo "::error::CI for ${SHA} has not finished — ${pending} run(s) still queued or in progress. This gate is dispatched too early; wait for CI to settle, then re-run. Nothing here is red, but nothing has been proved either."
+            else
+              echo "::error::CI has run to completion for ${SHA} and no run concluded 'success'. A release gate cannot pass over a red CI. Conclusions above."
+            fi
             exit 1
           fi
           echo "OK — ${green} green CI run(s) for ${SHA}"
@@ -471,6 +482,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libssl-dev
+
+      # libdbus-1-dev is REQUIRED here and nowhere else in this workflow. The
+      # contract extractor builds rustdoc JSON for trusty-common with its full
+      # feature set, which pulls in libdbus-sys; its build.rs calls pkg-config
+      # and `explicit panic`s when the headers are absent. On the gate's first
+      # real run (31858449749) that failed Gate 5 with exit 3 — a build failure,
+      # correctly NOT reported as a contract verdict. The other jobs build
+      # narrower graphs and do not need it.
+      - name: Install libdbus (contract extraction only)
+        run: sudo apt-get install -y --no-install-recommends libdbus-1-dev
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
