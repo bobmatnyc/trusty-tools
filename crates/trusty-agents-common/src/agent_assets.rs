@@ -27,6 +27,8 @@
 //! and keeps 8 files of its own: 4 deliberate forks that add a read-only
 //! `tools:` restriction, and 4 defaults with no counterpart here. Those are
 //! single copies already, so the one-copy rule has nothing to say about them.
+//!
+//! [`AGENT_ASSETS`]: crate::agent_assets::AGENT_ASSETS
 
 /// Root of every trusty-mpm inheritance chain.
 pub const BASE_AGENT: &str = include_str!("assets/agents/BASE-AGENT.md");

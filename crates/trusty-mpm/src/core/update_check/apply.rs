@@ -130,7 +130,7 @@ struct PruneOutcome {
 /// sequence so the content `apply` lands is exactly what a fresh session would get,
 /// and it refreshes the checksum manifests so a subsequent `detect_staleness`
 /// reports fresh.
-/// What: syncs the catalog via [`CatalogSync::sync`] (honouring the TTL unless
+/// What: syncs the catalog via [`CatalogSync::sync`](crate::content::CatalogSync::sync) (honouring the TTL unless
 /// `force`), resolves the harness manifest for `project_dir`, materializes the
 /// [`HarnessPlan`], redeploys the selected agents/skills via the filtered
 /// deployers, and — when `prune` is set — removes managed agents/skills the plan

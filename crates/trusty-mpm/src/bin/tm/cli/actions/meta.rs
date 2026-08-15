@@ -34,7 +34,7 @@ pub(crate) enum MetaAction {
     /// is a CURRENT NO-OP (the POC always uses the `--project` dir in place, so
     /// there is no provisioning/clone step to skip — the flag reserves that future
     /// seam); `--timeout-secs <N>` bounds the session-exit poll (default
-    /// [`super::commands::meta::DEFAULT_TIMEOUT_SECS`]).
+    /// [`super::commands::meta::DEFAULT_TIMEOUT_SECS`](crate::commands::meta::DEFAULT_TIMEOUT_SECS)).
     /// Test: `cli_parses_meta_run*` in `tests.rs`; handler behaviour in the
     /// `commands::meta` unit tests.
     Run {

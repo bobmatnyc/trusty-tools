@@ -131,10 +131,10 @@ pub(crate) fn is_zombie(state: &str, tmux_live: bool) -> bool {
 ///
 /// Why: the resume decision (`plan_resume`) must refuse a terminal record
 /// outright — never attach into it, never reconcile-restart it. Driving this
-/// off [`ManagedSessionState::is_terminal`] (the enum, the single source of
+/// off `ManagedSessionState::is_terminal` (the enum, the single source of
 /// truth) rather than a hardcoded token list means a new terminal variant can
 /// never silently slip past the resume guard.
-/// What: `true` iff `state` parses to a terminal [`ManagedSessionState`].
+/// What: `true` iff `state` parses to a terminal `ManagedSessionState`.
 /// Test: `plan_resume_refuses_terminal_states` in `tests_behavior_c_tests.rs`.
 fn is_terminal_state(state: &str) -> bool {
     trusty_mpm::session_manager::ManagedSessionState::from_wire(state)
@@ -152,7 +152,7 @@ fn is_terminal_state(state: &str) -> bool {
 ///     managed session named by `TM_MANAGED_SESSION_ID`, whose runtime already
 ///     exited (#2023 A/B); relaunch it in place via direct `exec`, never the
 ///     daemon kill+recreate path (#2023 C). Takes priority over everything
-///     below — see [`try_inplace_relaunch`].
+///     below — see [`try_inplace_relaunch`](crate::commands::guided_inplace::try_inplace_relaunch).
 ///   • [`ResumeAction::Attach`] — a live runtime; attach directly.
 ///   • [`ResumeAction::Restart`] — Stopped/Errored; POST `/resume` then attach.
 ///   • [`ResumeAction::ReconcileThenRestart`] — zombie (active/provisioning but
@@ -217,7 +217,7 @@ pub(crate) fn resume_classification_state(
 /// is the missing third input: when the record is active/provisioning, tmux is
 /// up, but the runtime is provably gone, the plan is `ReconcileThenRestart` —
 /// the SAME auto-stop-then-restart recovery the tmux-gone zombie already uses,
-/// so the first invocation does the whole job. See [`pane_runtime_live`] for how
+/// so the first invocation does the whole job. See `pane_runtime_live` for how
 /// the caller resolves this input (it reuses the daemon reaper's own
 /// [`trusty_mpm::daemon::runtime_reap::pane_runtime_exited`] predicate, so the
 /// CLI and the reaper can never disagree on what "dead runtime" means), and note
@@ -738,7 +738,7 @@ async fn reconcile_zombie_stop(
 /// bare status code. On HTTP 200 the body is parsed
 /// and, if `state=errored`, the async runtime spawn failed → bail directing the
 /// operator to `tm session info`. Success prints "session restarted." and
-/// returns the daemon's authoritative post-restart [`ManagedSessionSummary`]
+/// returns the daemon's authoritative post-restart `ManagedSessionSummary`
 /// (#2649 review: the caller needs this to print an accurate final state in
 /// headless/`no_attach` mode, rather than assuming `state == "active"`); the
 /// interactive caller uses it to attach.

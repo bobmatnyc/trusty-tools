@@ -10,7 +10,7 @@
 //! stays on the registry's conservative allow-list posture.
 //! What: [`build`] constructs an [`OpenAiCompatAdapter`] for a resolved Fireworks
 //! credential against a given base URL; [`factory`] is the production factory
-//! (real base URL) registered into the [`Configurator`].
+//! (real base URL) registered into the [`Configurator`](crate::inference::Configurator).
 //! Test: inline `#[ignore]` `live_fireworks_call`; offline round-trip in
 //! `crates/trusty-common/tests/inference_adapters.rs`.
 

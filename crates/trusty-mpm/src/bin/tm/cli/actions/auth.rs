@@ -11,7 +11,7 @@ use clap::Subcommand;
 ///
 /// Why: scoped sub-actions keep the token lifecycle (store/remove/inspect)
 /// under one command group without cluttering the top-level CLI surface.
-/// What: `SetToken`, `ClearToken`, `Status` — see [`Command::Auth`]'s doc
+/// What: `SetToken`, `ClearToken`, `Status` — see [`Command::Auth`](crate::cli::Command::Auth)'s doc
 /// comment for the full rationale.
 /// Test: `cli_parses_auth_set_token`, `cli_parses_auth_set_token_stdin`,
 /// `cli_parses_auth_clear_token`, `cli_parses_auth_status`.

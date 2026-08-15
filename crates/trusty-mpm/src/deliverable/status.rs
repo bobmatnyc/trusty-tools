@@ -8,7 +8,7 @@
 //! deterministic (§11 boundary: no LLM, no inference) and lets the CRUD API layer
 //! reject illegal `set-status` requests with a structured error that names the
 //! legal next states (#2380).
-//! What: [`DeliverableStatus`] (the six lifecycle states), [`allowed_next`]
+//! What: [`DeliverableStatus`] (the six lifecycle states), `allowed_next`
 //! ([`DeliverableStatus::allowed_next`]) as the single source of truth for legal
 //! transitions, [`DeliverableStatus::can_transition`], and
 //! [`validate_transition`] which returns a [`TransitionError`] naming the legal

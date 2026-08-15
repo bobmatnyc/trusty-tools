@@ -17,6 +17,8 @@
 //! - [`upgrade_and_restart`] — compose the three above into the full workflow.
 //!
 //! Test: `cargo test -p trusty-common --features update-check`
+//!
+//! [`is_launchd_supervised`]: crate::update::upgrade::is_launchd_supervised
 
 /// How a shelled-out upgrade command's stdout/stderr should be handled.
 ///

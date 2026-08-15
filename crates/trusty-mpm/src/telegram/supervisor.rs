@@ -75,7 +75,7 @@ pub fn classify_error(err: &anyhow::Error) -> BotExit {
 /// What: holds the first delay, the per-step multiplier, the ceiling, and the
 /// minimum run duration that counts as "healthy" (after which the consecutive
 /// transient-failure counter resets so backoff starts fresh). Computes the delay
-/// for a given consecutive-failure count via [`delay_for`].
+/// for a given consecutive-failure count via `delay_for`.
 /// Test: `backoff_grows_and_caps`, `healthy_run_resets_transient_backoff`.
 #[derive(Debug, Clone, Copy)]
 pub struct BackoffPolicy {

@@ -15,6 +15,12 @@
 //! Test: behaviour is pinned by `cargo test -p trusty-common -- palace_id::tests`;
 //! trusty-memory inherits it transitively (its `messaging` tests exercise the
 //! env-override read path that wraps these shims).
+//!
+//! [`derive_palace_id`]: trusty_common::palace_id::derive_palace_id
+//! [`owner_repo_from_git_remote`]: trusty_common::palace_id::owner_repo_from_git_remote
+//! [`parent_dir_slug`]: trusty_common::palace_id::parent_dir_slug
+//! [`PALACE_OVERRIDE_ENV`]: trusty_common::palace_id::PALACE_OVERRIDE_ENV
+//! [`palace_override_from_env`]: trusty_common::palace_id::palace_override_from_env
 
 pub use trusty_common::palace_id::{
     derive_palace_id, owner_repo_from_git_remote, palace_override_from_env, parent_dir_slug,

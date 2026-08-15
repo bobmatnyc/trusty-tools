@@ -13,6 +13,9 @@
 //! Test: see the `tests` module — `sample_does_not_panic` exercises the
 //!      refresh path; `rss_is_plausible` asserts the test process reports a
 //!      non-trivial, non-absurd RSS.
+//!
+//! [`SysMetrics`]: crate::sys_metrics::SysMetrics
+//! [`SysMetrics::sample`]: crate::sys_metrics::SysMetrics::sample
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 

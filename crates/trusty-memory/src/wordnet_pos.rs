@@ -19,6 +19,8 @@
 //! carried again in the `#` header of `wordnet/lemma-pos.txt`, which this
 //! module skips at lookup time rather than stripping from the file.
 //! Regeneration: `wordnet/README.md`.
+//!
+//! [`WordNetPos`]: crate::wordnet_pos::WordNetPos
 
 use std::cmp::Ordering;
 

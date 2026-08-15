@@ -8,8 +8,8 @@
 //! rendered only the focused session's already-polled STATIC record fields
 //! because that live wiring was explicitly this issue's scope. This module
 //! now prefers [`ProjectCtlState::activity_for_selected`] (populated by
-//! [`super::super::poll::refresh_activity`] on the same poll cadence as the
-//! Projects/Sessions panes) and falls back to the static [`SessionRow`]
+//! `super::super::poll::refresh_activity` on the same poll cadence as the
+//! Projects/Sessions panes) and falls back to the static [`SessionRow`](crate::client::SessionRow)
 //! fields — with an explanatory suffix, never silently — for the windows
 //! where no live snapshot is available: right after a selection changes (the
 //! fetch for the new selection has not landed), while the daemon is down

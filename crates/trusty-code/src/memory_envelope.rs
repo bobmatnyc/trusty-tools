@@ -19,6 +19,10 @@
 //! `trusty_common::mcp::memory_rpc::call_memory_tool_at` for callers that
 //! want a one-shot "call this tool, give me its parsed result" helper.
 //! Test: `memory_envelope::tests::*`.
+//!
+//! [`tools_call_params`]: crate::memory_envelope::tools_call_params
+//! [`parse_tools_call_envelope`]: crate::memory_envelope::parse_tools_call_envelope
+//! [`call_tool_wrapped`]: crate::memory_envelope::call_tool_wrapped
 
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};

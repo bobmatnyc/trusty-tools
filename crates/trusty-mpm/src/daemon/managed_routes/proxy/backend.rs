@@ -66,7 +66,7 @@ impl DirectManagedBackend {
 impl ManagedBackend for DirectManagedBackend {
     /// Resolve `target` against the live managed-session list.
     ///
-    /// Why: mirrors [`crate::client::executor::managed`]'s `resolve_managed`
+    /// Why: mirrors `crate::client::executor::managed`'s `resolve_managed`
     /// EXACTLY in wording — the "not found" phrasing must match so
     /// `is_missing_session` behaves identically regardless of which backend a
     /// [`crate::client::proxy::SessionProxy`] is built over.

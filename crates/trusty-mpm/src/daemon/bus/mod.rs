@@ -12,7 +12,7 @@
 //! second writer). Submodules: [`envelope`] is the §11 schema, [`registry`]
 //! resolves both addressing modes, [`error`] is the §4 fail-closed contract,
 //! and [`routes`] is the HTTP surface.
-//! Test: [`tests`] — the module's suite covers publish, both addressing modes,
+//! Test: `tests` — the module's suite covers publish, both addressing modes,
 //! the bypass failure mode, and the durable record.
 //!
 //! ## Scope: step 1 of DOC-60 §5.3, and what it deliberately excludes
@@ -29,6 +29,12 @@
 //!   capacity is sized accordingly.
 //! - **The client and the peer-message tool are separate changes.** This is the
 //!   daemon-side foundation only.
+//!
+//! [`PeerBus`]: crate::daemon::bus::PeerBus
+//! [`envelope`]: crate::daemon::bus::envelope
+//! [`registry`]: crate::daemon::bus::registry
+//! [`error`]: crate::daemon::bus::error
+//! [`routes`]: crate::daemon::bus::routes
 
 use std::path::Path;
 use std::sync::Arc;
@@ -62,7 +68,7 @@ pub use registry::{InstanceMeta, InstanceRegistry, LiveInstance, PeerTarget};
 /// seeing a half-applied state.
 /// What: an [`InstanceRegistry`] and an [`AuditLogger`] pointed at the
 /// `logs_dir/bus/` stream.
-/// Test: [`tests`].
+/// Test: `tests`.
 #[derive(Debug)]
 pub struct PeerBus {
     /// §6b instance registry — the resolution table for both addressing modes.

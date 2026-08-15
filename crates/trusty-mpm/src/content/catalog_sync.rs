@@ -104,7 +104,7 @@ impl CatalogSyncResult {
 /// What: clones or updates the catalog repo under ~/.trusty-mpm/catalog/,
 /// respects a TTL to avoid redundant fetches, and exposes list methods for
 /// the CLI.
-/// Test: unit tests use FakeGitBackend; integration test uses a real repo (#[ignore]).
+/// Test: unit tests use FakeGitBackend; integration test uses a real repo (#\[ignore\]).
 pub struct CatalogSync<G: GitBackend> {
     git: G,
     /// Root directory for the cached catalog (~/.trusty-mpm/catalog/).
@@ -135,7 +135,7 @@ impl<G: GitBackend> CatalogSync<G> {
     /// (a user fork, a pinned ref, a shorter TTL) via the `[manifest]` section of
     /// `config.toml`, on top of the existing env knobs. Threading the optional
     /// config through one constructor keeps the precedence in a single place and
-    /// preserves the env-only behavior of [`new`] (which passes `None`).
+    /// preserves the env-only behavior of `new` (which passes `None`).
     /// What: for each of repo, ref, and TTL, takes the config value when set,
     /// else the env var, else the compiled-in default.
     /// Test: `catalog_config_overrides_env_and_default`.

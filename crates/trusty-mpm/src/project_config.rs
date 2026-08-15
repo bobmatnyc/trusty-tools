@@ -31,6 +31,15 @@
 //! directly) plus the two front-end-specific consumers:
 //! `tests_projects.rs::projects_config_shared_cases_match_cli_arg_building` (CLI)
 //! and `tui::project_ctl::state::modals::tests::config_form_shared_cases_match_tui_diff` (TUI).
+//!
+//! [`ConfigEdit`]: crate::project_config::ConfigEdit
+//! [`build_patch_args`]: crate::project_config::build_patch_args
+//! [`merge_patch_args`]: crate::project_config::merge_patch_args
+//! [`PatchProjectArgs`]: crate::client::http_client::projects::PatchProjectArgs
+//! [`ConfigField`]: crate::project_config::ConfigField
+//! [`ClearableField`]: crate::project_config::ClearableField
+//! [`config_edit_cases`]: crate::project_config::config_edit_cases
+//! [`assert_matches_case`]: crate::project_config::assert_matches_case
 
 use crate::client::http_client::projects::PatchProjectArgs;
 

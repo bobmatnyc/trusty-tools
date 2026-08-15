@@ -54,13 +54,13 @@ impl JiraClient {
     /// whenever JIRA's `changelog.total` exceeds the number of embedded
     /// entries, driven from `run_sync`'s per-ticket loop so a failure here is
     /// isolated to its ticket (see
-    /// [`super::model::ChangelogIssue::truncated_history_total`]).
+    /// [`super::model::ChangelogIssue::truncated_history_total`](crate::collect::jira::ChangelogIssue::truncated_history_total)).
     ///
     /// What: `GET /rest/api/3/issue/{key}/changelog?startAt=&maxResults=`,
     /// looping until the accumulated entry count reaches the largest `total`
     /// anyone reported, then extracting `status` items exactly as the
     /// embedded path does. Transient failures are retried with backoff, like
-    /// every other paged read on this client (see [`super::retry`]).
+    /// every other paged read on this client (see [`super::retry`](crate::collect::jira::retry)).
     ///
     /// `expected` is the count the SEARCH response reported for this issue —
     /// the number that proved the embedded copy short in the first place. It

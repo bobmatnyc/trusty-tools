@@ -7,7 +7,7 @@
 //! issue's primary acceptance criterion is that the CHAT LOOP itself — not only
 //! the standalone `/manager/act` endpoint — "proposes a session launch/inject
 //! action in-conversation and only executes it after explicit user confirmation
-//! in the same [conversation]"). This module now supports exactly that: when the
+//! in the same \[conversation\]"). This module now supports exactly that: when the
 //! model's reply embeds a proposal (see [`super::proposal::extract_proposed_action`]),
 //! the chat handler stores it as PENDING for that `conversation_key` and returns
 //! it to the caller as advisory text — NOTHING is executed. Only when the VERY

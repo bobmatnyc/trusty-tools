@@ -18,6 +18,11 @@
 //! eviction, evicted-content survival, the goal/session-id golden, the
 //! token-budget trigger, default-vs-override model selection, atomic-persist
 //! round-trip, and §7.5 assembly order.
+//!
+//! [`model`]: crate::core::sm::context::model
+//! [`compaction`]: crate::core::sm::context::compaction
+//! [`persist`]: crate::core::sm::context::persist
+//! [`engine`]: crate::core::sm::context::engine
 
 pub mod compaction;
 pub mod engine;

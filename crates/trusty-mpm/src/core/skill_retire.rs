@@ -268,7 +268,7 @@ fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Resu
 ///
 /// Why: this is the whole fix, and taking `live` as a parameter is what makes
 /// it testable against a literal source set instead of the real embedded bundle
-/// — the same split [`crate::daemon::doctor_skill_drift`] uses for its report.
+/// — the same split `crate::daemon::doctor_skill_drift` uses for its report.
 /// What: under the ledger lock, for each retired stem —
 /// - [`skill_removal_verdict`] `Removable` → delete `<dest>/<stem>/`;
 /// - `Kept` → leave every file exactly where it is.

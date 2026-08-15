@@ -22,6 +22,12 @@
 //!
 //! Test: `crate_config_path_layout`, `load_absent_is_none`, `save_then_load_round_trips`,
 //! `load_or_default_on_missing`, `load_malformed_is_err` in the `tests` module.
+//!
+//! [`crate_config_dir`]: crate::crate_config::crate_config_dir
+//! [`crate_config_path`]: crate::crate_config::crate_config_path
+//! [`load`]: crate::crate_config::load
+//! [`load_or_default`]: crate::crate_config::load_or_default
+//! [`save`]: crate::crate_config::save
 
 use std::path::{Path, PathBuf};
 

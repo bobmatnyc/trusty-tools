@@ -34,12 +34,12 @@ use super::state::load_catchup_state;
 /// Why: an MCP tool caller needs typed fields it can branch on (e.g. "does this
 /// session have a tmux window to realign to?") rather than parsing a rendered
 /// digest back apart. This is the structured sibling of
-/// [`session_finder::render_session`] (private) — same source fields, JSON
+/// `session_finder::render_session` (private) — same source fields, JSON
 /// shape instead of markdown.
 /// What: `format` is `"trusty-mpm"` or `"claude-mpm"`; the remaining fields are
 /// populated from whichever [`PausedSession`] variant produced them. A
 /// `claude-mpm` (legacy) session has no on-disk single-file `source_file` (its
-/// loader discards the path — see [`mpm_session::load_all_claude_mpm_sessions`]),
+/// loader discards the path — see [`mpm_session::load_all_claude_mpm_sessions`](crate::catchup::mpm_session::load_all_claude_mpm_sessions)),
 /// so that field is `None` for that variant; its `in_progress`/`next_steps`
 /// are best-effort folds of `todos`+`task_list` / `open_questions`.
 ///
@@ -158,10 +158,10 @@ fn paused_session_to_json(session: &PausedSession) -> PausedSessionJson {
 /// A recent memory-palace drawer, trimmed to the fields the catch-up JSON
 /// output surfaces.
 ///
-/// Why: [`palace::DrawerSummary`] also carries `created_at`, which the digest
+/// Why: [`palace::DrawerSummary`](crate::catchup::palace::DrawerSummary) also carries `created_at`, which the digest
 /// doesn't need once drawers are already newest-first; keeping the tool output
 /// to `title`/`tags` matches the documented `session_context_catchup` schema.
-/// What: a two-field projection of [`palace::DrawerSummary`].
+/// What: a two-field projection of [`palace::DrawerSummary`](crate::catchup::palace::DrawerSummary).
 /// Test: covered by `generate_catchup_json_returns_structured_fields`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecentMemoryJson {
@@ -178,7 +178,7 @@ pub struct RecentMemoryJson {
 /// [`super::generate_catchup_context`]'s markdown string, built from the exact
 /// same three sources so both surfaces stay in lockstep.
 /// What: `sessions` (structured paused-session records), `recent_commits`
-/// (unchanged [`git::CommitSummary`] values), and `recent_memory` (title+tags
+/// (unchanged [`git::CommitSummary`](crate::catchup::git::CommitSummary) values), and `recent_memory` (title+tags
 /// drawer projections). Callers (the MCP daemon backend) layer
 /// `resolved_snapshot` and `watermark_advanced` on top, since those depend on
 /// an explicit `session_id` this function does not take.
@@ -198,7 +198,7 @@ pub struct CatchupJson {
     /// and were withheld. The watermark advances either way, so without this
     /// count a withheld session is invisible to the caller forever and there is
     /// nothing to tell them to re-run with `full` (#5072).
-    /// What: [`session_finder::FilteredSessions::dropped_undatable`]; always 0
+    /// What: [`session_finder::FilteredSessions::dropped_undatable`](crate::catchup::session_finder::FilteredSessions::dropped_undatable); always 0
     /// when `full` is set, since a full catch-up applies no watermark.
     /// Test: `generate_catchup_json_reports_undatable_drop_count`.
     pub undatable_sessions_dropped: usize,

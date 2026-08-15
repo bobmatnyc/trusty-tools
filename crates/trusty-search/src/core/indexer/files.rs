@@ -110,7 +110,8 @@ impl CodeIndexer {
     /// Why: [`Self::enumerate_chunks`] loads every chunk and re-sorts the whole
     /// corpus on every page request — O(N log N) per page — which times out
     /// (and 502s behind a proxy) at deep offsets on large indexes
-    /// (`offset=304000`). When a durable [`CorpusStore`] is wired, this method
+    /// (`offset=304000`). When a durable [`CorpusStore`](crate::core::corpus::CorpusStore)
+    /// is wired, this method
     /// instead seeks straight to the cursor in redb's `chunk_id`-keyed B-tree
     /// and reads one page: O(log N) + O(page) per call, so a forward scan over
     /// the whole corpus is O(N) total rather than O(N²/page). Indexers without

@@ -8,7 +8,7 @@
 //! well under the 500-SLOC cap and each concern (project sessions, managed
 //! sessions, pairing) lives in its own file: this `mod.rs` owns only the struct,
 //! the constructor, and the [`execute`](CommandExecutor::execute) dispatch.
-//! What: [`CommandExecutor`] owns a [`DaemonClient`]; [`execute`] maps each
+//! What: [`CommandExecutor`] owns a [`DaemonClient`]; `execute` maps each
 //! [`TrustyCommand`] to the corresponding submodule method. The project-session
 //! family lives in [`sessions`], the managed session-manager verbs in
 //! [`managed`], and the pairing handshake in [`pairing`]. Unreachable-daemon

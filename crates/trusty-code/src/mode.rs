@@ -34,6 +34,10 @@
 //! `std::env`/`std::fs` read in production code).
 //! Test: `mode::tests::*` (precedence order, lenient parsing, unknown-value
 //! degrade-to-next-tier, settings.json presence/absence/malformed-JSON).
+//!
+//! [`resolve_mode`]: crate::mode::resolve_mode
+//! [`HarnessMode`]: crate::mode::HarnessMode
+//! [`HarnessMode::parse_lenient`]: crate::mode::HarnessMode::parse_lenient
 
 use std::path::Path;
 

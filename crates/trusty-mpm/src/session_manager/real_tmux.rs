@@ -11,6 +11,10 @@
 //! Test: `real_tmux_constructs` (construction is the only side-effect-free path;
 //! the actual tmux calls require a live `tmux` binary and are exercised by the
 //! `#[ignore]` live integration test in `tests/session_manager_mvp.rs`).
+//!
+//! [`ManagedTmuxDriver`]: crate::session_manager::manager::ManagedTmuxDriver
+//! [`TmuxDriver`]: crate::daemon::tmux::TmuxDriver
+//! [`ManagedError`]: crate::session_manager::manager::ManagedError
 
 use crate::core::tmux::TmuxTarget;
 use crate::daemon::tmux::TmuxDriver;

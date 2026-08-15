@@ -11,6 +11,12 @@
 //! Test: exercised end-to-end by the wrapper `scripts/check_sld.sh` and the
 //! library's `tests/lint_real_tree.rs`.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -262,9 +268,9 @@ fn main() -> Result<ExitCode> {
 /// Why: kept separate from `main` so the dispatch in `main` stays a one-line
 /// match arm.
 /// What: runs [`trusty_sld_lint::gap::run_gap_report`], prints the JSON (when
-/// `json`) and always prints the human [`GapReport::summary`], then returns
+/// `json`) and always prints the human `GapReport::summary`, then returns
 /// `FAILURE` only when `strict` is set AND the report is not
-/// [`GapReport::is_strict_clean`] — the default is report-and-succeed so this
+/// `GapReport::is_strict_clean` — the default is report-and-succeed so this
 /// subcommand can never unexpectedly break CI (issue #595).
 /// Test: covered end-to-end by `tests/gap_report_real_tree.rs`.
 fn run_gap_report_cmd(root: &Path, json: bool, strict: bool) -> ExitCode {

@@ -1,6 +1,6 @@
 //! CommonMark → Slack canvas-markdown translator (issue #3744 slice 2).
 //!
-//! Why: `slack_canvas_push` (in [`super::handlers::canvas`]) accepts CommonMark
+//! Why: `slack_canvas_push` (in `super::handlers::canvas`) accepts CommonMark
 //! from the caller, but Slack's `canvases.edit`/`canvases.create` document
 //! content is a narrower markdown dialect — no h4-h6, no HTML, no footnotes,
 //! and a hard 300-cell table cap. Feeding raw CommonMark straight through
@@ -90,7 +90,7 @@ pub enum TranslationError {
 
 /// Translate a CommonMark document into Slack canvas markdown.
 ///
-/// Why: the single entry point [`super::handlers::canvas::canvas_push`] calls
+/// Why: the single entry point `super::handlers::canvas::canvas_push` calls
 /// before ever touching the network — pure and synchronous, so it is fully
 /// unit-testable without a mock Slack server.
 /// What: parses `input` with `table`/`strikethrough`/`tasklist`/`footnotes`

@@ -24,7 +24,7 @@
 //! ## Factory
 //!
 //! [`build_adapters`] instantiates every PM adapter that is configured in the
-//! supplied [`Config`]. Adapters whose config is absent or invalid are simply
+//! supplied [`Config`](crate::core::config::Config). Adapters whose config is absent or invalid are simply
 //! skipped (with a `tracing::warn!`) so the caller does not have to know which
 //! integrations are enabled.
 

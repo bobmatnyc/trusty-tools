@@ -32,6 +32,11 @@
 //! predicate this module owns, so the two paths can never independently
 //! drift on what counts as a matching invocation).
 //! Test: `verify_gate::tests::*`.
+//!
+//! [`names_test_command`]: crate::verify_gate::names_test_command
+//! [`is_test_command`]: crate::verify_gate::is_test_command
+//! [`default_finish_gate`]: crate::verify_gate::default_finish_gate
+//! [`pm_finish_gate`]: crate::verify_gate::pm_finish_gate
 
 use std::sync::Arc;
 

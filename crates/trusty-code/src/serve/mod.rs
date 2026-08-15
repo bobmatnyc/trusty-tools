@@ -32,6 +32,13 @@
 //! so this is a small extension when it's needed).
 //!
 //! Test: `serve::tests::*`.
+//!
+//! [`build_router`]: crate::serve::build_router
+//! [`methods::register`]: crate::serve::methods::register
+//! [`run_stdio`]: crate::serve::run_stdio
+//! [`run_http`]: crate::serve::run_http
+//! [`transport::run_stdio_loop`]: crate::serve::transport::run_stdio_loop
+//! [`http::run_http`]: crate::serve::http::run_http
 
 pub mod discovery;
 pub mod http;

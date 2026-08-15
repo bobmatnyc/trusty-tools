@@ -187,7 +187,7 @@ pub struct RealGitBackend {
 }
 
 impl RealGitBackend {
-    /// Construct a backend bound to a resolved per-project [`GitIdentity`]
+    /// Construct a backend bound to a resolved per-project [`GitIdentity`](crate::core::git_identity::GitIdentity)
     /// (#2184).
     ///
     /// Why: the daemon's `spawn_managed` path resolves ONE identity per spawn

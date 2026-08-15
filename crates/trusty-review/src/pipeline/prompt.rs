@@ -81,7 +81,7 @@ const REVIEW_SCHEMA_NAME: &str = "review_output";
 /// `"required"`.  Rather than hand-maintain those on each nested object — the
 /// omission on `findings.items` is exactly what blocked all OpenAI reviews —
 /// the schema is declared in its natural shape and then made strict-compliant
-/// in one pass by [`enforce_strict_mode`] (#1235).  Fields that are
+/// in one pass by [`enforce_strict_mode`](crate::llm::enforce_strict_mode) (#1235).  Fields that are
 /// semantically optional are expressed as nullable types (`line`) or carry a
 /// safe default value the model emits; the `LlmOutputBlock` deserializer uses
 /// `#[serde(default)]` so both lenient (Bedrock/Anthropic, Gemini) and strict

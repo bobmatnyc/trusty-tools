@@ -90,7 +90,7 @@ impl L1Cache {
     /// so whichever entries land here are the ones `retrieve_l0_l1` serves
     /// until the next write. Sorting on importance alone picked them by the
     /// caller's input order (v4 UUIDs, uncorrelated with age).
-    /// What: Sorts a clone of `drawers` by [`drawer_listing_order`], takes the
+    /// What: Sorts a clone of `drawers` by `drawer_listing_order`, takes the
     /// first `L1_SNAPSHOT_CAP`, writes JSON to a per-call unique tmp path
     /// (PID + monotonic counter so concurrent writers don't share the tmp),
     /// re-asserts `create_dir_all` immediately before the rename so the

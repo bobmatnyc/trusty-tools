@@ -13,14 +13,14 @@
 //! the heavy `memory-core` engine is not even compiled into this build — the
 //! manager surface stays fully operable and simply reports the palace as
 //! unavailable (DOC-36 §4 degrade-graceful bar). This mirrors the SM palace's
-//! own "log and disable recall, never crash" posture ([`crate::core::sm::memory`]).
+//! own "log and disable recall, never crash" posture ([`crate::core::sm::memory`](crate::core::memory)).
 //! What: [`PortfolioPalace`] is the ALWAYS-present handle threaded into
 //! [`crate::daemon::manager::ManagerState`]; it carries the fixed palace id
 //! ([`PORTFOLIO_PALACE_ID`]) plus an availability flag/reason so callers can read
 //! "is the palace usable, and if not why" without any feature-cfg of their own.
 //! Under the opt-in `manager-memory` feature it also owns a live
-//! [`PortfolioMemory`] — a direct `memory-core` library binding (no MCP/network
-//! hop) mirroring [`crate::core::sm::memory::SmMemory`] — that idempotently
+//! `PortfolioMemory` — a direct `memory-core` library binding (no MCP/network
+//! hop) mirroring `crate::core::sm::memory::SmMemory` — that idempotently
 //! ensures the single portfolio palace and offers the minimal remember/recall
 //! surface later phases (digest history, chat turns) build on.
 //! Test: `portfolio_palace_reports_unavailable_without_feature` (default build)
@@ -63,7 +63,7 @@ const MANAGER_DATA_SUBDIR: &str = "manager";
 /// no `#[cfg]` of their own.
 /// What: the stable palace `id`, an `available` flag, an optional
 /// human-readable `reason` when unavailable, and — only under `manager-memory` —
-/// the live [`PortfolioMemory`] binding. Built once at daemon startup via
+/// the live `PortfolioMemory` binding. Built once at daemon startup via
 /// [`Self::provision`]; a failure to open the palace degrades to
 /// `available = false` with the error captured in `reason`, never a panic.
 /// Test: `portfolio_palace_reports_unavailable_without_feature`,

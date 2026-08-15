@@ -116,7 +116,7 @@ pub async fn discover_org_repos(
 /// Build the effective org list by merging `github.org` (singular back-compat)
 /// into `github.orgs` (plural list), deduplicating while preserving insertion
 /// order. Explicit per-repo `org:` and `github.repo` are handled separately
-/// in [`super::client::resolve_github_repos`].
+/// in [`super::client::resolve_github_repos`](crate::collect::github::resolve_github_repos).
 ///
 /// Why: the config schema exposes both `github.org` (old) and `github.orgs`
 /// (new). Merging them here into one canonical list lets discovery code ignore
@@ -136,13 +136,13 @@ pub fn effective_orgs(org: Option<&str>, orgs: &[String]) -> Vec<String> {
     out
 }
 
-/// Like [`super::client::resolve_github_repos`] but unions in `org_discovered`
+/// Like [`super::client::resolve_github_repos`](crate::collect::github::resolve_github_repos) but unions in `org_discovered`
 /// pairs that were fetched asynchronously by the caller via
 /// [`discover_org_repos`].
 ///
 /// Why: keeps the core per-repo resolution logic in `client.rs` (sync) while
 /// letting the async pipeline inject org-discovery results in one dedup pass.
-/// What: calls [`super::client::resolve_github_repos`] for the repositories
+/// What: calls [`super::client::resolve_github_repos`](crate::collect::github::resolve_github_repos) for the repositories
 /// slice, then appends each `org_discovered` pair not already in the set.
 /// Test: `resolve_github_repos_with_org_discovered_appends` below.
 pub fn resolve_github_repos_with_discovered(

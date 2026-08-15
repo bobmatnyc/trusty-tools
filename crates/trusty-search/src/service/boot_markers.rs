@@ -22,6 +22,8 @@
 //! Test: see the `tests` submodule below for the marker read/write contract
 //! and re-arm decision, and `commands::start_restore`'s `markers_tests`
 //! submodule for the end-to-end restore-path proof (#4390 / #4391).
+//!
+//! [`persist_deferred_embed_pending`]: crate::service::boot_markers::persist_deferred_embed_pending
 
 use std::sync::Arc;
 

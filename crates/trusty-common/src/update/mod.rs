@@ -16,6 +16,8 @@
 //! `None` — the check is best-effort and must never panic or stall a CLI.
 //!
 //! Test: `cargo test -p trusty-common --features update-check`.
+//!
+//! [`check_throttled`]: crate::update::check_throttled
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

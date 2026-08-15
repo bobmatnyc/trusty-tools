@@ -274,7 +274,7 @@ impl std::fmt::Display for ExecutionProvider {
     }
 }
 
-/// Predict the execution provider a freshly-constructed [`FastEmbedder`] will
+/// Predict the execution provider a freshly-constructed [`FastEmbedder`](crate::embedder::FastEmbedder) will
 /// resolve, from build cfg + environment alone — without constructing a model.
 ///
 /// Why: issue #604. When `trusty-search` runs the embedder out-of-process (the
@@ -282,7 +282,7 @@ impl std::fmt::Display for ExecutionProvider {
 /// handle is an RPC adapter whose `provider()` fell through to the trait
 /// default `Cpu`, so `GET /health` reported `provider=CPU` even though the
 /// sidecar's own startup log said `provider=CUDA`. The sidecar resolves its
-/// provider through this crate's [`FastEmbedder::init_options`]; since that
+/// provider through this crate's [`FastEmbedder::init_options`](crate::embedder::FastEmbedder::init_options); since that
 /// resolution is a pure function of build features, platform, and the
 /// `TRUSTY_DEVICE` / `TRUSTY_COREML_COMPUTE_UNITS` env vars, the parent can
 /// predict the exact same answer and surface it on `/health` without an extra

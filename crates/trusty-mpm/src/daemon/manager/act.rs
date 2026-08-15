@@ -8,11 +8,11 @@
 //! protocol: a first call with `confirm` unset returns a human-readable PROPOSAL
 //! and does nothing; only a second call with `confirm: true` executes exactly that
 //! action, as one deliberate, traceable call. Execution never reimplements the
-//! composed subsystems — a launch calls #2108's launch verb ([`spawn_managed`] via
+//! composed subsystems — a launch calls #2108's launch verb ([`spawn_managed`](crate::daemon::managed_routes::spawn_managed) via
 //! the actuator), and a session-directed message routes through L2's real
 //! [`crate::client::proxy::SessionProxy`] — never a direct tmux mutation. The
 //! execution seam ([`ManagerActuator`], `actuator.rs`) is overridable on
-//! [`ManagerState`] so the hermetic suite drives the whole flow over a test-double
+//! [`ManagerState`](crate::daemon::manager::ManagerState) so the hermetic suite drives the whole flow over a test-double
 //! launcher + a `SessionProxy` over a mock backend, with no live session/channel.
 //! What: [`ActRequest`]/[`ProposedAction`]/[`ActResponse`], the pure
 //! [`propose_message`] renderer, and the [`manager_act_route`] handler.
@@ -298,7 +298,7 @@ pub async fn execute_action(
 /// every action, including `Launch`, which does not read it operationally; see
 /// [`ActRequest::conversation_key`]'s doc for why); on `confirm == false` returns
 /// [`ActResponse::Proposed`]; on `confirm == true` resolves the actuator (a test
-/// override on [`ManagerState`], else a fresh production `ProxyActuator`, via
+/// override on [`ManagerState`](crate::daemon::manager::ManagerState), else a fresh production `ProxyActuator`, via
 /// [`resolve_actuator`]) and calls [`execute_action`]. A launch spawn error is a
 /// 502 (the one genuinely failing side effect); inject/summarize
 /// resolution/vanish/transient outcomes are valid advisory states returned as 200.

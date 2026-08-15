@@ -11,6 +11,8 @@
 //! callers importing from `crate::activity`.
 //! Test: each sub-module carries its own unit tests; the integration path is
 //! exercised by the monitor tests against a `MockClassifier`.
+//!
+//! [`OpenRouterClassifier`]: crate::control::OpenRouterClassifier
 
 pub mod cache;
 pub mod classifier;

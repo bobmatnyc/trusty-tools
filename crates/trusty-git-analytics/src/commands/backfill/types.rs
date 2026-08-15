@@ -34,7 +34,7 @@ pub struct BackfillArgs {
     /// Report what would change without writing.
     #[arg(long, default_value_t = false, global = true)]
     pub dry_run: bool,
-    /// Limit backfill to these repository names (comma-separated). [global]
+    /// Limit backfill to these repository names (comma-separated). \[global\]
     ///
     /// Matches against the `repository` column in the `commits` table
     /// (for ticket-ids, revert-flags) or the repo `name` in config
@@ -43,18 +43,18 @@ pub struct BackfillArgs {
     /// NOTE: not applicable to ai-detection (global LLM re-classification).
     #[arg(long, value_delimiter = ',', global = true)]
     pub repos: Vec<String>,
-    /// Limit backfill to commits in the last N ISO weeks. [global]
+    /// Limit backfill to commits in the last N ISO weeks. \[global\]
     ///
     /// Restricts the set of commits processed by timestamp. Mutually exclusive
     /// with --since/--until. Not applicable to reachability (uses config repos).
     #[arg(long, value_name = "N", global = true, conflicts_with_all = ["since", "until"])]
     pub weeks: Option<u32>,
-    /// Limit backfill to commits on or after this date (ISO8601: YYYY-MM-DD). [global]
+    /// Limit backfill to commits on or after this date (ISO8601: YYYY-MM-DD). \[global\]
     ///
     /// Lower bound on the author timestamp. Mutually exclusive with --weeks.
     #[arg(long, value_name = "DATE", global = true, conflicts_with = "weeks")]
     pub since: Option<String>,
-    /// Limit backfill to commits on or before this date (ISO8601: YYYY-MM-DD). [global]
+    /// Limit backfill to commits on or before this date (ISO8601: YYYY-MM-DD). \[global\]
     ///
     /// Upper bound on the author timestamp. Mutually exclusive with --weeks.
     #[arg(long, value_name = "DATE", global = true, conflicts_with = "weeks")]

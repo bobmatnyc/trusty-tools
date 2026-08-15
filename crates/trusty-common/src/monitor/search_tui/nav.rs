@@ -72,7 +72,7 @@ pub fn navigate_down_visible(state: &mut SearchTuiState) {
 /// state the renderer sees, it returns the visible row at which the current
 /// selection is drawn so the highlight follows the sorted order.
 /// What: returns `0` when "All" is selected; otherwise walks
-/// [`index_lines`] looking for the row whose `selected` flag is set and
+/// [`index_lines`](crate::monitor::search_tui::index_lines) looking for the row whose `selected` flag is set and
 /// returns its index. Falls back to `0` (the "All" row) when no matching
 /// row is found, which mirrors how `clamp_to_visible` collapses a hidden
 /// selection back to "All".

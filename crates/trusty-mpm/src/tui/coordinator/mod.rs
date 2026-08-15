@@ -17,7 +17,7 @@
 //! column and slash-command dispatch are deferred to later children; the summary
 //! is derived client-side from `recent_output` until then.
 //! Test: the pure pieces (rows, state, events, layout text) are unit-tested in
-//! [`tests`]; [`run`] is the thin terminal glue exercised by launching the TUI.
+//! `tests`; [`run`] is the thin terminal glue exercised by launching the TUI.
 
 pub mod banner;
 pub mod dispatch;

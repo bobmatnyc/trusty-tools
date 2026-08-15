@@ -4,9 +4,9 @@
 //! activity since the last session — paused sessions, git commits, and recent
 //! memory palace drawers — so they can resume with full context. This module
 //! orchestrates the three sources and renders one markdown digest.
-//! What: [`generate_catchup_context`] computes the digest (watermark-aware,
-//! fail-open on every source); [`run_catchup`] wraps it and optionally advances
-//! the watermark. [`CatchupOptions`] controls which sources are active.
+//! What: [`generate_catchup_context`](crate::catchup::generate_catchup_context) computes the digest (watermark-aware,
+//! fail-open on every source); [`run_catchup`](crate::catchup::run_catchup) wraps it and optionally advances
+//! the watermark. [`CatchupOptions`](crate::catchup::CatchupOptions) controls which sources are active.
 //! Test: `generate_catchup_context_renders_all_sections`,
 //! `run_catchup_no_advance_does_not_panic`, `run_catchup_advance_writes_state`.
 //!

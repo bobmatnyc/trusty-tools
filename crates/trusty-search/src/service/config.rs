@@ -70,7 +70,8 @@ impl Default for LocalModelSection {
     }
 }
 
-/// Resolved user configuration ready to inject into [`crate::SearchAppState`].
+/// Resolved user configuration ready to inject into
+/// [`SearchAppState`](crate::service::SearchAppState).
 ///
 /// Why: separating the "wire" deserialisation type from the runtime struct
 /// lets us apply defaults exactly once at the boundary and keeps the rest of

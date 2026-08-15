@@ -20,7 +20,7 @@ use trusty_mpm::core::skill_repair::{RepairAction, RepairOutcome};
 /// assets — never the `~/.trusty-mpm/framework/skills` extraction cache, which
 /// is what lagged the installed binary and made every skill it covered report
 /// clean regardless of what shipped.
-/// What: resolves the deploy tiers from [`FrameworkPaths::default`] and the
+/// What: resolves the deploy tiers from `FrameworkPaths::default` and the
 /// current directory, builds the reference (preferring a checked-out
 /// `agents/skills` submodule when this is a source checkout), and returns the
 /// reference's origin label alongside the outcomes. Local-filesystem only —

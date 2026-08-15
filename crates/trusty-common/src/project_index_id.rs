@@ -60,6 +60,8 @@
 //! symlinked roots, determinism, the id charset, and the origin/operator drift
 //! cases enumerated in [`ProjectIdentity::index_id`]'s `Known limitation`
 //! block.
+//!
+//! [`RepoIdentity`]: crate::repo_identity::RepoIdentity
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

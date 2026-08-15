@@ -8,10 +8,10 @@
 //! (SoftResourceLimits / HardResourceLimits = 8192) has taken effect.
 //!
 //! What: two platform-specific helpers —
-//!   - [`count_open_fds`]: best-effort count of open file descriptors for
+//!   - [`count_open_fds`](crate::fd_metrics::count_open_fds): best-effort count of open file descriptors for
 //!     the current process. macOS: list entries under `/dev/fd`; Linux: count
 //!     entries under `/proc/self/fd`. Returns `None` on any I/O error.
-//!   - [`fd_soft_limit`]: the soft `RLIMIT_NOFILE` ceiling via `libc::getrlimit`.
+//!   - [`fd_soft_limit`](crate::fd_metrics::fd_soft_limit): the soft `RLIMIT_NOFILE` ceiling via `libc::getrlimit`.
 //!     Returns `None` only when the syscall fails (extremely rare).
 //!
 //! Test: `fd_metrics_returns_sane_values` asserts both helpers return `Some`

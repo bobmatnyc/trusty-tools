@@ -8,7 +8,12 @@
 //! and returns a [`PreparedWorkspace`] struct. The [`GitBackend`] trait seam
 //! allows unit tests to substitute a [`FakeGitBackend`] without a real remote.
 //! Test: unit tests in workspace.rs use FakeGitBackend; integration test
-//! test_provision_real_repo uses a temp bare repo (marked #[ignore]).
+//! test_provision_real_repo uses a temp bare repo (marked `#[ignore]`).
+//!
+//! [`WorkspaceProvisioner`]: crate::provisioner::WorkspaceProvisioner
+//! [`PreparedWorkspace`]: crate::provisioner::PreparedWorkspace
+//! [`GitBackend`]: crate::provisioner::GitBackend
+//! [`FakeGitBackend`]: crate::provisioner::FakeGitBackend
 
 mod clone_progress;
 mod identity_seed;

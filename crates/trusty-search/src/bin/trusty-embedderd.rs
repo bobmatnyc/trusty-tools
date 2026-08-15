@@ -19,6 +19,9 @@
 //! `trusty-search/tests/bundled_install.rs` (`#[ignore]`) verifies that
 //! `cargo install --path crates/trusty-search` produces both binaries.
 
+// See the rationale on the library crate root.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     trusty_embedderd::run().await

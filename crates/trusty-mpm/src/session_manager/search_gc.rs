@@ -317,7 +317,7 @@ impl SessionManager {
     /// session" shape.
     /// What: lists every registered index (`GET /indexes?details=true`),
     /// keeps only `.worktrees`-scoped candidates ([`is_session_worktree`]) not
-    /// claimed by [`active_workspace_path_set`], fetches each candidate's
+    /// claimed by `active_workspace_path_set`, fetches each candidate's
     /// `chunk_count`, and applies [`is_orphan_index`]. Under `dry_run` the
     /// matching ids are logged and returned without deleting anything
     /// (mirrors `PruneWorktreesRequest`'s dry-run-by-default convention);

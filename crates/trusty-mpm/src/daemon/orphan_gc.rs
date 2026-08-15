@@ -24,7 +24,7 @@
 //!
 //! Test: `classify_*` and `debounce_*` unit tests in the `tests` submodule below
 //! exercise the full decision matrix with a fake driver; `run_sweep` is covered
-//! by `tests/orphan_gc_sweep.rs` against a fake [`ManagedTmuxDriver`].
+//! by `tests/orphan_gc_sweep.rs` against a fake [`ManagedTmuxDriver`](crate::session_manager::ManagedTmuxDriver).
 
 use std::collections::HashSet;
 use std::process::Command;

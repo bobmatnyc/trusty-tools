@@ -148,7 +148,7 @@ pub struct SessionRow {
     /// `PickerDecision::Unresumable`), rather than firing a daemon round trip
     /// that can only 422.
     /// What: copied verbatim from the fleet DTO by
-    /// [`crate::tui::project_ctl::poll::rows::session_to_row`].
+    /// `crate::tui::project_ctl::poll::rows::session_to_row`.
     /// Test: `crate::tui::project_ctl::events::tests::resume_on_unresumable_session_is_blocked`.
     pub unresumable: bool,
 }
@@ -376,7 +376,7 @@ pub struct ProjectCtlState {
     /// succeeded at least once; a transient fetch failure after that point
     /// leaves the last-known-good `Some(list)` in place rather than
     /// overwriting it (mirrors [`ActivityInfo`]'s stale-keep pattern via
-    /// [`refresh_activity`]: `poll::refresh_activity`). This distinction
+    /// `refresh_activity`: `poll::refresh_activity`). This distinction
     /// matters because [`Self::deliverable_link_state`] must never render a
     /// bound session's link as "confirmed dangling" just because ONE poll's
     /// `list_deliverables` call happened to time out — see the review finding

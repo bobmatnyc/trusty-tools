@@ -79,7 +79,7 @@ impl ReportPipeline {
     /// the aggregator without duplicating the full run logic.
     /// What: delegates to [`Aggregator::build_filtered`] when `author_email`
     /// is `Some`; falls back to the full aggregate when `None`.  All
-    /// formatters receive the (possibly filtered) [`ReportData`] unchanged.
+    /// formatters receive the (possibly filtered) [`ReportData`](crate::report::ReportData) unchanged.
     /// Test: covered by `report::tests::pipeline_author_filter_single_author`.
     pub fn run_with_filter(
         &self,

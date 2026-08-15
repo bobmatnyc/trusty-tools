@@ -13,7 +13,7 @@
 //!
 //! What: [`AnalyzeMetricsSource`] is the injectable fetch seam;
 //! [`HttpAnalyzeMetricsSource`] is the live implementation. The pure mapping
-//! ([`map_metrics`], [`complexity_buckets`], [`diagnostic_finding`],
+//! ([`map_metrics`], `complexity_buckets`, [`diagnostic_finding`],
 //! [`refactor_finding`]) is unit-tested against fixture JSON with no live
 //! daemon. `loc`/`counts` are deliberately left empty — the built-in scanner
 //! owns those measured numbers.
@@ -700,7 +700,7 @@ pub fn derive_index_id(path: &Path) -> Option<String> {
 
 // ─── Model enrichment (precedence seam, #2448) ───────────────────────────────
 
-/// Fill live analyze metrics into a built [`ReportModel`], honouring the
+/// Fill live analyze metrics into a built [`ReportModel`](crate::report::ReportModel), honouring the
 /// fail-open precedence: declared metrics file > `--analyze` live fetch > None.
 ///
 /// Why: `--analyze` must populate the complexity chart + finding bands for a

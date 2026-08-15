@@ -364,7 +364,7 @@ impl SkillsLoader {
         prefix
     }
 
-    /// Like [`build_skills_prefix`], but also returns the list of skill names
+    /// Like `build_skills_prefix`, but also returns the list of skill names
     /// whose bodies were actually loaded into the prefix (#171).
     ///
     /// Why: The workflow engine needs to know which skills were injected so

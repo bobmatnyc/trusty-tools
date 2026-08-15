@@ -57,7 +57,7 @@ pub fn draw_separator(f: &mut ratatui::Frame, area: Rect) {
 /// Test: pure geometry is covered by
 /// [`crate::widgets::scrollback::chat_line_count`]'s own tests; the full
 /// `Frame` composition is exercised via `ratatui::backend::TestBackend` in
-/// [`tests::draw_renders_without_panicking`], which is a smoke test (no
+/// `tests::draw_renders_without_panicking`, which is a smoke test (no
 /// TTY, no assertions on cell contents — see that test's doc comment).
 pub fn draw(f: &mut ratatui::Frame, app: &ReplApp) {
     let area = f.area();

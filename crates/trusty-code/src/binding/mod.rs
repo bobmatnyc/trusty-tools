@@ -27,6 +27,11 @@
 //! offered, never whether the project binds or indexes.
 //!
 //! Test: `binding::tests::*`.
+//!
+//! [`ProjectBinding`]: crate::binding::ProjectBinding
+//! [`ProjectBinding::None`]: crate::binding::ProjectBinding::None
+//! [`ProjectBinding::Directory`]: crate::binding::ProjectBinding::Directory
+//! [`ProjectBinding::GitRepo`]: crate::binding::ProjectBinding::GitRepo
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

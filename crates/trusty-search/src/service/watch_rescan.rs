@@ -32,6 +32,9 @@
 //! module replaces, not new ones it introduces.
 //!
 //! Test: `crate::service::watch_rescan_tests`.
+//!
+//! [`reconcile_after_rescan`]: crate::service::watch_rescan::reconcile_after_rescan
+//! [`WalkOptions::default`]: crate::service::walker::WalkOptions::default
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

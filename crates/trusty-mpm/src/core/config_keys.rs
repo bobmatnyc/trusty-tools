@@ -25,6 +25,9 @@
 //! Test: `unknown_top_level_key_is_reported`, `unknown_nested_key_is_reported`,
 //! `known_keys_are_not_reported`, `map_valued_sections_are_not_reported`,
 //! `explicit_null_is_not_reported` in `config_keys_tests.rs`.
+//!
+//! [`unknown_key_paths`]: crate::core::config_keys::unknown_key_paths
+//! [`report_unknown_keys`]: crate::core::config_keys::report_unknown_keys
 
 use serde::Serialize;
 use serde_json::Value;

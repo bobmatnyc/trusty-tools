@@ -41,6 +41,12 @@
 //! Test: `tests.rs` — directory and socket modes after a real bind, the
 //! pre-existing-wide-directory repair, symlink refusal, the pure decision
 //! functions behind every refusal, and the `sun_path` budget pre-check.
+//!
+//! [`scratch_socket_dir`]: crate::uds::scratch_socket_dir
+//! [`bind_hardened`]: crate::uds::bind_hardened
+//! [`connect_hardened`]: crate::uds::connect_hardened
+//! [`ensure_peer_is_self`]: crate::uds::ensure_peer_is_self
+//! [`dir::prepare_socket_dir`]: crate::uds::dir::prepare_socket_dir
 
 #[cfg(test)]
 #[path = "tests.rs"]

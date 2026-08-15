@@ -38,7 +38,7 @@
 //! plain `Uuid::parse_str`), so building client-side "list, then match an
 //! unambiguous prefix" resolution here would race against concurrent
 //! creates/closes for a purely cosmetic convenience. Left as a documented
-//! future nicety — [`crate::cli_client::render::render_workstream_table`]'s
+//! future nicety — [`trusty_code::cli_client::render::render_workstream_table`]'s
 //! displayed id prefix is DISPLAY ONLY.
 //! What: [`list`] (table view), [`get`] (raw JSON view), [`create`],
 //! [`activate`] (special-cases `-32008 active_conflict` into a human message

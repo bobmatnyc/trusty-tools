@@ -367,7 +367,8 @@ fn default_data_file_max_bytes() -> Option<u64> {
 }
 
 /// Resolve a persisted `data_file_max_bytes` (`Option<u64>`) to the concrete
-/// cap the walker expects, falling back to [`walker::DEFAULT_DATA_FILE_MAX_BYTES`]
+/// cap the walker expects, falling back to
+/// [`walker::DEFAULT_DATA_FILE_MAX_BYTES`](crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES)
 /// when the stored value is `None` (issue #1372).
 pub fn resolve_data_file_max_bytes(stored: Option<u64>) -> u64 {
     stored.unwrap_or(crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES)

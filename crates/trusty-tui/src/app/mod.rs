@@ -33,26 +33,26 @@
 //! tagent's actual `keys.rs`/`app.rs`, not just its doc comments — one round
 //! of review on this slice caught a doc/reality drift in tagent itself, see
 //! history below):
-//! - Up-arrow recalls [`Self::last_prompt`] (the single most recent
-//!   submission) and, when [`Self::busy`], ALSO sets
-//!   [`Self::pending_cancel`] — mirrors
+//! - Up-arrow recalls `Self::last_prompt` (the single most recent
+//!   submission) and, when `Self::busy`, ALSO sets
+//!   `Self::pending_cancel` — mirrors
 //!   `crates/trusty-agents/src/repl/tui/keys.rs`'s real `KeyCode::Up` arm,
 //!   not the multi-level `history_prev`/`history_next` `#[allow(dead_code)]`
 //!   helpers tagent's own doc comment (misleadingly) attributes to
 //!   production Up-handling.
-//! - Down-arrow calls [`Self::history_next`] — tagent's real `KeyCode::Down`
+//! - Down-arrow calls `Self::history_next` — tagent's real `KeyCode::Down`
 //!   arm does exactly this, even though nothing (including this crate's Up
 //!   handler) ever sets `history_idx`, making it a functional no-op today in
 //!   both tagent and here. Ported for fidelity, not because it currently
 //!   does anything.
 //! - Ctrl-E, with an empty input buffer and a non-`None`
-//!   [`Self::last_bash_block`], pastes only that block's first non-blank
+//!   `Self::last_bash_block`, pastes only that block's first non-blank
 //!   line (not the whole block) — matches
 //!   `crates/trusty-agents/src/repl/tui/keys.rs`'s `KeyCode::Char('e')` arm
 //!   exactly (the REPL input is single-line; pasting a multi-line block
 //!   would silently truncate at the first `\n` on submit).
 //! - The input composer's right-aligned `[thinking...]` label renders
-//!   whenever [`Self::busy`] is true, REGARDLESS of whether the input
+//!   whenever `Self::busy` is true, REGARDLESS of whether the input
 //!   buffer is empty — mirrors
 //!   `crates/trusty-agents/src/repl/tui/chat.rs::draw_input`. `busy` is set
 //!   `true` at submit time (not on the first streamed chunk), so the
@@ -78,23 +78,23 @@
 //!   [`crate::model::PickerItem`]/[`crate::model::PickerRequest`] exist
 //!   (Slice 1.5) but no widget consumes them yet.
 //! - `AgentScope`'s User/Project cyan/yellow semantic — replaced by a plain
-//!   [`Self::accent_color`] field with no "scope" concept; the engine
+//!   `Self::accent_color` field with no "scope" concept; the engine
 //!   decides what it means and when to change it.
 //! - The shared `trusty_common::banner` splash art, tagent's hardcoded
 //!   banner title/identity text, and its fixed `/help`/`/connect`/`/clear`/
 //!   `/status` command list — all now engine-supplied fields
-//!   ([`Self::banner_art`], [`Self::banner_title`], [`Self::commands`],
-//!   [`Self::recent_activity`]) rather than constants (this crate must not
+//!   (`Self::banner_art`, `Self::banner_title`, [`Self::commands`](crate::commands),
+//!   `Self::recent_activity`) rather than constants (this crate must not
 //!   depend on `trusty_common`, see DOC-50 §2.2's dependency direction).
 //! - The literal `"[trusty-agents] "` status prefix and its exact idle-hint
 //!   copy (`"Ask ctrl anything, or /connect <path> for project work"`) —
-//!   generalized to [`Self::status_prefix`] (defaulted from `label`) and a
+//!   generalized to `Self::status_prefix` (defaulted from `label`) and a
 //!   generic [`crate::widgets::input_composer`] hint string respectively.
 //!
 //! Deliberately **DIVERGES** from tagent (Slice 5, DOC-50 §5 — an intentional
 //! improvement per spec, not an oversight or a parity gap):
-//! - **Ctrl-C cancels the in-flight request** (see [`reduce::apply_key`]'s
-//!   `'c'` arm, staging [`Self::pending_cancel`] for `crate::run::run`'s
+//! - **Ctrl-C cancels the in-flight request** (see `reduce::apply_key`'s
+//!   `'c'` arm, staging `Self::pending_cancel` for `crate::run::run`'s
 //!   dispatch step to relay as a real `TuiEngine::cancel_session` RPC).
 //!   Tagent's actual Ctrl-c (`crates/trusty-agents/src/repl/tui/keys.rs`)
 //!   only clears the input buffer — tagent's cancel trigger is Up-arrow
@@ -338,7 +338,7 @@ impl ReplApp {
     /// blank lines and markdown-style `\n\n` paragraph breaks; rendering
     /// them verbatim leaves visible dead space. See [`crate::text`] for the
     /// two trimming passes.
-    /// Test: [`reduce::tests::push_assistant_trims_surrounding_blanks`].
+    /// Test: `reduce::tests::push_assistant_trims_surrounding_blanks`.
     pub fn push_assistant(&mut self, text: impl Into<String>, is_error: bool) {
         let role = if is_error {
             ChatRole::Error
@@ -370,8 +370,8 @@ impl ReplApp {
     /// entry containing an executable shell fence wins (errors and user/
     /// status entries are skipped — an error entry is never a paste source).
     /// `None` when no assistant entry has one.
-    /// Test: [`reduce::tests::push_assistant_updates_last_bash_block`],
-    /// [`reduce::tests::push_assistant_skips_error_entries_for_bash_block`].
+    /// Test: `reduce::tests::push_assistant_updates_last_bash_block`,
+    /// `reduce::tests::push_assistant_skips_error_entries_for_bash_block`.
     pub fn update_last_bash_block(&mut self) {
         for entry in self.chat.iter().rev() {
             if entry.role != ChatRole::Assistant {
@@ -422,8 +422,8 @@ impl ReplApp {
     /// (leaving the picker untouched) when no picker is open or `index` is
     /// out of range, so a stale/invalid confirmation is a no-op rather than
     /// a panic.
-    /// Test: [`crate::commands::tests::confirm_picker_selection_composes_and_closes`],
-    /// [`crate::commands::tests::confirm_picker_selection_out_of_range_is_noop`].
+    /// Test: `crate::commands::tests::confirm_picker_selection_composes_and_closes`,
+    /// `crate::commands::tests::confirm_picker_selection_out_of_range_is_noop`.
     pub fn confirm_picker_selection(&mut self, index: usize) -> Option<String> {
         let request = self.active_picker.as_ref()?;
         let selected = request.items.get(index)?;
@@ -634,7 +634,7 @@ impl TuiModel for ReplApp {
         self.quit
     }
 
-    /// Drain [`Self::pending_submit`] — see [`crate::run::dispatch_pending`]
+    /// Drain [`Self::pending_submit`] — see `crate::run::dispatch_pending`
     /// (private to `crate::run`, called from [`crate::run::run`]) for the
     /// caller that reads this after every `apply` call.
     fn take_pending_submit(&mut self) -> Option<String> {
@@ -657,7 +657,7 @@ impl TuiModel for ReplApp {
     /// entry index (a future response starts a fresh chat entry rather than
     /// appending to one no more chunks will ever arrive for), then pushes a
     /// "cancelled" status line.
-    /// Test: [`reduce::tests::apply_ctrl_c_signals_pending_cancel`] covers
+    /// Test: `reduce::tests::apply_ctrl_c_signals_pending_cancel` covers
     /// the reducer half; `crate::run::tests` covers this method being
     /// invoked from the dispatch step.
     fn on_cancelled(&mut self) {
@@ -669,10 +669,10 @@ impl TuiModel for ReplApp {
     /// Record `generation` into [`Self::current_generation`] — see
     /// [`crate::run::TuiModel::set_current_generation`]'s doc comment for
     /// why this is called only from `dispatch_pending` on the serial
-    /// event-loop task, and [`ReplEvent::TurnFinished`]'s doc comment for
+    /// event-loop task, and [`ReplEvent::TurnFinished`](crate::ReplEvent::TurnFinished)'s doc comment for
     /// the race this by-construction design closes.
-    /// Test: [`reduce::tests::apply_turn_finished_with_stale_generation_is_ignored`],
-    /// [`reduce::tests::apply_turn_finished_clears_busy_and_streaming_idx_without_touching_chat`].
+    /// Test: `reduce::tests::apply_turn_finished_with_stale_generation_is_ignored`,
+    /// `reduce::tests::apply_turn_finished_clears_busy_and_streaming_idx_without_touching_chat`.
     fn set_current_generation(&mut self, generation: u64) {
         self.current_generation = generation;
     }

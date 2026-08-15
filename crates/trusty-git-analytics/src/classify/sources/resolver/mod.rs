@@ -10,7 +10,7 @@
 //! cache. [`ExternalSourceResolver::resolve`] accepts a commit message, extracts
 //! ticket keys, checks the cache, fetches only misses, and returns the
 //! highest-priority [`super::ExternalSignal`] found across all configured sources.
-//! [`warm::warm_cache`] (see the `warm` submodule) pre-populates every source's
+//! `warm::warm_cache` (see the `warm` submodule) pre-populates every source's
 //! cache from a batch of messages with bounded concurrency, deduped on the
 //! extracted ticket KEY (not the raw message) — this is what the pipeline's
 //! concurrent Tier-0.5 pass (issue #2719) calls before doing any per-message

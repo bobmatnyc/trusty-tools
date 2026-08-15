@@ -13,7 +13,7 @@
 //! overwritten", exactly the `duettoresearch/duetto-eve-agents` reproduction
 //! (28 commits stranded, resolved only by `git rm -r --cached` + a manual
 //! `.gitignore`, duetto-eve-agents#111). This is Option 1 (prevent) of #3427;
-//! [`crate::daemon::doctor_scaffold_tracking`] is Option 2 (detect + exact
+//! `crate::daemon::doctor_scaffold_tracking` is Option 2 (detect + exact
 //! remediation for a project that already committed these paths — a
 //! `.gitignore` entry added AFTER the fact does not untrack anything already
 //! in the index).

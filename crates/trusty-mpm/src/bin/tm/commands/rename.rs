@@ -79,7 +79,7 @@ fn confirm_rename_target_pane(
 /// Why: separates the daemon round trip from the pure decision in
 /// [`confirm_rename_target_pane`] so each is independently testable — the
 /// fetch via a mock daemon, the decision via plain unit tests. Returning the
-/// resolved [`ManagedSessionSummary`] on success also lets [`session_rename`]
+/// resolved `ManagedSessionSummary` on success also lets [`session_rename`]
 /// skip a second `resolve_managed_match` round trip for the id it already has.
 /// What: `Ok(record)` only when the record is found AND
 /// [`confirm_rename_target_pane`] confirms pane identity; `Err(<message>)`

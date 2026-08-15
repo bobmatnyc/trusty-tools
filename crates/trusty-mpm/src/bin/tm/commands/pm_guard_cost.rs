@@ -217,8 +217,8 @@ async fn read_latest_context(path: &Path) -> Option<u64> {
 /// hatch lets through: a grace *count* is spendable on anything the agent likes,
 /// while naming the tools makes the hatch exactly as wide as "persist and
 /// report" and no wider.
-/// What: `true` for [`is_persistence_tool`] (`SendMessage`), and for `Bash`
-/// when [`command_is_persistence_only`] proves every segment of its command is
+/// What: `true` for `is_persistence_tool` (`SendMessage`), and for `Bash`
+/// when [`command_is_persistence_only`](crate::commands::pm_guard_bash::command_is_persistence_only) proves every segment of its command is
 /// an allowlisted git call carrying no exec-capable flag — see that function's
 /// module docs for the four bypass classes the #4850 review closed. Everything
 /// else is `false` → denied.

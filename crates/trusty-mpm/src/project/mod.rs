@@ -18,6 +18,12 @@
 //!   see [`worktree_enabled_for_project`].
 //! Test: each submodule carries inline unit tests; run with
 //! `cargo test -p trusty-mpm`.
+//!
+//! [`Project`]: crate::project::Project
+//! [`ProjectRegistry`]: crate::project::ProjectRegistry
+//! [`derive_name_from_url`]: crate::project::derive_name_from_url
+//! [`ProjectStore`]: crate::project::store::ProjectStore
+//! [`worktree_enabled_for_project`]: crate::project::worktree_enabled_for_project
 
 pub mod record;
 pub mod registry;

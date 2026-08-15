@@ -29,6 +29,8 @@
 //! set [`FORCE_ENV`] or `TRUSTY_DATA_DIR` on the child explicitly.
 //!
 //! Test: `detect_*` and `is_cargo_test_binary_*` in this module's `tests`.
+//!
+//! [`FORCE_ENV`]: crate::test_harness::FORCE_ENV
 
 use std::path::Path;
 

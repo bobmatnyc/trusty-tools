@@ -249,7 +249,7 @@ impl ChatProvider for OllamaProvider {
 /// Returns `None` on network errors, timeouts, or non-2xx status. Never
 /// returns an error — the caller treats absence as "no local provider
 /// available" and is responsible for setting the model id afterwards (e.g.
-/// from [`super::LocalModelConfig::model`]).
+/// from [`super::LocalModelConfig::model`](crate::LocalModelConfig::model)).
 /// Test: `auto_detect_returns_none_on_unreachable` points at a closed port
 /// and asserts `None` within the 1-second budget;
 /// `auto_detect_returns_some_on_200` spins up an in-process server and

@@ -11,7 +11,7 @@
 //! and serialises the request verbatim).
 //! What: [`build`] constructs an [`OpenAiCompatAdapter`] for a resolved
 //! OpenRouter credential against a given base URL; [`factory`] is the
-//! production factory (real base URL) registered into the [`Configurator`].
+//! production factory (real base URL) registered into the [`Configurator`](crate::inference::Configurator).
 //! Test: inline `#[ignore]` `live_openrouter_call`; offline round-trip in
 //! `crates/trusty-common/tests/inference_adapters.rs`.
 

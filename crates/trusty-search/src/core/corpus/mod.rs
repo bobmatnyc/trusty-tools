@@ -12,8 +12,9 @@
 //!     (the JSON `Vec<RawChunk>` plus the live `HashMap`) in RAM at once.
 //!
 //! What: [`CorpusStore`] wraps a `redb::Database` with two tables — one keyed
-//! by `chunk_id` holding the serialized [`RawChunk`], one keyed by file path
-//! holding the serialized per-file [`RawEntity`] list. Values are serialized
+//! by `chunk_id` holding the serialized [`RawChunk`](crate::core::chunker::RawChunk),
+//! one keyed by file path holding the serialized per-file
+//! [`RawEntity`](crate::core::entity::RawEntity) list. Values are serialized
 //! with `serde_json` (already a workspace dependency; no new crate, and the
 //! human-readable form keeps `redb` dumps debuggable).
 //!

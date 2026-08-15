@@ -41,6 +41,12 @@
 //!
 //! Test: `fs_browse::tests::*` (resolution, git-ness incl. the linked-worktree
 //! `.git`-as-file shape, error distinguishability, 7a response shape).
+//!
+//! [`DirEntryInfo::is_git_repo`]: crate::fs_browse::DirEntryInfo::is_git_repo
+//! [`list_dir`]: crate::fs_browse::list_dir
+//! [`DirListing`]: crate::fs_browse::DirListing
+//! [`ListDirError`]: crate::fs_browse::ListDirError
+//! [`ListDirError::PermissionDenied`]: crate::fs_browse::ListDirError::PermissionDenied
 
 pub mod mpm_registry;
 pub mod protocol;

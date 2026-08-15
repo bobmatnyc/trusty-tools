@@ -7,7 +7,7 @@
 //! silently stayed down (the exact "looks installed, actually broken" failure
 //! class #2557 / #2498 exist because of). This module runs immediately after
 //! `install_all` (skipped entirely by `--no-verify`) and its result is folded
-//! into the SAME [`super::install::InstallReport`] so the exit code CI/automation
+//! into the SAME `super::install::InstallReport` so the exit code CI/automation
 //! gates on already reflects it.
 //!
 //! What: [`run_verify_tail`]:
@@ -67,7 +67,7 @@
 //! [`print_human`] renders the final green/red pass/fail summary — the last
 //! thing the installer prints. Because the health used to build the report is
 //! already the POST-wait value, the exit code CI/automation gates on
-//! ([`super::install::InstallReport`], folded from `verified`) reflects the
+//! (`super::install::InstallReport`, folded from `verified`) reflects the
 //! final state, not the instant-after-kickstart snapshot.
 //!
 //! Test: the pure decision pieces (`needs_kickstart`, `poll_until_not_down`,
@@ -162,7 +162,7 @@ pub struct VerifyRow {
 /// The aggregate verify-tail report (#2560).
 ///
 /// Why: `--json` consumers need the ensure + health verdict as one object,
-/// nested inside [`super::install::InstallReport`].
+/// nested inside `super::install::InstallReport`.
 /// What: `ensure_ok` — whether the `.mcp.json` patch and project-setup stages
 /// all succeeded; `members` — per-daemon health rows; `verified` — the overall
 /// verdict this module derives (see [`VerifyTailReport::build`]).

@@ -31,7 +31,7 @@ use ratatui::text::{Line, Span};
 /// What: Trims the line; if it starts with three backticks, returns the
 /// trailing tag (lowercased) — empty string for bare openers, `None` for
 /// anything that isn't a fence line at all.
-/// Test: [`tests::code_fence_lang_recognizes_openers_and_closers`].
+/// Test: `tests::code_fence_lang_recognizes_openers_and_closers`.
 pub fn code_fence_lang(line: &str) -> Option<String> {
     let t = line.trim();
     t.strip_prefix("```")
@@ -45,7 +45,7 @@ pub fn code_fence_lang(line: &str) -> Option<String> {
 /// a glance.
 /// What: Matches `bash`, `sh`, `zsh`, `fish` (case-insensitive — caller
 /// passes a lowercased tag).
-/// Test: [`tests::is_executable_shell_lang_matches_shells`].
+/// Test: `tests::is_executable_shell_lang_matches_shells`.
 pub fn is_executable_shell_lang(lang: &str) -> bool {
     matches!(lang, "bash" | "sh" | "zsh" | "fish")
 }
@@ -60,12 +60,12 @@ pub fn is_executable_shell_lang(lang: &str) -> bool {
 /// opened but never closed (an unclosed fence is discarded, not inferred to
 /// end at EOF — a truncated response should not be pasted as a partial
 /// command).
-/// Test: [`tests::extract_last_shell_block_finds_bash`],
-/// [`tests::extract_last_shell_block_returns_last_when_multiple`],
-/// [`tests::extract_last_shell_block_ignores_non_shell`],
-/// [`tests::extract_last_shell_block_none_without_block`],
-/// [`tests::extract_last_shell_block_unclosed_fence_returns_none`],
-/// [`tests::extract_last_shell_block_closed_then_unclosed_returns_closed`].
+/// Test: `tests::extract_last_shell_block_finds_bash`,
+/// `tests::extract_last_shell_block_returns_last_when_multiple`,
+/// `tests::extract_last_shell_block_ignores_non_shell`,
+/// `tests::extract_last_shell_block_none_without_block`,
+/// `tests::extract_last_shell_block_unclosed_fence_returns_none`,
+/// `tests::extract_last_shell_block_closed_then_unclosed_returns_closed`.
 pub fn extract_last_shell_block(text: &str) -> Option<String> {
     let mut last: Option<String> = None;
     let mut current_body: Option<Vec<String>> = None;
@@ -93,7 +93,7 @@ pub fn extract_last_shell_block(text: &str) -> Option<String> {
 /// Why: Table detection is the gate for box-drawing rendering — non-table
 /// lines fall through to plain rendering.
 /// What: Returns true if the trimmed line starts with `|`.
-/// Test: [`tests::is_md_table_row_basic`].
+/// Test: `tests::is_md_table_row_basic`.
 pub fn is_md_table_row(line: &str) -> bool {
     line.trim_start().starts_with('|')
 }
@@ -105,7 +105,7 @@ pub fn is_md_table_row(line: &str) -> bool {
 /// with `|`).
 /// What: Returns true if every non-empty cell after split-on-`|` is composed
 /// solely of `-`, `:`, or whitespace, AND at least one `-` appears.
-/// Test: [`tests::is_md_table_separator_basic`].
+/// Test: `tests::is_md_table_separator_basic`.
 pub fn is_md_table_separator(line: &str) -> bool {
     if !is_md_table_row(line) {
         return false;
@@ -133,7 +133,7 @@ pub fn is_md_table_separator(line: &str) -> bool {
 /// empty cells when split naïvely; consumers want only the real cell content.
 /// What: Returns the trimmed cell strings, dropping leading/trailing empties
 /// produced by the bordering pipes.
-/// Test: [`tests::parse_md_table_cells_basic`].
+/// Test: `tests::parse_md_table_cells_basic`.
 pub fn parse_md_table_cells(line: &str) -> Vec<String> {
     let trimmed = line.trim();
     let mut parts: Vec<String> = trimmed.split('|').map(|s| s.trim().to_string()).collect();
@@ -152,7 +152,7 @@ pub fn parse_md_table_cells(line: &str) -> Vec<String> {
 /// gets a visual ellipsis so the reader knows truncation happened.
 /// What: Returns the input unchanged if it fits, otherwise the first `max-1`
 /// chars + `…`. If `max == 0`, returns an empty string.
-/// Test: [`tests::truncate_cell_basic`].
+/// Test: `tests::truncate_cell_basic`.
 pub fn truncate_cell(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -175,8 +175,8 @@ pub fn truncate_cell(s: &str, max: usize) -> String {
 /// and any body cell), clamps total table width to `available_width`, and
 /// emits top border, header row, separator, body rows, bottom border. Border
 /// glyphs use `Color::DarkGray`; cell content uses `body_color` if provided.
-/// Test: [`tests::render_markdown_table_emits_expected_lines`],
-/// [`tests::render_markdown_table_truncates_when_too_wide`].
+/// Test: `tests::render_markdown_table_emits_expected_lines`,
+/// `tests::render_markdown_table_truncates_when_too_wide`.
 pub fn render_markdown_table(
     header: &[String],
     body: &[Vec<String>],

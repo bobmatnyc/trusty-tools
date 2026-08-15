@@ -67,7 +67,7 @@ impl SessionManagerAgent {
     /// checks credentials + builds a provider handle but does NOT call the model,
     /// so this is cheap and testable with the mock resolver.
     /// What: with no runtime (inert agent) → degraded with `provider = "none"`.
-    /// With a runtime, resolves the orchestration tier: a [`SmLlmError::Degraded`]
+    /// With a runtime, resolves the orchestration tier: a [`SmLlmError::Degraded`](crate::core::sm::SmLlmError::Degraded)
     /// (or any resolution error) → degraded; success → `ok = true` and the
     /// resolved provider name. Always fills `model_tiers` from config.
     /// Test: `agent/health_tests.rs`.

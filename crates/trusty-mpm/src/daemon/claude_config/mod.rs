@@ -6,7 +6,7 @@
 //! purity while still letting trusty-mpm inspect and improve a project's
 //! Claude Code setup.
 //! What: [`ClaudeConfigAnalyzer`] reads + merges the settings files, produces
-//! [`ConfigRecommendation`]s, and applies them; [`ClaudeCodeRestarter`] finds
+//! [`ConfigRecommendation`](crate::client::ConfigRecommendation)s, and applies them; [`ClaudeCodeRestarter`] finds
 //! running `claude` processes and restarts Claude Code inside a tmux session;
 //! [`ConfigCheckpointer`] snapshots and restores config files;
 //! [`ProfileDeployer`] deploys named configuration presets.

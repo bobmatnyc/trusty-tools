@@ -470,7 +470,7 @@ pub fn remove_legacy_compiled_prompt(project_dir: &std::path::Path) -> std::io::
 /// `framework/instructions/INSTRUCTIONS.md`. Nothing writes that path anymore —
 /// but [`build_instructions`] still READS it as an optional framework section,
 /// so an upgraded machine would keep folding a frozen copy of an OLD compiled
-/// prompt into [`PipelineOutput::merged`] forever, with no writer left to
+/// prompt into `PipelineOutput::merged` forever, with no writer left to
 /// refresh it. A stale input nothing can update is worse than an absent one, and
 /// the pipeline already treats absence as normal (`instructions_loaded: false`).
 /// The file is framework-owned — trusty-mpm has always overwritten it on every

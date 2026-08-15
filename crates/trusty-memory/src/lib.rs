@@ -15,6 +15,12 @@
 //! the in-process `handle_message` unit tests and the
 //! `tests/serve_stdio_e2e.rs` end-to-end harness.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 use crate::session_store_cache::SessionStoreCache;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -917,7 +923,7 @@ impl AppState {
         Ok(count)
     }
 
-    /// Builder-style: attach the daemon's shared [`LogBuffer`] so the
+    /// Builder-style: attach the daemon's shared `LogBuffer` so the
     /// `GET /api/v1/logs/tail` endpoint serves the same lines the tracing
     /// subscriber captures (issue #35).
     ///

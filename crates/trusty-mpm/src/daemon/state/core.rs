@@ -57,7 +57,7 @@ fn build_session_registry(root: &std::path::Path) -> SessionRegistry {
 /// tracked `claude` process has exited. Callers (and the dashboard) need to
 /// tell those apart, so the sweep reports both counts.
 /// What: `reaped` is the number of entries deleted from the registry;
-/// `stopped` is the number transitioned to [`SessionStatus::Stopped`] in place.
+/// `stopped` is the number transitioned to [`SessionStatus::Stopped`](crate::core::session::SessionStatus::Stopped) in place.
 /// Test: `reap_dead_sessions`, `reap_marks_stopped_when_pid_dead`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReapResult {
@@ -738,7 +738,7 @@ impl DaemonState {
             .clone()
     }
 
-    /// Return the lazily-initialized managed [`SessionManager`].
+    /// Return the lazily-initialized managed [`SessionManager`](crate::session_manager::SessionManager).
     ///
     /// Why: the `/sessions/managed` handlers need a single shared session
     /// manager backed by an on-disk store and a real tmux driver. Because the

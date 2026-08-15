@@ -123,7 +123,7 @@ impl OverseerContext {
 /// The session overseer — a pluggable oversight strategy.
 ///
 /// Why: the daemon consults an overseer on hook events but must stay agnostic
-/// of whether the policy is rule-based ([`DeterministicOverseer`]) or
+/// of whether the policy is rule-based ([`DeterministicOverseer`](crate::core::deterministic_overseer::DeterministicOverseer)) or
 /// LLM-backed (a future `LlmOverseer`); the trait is the seam.
 /// What: three evaluation hooks (`pre_tool_use`, `post_tool_use`,
 /// `session_question`) plus [`is_enabled`](Overseer::is_enabled) so the daemon

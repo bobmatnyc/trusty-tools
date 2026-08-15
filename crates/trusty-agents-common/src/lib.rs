@@ -23,6 +23,12 @@
 //!       `ToolResult`'s predicates are covered by
 //!       `tool_result_is_error_distinguishes_variants`.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 /// Portable perf value types: `TokenUsage`, `PhaseRecord`, `PerfTotals`, `PerfRecord`.
 ///
 /// Why: Moved to trusty-agents-common in Wave 2 (issue #867, refs #830/#832) so

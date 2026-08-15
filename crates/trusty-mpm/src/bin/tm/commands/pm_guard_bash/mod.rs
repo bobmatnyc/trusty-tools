@@ -528,7 +528,7 @@ const WORKTREE_ADD_FLAGS_WITH_ARG: &[&str] = &["-b", "-B", "--reason"];
 ///
 /// Why: this is the ONE piece of policy that must be called directly from
 /// `pm_guard()` **before** its Guard 4 subagent-exemption early return, NOT
-/// routed through [`evaluate_tool`]/[`evaluate_bash_command`] like every other
+/// routed through [`evaluate_tool`](crate::commands::pm_guard::evaluate_tool)/[`evaluate_bash_command`] like every other
 /// Bash rule in this module. `evaluate_bash_command` is the sole callee of
 /// `evaluate_tool`, which Guard 4 never reaches for a payload carrying a
 /// non-empty `agent_id` — i.e. every native Task/Agent-dispatched subagent,

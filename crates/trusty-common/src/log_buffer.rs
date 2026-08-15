@@ -12,6 +12,9 @@
 //!      line and pushes it onto the buffer. The HTTP handler drains the tail.
 //! Test: see the `tests` module — capacity eviction, tail semantics, and a
 //!      layer-integration test that emits events through a real subscriber.
+//!
+//! [`LogBuffer`]: crate::log_buffer::LogBuffer
+//! [`LogBufferLayer`]: crate::log_buffer::LogBufferLayer
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;

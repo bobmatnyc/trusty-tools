@@ -70,7 +70,7 @@ pub enum ManagedError {
     /// Adoption was requested for a tmux session that does not exist on the host.
     ///
     /// Why: adoption CONNECTS to a pre-existing, unmanaged pane — there is nothing
-    /// to drive if the pane is absent. This is the inverse of [`NameCollision`]:
+    /// to drive if the pane is absent. This is the inverse of `NameCollision`:
     /// `create` fails when a name exists, `adopt_existing` fails when it does NOT.
     #[error("tmux session does not exist: {0} — adoption requires a live pane")]
     TmuxSessionMissing(String),
@@ -381,7 +381,7 @@ impl SessionManager {
     /// `Errored` (runtime crashed back to a bare shell) were NOT refused, so
     /// `Submit::Enter`'s literal-then-Enter dispatch would type the message
     /// into a bare shell and press Enter, **executing it as a shell command**.
-    /// [`super::task_inject::SessionManager::check_send_input_ready`] (kept
+    /// [`super::task_inject::SessionManager::check_send_input_ready`](crate::session_manager::SessionManager::check_send_input_ready) (kept
     /// in that sibling file, alongside the readiness/modal machinery it
     /// reuses, to stay under THIS file's 500-SLOC production cap) now runs
     /// first: a state guard refusing `Provisioning`/`Errored` (closes the

@@ -261,7 +261,7 @@ impl EmbedPool {
     /// Why: One-call convenience for `start.rs` — picks the right worker
     /// count based on host RAM unless overridden by `TRUSTY_EMBED_WORKERS`.
     /// `ingest::embed::embed_chunks_in_batches` dispatches
-    /// `TRUSTY_EMBED_INFLIGHT` (clamped [1,4], default 2) sub-batches
+    /// `TRUSTY_EMBED_INFLIGHT` (clamped `[1,4]`, default 2) sub-batches
     /// CONCURRENTLY per wave — issue #753's ANE-idle fix. Once those
     /// sub-batches route through this pool (issue #3748 slice B PR 1), a
     /// pool with FEWER workers than `inflight` collapses that concurrency
@@ -276,7 +276,7 @@ impl EmbedPool {
     /// (matching `TRUSTY_EMBED_INFLIGHT`'s own default) — a small, bounded
     /// increase in OS-thread count (each worker is a thin `current_thread`
     /// runtime sharing the same `Arc<dyn Embedder>`, not a second model
-    /// load), never exceeding `resolve_embed_inflight()`'s own [1,4] clamp
+    /// load), never exceeding `resolve_embed_inflight()`'s own `[1,4]` clamp
     /// beyond what autotune already provides.
     /// Test:
     /// `core::indexer::tests::embed_pool_routing::catchup_wave_concurrency_survives_pool_sized_to_default_inflight`,

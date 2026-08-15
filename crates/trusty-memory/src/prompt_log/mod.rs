@@ -20,7 +20,7 @@
 //!   - `config`: `PromptLogConfig`, `PromptLogEntry`, env-var constants.
 //!   - `writer`: `PromptLogger` + rotation/retention/hash logic.
 //!
-//! Test: see [`writer::tests`] for round-trip, rotation, retention, disabled,
+//! Test: see `writer::tests` for round-trip, rotation, retention, disabled,
 //! hash and integration-style assertions.
 
 mod config;

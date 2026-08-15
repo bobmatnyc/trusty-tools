@@ -14,6 +14,12 @@
 //! `DailyDriver` appends the cheap, always-cached skill metadata catalog
 //! (`crate::skills::format_skill_catalog`); `Parity` ignores it.
 //! Test: `prompt::tests::*` (via `assembler.rs`'s inline test include).
+//!
+//! [`BASE_PREAMBLE`]: crate::prompt::BASE_PREAMBLE
+//! [`BASE_PREAMBLE_VERSION`]: crate::prompt::BASE_PREAMBLE_VERSION
+//! [`PromptAssembler`]: crate::prompt::PromptAssembler
+//! [`assemble_system_prompt`]: crate::prompt::assemble_system_prompt
+//! [`assemble_system_prompt_for_mode`]: crate::prompt::assemble_system_prompt_for_mode
 
 mod assembler;
 mod preamble;

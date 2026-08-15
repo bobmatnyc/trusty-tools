@@ -15,12 +15,12 @@
 //! What: [`evaluate_shared_tree_dispatch`] denies a dispatch when, and only
 //! when, ALL of the following hold:
 //!
-//! 1. the tool is a [`SUBAGENT_DISPATCH_TOOLS`] member;
+//! 1. the tool is a `SUBAGENT_DISPATCH_TOOLS` member;
 //! 2. the caller is the PM, not a subagent (a subagent's dispatch is already
 //!    denied outright by [`super::pm_guard_fanout`], so this never reaches it);
 //! 3. the dispatch names a bundled engineer-tier agent
-//!    ([`agent_mutates_files`]) and declares no isolation
-//!    ([`isolation_separates_working_tree`]);
+//!    (`agent_mutates_files`) and declares no isolation
+//!    (`isolation_separates_working_tree`);
 //! 4. the daemon reports at least one OTHER live delegation already doing the
 //!    same thing in the same directory.
 //!

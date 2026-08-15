@@ -10,7 +10,7 @@
 //! "there was nothing to say".  A fabricated figure is still rejected
 //! field-by-field by the numeric guardrail — that is a correctness property, not
 //! a mode, and dropping one field leaves the deterministic composition (#5374) to
-//! fill it.  Greens are excluded structurally (see [`synthesize_prompt`]), never
+//! fill it.  Greens are excluded structurally (see [`synthesize_prompt`](crate::report::synthesize_prompt)), never
 //! merely by instruction.
 //! What: [`Synthesizer`] holds an [`LlmProvider`] and calls it once; [`Synthesis`]
 //! is the verified result recorded on the [`ReportModel`] (its JSON twin) and read
