@@ -630,19 +630,22 @@ jobs:
           bash scripts/check_contracts.sh --crate trusty-common
         id: contract-drift
 
-      # NEXT AUTHOR, READ THIS BEFORE WIRING THE REAL COMPARISON. When a
-      # published trusty-common finally carries contracts.json, the entry point
-      # to use is NOT `python3 scripts/diff_contracts.py` — it is
+      # NEXT AUTHOR, READ THIS BEFORE WIRING A REAL crates.io FETCH. The entry
+      # point for the comparison itself is already correct below:
       #
       #     bash scripts/check_contracts.sh --diff <baseline> <current>
       #
       # which #5729 built for exactly this, and which owns the exit-code
-      # contract (0 clean / 1 drift / 2 usage / 3 no verdict) that this job
-      # should be reading. Calling the Python differ directly would re-implement
-      # that mapping here and let the two drift apart. This step still shells out
-      # to diff_contracts.py only as a RUNNABILITY PROBE; both arms end in the
-      # no-baseline SKIP today, so the choice has no effect yet and was left
-      # alone rather than changed speculatively.
+      # contract (0 clean / 1 drift / 2 usage / 3 no verdict) this step reads.
+      # What is still missing is fetching a REAL published baseline from
+      # crates.io (compare `registry_probe` in scripts/check_semver.sh, which
+      # already solves this for the SemVer gate). Until that lands, `$BASELINE`
+      # below is a path that is never written to — it stands in for "the
+      # baseline a real fetch would have produced," and since none is published
+      # yet, check_contracts.sh's own fail-closed logic reports NO VERDICT (3)
+      # for it not existing. That is a REAL run of the real tool against real
+      # (if intentionally absent) inputs, not a probe of a flag it doesn't
+      # support, and it fails closed the same way if the tool ever misbehaves.
       - name: "Gate 6 — cross-version contract diff"
         run: |
           set -euo pipefail
@@ -651,21 +654,41 @@ jobs:
             echo "  RECORDED SKIP — no behavioural-contract comparison was performed."
             exit 0
           fi
-          # No published trusty-common carries contracts.json yet, so there is
-          # no baseline artifact to fetch. Detect that explicitly rather than
-          # letting the differ fail on a 404 and be read as a tooling error.
           pkg="${{ inputs.crate || 'trusty-common' }}"
           ver="$(grep -m1 -E '^version[[:space:]]*=' "crates/trusty-common/Cargo.toml" \
                  | sed -E 's/.*"([^"]+)".*/\1/')"
           echo "Looking for a published contracts.json baseline for ${pkg} (current ${ver})"
-          if ! python3 scripts/diff_contracts.py --help >/dev/null 2>&1; then
-            echo "::error::scripts/diff_contracts.py exists but is not runnable — refusing to report a pass."
+
+          # No published trusty-common carries contracts.json yet, so there is
+          # no baseline artifact to fetch. CURRENT is the artifact Gate 5 just
+          # verified matches this tree's source; BASELINE is a path that is
+          # deliberately never created, so the tool itself — not this step —
+          # is the one that decides whether that counts as "no baseline".
+          CURRENT="crates/trusty-common/contracts.json"
+          SCRATCH="$(mktemp -d "${RUNNER_TEMP:-/tmp}/gate6.XXXXXX")"
+          trap 'rm -rf "$SCRATCH"' EXIT
+          BASELINE="${SCRATCH}/no-published-baseline.json"
+
+          set +e
+          OUT="$(bash scripts/check_contracts.sh --diff "$BASELINE" "$CURRENT" 2>&1)"
+          rc=$?
+          set -e
+          echo "$OUT"
+
+          if [[ "$rc" -ne 3 ]]; then
+            echo "::error::check_contracts.sh --diff exited ${rc}, not the 3 (NO VERDICT) a genuinely absent baseline must produce — refusing to report a pass or a skip."
             exit 1
           fi
+          if ! grep -qF "baseline artifact ${BASELINE} could not be read" <<< "$OUT"; then
+            echo "::error::check_contracts.sh --diff exited 3 (NO VERDICT) for a different reason than the missing baseline file — refusing to assume this is the known no-baseline case."
+            exit 1
+          fi
+
           echo "::warning::[SKIP] contract-diff: no published release of ${pkg} carries contracts.json."
           echo "  The artifact was introduced by #5729 and ships for the first time with the NEXT"
           echo "  release, so there is nothing to diff against on this run. RECORDED SKIP with a"
-          echo "  stated reason — this becomes a real comparison from the following release onward."
+          echo "  stated reason — this becomes a real comparison from the following release onward,"
+          echo "  once this step also fetches the published baseline instead of leaving it absent."
           echo "  This is the only run for which that is true; if this message appears on a release"
           echo "  AFTER contracts.json has shipped once, the baseline lookup is broken and this"
           echo "  step must be made to fail instead."
