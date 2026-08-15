@@ -22,19 +22,24 @@ worktrees — they share only the object database and refs.
 ## Worktree Cleanup
 
 `git worktree remove --force <path>` deletes the worktree directory but never
-the main checkout. After a squash-merge the local feature branch will appear
-"unmerged" to git because the squashed commit on `main` has a different hash —
-use `git branch -D <branch>` and `git push origin --delete <branch>` to clean up.
-These operations touch only refs, never working trees.
+the main checkout — deleting a worktree does NOT delete the main checkout or
+any other worktree. A worktree is disposable; all durable state lives in git
+objects and refs.
 
-Deleting a worktree does NOT delete the main checkout or any other worktree.
-A worktree is disposable — all durable state lives in git objects and refs.
+What is specific to this repo: every merge here is a squash merge, so the
+local feature branch's tip commit is routinely NOT an ancestor of the squashed
+commit that lands on `main` — same content, different hash. `git branch -d`
+sees that as "not fully merged" and refuses even when the PR merged cleanly —
+a plain `git pull --ff-only` on a stale local checkout does not fix this, it
+only compounds it, since the ancestry check runs against whatever `main` that
+checkout currently has. Treat git's own ancestry check as untrustworthy here;
+`gh pr view <branch> --json state` is the real signal.
 
-For the generic discipline (main checkout inspection-only, branch off
-`origin/main`, one branch per PR outcome, subagent worktree confinement,
-cleanup order), see the "Worktree Discipline" section of the `tm-workflow`
-skill — this page carries only what is specific to this repo's Cargo/macOS
-toolchain.
+For the operational rule (worktree-then-branch order, confirming the merge via
+`gh pr view` before force-deleting the branch, and never deleting a branch
+that was never pushed and holds unique commits), see BASE-AGENT's Git Workflow
+section, cross-referenced from the "Worktree Discipline" section of the
+`tm-workflow` skill.
 
 ## Installing a Freshly Built Binary
 
