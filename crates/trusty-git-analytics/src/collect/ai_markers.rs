@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::collect::ai_attribution::AgenticMode;
+use crate::collect::ai_attribution::{provenance_possibly_stripped, AgenticMode};
 use crate::collect::ai_marker_config::{
     marker_file_path, MarkerConfig, MarkerConfigError, MarkerScope,
 };
@@ -61,8 +61,9 @@ impl<'a> CommitSignals<'a> {
 ///
 /// Why: `ai_tool`, `is_ai_assisted` and `agentic_mode` are written from the
 /// same scan so they cannot disagree about whether a commit was AI-assisted.
-/// What: `tool` is the winning marker's label; `mode` is
-/// [`AgenticMode::None`] when nothing matched.
+/// What: `tool` is the winning marker's label; when nothing matched, `mode` is
+/// [`AgenticMode::None`], or [`AgenticMode::Unknown`] if the message shows a
+/// rewrite fingerprint (#5250).
 /// Test: `tests::detects_trusty_mpm_footer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Detection {
@@ -83,10 +84,13 @@ pub struct Detection {
 /// verdict of [`AgenticMode::None`] falls through to them. Within one scan the
 /// first `FullAgentic` match returns immediately, so it outranks an
 /// `IdeAssisted` match found earlier in that slice; among `IdeAssisted` matches
-/// the earliest supplies the label.
+/// the earliest supplies the label. When neither scan matches, the verdict
+/// splits on [`provenance_possibly_stripped`] (#5250) — that predicate reads the
+/// message only, never the identities the backfill lacks.
 /// Test: `tests::detects_trusty_mpm_footer`,
 /// `tests::full_agentic_wins_over_ide_assisted`,
-/// `tests::operator_full_agentic_cannot_upgrade_a_builtin_ide_match`.
+/// `tests::operator_full_agentic_cannot_upgrade_a_builtin_ide_match`,
+/// `tests::merge_summary_is_unknown_not_none`.
 pub fn detect(signals: &CommitSignals<'_>) -> Detection {
     detect_in(marker_set(), signals)
 }
@@ -101,8 +105,12 @@ pub fn detect(signals: &CommitSignals<'_>) -> Detection {
 /// single flat scan could not deliver it: `scan` returns early on `FullAgentic`
 /// but merely records `IdeAssisted` and keeps going, so an operator
 /// `FullAgentic` entry appended after the two builtin `IdeAssisted` markers
-/// overwrote a copilot verdict with its own.
-/// Test: `tests::operator_full_agentic_cannot_upgrade_a_builtin_ide_match`.
+/// overwrote a copilot verdict with its own. The #5250 `Unknown` split lands
+/// here rather than in `scan` for the same structural reason — see the two
+/// `provenance_stripped` tests below.
+/// Test: `tests::operator_full_agentic_cannot_upgrade_a_builtin_ide_match`,
+/// `tests::operator_marker_still_applies_to_a_provenance_stripped_subject`,
+/// `tests::provenance_stripped_subject_is_unknown_when_no_marker_matches`.
 fn detect_in(set: &MarkerSet, signals: &CommitSignals<'_>) -> Detection {
     let trailers: Vec<&str> = trailer_line()
         .captures_iter(signals.message)
@@ -113,7 +121,26 @@ fn detect_in(set: &MarkerSet, signals: &CommitSignals<'_>) -> Detection {
     if builtin.mode != AgenticMode::None {
         return builtin;
     }
-    scan(&set.markers[set.builtin_len..], signals, &trailers)
+    let operator = scan(&set.markers[set.builtin_len..], signals, &trailers);
+    if operator.mode != AgenticMode::None {
+        return operator;
+    }
+
+    // #5250: neither scan matched a marker. A message git or the forge composed
+    // never had room for the author's marker, so "no marker" is not a
+    // human-work finding there. This split runs once, AFTER both scans — a
+    // `scan` that returned `Unknown` itself would satisfy the `!= None` test
+    // above and skip the operator markers #5414 added.
+    if provenance_possibly_stripped(signals.message) {
+        return Detection {
+            tool: None,
+            mode: AgenticMode::Unknown,
+        };
+    }
+    Detection {
+        tool: None,
+        mode: AgenticMode::None,
+    }
 }
 
 /// One ordered pass over a marker slice.
@@ -135,7 +162,7 @@ fn scan(markers: &[AiMarker], signals: &CommitSignals<'_>, trailers: &[&str]) ->
                     ide = Some(marker.tool);
                 }
             }
-            AgenticMode::None => {}
+            AgenticMode::None | AgenticMode::Unknown => {}
         }
     }
 
@@ -144,6 +171,8 @@ fn scan(markers: &[AiMarker], signals: &CommitSignals<'_>, trailers: &[&str]) ->
             tool: Some(tool),
             mode: AgenticMode::IdeAssisted,
         },
+        // "No marker in this slice" only. The #5250 Unknown split belongs to
+        // `detect_in`, which alone knows both slices came up empty.
         None => Detection {
             tool: None,
             mode: AgenticMode::None,
@@ -621,6 +650,28 @@ mod tests {
         );
     }
 
+    /// Why: #5250 — the fingerprint split happens inside `detect`, not only in
+    /// the predicate, and the email family must not change the verdict. The
+    /// backfill path sees empty emails, so a merge summary has to classify
+    /// identically with and without them or a repaired row stops matching a
+    /// freshly walked one.
+    #[test]
+    fn merge_summary_is_unknown_not_none() {
+        let msg = "Merge branch 'feat/x' into main";
+        let by_message = detect(&CommitSignals::from_message(msg));
+        assert_eq!(by_message.mode, AgenticMode::Unknown);
+        assert_eq!(by_message.tool, None);
+
+        let with_identities = detect(&CommitSignals {
+            message: msg,
+            author_email: "engineer@example.com",
+            committer_email: "noreply@github.com",
+        });
+        assert_eq!(with_identities, by_message);
+
+        assert_eq!(mode_of("feat: add button"), AgenticMode::None);
+    }
+
     /// Why: the disclosure is the answer to "does a low share mean no AI?".
     #[test]
     fn disclosure_names_active_tools() {
@@ -722,6 +773,54 @@ mod tests {
         let d = detect_in(&set, &CommitSignals::from_message(msg));
         assert_eq!(d.mode, AgenticMode::FullAgentic);
         assert_eq!(d.tool, Some("claude"));
+    }
+
+    /// Why: the seam where #5414 and #5250 meet. `provenance_possibly_stripped`
+    /// is true for this subject, so deciding `Unknown` inside `scan` would let
+    /// the builtin pass return a non-`None` verdict and skip the operator
+    /// markers entirely — a merge-summary-shaped commit would become
+    /// unclassifiable by any house marker. The split therefore runs once, after
+    /// both passes.
+    /// What: an operator marker matching a machine merge subject still wins.
+    #[test]
+    fn operator_marker_still_applies_to_a_provenance_stripped_subject() {
+        let msg = "Merge branch 'feat/x' into main";
+        assert!(
+            provenance_possibly_stripped(msg),
+            "precondition: the subject must look stripped, else this proves nothing"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_marker_file(
+            &dir,
+            "markers:\n  - { tool: house-bot, mode: full_agentic, scope: message, pattern: \"Merge branch\" }\n",
+        );
+        let set = build_marker_set(&path);
+        let d = detect_in(&set, &CommitSignals::from_message(msg));
+        assert_eq!(
+            d.mode,
+            AgenticMode::FullAgentic,
+            "the operator marker must be consulted, not pre-empted by Unknown"
+        );
+        assert_eq!(d.tool, Some("house-bot"));
+    }
+
+    /// Why: the other half of the pair above — with no operator marker to match,
+    /// the same subject must still reach the #5250 `Unknown` verdict.
+    #[test]
+    fn provenance_stripped_subject_is_unknown_when_no_marker_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_marker_file(
+            &dir,
+            "markers:\n  - { tool: house-bot, mode: full_agentic, scope: message, pattern: 'nothing-matches-this' }\n",
+        );
+        let set = build_marker_set(&path);
+        let d = detect_in(
+            &set,
+            &CommitSignals::from_message("Merge branch 'feat/x' into main"),
+        );
+        assert_eq!(d.mode, AgenticMode::Unknown);
+        assert_eq!(d.tool, None);
     }
 
     /// Why: THE error arm. A marker file with a pattern the regex crate

@@ -13,8 +13,9 @@
 //! re-exports it as `trusty_memory::messaging::slugify_string` (a thin shim) and
 //! trusty-installer calls it directly.
 //!
-//! Test: `cargo test -p trusty-common -- slug::tests` pins the canonical
-//! behaviour here; the consuming crates inherit it transitively.
+//! Test: `cargo test -p trusty-common --features unconditional-only --
+//! slug::tests` pins the canonical behaviour here; the consuming crates inherit
+//! it transitively.
 
 /// Canonicalise an arbitrary string into a stable project slug.
 ///

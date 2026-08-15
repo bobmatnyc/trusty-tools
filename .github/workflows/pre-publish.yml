@@ -39,6 +39,15 @@
 #   minutes and gates the publish boundary, not the merge boundary — the same
 #   reasoning `ci.yml` applies to its shard matrix.
 #
+# SHA TARGETING. `workflow_dispatch` only accepts a REF (branch/tag), so a
+#   caller normally cannot pin a manual run to a commit older than the ref's
+#   current tip — a real cost when an operator waits for CI to settle and
+#   `main` has already moved by the time they dispatch. The optional `sha`
+#   input closes that gap: the `resolve-sha` job checks it out instead of the
+#   tip and refuses (fails closed) a SHA that is not an ancestor of the
+#   dispatched ref, so a typo or a stale value can never silently gate a
+#   release on unrelated code. Omitted, behaviour is unchanged.
+#
 # EVERY JOB FAILS CLOSED. This repo has been bitten twice by a gate reporting
 #   success while checking nothing — #5620 (`0 compared` printing `[PASS]`) and
 #   the SemVer type gap (#5723). So: no job here uses `continue-on-error`, no
@@ -56,6 +65,10 @@ on:
     inputs:
       crate:
         description: "Crate being released (package name, e.g. trusty-common). Optional — only the contract diff uses it."
+        required: false
+        type: string
+      sha:
+        description: "Exact commit SHA to gate (optional). Must be an ancestor of the dispatched ref's tip. Omit to gate the ref's current tip (unchanged default behaviour)."
         required: false
         type: string
 
@@ -77,6 +90,91 @@ env:
   CARGO_AUDIT_VERSION: "0.22.2"
 
 jobs:
+  # ==========================================================================
+  # resolve-sha — turn the optional `sha` input into the ONE commit every
+  # other job checks out and reports on.
+  #
+  # WHY THIS EXISTS. `workflow_dispatch` accepts a REF (branch/tag), not a
+  # SHA — there is no built-in way to pin a manual run to a specific commit.
+  # For a gate whose entire point is "verify the exact commit about to be
+  # published", that is a hole: `main` can move between "CI went green" and
+  # "operator dispatches the gate", and every job in this workflow would
+  # silently test the NEW tip instead of the commit the operator meant. That
+  # happened twice in one evening (`af64b4df` -> `c1ad924a` -> `48dc2d1b`),
+  # each restarting a 13-16 minute run with no way to target the tip already
+  # known green.
+  #
+  # RESOLUTION. `inputs.sha` empty (the tag-push trigger, or a dispatch with
+  # no sha given) resolves to `github.sha` — the dispatched ref's current
+  # tip, i.e. today's unchanged behaviour. `inputs.sha` given is resolved
+  # with `git rev-parse` (so a short hash is accepted) and then MUST pass
+  # `git merge-base --is-ancestor` against the ref's tip — a SHA that is not
+  # on this branch is refused rather than silently gated, because falling
+  # back to the tip would let an operator believe a specific commit was
+  # verified when a different one actually was.
+  #
+  # FAILS CLOSED. A malformed SHA, a SHA absent from history, and a SHA that
+  # exists but is not an ancestor are three distinct `::error::`s so the
+  # operator knows which problem to fix, and all three exit 1. `summary`
+  # depends on this job, so any of these failures already turns the whole
+  # gate red without needing separate wiring.
+  # ==========================================================================
+  resolve-sha:
+    name: Resolve target commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      # fetch-depth: 0 pulls full history for all branches and tags, not just
+      # the dispatched ref — a requested SHA can legitimately live on a
+      # branch other than the one dispatched, and the ancestor check below
+      # needs to see it to correctly refuse it.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and verify the target commit
+        id: resolve
+        env:
+          REQUESTED_SHA: ${{ inputs.sha }}
+          REF_TIP: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${REQUESTED_SHA}" ]; then
+            echo "No sha input given — gating the dispatched ref's current tip: ${REF_TIP}"
+            echo "sha=${REF_TIP}" >> "$GITHUB_OUTPUT"
+            echo "### Resolved commit" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`${REF_TIP}\` (ref tip, no sha input given)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Shape check before touching git — a typo should fail with a
+          # plain message, not an opaque git error.
+          if ! [[ "${REQUESTED_SHA}" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            echo "::error::sha input '${REQUESTED_SHA}' is not a valid commit SHA (expected 7-40 hex characters). Refusing to fall back to the ref tip."
+            exit 1
+          fi
+
+          if ! git cat-file -e "${REQUESTED_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::sha input '${REQUESTED_SHA}' does not resolve to a commit in this repository's history. Refusing to fall back to the ref tip."
+            exit 1
+          fi
+
+          resolved="$(git rev-parse "${REQUESTED_SHA}")"
+
+          if ! git merge-base --is-ancestor "${resolved}" "${REF_TIP}"; then
+            echo "::error::sha '${resolved}' is not an ancestor of the dispatched ref (tip ${REF_TIP}). Refusing to gate a release on a commit that is not on this branch."
+            exit 1
+          fi
+
+          echo "Verified: ${resolved} is an ancestor of ${REF_TIP}"
+          echo "sha=${resolved}" >> "$GITHUB_OUTPUT"
+          echo "### Resolved commit" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`${resolved}\` (pinned via sha input, verified ancestor of ${REF_TIP})" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Pre-publish gate target::Verified commit ${resolved}"
+
   # ==========================================================================
   # ci-parity — the existing shards must already be green for THIS commit.
   #
@@ -102,15 +200,18 @@ jobs:
   # ==========================================================================
   ci-parity:
     name: CI shards already green for this commit
+    needs: resolve-sha
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve-sha.outputs.sha }}
 
       - name: Require a green CI run for this exact commit
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ github.sha }}
+          SHA: ${{ needs.resolve-sha.outputs.sha }}
         run: |
           set -euo pipefail
           echo "Looking for a CI workflow run against ${SHA}"
@@ -163,10 +264,13 @@ jobs:
   # ==========================================================================
   rustdoc-links:
     name: "Gate 1 — cargo doc (broken intra-doc links)"
+    needs: resolve-sha
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve-sha.outputs.sha }}
 
       - name: Free disk space
         run: bash scripts/ci-free-disk-space.sh
@@ -208,10 +312,13 @@ jobs:
   # ==========================================================================
   audit:
     name: "Gate 2 — cargo audit (RustSec advisories)"
+    needs: resolve-sha
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve-sha.outputs.sha }}
 
       - name: Install cargo-audit (official prebuilt binary)
         run: |
@@ -242,10 +349,13 @@ jobs:
   # ==========================================================================
   deny:
     name: "Gate 3 — cargo deny (licences, bans, sources)"
+    needs: resolve-sha
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve-sha.outputs.sha }}
 
       - name: Install cargo-deny (official prebuilt binary)
         run: |
@@ -293,6 +403,7 @@ jobs:
   # ==========================================================================
   ignored-tests:
     name: "Gate 4 — #[ignore]d ONNX/embedder tests"
+    needs: resolve-sha
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -301,6 +412,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.resolve-sha.outputs.sha }}
           fetch-depth: 0
 
       - name: Free disk space
@@ -460,10 +572,13 @@ jobs:
   # ==========================================================================
   contracts:
     name: "Gates 5-6 — Code Contracts drift + cross-version diff"
+    needs: resolve-sha
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve-sha.outputs.sha }}
 
       - name: Free disk space
         run: bash scripts/ci-free-disk-space.sh
@@ -589,23 +704,27 @@ jobs:
   # ==========================================================================
   summary:
     name: Pre-publish gate
-    needs: [ci-parity, rustdoc-links, audit, deny, ignored-tests, contracts]
+    needs: [resolve-sha, ci-parity, rustdoc-links, audit, deny, ignored-tests, contracts]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every gate to have succeeded
         env:
+          R_RESOLVE: ${{ needs.resolve-sha.result }}
           R_CI: ${{ needs.ci-parity.result }}
           R_DOC: ${{ needs.rustdoc-links.result }}
           R_AUDIT: ${{ needs.audit.result }}
           R_DENY: ${{ needs.deny.result }}
           R_IGNORED: ${{ needs.ignored-tests.result }}
           R_CONTRACTS: ${{ needs.contracts.result }}
+          RESOLVED_SHA: ${{ needs.resolve-sha.outputs.sha }}
         run: |
           set -euo pipefail
+          echo "Gated commit: ${RESOLVED_SHA:-<not resolved>}"
           fail=0
           for pair in \
+            "resolve-sha:${R_RESOLVE}" \
             "ci-parity:${R_CI}" \
             "rustdoc-links:${R_DOC}" \
             "audit:${R_AUDIT}" \

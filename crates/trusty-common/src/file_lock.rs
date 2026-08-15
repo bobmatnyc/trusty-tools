@@ -14,7 +14,8 @@
 //! What: [`with_exclusive_lock`] runs a closure while holding an exclusive
 //! `flock(2)`-style advisory lock on a `<path>.lock` sidecar, releasing it by
 //! RAII on every exit path including a panic. [`lock_path`] names that sidecar.
-//! Test: `cargo test -p trusty-common -- file_lock::tests`.
+//! Test: `cargo test -p trusty-common --features unconditional-only --
+//! file_lock::tests`.
 //!
 //! # Contract
 //!

@@ -3,7 +3,7 @@
 //! Why: Keeps test code out of backend.rs so the production file stays under
 //! the 500-SLOC cap while tests get the 1500-SLOC test-file budget.
 //! What: Unit tests for priority/state helpers and backend construction.
-//! Test: Run with `cargo test -p trusty-common`.
+//! Test: Run with `cargo test -p trusty-common --features tickets`.
 
 use super::types::{int_to_priority, priority_to_int, state_from_name};
 use crate::tickets::api::backends::linear::LinearBackend;

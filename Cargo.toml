@@ -131,7 +131,7 @@ trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.2.0" }
 # Cargo edge on it: #5466 removed trusty-review's, and the tga -> trusty-review
 # direction is a PATH lookup, not a manifest edge (#5236, DOC-67 §6). The entry
 # stays so a future in-tree consumer resolves from source rather than crates.io.
-tga = { path = "crates/trusty-git-analytics", version = "2.19.1" }
+tga = { path = "crates/trusty-git-analytics", version = "3.0.0" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.
