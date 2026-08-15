@@ -9,9 +9,3 @@ Changed
   `install-wrapper.sh` is deleted. Binaries no longer land in two directories
   with PATH order deciding which copy runs — the stale-daemon mechanism
   behind #2386. The unused `DEFAULT_INSTALL_DIR` const is removed.
-
-Fixed
-- Prebuilt tarball installs place only the crate's expected binaries (per the
-  shared `installed_binaries` table). Release tarballs ship mode-0755
-  `LICENSE`/`README.md`, which previously landed in the bin dir as if they
-  were binaries (#5777).
