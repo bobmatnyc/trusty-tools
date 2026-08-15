@@ -224,8 +224,10 @@ cd .claude/worktrees/<dirname>
 mechanism** — a subagent dispatch declares `isolation: "worktree"` instead, per
 "Worktree Discipline" below and `tm-delegation-patterns`.
 
-Always `git fetch origin main` first and branch off `origin/main`, never local
-`main` — local `main` can be stale and branching from it has caused lost commits.
+Fetch-before-branch, and its fetch-after-merge companion, are BASE-AGENT's Git
+Workflow rule — the command block above is that rule's provisioning form. Local
+`main` can be stale enough to lose commits, or to leave a fresh branch `BEHIND`
+the moment its PR opens.
 
 **Keep the main checkout fresh.** Worktrees branch off `origin/main` and stay
 current; nothing refreshes the main checkout, so it drifts — and then every

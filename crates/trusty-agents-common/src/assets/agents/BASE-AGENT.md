@@ -92,6 +92,14 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
 - Reference issues in the body (`Closes #N`) to auto-close on merge.
 - Check `git status` before starting. Never force-push a shared branch without
   explicit instruction. Leave the working tree clean.
+- **Fetch before you branch, and fetch again after you merge.** `git fetch
+  origin`, then branch off `origin/main` explicitly — `git checkout -b <name>
+  origin/main`, never local `main`, which can be stale enough to lose commits
+  or to leave your new branch `BEHIND` the moment its PR opens. After a PR you
+  opened merges, `git fetch origin` again before deciding anything from local
+  state. Fetch only, never `pull`, in a main checkout — see `tm-workflow`,
+  "Worktree Discipline", for the exact provisioning commands and the narrower,
+  guarded exception that does pull for inspection freshness.
 - **Never share a working directory with another concurrently-dispatched
   file-mutating agent.** Stay in the worktree you were given, and never
   `git checkout` / `git switch` in one you were handed — a sibling shares that
