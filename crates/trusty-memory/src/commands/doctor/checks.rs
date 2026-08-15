@@ -4,7 +4,7 @@
 //! implementations live in their own focused file, separate from the
 //! audit data types and the command entry-points.
 //! What: exports check functions called by [`super::handle_doctor`]:
-//! [`check_fastembed_cache`], [`check_launchd_plist`] (macOS),
+//! [`check_fastembed_cache`], `check_launchd_plist` (macOS),
 //! [`check_daemon_health`], and [`check_stale_palace_locks`]. Also exports
 //! private helpers used by the tests in `mod.rs`.
 //! Test: individual check helpers are exercised by unit tests in `mod.rs`;

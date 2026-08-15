@@ -21,7 +21,7 @@
 //! - The canonicalization above is a SILENT IDENTIFIER MIGRATION for any host
 //!   previously signed by the pre-PR Rust hook's `com.trusty.search` — changing
 //!   the designated requirement invalidates that host's existing FDA grant with
-//!   no warning (reproducing #873's `indexes:2` symptom). [`current_identifier`]
+//!   no warning (reproducing #873's `indexes:2` symptom). `current_identifier`
 //!   reads the binary's on-disk identifier before signing and
 //!   [`identifier_migration_notice`] prints a loud, distinct callout when it is
 //!   about to change.
@@ -101,12 +101,12 @@
 //! What: [`binaries_for_set`] and [`codesign_identifier`] are both derived from
 //! the single [`SIGNABLE_BINARIES`] table (binary, set, identifier) so set
 //! membership and identifier mapping can never drift apart again.
-//! [`has_developer_id_cert`] probes for a cert (env var `TRUSTY_SIGN_IDENTITY` >
-//! `security find-identity`). [`sign_binary`] signs with `--options runtime
+//! `has_developer_id_cert` probes for a cert (env var `TRUSTY_SIGN_IDENTITY` >
+//! `security find-identity`). `sign_binary` signs with `--options runtime
 //! --timestamp` only when `hardened` is `true` (see [`use_hardened_runtime`]),
-//! and [`verify_signature`] checks with `codesign --verify --deep --strict`.
+//! and `verify_signature` checks with `codesign --verify --deep --strict`.
 //! [`post_install_search`] / [`post_install_mpm`] are the fail-soft hooks
-//! `commands::install` calls after each member lands; [`sign_set_strict`] is the
+//! `commands::install` calls after each member lands; `sign_set_strict` is the
 //! hard-failing primitive the standalone `tctl sign <target>` command
 //! (`commands::sign`) uses, which `scripts/install-trusty-search-signed.sh` now
 //! shells out to instead of duplicating codesign flags in bash.
@@ -614,7 +614,7 @@ pub fn verify_signature(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Typed error for [`sign_set_strict`].
+/// Typed error for `sign_set_strict`.
 ///
 /// Why: PR #2657 review (MEDIUM) — `commands::sign::run_macos` previously
 /// distinguished "no cert" from "signing failed" by substring-matching the
@@ -957,11 +957,11 @@ fn post_install_signed_set(
 /// should immediately sign them (if a cert is available) or report the FDA
 /// re-grant guidance so the operator knows what to do next.
 ///
-/// What: On macOS delegates to [`post_install_signed_set`] for [`SEARCH_SET`],
+/// What: On macOS delegates to `post_install_signed_set` for [`SEARCH_SET`],
 /// returning its note/guidance text instead of printing directly (see that
 /// function's doc), plus a `bool` telling the caller whether
 /// [`signing_persistence_tip`] should be printed. On non-macOS: `None`.
-/// `existed_before` / `primary_path` — see [`post_install_signed_set`]; both
+/// `existed_before` / `primary_path` — see `post_install_signed_set`; both
 /// MUST come from the caller's `InstalledBinary` result for the CONCRETE
 /// outcome branch taken, never re-derived from `install_dir` alone.
 ///
@@ -992,11 +992,11 @@ pub fn post_install_search(
 /// same stable-identity signing as trusty-search so the App Data TCC prompt
 /// does not re-fire on every `cargo install` rebuild.
 ///
-/// What: On macOS delegates to [`post_install_signed_set`] for [`MPM_SET`],
+/// What: On macOS delegates to `post_install_signed_set` for [`MPM_SET`],
 /// returning its note/guidance text instead of printing directly (see that
 /// function's doc), plus a `bool` telling the caller whether
 /// [`signing_persistence_tip`] should be printed. On non-macOS: `None`.
-/// `existed_before` / `primary_path` — see [`post_install_signed_set`]; both
+/// `existed_before` / `primary_path` — see `post_install_signed_set`; both
 /// MUST come from the caller's `InstalledBinary` result for the CONCRETE
 /// outcome branch taken, never re-derived from `install_dir` alone.
 ///

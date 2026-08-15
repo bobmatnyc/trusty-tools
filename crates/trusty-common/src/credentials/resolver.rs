@@ -105,58 +105,8 @@ pub fn default_store() -> Box<dyn KeyStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::env_guard::EnvVarGuard;
     use serial_test::serial;
-
-    /// RAII guard over one process-wide credential environment variable.
-    ///
-    /// Why: these tests must drive `std::env` to exercise the env tier, but
-    /// the same process environment is where [`dotenv::load_env_local_once`]
-    /// deposits the developer's REAL credentials. A test that ended with a
-    /// bare `remove_var` therefore destroyed a real value for every test that
-    /// ran after it in the same binary, and a test that assumed a variable was
-    /// absent was reading machine state rather than a fixture it built. This
-    /// guard makes each test set what it needs and put back exactly what it
-    /// found, so no test depends on — or damages — ambient state (#3451).
-    /// What: captures the prior value on construction and restores it on drop,
-    /// removing the variable again when there was no prior value.
-    /// Test: used by every test in this module.
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        /// Set `key` to `value` for the guard's lifetime.
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            // SAFETY: every caller is `#[serial(dotenv_credential_env)]` — the
-            // group every test in this crate that reads or writes a credential
-            // env var joins — so no other test thread mutates the environment
-            // concurrently with this call.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-
-        /// Remove `key` for the guard's lifetime.
-        fn remove(key: &'static str) -> Self {
-            let previous = std::env::var(key).ok();
-            // SAFETY: see `EnvVarGuard::set`.
-            unsafe { std::env::remove_var(key) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            // SAFETY: see `EnvVarGuard::set`.
-            unsafe {
-                match self.previous.take() {
-                    Some(v) => std::env::set_var(self.key, v),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
 
     /// Render a resolved credential for a failure message without disclosing it.
     ///

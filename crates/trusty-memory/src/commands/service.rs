@@ -5,7 +5,7 @@
 //! `launchctl` for diagnostics. Wrapping the plist mechanics in `service`
 //! subcommands keeps users from having to hand-edit XML. This mirrors the
 //! pattern used by `trusty-search service`, sharing the
-//! [`trusty_common::launchd`] implementation so the two tools cannot drift.
+//! `trusty_common::launchd` implementation so the two tools cannot drift.
 //! What: macOS routes to `service_install` / `service_start` / `service_stop`
 //! / `service_logs`. Non-macOS prints a "not supported" error and exits 1.
 //!
