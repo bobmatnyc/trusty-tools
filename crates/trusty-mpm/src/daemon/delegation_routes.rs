@@ -172,9 +172,11 @@ pub fn router() -> Router<Arc<DaemonState>> {
 /// daemon's policy call. A payload with no `cwd`, no `tool_use_id`, a
 /// non-dispatch `tool`, or no isolating `isolation` answers the query and
 /// records nothing.
-/// Test: `granted_worktree_route_corrects_an_existing_unisolated_record`,
-/// `granted_worktree_route_records_a_grant_that_arrives_first`,
-/// `granted_worktree_route_records_nothing_without_isolation`,
+/// Test: `a_grant_and_the_tracker_converge_in_either_order` covers both the
+/// correct-an-existing-record and the record-arrives-first halves;
+/// `a_grant_and_the_tracker_race_without_losing_the_isolation`,
+/// `granted_worktree_route_records_nothing_without_isolation_or_a_tool_use_id`,
+/// `record_granted_isolation_refuses_a_non_separating_mode`,
 /// `granted_worktree_route_reports_a_live_writer_without_claiming`.
 pub async fn granted_worktree_route(
     State(state): State<Arc<DaemonState>>,
