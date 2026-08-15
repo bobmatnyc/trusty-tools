@@ -205,9 +205,18 @@ if ! SKIP_UI_BUILD=1 RUSTDOCFLAGS="-Z unstable-options --output-format json" \
   # renders the offending source line inside its `= note:` block and indents the
   # blank line above it, so a whitespace-tolerant terminator cuts the block
   # before `no item named ... in scope` — the one line that says what to fix.
+  #
+  # STRIP ANSI FIRST. CI sets `CARGO_TERM_COLOR: always`, so on a GitHub runner
+  # every diagnostic arrives as `\033[1m\033[91merror\033[0m: ...` and an anchored
+  # `/^error/` matches NONE of them. The first version of this block shipped
+  # without the strip and run 31873627099 reported `rustdoc emitted no 'error:'
+  # diagnostic` for a build that failed on exactly such errors — the same class
+  # of misreport it was written to end, just one layer further in.
+  PLAIN="${SCRATCH}/rustdoc.plain"
+  sed $'s/\033\\[[0-9;]*[A-Za-z]//g' "${SCRATCH}/rustdoc.log" > "$PLAIN" || cp "${SCRATCH}/rustdoc.log" "$PLAIN"
   ERRORS="${SCRATCH}/rustdoc.errors"
   awk '/^error/ { blk = 1 } blk { print } /^$/ { blk = 0 }' \
-    "${SCRATCH}/rustdoc.log" > "$ERRORS" || true
+    "$PLAIN" > "$ERRORS" || true
   SAVED_LOG="${REPO_ROOT}/target/contracts-rustdoc-failure.log"
   mkdir -p "$(dirname "$SAVED_LOG")" 2>/dev/null || true
   cp "${SCRATCH}/rustdoc.log" "$SAVED_LOG" 2>/dev/null || SAVED_LOG=""
@@ -223,18 +232,26 @@ if ! SKIP_UI_BUILD=1 RUSTDOCFLAGS="-Z unstable-options --output-format json" \
       echo "            rustdoc emitted no 'error:' diagnostic, so this is a BUILD"
       echo "            failure rather than a documentation failure — a dependency's"
       echo "            build script or the toolchain itself."
-      if grep -qiE 'dbus|pkg-config|pkg_config' "${SCRATCH}/rustdoc.log"; then
+      # Name the missing library only on a REAL build-script failure. Matching
+      # `dbus` anywhere in the log fires on the ordinary `Compiling libdbus-sys`
+      # progress line, which is present on every successful run — run
+      # 31873627099 printed the whole install-libdbus remedy for a build that
+      # had libdbus installed and was failing on doc links. A remedy for a
+      # problem the developer does not have is worse than no remedy.
+      if grep -q 'failed to run custom build command' "$PLAIN" &&
+        grep -qiE 'libdbus|pkg-config|pkg_config' "$PLAIN"; then
         echo ""
-        echo "            The log names pkg-config/dbus. This crate's full feature set"
-        echo "            pulls in libdbus-sys, whose build.rs panics when the dbus"
-        echo "            headers are absent — the failure that took down this gate's"
-        echo "            first CI run (31858449749). Install them:"
+        echo "            A build script failed and the log names libdbus/pkg-config."
+        echo "            This crate's full feature set pulls in libdbus-sys, whose"
+        echo "            build.rs panics when the dbus headers are absent — the"
+        echo "            failure that took down this gate's first CI run"
+        echo "            (31858449749). Install them:"
         echo "              Debian/Ubuntu:  sudo apt-get install -y libdbus-1-dev"
         echo "              macOS:          brew install dbus pkg-config"
       fi
       echo ""
       echo "            Last 20 lines:"
-      tail -20 "${SCRATCH}/rustdoc.log" | sed 's/^/       /'
+      tail -20 "$PLAIN" | sed 's/^/       /'
     fi
     if [ -n "$SAVED_LOG" ]; then
       echo ""
