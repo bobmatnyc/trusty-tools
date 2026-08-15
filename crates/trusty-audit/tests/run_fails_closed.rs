@@ -26,12 +26,16 @@ instructions = "Assess the last 52 weeks."
 
 [tools]
 tga = "2.9.4"
+trusty-search = "0.47.0"
 trusty-analyze = "0.9.2"
 trusty-review = "0.15.1"
 "#;
 
+/// The directory name `--work-dir` is spelled with, relative to the engagement.
+const WORK_DIR_NAME: &str = "trusty-audit-work";
+
 struct Engagement {
-    _tmp: tempfile::TempDir,
+    tmp: tempfile::TempDir,
     work: PathBuf,
     config: PathBuf,
 }
@@ -39,17 +43,13 @@ struct Engagement {
 impl Engagement {
     fn new() -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let work = tmp.path().join("trusty-audit-work");
+        let work = tmp.path().join(WORK_DIR_NAME);
         let config = tmp.path().join("engagement.toml");
         std::fs::write(&config, CONFIG).expect("write engagement config");
         for area in ["tools", "repos", "extract", "state", "out", "logs"] {
             std::fs::create_dir_all(work.join(area)).expect("mkdir area");
         }
-        Self {
-            _tmp: tmp,
-            work,
-            config,
-        }
+        Self { tmp, work, config }
     }
 
     /// A stub `tga` that writes the manifest a real one would — a zero exit
@@ -68,16 +68,17 @@ impl Engagement {
         )
     }
 
-    /// Stand in for a verified install: three executables plus the record that
+    /// Stand in for a verified install: four executables plus the record that
     /// says this client placed them.
     fn install_stubs(&self, script: &str) {
-        for name in ["tga", "trusty-analyze", "trusty-review"] {
+        for name in ["tga", "trusty-search", "trusty-analyze", "trusty-review"] {
             let path = self.work.join("tools").join(name);
             std::fs::write(&path, script).expect("stub");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
         let record = format!(
             "[[tools]]\ncrate_name = \"tga\"\nversion = \"2.9.4\"\nbinary = \"{d}/tga\"\n\
+             [[tools]]\ncrate_name = \"trusty-search\"\nversion = \"0.47.0\"\nbinary = \"{d}/s\"\n\
              [[tools]]\ncrate_name = \"trusty-analyze\"\nversion = \"0.9.2\"\nbinary = \"{d}/a\"\n\
              [[tools]]\ncrate_name = \"trusty-review\"\nversion = \"0.15.1\"\nbinary = \"{d}/r\"\n",
             d = self.work.join("tools").display()
@@ -101,23 +102,47 @@ impl Engagement {
     }
 
     fn run(&self) -> (String, String, Option<i32>) {
-        let out = Command::new(TAUDIT)
+        let mut command = Command::new(TAUDIT);
+        command
             .args(["run", "--work-dir"])
             .arg(&self.work)
             .arg("--config")
-            .arg(&self.config)
-            .output()
-            .expect("taudit runs");
-        (
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-            out.status.code(),
-        )
+            .arg(&self.config);
+        report(&mut command)
+    }
+
+    /// The same run with the flags spelled RELATIVE, from a shell sitting in
+    /// the engagement directory — the shape #5672 broke.
+    ///
+    /// The child's cwd is set here rather than the test process's: mutating
+    /// the process cwd would race every other test in this binary.
+    fn run_relative(&self) -> (String, String, Option<i32>) {
+        let mut command = Command::new(TAUDIT);
+        command
+            .args([
+                "run",
+                "--work-dir",
+                WORK_DIR_NAME,
+                "--config",
+                "engagement.toml",
+            ])
+            .current_dir(self.tmp.path());
+        report(&mut command)
     }
 
     fn progress(&self) -> String {
         std::fs::read_to_string(self.work.join("state/run-progress.toml")).unwrap_or_default()
     }
+}
+
+/// Run one `taudit` and split its result into stdout, stderr and status.
+fn report(command: &mut Command) -> (String, String, Option<i32>) {
+    let out = command.output().expect("taudit runs");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
 }
 
 fn is_empty(dir: &Path) -> bool {
@@ -213,6 +238,29 @@ fn a_clean_sweep_exits_zero() {
     e.select(&[("acme-api", "repos/acme-api")]);
 
     let (stdout, stderr, code) = e.run();
+    assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("Audited 1 repository"), "{stdout}");
+}
+
+/// #5672: the same clean sweep, driven with a RELATIVE `--work-dir`.
+///
+/// Against `origin/main` this fails. `spawn_tga` makes the work-dir root the
+/// child's working directory while naming the tool by a path relative to the
+/// PARENT's, so the child looked for `trusty-audit-work/trusty-audit-work/
+/// tools/tga`, the spawn returned `os error 2`, and the sweep exited 1 with
+/// "`tga audit` could not be started".
+#[test]
+fn a_clean_sweep_with_a_relative_work_dir_exits_zero() {
+    let e = Engagement::new();
+    e.install_stubs(&Engagement::manifest_writer(None));
+    e.checkout("acme-api");
+    e.select(&[("acme-api", "repos/acme-api")]);
+
+    let (stdout, stderr, code) = e.run_relative();
+    assert!(
+        !stdout.contains("could not be started"),
+        "the child never started — the tool path was relative to its own cwd:\n{stdout}"
+    );
     assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("Audited 1 repository"), "{stdout}");
 }

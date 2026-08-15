@@ -1,104 +1,45 @@
 //! Daemon discovery + reachability helpers shared across CLI subcommands.
 //!
 //! Why: every subcommand that talks to the running daemon needs the same
-//! "where is it listening?" logic -- preferring the canonical `http_addr`
-//! discovery file, falling back to the legacy port lockfile, and finally to
-//! the compiled-in default port. Centralising it removes duplication and
-//! gives `main.rs` a thinner footprint.
+//! "where is it listening?" logic. That logic no longer lives here: #5670
+//! promoted it to `trusty_common::daemon_guard::DaemonAddrLayout`, because
+//! `tga` has to probe this daemon and cannot depend on this crate. What is
+//! left is the thin binding to `DaemonAddrLayout::TRUSTY_SEARCH` plus the two
+//! path helpers that are genuinely local to this CLI.
 //!
-//! Issue #3545: `daemon_base_url()` previously preferred
-//! `trusty_common::read_daemon_addr("trusty-search")` /
-//! `write_daemon_addr("trusty-search", ...)` -- a generic per-app resolver
-//! (`trusty_common::resolve_data_dir`) that only honours the test-only
-//! `TRUSTY_DATA_DIR_OVERRIDE` env var, never `TRUSTY_DATA_DIR`. That path is
-//! also a *third*, distinct location from the one the daemon itself writes
-//! (`trusty_search::service::http_addr_path()`), so it almost never matched
-//! what `start` actually wrote -- and once the TCP-probe fallback below
-//! populated it (from whichever daemon happened to be reachable on the
-//! default port), it stuck as a stale cross-instance cache that silently
-//! outranked an isolated `TRUSTY_DATA_DIR` instance on every later call. The
-//! fix: read and refresh `trusty_search::service::http_addr_path()` directly
-//! -- the exact same, now `TRUSTY_DATA_DIR`-aware resolver `run_daemon()` uses
-//! to write the file -- so client subcommands and `start` always agree on
-//! which file they mean.
+//! Why the promoted resolver prefers `http_addr_path()` over
+//! `trusty_common::read_daemon_addr("trusty-search")`: see #3545. The generic
+//! per-app resolver honours only the test-only `TRUSTY_DATA_DIR_OVERRIDE`,
+//! never `TRUSTY_DATA_DIR`, and names a third location distinct from the one
+//! the daemon writes — so it went stale as a cross-instance cache that
+//! outranked an isolated instance on every later call.
 //!
-//! What: pure path resolvers and one async TCP probe.
-//! Test: covered indirectly by every CLI subcommand that calls into the
-//! daemon -- `status`, `index`, `query`, `doctor`, etc.
+//! What: two pure path resolvers, one async TCP probe, and one delegation.
+//! Test: `daemon_base_url_falls_back_when_http_addr_dead` and
+//! `daemon_base_url_prefers_isolated_instance_over_stale_default_cache` below
+//! prove this crate's binding still satisfies the #117 / #3545 contracts. The
+//! resolution paths themselves moved to trusty-common with the resolver
+//! (#5670) and are covered there by `trusty_common::daemon_guard::addr_tests`.
+//! That name stays in prose rather than in the citation list above, because
+//! `scripts/check_test_pointers.sh` resolves a `Test:` pointer only within the
+//! citing file's own crate.
 
 use std::time::Duration;
 
 /// Resolve the daemon's base URL.
 ///
 /// Why: stdio MCP servers and CLI subcommands need to find the running daemon
-/// without configuration. We check the canonical address-discovery file
-/// (`trusty_search::service::http_addr_path()`, issue #3545) first, then fall
-/// back to the legacy port file (`daemon.port`) for backward compatibility,
-/// and finally to `127.0.0.1:7878` if neither exists. Both the discovery file
-/// and the port file honour `TRUSTY_DATA_DIR`, so an isolated instance's
-/// clients never fall through to the production daemon's address.
-///
-/// Defensive TCP probe (issue #117): if the discovery file points at a dead
-/// address (e.g. left behind by a SIGKILL'd `serve --http`, or by a stopped
-/// daemon whose cleanup did not run), we fall back to `daemon.port` and
-/// overwrite the discovery file with the live address so future callers are
-/// fast. The probe is 200 ms -- short enough to keep CLI startup snappy when
-/// the file is current, long enough to tolerate a busy machine.
-///
-/// What: returns `http://{host}:{port}` (no trailing slash).
-/// Test: `daemon_base_url_falls_back_when_http_addr_dead` exercises this path;
-/// `daemon_base_url_prefers_isolated_instance_over_stale_default_cache`
-/// (issue #3545) proves an isolated `TRUSTY_DATA_DIR` instance is addressed
-/// instead of a stale, non-isolated discovery cache.
+/// without configuration.
+/// What: delegates to the shared resolver (#5670). Returns
+/// `http://{host}:{port}`, no trailing slash; see
+/// [`trusty_common::daemon_guard::DaemonAddrLayout::resolve_base_url`] for the
+/// discovery-file / port-file / default-port precedence and the #117
+/// reachability probe.
+/// Test: `daemon_base_url_falls_back_when_http_addr_dead`,
+/// `daemon_base_url_prefers_isolated_instance_over_stale_default_cache`.
 pub fn daemon_base_url() -> String {
-    if let Some(path) = trusty_search::service::http_addr_path() {
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            let addr = raw.trim();
-            if !addr.is_empty() && address_reachable_blocking(addr) {
-                return format!("http://{addr}");
-            }
-        }
-        // Missing or stale file -- fall through to the port-file fallback and refresh.
-    }
-    let port = daemon_port_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| s.trim().parse::<u16>().ok())
-        .unwrap_or(trusty_search::service::DEFAULT_PORT);
-
-    // Refresh the discovery file so subsequent calls skip the TCP probe.
-    // Best-effort: a write failure (no $HOME, read-only fs) is non-fatal.
-    // Issue #3602 review: route through the same atomic tmp+rename helper
-    // `run_daemon()` uses (`write_http_addr_file`), not a bare `std::fs::write`
-    // -- a false-positive reachability probe here must never tear a
-    // concurrent reader's view of the file that trusty-console/trusty-mpm's
-    // discovery trusts as ground truth.
-    let live_addr = format!("127.0.0.1:{port}");
-    if address_reachable_blocking(&live_addr) {
-        if let Some(path) = trusty_search::service::http_addr_path() {
-            let _ = trusty_search::service::write_http_addr_file(&path, &live_addr);
-        }
-    }
-    format!("http://{live_addr}")
-}
-
-/// Synchronous, time-boxed TCP reachability check used by `daemon_base_url()`.
-///
-/// Why: `daemon_base_url()` is called from sync contexts (e.g. main.rs CLI
-/// dispatch) and cannot easily `.await`. A blocking `TcpStream::connect_timeout`
-/// is the simplest correct primitive -- 200 ms is well below the perceptual
-/// threshold for CLI startup.
-/// What: parses `host:port`, attempts a TCP connect with a 200 ms deadline,
-/// returns true on success. Any parse or connect error returns false.
-/// Test: `address_reachable_returns_false_for_dead_port` unit test below.
-fn address_reachable_blocking(host_port: &str) -> bool {
-    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-    let Ok(mut iter) = host_port.to_socket_addrs() else {
-        return false;
-    };
-    let Some(addr): Option<SocketAddr> = iter.next() else {
-        return false;
-    };
-    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+    // #5670: one implementation, in trusty-common — tga probes the same daemon.
+    trusty_common::daemon_guard::DaemonAddrLayout::TRUSTY_SEARCH.resolve_base_url()
 }
 
 /// Path to `~/.trusty-search/mcp_http_addr` -- the MCP HTTP/SSE listener's
@@ -127,14 +68,13 @@ pub fn mcp_http_addr_path() -> Option<std::path::PathBuf> {
 /// var), the port file lives in that directory so an isolated test/cert daemon
 /// does not collide with the production daemon's port file (issue #281).
 /// What: returns `$TRUSTY_DATA_DIR/daemon.port` when the env var is set,
-/// otherwise `<data_local_dir>/trusty-search/daemon.port`.
+/// otherwise `<data_local_dir>/trusty-search/daemon.port`. #5670 moved that
+/// rule into `DaemonAddrLayout::TRUSTY_SEARCH`, which the promoted resolver
+/// reads through, so both agree by construction.
 /// Test: set `TRUSTY_DATA_DIR=/tmp/ts-x`; assert path equals
 /// `/tmp/ts-x/daemon.port`.
 pub fn daemon_port_path() -> Option<std::path::PathBuf> {
-    if let Ok(dir) = std::env::var("TRUSTY_DATA_DIR") {
-        return Some(std::path::PathBuf::from(dir).join("daemon.port"));
-    }
-    dirs::data_local_dir().map(|d| d.join("trusty-search").join("daemon.port"))
+    trusty_common::daemon_guard::DaemonAddrLayout::TRUSTY_SEARCH.port_file_path()
 }
 
 /// Check whether a TCP port is open (non-blocking connect with 500 ms timeout).
@@ -155,39 +95,8 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    #[test]
-    fn address_reachable_returns_false_for_dead_port() {
-        // Why: regression coverage for issue #117 -- `daemon_base_url()` must
-        // detect a dead address read from the discovery file so it can fall back
-        // to the port file instead of returning a URL nobody can connect to.
-        // What: port 1 is reserved and unbound on every developer machine.
-        // Test: the probe returns false in well under the 200 ms deadline.
-        let start = std::time::Instant::now();
-        assert!(!address_reachable_blocking("127.0.0.1:1"));
-        assert!(
-            start.elapsed() < Duration::from_millis(1500),
-            "probe took too long: {:?}",
-            start.elapsed()
-        );
-    }
-
-    #[test]
-    fn address_reachable_returns_false_for_garbage_input() {
-        // Why: defence-in-depth -- a corrupted discovery file (zero bytes,
-        // partial write, hand-edited typo) must not panic the resolver.
-        assert!(!address_reachable_blocking("not-a-host:port"));
-        assert!(!address_reachable_blocking(""));
-        assert!(!address_reachable_blocking("127.0.0.1"));
-    }
-
-    #[test]
-    fn address_reachable_returns_true_for_live_listener() {
-        // Why: positive control -- a real bound port must register as reachable
-        // so we don't fall back unnecessarily.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        assert!(address_reachable_blocking(&addr.to_string()));
-    }
+    // #5670: the three `address_reachable_blocking` unit tests moved with the
+    // probe itself to `trusty_common::daemon_guard::addr_tests`.
 
     #[test]
     fn mcp_http_addr_path_is_home_relative() {

@@ -292,6 +292,74 @@ pub enum AuditError {
         attempted: usize,
     },
 
+    /// The sweep audited nothing, so there is no deliverable to assemble.
+    ///
+    /// Why: #5499's package is what the recipient sends back, and a zip holding
+    /// two generated files and no report is worse than a refusal — it looks like
+    /// a deliverable. The same shape as [`AuditError::AllClonesFailed`] one stage
+    /// later.
+    /// What: one line naming why there is nothing to package.
+    /// Test: `crate::package::package_tests::a_sweep_that_audited_nothing_has_nothing_to_return`.
+    #[error("{reason}")]
+    NothingToPackage {
+        /// Why the package was not assembled.
+        reason: String,
+    },
+
+    /// A file the package would carry is a link to content from elsewhere.
+    ///
+    /// Why: the members come from `out/` and `extract/`, and packaging a link
+    /// planted in either would read a file from anywhere on the recipient's
+    /// machine into an archive that LEAVES their network. That is a wider
+    /// consequence than [`AuditError::UnsafeArea`]'s, which only misplaces this
+    /// crate's own writes (#5499).
+    ///
+    /// Two kinds, because they are not detectable the same way. A symlink is
+    /// visible as a link in its own file type. A hardlink is not visible at all
+    /// — it is an ordinary directory entry on an inode that another directory
+    /// entry also names, so it reports `is_symlink() == false` and
+    /// `is_file() == true`, and the only observable signal is the link count.
+    /// What: names the entry and which kind it is.
+    /// Test: `crate::package::package_tests::a_symlinked_member_is_refused`,
+    /// `crate::package::package_tests::a_hardlinked_member_under_out_is_refused`.
+    #[error(
+        "{path} is a {kind}, and packaging it could send a file from outside the working \
+         directory; no package was written"
+    )]
+    UnsafePackageEntry {
+        /// The entry that was refused.
+        path: PathBuf,
+        /// What it is — `"symlink"` or `"hardlink"`.
+        kind: &'static str,
+    },
+
+    /// A file the package would carry holds the engagement credential.
+    ///
+    /// Why: [`crate::config::SecretKey`] makes writing the key into a file THIS
+    /// crate generates a compile error, and that is the whole of what a type can
+    /// promise. The package's members are files other programs wrote, so the
+    /// same invariant needs a runtime check there (#5499).
+    /// What: names the file. The key itself is never quoted.
+    /// Test: `crate::package::package_tests::a_member_carrying_the_credential_is_refused_and_leaves_no_zip`.
+    #[error(
+        "{path} contains the engagement credential, which must never leave in the return \
+         package; no package was written"
+    )]
+    CredentialInPackage {
+        /// The file that carries it.
+        path: PathBuf,
+    },
+
+    /// The return package could not be read, written, or renamed into place.
+    #[error("return package {path}: {source}")]
+    Package {
+        /// The path that failed.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// A capability this scaffold declares but does not yet implement.
     ///
     /// Why: a half-built capability must fail closed rather than silently

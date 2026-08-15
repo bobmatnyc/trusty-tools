@@ -35,11 +35,18 @@ pub const HEALTH_DAEMON_ERROR: &str = "daemon_error";
 pub const HEALTH_INDEX_NOT_REGISTERED: &str = "index_not_registered";
 /// The index is registered on the daemon but holds zero chunks.
 pub const HEALTH_INDEX_EMPTY: &str = "index_empty";
-/// No index could be named, so the project-level check never ran.
+/// The project-level check produced no verdict.
 ///
 /// Why: this is not `ok`. Reporting the daemon healthy when the caller's own
 /// project was never checked is the same unverified-green this tool exists to
 /// stop, moved one layer down from the daemon to the index.
+///
+/// Covers two shapes, distinguishable by the report's `index` block. No index
+/// could be NAMED, so nothing was probed at all (`index` is null); or an index
+/// was probed and the daemon declined to state its chunk count (#5633 — `index`
+/// carries `chunk_count: null`, plus `corpus_open_failure` when that is why).
+/// Both are a check that never established an answer, which is why they share a
+/// status; the remediation differs and is set per shape.
 pub const HEALTH_INDEX_UNKNOWN: &str = "index_unknown";
 
 /// Longest response-body excerpt echoed back in a diagnostic.
@@ -77,7 +84,8 @@ const DAEMON_IDENTITY_FIELDS: &[&str] = &[
 /// `search_health_reports_a_non_2xx_daemon`,
 /// `search_health_reports_an_unregistered_project_index`,
 /// `search_health_names_the_answering_daemon`,
-/// `search_health_does_not_report_ok_when_no_index_could_be_resolved`.
+/// `search_health_does_not_report_ok_when_no_index_could_be_resolved`,
+/// `search_health_does_not_report_an_unreadable_chunk_count_as_empty`.
 pub(super) async fn handle_search_health(server: &McpServer, args: &Value) -> Value {
     report_health(server, resolve_scope(server, args)).await
 }
@@ -196,17 +204,29 @@ pub(super) async fn report_health(
             )
         }
         IndexProbe::Present { body } => {
-            let chunks = body.get("chunk_count").and_then(Value::as_u64).unwrap_or(0);
             let mut detail = Map::new();
             detail.insert("registered".into(), Value::Bool(true));
-            for key in ["chunk_count", "root_path", "watcher", "semantic_coverage"] {
+            for key in [
+                "chunk_count",
+                "root_path",
+                "watcher",
+                "semantic_coverage",
+                // #5633: the daemon sends this beside a null `chunk_count`. It
+                // is the REASON the count is unknown, and it was arriving in
+                // the response body and being dropped here.
+                "corpus_open_failure",
+            ] {
                 if let Some(v) = body.get(key) {
                     detail.insert(key.to_string(), v.clone());
                 }
             }
             let index = index_scope(&index_id, source, Value::Object(detail));
-            if chunks == 0 {
-                report(
+            // #5633: the daemon's `chunk_count` is `Option<usize>` and a null
+            // one rides a 200, so `unwrap_or(0)` turned "I could not read this"
+            // into "it holds nothing" — and prescribed the reindex that is
+            // exactly wrong against a write-quarantined corpus.
+            match body.get("chunk_count").and_then(Value::as_u64) {
+                Some(0) => report(
                     HEALTH_INDEX_EMPTY,
                     daemon,
                     index,
@@ -214,18 +234,82 @@ pub(super) async fn report_health(
                     "Populate it with `trusty-search index <path>`, or \
                      `trusty-search doctor --fix`, which reindexes every \
                      zero-chunk index.",
-                )
-            } else {
-                report(
+                ),
+                Some(chunks) => report(
                     HEALTH_OK,
                     daemon,
                     index,
                     format!("{answered} Index '{index_id}' ({source}) holds {chunks} chunks."),
                     "None needed.",
-                )
+                ),
+                // Absent, null, or non-numeric: the count was never
+                // established. That is not a count of zero.
+                None => {
+                    let (because, remediation) = unknown_count_cause(&body);
+                    report(
+                        HEALTH_INDEX_UNKNOWN,
+                        daemon,
+                        index,
+                        format!(
+                            "{answered} Index '{index_id}' ({source}) is registered, but \
+                             {because}, so this reports NOTHING about how many chunks it \
+                             holds or whether searches against it will find anything. This \
+                             is NOT a report of an empty index."
+                        ),
+                        remediation,
+                    )
+                }
             }
         }
     }
+}
+
+/// Why the daemon could not state a chunk count, and what to do about it.
+///
+/// Why (#5633): "0 chunks because the index is empty" and "count unavailable
+/// because the corpus would not open" demand OPPOSITE actions — reindex, versus
+/// do not reindex because the index is write-quarantined and its chunks are
+/// intact on disk. Rendering both the same way is what sent a caller to
+/// `trusty-search index` against a quarantined corpus.
+/// What: reads the `corpus_open_failure` block the daemon already sends beside
+/// a null count (#4333) rather than inventing a cause, and lets its `transient`
+/// classifier pick between "retry" and "this needs operator action". Returns
+/// `(because, remediation)`; when no failure block is present the cause is
+/// genuinely unknown and the remediation says exactly that.
+/// Test: `search_health_does_not_report_an_unreadable_chunk_count_as_empty`,
+/// `search_health_does_not_report_a_missing_chunk_count_as_empty`.
+fn unknown_count_cause(body: &Value) -> (String, &'static str) {
+    let Some(failure) = body.get("corpus_open_failure").filter(|v| !v.is_null()) else {
+        return (
+            "its chunk count was absent from the daemon's status response".to_string(),
+            "Re-run `search_health`. If the count stays unreadable, check \
+             `trusty-search status` and the daemon log. Do NOT reindex on this \
+             verdict alone — nothing here says the index is empty.",
+        );
+    };
+    let field = |k: &str| failure.get(k).and_then(Value::as_str).unwrap_or("unknown");
+    let because = format!(
+        "its durable corpus failed to open ({}: {}), so the daemon reported the \
+         count as unknown rather than guessing at one",
+        field("kind"),
+        field("reason"),
+    );
+    let remediation = if failure
+        .get("transient")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "Retry shortly — the daemon classified this corpus failure as transient \
+         (typically an open timeout under warm-boot contention). Do NOT reindex: \
+         the chunks are intact on disk and the index is write-quarantined until \
+         the corpus opens."
+    } else {
+        "The daemon classified this corpus failure as NOT transient, so retrying \
+         will not clear it. Restart the daemon (`trusty-search stop` then \
+         `trusty-search start`) and re-check. Do NOT reindex on this verdict — \
+         the count is unknown, not zero."
+    };
+    (because, remediation)
 }
 
 /// Assemble one report body. `status` decides `healthy`.

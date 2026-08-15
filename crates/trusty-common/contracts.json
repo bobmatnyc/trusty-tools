@@ -1,0 +1,254 @@
+{
+  "artifact_version": 1,
+  "crate": "trusty-common",
+  "items": [
+    {
+      "invariants": [
+        "Pure with respect to this value: no field is mutated and no file is written. For a fixed filesystem state the result is stable across calls.",
+        "The ordering it induces is the ONE ordering used for both sorting and watermark membership; the two never diverge."
+      ],
+      "kind": "function",
+      "path": "trusty_common::catchup::session_finder::PausedSession::sort_key",
+      "postconditions": [
+        "`None` means \"this session cannot be dated at all\", which since #5072 means EXCLUDED from a watermark-filtered digest. It does not mean \"always included\" — that was the reading `is_none_or` encoded, and it inverted a real project's digest.",
+        "Both variants receive the same file-mtime fallback, so neither arm can be undatable merely because its recorded timestamp is missing or malformed. `None` survives only for a session with no file behind it."
+      ],
+      "preconditions": [
+        "None. Every `PausedSession` value is accepted."
+      ]
+    },
+    {
+      "invariants": [
+        "`kept.len() + dropped_undatable <= sessions.len()`, with the shortfall being sessions that were datable and did not postdate the watermark.",
+        "No session is both kept and counted as dropped.",
+        "The count is a RECEIPT, not diagnostics: a withheld session falls outside every future window once the watermark advances, so it must be reportable in the return value and not only on stderr."
+      ],
+      "kind": "function",
+      "path": "trusty_common::catchup::session_finder::filter_sessions_since",
+      "postconditions": [
+        "With `watermark == None`, `kept` is `sessions` unchanged in length and order, and `dropped_undatable == 0`.",
+        "With `watermark == Some(wm)`, `kept` contains exactly those sessions whose `sort_key()` is `Some(ts)` with `ts > wm`. The comparison is STRICT, so a session paused exactly at the watermark is excluded.",
+        "`dropped_undatable` counts exactly the sessions whose `sort_key()` is `None`. Since #5072 an undatable session is WITHHELD, not admitted — the inverse of the `is_none_or` predicate this replaced.",
+        "`kept` preserves the relative order of the input."
+      ],
+      "preconditions": [
+        "None. Every `sessions` list and every `watermark` is accepted; an empty list and a `None` watermark are ordinary inputs, not edge cases."
+      ]
+    },
+    {
+      "invariants": [
+        "Read-only: no file, directory, or session-log entry is created, modified, or removed.",
+        "Referentially transparent for a fixed filesystem state — repeated calls with equal arguments return equal results."
+      ],
+      "kind": "function",
+      "path": "trusty_common::catchup::session_finder::latest_trusty_mpm_snapshot",
+      "postconditions": [
+        "Returns `None` whenever `session_id` is `None`, for every `project_dir`, including one holding snapshots that would have matched before #5272.",
+        "A returned path is always a snapshot the session log attributes to `session_id`; it is never selected by recency across session boundaries.",
+        "A returned path is `<project_dir>/.trusty-mpm/sessions/` rooted."
+      ],
+      "preconditions": [
+        "`session_id` is the ATTRIBUTION of the asking session, not a search hint. `None` asserts \"the caller did not identify itself\". It does NOT mean \"any session will do\" — that was the pre-#5272 reading, and it is the precondition that changed under a byte-identical signature.",
+        "`project_dir` need not exist; a missing directory yields `None`, not an error."
+      ]
+    },
+    {
+      "invariants": [
+        "Reads the environment but never writes it, and never caches — a region changed between two calls is observed by the second.",
+        "The precedence walk itself is pure; the env read is lifted to the single call site here so [`resolve_region_from`] stays provable without mutating process-wide state."
+      ],
+      "kind": "function",
+      "path": "trusty_common::chat::bedrock_provider::resolve_bedrock_region",
+      "postconditions": [
+        "Returns the first non-empty value in the strict order `explicit` > `TRUSTY_AWS_REGION` > `AWS_REGION` > [`DEFAULT_BEDROCK_REGION`] (#5652).",
+        "Never returns an empty string, because the last tier is a non-empty constant.",
+        "Total: there is no input for which this fails or panics."
+      ],
+      "preconditions": [
+        "None. `explicit` may be `None`, `Some(\"\")`, or any string; an empty string at ANY tier is treated as unset rather than as a chosen region."
+      ]
+    },
+    {
+      "invariants": [
+        "Pure: no I/O, no logging, no environment access.",
+        "The output format is depended on by `memory_core::filter`; it is a compatibility surface, not a cosmetic choice."
+      ],
+      "kind": "function",
+      "path": "trusty_common::credentials::redact_secret",
+      "postconditions": [
+        "The result is NON-REVERSIBLE: it never contains more than the first [`DEFAULT_HEAD_LEN`] characters of `secret`.",
+        "When `secret` is at or under [`DEFAULT_HEAD_LEN`] CHARACTERS, no head is shown at all (#2475) — showing the head of a short secret discloses the whole value.",
+        "The reported length is `secret.len()`, a BYTE count, while the head is taken in CHARACTERS. The two units differ deliberately and the char-wise `take` is what keeps a multi-byte secret from panicking.",
+        "Total: never panics, for any input."
+      ],
+      "preconditions": [
+        "None. Every `&str` is accepted, including the empty string and non-ASCII input. The caller decides whether the value is secret-shaped; this function does not gate on length."
+      ]
+    },
+    {
+      "invariants": [
+        "Pure: no I/O, no environment access, `secrets` is not mutated.",
+        "The result is LOWER-RISK, NOT PROVEN SECRET-FREE. It removes only values the caller already holds; a secret the process does not know passes through untouched. This is a bound on what the postconditions above claim, and it is why scrubbed text is not a licence to route untrusted text into a sink that could not otherwise hold a secret."
+      ],
+      "kind": "function",
+      "path": "trusty_common::credentials::scrub_secrets",
+      "postconditions": [
+        "For every needle of at least [`MIN_SCRUBBABLE_SECRET_CHARS`] characters, the result contains NO occurrence of that needle.",
+        "A needle under that length — the empty string included — is left unapplied, and text that happens to contain it is returned unchanged.",
+        "Overlapping needles are applied longest-first, so a secret that is a prefix of another cannot leave the longer one's tail behind.",
+        "Returns `text` unchanged when no needle survives the guard or none occurs."
+      ],
+      "preconditions": [
+        "None. `secrets` may be empty and may contain empty or short values; those are skipped by the guard rather than rejected."
+      ]
+    },
+    {
+      "invariants": [
+        "Read-only: unlike `check_already_running`, it never deletes a stale file.",
+        "The path it reads is the one `write_daemon_addr` writes and `remove_daemon_addr` deletes; the three share one layout so a third trusty-* daemon cannot invent another location."
+      ],
+      "kind": "function",
+      "path": "trusty_common::daemon_addr::read_daemon_addr",
+      "postconditions": [
+        "`Ok(None)` means the address file DOES NOT EXIST, and only that. It never stands in for a read that failed.",
+        "`Err` means the address is UNKNOWN — a permission denial, a corrupt data directory, or any other I/O failure. Distinguishing it from `Ok(None)` is this function's reason to be fallible, and is what lets callers avoid string-matching on error messages.",
+        "`Ok(Some(s))` returns the file's contents with surrounding whitespace trimmed. `s` may be empty if the file is empty or blank; this function does not validate that `s` is a well-formed address."
+      ],
+      "preconditions": [
+        "None. `app_name` need not name a daemon that has ever run."
+      ]
+    },
+    {
+      "invariants": [
+        "Read-only, and does not probe the address — a returned url means \"recorded\", never \"reachable\". Use `check_already_running` for liveness."
+      ],
+      "kind": "function",
+      "path": "trusty_common::daemon_addr::resolve_daemon_base_url",
+      "postconditions": [
+        "`Some(url)` is returned ONLY from an address the named daemon actually recorded. No port, host, or scheme is ever guessed — the #2030 discovery-first rule, because a wrong guessed port fails worse than a clean skip.",
+        "A returned url carries exactly one scheme: the recorded address is returned as-is when it already starts with `http://` or `https://`, and prefixed with `http://` otherwise. It is never double-prefixed.",
+        "`None` is returned when the daemon never started, when the address file is empty or blank, and when it is unreadable. Callers read `None` as \"skip, not discoverable\" — it is deliberately NOT distinguishable from an I/O error here, because every one of those cases has the same correct response.",
+        "Total: never panics and never returns `Err`; I/O failure collapses to `None`."
+      ],
+      "preconditions": [
+        "None. `app_name` need not name a daemon that has ever run."
+      ]
+    },
+    {
+      "invariants": [
+        "Pure: no I/O, no logging, no environment access.",
+        "The output format is depended on by `memory_core::filter`; it is a compatibility surface, not a cosmetic choice."
+      ],
+      "kind": "function",
+      "path": "trusty_common::inference::credentials::redact_secret",
+      "postconditions": [
+        "The result is NON-REVERSIBLE: it never contains more than the first [`DEFAULT_HEAD_LEN`] characters of `secret`.",
+        "When `secret` is at or under [`DEFAULT_HEAD_LEN`] CHARACTERS, no head is shown at all (#2475) — showing the head of a short secret discloses the whole value.",
+        "The reported length is `secret.len()`, a BYTE count, while the head is taken in CHARACTERS. The two units differ deliberately and the char-wise `take` is what keeps a multi-byte secret from panicking.",
+        "Total: never panics, for any input."
+      ],
+      "preconditions": [
+        "None. Every `&str` is accepted, including the empty string and non-ASCII input. The caller decides whether the value is secret-shaped; this function does not gate on length."
+      ]
+    },
+    {
+      "invariants": [
+        "Pure: no I/O, no environment access, `secrets` is not mutated.",
+        "The result is LOWER-RISK, NOT PROVEN SECRET-FREE. It removes only values the caller already holds; a secret the process does not know passes through untouched. This is a bound on what the postconditions above claim, and it is why scrubbed text is not a licence to route untrusted text into a sink that could not otherwise hold a secret."
+      ],
+      "kind": "function",
+      "path": "trusty_common::inference::credentials::scrub_secrets",
+      "postconditions": [
+        "For every needle of at least [`MIN_SCRUBBABLE_SECRET_CHARS`] characters, the result contains NO occurrence of that needle.",
+        "A needle under that length — the empty string included — is left unapplied, and text that happens to contain it is returned unchanged.",
+        "Overlapping needles are applied longest-first, so a secret that is a prefix of another cannot leave the longer one's tail behind.",
+        "Returns `text` unchanged when no needle survives the guard or none occurs."
+      ],
+      "preconditions": [
+        "None. `secrets` may be empty and may contain empty or short values; those are skipped by the guard rather than rejected."
+      ]
+    },
+    {
+      "invariants": [
+        "Read-only: opens a read transaction and writes nothing.",
+        "Counts only ACTIVE triples — a superseded or retracted triple is excluded even though its history row survives.",
+        "The sum saturates rather than overflowing `u64`."
+      ],
+      "kind": "function",
+      "path": "trusty_common::memory_core::store::kg_redb::KgStoreRedb::count_active_triples",
+      "postconditions": [
+        "`Ok(n)` means the read COMPLETED and `n` is the number of currently active triples. `Ok(0)` therefore means the graph is empty, and only that (#5384). Before 0.33.0 this returned a bare `u64` and a failed read also produced `0`, which `kg_query` reported as `graph_state: \"graph_empty\"` — the false claim #4775 exists to prevent.",
+        "`Err` means the count is UNKNOWN. It never means zero, and a caller must not substitute one.",
+        "Every read step propagates: `begin_read`, `open_table`, `iter`, and each per-row read."
+      ],
+      "preconditions": [
+        "The store is open. No table need be populated — `open_with_intent` creates every table on open, so a missing table is a real failure and never means \"not written yet\"."
+      ]
+    },
+    {
+      "invariants": [
+        "Read-only: unlike `check_already_running`, it never deletes a stale file.",
+        "The path it reads is the one `write_daemon_addr` writes and `remove_daemon_addr` deletes; the three share one layout so a third trusty-* daemon cannot invent another location."
+      ],
+      "kind": "function",
+      "path": "trusty_common::read_daemon_addr",
+      "postconditions": [
+        "`Ok(None)` means the address file DOES NOT EXIST, and only that. It never stands in for a read that failed.",
+        "`Err` means the address is UNKNOWN — a permission denial, a corrupt data directory, or any other I/O failure. Distinguishing it from `Ok(None)` is this function's reason to be fallible, and is what lets callers avoid string-matching on error messages.",
+        "`Ok(Some(s))` returns the file's contents with surrounding whitespace trimmed. `s` may be empty if the file is empty or blank; this function does not validate that `s` is a well-formed address."
+      ],
+      "preconditions": [
+        "None. `app_name` need not name a daemon that has ever run."
+      ]
+    },
+    {
+      "invariants": [
+        "Read-only, and does not probe the address — a returned url means \"recorded\", never \"reachable\". Use `check_already_running` for liveness."
+      ],
+      "kind": "function",
+      "path": "trusty_common::resolve_daemon_base_url",
+      "postconditions": [
+        "`Some(url)` is returned ONLY from an address the named daemon actually recorded. No port, host, or scheme is ever guessed — the #2030 discovery-first rule, because a wrong guessed port fails worse than a clean skip.",
+        "A returned url carries exactly one scheme: the recorded address is returned as-is when it already starts with `http://` or `https://`, and prefixed with `http://` otherwise. It is never double-prefixed.",
+        "`None` is returned when the daemon never started, when the address file is empty or blank, and when it is unreadable. Callers read `None` as \"skip, not discoverable\" — it is deliberately NOT distinguishable from an I/O error here, because every one of those cases has the same correct response.",
+        "Total: never panics and never returns `Err`; I/O failure collapses to `None`."
+      ],
+      "preconditions": [
+        "None. `app_name` need not name a daemon that has ever run."
+      ]
+    },
+    {
+      "invariants": [
+        "Back-off doubles from [`ETXTBSY_BACKOFF_MS`] per retry and saturates rather than overflowing if the attempt ceiling is ever raised.",
+        "This function blocks the calling thread during back-off. Async callers must use [`retry_on_etxtbsy_async`], which applies an identical policy."
+      ],
+      "kind": "function",
+      "path": "trusty_common::spawn_retry::retry_on_etxtbsy",
+      "postconditions": [
+        "Returns the outcome of the LAST invocation of `attempt`, whatever it is.",
+        "`attempt` is invoked at least once, and at most [`ETXTBSY_MAX_ATTEMPTS`] times.",
+        "A retry happens if and only if the previous outcome was `Err(ErrorKind::ExecutableFileBusy)` AND attempts remain. Every other outcome — success or any other error — is returned immediately, with no further invocation and no trailing sleep.",
+        "The final `ExecutableFileBusy` error is returned rather than swallowed, so exhausting the budget is distinguishable from succeeding."
+      ],
+      "preconditions": [
+        "`attempt` performs AT MOST ONE spawn per invocation and is safe to call again after an `ExecutableFileBusy` error. The type system does not enforce this; see the section above for why the errno classification, not the signature, is what makes it hold.",
+        "`attempt` must not itself manufacture an `ExecutableFileBusy` from a non-exec failure, or it would drive a retry of work that already ran."
+      ]
+    },
+    {
+      "invariants": [
+        "Yields to the runtime during back-off instead of blocking a worker thread. That is the ONLY difference from the blocking twin."
+      ],
+      "kind": "function",
+      "path": "trusty_common::spawn_retry::retry_on_etxtbsy_async",
+      "postconditions": [
+        "Every postcondition of [`retry_on_etxtbsy`] holds verbatim: same invocation bounds, same retry-if-and-only-if condition, same returned outcome, same final-error propagation. The two share one `step` driver so the policies cannot drift apart."
+      ],
+      "preconditions": [
+        "Identical to [`retry_on_etxtbsy`]: `attempt` performs at most one spawn per invocation and is safe to re-invoke after `ExecutableFileBusy`.",
+        "`attempt` stays SYNCHRONOUS. Only the back-off is async, because `tokio::process::Command::spawn` is itself a sync call returning `io::Result<Child>`.",
+        "Must be polled inside a tokio runtime, since back-off sleeps on it."
+      ]
+    }
+  ]
+}

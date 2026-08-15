@@ -3,6 +3,14 @@ name = "trusty-agents-ui"
 version = "0.16.1"
 edition = "2021"
 description = "Tauri 2 desktop chat interface for trusty-agents"
+# `publish = false` and an explicit licence, matching the two sibling Tauri
+# GUIs (trusty-mpm-gui, trusty-code-gui) which both declare them. This crate
+# declared neither, which `cargo deny check licenses` reported as
+# `error[unlicensed]: trusty-agents-ui = 0.16.1 is unlicensed` — the only
+# licence error anywhere in a 1220-crate graph. Without `publish = false`
+# nothing but human memory stopped `cargo publish` being pointed at it.
+publish = false
+license.workspace = true
 
 [[bin]]
 name = "trusty-agents-ui"

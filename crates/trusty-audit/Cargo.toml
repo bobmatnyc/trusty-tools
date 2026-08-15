@@ -66,6 +66,14 @@ serde_json = { workspace = true }
 # Async runtime for the binary. `Session::execute` is async because installing
 # the pinned tools downloads; the Tauri shell will drive the same future.
 tokio = { workspace = true }
+# #5499: the return package is one zip file, because the return channel is
+# manual (#5642) and a directory cannot be attached to an email.
+zip = { workspace = true }
+# #5499: walking each audited repository's output directory. Not followed
+# through symlinks — `package::collect_dir` refuses one rather than reading a
+# file from outside the working directory into a package that leaves the
+# recipient's network.
+walkdir = { workspace = true }
 
 [dev-dependencies]
 # Real directories for the working-directory creation tests.

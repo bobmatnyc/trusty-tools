@@ -62,6 +62,14 @@ pub const VERSION_RECORD_FILE: &str = "tool-versions.toml";
 pub enum RequiredTool {
     /// The audit sweep itself.
     Tga,
+    /// The search daemon the rest of the stack stands on (#5670).
+    ///
+    /// Why it is a pinned tool rather than a machine prerequisite: `tga audit`
+    /// starts this daemon itself, and on a recipient's clean machine the only
+    /// copy it can start is the one this client installed. Without it here,
+    /// `TRUSTY_SEARCH_BIN` would have nothing to name and the guard would fall
+    /// through to a `PATH` lookup — the one thing an isolated run must not do.
+    TrustySearch,
     /// Static analysis feeding the scorecard.
     TrustyAnalyze,
     /// Report rendering.
@@ -69,9 +77,13 @@ pub enum RequiredTool {
 }
 
 impl RequiredTool {
-    /// Every tool the run needs (#5495).
-    pub const ALL: [RequiredTool; 3] = [
+    /// Every tool the run needs (#5495, #5670).
+    ///
+    /// The order is the prerequisite chain: trusty-search must exist before
+    /// `trusty-analyze` can boot against it, and both before `tga` sweeps.
+    pub const ALL: [RequiredTool; 4] = [
         RequiredTool::Tga,
+        RequiredTool::TrustySearch,
         RequiredTool::TrustyAnalyze,
         RequiredTool::TrustyReview,
     ];
@@ -80,6 +92,7 @@ impl RequiredTool {
     pub fn binary_name(self) -> &'static str {
         match self {
             RequiredTool::Tga => "tga",
+            RequiredTool::TrustySearch => "trusty-search",
             RequiredTool::TrustyAnalyze => "trusty-analyze",
             RequiredTool::TrustyReview => "trusty-review",
         }
@@ -89,6 +102,7 @@ impl RequiredTool {
     pub fn crate_name(self) -> &'static str {
         match self {
             RequiredTool::Tga => "tga",
+            RequiredTool::TrustySearch => "trusty-search",
             RequiredTool::TrustyAnalyze => "trusty-analyze",
             RequiredTool::TrustyReview => "trusty-review",
         }
@@ -101,7 +115,7 @@ impl RequiredTool {
 
     /// This tool's pin, from the engagement config.
     ///
-    /// Why: an exhaustive match, so adding a fourth tool to [`RequiredTool`]
+    /// Why: an exhaustive match, so adding a fifth tool to [`RequiredTool`]
     /// fails to compile until [`ToolPins`] gains a field for it. A lookup by
     /// string key would instead resolve to "absent" at runtime, and absent is
     /// how an unpinned tool gets fetched at whatever version is current.
@@ -110,6 +124,7 @@ impl RequiredTool {
     pub fn pin_in(self, pins: &ToolPins) -> &ToolPin {
         match self {
             RequiredTool::Tga => &pins.tga,
+            RequiredTool::TrustySearch => &pins.trusty_search,
             RequiredTool::TrustyAnalyze => &pins.trusty_analyze,
             RequiredTool::TrustyReview => &pins.trusty_review,
         }
@@ -444,6 +459,7 @@ instructions = "Assess the last 52 weeks."
 
 [tools]
 tga = "2.9.4"
+trusty-search = "0.47.0"
 trusty-analyze = "0.9.2"
 trusty-review = "0.15.1"
 "#,
@@ -464,6 +480,7 @@ trusty-review = "0.15.1"
     fn a_matching_set() -> Vec<InstalledTool> {
         vec![
             install_of("tga", "2.9.4"),
+            install_of("trusty-search", "0.47.0"),
             install_of("trusty-analyze", "0.9.2"),
             install_of("trusty-review", "0.15.1"),
         ]
@@ -511,7 +528,7 @@ trusty-review = "0.15.1"
             assert_eq!(pinned.binary, tool.binary_name());
         }
         let versions: Vec<&str> = plan.iter().map(|p| p.version.as_str()).collect();
-        assert_eq!(versions, vec!["2.9.4", "0.9.2", "0.15.1"]);
+        assert_eq!(versions, vec!["2.9.4", "0.47.0", "0.9.2", "0.15.1"]);
         // No digest was pinned, so none is invented.
         assert!(plan.iter().all(|p| p.sha256.is_none()));
     }
@@ -535,7 +552,7 @@ trusty-review = "0.15.1"
                 .iter()
                 .map(|i| i.version.as_str())
                 .collect::<Vec<_>>(),
-            vec!["2.9.4", "0.9.2", "0.15.1"]
+            vec!["2.9.4", "0.47.0", "0.9.2", "0.15.1"]
         );
     }
 
@@ -543,7 +560,7 @@ trusty-review = "0.15.1"
     #[test]
     fn a_version_that_drifts_from_the_pin_is_refused() {
         let mut installs = a_matching_set();
-        installs[2] = install_of("trusty-review", "0.14.0");
+        installs[3] = install_of("trusty-review", "0.14.0");
         let err = verify(&pins(), &installs).expect_err("a drifted version must not verify");
         let AuditError::VersionMismatch {
             tool,
@@ -565,7 +582,7 @@ trusty-review = "0.15.1"
         assert!(matches!(
             err,
             AuditError::VersionMismatch {
-                tool: "trusty-analyze",
+                tool: "trusty-search",
                 ..
             }
         ));

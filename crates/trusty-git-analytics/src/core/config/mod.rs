@@ -10,7 +10,10 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! `no_run`: type-checks the real API without requiring a `config.yaml` on
+//! disk at doctest time. // #5460: was `ignore`, which `--include-ignored`
+//! forces to run and panics on the missing file
+//! ```no_run
 //! use std::path::Path;
 //! use tga::core::config::Config;
 //!
@@ -1217,26 +1220,113 @@ pub struct JiraConfig {
     pub ticket_regex: Option<String>,
 }
 
+/// The current user's home directory, as `$HOME`.
+///
+/// Why: `expand_path` and [`aliases::AliasFile::load`] both need it, and a
+/// separate `$HOME` read in each left two tests that could only be steered by
+/// mutating the process environment (#5313).
+/// What: returns `$HOME` as a path, or `None` when the variable is unset.
+/// Test: covered through `expand_path`'s callers; the expansion rule itself is
+/// proven env-free by `expand_path_with_home_*`.
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
 /// Expand a leading `~` in a path to the current user's home directory.
 ///
 /// Returns the path unchanged if it does not start with `~`. If `~` is
 /// present but the home directory cannot be determined, the path is also
 /// returned unchanged.
 pub fn expand_path(path: &Path) -> PathBuf {
+    // #5313: read $HOME here so the expansion rule below stays pure.
+    expand_path_with(path, home_dir().as_deref())
+}
+
+/// Expand a leading `~` in `path` against an explicitly supplied `home`.
+///
+/// Why (#5313): [`expand_path`] reads `$HOME`, so any test of tilde expansion —
+/// or of a caller that expands a tilde path — had to mutate the process
+/// environment, which is `unsafe` under the 2024 edition and races every other
+/// thread `cargo test` runs in parallel. Taking the home directory as an
+/// argument makes the rule provable without touching global state.
+/// What: `~/rest` becomes `home/rest` and a bare `~` becomes `home`; every
+/// other shape, and any shape at all when `home` is `None`, is returned
+/// unchanged. A path that is not valid UTF-8 is returned unchanged.
+/// Test: `expand_path_with_home_tilde_slash`, `expand_path_with_home_bare_tilde`,
+/// `expand_path_with_home_passthrough`, `expand_path_with_home_none`.
+pub(crate) fn expand_path_with(path: &Path, home: Option<&Path>) -> PathBuf {
     let s = match path.to_str() {
         Some(s) => s,
         None => return path.to_path_buf(),
     };
     if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
+        if let Some(home) = home {
+            return home.join(rest);
         }
     } else if s == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home);
+        if let Some(home) = home {
+            return home.to_path_buf();
         }
     }
     path.to_path_buf()
+}
+
+#[cfg(test)]
+mod expand_path_tests {
+    use super::expand_path_with;
+    use std::path::{Path, PathBuf};
+
+    /// `~/rest` joins onto the supplied home directory.
+    #[test]
+    fn expand_path_with_home_tilde_slash() {
+        assert_eq!(
+            expand_path_with(
+                Path::new("~/data/tga.db"),
+                Some(Path::new("/home/testuser"))
+            ),
+            PathBuf::from("/home/testuser/data/tga.db")
+        );
+    }
+
+    /// A bare `~` becomes the home directory itself.
+    #[test]
+    fn expand_path_with_home_bare_tilde() {
+        assert_eq!(
+            expand_path_with(Path::new("~"), Some(Path::new("/home/testuser"))),
+            PathBuf::from("/home/testuser")
+        );
+    }
+
+    /// Paths without a leading `~` are returned unchanged, including ones that
+    /// merely contain a tilde.
+    #[test]
+    fn expand_path_with_home_passthrough() {
+        let home = Some(Path::new("/home/testuser"));
+        assert_eq!(
+            expand_path_with(Path::new("/var/data/tga.db"), home),
+            PathBuf::from("/var/data/tga.db")
+        );
+        assert_eq!(
+            expand_path_with(Path::new("data/tga.db"), home),
+            PathBuf::from("data/tga.db")
+        );
+        assert_eq!(
+            expand_path_with(Path::new("~user/data"), home),
+            PathBuf::from("~user/data"),
+            "only `~/` and a bare `~` expand; `~user` is not a home reference"
+        );
+    }
+
+    /// With no home directory known, a tilde path is returned unchanged rather
+    /// than expanded against a fabricated root.
+    #[test]
+    fn expand_path_with_home_none() {
+        assert_eq!(
+            expand_path_with(Path::new("~/data/tga.db"), None),
+            PathBuf::from("~/data/tga.db")
+        );
+        assert_eq!(expand_path_with(Path::new("~"), None), PathBuf::from("~"));
+    }
 }
 
 impl Config {

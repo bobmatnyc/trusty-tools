@@ -1,0 +1,5 @@
+TYPES tga 2.19.1
+  baseline: /repo/target/semver-checks/cache/tga-2_19_0-aarch64_apple_darwin-b9afc9ea5d7838c6.json
+  current:  /repo/target/semver-checks/local-tga-2_19_1-aarch64_apple_darwin-e222d1f636266871/target/doc/tga.json
+compared: 7628 public item(s); 0 changed, 0 removed, 89 added
+semver type differ: 7628 public item position(s) compared, 0 type change(s) — OK.

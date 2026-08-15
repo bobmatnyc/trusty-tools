@@ -199,14 +199,7 @@ pub fn build_dd_manifest(
     let secrets = configured_secrets(cfg);
     let clean = |s: &str| scrub_secrets(s, &secrets);
 
-    let repositories = cfg
-        .repositories
-        .iter()
-        .map(|repo| DdRepositoryEntry {
-            name: clean(&repo_name(repo.name.as_deref(), &repo.path)),
-            path: anchor(&opts.base_dir, &repo.path),
-        })
-        .collect();
+    let repositories = dd_repository_entries(cfg, &opts.base_dir);
 
     Ok(DdManifest {
         report: DdReportSection {
@@ -217,6 +210,31 @@ pub fn build_dd_manifest(
         },
         repositories,
     })
+}
+
+/// The `[[repositories]]` entries for one audit run.
+///
+/// Why: #5670 — `tga audit` indexes each repository before the renderer asks for
+/// it, and the index id trusty-review looks up is derived from the checkout path
+/// in THIS list. Sharing the mapping rather than re-deriving it beside the caller
+/// is what makes the two agree by construction: index an anchored path the
+/// manifest does not carry, or under a name the manifest does not use, and the
+/// run indexes repositories nobody ever queries while still rendering hollow
+/// sections.
+/// What: one entry per configured repository, in config order, with the same
+/// name fallback and the same base-dir anchoring [`build_dd_manifest`] emits,
+/// scrubbed against the same needles. Pure: no I/O, no clock, no environment.
+/// Test: `super::dd_manifest_tests::names_fall_back_to_the_directory_basename`,
+/// and `crate::audit::tests::index_ids_match_the_manifest_paths_the_renderer_reads`.
+pub fn dd_repository_entries(cfg: &Config, base_dir: &Path) -> Vec<DdRepositoryEntry> {
+    let secrets = configured_secrets(cfg);
+    cfg.repositories
+        .iter()
+        .map(|repo| DdRepositoryEntry {
+            name: scrub_secrets(&repo_name(repo.name.as_deref(), &repo.path), &secrets),
+            path: anchor(base_dir, &repo.path),
+        })
+        .collect()
 }
 
 /// Anchor a possibly-relative repository path to `base`.

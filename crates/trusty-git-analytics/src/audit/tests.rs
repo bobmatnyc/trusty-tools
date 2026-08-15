@@ -934,3 +934,1066 @@ fn stale_renderer_is_rejected_before_the_sweep() {
             .unwrap_or_else(|e| panic!("{unreadable:?} must proceed, not fail: {e}"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// #5670 — the analyze daemon the audit's report is built from
+// ---------------------------------------------------------------------------
+
+/// A localhost port nothing is listening on.
+///
+/// Binds port 0 so the OS picks a free one, then releases it — hard-coding a
+/// high port instead can collide with something already bound on a busy host.
+pub(super) fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("read the bound address")
+        .port();
+    drop(listener);
+    port
+}
+
+/// A listener standing in for `trusty-analyze`'s `/health`, answering
+/// `503 Service Unavailable` to its first `degraded_replies` callers and
+/// `200 OK` to every caller after that. Returns the port it bound.
+///
+/// 503 is not an arbitrary sad path: it is what the real daemon answers whenever
+/// trusty-search is unreachable
+/// (`crates/trusty-analyze/src/service/routes.rs`'s `health`, which returns
+/// `SERVICE_UNAVAILABLE` + `status: "degraded"`). `probe_once` counts only a
+/// 2xx, so a 503 daemon reads to the guard exactly like no daemon.
+///
+/// The counter advances on REPLIES, so this is deterministic only for
+/// assertions about replies — which probes missed, and what the guard concluded
+/// from them. An assertion about a side effect the stub performs, such as a
+/// spawn or a file write, is a different event: it can still be pending when
+/// the counter has already flipped the daemon to ready. Gate that on the effect
+/// itself — see `serve_health_after_spawns` (#5713).
+async fn serve_health(degraded_replies: usize) -> u16 {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("read the bound address")
+        .port();
+    let served = Arc::new(AtomicUsize::new(0));
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let served = Arc::clone(&served);
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                let nth = served.fetch_add(1, Ordering::SeqCst);
+                let reply: &[u8] = if nth < degraded_replies {
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                };
+                let _ = stream.write_all(reply).await;
+            });
+        }
+    });
+    port
+}
+
+/// A listener answering `HTTP/1.1 200 OK` to everything, standing in for a
+/// healthy daemon. Returns the port it bound.
+async fn serve_healthy() -> u16 {
+    serve_health(0).await
+}
+
+/// A listener whose `/health` answers `503 Service Unavailable` until
+/// `spawn_log` holds `required` lines, and `200 OK` from then on. Returns the
+/// port it bound.
+///
+/// Why a spawn log rather than [`serve_health`]'s reply counter (#5713): the
+/// counter flips on the Nth REQUEST, which is a different event from the spawns
+/// the concurrency test asserts on. Both guards could therefore reach `Ok` off
+/// the counter alone, before either detached stub had been scheduled to append
+/// its line — and on a loaded host they did, leaving the test reading an empty
+/// log and reporting `got []`.
+///
+/// Gating on the log inverts that: the daemon becomes ready BECAUSE the spawns
+/// happened, so a guard that returns `Ok` proves both lines are already on disk.
+/// It also fixes the opening-probe ordering for free. A guard's own spawn cannot
+/// precede its own opening probe, so the second guard's probe sees at most one
+/// line, misses, and spawns — by construction rather than by winning a race
+/// against the first guard's readiness polls.
+///
+/// A file rather than an in-process counter, because the thing that writes it is
+/// a detached child process — the same reason [`serve_health_gated_on`] uses one.
+async fn serve_health_after_spawns(spawn_log: std::path::PathBuf, required: usize) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("read the bound address")
+        .port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let spawn_log = spawn_log.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                let spawned = std::fs::read_to_string(&spawn_log)
+                    .unwrap_or_default()
+                    .lines()
+                    .count();
+                let reply: &[u8] = if spawned >= required {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
+                };
+                let _ = stream.write_all(reply).await;
+            });
+        }
+    });
+    port
+}
+
+/// An executable stub at `dir/name` running `script`, standing in for a
+/// `trusty-analyze` binary without needing one on the machine.
+#[cfg(unix)]
+fn stub_binary(dir: &std::path::Path, name: &str, script: &str) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = dir.join(name);
+    std::fs::write(&stub, script).expect("write the stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+        .expect("make the stub executable");
+    stub.to_str().expect("a UTF-8 temp path").to_string()
+}
+
+/// A guard pointed at `port`, with budgets short enough for a unit test.
+fn guard_on(port: u16, binary: &str) -> crate::audit::AnalyzeGuard {
+    crate::audit::AnalyzeGuard {
+        url: format!("http://127.0.0.1:{port}"),
+        binary: binary.to_string(),
+        startup_timeout: std::time::Duration::from_millis(400),
+        poll_interval: std::time::Duration::from_millis(50),
+    }
+}
+
+/// Both overrides win when set, and an empty one is not a setting.
+///
+/// The empty case matters because `trusty-audit` exports `TRUSTY_ANALYZE_BIN`
+/// unconditionally, and a half-written export leaves it set to `""` — which must
+/// resolve to the PATH lookup rather than to an unspawnable empty program name.
+#[test]
+fn analyze_resolution_prefers_the_env_overrides() {
+    use crate::audit::analyze::{binary_from_override, url_from_override};
+    use crate::audit::{DEFAULT_ANALYZE_BIN, DEFAULT_ANALYZE_URL};
+
+    assert_eq!(
+        binary_from_override(Some("/pinned/trusty-analyze")),
+        "/pinned/trusty-analyze"
+    );
+    assert_eq!(binary_from_override(None), DEFAULT_ANALYZE_BIN);
+    assert_eq!(binary_from_override(Some("")), DEFAULT_ANALYZE_BIN);
+
+    assert_eq!(
+        url_from_override(Some("http://127.0.0.1:9999")),
+        "http://127.0.0.1:9999"
+    );
+    assert_eq!(url_from_override(None), DEFAULT_ANALYZE_URL);
+    assert_eq!(url_from_override(Some("")), DEFAULT_ANALYZE_URL);
+}
+
+/// `serve` takes `--port`, not a URL, so an operator who moved the daemon must
+/// get a daemon on the port they named — spawning on 7879 and then probing the
+/// override would burn the whole budget and refuse a correct configuration.
+#[test]
+fn the_spawn_port_comes_from_the_configured_url() {
+    use crate::audit::analyze::port_of;
+    use crate::audit::DEFAULT_ANALYZE_PORT;
+
+    assert_eq!(port_of("http://127.0.0.1:9312"), 9312);
+    assert_eq!(port_of("http://localhost:9312/"), 9312);
+    assert_eq!(port_of("https://localhost:9312"), 9312);
+    // No port, and unreadable ports, fall back rather than failing the run.
+    assert_eq!(port_of("http://localhost"), DEFAULT_ANALYZE_PORT);
+    assert_eq!(port_of("http://localhost:not-a-port"), DEFAULT_ANALYZE_PORT);
+}
+
+/// A daemon that is already up is left alone.
+///
+/// The binary is a path that cannot exist, so any spawn attempt would fail the
+/// run — passing is therefore proof the fast path returned without spawning
+/// anything, which is what keeps `tga audit` from starting a second daemon
+/// beside an operator's own.
+#[tokio::test]
+async fn a_reachable_analyze_daemon_is_not_restarted() {
+    let port = serve_healthy().await;
+    let guard = guard_on(port, "/nonexistent/trusty-analyze");
+    crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect("a healthy daemon must satisfy the preflight without a spawn");
+}
+
+/// #5670, the spawn-failure arm: a binary that will not start is a refusal, not
+/// a warning the sweep proceeds past.
+///
+/// This is the shape the defect had — `trusty-analyze` absent from the machine —
+/// and before the fix nothing looked for it at all, so the audit ran to
+/// completion and delivered a report with three empty sections.
+#[tokio::test]
+async fn an_unspawnable_analyze_binary_refuses_the_audit() {
+    let guard = guard_on(free_port(), "/nonexistent/trusty-analyze");
+    let err = crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a binary that cannot be spawned must stop the audit");
+
+    let msg = err.to_string();
+    for needle in [
+        "trusty-analyze",
+        "trusty-search",
+        "/nonexistent/trusty-analyze",
+    ] {
+        assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+}
+
+/// The argument vector is the tga→trusty-analyze contract, asserted without
+/// spawning anything — the same pure-function split `report_args` uses on the
+/// renderer side.
+#[test]
+fn the_spawn_arguments_are_serve_on_the_configured_port() {
+    use crate::audit::analyze::serve_args;
+
+    assert_eq!(serve_args(9312), vec!["serve", "--port", "9312"]);
+}
+
+/// #5670, the readiness arm: a spawn that succeeds is not a daemon.
+///
+/// `trusty-analyze serve` exits 1 when trusty-search is unreachable, so the PID
+/// a spawn returns proves nothing. This stub reproduces exactly that — it execs
+/// and exits at once — and the refusal must still happen. The `cause` is what
+/// separates this arm from the spawn-failure one above: reaching the readiness
+/// timeout is only possible after `spawn_detached` returned a live PID.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_analyze_daemon_that_never_comes_up_refuses_the_audit() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let stub = stub_binary(dir.path(), "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
+
+    let guard = guard_on(free_port(), &stub);
+    let err = crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a daemon that exits at once must stop the audit");
+
+    // The spawn itself succeeded — this is the readiness verdict, not a spawn
+    // failure wearing the same error type.
+    assert!(
+        err.cause.contains("did not become ready"),
+        "expected the readiness arm, got: {}",
+        err.cause
+    );
+
+    // And the refusal names the ordering that actually fixes it.
+    let msg = err.to_string();
+    for needle in ["trusty-search start", "reads as a clean bill of health"] {
+        assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+}
+
+/// #5670, the degraded arm: an analyze daemon that is up but whose trusty-search
+/// is down does not satisfy the preflight either.
+///
+/// This is the arm that decides how far #5670 actually reaches. `trusty-analyze`
+/// answers its own `/health` with 503 `degraded` whenever trusty-search is
+/// unreachable, and `probe_once` counts only a 2xx — so the guard's probe
+/// re-reads trusty-search's LIVE status on every `tga audit` run, not only when
+/// it has to spawn. An operator whose analyze daemon has been up for days and
+/// whose trusty-search died an hour ago is refused, with the same message.
+///
+/// The stub daemon here answers 503 forever, standing in for that daemon; the
+/// spawned replacement exits at once, as the real binary does at its own search
+/// check. The refusal must therefore come from the readiness poll — proof the
+/// guard kept probing the live 503 rather than accepting the bound port.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_degraded_analyze_daemon_refuses_the_audit() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let stub = stub_binary(dir.path(), "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
+
+    // usize::MAX degraded replies: it never recovers, exactly like an analyze
+    // daemon sitting on top of a dead trusty-search.
+    let port = serve_health(usize::MAX).await;
+    let guard = guard_on(port, &stub);
+    let err = crate::audit::ensure_analyze_daemon_with(&guard)
+        .await
+        .expect_err("a daemon answering 503 must stop the audit");
+
+    assert!(
+        err.cause.contains("did not become ready"),
+        "expected the readiness arm against a live-but-degraded daemon, got: {}",
+        err.cause
+    );
+    assert!(
+        err.to_string().contains("trusty-search start"),
+        "the refusal must name trusty-search: {err}"
+    );
+}
+
+/// #5670, the concurrency arm: two guards racing the same slow daemon both get a
+/// correct verdict, and neither observes state the other corrupted.
+///
+/// [`crate::audit::ensure_analyze_daemon_with`] holds no state between calls —
+/// its guard is a shared `&AnalyzeGuard` it only reads — so what this pins is
+/// the consequence: two overlapping calls each reach their own verdict from
+/// their own probe, and the daemon that comes up mid-flight satisfies both.
+///
+/// It also pins the spawn count at **two**, which is the honest number. There is
+/// no cross-call deduplication, in-process or otherwise, and adding one would
+/// guard a path no caller reaches: `ensure_analyze_daemon` is called once per
+/// `tga audit` process, and `trusty-audit run` audits its repositories
+/// sequentially (`crates/trusty-audit/src/run.rs`'s `run_one` loop). A second
+/// spawn is also self-limiting rather than damaging — `trusty-analyze serve`
+/// takes an exclusive redb lock on the facts store and binds a fixed port, so
+/// the loser of either race exits and the winner is the one daemon. Should a
+/// concurrent caller ever appear, this assertion is what will fail and say so.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_concurrent_guards_both_resolve_against_one_slow_daemon() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let spawn_log = dir.path().join("spawns.log");
+    let stub = stub_binary(
+        dir.path(),
+        "trusty-analyze-stub",
+        &format!(
+            "#!/bin/sh\necho \"$@\" >> {}\n",
+            spawn_log.to_str().expect("a UTF-8 temp path")
+        ),
+    );
+
+    // #5713: the daemon goes ready only once BOTH spawns have appended, so
+    // readiness is caused by the spawns instead of racing them. Each guard's own
+    // spawn follows its own opening probe, so the second probe sees at most one
+    // line and misses — both calls spawn by construction, not by timing luck.
+    let port = serve_health_after_spawns(spawn_log.clone(), 2).await;
+    let mut guard = guard_on(port, &stub);
+    // A ceiling, not a schedule. The happy path ends when the second stub
+    // appends, however many seconds a loaded host takes to schedule it; this
+    // only bounds a genuinely stuck run.
+    guard.startup_timeout = std::time::Duration::from_secs(60);
+
+    let (first, second) = tokio::join!(
+        crate::audit::ensure_analyze_daemon_with(&guard),
+        crate::audit::ensure_analyze_daemon_with(&guard),
+    );
+    first.expect("the first concurrent guard must resolve");
+    second.expect("the second concurrent guard must resolve");
+
+    // The guard both calls borrowed is unchanged: it is read-only input, and a
+    // reader that mutated it would have had to do so through a shared `&`.
+    assert_eq!(guard.url, format!("http://127.0.0.1:{port}"));
+    assert_eq!(guard.binary, stub);
+
+    // Both calls returned, and neither could have without the daemon going
+    // ready, which needs both lines on disk — so the expected two are already
+    // there and there is nothing left to wait FOR. What remains is the opposite
+    // question, the absence of a third spawn, and absence is not a condition to
+    // poll on. So wait for the count to stop changing instead of for a guessed
+    // interval: a loaded host simply takes more rounds to settle.
+    let spawned = settled_spawn_log(&spawn_log).await;
+    assert_eq!(
+        spawned.len(),
+        2,
+        "each call spawns for its own missed probe; got {spawned:?}"
+    );
+    for line in &spawned {
+        assert_eq!(
+            line.trim(),
+            format!("serve --port {port}"),
+            "every spawn carries the configured port"
+        );
+    }
+}
+
+/// The spawn log's lines, read once its length has stopped changing.
+///
+/// #5713: a third spawn would be issued before its call returned, but the write
+/// itself is a detached child that can still be in flight — so the count is read
+/// only after it holds steady across several consecutive rounds.
+async fn settled_spawn_log(spawn_log: &std::path::Path) -> Vec<String> {
+    const STABLE_ROUNDS: usize = 4;
+    let round = std::time::Duration::from_millis(25);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+
+    let read = || -> Vec<String> {
+        std::fs::read_to_string(spawn_log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+
+    let mut lines = read();
+    let mut stable = 0usize;
+    while stable < STABLE_ROUNDS && std::time::Instant::now() < deadline {
+        tokio::time::sleep(round).await;
+        let next = read();
+        stable = if next.len() == lines.len() {
+            stable + 1
+        } else {
+            0
+        };
+        lines = next;
+    }
+    lines
+}
+
+// ─── #5670: indexing every audited repository before the render ──────────────
+
+use crate::audit::repo_index::{binary_from_override as search_binary_from_override, index_args};
+use crate::audit::{
+    index_gap_lines, index_id_for, RepoIndexOutcome, RepoIndexStatus, DEFAULT_SEARCH_BIN,
+};
+use crate::report::dd_manifest::{
+    build_dd_manifest, dd_repository_entries, DdManifestOptions, DdRepositoryEntry,
+};
+
+/// One manifest entry, as `dd_repository_entries` would produce it.
+fn repo_entry(name: &str, path: &std::path::Path) -> DdRepositoryEntry {
+    DdRepositoryEntry {
+        name: name.to_string(),
+        path: path.to_path_buf(),
+    }
+}
+
+/// The same override-then-PATH rule the other two sibling binaries use. `""` is
+/// not a setting: `trusty-audit` exports the pinned-tool variables
+/// unconditionally, so a half-written export must fall back to PATH rather than
+/// try to spawn an empty program name.
+#[test]
+fn search_binary_resolution_prefers_the_env_override() {
+    assert_eq!(
+        search_binary_from_override(Some("/opt/bin/trusty-search")),
+        "/opt/bin/trusty-search"
+    );
+    assert_eq!(search_binary_from_override(Some("")), DEFAULT_SEARCH_BIN);
+    assert_eq!(search_binary_from_override(None), DEFAULT_SEARCH_BIN);
+    assert!(!crate::audit::resolve_search_binary().is_empty());
+}
+
+/// The cross-process contract, pinned as a rule.
+///
+/// trusty-review looks the index up by the checkout path's basename
+/// (`report::analyze_adapter::derive_index_id`, a `path.file_name()` mapped to a
+/// `String`). No Cargo edge joins the two crates, so this is a copy of that
+/// rule — including the two shapes that are easy to get wrong: a trailing `.`,
+/// which `Path` normalises away rather than treating as the final component, and
+/// a root path, which has no basename at all and which BOTH sides must decline.
+#[test]
+fn the_index_id_is_the_checkout_basename() {
+    use std::path::Path;
+
+    assert_eq!(
+        index_id_for(Path::new("/src/northwind-web")).as_deref(),
+        Some("northwind-web")
+    );
+    assert_eq!(
+        index_id_for(Path::new("/src/northwind-web/")).as_deref(),
+        Some("northwind-web"),
+        "a trailing separator is not a component"
+    );
+    assert_eq!(
+        index_id_for(Path::new("/src/northwind-web/.")).as_deref(),
+        Some("northwind-web"),
+        "`base_dir.join(\".\")` is what a `path: .` config entry anchors to"
+    );
+    assert_eq!(index_id_for(Path::new("/")), None);
+}
+
+/// The ids indexed are derived from the paths the renderer reads.
+///
+/// This is the whole no-op risk of #5670: index every repository under an id
+/// nobody queries and the reports stay exactly as hollow as before, with the
+/// work done and nothing to show for it. The manifest is the only channel
+/// between the two processes, so the entries handed to the indexer must be the
+/// entries the manifest carries — asserted here against `build_dd_manifest`'s
+/// own output rather than against a copy of the mapping.
+#[test]
+fn index_ids_match_the_manifest_paths_the_renderer_reads() {
+    let cfg = Config {
+        repositories: vec![
+            crate::core::config::RepositoryConfig {
+                path: std::path::PathBuf::from("/src/northwind-web"),
+                name: Some("Northwind Web".to_string()),
+                ..Default::default()
+            },
+            crate::core::config::RepositoryConfig {
+                // Relative, so the base-dir anchoring is exercised too.
+                path: std::path::PathBuf::from("checkouts/northwind-api"),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let base_dir = std::path::PathBuf::from("/work");
+
+    let entries = dd_repository_entries(&cfg, &base_dir);
+    let manifest = build_dd_manifest(
+        &cfg,
+        &DdManifestOptions {
+            title: "T".to_string(),
+            base_dir: base_dir.clone(),
+            ..Default::default()
+        },
+    )
+    .expect("builds");
+
+    assert_eq!(
+        entries, manifest.repositories,
+        "the indexer must be handed the manifest's own entries"
+    );
+    let ids: Vec<Option<String>> = entries.iter().map(|e| index_id_for(&e.path)).collect();
+    assert_eq!(
+        ids,
+        vec![
+            Some("northwind-web".to_string()),
+            Some("northwind-api".to_string())
+        ],
+        "each id is the basename of the path written into manifest.toml"
+    );
+}
+
+/// The two argument vectors, asserted without spawning anything.
+///
+/// `--name` is the load-bearing flag: without it trusty-search names the index
+/// after the directory the audit happens to be running from, while the renderer
+/// looks up the checkout basename — so the run would index the right code under
+/// the wrong id.
+#[test]
+fn the_index_invocation_names_the_path_and_the_id() {
+    use crate::audit::repo_index::probe_args;
+    use std::path::Path;
+
+    let rendered = |args: Vec<std::ffi::OsString>| {
+        args.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        rendered(index_args(Path::new("/src/acme-web"), "acme-web")),
+        vec!["index", "/src/acme-web", "--name", "acme-web"]
+    );
+    assert_eq!(
+        rendered(probe_args("acme-web")),
+        vec!["index-status", "acme-web"]
+    );
+}
+
+/// A `trusty-search` stub that logs every invocation and decides by argument.
+///
+/// `index-status <id>` exits 0 only for an id containing `served` — the real CLI
+/// exits non-zero on the daemon's 404, which is the membership signal this
+/// module reads. `index <path>` fails for a path containing `broken`.
+#[cfg(unix)]
+fn search_stub(dir: &std::path::Path, log: &std::path::Path) -> String {
+    let script = format!(
+        "#!/bin/sh\n\
+         echo \"$@\" >> {log}\n\
+         case \"$1\" in\n\
+         index-status)\n\
+         case \"$2\" in *served*) exit 0 ;; *) exit 1 ;; esac ;;\n\
+         index)\n\
+         case \"$2\" in\n\
+         *broken*) echo 'progress: walking' >&2; echo 'error: not a directory' >&2; exit 3 ;;\n\
+         *) exit 0 ;;\n\
+         esac ;;\n\
+         esac\n\
+         exit 9\n",
+        log = log.display()
+    );
+    stub_binary(dir, "trusty-search-stub", &script)
+}
+
+/// Every line the stub was invoked with, in order.
+#[cfg(unix)]
+fn stub_log(log: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The defect itself: nothing indexed the repository, so the renderer's
+/// membership check missed and three report sections came back empty over an
+/// exit 0. The audit now probes, misses, and indexes — under the id the renderer
+/// will look up.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unindexed_repository_is_indexed_before_the_render() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("invocations");
+    let stub = search_stub(dir.path(), &log);
+    let entries = vec![repo_entry("Acme Web", &dir.path().join("acme-web"))];
+
+    let outcomes = crate::audit::repo_index::ensure_repositories_indexed_with(stub, &entries).await;
+
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, RepoIndexStatus::Indexed);
+    assert_eq!(outcomes[0].index_id.as_deref(), Some("acme-web"));
+    let calls = stub_log(&log);
+    assert_eq!(calls.len(), 2, "one probe, then one index: {calls:?}");
+    assert_eq!(calls[0], "index-status acme-web");
+    assert!(
+        calls[1].starts_with("index ") && calls[1].ends_with("--name acme-web"),
+        "the index is built under the id the renderer looks up: {calls:?}"
+    );
+    assert!(
+        index_gap_lines(&outcomes, &[] as &[String]).is_empty(),
+        "an indexed repository is not a gap"
+    );
+}
+
+/// A repository trusty-search already serves must not be re-indexed: an audit
+/// over an org that is already indexed would otherwise spend its one shot
+/// re-embedding unchanged code. The probe answers, and nothing else is spawned.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_already_indexed_repository_is_not_reindexed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("invocations");
+    let stub = search_stub(dir.path(), &log);
+    // The stub answers the probe for any id containing `served`.
+    let entries = vec![repo_entry("Acme Web", &dir.path().join("acme-served"))];
+
+    let outcomes = crate::audit::repo_index::ensure_repositories_indexed_with(stub, &entries).await;
+
+    assert_eq!(outcomes[0].status, RepoIndexStatus::AlreadyServed);
+    let calls = stub_log(&log);
+    assert_eq!(
+        calls,
+        vec!["index-status acme-served".to_string()],
+        "the probe is the only invocation — no reindex: {calls:?}"
+    );
+}
+
+/// DOC-67 §9's per-repository rule, in both directions.
+///
+/// One repository that will not index must not cost the other two their audit:
+/// the run continues past it (the third repository is still indexed, after the
+/// failure), the failure is NAMED in the Gaps & Caveats lines, and the pass
+/// returns a value rather than an error — nothing here can change the exit
+/// status. The two assertions fail for opposite regressions: making the failure
+/// abort the run drops the third repository's invocation, and swallowing it
+/// drops the gap line.
+#[cfg(unix)]
+#[tokio::test]
+async fn one_repository_that_fails_to_index_does_not_stop_the_others() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("invocations");
+    let stub = search_stub(dir.path(), &log);
+    let entries = vec![
+        repo_entry("Acme Web", &dir.path().join("acme-web")),
+        repo_entry("Acme Broken", &dir.path().join("acme-broken")),
+        repo_entry("Acme API", &dir.path().join("acme-api")),
+    ];
+
+    let outcomes = crate::audit::repo_index::ensure_repositories_indexed_with(stub, &entries).await;
+
+    assert_eq!(outcomes[0].status, RepoIndexStatus::Indexed);
+    assert!(outcomes[1].failed(), "{:?}", outcomes[1]);
+    assert_eq!(
+        outcomes[2].status,
+        RepoIndexStatus::Indexed,
+        "the run must continue past the failure"
+    );
+    let calls = stub_log(&log);
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("acme-api") && c.starts_with("index ")),
+        "the repository after the failure is still indexed: {calls:?}"
+    );
+
+    let gaps = index_gap_lines(&outcomes, &[] as &[String]);
+    assert_eq!(gaps.len(), 1, "one line per distinct reason: {gaps:?}");
+    assert!(
+        gaps[0].contains("Acme Broken") && gaps[0].contains("not a directory"),
+        "the failure is named, with its cause: {}",
+        gaps[0]
+    );
+    assert!(
+        !gaps[0].contains("Acme Web") && !gaps[0].contains("Acme API"),
+        "a repository that indexed is not a gap: {}",
+        gaps[0]
+    );
+    assert!(
+        gaps[0].contains("not assessed, not clean"),
+        "an empty section must not read as a clean pass: {}",
+        gaps[0]
+    );
+}
+
+/// `trusty-search` is resolved from PATH, not from a Cargo edge, so its absence
+/// is ordinary rather than exotic. It must not panic, must not abort the audit,
+/// and must name both ways to supply the binary — an engagement that pins its
+/// tools uses the override.
+#[tokio::test]
+async fn a_missing_search_binary_is_named_and_the_run_continues() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("definitely-not-installed");
+    let entries = vec![
+        repo_entry("Acme Web", &dir.path().join("acme-web")),
+        repo_entry("Acme API", &dir.path().join("acme-api")),
+    ];
+
+    let outcomes = crate::audit::repo_index::ensure_repositories_indexed_with(
+        missing.display().to_string(),
+        &entries,
+    )
+    .await;
+
+    assert_eq!(outcomes.len(), 2, "every repository is still reported on");
+    assert!(outcomes.iter().all(RepoIndexOutcome::failed));
+
+    let gaps = index_gap_lines(&outcomes, &[] as &[String]);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "one fault affecting every repository is one line, not N: {gaps:?}"
+    );
+    assert!(
+        gaps[0].contains("Acme Web") && gaps[0].contains("Acme API"),
+        "every unassessed application is named: {}",
+        gaps[0]
+    );
+    assert!(
+        gaps[0].contains("TRUSTY_SEARCH_BIN") && gaps[0].contains("cargo install trusty-search"),
+        "the remedy names both ways to supply the binary: {}",
+        gaps[0]
+    );
+}
+
+/// A run where every repository is served adds no line — a clean run must not
+/// dilute the Gaps section with a report of its own success.
+#[test]
+fn index_gap_lines_are_empty_when_every_repository_is_served() {
+    let outcomes = vec![
+        RepoIndexOutcome {
+            repo: "Acme Web".to_string(),
+            index_id: Some("acme-web".to_string()),
+            status: RepoIndexStatus::AlreadyServed,
+        },
+        RepoIndexOutcome {
+            repo: "Acme API".to_string(),
+            index_id: Some("acme-api".to_string()),
+            status: RepoIndexStatus::Indexed,
+        },
+    ];
+    assert!(index_gap_lines(&outcomes, &[] as &[String]).is_empty());
+}
+
+/// The failure reason is a child's message, so it can quote a credential back at
+/// us — a token in an HTTPS remote URL, or in a path. It is scrubbed before it
+/// is excerpted, for the reason `gaps.rs` documents: cutting first leaves a
+/// fragment no later scrub can match, `build_dd_manifest`'s included.
+#[test]
+fn a_credential_in_an_index_failure_never_reaches_the_gap_line() {
+    let token = "ghp_averyrealisticlookingtoken0123456789";
+    let outcomes = vec![RepoIndexOutcome {
+        repo: "Acme Web".to_string(),
+        index_id: Some("acme-web".to_string()),
+        status: RepoIndexStatus::Failed(format!(
+            "failed to clone https://{token}@github.com/acme/web.git"
+        )),
+    }];
+
+    let gaps = index_gap_lines(&outcomes, &[token.to_string()]);
+    assert_eq!(gaps.len(), 1);
+    assert!(!gaps[0].contains(token), "{}", gaps[0]);
+    assert!(
+        gaps[0].contains("Acme Web"),
+        "redaction must not cost the reader the repository name: {}",
+        gaps[0]
+    );
+}
+
+// ─── #5670: starting trusty-search, link 1 of the prerequisite chain ──────────
+
+use crate::audit::search_daemon::start_args;
+use crate::audit::{ensure_search_daemon_with, SearchGuard};
+
+/// A listener whose `/health` answers `503 Service Unavailable` while `flag` is
+/// absent and `200 OK` once it exists. Returns the port it bound.
+///
+/// The flag file stands in for "trusty-search is up". Both daemons in the
+/// ordering fixture below read the same flag, because that is the real coupling:
+/// `trusty-analyze`'s health is a function of trusty-search's live status
+/// (`crates/trusty-analyze/src/service/routes.rs`'s `health`), not of its own
+/// uptime. A file rather than an in-process flag, because the thing that flips it
+/// is a detached child process.
+async fn serve_health_gated_on(flag: std::path::PathBuf) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("read the bound address")
+        .port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let flag = flag.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                let reply: &[u8] = if flag.exists() {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
+                };
+                let _ = stream.write_all(reply).await;
+            });
+        }
+    });
+    port
+}
+
+/// A search guard pointed at `port`, with budgets short enough for a unit test.
+fn search_guard_on(port: u16, binary: &str) -> SearchGuard {
+    SearchGuard {
+        url: format!("http://127.0.0.1:{port}"),
+        binary: binary.to_string(),
+        startup_timeout: std::time::Duration::from_millis(400),
+        poll_interval: std::time::Duration::from_millis(50),
+    }
+}
+
+/// The address is trusty-search's to publish, not tga's to guess.
+///
+/// `trusty-search` binds an OS-assigned port and records it in its own discovery
+/// files, so a hard-coded `127.0.0.1:7878` here would miss every auto-ported and
+/// every `TRUSTY_DATA_DIR`-isolated daemon. This asserts the guard asks
+/// `DaemonAddrLayout::TRUSTY_SEARCH` — the resolver promoted into `trusty-common`
+/// for exactly this caller (#5670) — rather than carrying a second copy of those
+/// rules, and that the binary comes from the one resolver `repo_index` already
+/// owns, so the daemon this starts and the binary that indexes into it are the
+/// same install.
+#[test]
+fn the_search_guard_resolves_its_address_from_the_shared_layout() {
+    use trusty_common::daemon_guard::DaemonAddrLayout;
+
+    let guard = SearchGuard::from_env();
+    assert_eq!(
+        guard.url,
+        DaemonAddrLayout::TRUSTY_SEARCH.resolve_base_url()
+    );
+    assert_eq!(guard.binary, crate::audit::resolve_search_binary());
+    assert_eq!(guard.startup_timeout, crate::audit::SEARCH_STARTUP_TIMEOUT);
+}
+
+/// The argument vector is the tga→trusty-search contract, asserted without
+/// spawning anything.
+///
+/// `--foreground` is the load-bearing half: it is what trusty-search's own guard
+/// passes (`crates/trusty-search/src/commands/daemon_guard.rs`'s
+/// `spawn_daemon_with_device`), and without it `start` re-spawns itself as a
+/// background daemon and the child we detached exits immediately.
+#[test]
+fn the_search_spawn_arguments_are_start_in_the_foreground() {
+    assert_eq!(start_args(), vec!["start", "--foreground"]);
+}
+
+/// A daemon that is already up is left alone.
+///
+/// The binary is a path that cannot exist, so any spawn attempt would fail the
+/// run — passing is therefore proof the fast path returned without spawning
+/// anything, which is what keeps `tga audit` from starting a second daemon beside
+/// the operator's own.
+#[tokio::test]
+async fn a_reachable_search_daemon_is_not_restarted() {
+    let port = serve_healthy().await;
+    let guard = search_guard_on(port, "/nonexistent/trusty-search");
+    ensure_search_daemon_with(&guard)
+        .await
+        .expect("a healthy daemon must satisfy the preflight without a spawn");
+}
+
+/// #5670, the spawn-failure arm: a machine with no trusty-search installed is a
+/// refusal, not a warning the sweep proceeds past.
+///
+/// The message has to name trusty-search and the path that was tried, because on
+/// a recipient's machine the whole remedy is either installing it or pointing
+/// `TRUSTY_SEARCH_BIN` at the engagement's pinned copy.
+#[tokio::test]
+async fn an_unspawnable_search_binary_refuses_the_audit() {
+    let guard = search_guard_on(free_port(), "/nonexistent/trusty-search");
+    let err = ensure_search_daemon_with(&guard)
+        .await
+        .expect_err("a binary that cannot be spawned must stop the audit");
+
+    let msg = err.to_string();
+    for needle in [
+        "trusty-search",
+        "/nonexistent/trusty-search",
+        "TRUSTY_SEARCH_BIN",
+    ] {
+        assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+}
+
+/// #5670, the readiness arm: a spawn that succeeds is not a daemon, and the
+/// refusal must arrive at the timeout rather than hanging the one-shot sweep.
+///
+/// The stub execs and exits at once, which is what `trusty-search start` does on
+/// a host it refuses to run on — under-spec RAM, or a data directory it cannot
+/// lock. The `cause` is what separates this arm from the spawn-failure one:
+/// reaching the readiness timeout is only possible after `spawn_detached`
+/// returned a live PID.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_search_daemon_that_never_comes_up_refuses_the_audit() {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let stub = stub_binary(dir.path(), "trusty-search-stub", "#!/bin/sh\nexit 1\n");
+
+    let started = std::time::Instant::now();
+    let guard = search_guard_on(free_port(), &stub);
+    let err = ensure_search_daemon_with(&guard)
+        .await
+        .expect_err("a daemon that exits at once must stop the audit");
+
+    assert!(
+        err.cause.contains("did not become ready"),
+        "expected the readiness arm, got: {}",
+        err.cause
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the refusal must be bounded by the budget, not hang: {:?}",
+        started.elapsed()
+    );
+}
+
+/// The two-daemon fixture the ordering test below drives in both directions.
+///
+/// Returns a search guard and an analyze guard sharing one "trusty-search is up"
+/// flag file. The search stub creates the flag — starting trusty-search. The
+/// analyze stub exits 1, as the real `trusty-analyze serve` does at its own
+/// trusty-search check. Both `/health` listeners answer 503 until the flag
+/// exists, which is what an analyze daemon that has been up for days does while
+/// its trusty-search is dead.
+///
+/// `budget` is the readiness budget both guards get. The caller sets it per
+/// direction: a direction that waits on a real forked process needs a real one,
+/// and a direction whose flag is never created is decided by the fixture rather
+/// than by the clock.
+#[cfg(unix)]
+async fn degraded_stack(
+    dir: &std::path::Path,
+    budget: std::time::Duration,
+) -> (SearchGuard, crate::audit::AnalyzeGuard, std::path::PathBuf) {
+    let flag = dir.join("trusty-search-is-up");
+    let search_stub = stub_binary(
+        dir,
+        "trusty-search-stub",
+        &format!(
+            "#!/bin/sh\ntouch {}\nsleep 30\n",
+            flag.to_str().expect("a UTF-8 temp path")
+        ),
+    );
+    let analyze_stub = stub_binary(dir, "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
+
+    let mut search = search_guard_on(serve_health_gated_on(flag.clone()).await, &search_stub);
+    search.startup_timeout = budget;
+    let mut analyze = guard_on(serve_health_gated_on(flag.clone()).await, &analyze_stub);
+    analyze.startup_timeout = budget;
+
+    (search, analyze, flag)
+}
+
+/// #5670, THE regression: trusty-search is down while a stale `trusty-analyze`
+/// keeps answering `503 degraded`, and only the search guard running FIRST
+/// recovers it.
+///
+/// This is the case a fresh-spawn fix misses. `trusty-analyze`'s `/health` is a
+/// function of trusty-search's LIVE status, and `probe_once` counts only a 2xx,
+/// so an analyze daemon that has been up for days on top of a trusty-search that
+/// died an hour ago fails the analyze probe every run. Its spawned replacement
+/// exits at its own search check, the original keeps answering 503, and the
+/// readiness poll refuses an audit that has nothing wrong with its analyze daemon
+/// at all.
+///
+/// The test drives BOTH orders against the same fixture. Search-then-analyze
+/// leaves both preflights satisfied without the analyze daemon being touched;
+/// analyze-then-search refuses at the analyze poll, exactly as the defect did. So
+/// the assertion is not that two guards pass — it is that the ORDER is what makes
+/// them pass. `the_audit_command_runs_the_search_guard_before_the_analyze_guard`
+/// pins that order at the call site.
+///
+/// The two directions get different readiness budgets, and the short one is not
+/// what decides the failure: the reversed direction's flag file is never created
+/// by anything, which the assertion below states outright, so waiting longer
+/// changes nothing. The forward direction waits on a real forked process, which
+/// needs a budget wide enough to survive a loaded machine.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_search_guard_recovers_a_stale_degraded_analyze_daemon() {
+    // The fixed order, as `crate::commands::audit::run` runs it.
+    let ok_dir = tempfile::tempdir().expect("create a temp dir");
+    let (search, analyze, flag) =
+        degraded_stack(ok_dir.path(), std::time::Duration::from_secs(20)).await;
+    assert!(!flag.exists(), "trusty-search starts this run down");
+
+    ensure_search_daemon_with(&search)
+        .await
+        .expect("the search guard must start trusty-search");
+    assert!(
+        flag.exists(),
+        "the search guard must have started the daemon"
+    );
+    crate::audit::ensure_analyze_daemon_with(&analyze)
+        .await
+        .expect("a stale 503 analyze daemon recovers once trusty-search is back");
+
+    // The reverse order, against an identical fixture.
+    let bad_dir = tempfile::tempdir().expect("create a temp dir");
+    let (search, analyze, flag) =
+        degraded_stack(bad_dir.path(), std::time::Duration::from_secs(2)).await;
+    let err = crate::audit::ensure_analyze_daemon_with(&analyze)
+        .await
+        .expect_err("running the analyze guard first must refuse the audit");
+    assert!(
+        err.cause.contains("did not become ready"),
+        "the analyze preflight must fail at its readiness poll against the live 503, got: {}",
+        err.cause
+    );
+    assert!(
+        !flag.exists(),
+        "nothing in the analyze preflight starts trusty-search — that is the defect"
+    );
+    ensure_search_daemon_with(&search)
+        .await
+        .expect("the search guard still works; it was simply run too late");
+}
+
+/// #5670: the call site keeps the two preflights in the order the test above
+/// proves is load-bearing.
+///
+/// The behavioural test can only show that search-then-analyze passes where
+/// analyze-then-search refuses; it cannot see which order `run` uses. This reads
+/// the source of that function and asserts the search guard is called first, so a
+/// later edit that reorders them — or drops the search guard entirely — fails
+/// here rather than on a recipient's machine.
+#[test]
+fn the_audit_command_runs_the_search_guard_before_the_analyze_guard() {
+    let source = include_str!("../commands/audit.rs");
+    let search = source
+        .find("ensure_search_daemon().await?")
+        .expect("`tga audit` must ensure trusty-search before its sweep");
+    let analyze = source
+        .find("ensure_analyze_daemon().await?")
+        .expect("`tga audit` must still ensure trusty-analyze");
+    assert!(
+        search < analyze,
+        "trusty-analyze cannot boot without trusty-search, so its guard must run second"
+    );
+}

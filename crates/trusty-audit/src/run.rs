@@ -282,15 +282,68 @@ pub fn load_selection(work: &WorkDir) -> Result<Vec<SelectedRepo>, AuditError> {
     Ok(selection.repositories)
 }
 
-/// The three binaries a run drives, each proven to be at the engagement's pin.
+/// Record the repositories the next sweep should audit.
 ///
-/// Why: three named fields rather than a lookup table, so the "tool not found"
-/// branch does not exist. The obvious table version needs a fallback arm at
-/// every use site, and the natural fallback — the bare binary name — is a `PATH`
-/// lookup, which is the one thing this module must never do.
+/// Why: [`SELECTION_FILE`] states two obligations on whoever writes it, and
+/// #5556 found there was no writer at all — `taudit clone` acquired the
+/// checkouts, `taudit run` then refused with "nothing to audit", and every
+/// per-stage test passed throughout. The writer lives beside the reader so the
+/// atomic-rename and `count`-first obligations are one decision rather than a
+/// note each producer re-reads; #5497's picker writes through here too.
+/// What: renders `count` ahead of the entries (serde field order, and `toml`
+/// emits values before tables), writes to a uniquely-named temporary file in
+/// the same directory, and renames it into place. The unique name is what lets
+/// two writers race without either reading the other's half-written file.
+/// Test: `super::run_tests::a_saved_selection_reads_back_whole`,
+/// `super::run_tests::racing_writers_never_leave_a_torn_selection`.
+///
+/// # Errors
+///
+/// [`AuditError::WorkDir`] when the state area cannot be made, the temporary
+/// file cannot be written, or the rename fails.
+pub fn save_selection(work: &WorkDir, repos: &[SelectedRepo]) -> Result<(), AuditError> {
+    let path = selection_path(work);
+    let dir = work.path(Area::State);
+    std::fs::create_dir_all(&dir).map_err(|source| AuditError::WorkDir { path: dir, source })?;
+
+    let selection = Selection {
+        count: repos.len(),
+        repositories: repos.to_vec(),
+    };
+    let text = toml::to_string_pretty(&selection).map_err(|e| AuditError::WorkDir {
+        path: path.clone(),
+        source: std::io::Error::other(e),
+    })?;
+
+    let temp = path.with_file_name(format!("{SELECTION_FILE}.{}.tmp", writer_tag()));
+    std::fs::write(&temp, text).map_err(|source| AuditError::WorkDir {
+        path: temp.clone(),
+        source,
+    })?;
+    std::fs::rename(&temp, &path).map_err(|source| {
+        let _ = std::fs::remove_file(&temp);
+        AuditError::WorkDir { path, source }
+    })
+}
+
+/// A suffix no two concurrent writers share: process, plus thread within it.
+fn writer_tag() -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    format!("{}-{}", std::process::id(), hasher.finish())
+}
+
+/// The four binaries a run drives, each proven to be at the engagement's pin.
+///
+/// Why: named fields rather than a lookup table, so the "tool not found" branch
+/// does not exist. The obvious table version needs a fallback arm at every use
+/// site, and the natural fallback — the bare binary name — is a `PATH` lookup,
+/// which is the one thing this module must never do.
 #[derive(Debug, Clone)]
 struct PinnedBinaries {
     tga: PathBuf,
+    search: PathBuf,
     analyze: PathBuf,
     review: PathBuf,
 }
@@ -354,6 +407,7 @@ fn pinned_binaries(work: &WorkDir, pins: &ToolPins) -> Result<PinnedBinaries, Au
 
     Ok(PinnedBinaries {
         tga: path_of(RequiredTool::Tga)?,
+        search: path_of(RequiredTool::TrustySearch)?,
         analyze: path_of(RequiredTool::TrustyAnalyze)?,
         review: path_of(RequiredTool::TrustyReview)?,
     })
@@ -711,11 +765,11 @@ pub const PER_REPO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 /// Spawn the pinned `tga audit` and turn its exit into a per-repo verdict.
 ///
-/// The child inherits nothing it does not need: the three binaries are named by
+/// The child inherits nothing it does not need: the four binaries are named by
 /// absolute path or by the variables tga and trusty-review read
-/// (`TRUSTY_ANALYZE_BIN`, `TRUSTY_REVIEW_BIN`), so nothing on the operator's
-/// `PATH` can be reached instead. The credential goes in the environment and
-/// only there — see the module docs for what that costs.
+/// (`TRUSTY_SEARCH_BIN`, `TRUSTY_ANALYZE_BIN`, `TRUSTY_REVIEW_BIN`), so nothing
+/// on the operator's `PATH` can be reached instead. The credential goes in the
+/// environment and only there — see the module docs for what that costs.
 ///
 /// Alongside the credential the child gets the provider and per-role model ids
 /// from [`crate::inference`]: naming the key never routed anything to
@@ -752,6 +806,11 @@ async fn spawn_tga(
         .arg(output)
         .current_dir(cwd)
         .env(ENV_INFERENCE_CREDENTIAL, config.openrouter_key.expose())
+        // #5670: `tga audit` starts trusty-search and indexes each repository
+        // through it. On a recipient's clean machine the pinned copy in
+        // `work/tools/` is the only one there is, so without this the guard falls
+        // through to a PATH lookup and refuses the run.
+        .env(ENV_SEARCH_BIN, &binaries.search)
         .env(ENV_ANALYZE_BIN, &binaries.analyze)
         .env(ENV_REVIEW_BIN, &binaries.review)
         .stdin(Stdio::null())
@@ -813,6 +872,9 @@ async fn spawn_tga(
 /// The variable `tga audit` reads the inference credential from.
 pub const ENV_INFERENCE_CREDENTIAL: &str = "OPENROUTER_API_KEY";
 
+/// The variable `tga audit` reads its trusty-search binary from (#5670).
+const ENV_SEARCH_BIN: &str = "TRUSTY_SEARCH_BIN";
+
 /// The variable `trusty-review` reads its analyze binary from.
 const ENV_ANALYZE_BIN: &str = "TRUSTY_ANALYZE_BIN";
 
@@ -873,6 +935,7 @@ instructions = "Assess the last 52 weeks."
 
 [tools]
 tga = "2.9.4"
+trusty-search = "0.47.0"
 trusty-analyze = "0.9.2"
 trusty-review = "0.15.1"
 "#;
@@ -934,9 +997,11 @@ trusty-review = "0.15.1"
         }
         let record = format!(
             "[[tools]]\ncrate_name = \"tga\"\nversion = \"2.9.4\"\nbinary = \"{tga}\"\n\
+             [[tools]]\ncrate_name = \"trusty-search\"\nversion = \"0.47.0\"\nbinary = \"{s}\"\n\
              [[tools]]\ncrate_name = \"trusty-analyze\"\nversion = \"0.9.2\"\nbinary = \"{a}\"\n\
              [[tools]]\ncrate_name = \"trusty-review\"\nversion = \"0.15.1\"\nbinary = \"{r}\"\n",
             tga = RequiredTool::Tga.path_in(work).display(),
+            s = RequiredTool::TrustySearch.path_in(work).display(),
             a = RequiredTool::TrustyAnalyze.path_in(work).display(),
             r = RequiredTool::TrustyReview.path_in(work).display(),
         );
@@ -945,6 +1010,80 @@ trusty-review = "0.15.1"
 
     fn make_repo(work: &WorkDir, name: &str) {
         std::fs::create_dir_all(work.path(Area::Repos).join(name)).expect("mkdir repo");
+    }
+
+    /// The writer's own round trip: what [`save_selection`] leaves behind is
+    /// what [`load_selection`] accepts, `count` and all.
+    #[test]
+    fn a_saved_selection_reads_back_whole() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let repos = vec![
+            SelectedRepo {
+                name: "acme/api".to_owned(),
+                path: PathBuf::from("repos/acme/api"),
+            },
+            SelectedRepo {
+                name: "acme/web".to_owned(),
+                path: PathBuf::from("repos/acme/web"),
+            },
+        ];
+        save_selection(&work, &repos).expect("the selection writes");
+
+        let text = std::fs::read_to_string(selection_path(&work)).expect("read");
+        assert!(
+            text.starts_with("count = 2"),
+            "the count must precede the entries, or a truncated write is undetectable:\n{text}"
+        );
+        assert_eq!(load_selection(&work).expect("reads back"), repos);
+    }
+
+    /// The obligation the atomic rename exists for: a reader must never see a
+    /// prefix of a write, and two writers must not build the same temporary
+    /// file. Both are exercised at once — readers run throughout, and every
+    /// read either finds no file or finds a whole one.
+    #[test]
+    fn racing_writers_never_leave_a_torn_selection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let entry = |n: usize| SelectedRepo {
+            name: format!("acme/repo-{n}"),
+            path: PathBuf::from(format!("repos/acme/repo-{n}")),
+        };
+
+        std::thread::scope(|scope| {
+            for writer in 1..=4usize {
+                let work = &work;
+                scope.spawn(move || {
+                    // Different lengths, so a torn read is a mismatched count
+                    // rather than an identical file written twice.
+                    let repos: Vec<SelectedRepo> = (0..writer * 3).map(entry).collect();
+                    for _ in 0..20 {
+                        save_selection(work, &repos).expect("a racing write still succeeds");
+                    }
+                });
+            }
+            scope.spawn(|| {
+                for _ in 0..200 {
+                    match load_selection(&work) {
+                        Ok(repos) => assert!(!repos.is_empty()),
+                        // Absent is legal only before the first rename lands.
+                        Err(AuditError::NoRepositoriesSelected { .. }) => {}
+                        Err(e) => panic!("a reader saw a torn selection: {e}"),
+                    }
+                }
+            });
+        });
+
+        let repos = load_selection(&work).expect("the last write is whole");
+        assert!([3, 6, 9, 12].contains(&repos.len()), "{repos:?}");
+        // Nothing may be left in the state area but the file itself.
+        let leftovers: Vec<PathBuf> = std::fs::read_dir(work.path(Area::State))
+            .expect("read state")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]
@@ -1235,9 +1374,14 @@ trusty-review = "0.15.1"
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
         let mut script = String::from(
+            // #5670: the search binary is checked alongside the other two — on a
+            // recipient's clean machine the pinned copy is the only one there is,
+            // and without it named here `tga audit`'s search preflight falls
+            // through to a PATH lookup and refuses the run.
             "#!/bin/sh\ntest -n \"$OPENROUTER_API_KEY\" || exit 9\n\
              test -n \"$TRUSTY_REVIEW_BIN\" || exit 8\n\
-             test -n \"$TRUSTY_ANALYZE_BIN\" || exit 7\n",
+             test -n \"$TRUSTY_ANALYZE_BIN\" || exit 7\n\
+             test -n \"$TRUSTY_SEARCH_BIN\" || exit 6\n",
         );
         script.push_str(writes_a_manifest(None).trim_start_matches("#!/bin/sh\n"));
         install_stubs(&work, &script);

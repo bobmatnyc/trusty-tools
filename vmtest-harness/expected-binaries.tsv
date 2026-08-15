@@ -2,7 +2,6 @@ package	crate_dir	binary	bin_path	req_features	in_scope	expect_a	expect_b	expect
 trusty-search	trusty-search	trusty-search	src/main.rs	-	yes	present	present	present
 trusty-search	trusty-search	trusty-embedderd	src/bin/trusty-embedderd.rs	-	yes	present	present	present
 trusty-memory	trusty-memory	trusty-memory	src/main.rs	axum-server	yes	present	present	present
-trusty-memory	trusty-memory	trusty-bm25-daemon	src/bin/bm25_daemon.rs	-	yes	present	present	present
 trusty-memory	trusty-memory	trusty-memory-mcp-bridge	src/bin/mcp_bridge.rs	-	yes	present	present	present
 trusty-analyze	trusty-analyze	trusty-analyze	src/main.rs	http-server	yes	present	present	present
 trusty-code	trusty-code	tcode	src/main.rs	-	yes	present	present	present

@@ -226,12 +226,33 @@ jobs:
           # cargo-semver-checks builds into target/semver-checks/, which
           # rust-cache prunes as "unrecognised" by default.
           cache-directories: target/semver-checks
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota, and this
+          # repo was over it — see the note on the test-shard cache in ci.yml.
+          # This one also saved from worktree branches pushed for release tags.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Runs BEFORE the real gate, matching line-cap.yml's selftest-then-gate
       # ordering: a gate that cannot fail makes the real run's green meaningless.
       - name: SemVer gate selftest (must refuse a blind run)
         if: steps.crate.outputs.have_work == 'true'
         run: bash scripts/check_semver_selftest.sh
+
+      # cargo-semver-checks 0.50.0 compares NO TYPES: substitute any type and
+      # the item still exists with the same name and arity, so every lint
+      # passes. Against a 9-break probe crate at --release-type patch it caught
+      # 2 and missed 7, all 7 type substitutions; trusty-common 0.32.0 -> 0.33.0
+      # changed a return from u64 to Result<u64> and the step below reported
+      # `196 checks: 196 pass`. scripts/check_semver_types.sh closes that, and
+      # this proves it still catches all seven.
+      #
+      # Gated the same way as the selftest above, not because it is expensive —
+      # it reads two committed rustdoc JSON documents and builds nothing — but
+      # because its --crate cases need `cargo metadata`, and the toolchain step
+      # is itself gated on there being a release under test.
+      - name: Type-differ selftest (must catch what the lints miss)
+        if: steps.crate.outputs.have_work == 'true'
+        run: bash scripts/check_semver_types_selftest.sh
 
       # The two nonzero statuses are annotated differently ON PURPOSE (#5289).
       # Exit 1 is a computed verdict that says break; exit 3 means the gate never

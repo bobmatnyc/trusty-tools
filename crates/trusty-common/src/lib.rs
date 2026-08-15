@@ -305,7 +305,7 @@ pub mod symgraph;
 /// into `trusty-common` (issue #5 phase 2d) so we ship one fewer published
 /// crate.
 /// What: Gated behind the `memory-core` feature because it pulls in heavy
-/// storage deps (`usearch`, `rusqlite`, `r2d2`, `git2`, `kuzu`). Enables
+/// storage deps (`usearch`, `rusqlite`, `r2d2`, `git2`). Enables
 /// the embedder surface automatically (memory-core → embedder).
 /// Test: `cargo test -p trusty-common --features memory-core` exercises
 /// the full surface.

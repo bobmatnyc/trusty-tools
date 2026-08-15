@@ -1,0 +1,627 @@
+# Pre-publish release gate — the checks that guard an IRREVERSIBLE artifact.
+#
+# WHY THIS WORKFLOW EXISTS, AND WHY IT IS ALLOWED TO BE SLOW.
+#   A crates.io publish cannot be undone. Yanking removes a version from
+#   resolution for NEW dependents; every existing lockfile still resolves it,
+#   and docs.rs never rebuilds the documentation it already generated. So the
+#   cost of a bad release is permanent and the cost of a slow gate is 30
+#   minutes, a few times a month. Everything below is tuned for coverage, not
+#   for speed. Do not "optimise" a check here by narrowing what it examines.
+#
+# WHAT IT ADDS OVER THE EXISTING GATES. Before this workflow, a release was
+#   guarded by `ci.yml` (fmt, clippy, MSRV, four nextest shards, doctests) and
+#   `scripts/preflight-publish.sh` (merged-main, identity, clean tree, version
+#   not live, SemVer, tag/publish parity, UI bundle freshness). Four things
+#   nothing checked, each of which can only be fixed by burning another version
+#   number:
+#
+#     1. BROKEN INTRA-DOC LINKS. `cargo doc` appeared in no workflow at all.
+#        docs.rs builds a release's documentation once and never again, so a
+#        broken link ships permanently. Measured at e39183c3: 852 of them
+#        across 16 crates.
+#     2. KNOWN-VULNERABLE DEPENDENCIES. `cargo-audit.yml` runs on a WEEKLY CRON
+#        and nothing else — never before a publish. A release could ship a
+#        dependency with a RustSec advisory filed four days earlier with every
+#        gate green.
+#     3. LICENCE AND PROVENANCE. Nothing checked either. 1220 crates in the
+#        dependency graph, no policy anywhere about what licences may be
+#        redistributed or which registries they may come from.
+#     4. THE `#[ignore]`d TESTS. `ci.yml` states in its own header that the
+#        shards skip them. They are the ONNX/embedder tests — the model-loading
+#        path a published daemon runs on a user's machine at first start.
+#
+#   Plus the Code Contracts gates from #5729 (see the `contracts` job), which
+#   need a rustdoc JSON build too heavy for per-PR CI and belong here.
+#
+# TRIGGERS. `workflow_dispatch` plus tag push on `*-v*`, matching
+#   `semver-checks.yml`'s existing tag trigger so both release gates fire on the
+#   same event. It deliberately does NOT run on pull_request: it is 25-35
+#   minutes and gates the publish boundary, not the merge boundary — the same
+#   reasoning `ci.yml` applies to its shard matrix.
+#
+# EVERY JOB FAILS CLOSED. This repo has been bitten twice by a gate reporting
+#   success while checking nothing — #5620 (`0 compared` printing `[PASS]`) and
+#   the SemVer type gap (#5723). So: no job here uses `continue-on-error`, no
+#   step swallows an exit code, and the `summary` job at the bottom requires
+#   every other job to have concluded `success` — never merely "not failed",
+#   because GitHub reports a SKIPPED job as neither failure nor success and a
+#   skipped gate must not read as a passing one.
+name: Pre-publish gate
+
+on:
+  push:
+    tags:
+      - "*-v*"
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: "Crate being released (package name, e.g. trusty-common). Optional — only the contract diff uses it."
+        required: false
+        type: string
+
+# Keyed to the ref. A tag push and a manual dispatch for the same release
+# should not race, and two dispatches against the same branch should supersede.
+concurrency:
+  group: pre-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SKIP_UI_BUILD: "1"
+  CARGO_TERM_COLOR: always
+  RUST_LOG: "warn"
+  # Pinned tool versions. A release gate whose tooling floats is a release gate
+  # whose verdict is not reproducible: the same commit could pass on Tuesday and
+  # fail on Wednesday because a tool changed its lint set, and nobody would know
+  # which run to believe.
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_AUDIT_VERSION: "0.22.2"
+
+jobs:
+  # ==========================================================================
+  # ci-parity — the existing shards must already be green for THIS commit.
+  #
+  # WHY THIS RATHER THAN RE-RUNNING THE SHARDS HERE. The brief for this
+  # workflow asked for "the existing shards plus the four new gates". There are
+  # two ways to get that, and copying the shard matrix into this file is the
+  # worse one: it would duplicate ~600 lines of fastembed cache handling, disk
+  # reclamation and nextest partitioning that `ci.yml` already maintains, and
+  # the copy would drift from the original the first time either was edited.
+  # `workflow_call` would avoid the duplication but requires editing `ci.yml`,
+  # which a concurrent workstream is rewriting for CI speed.
+  #
+  # So this job ASSERTS the shards ran instead of running them. `ci.yml` runs
+  # the four-shard matrix on every push to `main`, and `preflight-publish.sh`
+  # CHECK 1 refuses to publish from any commit that is not `origin/main` — so
+  # the commit being released has always had the shards run against it, and
+  # querying that result is not weaker than re-running it, only cheaper.
+  #
+  # IT FAILS CLOSED IN BOTH DIRECTIONS. No CI run found for the SHA is a
+  # FAILURE, not a pass — "never ran" and "ran and passed" are different facts,
+  # and conflating them is the #5620 shape. A run that exists but concluded
+  # anything other than `success` is a failure. There is no override.
+  # ==========================================================================
+  ci-parity:
+    name: CI shards already green for this commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Require a green CI run for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "Looking for a CI workflow run against ${SHA}"
+
+          # `--json` over the runs for this head SHA. `-q` filters to the CI
+          # workflow by name; the shard aggregate row is "Rust tests
+          # (pre-publish gate)" inside that run, so the run's own conclusion is
+          # what we read (it is `failure` if any shard failed).
+          runs="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&per_page=100" \
+            --jq '[.workflow_runs[] | select(.name == "CI") | {id, status, conclusion, event}]')"
+
+          echo "CI runs for this SHA: ${runs}"
+
+          count="$(printf '%s' "${runs}" | jq 'length')"
+          if [ "${count}" -eq 0 ]; then
+            echo "::error::No CI workflow run exists for ${SHA}. The four nextest shards have never executed against this tree, so nothing here can claim they passed. Push this commit to main (or dispatch CI against it) and re-run."
+            exit 1
+          fi
+
+          # Any completed run that succeeded is enough; a re-run after a flake
+          # is a legitimate green.
+          green="$(printf '%s' "${runs}" | jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length')"
+          if [ "${green}" -eq 0 ]; then
+            # STILL RUNNING and CONCLUDED RED are different facts and get
+            # different messages. On the gate's first real run the only CI run
+            # for the SHA was `queued` — the gate was dispatched ~20 s after the
+            # merge landed — and a message about a "red CI" would have sent
+            # someone hunting a failure that did not exist. Both still FAIL:
+            # an unfinished CI has not proved anything yet.
+            pending="$(printf '%s' "${runs}" | jq '[.[] | select(.status != "completed")] | length')"
+            if [ "${pending}" -gt 0 ]; then
+              echo "::error::CI for ${SHA} has not finished — ${pending} run(s) still queued or in progress. This gate is dispatched too early; wait for CI to settle, then re-run. Nothing here is red, but nothing has been proved either."
+            else
+              echo "::error::CI has run to completion for ${SHA} and no run concluded 'success'. A release gate cannot pass over a red CI. Conclusions above."
+            fi
+            exit 1
+          fi
+          echo "OK — ${green} green CI run(s) for ${SHA}"
+
+  # ==========================================================================
+  # rustdoc-links — GATE 1. Broken intra-doc links.
+  #
+  # Ranked the highest-value addition of the four: a broken link is invisible
+  # locally, ships to docs.rs on upload, and cannot be corrected without
+  # publishing a new version. The gate is a ratchet over a recorded per-crate
+  # baseline — see scripts/check_rustdoc_links.sh for why 852 pre-existing
+  # findings are baselined rather than fixed here, and how the script refuses to
+  # report success on a build it could not complete.
+  # ==========================================================================
+  rustdoc-links:
+    name: "Gate 1 — cargo doc (broken intra-doc links)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space
+        run: bash scripts/ci-free-disk-space.sh
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: pre-publish-doc
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The script runs `cargo doc --workspace --no-deps --locked --keep-going`
+      # itself; --locked is inside it so the gate proves the committed lockfile
+      # is the one documented.
+      - name: cargo doc + broken-link ratchet
+        run: bash scripts/check_rustdoc_links.sh
+
+  # ==========================================================================
+  # audit — GATE 2. Known-vulnerable dependencies.
+  #
+  # `.github/workflows/cargo-audit.yml` already runs `cargo audit`, but on a
+  # weekly cron only — never in the publish path. A vulnerability disclosed on
+  # Tuesday would not be seen until the following Monday, and a release cut in
+  # between ships it with every gate green.
+  #
+  # PREBUILT BINARY, NOT `cargo install`. The scheduled workflow compiles
+  # cargo-audit from source on every run. rustsec/rustsec publishes official
+  # prebuilt binaries per release; using one takes seconds instead of minutes
+  # and involves no third-party action — the same reasoning ci.yml applies to
+  # cargo-nextest via get.nexte.st.
+  # ==========================================================================
+  audit:
+    name: "Gate 2 — cargo audit (RustSec advisories)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install cargo-audit (official prebuilt binary)
+        run: |
+          set -euo pipefail
+          url="https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${CARGO_AUDIT_VERSION}/cargo-audit-x86_64-unknown-linux-gnu-v${CARGO_AUDIT_VERSION}.tgz"
+          echo "Fetching ${url}"
+          curl -fsSL "${url}" | tar xzf - -C /tmp
+          install -m755 "/tmp/cargo-audit-x86_64-unknown-linux-gnu-v${CARGO_AUDIT_VERSION}/cargo-audit" \
+            "${CARGO_HOME:-$HOME/.cargo}/bin/cargo-audit"
+          cargo audit --version
+
+      # Default behaviour: exit nonzero on a VULNERABILITY. The 38 warnings this
+      # workspace carries today (unmaintained / unsound / yanked transitive
+      # crates, mostly behind the Tauri GUI stack) are reported and do not fail
+      # the gate — none has a patched version available, so failing on them
+      # would make the gate permanently red and therefore permanently ignored.
+      # `cargo deny`'s advisories section covers the yanked subset separately.
+      - name: cargo audit
+        run: cargo audit
+
+  # ==========================================================================
+  # deny — GATE 3. Licences, provenance, duplicate versions.
+  #
+  # Policy lives in deny.toml at the repo root; read that file for what each
+  # check asserts and why every allowed licence is on the list. This job runs
+  # the four checks separately so a failure names which question it answered
+  # rather than a single opaque red.
+  # ==========================================================================
+  deny:
+    name: "Gate 3 — cargo deny (licences, bans, sources)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install cargo-deny (official prebuilt binary)
+        run: |
+          set -euo pipefail
+          url="https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "Fetching ${url}"
+          curl -fsSL "${url}" | tar xzf - -C /tmp
+          install -m755 "/tmp/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny" \
+            "${CARGO_HOME:-$HOME/.cargo}/bin/cargo-deny"
+          cargo deny --version
+
+      - name: cargo deny check licenses
+        run: cargo deny check licenses
+
+      - name: cargo deny check sources
+        run: cargo deny check sources
+
+      - name: cargo deny check advisories
+        run: cargo deny check advisories
+
+      # `bans` is where duplicate versions surface. cargo-deny reports them as
+      # WARNINGS and exits 0, so this step alone would never fail — the ratchet
+      # script is what turns the count into a gate. See deny.toml's [bans]
+      # section for why 105 duplicates are baselined rather than skipped.
+      - name: cargo deny check bans + duplicate ratchet
+        run: bash scripts/check_deny_duplicates.sh
+
+  # ==========================================================================
+  # ignored-tests — GATE 4. The `#[ignore]`d ONNX/embedder tests.
+  #
+  # ci.yml:414 says the shards skip these; nothing else picks them up. They
+  # exercise the model download and load path a published daemon runs on a
+  # user's machine at first start, which makes them the tests most likely to
+  # break a fresh install and the ones with the least coverage before an
+  # irreversible upload.
+  #
+  # The fastembed model cache is warmed exactly as ci.yml warms it, because
+  # these tests are the ones that actually need the model — under the shards the
+  # same cache mostly serves tests that use a MockEmbedder instead.
+  #
+  # scripts/check_ignored_tests.sh both RUNS the selected tests and ACCOUNTS for
+  # the ones it does not run; read its header for why a subset plus a ratchet is
+  # the honest shape here and a blanket `--run-ignored all` is not (442 ignored
+  # tests, many needing API keys, live daemons, tmux, or macOS hardware).
+  # ==========================================================================
+  ignored-tests:
+    name: "Gate 4 — #[ignore]d ONNX/embedder tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: bash scripts/ci-free-disk-space.sh
+
+      - name: Create local main branch for git tests
+        run: git fetch origin main:main || true
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev
+
+      - name: Install cargo-nextest
+        run: |
+          set -euo pipefail
+          curl -LsSf https://get.nexte.st/latest/linux \
+            | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Same key derivation as ci.yml's: the fastembed VERSION plus the two
+      # model repo IDs, so the key rotates when the models change and not on
+      # every unrelated dependency bump (#4940).
+      - name: Resolve fastembed model cache key
+        id: fastembed-key
+        run: |
+          set -euo pipefail
+          ver=$(awk '/^name = "fastembed"$/ { found = 1; next }
+                     found && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' Cargo.lock)
+          if [ -z "${ver}" ]; then
+            echo "::error::could not resolve the fastembed version from Cargo.lock — refusing to fall back to an unkeyed cache"
+            exit 1
+          fi
+          echo "key=fastembed-v${ver}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
+
+      - name: Restore fastembed model cache
+        id: fastembed-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/fastembed
+          key: ${{ steps.fastembed-key.outputs.key }}
+
+      # NOT fail-soft here, unlike ci.yml's equivalent step. In the shards the
+      # pre-seed is a latency optimisation — almost every test that needs a real
+      # model is #[ignore]d and therefore not running. In THIS job those are
+      # exactly the tests being run, so a missing model is not a slow path, it
+      # is the gate having nothing to test. Downloading at test time instead
+      # would work but would hit HuggingFace concurrently from N test processes,
+      # which is the HTTP 429 flake #865 exists because of.
+      - name: Pre-seed fastembed models (cache miss only)
+        if: steps.fastembed-cache.outputs.cache-hit != 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          CACHE_DIR="${FASTEMBED_CACHE_DIR}"
+          mkdir -p "${CACHE_DIR}"
+
+          CURL_AUTH=()
+          if [ -n "${HF_TOKEN:-}" ]; then
+            CURL_AUTH=(-H "Authorization: Bearer ${HF_TOKEN}")
+          fi
+
+          curl_retry() {
+            local url="$1" dest="$2" attempt=1 max=7 wait=10
+            until curl -fsSL --retry 0 "${CURL_AUTH[@]}" -o "${dest}" "${url}"; do
+              if [ "${attempt}" -ge "${max}" ]; then
+                echo "ERROR: download failed after ${max} attempts: ${url}" >&2
+                return 1
+              fi
+              echo "Download failed (attempt ${attempt}/${max}), retrying in ${wait}s …"
+              sleep "${wait}"
+              attempt=$(( attempt + 1 ))
+              wait=$(( wait * 2 ))
+              if [ "${wait}" -gt 60 ]; then wait=60; fi
+            done
+          }
+
+          seed_repo() {
+            set -euo pipefail
+            local repo="$1" dir="$2"; shift 2
+            local files=("$@")
+            local base="https://huggingface.co"
+            local rev
+            rev=$(curl -fsSL "${CURL_AUTH[@]}" \
+              "${base}/api/models/${repo}?full=false" | jq -r '.sha')
+            [ -n "${rev}" ] && [ "${rev}" != "null" ] || { echo "could not resolve ${repo} revision" >&2; return 1; }
+            mkdir -p "${dir}/refs" "${dir}/snapshots/${rev}"
+            printf '%s' "${rev}" > "${dir}/refs/main"
+            local f
+            for f in "${files[@]}"; do
+              mkdir -p "$(dirname "${dir}/snapshots/${rev}/${f}")"
+              curl_retry "${base}/${repo}/resolve/${rev}/${f}" "${dir}/snapshots/${rev}/${f}"
+            done
+          }
+
+          seed_repo "Xenova/all-MiniLM-L6-v2" \
+            "${CACHE_DIR}/models--Xenova--all-MiniLM-L6-v2" \
+            "onnx/model_quantized.onnx" "tokenizer.json" "config.json" \
+            "tokenizer_config.json" "special_tokens_map.json"
+
+          seed_repo "Qdrant/all-MiniLM-L6-v2-onnx" \
+            "${CACHE_DIR}/models--Qdrant--all-MiniLM-L6-v2-onnx" \
+            "model.onnx" "tokenizer.json" "config.json" \
+            "tokenizer_config.json" "special_tokens_map.json"
+
+          du -sh "${CACHE_DIR}" || true
+
+      - name: Save fastembed model cache
+        if: steps.fastembed-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.cache/fastembed
+          key: ${{ steps.fastembed-key.outputs.key }}
+
+      - name: Run the selected ignored tests + reconcile the rest
+        run: bash scripts/check_ignored_tests.sh
+
+  # ==========================================================================
+  # contracts — GATE 5 and 6. Code Contracts (#5729).
+  #
+  # Added at the coordinator's request alongside the four gates above. #5729
+  # makes trusty-common's Code Contracts a machine-readable artifact
+  # (crates/trusty-common/contracts.json) with a drift gate and a cross-version
+  # differ. Both need a rustdoc JSON build (~2 min), which is why they were kept
+  # out of per-PR CI; the publish boundary is the right home.
+  #
+  # GATE 5 (drift): contracts.json must match the doc comments it was extracted
+  #   from. Cheap once the rustdoc JSON exists, and it belongs on every publish.
+  #
+  # GATE 6 (cross-version diff): compares this release's contracts against the
+  #   last PUBLISHED release's. This is the blind spot neither cargo-semver-checks
+  #   nor check_semver_types.sh can see — a precondition that changed under a
+  #   byte-identical signature, which is the class that shipped the #5272 break.
+  #
+  # #5729 HAS NOT MERGED AS OF THIS WORKFLOW'S AUTHORING, so both steps are
+  # written against its known paths and guarded on the files existing. A missing
+  # script reports an explicit, loud SKIP naming #5729 — never a silent pass,
+  # and never a green tick implying contracts were verified. The moment #5729
+  # lands, both steps go live with no edit to this file.
+  #
+  # THE DIFF HAS NO BASELINE YET. No published trusty-common carries
+  # contracts.json, so the first run of gate 6 has nothing to compare against.
+  # That is a recorded SKIP with a stated reason — the same treatment
+  # preflight-publish.sh CHECK 5 gives a crate with no crates.io baseline — and
+  # it becomes a real comparison from the next release onward.
+  # ==========================================================================
+  contracts:
+    name: "Gates 5-6 — Code Contracts drift + cross-version diff"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space
+        run: bash scripts/ci-free-disk-space.sh
+
+      # The contract extractor reads rustdoc JSON, which is a nightly-only
+      # output format. Same requirement scripts/check_semver_types.sh already
+      # carries, and the reason the shared walk was factored out in #5729.
+      - name: Install nightly toolchain (rustdoc JSON)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev
+
+      # libdbus-1-dev is REQUIRED here and nowhere else in this workflow. The
+      # contract extractor builds rustdoc JSON for trusty-common with its full
+      # feature set, which pulls in libdbus-sys; its build.rs calls pkg-config
+      # and `explicit panic`s when the headers are absent. On the gate's first
+      # real run (31858449749) that failed Gate 5 with exit 3 — a build failure,
+      # correctly NOT reported as a contract verdict. The other jobs build
+      # narrower graphs and do not need it.
+      - name: Install libdbus (contract extraction only)
+        run: sudo apt-get install -y --no-install-recommends libdbus-1-dev
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: pre-publish-contracts
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: "Gate 5 — contract drift (scripts/check_contracts.sh)"
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/check_contracts.sh ]; then
+            echo "::warning::[SKIP] contract-drift: scripts/check_contracts.sh does not exist in this tree."
+            echo "  It arrives with PR #5729 (Code Contracts), which had not merged when this"
+            echo "  workflow was written. This is a RECORDED SKIP, not a pass: nothing checked"
+            echo "  whether contracts.json matches its doc comments, because the checker is not"
+            echo "  here yet. No edit to this workflow is needed when #5729 lands — this step"
+            echo "  goes live on its own."
+            echo "contract_drift=SKIPPED-NO-SCRIPT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash scripts/check_contracts.sh --crate trusty-common
+        id: contract-drift
+
+      # NEXT AUTHOR, READ THIS BEFORE WIRING A REAL crates.io FETCH. The entry
+      # point for the comparison itself is already correct below:
+      #
+      #     bash scripts/check_contracts.sh --diff <baseline> <current>
+      #
+      # which #5729 built for exactly this, and which owns the exit-code
+      # contract (0 clean / 1 drift / 2 usage / 3 no verdict) this step reads.
+      # What is still missing is fetching a REAL published baseline from
+      # crates.io (compare `registry_probe` in scripts/check_semver.sh, which
+      # already solves this for the SemVer gate). Until that lands, `$BASELINE`
+      # below is a path that is never written to — it stands in for "the
+      # baseline a real fetch would have produced," and since none is published
+      # yet, check_contracts.sh's own fail-closed logic reports NO VERDICT (3)
+      # for it not existing. That is a REAL run of the real tool against real
+      # (if intentionally absent) inputs, not a probe of a flag it doesn't
+      # support, and it fails closed the same way if the tool ever misbehaves.
+      - name: "Gate 6 — cross-version contract diff"
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/diff_contracts.py ]; then
+            echo "::warning::[SKIP] contract-diff: scripts/diff_contracts.py does not exist in this tree (arrives with #5729)."
+            echo "  RECORDED SKIP — no behavioural-contract comparison was performed."
+            exit 0
+          fi
+          pkg="${{ inputs.crate || 'trusty-common' }}"
+          ver="$(grep -m1 -E '^version[[:space:]]*=' "crates/trusty-common/Cargo.toml" \
+                 | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "Looking for a published contracts.json baseline for ${pkg} (current ${ver})"
+
+          # No published trusty-common carries contracts.json yet, so there is
+          # no baseline artifact to fetch. CURRENT is the artifact Gate 5 just
+          # verified matches this tree's source; BASELINE is a path that is
+          # deliberately never created, so the tool itself — not this step —
+          # is the one that decides whether that counts as "no baseline".
+          CURRENT="crates/trusty-common/contracts.json"
+          SCRATCH="$(mktemp -d "${RUNNER_TEMP:-/tmp}/gate6.XXXXXX")"
+          trap 'rm -rf "$SCRATCH"' EXIT
+          BASELINE="${SCRATCH}/no-published-baseline.json"
+
+          set +e
+          OUT="$(bash scripts/check_contracts.sh --diff "$BASELINE" "$CURRENT" 2>&1)"
+          rc=$?
+          set -e
+          echo "$OUT"
+
+          if [[ "$rc" -ne 3 ]]; then
+            echo "::error::check_contracts.sh --diff exited ${rc}, not the 3 (NO VERDICT) a genuinely absent baseline must produce — refusing to report a pass or a skip."
+            exit 1
+          fi
+          if ! grep -qF "baseline artifact ${BASELINE} could not be read" <<< "$OUT"; then
+            echo "::error::check_contracts.sh --diff exited 3 (NO VERDICT) for a different reason than the missing baseline file — refusing to assume this is the known no-baseline case."
+            exit 1
+          fi
+
+          echo "::warning::[SKIP] contract-diff: no published release of ${pkg} carries contracts.json."
+          echo "  The artifact was introduced by #5729 and ships for the first time with the NEXT"
+          echo "  release, so there is nothing to diff against on this run. RECORDED SKIP with a"
+          echo "  stated reason — this becomes a real comparison from the following release onward,"
+          echo "  once this step also fetches the published baseline instead of leaving it absent."
+          echo "  This is the only run for which that is true; if this message appears on a release"
+          echo "  AFTER contracts.json has shipped once, the baseline lookup is broken and this"
+          echo "  step must be made to fail instead."
+
+  # ==========================================================================
+  # summary — the aggregate verdict.
+  #
+  # Written as "every job must equal success" rather than "no job failed".
+  # GitHub reports a SKIPPED job as neither success nor failure, so the negative
+  # form would let a job that never ran read as a passing gate — the fail-open
+  # hole #4179 closed for ci.yml's required checks, and the reason ci.yml's
+  # `test` aggregate is spelled the same way.
+  # ==========================================================================
+  summary:
+    name: Pre-publish gate
+    needs: [ci-parity, rustdoc-links, audit, deny, ignored-tests, contracts]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every gate to have succeeded
+        env:
+          R_CI: ${{ needs.ci-parity.result }}
+          R_DOC: ${{ needs.rustdoc-links.result }}
+          R_AUDIT: ${{ needs.audit.result }}
+          R_DENY: ${{ needs.deny.result }}
+          R_IGNORED: ${{ needs.ignored-tests.result }}
+          R_CONTRACTS: ${{ needs.contracts.result }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for pair in \
+            "ci-parity:${R_CI}" \
+            "rustdoc-links:${R_DOC}" \
+            "audit:${R_AUDIT}" \
+            "deny:${R_DENY}" \
+            "ignored-tests:${R_IGNORED}" \
+            "contracts:${R_CONTRACTS}"; do
+            name="${pair%%:*}"; result="${pair##*:}"
+            if [ "${result}" = "success" ]; then
+              echo "  [PASS] ${name}"
+            else
+              echo "  [FAIL] ${name}: ${result}"
+              fail=1
+            fi
+          done
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error::Pre-publish gate is RED. Do not publish. A job reported anything other than 'success' — including 'skipped', which means the gate did not run and therefore verified nothing."
+            exit 1
+          fi
+          echo "every pre-publish gate passed"

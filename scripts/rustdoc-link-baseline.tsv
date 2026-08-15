@@ -1,0 +1,45 @@
+# Per-crate broken intra-doc link baseline (scripts/check_rustdoc_links.sh).
+#
+# A RATCHET, not a target. Each row records how many broken links a crate has
+# today; the gate fails when a crate exceeds its row, when a crate with no row
+# has any at all, or when a crate that has a row was never documented.
+#
+# LOWERING A ROW IS ALWAYS WELCOME AND NEVER REQUIRED. Fix links in the PR that
+# touches the file anyway, then run:
+#     bash scripts/check_rustdoc_links.sh --update-baseline
+# Deleting a row entirely is the goal state for every crate here.
+#
+# RAISING A ROW IS A REVIEW DECISION, not a way to make a red gate green. A
+# broken link on docs.rs cannot be fixed without publishing a new version, so
+# the cost of letting one through is a wasted version number.
+#
+# RAISED ONCE, ON 2026-08-15, FROM 852 TO 873. The original numbers were
+# measured at e39183c3. #5729 (Code Contracts) and #5730 (CI speed) merged
+# between that measurement and this gate's first real run, and the gate caught
+# the delta on that run (31858449749): trusty-installer +14, trusty-mpm +4,
+# trusty-common +2, trusty-memory +1. Those 21 links are not this gate's work to
+# fix and predate its enforcement, so the rows were rebased onto main rather
+# than reverted — which is the raise this file calls a review decision, recorded
+# here because that is what the rule asks for.
+#
+# This is the only rebase of its kind that should ever be needed. From here the
+# gate runs on every release, so a regression is caught by the PR that causes it.
+#
+# Regenerate with: bash scripts/check_rustdoc_links.sh --update-baseline
+# Format (tab-separated):  <crate-directory>	<broken-link-count>
+trusty-agents	11
+trusty-agents-common	61
+trusty-analyze	1
+trusty-audit	2
+trusty-channels	2
+trusty-code	125
+trusty-common	202
+trusty-git-analytics	43
+trusty-gworkspace	1
+trusty-installer	18
+trusty-memory	18
+trusty-mpm	260
+trusty-review	7
+trusty-search	29
+trusty-sld-lint	2
+trusty-tui	91

@@ -6,6 +6,189 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.4.1] — 2026-08-14
+
+### Fixed
+
+- `trusty-mpm-v1.4.0` was tagged but never published: its root `Cargo.toml`
+  still pinned `trusty-common = "0.33"` at tag time, and the only `0.33.x`
+  release on crates.io (0.33.0) lacks the `gh-cli` feature that 1.4.0's
+  `get_origin_url` work depends on, so `cargo publish` failed at packaging
+  before any upload occurred. `trusty-common` 0.34.0 published after the tag,
+  and `main`'s requirement moved to `"0.34"` afterward too — both landed too
+  late for the immutable `trusty-mpm-v1.4.0` tag to pick up. 1.4.1 carries the
+  same 1.4.0 content against the now-current `trusty-common` requirement and
+  is the first version of this release actually shipped to crates.io.
+
+## [1.4.0] — 2026-08-14
+
+This release ships a library-surface breaking change (below) as a MINOR bump.
+`trusty-mpm` is a binary-only consumer surface — users install it as the `tm`
+executable via `cargo install trusty-mpm` — with zero workspace dependents and
+zero crates.io reverse dependencies, so the break carries no downstream
+library-compatibility impact. It is recorded in
+`scripts/semver-checks-crate-exclusions.tsv` and the release semver gate skips
+this crate accordingly.
+
+### Breaking
+
+- `daemon::managed_routes::inproject::get_origin_url` returns
+  `Result<Option<String>, String>` rather than `Option<String>`, so a git
+  failure can no longer be mistaken for an absent remote (refs
+  [#4734](https://github.com/bobmatnyc/trusty-tools/issues/4734)). A caller that
+  wants the previous fail-open behaviour now spells it out with
+  `.ok().flatten()`.
+- `ColdStartError` gained an `OriginUnreadable` variant, so an exhaustive match
+  over it needs a new arm.
+
+### Added
+
+- `tm-workflow` now carries a "Concurrent Sessions on One Repo" protocol: use
+  `session_list` to find the other session on this repo and `session_activity` to
+  read its raw tmux pane, claim work on the tracker before starting, and verify
+  every `session_send` with `session_activity`. `session_send` and
+  `session_proxy_message` inject characters into a pane and do not deliver a
+  message — an observed long single-line send landed as a bracketed paste, the
+  submit never fired, and the text sat unsent in the target's prompt buffer. The
+  tools existed and were documented nowhere, so every cross-session handoff went
+  through the human owner by hand.
+- All three bundled output styles gain an ASD-STE-100 (Simplified Technical
+  English) sentence-construction layer in `Communication — Write Plainly`: one
+  idea per sentence, ~20/25-word sentence targets, active voice, one meaning
+  per word, the same term for the same thing, no noun cluster over three
+  words, present tense. The ~900-word approved vocabulary is named as NOT
+  adopted so a future reader cannot tighten it into literal conformance. The
+  stance rules it sits on top of are unchanged; the superseded "Short
+  sentences, one idea each" bullet is folded into the layer rather than left
+  beside it (#4574).
+- The composed PM prompt now carries a "Messages Are Pointers" rule in its core
+  section: a cross-session message is a pointer, and long-form content —
+  findings, evidence, rationale, defect analysis — belongs in an issue or PR
+  comment the message links to. A message dies with its session and is never
+  indexed or searchable, so long-form content sent that way is stored where no
+  third party and no later session can recover it (#5629). PM-prompt goldens
+  regenerated.
+
+### Fixed
+
+- The mandatory pre-push credential scan now scopes its diff with three dots — `git diff origin/main...HEAD` — in both places that state the rule: the composed `WORKFLOW` instruction section and the `tm-workflow` skill's "Git Security Review". Two-dot diffs the two commits, so files DELETED from `main` since the branch point are reported as the branch's own additions
+  - measured, not theoretical: one session's two-dot scan returned 19 hits that belonged to another PR's deletions, where three-dot returned zero across 36 files. The same session's earlier pre-first-push scan had been accurate only because `origin/main` still equalled its branch point — correct by luck, and on a busy `main` that luck runs out silently
+  - the severity is the noise, not the wording. A credential scan that reports hits nobody owns is one reviewers learn to wave through, and a real secret arrives inside that noise
+  - both statements now carry the reason inline, so the next reader does not simplify the third dot back out
+- `tm` launch-new-session no longer fails on a host where tmux has never run (closes [#3886](https://github.com/bobmatnyc/trusty-tools/issues/3886))
+  - the #3823 server-up guard moved into `SessionManager::resolve_session_name`, adjacent to the `list-sessions` probe it protects, so the in-project launch routes (`spawn_managed_on_main`, `reserve_inproject_worktree`) that bypass `create_with_id` inherit it
+  - `tmux error:` is no longer printed twice — `names_for_serial_allocation` and `dedupe_session_name` propagate the already-typed `ManagedError` instead of re-wrapping it
+- A repository git cannot read is no longer reported as one with no remote
+  (refs [#4734](https://github.com/bobmatnyc/trusty-tools/issues/4734)).
+  `inproject::get_origin_url` returned a bare `Option`, so "this repo has no
+  `origin` remote" and "git could not answer at all" were the same value, and
+  every caller read it as the former. `tm launch` and the guided default told
+  the operator a checkout they could not read had no GitHub remote, and sent
+  them to `tm connect` to fix a repo that is fine. It now returns
+  `Result<Option<String>, String>`: a git-exec failure, or a fatal exit such as
+  128 for an unreadable `.git/config`, a dangling gitdir pointer, or a
+  `safe.directory` ownership refusal, is `Err`, while git-config's exit 1 — its
+  "the key is not set" answer, and what both a plain non-git directory and a
+  repo without an `origin` produce — stays `Ok(None)` and still falls through
+  by design.
+- A `.git` git cannot open no longer answers with a DIFFERENT repository's
+  remote. Discovery walks past an unreadable `.git`, so a `.git` directory at
+  mode 000 exited 1 with empty stderr (indistinguishable from "no origin"), and
+  the same directory nested inside another repo exited 0 with the PARENT repo's
+  origin — which would have the daemon provision a managed clone of the wrong
+  repository. When `path/.git` exists, git's own `rev-parse --show-toplevel`
+  must now name that path back.
+- A managed checkout whose remote git cannot read is no longer reported as
+  having no remote, which told the operator to move or remove a directory that
+  may be fine.
+- `validate_and_repair` no longer reports `repaired: true` for a repair that
+  failed (closes [#4781](https://github.com/bobmatnyc/trusty-tools/issues/4781)).
+  The flag was set unconditionally on the repair path, so a workspace whose
+  repair was refused outright — `prepare_session_with_repo_url` returning the
+  fatal `PrepError::Instructions` (#4752) — still reported itself repaired next
+  to a populated `repair_error`. It is now derived from the re-validation:
+  `true` only when the pipeline returned no error AND the post-repair report has
+  no gaps.
+- `tm validate --repair` prints the attempt's diagnostics again. It gated them
+  on `repaired`, which under the new meaning would have silenced the error
+  message on exactly the runs that produce one; it now gates on whether the
+  pre-repair report had gaps, and says so when the repair did not restore the
+  workspace.
+- `SmMemory` and `PortfolioMemory` no longer destroy a palace's metadata when the palace exists but cannot be opened. Both `ensure_palace` implementations treated every `open_palace` failure as "the palace does not exist" and fell through to `create_palace`, which rewrites `palace.json` unconditionally — so a palace that merely could not be READ lost its `created_at` and only then re-failed against the same unreadable store. They now fall through to create only when `PalaceStore::metadata_present` definitively reports no `palace.json`, and fail closed on a probe that cannot complete (#4911).
+- `tm doctor`'s `gh_account` check no longer reports "gh is not authenticated"
+  for a working `GH_TOKEN` / `GITHUB_TOKEN` login. Its `gh auth status` probe
+  was bounded at 250 ms — a constant inherited from the statusline's render
+  path — while validating an env token takes a network round trip that measured
+  281–389 ms, so every probe timed out and the timeout rendered as a definite
+  negative. The doctor now probes under its own 5 s bound, and a probe that
+  still does not finish reports the auth state as UNKNOWN with the reason,
+  instead of claiming the account does not exist.
+- The doctor reads the active login and the logged-in list from ONE
+  `gh auth status` invocation (previously two, one of them `--active`), so the
+  check costs a single network round trip.
+- The assembled session-manager prompt told the SM to watch tcode for
+  `__HARNESS_EVENT__`; tcode emits `__OMPM_EVENT__`. The harness-understanding
+  sections now carry the emitted marker, and the prompt tests assert against
+  `trusty_agents_common::events::EVENT_LINE_PREFIX` instead of a literal — they
+  previously passed by agreeing with the wrong instruction text
+  ([#5129](https://github.com/bobmatnyc/trusty-tools/issues/5129)).
+- `tm-ticketing` skill: removed the `Provenance` label family, which listed
+  `trusty-mpm` as a harness default and let the ticketing agent apply that label
+  to any issue it filed regardless of which crate the defect lived in. The skill
+  now states three label families and rules out an origin-based axis under any
+  name — provenance, umbrella, or dogfooding — matching the agent asset fixed in
+  #5691.
+- The launchd probe no longer reads an unreadable `~/Library/LaunchAgents` as
+  "no launchd unit is registered"
+  (closes [#5623](https://github.com/bobmatnyc/trusty-tools/issues/5623)).
+  `daemon_launchd_label_in` mapped every `read_dir` error to the same answer as
+  an empty directory, and `tm start`, `tm restart` and the MCP stdio bridge all
+  read that answer as permission to spawn — creating the unsupervised orphan
+  daemon of #2486/#4230. It now answers in three states, and both spawn sites
+  and `tm doctor`'s `daemon_orphan` check treat "could not determine" as
+  "launchd may own this" rather than as absence. A home with no `LaunchAgents`
+  directory still resolves to "no unit registered" (ADR-0045 §3).
+- The `tm-issues-prune` skill no longer presents a truncated backlog as the
+  whole one. Its scan and prioritize passes hardcoded
+  `gh issue list --limit 500` against a repo with 745 open issues; they now
+  paginate to exhaustion and report retrieved-vs-total, so a short read
+  announces itself.
+- `tm-workflow` and `tm-delegation-patterns` now name harness-managed
+  `isolation: "worktree"` as the only sanctioned isolation mechanism for a
+  file-mutating subagent dispatch, and state that the PM serializes when
+  isolation is unavailable rather than hand-rolling `git worktree add` into a
+  prompt. The old "name the exact worktree path" wording led PMs into a
+  hand-rolled worktree the `tm hook --pm-guard` guard cannot see, which then
+  denied the next dispatch for a collision that did not exist (#5649).
+- The shared-worktree deny message now offers the serialize fallback alongside
+  `isolation: "worktree"`, and says the guard reads the declared parameter and
+  never the prompt (#5649).
+- `tm hook --pm-guard` now denies an unisolated `documentation`,
+  `version-control`, `qa`, `web-qa`, or `api-qa` dispatch that would share a
+  running file-mutating agent's working tree. The classifier recognised only
+  engineer-tier agents, so those five wrote into an engineer's tree on one git
+  HEAD with no deny at any step (#5650).
+- `code-critic` still classifies as non-mutating. It declares the same
+  `role: qa` and `extends: base-qa` as the three QA writers but only reviews, so
+  the QA agents are matched by name rather than by role — a role-based widen
+  would have denied a review dispatched alongside the engineer it reviews
+  (#5650).
+- `tm-workflow` now lists which agents count as file-mutating, replacing wording
+  that said QA agents get their own worktree while the guard classified `qa` as
+  non-mutating (#5650).
+
+### Changed
+
+- `core::gh_account`, `core::gh_account_enforce`,
+  `core::session_launch::workstream_label`, and
+  `session_manager::worktree_reclaim` invoke `gh` through
+  `trusty_common::gh::GhCommand`
+  ([#5475](https://github.com/bobmatnyc/trusty-tools/issues/5475)). Timeout
+  bounds, `GH_CONFIG_DIR` scoping, the `GH_TOKEN` env stripping, and the
+  `current_dir`-never-`-C` rule (#2919) are all unchanged — `worktree_reclaim`
+  keeps its own kill-on-expiry runner and takes the unspawned command from the
+  entry point.
+
 ## [1.3.6] — 2026-08-12
 
 ### Added

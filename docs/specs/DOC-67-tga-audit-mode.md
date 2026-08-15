@@ -331,7 +331,9 @@ shape.
 
 **Orchestration.** `tga audit` (proposed new subcommand,
 `crates/trusty-git-analytics/src/commands/audit.rs`, dispatched alongside the
-existing commands at `main.rs:371-399`) sequences: (1) acquisition/collection
+existing commands at `main.rs:371-399`) sequences: (0) ensure the
+`trusty-analyze` daemon step 3 fetches from is running — see the preflight
+paragraph below, (1) acquisition/collection
 via #5223's machinery, (2) `dd_manifest::build_dd_manifest` → write
 `manifest.toml` to a run-scoped output directory, (3) spawn `trusty-review
 report --manifest <path> --analyze --output <dir>` (binary resolved the same
@@ -339,6 +341,85 @@ way `SubprocessAnalyzeClient` resolves `trusty-analyze` — `TRUSTY_REVIEW_BIN`
 env override, else PATH lookup), (4) surface the child's stdout/stderr and
 exit code to the operator, (5) print the resulting `{slug}.md`/`{slug}.json`
 paths.
+
+**Who starts `trusty-analyze` (#5670) — `tga audit`, as a preflight.** Step 3
+passes `--analyze` on every invocation, and §8 sources the findings table, the
+complexity distribution and the health factors from that daemon and nowhere
+else. Nothing started it. On a machine with no daemon running, every audit
+delivered a report with those three sections empty and exited 0.
+
+`tga audit` now ensures the daemon before stage 1
+(`crates/trusty-git-analytics/src/audit/analyze.rs`): it probes `/health`,
+spawns `<binary> serve --port <port>` detached when there is no answer, and polls
+until the daemon answers. The binary is `TRUSTY_ANALYZE_BIN` else PATH, and the
+address is `PR_INTELLIGENCE_ANALYZER_URL` else `http://localhost:7879` — the same
+variable `trusty-review` reads, so the daemon that gets started and the daemon
+that gets queried are the same process by construction. The probe/spawn/poll loop
+is `trusty_common::daemon_guard`, not a second copy.
+
+`tga audit` is the right owner for three reasons. It is the only process that
+always passes `--analyze`. `trusty-audit run` reaches the daemon only through the
+`tga audit` children it spawns, so one implementation covers both entry points.
+And it already carries two whole-run preflights of exactly this shape — the
+inference credential and the renderer version — both justified by §2's single
+non-interactive shot, which applies here identically: this precondition is
+knowable in milliseconds and was previously discovered after minutes of
+collection, in the artifact.
+
+**A daemon that cannot be started refuses the run**, before the sweep, with a
+message naming `trusty-search` — `trusty-analyze serve` exits immediately when
+trusty-search is unreachable, which is the usual reason a spawn produces no
+daemon. This is a preflight, so neither arm is fail-open: a spawn failure and a
+readiness timeout both stop the run. §9's fail-open contract for
+`analyze_adapter.rs` is unchanged, and remains correct for its own callers — what
+changes is that `tga audit` now guarantees the precondition rather than letting
+the renderer discover its absence.
+
+**The daemon is necessary, not sufficient.** `try_fetch` also requires the
+repository to be indexed in trusty-search under its checkout basename
+(`analyze_adapter.rs`'s `index_served`). Nothing in the audit path indexed
+anything, so a run on an unindexed repository reached the renderer's
+`trusty-analyze index not built` gap and rendered three empty sections over an
+exit 0.
+
+The full prerequisite chain is trusty-search → per-repository index →
+trusty-analyze, and #5670 reaches each link differently:
+
+- **trusty-analyze (link 3) — closed.** The preflight starts it or refuses.
+- **trusty-search (link 1) — started by the audit, ahead of link 3.** It had to
+  be, and not only for a cold machine. `trusty-analyze`'s own `/health` answers
+  `503 degraded` whenever trusty-search is unreachable
+  (`crates/trusty-analyze/src/service/routes.rs`'s `health`), and `probe_once`
+  counts only a 2xx — so the analyze preflight re-reads trusty-search's LIVE
+  status each run. An analyze daemon up for days on top of a trusty-search that
+  died an hour ago failed that probe, its spawned replacement exited at its own
+  search check, the original kept answering 503, and the readiness poll refused
+  an audit with nothing wrong with its analyze daemon at all.
+
+  `crate::audit::search_daemon::ensure_search_daemon` now runs FIRST, before the
+  analyze preflight: it probes `/health`, spawns `<binary> start --foreground`
+  detached when there is no answer, and polls for up to 60s — trusty-search's own
+  `READY_TIMEOUT`, which covers a first-run ONNX model load. The binary is
+  `TRUSTY_SEARCH_BIN` else PATH, resolved through the one rule
+  `audit::repo_index` already owns so the daemon that gets started and the binary
+  that indexes into it are the same install. The ADDRESS is not a tga setting:
+  trusty-search binds an OS-assigned port and records it, so the guard reads
+  `trusty_common::daemon_guard::DaemonAddrLayout::TRUSTY_SEARCH`, the resolver
+  promoted into `trusty-common` for this caller. Both failure arms refuse the run,
+  as link 3's do. `trusty-audit` pins `trusty-search` as a fourth
+  `RequiredTool` and exports `TRUSTY_SEARCH_BIN` onto every `tga audit` child, so
+  an isolated run reaches the engagement's copy rather than a PATH lookup.
+- **The per-repository index (link 2) — built by the audit, and still fail-open
+  per repository.** `crate::audit::repo_index::ensure_repositories_indexed` runs
+  between the sweep and the manifest: it probes each repository with
+  `trusty-search index-status <id>` and, on a miss, runs `trusty-search index
+  <path> --name <id>`, with the id derived from the same manifest entry
+  `derive_index_id` reads. `analyze_adapter.rs` is untouched, so
+  `AnalyzeGap::NotIndexed` remains what it was — but the run now has to fail
+  before the renderer can reach it. A repository that will not index is excluded
+  and named in Gaps & Caveats by `index_gap_lines`, and the audit continues at
+  the same exit status, which is §9's per-repository rule rather than the
+  whole-run refusal link 3 gets.
 
 ## {#SPEC-TGAUDIT-07~draft} 7. What AUDIT Adds Beyond Epic #5223
 

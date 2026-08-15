@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use crate::collect::azdo::AzureDevOpsClient;
 use crate::collect::bitbucket::BitbucketClient;
 use crate::collect::errors::Result;
+use crate::collect::fault::CollectionFault;
 use crate::collect::git::GitCollector;
 use crate::collect::github::GitHubClient;
 use crate::collect::identity::IdentityResolver;
@@ -70,7 +71,8 @@ pub struct PerRepoFetch {
 /// describing what the run did, both for stdout output and for asserting
 /// expectations in tests.
 /// What: counter struct populated by [`CollectionPipeline::run`]; the
-/// `errors` vec accumulates per-repo non-fatal errors.
+/// `errors` vec accumulates non-fatal faults, each tagged with whether a whole
+/// stage failed or one record was skipped (#5655).
 /// Test: covered by `tests::collect_integration_repo` (integration test
 /// that runs the pipeline against a fixture repo).
 #[derive(Debug, Clone, Default)]
@@ -90,8 +92,13 @@ pub struct CollectionStats {
     /// Number of `(repo, week)` pairs skipped because already present in
     /// `collection_runs` (and `force` was false).
     pub weeks_skipped: usize,
-    /// Per-repo error messages encountered (non-fatal).
-    pub errors: Vec<String>,
+    /// Non-fatal faults encountered, each tagged with its blast radius (#5655).
+    ///
+    /// Nothing in the pipeline aborts on a fault. A `StageFailed` entry means
+    /// that stage's data is absent from the database, which is what
+    /// [`Self::stage_failures`] hands the caller so the process exit code can
+    /// say so.
+    pub errors: Vec<CollectionFault>,
     /// Total `fact_commit_reachability` rows upserted across all repos.
     pub reachability_rows: usize,
     /// Per-repo fetch outcomes (one entry per repository attempted).
@@ -360,7 +367,7 @@ impl CollectionPipeline {
                         repo_label.clone(),
                         msg.clone(),
                     ));
-                    stats.errors.push(msg);
+                    stats.fail_stage(msg);
                     continue;
                 }
             };
@@ -388,7 +395,7 @@ impl CollectionPipeline {
                         repo_label.clone(),
                         msg.clone(),
                     ));
-                    stats.errors.push(msg);
+                    stats.fail_stage(msg);
                     continue;
                 }
             };
@@ -401,7 +408,10 @@ impl CollectionPipeline {
             self.progress.emit(if failures == 0 {
                 ProgressEvent::completed(Stage::Collect, repo_label, collected)
             } else {
-                let first = stats.errors.get(errors_before).map_or("", String::as_str);
+                let first = stats
+                    .errors
+                    .get(errors_before)
+                    .map_or("", |f| f.message.as_str());
                 ProgressEvent::failed(
                     Stage::Collect,
                     repo_label,
@@ -460,9 +470,7 @@ impl CollectionPipeline {
                     .fetch_and_persist_azdo_work_items(db, &client, azdo_cfg)
                     .await
                 {
-                    stats
-                        .errors
-                        .push(format!("ADO work item persistence failed: {e}"));
+                    stats.fail_stage(format!("ADO work item persistence failed: {e}"));
                 }
             }
             if azdo_cfg.fetch_prs {
@@ -472,7 +480,7 @@ impl CollectionPipeline {
                         stats.prs_fetched += n;
                     }
                     Err(e) => {
-                        stats.errors.push(format!("ADO PR fetch failed: {e}"));
+                        stats.fail_stage(format!("ADO PR fetch failed: {e}"));
                     }
                 }
             }
@@ -534,7 +542,7 @@ impl CollectionPipeline {
                 Err(e) => {
                     let msg = format!("reachability scan failed for {name}: {e}");
                     warn!("{msg}");
-                    stats.errors.push(msg);
+                    stats.fail_stage(msg);
                 }
             }
         }
@@ -598,7 +606,7 @@ impl CollectionPipeline {
                     );
                     match GitHubClient::new_for_prs(gh_cfg, repos) {
                         Ok(gh) => providers.push(Box::new(gh)),
-                        Err(e) => stats.errors.push(format!("GitHub client init failed: {e}")),
+                        Err(e) => stats.fail_stage(format!("GitHub client init failed: {e}")),
                     }
                 } else {
                     info!(
@@ -608,7 +616,7 @@ impl CollectionPipeline {
                     );
                     match GitHubClient::new_for_prs(gh_cfg, repos) {
                         Ok(gh) => providers.push(Box::new(gh)),
-                        Err(e) => stats.errors.push(format!("GitHub client init failed: {e}")),
+                        Err(e) => stats.fail_stage(format!("GitHub client init failed: {e}")),
                     }
                 }
             } else {
@@ -642,9 +650,7 @@ impl CollectionPipeline {
             if bb_cfg.fetch_prs {
                 match BitbucketClient::new(bb_cfg) {
                     Ok(bb) => providers.push(Box::new(bb)),
-                    Err(e) => stats
-                        .errors
-                        .push(format!("Bitbucket client init failed: {e}")),
+                    Err(e) => stats.fail_stage(format!("Bitbucket client init failed: {e}")),
                 }
             }
         }
@@ -703,7 +709,7 @@ impl CollectionPipeline {
             let (provider_name, fetch_result) = match joined {
                 Ok(t) => t,
                 Err(e) => {
-                    stats.errors.push(format!("PR fetch task panicked: {e}"));
+                    stats.fail_stage(format!("PR fetch task panicked: {e}"));
                     continue;
                 }
             };
@@ -712,7 +718,7 @@ impl CollectionPipeline {
                     // Find the matching provider for storage.
                     let Some(provider) = providers.iter().find(|p| p.name() == provider_name)
                     else {
-                        stats.errors.push(format!(
+                        stats.fail_stage(format!(
                             "internal: no provider registered for '{provider_name}' \
                              when storing PRs"
                         ));
@@ -724,16 +730,12 @@ impl CollectionPipeline {
                             stats.prs_fetched += n;
                         }
                         Err(e) => {
-                            stats
-                                .errors
-                                .push(format!("{provider_name} PR store failed: {e}"));
+                            stats.fail_stage(format!("{provider_name} PR store failed: {e}"));
                         }
                     }
                 }
                 Err(e) => {
-                    stats
-                        .errors
-                        .push(format!("{provider_name} PR fetch failed: {e}"));
+                    stats.fail_stage(format!("{provider_name} PR fetch failed: {e}"));
                 }
             }
         }
@@ -813,7 +815,7 @@ impl CollectionPipeline {
                     Err(e) => {
                         let msg = format!("collection failed for {repo_name}: {e}");
                         warn!("{msg}");
-                        stats.errors.push(msg);
+                        stats.fail_stage(msg);
                     }
                 }
                 return stats.errors.len() - errors_before;
@@ -842,7 +844,7 @@ impl CollectionPipeline {
                     Err(e) => {
                         let msg = format!("collection failed for {repo_name}: {e}");
                         warn!("{msg}");
-                        stats.errors.push(msg);
+                        stats.fail_stage(msg);
                     }
                 }
                 return stats.errors.len() - errors_before;
@@ -873,7 +875,7 @@ impl CollectionPipeline {
                             "collection_runs lookup failed for {repo_name} W{week_no} {year}: {e}"
                         );
                         warn!("{msg}");
-                        stats.errors.push(msg);
+                        stats.skip_item(msg);
                         continue;
                     }
                 }
@@ -906,13 +908,13 @@ impl CollectionPipeline {
                             "failed to record collection_run for {repo_name} W{week_no} {year}: {e}"
                         );
                         warn!("{msg}");
-                        stats.errors.push(msg);
+                        stats.skip_item(msg);
                     }
                 }
                 Err(e) => {
                     let msg = format!("collection failed for {repo_name} W{week_no} {year}: {e}");
                     warn!("{msg}");
-                    stats.errors.push(msg);
+                    stats.skip_item(msg);
                 }
             }
         }
