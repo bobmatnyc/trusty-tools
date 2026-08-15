@@ -316,21 +316,12 @@ pub mod bm25;
 #[cfg(feature = "migrations")]
 pub mod migrations;
 
-/// UDS JSON-RPC client for the per-palace `trusty-bm25-daemon` subprocess
-/// (issue #156).
-///
-/// Why: trusty-memory needs a lexical-search lane without holding an
-/// in-process BM25 index. `Bm25Client` delegates to the per-palace daemon
-/// over `$TMPDIR/trusty-bm25-<palace>.sock`, matching the design of
-/// `EmbedClient` and `trusty-embed-daemon` (PR #157).
-/// What: Gated behind the `bm25-client` feature. Pure user of existing
-/// `tokio` / `serde_json` / `anyhow` workspace deps — adds no new
-/// dependencies.
-/// Test: `cargo test -p trusty-common --features bm25-client` covers
-/// request shape and path defaults; end-to-end coverage lives in
-/// `trusty-bm25-daemon/tests/`.
-#[cfg(feature = "bm25-client")]
-pub mod bm25_client;
+// Why (#5329): the `bm25_client` module was REMOVED along with the
+// `trusty-bm25-daemon` subprocess it spoke to. trusty-memory now links the
+// `bm25` module's `BM25Index` directly, the way trusty-search always has, so
+// there is no socket, no wire protocol and no binary to locate. The `uds`
+// module and its `supervisor` submodule are untouched — trusty-console and
+// trusty-agents supervise trusty-review / trusty-analyze through them.
 
 /// Symbol-graph engine (formerly the `trusty-symgraph` crate).
 ///

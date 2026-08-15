@@ -57,10 +57,11 @@ classification test.
 **Two things this table does not show, worth stating so it is not misread:**
 
 1. **It is an inventory of HTTP surfaces, not of the whole transport topology.**
-   Two daemons have no HTTP surface and therefore no row:
-   **trusty-bm25-daemon** (per-palace Unix-socket JSON-RPC; the subprocess owns
-   the index and is itself the writer lock) and **trusty-embedderd** (Unix
-   socket + stdio). Their absence is correct here, not an omission.
+   One daemon has no HTTP surface and therefore no row: **trusty-embedderd**
+   (Unix socket + stdio). Its absence is correct here, not an omission.
+   #5329 removed a second, **trusty-bm25-daemon** — its per-palace Unix-socket
+   JSON-RPC surface no longer exists at all, because the index it guarded now
+   runs inside trusty-memory.
 2. **Each daemon's stdio/MCP surface is a client of its own HTTP daemon, not a
    separate surface.** `trusty-memory serve --stdio` is a pure proxy to
    `POST /rpc` and never opens redb (#1078); trusty-search's and

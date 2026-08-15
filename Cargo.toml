@@ -56,7 +56,6 @@ default-members = [
     "crates/trusty-agents-local",
     "crates/trusty-analyze",
     "crates/trusty-audit",
-    "crates/trusty-bm25-daemon",
     "crates/trusty-channels",
     "crates/trusty-code",
     "crates/trusty-common",
@@ -109,7 +108,7 @@ trusty-code = { path = "crates/trusty-code", version = "0.3.0" }
 # epic #3411). Not yet published (Slice 1, #3425).
 trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.5.2" }
-trusty-common = { path = "crates/trusty-common", version = "0.34" }
+trusty-common = { path = "crates/trusty-common", version = "0.35" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 # Why: `default-features = false` HERE, not only on the member entry (mirrors
@@ -122,10 +121,9 @@ trusty-common = { path = "crates/trusty-common", version = "0.34" }
 #      too. No workspace member depends on `trusty-embedderd = { workspace =
 #      true }` today, so this has no effect on current feature resolution.
 trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.11", default-features = false }
-# trusty-bm25-daemon: per-palace BM25 lexical-index daemon — referenced by
-# trusty-memory so `cargo install trusty-memory` produces both binaries from
-# one command (mirrors the trusty-embedderd / trusty-search pattern, PR #190).
-trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.2.0" }
+# Why (#5329): the `trusty-bm25-daemon` member and dependency were REMOVED. Its
+# per-palace subprocess never ran in any shipped configuration, and its index is
+# now `trusty_memory::bm25_lane::Bm25Lane`, in-process.
 # tga: trusty-git-analytics — developer productivity analytics, and (since
 # #5468) the sole owner of contributor profiling. No workspace member takes a
 # Cargo edge on it: #5466 removed trusty-review's, and the tga -> trusty-review
@@ -433,7 +431,6 @@ quick-xml = "0.41"
 [patch.crates-io]
 trusty-common = { path = "crates/trusty-common" }
 trusty-embedderd = { path = "crates/trusty-embedderd" }
-trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon" }
 trusty-console = { path = "crates/trusty-console" }
 
 [profile.dev]

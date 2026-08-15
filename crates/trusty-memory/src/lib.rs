@@ -23,7 +23,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{broadcast, OnceCell, RwLock};
-use trusty_common::bm25_client::Bm25Client;
 use trusty_common::mcp::initialize_response;
 use trusty_common::memory_core::embed::Embedder;
 use trusty_common::memory_core::{store::ChatSessionStore, PalaceRegistry};
@@ -76,8 +75,9 @@ pub mod activity;
 pub mod attribution;
 pub mod authz;
 pub mod bm25_backfill;
+pub mod bm25_index;
+pub mod bm25_lane;
 pub mod bm25_repair;
-pub mod bm25_supervisor;
 pub mod bootstrap;
 /// Autonomous Dreamer scheduler — spawns per-palace dream loops on daemon startup.
 ///
@@ -445,35 +445,29 @@ pub struct AppState {
     /// What: an `Arc<ActivityLog>` shared with every emitter.
     /// Test: `web::tests::activity_endpoint_lists_recent_emits`.
     pub activity_log: Arc<ActivityLog>,
-    /// Optional per-palace BM25 lexical search lane (issue #156).
+    /// Optional in-process BM25 lexical search lane (issue #156, #5329).
     ///
-    /// Why: in-process BM25 would serialise the recall hot path on disk
-    /// I/O during writes and contend with the redb/usearch locks. Delegating
-    /// to the `trusty-bm25-daemon` subprocess (one socket per palace) keeps
-    /// BM25 ingestion and search off the critical path while still feeding
-    /// hits into the recall RRF fusion.
-    /// What: `Some(client)` only when `TRUSTY_BM25_DAEMON=1` at startup —
-    /// every code path that uses this field is gated on `is_some()` and
-    /// falls back to vector-only behaviour otherwise so existing deployments
-    /// see zero behavioural change.
-    /// Test: `bm25_client_disabled_by_default`,
-    /// `bm25_client_enabled_when_env_set`.
-    pub bm25_client: Option<Arc<Bm25Client>>,
-    /// Optional per-palace BM25 daemon spawn supervisor (issue #193).
+    /// Why: this single field replaces the former `bm25_client` +
+    /// `bm25_supervisor` pair. Those existed because BM25 ran as a per-palace
+    /// subprocess — one to speak its wire protocol, one to spawn and reap it.
+    /// #5329 collapsed the subprocess into this process, so the lane IS the
+    /// index and there is nothing left to supervise.
+    /// What: `Some(lane)` only when `TRUSTY_BM25_DAEMON=1` at startup. Every
+    /// code path that uses it is gated on `is_some()` and falls back to
+    /// vector-only recall otherwise, so a deployment that never set the gate —
+    /// which is every shipped deployment (#5186) — sees no behavioural change.
     ///
-    /// Why: without an in-process supervisor the BM25 daemon must be
-    /// launched out-of-band (launchd, manual `trusty-bm25-daemon`), which
-    /// is the same UX trap PR #190 fixed for trusty-embedderd. Holding a
-    /// supervisor here lets us spawn the daemon on first BM25 use for a
-    /// palace, restart it if it dies, and reap it on clean shutdown.
-    /// `Some` only when `TRUSTY_BM25_DAEMON=1` at startup — the same gate
-    /// that enables `bm25_client`. When set but `TRUSTY_BM25_EXTERNAL=1`,
-    /// the supervisor's `ensure_running` becomes a no-op that just returns
-    /// the canonical socket path so operators can keep using their own
-    /// process manager.
-    /// Test: covered by `bm25_supervisor_present_when_env_set` and the
-    /// `bm25_supervisor::tests` unit tests.
-    pub bm25_supervisor: Option<Arc<bm25_supervisor::Bm25Supervisor>>,
+    /// 🔴 `pub(crate)`, not `pub`, and that is load-bearing. Installing a lane
+    /// also has to rebuild the indexer worker, because `AppState::new` spawns it
+    /// before any lane exists. Assigning this field on its own produces a state
+    /// whose READS use the lane and whose WRITES the placeholder worker
+    /// discards — silently, with no error anywhere. [`Self::with_bm25_lane`] is
+    /// the only way to set it and does both halves; keeping the field private
+    /// makes the broken half-installed state unrepresentable outside this crate
+    /// rather than merely documented. Read it with [`Self::bm25_lane`].
+    /// Test: `bm25_lane_disabled_by_default`, `bm25_lane_enabled_when_env_set`,
+    /// `writes_through_the_tool_surface_survive_eviction`.
+    pub(crate) bm25: Option<Arc<bm25_lane::Bm25Lane>>,
     /// Per-palace write serialisation locks (issue #230).
     ///
     /// Why: the dedup gate in `tools.rs` previously read a snapshot of
@@ -654,15 +648,15 @@ impl AppState {
         // replaces the per-write `tokio::spawn` fire-and-forget pattern so
         // BM25 indexing back-pressure is capped. The worker is spawned here
         // unconditionally so the channel always has a drain — even when
-        // `bm25_client` is `None`, the worker just consumes and discards
+        // the lane is off, the worker just consumes and discards
         // each request so senders never block on a full queue.
         let (bm25_index_tx, bm25_index_rx) =
             tokio::sync::mpsc::channel::<tools::Bm25IndexRequest>(tools::BM25_INDEX_QUEUE_CAPACITY);
-        // `bm25_client` / `bm25_supervisor` start as `None`; the builder
-        // `with_bm25_client_from_env` rebuilds the worker with the real
-        // client + supervisor once env-gated opt-in is resolved.
+        // `bm25` starts as `None`; the builder `with_bm25_lane_from_env`
+        // rebuilds the worker with the real lane once env-gated opt-in is
+        // resolved.
         let bm25_dirty: bm25_repair::DirtyPalaces = Arc::new(dashmap::DashSet::new());
-        tools::spawn_bm25_index_worker(bm25_index_rx, None, None, Arc::clone(&bm25_dirty));
+        tools::spawn_bm25_index_worker(bm25_index_rx, None, Arc::clone(&bm25_dirty));
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Idle-to-disk: honour TRUSTY_MEMORY_MAX_OPEN_PALACES (default 64)
@@ -694,8 +688,7 @@ impl AppState {
             prompt_context_cache: Arc::new(RwLock::new(prompt_facts::PromptFactsCache::default())),
             tier_s_admission_lock: Arc::new(tokio::sync::Mutex::new(())),
             activity_log,
-            bm25_client: None,
-            bm25_supervisor: None,
+            bm25: None,
             palace_write_locks: Arc::new(dashmap::DashMap::new()),
             pending_activity_writes: Arc::new(AtomicUsize::new(0)),
             worker_liveness: Arc::new(worker_liveness::WorkerLiveness::new()),
@@ -754,59 +747,71 @@ impl AppState {
         self.pin_project_map.get(palace_id).map(|e| e.clone())
     }
 
-    /// Builder-style: opt-in to the BM25 lexical lane (issue #156).
+    /// Builder-style: opt-in to the BM25 lexical lane (issue #156, #5329).
     ///
-    /// Why: the BM25 subprocess is gated behind `TRUSTY_BM25_DAEMON=1` so
-    /// the default `cargo install trusty-memory` / launchd plist deployment
-    /// stays vector-only and existing test fixtures keep passing without
-    /// having to provision a daemon. Reading the env var here keeps the
-    /// gating logic in one place (the helper in `main.rs` just plumbs the
-    /// result through).
-    /// What: when `TRUSTY_BM25_DAEMON=1`, constructs one `Bm25Client` per
-    /// palace by lazy-resolving the socket path the first time the palace
-    /// id is observed. Currently we install a shared `default` client up
-    /// front and re-key on the palace id at the call site — palaces with no
-    /// daemon socket simply see search/index errors which we log + ignore.
-    /// Returns `self` unchanged when the env var is unset or set to anything
-    /// other than `1`.
-    /// Test: `bm25_client_disabled_by_default`,
-    /// `bm25_client_enabled_when_env_set`.
+    /// Why: the lane stays gated behind `TRUSTY_BM25_DAEMON=1` even though
+    /// #5329 removed the daemon that name refers to. Renaming the variable
+    /// would break the only enablement path anyone could have configured, in
+    /// the one PR whose purpose is not losing that lane — the compatibility is
+    /// worth more than the accuracy.
+    /// What: when the gate is set, builds a [`bm25_lane::Bm25Lane`] over this
+    /// state's `data_root` — which is where the retired daemon wrote its
+    /// snapshots, so an existing corpus is picked up in place — and rebuilds
+    /// the bounded indexer channel so its worker holds the lane. Returns `self`
+    /// unchanged when the var is unset or set to anything other than `1`.
+    /// Test: `bm25_lane_disabled_by_default`, `bm25_lane_enabled_when_env_set`.
     #[must_use]
-    pub fn with_bm25_client_from_env(mut self) -> Self {
-        if std::env::var("TRUSTY_BM25_DAEMON").as_deref() == Ok("1") {
-            // Install the default-palace client; per-palace clients are
-            // constructed on demand via `Bm25Client::for_palace`.
-            let default_palace = self.default_palace.as_deref().unwrap_or("default");
-            self.bm25_client = Some(Arc::new(Bm25Client::for_palace(default_palace)));
-            // Issue #193: hand-in-hand with the client, attach a spawn
-            // supervisor so the BM25 daemon is auto-started on first use
-            // for any palace. Operators who want to manage daemons
-            // out-of-band (launchd, systemd, manual) set
-            // TRUSTY_BM25_EXTERNAL=1 which makes the supervisor a no-op.
-            self.bm25_supervisor = Some(Arc::new(bm25_supervisor::Bm25Supervisor::new()));
-            // Issue #231: rebuild the bounded indexer channel + worker so
-            // the worker holds the now-populated client + supervisor. The
-            // placeholder worker installed by `AppState::new` (with `None`
-            // / `None`) drained the channel into the void — replacing the
-            // sender here closes the placeholder receiver and the
-            // placeholder worker exits cleanly. The new worker takes over
-            // as the sole drain for the indexer queue.
-            let (tx, rx) = tokio::sync::mpsc::channel::<tools::Bm25IndexRequest>(
-                tools::BM25_INDEX_QUEUE_CAPACITY,
-            );
-            tools::spawn_bm25_index_worker(
-                rx,
-                self.bm25_client.clone(),
-                self.bm25_supervisor.clone(),
-                Arc::clone(&self.bm25_dirty),
-            );
-            self.bm25_index_tx = tx;
-            tracing::info!(
-                palace = default_palace,
-                "BM25 daemon client + spawn supervisor enabled (TRUSTY_BM25_DAEMON=1)"
-            );
+    pub fn with_bm25_lane_from_env(self) -> Self {
+        // #5329: the gate keeps its daemon-era name so an operator who set it
+        // does not silently lose the lane this change exists to preserve.
+        if std::env::var("TRUSTY_BM25_DAEMON").as_deref() != Ok("1") {
+            return self;
         }
+        let lane = bm25_lane::Bm25Lane::new(self.data_root.clone());
+        tracing::info!(
+            max_resident = lane.max_resident(),
+            text_budget_bytes = ?lane.text_budget_bytes(),
+            "in-process BM25 lane enabled (TRUSTY_BM25_DAEMON=1)"
+        );
+        self.with_bm25_lane(lane)
+    }
+
+    /// Builder-style: install an explicit BM25 lane, bypassing the env gate.
+    ///
+    /// Why: setting `bm25` on its own is a footgun. `AppState::new` spawns the
+    /// indexer worker with no lane, so a caller that assigns the field and
+    /// nothing else gets a state whose reads use the lane and whose WRITES are
+    /// silently discarded by the placeholder worker — which is exactly what
+    /// `writes_through_the_tool_surface_survive_eviction` caught. Every path
+    /// that installs a lane goes through here so the two cannot drift apart.
+    /// What: rebuilds the bounded indexer channel + worker so the worker holds
+    /// the lane, then stores it. The placeholder worker installed by
+    /// `AppState::new` exits cleanly when the replaced sender closes its
+    /// receiver. Tests use this to pin explicit limits without mutating
+    /// process-global env vars.
+    /// Test: `tests/bm25_lane_concurrency.rs`, `bm25_lane_enabled_when_env_set`.
+    #[must_use]
+    pub fn with_bm25_lane(mut self, lane: Arc<bm25_lane::Bm25Lane>) -> Self {
+        // Issue #231: the bounded channel is what keeps a write burst from
+        // growing an unbounded task queue; rebuilding it here is what points
+        // its single worker at the lane.
+        let (tx, rx) =
+            tokio::sync::mpsc::channel::<tools::Bm25IndexRequest>(tools::BM25_INDEX_QUEUE_CAPACITY);
+        tools::spawn_bm25_index_worker(rx, Some(Arc::clone(&lane)), Arc::clone(&self.bm25_dirty));
+        self.bm25_index_tx = tx;
+        self.bm25 = Some(lane);
         self
+    }
+
+    /// The BM25 lane, if one is installed.
+    ///
+    /// Why: the read half of the `pub(crate)` field above. Callers outside this
+    /// crate — the integration tests, and anything that wants to flush or query
+    /// the lane directly — need to reach it without being able to swap it for
+    /// one the indexer worker has never heard of.
+    /// Test: `tests/bm25_lane_concurrency.rs`, `tests/bm25_alias_write.rs`.
+    pub fn bm25_lane(&self) -> Option<&Arc<bm25_lane::Bm25Lane>> {
+        self.bm25.as_ref()
     }
 
     /// Scan the palace registry directory and re-register every persisted

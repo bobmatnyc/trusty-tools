@@ -1,6 +1,6 @@
 [package]
 name = "trusty-common"
-version = "0.34.1"
+version = "0.35.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -338,11 +338,9 @@ bm25 = []
 # Issue #179. Pure user of existing `serde` / `serde_json` / `anyhow` /
 # `tracing` workspace deps — adds no new dependencies.
 migrations = []
-# Enables the `bm25_client` module: a UDS JSON-RPC client for the per-palace
-# `trusty-bm25-daemon` subprocess (issue #156). Pure user of existing
-# `tokio` / `serde_json` / `anyhow` workspace deps — adds no new deps.
-# Implies `uds` for the shared socket-path resolver (#5099).
-bm25-client = ["uds"]
+# Why (#5329): the `bm25-client` feature was REMOVED with the `bm25_client`
+# module. BM25 runs in-process in trusty-memory now, so there is no subprocess
+# to speak a wire protocol to. Consumers that had it on want `bm25` instead.
 # Enables the `uds` module: the shared 0700-directory / 0600-socket /
 # peer-uid enforcement every UDS bind site routes through (issue #5099).
 # Pulls in `thiserror` (error enum) and uses the `libc` and `tokio` workspace

@@ -48,7 +48,7 @@ understand about the codebase — see [ADR-0001](../decisions/0001-frontend-core
 │  • UDS transport              transport/uds.rs                          │
 │  • Embedded Svelte UI         web.rs (rust-embed of ui/dist/)          │
 │  • CLI commands               main.rs, commands/*                       │
-│  • BM25 sidecar supervisor    bm25_supervisor.rs                        │
+│  • BM25 lexical lane          bm25_lane.rs, bm25_index.rs               │
 │  • KG auto-extract / bootstrap kg_extract.rs, bootstrap.rs, discovery.rs│
 │  • Messaging / activity / logs messaging.rs, activity.rs, prompt_log.rs │
 └───────────────────────────────┬────────────────────────────────────────┘
@@ -80,7 +80,7 @@ understand about the codebase — see [ADR-0001](../decisions/0001-frontend-core
   `trusty-common`'s `memory-core` feature, which pulls in the heavy storage deps
   (`redb`, HNSW, `tiktoken-rs`, `git2`); consumers that don't need storage skip it.
 - **This crate enables it** via
-  `trusty-common = { …, features = ["mcp", "memory-core", "monitor-tui", "bm25-client", "cli-help"] }`.
+  `trusty-common = { …, features = ["mcp", "memory-core", "monitor-tui", "bm25", "cli-help"] }`.
 - **Two consumption modes.** open-mpm links this crate as an **rlib** with
   `default-features = false` to get `MemoryMcpService` *without* the axum/HTTP
   surface (#226); the standalone daemon keeps `axum-server` on (the default). See
@@ -285,31 +285,41 @@ LLM context is precious, so recall is **layered and paid lazily**. The
 
 ---
 
-## 6. BM25 Sidecar — bundling & supervision
+## 6. BM25 Lexical Lane — in-process
 
-trusty-memory does not implement BM25 in-process; it drives the bundled
-**`trusty-bm25-daemon`** (also bundled by trusty-search via #156/#190).
+trusty-memory runs BM25 in-process, using the same
+`trusty_common::bm25::BM25Index` that trusty-search has always used in-process.
 
 ```
 cargo install trusty-memory  ⇒  trusty-memory
                                  trusty-memory-mcp-bridge
-                                 trusty-bm25-daemon     ← bundled [[bin]] shim
 ```
 
-- **Single-install:** the third `[[bin]]` (`src/bin/bm25_daemon.rs`) is a thin
-  shim that calls `trusty_bm25_daemon::run()`; declaring the daemon as a Cargo
-  dependency makes `cargo install trusty-memory` build and install all three
-  binaries in one command. This closes the "set `TRUSTY_BM25_DAEMON=1` but never
-  installed the daemon → silently degraded lexical recall" footgun. ✅
-- **Per-palace spawn supervision:** `Bm25Supervisor` (`bm25_supervisor.rs`, #193)
-  keyed by palace id, with a `Mutex<HashMap<String, ChildHandle>>` preventing
-  double-spawn. `ensure_running` discovers the binary, spawns a child with
-  `--palace`/`--data-dir`, polls the socket, and owns the `tokio::process::Child`
-  for the daemon's life. `TRUSTY_BM25_EXTERNAL=1` opts out (operator-managed
-  daemon); shutdown SIGTERMs (via `libc::kill`) then SIGKILLs each child and
-  cleans up its socket. Unix-only (UDS protocol). ✅
+- **No subprocess (#5329):** the `trusty-bm25-daemon` crate, its `[[bin]]` shim,
+  `Bm25Supervisor`, and the `trusty_common::bm25_client` UDS client were all
+  removed. The recorded justification for the split was an analogy to
+  trusty-embedderd, where a subprocess amortises an ONNX model load; an
+  in-memory inverted index pays no such cost. The gate had never been enabled in
+  any shipped configuration (#5186). ✅
+- **Per-palace residency:** `Bm25Lane` (`bm25_lane.rs`) holds an LRU-bounded map
+  of `PalaceBm25Index` values keyed by palace id, behind one
+  `tokio::sync::Mutex`. A cold palace is loaded from its snapshot on the blocking
+  pool; an evicted one is flushed first, so eviction never loses a write.
+  `TRUSTY_BM25_MAX_PALACES` (default 3) bounds residency and
+  `TRUSTY_BM25_TEXT_BUDGET_MB` (default 512) bounds retained corpus text. ✅
+- **Snapshot compatibility:** the on-disk format and path are unchanged from the
+  daemon —  `<data_root>/<palace>/bm25/bm25_index.json`, a JSON array of
+  `{doc_id, text}`. A snapshot written by the retired subprocess is read in
+  place, with no conversion step, and a downgrade still reads what this writes. ✅
+- **Durability:** a write marks the index dirty; a 100 ms tick flushes, which
+  keeps a 1311-drawer backfill from rewriting the whole snapshot per document.
+  `Bm25Lane::shutdown` flushes everything on the exit path, and the backfill
+  flushes explicitly when a sweep finishes. ✅
+- **Cost:** process-level fault isolation is gone. A runaway index can no longer
+  be SIGKILLed independently of the recall path. 🟡
 
 ---
+
 
 ## 7. Embedded UI Build
 
@@ -337,7 +347,8 @@ browser. ✅
 | `service.rs` | `MemoryService` — pure business-logic facade over `AppState` (extracted from `web.rs`, #151) reused by HTTP + chat dispatch. |
 | `chat.rs` | OpenRouter/Ollama SSE chat, tool dispatch loop, chat-session CRUD, `/api/v1/messages*`. |
 | `transport/` | `rpc.rs` (transport-agnostic JSON-RPC dispatch), `uds.rs` (Unix-socket listener + path resolution). |
-| `bm25_supervisor.rs` | Per-palace `trusty-bm25-daemon` spawn supervisor (#193). |
+| `bm25_lane.rs` | In-process per-palace BM25 lane, LRU-bounded (#5329). |
+| `bm25_index.rs` | Persistent per-palace BM25 index + JSON snapshot (#5329). |
 | `kg_extract.rs` | Deterministic KG triple extraction on write (#97). |
 | `bootstrap.rs` | KG bootstrap from project files after `palace_create` (#60). |
 | `discovery.rs` | Automatic project-alias discovery → `is_alias_for` triples. |
@@ -352,7 +363,6 @@ browser. ✅
 | `fd_metrics.rs` | Best-effort open-fd count (`count_open_fds`) and soft RLIMIT_NOFILE (`fd_soft_limit`) for the `/health` fd gauge (#464). |
 | `commands/` | Subcommand handlers: `serve`/`start`/`stop`, `setup`, `service` (launchd), `migrate`/`kuzu_migrate`/`migrations`, `monitor`, `note`, `send_message`, `inbox_check`, `doctor`, `kg_rebuild`, `prompt_context`, `port`, `upgrade`, `link`, `single_instance`. |
 | `bin/mcp_bridge.rs` | `trusty-memory-mcp-bridge` — stdio↔UDS byte pipe with idle-safe exponential-backoff reconnect (PR #149, #535). |
-| `bin/bm25_daemon.rs` | Bundled `trusty-bm25-daemon` binary shim. |
 
 ### 8.2 Core — `crates/trusty-common/src/memory_core/`
 
