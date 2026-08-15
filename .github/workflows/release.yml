@@ -287,9 +287,23 @@ jobs:
       #   skip_ui_build  – "true" to set SKIP_UI_BUILD=1 (UI-embedding crates)
       #   cargo_features – value for --features flag (empty = use defaults)
       #   no_default_features – "true" to pass --no-default-features
-      #   al2023_variant – "true" to also build the AL2023 load-dynamic asset
+      #   native_linux_link – "true" when the crate links a PREBUILT GNU-ABI
+      #     C++ archive (e.g. ort-sys' bundled ONNX Runtime) and therefore
+      #     cannot use `cargo zigbuild` on either Linux leg. zig cc ships LLVM
+      #     libc++, not GNU libstdc++, so the final link fails with
+      #     `undefined symbol: std::__cxx11::...`. See #5682.
+      #   al2023_variant – "true" to ALSO build the AL2023 load-dynamic asset
       #   al2023_no_default_features – "true" for the AL2023 build
       #   al2023_features – --features value for the AL2023 build
+      #
+      # NOTE (#5682): `native_linux_link` and `al2023_variant` are INDEPENDENT.
+      # Until #5682 the single `al2023_variant` flag answered both "does this
+      # crate need native GNU-ABI linking?" and "does this crate also want an
+      # AL2023-container asset?". Those are different questions: trusty-memory
+      # bundles ORT (so it needs the first) but ships no AL2023 asset (so it
+      # does not want the second). Conflating them left trusty-memory on
+      # zigbuild, and BOTH its Linux legs failed to link for five consecutive
+      # tag pushes over 40 days.
       #
       # TO ADD A NEW CRATE: append one `elif [[ "$CRATE" == "<name>" ]]; then`
       # block with the variables filled in.  Everything else is automatic.
@@ -315,6 +329,8 @@ jobs:
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            # Bundles ORT (prebuilt GNU-ABI C++ archive) -> no zigbuild.
+            NATIVE_LINUX_LINK="true"
             AL2023_VARIANT="true"
             AL2023_NO_DEFAULT="true"
             AL2023_FEATURES="load-dynamic"
@@ -329,12 +345,33 @@ jobs:
             # trusty-memory bin has required-features=["axum-server"]; default
             # features include axum-server so all build with default features.
             # UI-embedding crate: SKIP_UI_BUILD=1
-            # No ORT bundling (no ONNX in the released binary): no AL2023 variant.
+            #
+            # #5682 — THIS CRATE DOES BUNDLE ORT. The line that used to sit here
+            # ("No ORT bundling (no ONNX in the released binary)") was wrong, and
+            # that error is the whole defect. trusty-memory depends on
+            # trusty-common with `features = [... "memory-core" ...]`, and
+            # trusty-common's `memory-core` implies `embedder-bundled-ort` ->
+            # `fastembed/ort-download-binaries-native-tls`, which links a
+            # prebuilt ONNX Runtime static archive compiled against GNU
+            # libstdc++. Under `cargo zigbuild` the link dies on
+            # `undefined symbol: std::__cxx11::basic_string<...>::_M_create` etc,
+            # referenced from `libort_sys-*.rlib` (onnx-ml.pb.cc, unsqueeze.cc) —
+            # verified in run 31883156657 (trusty-memory-v0.23.0). Both Linux
+            # legs therefore need the runner's real GCC/libstdc++.
+            #
+            # NATIVE_LINUX_LINK is set INDEPENDENTLY of AL2023_VARIANT: this
+            # crate needs native GNU-ABI linking, but it exposes no
+            # `load-dynamic` feature path (memory-core hardcodes
+            # embedder-bundled-ort), so there is no AL2023 load-dynamic build to
+            # publish. Enabling AL2023_VARIANT here would fail the build.
+            # An AL2023 variant is a separate follow-up requiring a crate-level
+            # feature change, deliberately NOT bundled into this fix.
             CARGO_PKG="trusty-memory"
             BINARIES="trusty-memory"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="true"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -358,6 +395,7 @@ jobs:
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -374,6 +412,7 @@ jobs:
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -395,6 +434,7 @@ jobs:
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -412,6 +452,7 @@ jobs:
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -425,6 +466,7 @@ jobs:
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -439,6 +481,7 @@ jobs:
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -459,6 +502,7 @@ jobs:
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -516,6 +560,7 @@ jobs:
             echo "skip_ui_build=$SKIP_UI_BUILD"
             echo "cargo_features=$CARGO_FEATURES"
             echo "no_default_features=$NO_DEFAULT_FEATURES"
+            echo "native_linux_link=$NATIVE_LINUX_LINK"
             echo "al2023_variant=$AL2023_VARIANT"
             echo "al2023_no_default=$AL2023_NO_DEFAULT"
             echo "al2023_features=$AL2023_FEATURES"
@@ -561,6 +606,7 @@ jobs:
           SKIP_UI_BUILD:        ${{ steps.config.outputs.skip_ui_build }}
           CARGO_FEATURES:       ${{ steps.config.outputs.cargo_features }}
           NO_DEFAULT_FEATURES:  ${{ steps.config.outputs.no_default_features }}
+          NATIVE_LINUX_LINK:    ${{ steps.config.outputs.native_linux_link }}
           AL2023_VARIANT:       ${{ steps.config.outputs.al2023_variant }}
           AL2023_NO_DEFAULT:    ${{ steps.config.outputs.al2023_no_default }}
           AL2023_FEATURES:      ${{ steps.config.outputs.al2023_features }}
@@ -577,6 +623,9 @@ jobs:
           feats        = os.environ["CARGO_FEATURES"]
           no_def       = os.environ["NO_DEFAULT_FEATURES"] == "true"
           al2023       = os.environ["AL2023_VARIANT"] == "true"
+          # #5682: "needs native GNU-ABI linking" is its OWN question, asked
+          # separately from "also wants an AL2023-container asset".
+          native_link  = os.environ["NATIVE_LINUX_LINK"] == "true"
           al_no_def    = os.environ["AL2023_NO_DEFAULT"] == "true"
           al_feats     = os.environ["AL2023_FEATURES"]
 
@@ -672,8 +721,12 @@ jobs:
           # below, which sidesteps the problem entirely by not linking ONNX
           # Runtime at build time at all. All OTHER crates get the full
           # glibc-2.17 zigbuild leg.
+          #
+          # #5682: keyed off `native_link`, NOT `al2023`. For trusty-search the
+          # two are both True so this is unchanged; trusty-memory is the crate
+          # that needed native linking without an AL2023 asset.
           x86_64_entry = (
-              native_linux_entry("x86_64-unknown-linux-gnu") if al2023
+              native_linux_entry("x86_64-unknown-linux-gnu") if native_link
               else linux_zigbuild_entry("x86_64-unknown-linux-gnu", best_effort=False, use_al2023_features=False)
           )
 
@@ -708,8 +761,19 @@ jobs:
           # `aarch64-linux-al2023` counterpart to the existing x86_64 AL2023
           # asset is the portable-arm64 follow-up; it is deliberately NOT
           # bundled into this fix.
+          #
+          # #5682: the TOOLCHAIN choice is keyed off `native_link`, but the
+          # FEATURE choice stays keyed off `al2023`. They answer different
+          # questions. `use_al2023_features` exists because trusty-search's
+          # default `bundled-ort` has no aarch64 archive it can use, so that
+          # crate substitutes its load-dynamic set on arm64. trusty-memory has
+          # no load-dynamic feature to substitute, and needs none: ort-sys
+          # rc.12's dist.txt DOES list an `aarch64-unknown-linux-gnu` prebuilt,
+          # and run 31883156657 proves it downloads and compiles on arm64 —
+          # that leg reached the LINK stage with an aarch64 libort_sys rlib and
+          # failed only on zig's libc++. Native GCC is exactly what it lacked.
           aarch64_entry = (
-              native_linux_entry("aarch64-unknown-linux-gnu", use_al2023_features=True) if al2023
+              native_linux_entry("aarch64-unknown-linux-gnu", use_al2023_features=al2023) if native_link
               else linux_zigbuild_entry("aarch64-unknown-linux-gnu", best_effort=False, use_al2023_features=False)
           )
 
@@ -1729,7 +1793,10 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   release:
     name: Create / update GitHub Release
-    needs: [setup, build]
+    # #5682: `release-completeness-audit` is a dependency so its verdict is
+    # available here — but see the "ASSET-COMPLETENESS GATE" note below for why
+    # it is deliberately NOT gated on in this `if:`.
+    needs: [setup, build, release-completeness-audit]
     runs-on: ubuntu-latest
     # TOLERATED-FAILURE BEHAVIOR (issue #3540):
     #
@@ -1759,6 +1826,42 @@ jobs:
     # (regardless of Linux leg outcome); release is NOT created (job fails
     # red) when the macOS leg itself failed or when `build` was skipped/the
     # workflow was cancelled.
+    #
+    # ── ASSET-COMPLETENESS GATE (#5682) — WHY IT IS NOT IN THIS `if:` ─────────
+    # `release-completeness-audit` correctly failed on every trusty-memory run
+    # since it was added in f6f54774, while this job published green beside it —
+    # it computed `missing_required` and exited 1, but nothing consumed that.
+    # It has to gate the publish. The obvious change — adding
+    # `needs.release-completeness-audit.result == 'success'` to this expression
+    # — is the WRONG one: it would re-create the exact #3540 failure shape. A
+    # false `if:` SKIPS a job, and a skipped release is silent. #3540 was
+    # precisely that silence (trusty-mpm frozen at v0.16.0 with nothing red to
+    # show for it), and a skip is also indistinguishable from the legitimate
+    # dry-run/bundled skips right above.
+    #
+    # So the two conditions are separated by MECHANISM, not just by wording:
+    #
+    #   a build LEG failed          -> this job still RUNS (`!cancelled()`).
+    #                                  Unchanged from #3540. A red Linux leg
+    #                                  must never silently skip the release.
+    #   a REQUIRED ASSET is missing -> this job runs, then FAILS LOUDLY at the
+    #                                  "Require complete required-asset set"
+    #                                  step below, before anything is uploaded.
+    #
+    # Those are genuinely different conditions: `build.result == 'failure'` is
+    # true whenever any leg failed, including a best-effort AL2023 leg whose
+    # absence is tolerated by design. `missing_required` is true only when an
+    # asset the matrix marked REQUIRED did not appear. Gating on the audit's
+    # verdict rather than on `build.result` is what keeps a tolerated
+    # best-effort drop publishable while a genuine hole is not.
+    #
+    # Failing a step (rather than skipping the job) also keeps the run RED and
+    # keeps `homebrew-bump` — which needs this job — correctly skipped.
+    #
+    # This matters more here than in most repos: this repo has Immutable
+    # Releases enabled, so an incomplete release can never be repaired in
+    # place (see the immutable-release step below). Not publishing is the only
+    # available remedy.
     if: >-
       !cancelled() &&
       needs.setup.outputs.bundled != 'true' &&
@@ -1809,6 +1912,31 @@ jobs:
             exit 1
           fi
           echo "Primary macOS artifact present — proceeding (any Linux leg failures are tolerated)."
+
+      # ── Require a complete required-asset set (issue #5682) ──────────────────
+      # The step above only proves the macOS artifact exists. This one enforces
+      # the audit's verdict over the WHOLE matrix, and is the gate that stops a
+      # partial release from publishing.
+      #
+      # It reads `needs.release-completeness-audit.result` rather than
+      # re-deriving the asset list: the audit already owns that computation
+      # (expected names come from the build matrix), so duplicating it here
+      # would be a second implementation free to drift from the first.
+      #
+      # `!= 'success'` deliberately also catches 'skipped' and 'cancelled' —
+      # fail closed. If the audit did not render a verdict we do not publish.
+      # That cannot currently fire spuriously: the audit's `if:` is strictly
+      # broader than this job's (same `!cancelled()`, same `bundled`, same
+      # `build.result != 'skipped'`, minus the dry_run clause), so whenever
+      # this job runs the audit ran too.
+      #
+      # Placed BEFORE the git-cliff / softprops steps so nothing is created or
+      # uploaded when it trips.
+      - name: Require complete required-asset set (issue #2533 / #5682)
+        if: needs.release-completeness-audit.result != 'success'
+        run: |
+          echo "::error::Release BLOCKED — the release completeness audit did not pass (result: ${{ needs.release-completeness-audit.result }}). At least one REQUIRED platform asset is missing, so publishing would create a permanently incomplete release (Immutable Releases are enabled on this repo — assets can never be added after the fact). See the 'Release completeness audit' job summary for the per-leg table naming the missing asset, then the corresponding build job log for the underlying failure."
+          exit 1
 
       - name: Detect prerelease
         id: prerelease
