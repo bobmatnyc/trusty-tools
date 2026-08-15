@@ -8,7 +8,8 @@
 //! word be" without a tagger, a model, or a runtime service.
 //! What: binary-searches a byte-sorted `<lemma>\t<mask>` table embedded with
 //! `include_str!`. Membership is the ONLY fact exposed — no senses, glosses, or
-//! synset offsets are shipped. There is no load step, no cache, and no shared
+//! synset offsets are shipped; masks are read with the `NOUN`/`VERB`/`ADJ`/`ADV`
+//! bitmask constants. There is no load step, no cache, and no shared
 //! mutable state: [`WordNetPos`] is a 16-byte `Copy` handle over `&'static str`,
 //! so constructing one is free and every caller can own its own.
 //! Test: `mod tests` at the bottom of this file.

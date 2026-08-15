@@ -20,8 +20,6 @@ use crate::collect::jira::retry::{with_retry, RetryBudget, RetryPolicy};
 use crate::collect::jira::sync::{build_jql, SyncScope};
 use crate::core::config::JiraConfig;
 
-/// Full-history changelog retrieval (issue #4084). A child module rather
-/// than a sibling so it can use `JiraClient`'s private HTTP/retry fields.
 #[path = "changelog.rs"]
 mod changelog;
 

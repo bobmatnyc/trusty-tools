@@ -3,7 +3,7 @@
 //! Why: the axum HTTP server, its dynamic-port binding, the `http_addr`
 //! discovery-file plumbing, and the SSE stream are a cohesive "how the daemon
 //! is reachable" concern that is orthogonal to the `AppState` model in
-//! `lib.rs`. Splitting it here keeps `lib.rs` under the SLOC cap and lets the
+//! `lib.rs`. Splitting it here keeps `lib.rs` under the SLOC cap (#1195) and lets the
 //! whole HTTP surface (all `axum-server`-gated) sit behind one module boundary.
 //! What: exports `DEFAULT_HTTP_PORT`, `http_addr_path`, `bind_dynamic_port`,
 //! `is_data_dir_override_active`, and the `run_http*` serving entry points

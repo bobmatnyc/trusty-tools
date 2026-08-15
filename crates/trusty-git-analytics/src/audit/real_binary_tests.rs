@@ -30,7 +30,7 @@
 //! points the child's facts store and data directory at a temp directory, and
 //! the success arm kills the daemon it started. trusty-search is read-only to
 //! these tests — one `GET /health`, plus whatever the daemon asks it during
-//! boot.
+//! boot. That wrapper is a `#!/bin/sh` script, so this module is Unix-only.
 //! Test: this module.
 //!
 //! # Spec References

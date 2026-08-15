@@ -538,11 +538,6 @@ async fn dispatch_kg_assert_then_query() {
     assert_eq!(triples[0]["predicate"], "works_at");
 }
 
-/// Why: this file is at the 3000-SLOC test cap, so a new tool's dispatch tests
-/// live in a child module rather than pushing it over.
-/// What: `kg_retract_triple`'s tests; they read `super::*` for `test_state` and
-/// the imports above.
-/// Test: the module itself.
 mod kg_retract_tests;
 
 /// Why: #4776 — `kg_list_subjects` is the discovery read that makes `kg_query`

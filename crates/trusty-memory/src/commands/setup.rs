@@ -583,11 +583,6 @@ fn merge_prompt_context_hook(path: &Path, exe: Option<&std::path::Path>) -> Resu
     Ok(true)
 }
 
-/// Why: test module extracted to setup_tests.rs to keep this file under the
-/// 500-line cap (line-cap gate, issue #610). All tests exercise the same
-/// items as before via `use super::*`; child modules can access private items.
-/// What: declares the sibling test file as the `tests` submodule.
-/// Test: see setup_tests.rs.
 #[cfg(test)]
 #[path = "setup_tests.rs"]
 mod tests;

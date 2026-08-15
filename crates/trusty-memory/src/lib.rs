@@ -85,34 +85,9 @@ pub mod bm25_index;
 pub mod bm25_lane;
 pub mod bm25_repair;
 pub mod bootstrap;
-/// Autonomous Dreamer scheduler — spawns per-palace dream loops on daemon startup.
-///
-/// Why: issue #1529 — `Dreamer::start_with_shutdown()` was fully implemented
-/// but never called. This module wires it into the daemon so each palace gets
-/// a background dream loop that fires every 5 minutes of idle time.
-/// What: exports `spawn_dream_scheduler`, `make_shutdown_watch`, and
-/// `spawn_shutdown_bridge`. Disable with `TRUSTY_DREAM_DISABLED=1`.
-/// Test: see unit tests inside this module.
 pub mod dream_scheduler;
-/// File-descriptor usage and limit reporting for `/health`.
-///
-/// Why: expose `open_fds` / `fd_soft_limit` so operators can see the fd
-/// ceiling and current consumption without needing lsof or shell access.
-/// Test: `fd_metrics::tests::fd_metrics_returns_sane_values`.
 pub mod fd_metrics;
-/// Idle-to-disk eviction ticker: periodically drops cold palace handles to
-/// bound resident RSS. Wired in `spawn_startup_tasks` next to the dream
-/// scheduler; configured via `TRUSTY_MEMORY_IDLE_EVICT_SECS`.
 pub mod idle_evict;
-/// Live worker-occupancy gauge for the palace open/write path.
-///
-/// Why (issue #4001): doctor could only observe *process* liveness — an HTTP
-/// listener that answers and lock files that look clean — so a daemon with
-/// every worker parked in `concurrent_open::backoff_sleep_ms` still reported
-/// HEALTHY. This tracks how long the oldest in-flight operation has been
-/// running, which is the cheapest signal that actually distinguishes "the
-/// process is up" from "work is moving".
-/// Test: `worker_liveness::tests`.
 pub mod worker_liveness;
 // Why (issue #226): `chat` and `web` are pure axum HTTP/SSE handler
 //      surfaces. Gating them behind the `axum-server` feature is what lets
@@ -123,25 +98,9 @@ pub mod chat;
 pub mod commands;
 pub mod console_metrics;
 pub mod discovery;
-/// Daemon activity events (`DaemonEvent`, `HookType`, `InjectionKind`) plus
-/// the best-effort activity-log open fallback. Split from `lib.rs` to stay
-/// under the SLOC cap (#1195); the types are re-exported at the crate root so
-/// existing `trusty_memory::DaemonEvent` paths are unchanged.
 mod events;
-/// Supervised `serve --foreground` entry point (issue #787).
-///
-/// Why: launchd supervisors need loud failure on port collision, not silent
-/// port-walking to 7071+. Extracted to stay under the 500-line ratchet cap.
-/// What: exports `bind_foreground_port` (Fix C — abort on EADDRINUSE) and
-/// `run_http_foreground` (Fix A lock + Fix B http_addr + Fix C combined).
-/// Test: `foreground::tests::bind_foreground_port_refuses_collision`;
-/// `daemon_lock` module tests cover the lock-file logic.
 pub mod foreground;
 pub mod hook_emit;
-/// HTTP/SSE serving surface (`run_http*`, `bind_dynamic_port`, address-file
-/// helpers, `sse_handler`). Split from `lib.rs` to stay under the SLOC cap
-/// (#1195); its public entry points are re-exported at the crate root so
-/// existing `trusty_memory::run_http_on` paths are unchanged.
 mod http_server;
 pub mod kg_extract;
 // #5524: the single entry point every caller-supplied KG assert routes through.
@@ -149,47 +108,17 @@ pub mod kg_write;
 pub mod mcp_service;
 pub mod messaging;
 pub mod openrpc;
-/// Issue #1217: default palace-ID derivation from project identity.
-///
-/// Why: the default palace ID should reflect the project's identity
-/// (git `owner/repo`, else `parent/dir`) rather than the bare directory
-/// basename, so the same repo resolves to the same palace across checkouts.
-/// What: exports the pure `derive_palace_id` core plus
-/// `owner_repo_from_git_remote`, `parent_dir_slug`, and the
-/// `TRUSTY_MEMORY_PALACE` env-override helpers.
-/// Test: see unit tests inside this module.
 pub mod palace_id_derive;
-/// Issue #88: project-root detection and palace-slug enforcement.
-///
-/// Why: prevents unbounded palace creation by anchoring palace names to the
-/// canonical slug of the project directory that contains the CWD, or to the
-/// `personal` sentinel for non-project contexts.
-/// What: exports `find_project_root`, `project_slug_at`, `project_slug`,
-/// `validate_palace_name`, `PERSONAL_PALACE`, and `PROJECT_MARKERS`.
-/// Test: see unit tests inside this module.
 pub mod project_root;
 pub mod prompt_facts;
 pub mod prompt_log;
 pub mod service;
-/// LRU-bounded cache of per-palace `ChatSessionStore` handles (issue #4639).
-///
-/// Why: the previous unbounded `DashMap` never released a `chat_sessions.redb`
-/// file descriptor, leaking one per palace for the daemon's lifetime.
-/// What: see [`session_store_cache::SessionStoreCache`].
-/// Test: `session_store_cache::tests`.
 pub mod session_store_cache;
 pub mod startup_scan;
 pub mod tools;
 pub mod transport;
 #[cfg(feature = "axum-server")]
 pub mod web;
-/// Issue #5399: WordNet-backed part-of-speech membership for KG extraction.
-///
-/// Why: the #4678 lexical stopword filter cannot separate two ordinary content
-/// words, which is what `exhaustiveness --is-a--> hard` needs.
-/// What: exports [`wordnet_pos::WordNetPos`] and the `NOUN`/`VERB`/`ADJ`/`ADV`
-/// bitmask constants. There is no global and no load step — see the module docs.
-/// Test: see unit tests inside this module.
 pub mod wordnet_pos;
 
 pub use activity::{ActivityEntry, ActivityFilter, ActivityLog, ActivitySource};

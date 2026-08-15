@@ -1,8 +1,10 @@
 //! Unit tests for `commands::setup`.
 //!
 //! Why: extracted from setup.rs to keep the production file under the 500-line
-//! cap while retaining full test coverage of the patch_one / hook installation
-//! logic. All tests exercise the same items as before via `use super::*`.
+//! cap (line-cap gate, issue #610) while retaining full test coverage of the
+//! patch_one / hook installation logic. All tests exercise the same items as
+//! before via `use super::*`; as a child module this can still reach the
+//! parent's private items.
 //! What: tests for patch_one (creates file, idempotency, hook install,
 //! session-start upgrade, legacy-shape upgrade, unrelated key preservation,
 //! absolute-path hook commands).
