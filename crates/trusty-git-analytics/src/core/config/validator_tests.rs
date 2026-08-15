@@ -64,20 +64,10 @@ fn existing_repo_path_passes() {
     );
 }
 
-#[test]
-fn github_token_required_when_fetch_prs() {
-    // Ensure env var is not set for this test.
-    // SAFETY: setting env in tests is racy across threads; we use a
-    // best-effort save/restore.
-    let prev = std::env::var("GITHUB_TOKEN").ok();
-    // SAFETY: env var manipulation is unsafe in 2024 edition.
-    unsafe {
-        std::env::remove_var("GITHUB_TOKEN");
-    }
-
-    let mut cfg = empty_config();
-    cfg.github = Some(GithubConfig {
-        token: None,
+/// Build a `GithubConfig` with PR fetching on and the given config token.
+fn github_fetching_prs(token: Option<&str>) -> GithubConfig {
+    GithubConfig {
+        token: token.map(str::to_string),
         org: None,
         orgs: vec![],
         repo: None,
@@ -85,20 +75,42 @@ fn github_token_required_when_fetch_prs() {
         fetch_pr_reviews: true,
         review_fetch_concurrency: 1,
         ticket_regex: None,
-    });
-    let errors = ConfigValidator::new(&cfg).validate();
-    let found = errors
-        .iter()
-        .any(|e| matches!(e, ConfigError::MissingGitHubToken));
-
-    // Restore env.
-    if let Some(v) = prev {
-        // SAFETY: env var manipulation is unsafe in 2024 edition.
-        unsafe {
-            std::env::set_var("GITHUB_TOKEN", v);
-        }
     }
-    assert!(found, "got {errors:?}");
+}
+
+/// Why: a config with `fetch_prs = true` and no token anywhere cannot fetch
+/// PRs, so validation must say so before the run starts.
+/// What: drive `github_token_missing` across every combination of config token
+/// and `GITHUB_TOKEN` value, including whitespace-only ones.
+/// Test: this test. #5313: it used to remove `GITHUB_TOKEN` process-wide to
+/// reach the missing-token branch, which is `unsafe` under the 2024 edition and
+/// races every other test thread. The env value is now an argument, so the
+/// present-token branches are covered too — they were unreachable before.
+#[test]
+fn github_token_required_when_fetch_prs() {
+    assert!(
+        github_token_missing(&github_fetching_prs(None), None),
+        "no config token and no env token means PRs cannot be fetched"
+    );
+    assert!(
+        github_token_missing(&github_fetching_prs(Some("  ")), Some("\t")),
+        "whitespace-only tokens count as absent"
+    );
+    assert!(
+        !github_token_missing(&github_fetching_prs(Some("ghp_xxx")), None),
+        "a config token satisfies the check"
+    );
+    assert!(
+        !github_token_missing(&github_fetching_prs(None), Some("ghp_xxx")),
+        "GITHUB_TOKEN satisfies the check"
+    );
+
+    let mut off = github_fetching_prs(None);
+    off.fetch_prs = false;
+    assert!(
+        !github_token_missing(&off, None),
+        "no token is required when fetch_prs is off"
+    );
 }
 
 #[test]
