@@ -12,7 +12,10 @@
 //! `embeddings` array. The wire protocol matches the format used by
 //! `trusty-embed-daemon` (see `crates/trusty-embed-daemon/src/protocol.rs`
 //! for the daemon side's definitions) and by the UDS listener added to
-//! `trusty-embedderd` in issue #164.
+//! `trusty-embedderd` in issue #164. #5180: the framing itself is
+//! [`crate::uds::rpc::send_framed_request_capped`] — this module owns the
+//! JSON-RPC envelope, the dimension check and the error mapping, not the wire
+//! mechanics.
 //!
 //! Test: unit tests below cover empty-batch short-circuit, request
 //! serialisation shape, and error decoding without a live daemon. The
@@ -22,11 +25,38 @@
 //! ONNX model.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::{EmbedderClient, EmbedderError};
+
+/// Wall-clock ceiling for one embed exchange over the socket.
+///
+/// Why (#5180): the hand-rolled framing this client used before had no bound at
+/// all — a daemon that accepted the connection and then wedged (a stuck ONNX
+/// session, a CoreML cold compile that never finishes) held the caller open
+/// forever. The bound is deliberately loose rather than tight: callers that
+/// want a service-level deadline already impose one
+/// (`memory_core::timeouts::embed_batch_timeout`, 30 s by default), so this
+/// one's only job is to make an infinite hang finite. 10 minutes is longer than
+/// any batch that completes today.
+/// Test: `embed_bounds_are_generous_but_finite`.
+const EMBED_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Response-frame budget for one embed reply, in bytes.
+///
+/// Why (#5180): [`crate::uds::MAX_FRAME_BYTES`] (8 MiB) is sized for
+/// control-plane frames, and an embed reply is bulk data. JSON-encoded `f32`s
+/// run roughly 12 bytes per dimension, so one 768-dimension vector is ~9.5 KB
+/// and the dream-dedup pass — which embeds every drawer in a palace in a SINGLE
+/// batch (`memory_core::dream::cycle::dedup_drawers`) — crosses 8 MiB at around
+/// 900 drawers. Capping at the shared default would have turned a working dream
+/// cycle into a hard failure, so this client states its own budget. 256 MiB
+/// still bounds the read buffer against a peer that never terminates a frame,
+/// which is the only thing the cap is for.
+/// Test: `embed_bounds_are_generous_but_finite`.
+const EMBED_MAX_FRAME_BYTES: u64 = 256 * 1024 * 1024;
 
 // ── Wire types ──────────────────────────────────────────────────────────────
 // These intentionally mirror the private types in `trusty-common::embed_client`
@@ -178,60 +208,25 @@ impl EmbedderClient for UdsEmbedderClient {
             "UdsEmbedderClient: sending batch"
         );
 
-        // Open a fresh connection. UDS connect on a local socket is typically
-        // sub-millisecond, so the simplicity of one-connection-per-call is
-        // justified in Phase 1.
-        // #5099: verify the directory and socket before trusting them.
-        let stream = crate::uds::connect_hardened(&self.socket_path)
-            .await
-            .map_err(|e| {
-                EmbedderError::Uds(format!(
-                    "connect to {} failed: {e}",
-                    self.socket_path.display()
-                ))
-            })?;
-        let (read_half, mut write_half) = stream.into_split();
-
-        // Build and send the request frame.
         let req = RpcRequest {
             jsonrpc: JSONRPC_VERSION,
             method: METHOD_EMBED,
             params: EmbedParams { texts: &texts },
             id: 1,
         };
-        let mut payload = serde_json::to_vec(&req)
-            .map_err(|e| EmbedderError::Uds(format!("serialise JSON-RPC request: {e}")))?;
-        payload.push(b'\n');
 
-        write_half
-            .write_all(&payload)
-            .await
-            .map_err(|e| EmbedderError::Uds(format!("write request frame: {e}")))?;
-
-        // Half-close the write side so the daemon knows the request is complete.
-        write_half
-            .shutdown()
-            .await
-            .map_err(|e| EmbedderError::Uds(format!("half-close write side: {e}")))?;
-
-        // Read exactly one newline-terminated response frame.
-        let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| EmbedderError::Uds(format!("read response frame: {e}")))?;
-
-        if n == 0 {
-            return Err(EmbedderError::Uds(
-                "daemon closed connection before responding".to_owned(),
-            ));
-        }
-
-        // Decode the response.
-        let resp: RpcResponse = serde_json::from_str(line.trim()).map_err(|e| {
-            EmbedderError::Uds(format!("decode response (raw={:?}): {e}", line.trim()))
-        })?;
+        // #5180: dial (with the #5099 permission check), newline framing,
+        // half-close, size cap and timeout all come from the shared entry
+        // point. This used to be a private copy of `write_all` +
+        // `BufReader::read_line` + `serde_json::from_str`.
+        let resp: RpcResponse = crate::uds::rpc::send_framed_request_capped(
+            &self.socket_path,
+            &req,
+            EMBED_TIMEOUT,
+            EMBED_MAX_FRAME_BYTES,
+        )
+        .await
+        .map_err(|e| EmbedderError::Uds(e.to_string()))?;
 
         if let Some(err) = resp.error {
             return Err(EmbedderError::ModelError(format!(
@@ -264,6 +259,83 @@ impl EmbedderClient for UdsEmbedderClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    /// Why (#5180): this client's framing moved into `uds::rpc`, and
+    /// `trusty-embedderd`'s listener — a separate crate — was not changed. A
+    /// drift in the request bytes would only show up against a live daemon,
+    /// which the rest of this module's tests deliberately avoid needing.
+    /// What: runs a real `embed_batch` against a stub listener and asserts the
+    /// wire bytes are exactly one newline-terminated JSON-RPC 2.0 frame, and
+    /// that a newline-terminated reply decodes back into vectors.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn embed_batch_sends_one_newline_framed_jsonrpc_frame() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("embedderd-stub.sock");
+        let listener = crate::uds::bind_hardened(&sock).expect("bind stub socket");
+
+        let served = tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.expect("accept");
+            // The client half-closes after its request frame.
+            let mut raw = Vec::new();
+            conn.read_to_end(&mut raw).await.expect("drain request");
+            conn.write_all(
+                b"{\"jsonrpc\":\"2.0\",\"result\":{\"embeddings\":[[0.5,0.25]]},\"id\":1}\n",
+            )
+            .await
+            .expect("write reply");
+            conn.flush().await.expect("flush reply");
+            raw
+        });
+
+        let vectors = UdsEmbedderClient::new(sock)
+            .embed_batch(vec!["hello".to_string()])
+            .await
+            .expect("embed round trip");
+        assert_eq!(vectors, vec![vec![0.5_f32, 0.25_f32]]);
+
+        let raw = String::from_utf8(served.await.expect("join")).expect("utf8");
+        assert!(
+            raw.ends_with('\n'),
+            "the request frame must be newline-terminated: {raw:?}"
+        );
+        assert_eq!(
+            raw.matches('\n').count(),
+            1,
+            "exactly one frame, one terminator: {raw:?}"
+        );
+        let sent: serde_json::Value =
+            serde_json::from_str(raw.trim_end_matches('\n')).expect("the frame is one JSON value");
+        assert_eq!(sent["jsonrpc"], "2.0");
+        assert_eq!(sent["method"], "embed");
+        assert_eq!(sent["params"]["texts"][0], "hello");
+        assert_eq!(sent["id"], 1);
+    }
+
+    /// Why (#5180): the migration introduced a timeout and a response-size cap
+    /// where neither existed. The cap in particular is load-bearing — the
+    /// dream-dedup pass embeds a whole palace in one batch, and the shared
+    /// 8 MiB default would refuse the reply at roughly 900 drawers.
+    /// What: pins both bounds against a drift that would start failing real
+    /// batches.
+    /// Test: this test itself.
+    #[test]
+    fn embed_bounds_are_generous_but_finite() {
+        assert!(EMBED_TIMEOUT >= Duration::from_secs(120));
+        assert!(EMBED_TIMEOUT <= Duration::from_secs(3600));
+        // Both operands are consts, so these hold at compile time; a `const`
+        // block is what clippy's `assertions_on_constants` asks for and it
+        // turns a drift into a build failure rather than a test failure.
+        const {
+            assert!(
+                EMBED_MAX_FRAME_BYTES > crate::uds::MAX_FRAME_BYTES,
+                "an embed reply is bulk data; the control-plane default is too small"
+            );
+        }
+        // ~12 bytes per JSON-encoded f32 x 768 dims x 10_000 drawers.
+        const { assert!(EMBED_MAX_FRAME_BYTES >= 92_160_000) };
+    }
 
     #[tokio::test]
     async fn empty_batch_short_circuits() {

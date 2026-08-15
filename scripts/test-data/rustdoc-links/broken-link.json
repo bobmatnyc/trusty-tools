@@ -1,0 +1,5 @@
+{"reason":"compiler-artifact","fresh":false,"target":{"name":"trusty_common","kind":["lib"],"src_path":"crates/trusty-common/src/lib.rs"},"filenames":["target/doc/trusty_common/index.html"]}
+{"reason":"compiler-message","message":{"level":"error","message":"unresolved link to `physical_footprint_mb`","code":{"code":"rustdoc::broken_intra_doc_links"},"spans":[{"is_primary":true,"file_name":"crates/trusty-common/src/sys_metrics.rs","line_start":82}]}}
+{"reason":"compiler-message","message":{"level":"error","message":"unresolved link to `launchd`","code":{"code":"rustdoc::broken_intra_doc_links"},"spans":[{"is_primary":true,"file_name":"crates/trusty-common/src/lib.rs","line_start":180}]}}
+{"reason":"compiler-message","message":{"level":"error","message":"could not document `trusty-common`","code":null,"spans":[]}}
+{"reason":"build-finished","success":false}

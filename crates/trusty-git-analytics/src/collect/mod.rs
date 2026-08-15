@@ -41,6 +41,8 @@ pub mod linear;
 mod linear_pipeline;
 mod notify;
 pub mod pm_adapter;
+// #5734: the concurrent PR fetch drain, split out of `collector` (frozen SLOC).
+mod pr_pipeline;
 pub mod pr_provider;
 pub mod ticket;
 pub mod weeks;

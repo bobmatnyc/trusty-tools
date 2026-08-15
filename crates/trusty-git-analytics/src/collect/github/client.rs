@@ -11,6 +11,8 @@ use crate::collect::github::repo_resolver::{build_http_client, parse_slug};
 use crate::collect::github::retry::retry_get;
 use crate::collect::github::types::{ApiPull, GitHubIssue, GitHubPrCommit, GitHubReview};
 use crate::collect::pr_provider::PrProvider;
+// #5734: the PR body is scanned once here and discarded; only the key is kept.
+use crate::collect::ticket::pr_body_ticket_key;
 use crate::core::config::GithubConfig;
 use crate::core::db::Database;
 use crate::core::models::{PrState, PullRequest};
@@ -249,6 +251,12 @@ impl GitHubClient {
                     PrState::Open
                 };
                 let commit_shas = commit_shas_for_pull(&p)?;
+                // #5734: GitHub always sends `head.ref`, so `Some("")` here is
+                // an anomaly the collector reports rather than harvests as
+                // nothing. `None` means the payload carried no head block at
+                // all — the same "no claim made" value other providers use.
+                let head_ref = p.head.map(|h| h.ref_name);
+                let body_ticket_id = p.body.as_deref().and_then(pr_body_ticket_key);
                 out.push(PullRequest {
                     id: 0,
                     pr_number: p.number,
@@ -260,6 +268,8 @@ impl GitHubClient {
                     merged_at: p.merged_at,
                     commit_shas,
                     fetched_at: Utc::now().to_rfc3339(),
+                    head_ref,
+                    body_ticket_id,
                 });
             }
             if (n as u32) < PAGE_SIZE {
@@ -301,13 +311,17 @@ impl GitHubClient {
         let mut count = 0usize;
         for pr in prs {
             conn.execute(
+                // #5734: head_ref / body_ticket_id ride the same stale-write
+                // guard as every other mutable column, so an older snapshot
+                // cannot overwrite a newer branch or issue reference.
                 "INSERT INTO pull_requests \
-                 (provider,repository,pr_number,title,author,state,created_at,merged_at,commit_shas,fetched_at) \
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
+                 (provider,repository,pr_number,title,author,state,created_at,merged_at,commit_shas,fetched_at,head_ref,body_ticket_id) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) \
                  ON CONFLICT(provider,repository,pr_number) DO UPDATE SET \
                    title=excluded.title,author=excluded.author,state=excluded.state,\
                    merged_at=excluded.merged_at,commit_shas=excluded.commit_shas,\
-                   fetched_at=excluded.fetched_at \
+                   fetched_at=excluded.fetched_at,head_ref=excluded.head_ref,\
+                   body_ticket_id=excluded.body_ticket_id \
                  WHERE excluded.fetched_at > pull_requests.fetched_at",
                 params![
                     "github",
@@ -320,6 +334,8 @@ impl GitHubClient {
                     pr.merged_at.map(|t| t.to_rfc3339()),
                     pr.commit_shas,
                     pr.fetched_at,
+                    pr.head_ref.as_deref().unwrap_or(""),
+                    pr.body_ticket_id,
                 ],
             )?;
             count += 1;

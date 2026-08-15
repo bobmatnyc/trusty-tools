@@ -1,7 +1,7 @@
 //! Synchronous piped-stdout disclaimed spawn — the public, platform-agnostic
-//! half of [`macos::spawn_stdout_piped_disclaimed`] (the macOS
+//! half of `macos::spawn_stdout_piped_disclaimed` (the macOS
 //! `posix_spawn`-based implementation lives in `macos::stdout_piped`; this
-//! file holds the public API, the non-macOS/[`DISABLE_ENV`] fallback, and the
+//! file holds the public API, the non-macOS/[`super::DISABLE_ENV`] fallback, and the
 //! shared [`StdoutPipedSpawn`] return type both paths produce).
 //!
 //! Why: `formatters::info_box::probes::run_git_log` (in the `tm` binary)
@@ -16,7 +16,7 @@
 //! [`disclaimed_stdout_piped_spawn`] spawns `cmd` with stdout piped, stderr
 //! discarded to `/dev/null`, and stdin inherited, disclaiming TCC
 //! responsibility on macOS exactly like [`super::disclaimed_output`]. On
-//! non-macOS (or with [`DISABLE_ENV`] set) it sets the same stdio shape on
+//! non-macOS (or with [`super::DISABLE_ENV`] set) it sets the same stdio shape on
 //! `cmd` and delegates to `cmd.spawn()`, exposing `Child::id()` exactly as
 //! the pre-fix code did.
 //! Test: `tests::disclaimed_stdout_piped_spawn_captures_and_waits`,
@@ -106,7 +106,7 @@ impl StdoutPipedSpawn {
 /// `posix_spawnp` with a piped stdout, a `/dev/null` stderr file action, no
 /// stdin file action (inherited), and the disclaim attribute when the
 /// private SPI resolves — returning the pid immediately, unwaited. On
-/// non-macOS (or with [`DISABLE_ENV`] set) sets
+/// non-macOS (or with [`super::DISABLE_ENV`] set) sets
 /// `cmd.stdout(Stdio::piped()).stderr(Stdio::null())` and delegates to
 /// `cmd.spawn()`, exposing `Child::id()` exactly as the pre-fix code did.
 /// Test: `tests::disclaimed_stdout_piped_spawn_captures_and_waits`,

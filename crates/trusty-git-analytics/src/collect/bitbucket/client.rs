@@ -465,6 +465,11 @@ fn map_pr(pr: BbPullRequest, repository: &str) -> PullRequest {
         merged_at,
         commit_shas,
         fetched_at: Utc::now().to_rfc3339(),
+        // #5734: Bitbucket's list payload does carry `source.branch.name` and
+        // `description`, but neither is deserialized yet. `None` states that
+        // this provider makes no claim, rather than asserting an empty branch.
+        head_ref: None,
+        body_ticket_id: None,
     }
 }
 

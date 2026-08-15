@@ -48,6 +48,23 @@
 #   dispatched ref, so a typo or a stale value can never silently gate a
 #   release on unrelated code. Omitted, behaviour is unchanged.
 #
+# WHICH COMMIT A RUN GATED IS NOT `head_sha` (#5755). `workflow_dispatch` records
+#   `head_sha` as the dispatched ref's tip at dispatch time, and the `sha` input
+#   above deliberately makes the gated commit DIFFERENT from that tip. Measured
+#   on run 31874835425: `head_sha` 3f39b79f, commit actually checked out and
+#   gated 020c139d. So `head_sha` answers "what was the branch tip when someone
+#   pressed the button", never "what did this run examine", and a consumer that
+#   reads it credits a green run to a commit it never looked at.
+#
+#   The authoritative answer is the `::notice title=Pre-publish gate target::`
+#   annotation the `resolve-sha` job emits on BOTH of its arms, carrying the
+#   commit it resolved and verified. `preflight-publish.sh` CHECK 8 reads it
+#   through the check-runs annotations API and refuses to count a run it cannot
+#   attribute. Changing that title, that message shape, or emitting it from only
+#   one arm breaks CHECK 8 CLOSED — it stops finding evidence and fails, which is
+#   the safe direction but still a break. `scripts/preflight-check8-selftest.sh`
+#   pins the parse.
+#
 # EVERY JOB FAILS CLOSED. This repo has been bitten twice by a gate reporting
 #   success while checking nothing — #5620 (`0 compared` printing `[PASS]`) and
 #   the SemVer type gap (#5723). So: no job here uses `continue-on-error`, no
@@ -147,6 +164,16 @@ jobs:
             echo "sha=${REF_TIP}" >> "$GITHUB_OUTPUT"
             echo "### Resolved commit" >> "$GITHUB_STEP_SUMMARY"
             echo "\`${REF_TIP}\` (ref tip, no sha input given)" >> "$GITHUB_STEP_SUMMARY"
+            # The notice is emitted on BOTH arms, in the same shape, on purpose
+            # (#5755). It is the only machine-readable record of which commit
+            # this run gated: preflight CHECK 8 reads it back through the
+            # check-runs annotations API, because `head_sha` is the ref tip at
+            # DISPATCH time and is therefore the wrong commit whenever the sha
+            # input was used. A run that emitted no notice cannot be attributed
+            # to any commit, and CHECK 8 refuses to count it — so an arm that
+            # stayed silent here would be a gate that reports nothing, which is
+            # the hole this line closes rather than opens.
+            echo "::notice title=Pre-publish gate target::Verified commit ${REF_TIP}"
             exit 0
           fi
 

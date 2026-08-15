@@ -39,10 +39,10 @@
 //!    defensive-fallback check).
 //! 5. (#3841 belt-and-braces, second layer) A member classified
 //!    [`DownState::NotLoaded`] whose plist is present on disk gets ONE more
-//!    repair attempt here — [`apply_not_loaded_fallback`] calls the exact same
+//!    repair attempt here — `apply_not_loaded_fallback` calls the exact same
 //!    `ServiceEnv::bootstrap_fallback` primitive
 //!    `service_bootstrap::bootstrap_one`'s install-time postcondition uses
-//!    (via [`attempt_verify_fallback`]), and on success re-probes through the
+//!    (via `attempt_verify_fallback`), and on success re-probes through the
 //!    SAME [`poll_until_not_down`]/[`bounded_attempts`] machinery the #2498
 //!    kickstart retry uses (#3849 code-critic MEDIUM 1 fix — a single instant
 //!    re-probe here would race a just-repaired but slow-starting daemon
@@ -152,7 +152,7 @@ pub struct VerifyRow {
     /// `None` for a healthy/stale/unknown/not_installed member, or a
     /// non-LAUNCHD member.
     pub down_state: Option<DownState>,
-    /// Whether [`attempt_verify_fallback`] was invoked for this member
+    /// Whether `attempt_verify_fallback` was invoked for this member
     /// (#3841 — the verify tail's own second-layer repair for a `NotLoaded`
     /// diagnosis, independent of `service_bootstrap`'s install-time
     /// postcondition).
@@ -268,7 +268,7 @@ pub fn needs_kickstart(outcome: &ProbeOutcome, manage: ManageStrategy) -> bool {
 /// `tests::verify_one_does_not_kickstart_a_healthy_launchd_daemon` run the REAL
 /// probe against a stubbed healthy daemon and then assert ZERO restarts — the
 /// only shape of test that closes the loop. Mirrors the `ServiceEnv` seam already
-/// in this file (see [`apply_not_loaded_fallback`], tested against
+/// in this file (see `apply_not_loaded_fallback`, tested against
 /// `tests::FakeServiceEnv`).
 /// What: one operation — force-start a member's launchd job — returning whether
 /// it succeeded.

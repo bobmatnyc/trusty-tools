@@ -39,7 +39,7 @@
 //! was never independent evidence of anything. Both are recorded as legacy
 //! aliases below.
 //!
-//! Deliberately NOT `#[cfg(target_os = "macos")]`, unlike [`crate::launchd`]:
+//! Deliberately NOT `#[cfg(target_os = "macos")]`, unlike `crate::launchd`:
 //! the registry is data, and gating it would stop the drift tests from running
 //! on Linux CI, which is where a divergent literal most needs to be caught.
 //!
