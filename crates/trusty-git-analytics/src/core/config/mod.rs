@@ -31,6 +31,8 @@ use crate::core::errors::{Result, TgaError};
 
 pub mod aliases;
 pub mod azdo;
+// #5770: hand-written `Debug` for every config section holding a credential.
+mod credential_debug;
 pub mod database_path;
 pub mod validator;
 
@@ -492,7 +494,10 @@ pub struct OutputConfig {
 /// `deny_unknown_fields` closes the class of silent-drop bugs seen in
 /// issues #259 and #286. Any YAML key under `classification:` that is not
 /// a recognised field is rejected at load time with a clear error message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// #5770: `Debug` is hand-written in `credential_debug`, not derived — the
+// derived one printed `openrouter_api_key` in the clear, and `Config` embeds
+// this section while deriving `Debug`.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClassificationConfig {
     /// Supplemental rule files to load and merge in order (#445 batch C).
@@ -830,7 +835,9 @@ impl Default for ReachabilityConfig {
 }
 
 /// Linear project management integration settings.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// #5770: `Debug` is hand-written in `credential_debug`, not derived — the
+// derived one printed `api_key` in the clear.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct LinearConfig {
     /// Linear API key (personal or workspace).
     ///
@@ -1010,7 +1017,9 @@ fn default_failure_window_hours() -> u32 {
 /// section grows a knob whenever a provider learns an option, and every
 /// addition is otherwise a SemVer-major break for a published crate — build one
 /// with `..Default::default()`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// #5770: `Debug` is hand-written in `credential_debug`, not derived — the
+// derived one printed `token` in the clear.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct GithubConfig {
     /// Personal access token (often sourced from `GITHUB_TOKEN`).
@@ -1121,7 +1130,9 @@ fn default_review_fetch_concurrency() -> u32 {
 /// Tokens / passwords may also be sourced from the environment variables
 /// `BITBUCKET_TOKEN` and `BITBUCKET_APP_PASSWORD` — the validator treats
 /// either source as satisfying the requirement.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// #5770: `Debug` is hand-written in `credential_debug`, not derived — the
+// derived one printed `app_password` and `token` in the clear.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct BitbucketConfig {
     /// Bitbucket account / workspace member username (required for Basic auth).
     #[serde(default)]
@@ -1167,7 +1178,9 @@ pub struct BitbucketConfig {
 ///
 /// `#[non_exhaustive]` since #5219, which added `fetch_on_reference` — same
 /// reasoning as [`GithubConfig`].
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// #5770: `Debug` is hand-written in `credential_debug`, not derived — the
+// derived one printed `token` in the clear.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct JiraConfig {
     /// Base URL of the JIRA instance.

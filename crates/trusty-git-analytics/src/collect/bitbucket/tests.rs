@@ -427,7 +427,10 @@ fn resolve_auth_rejects_username_without_password() {
     let cfg = auth_config(None, Some("carol"), None);
     match resolve_auth(&cfg, env_map(&[])) {
         Err(CollectError::Config(_)) => {}
-        other => panic!("expected Config error, got {other:?}"),
+        // #5770: the Ok arm is split out so the panic formats only the error —
+        // `{other:?}` over the whole Result would print the resolved credential.
+        Ok(_) => panic!("expected Config error, got Ok(_)"),
+        Err(other) => panic!("expected Config error, got {other:?}"),
     }
 }
 
