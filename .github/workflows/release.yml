@@ -198,8 +198,8 @@ jobs:
       # standalone distributable binary, skip the build/release/homebrew jobs
       # GREEN." It fires for any crate NOT in the binary-crate allowlist in the
       # `config` step — i.e. all library-only crates. Examples: trusty-common
-      # (shared lib), trusty-bm25-daemon / trusty-embedderd (sidecar binaries
-      # that ship INSIDE a host crate, single-owner-per-binary), trusty-progress,
+      # (shared lib), trusty-embedderd (a sidecar binary that ships INSIDE a
+      # host crate, single-owner-per-binary), trusty-progress,
       # the internal trusty-agents* libs, etc. Previously a library-only tag
       # (e.g. trusty-common-v0.15.3) errored RED; it now green-skips. (trusty-console
       # is NOT bundled — it has its own standalone release job.)
@@ -320,8 +320,8 @@ jobs:
             AL2023_FEATURES="load-dynamic"
 
           elif [[ "$CRATE" == "trusty-memory" ]]; then
-            # Binaries: trusty-memory + trusty-bm25-daemon
-            # Both [[bin]] targets confirmed in trusty-memory/Cargo.toml.
+            # Binary: trusty-memory. #5329 removed trusty-bm25-daemon from the
+            # install surface — BM25 runs in-process, so that [[bin]] is gone.
             # trusty-console was REMOVED from the install surface in #1318
             # (single-owner-per-binary); it now ships as its own release job.
             # (The trusty-memory-mcp-bridge compat shim is built but not part of
@@ -329,9 +329,9 @@ jobs:
             # trusty-memory bin has required-features=["axum-server"]; default
             # features include axum-server so all build with default features.
             # UI-embedding crate: SKIP_UI_BUILD=1
-            # No ORT bundling (BM25 sidecar, no ONNX): no AL2023 variant.
+            # No ORT bundling (no ONNX in the released binary): no AL2023 variant.
             CARGO_PKG="trusty-memory"
-            BINARIES="trusty-memory trusty-bm25-daemon"
+            BINARIES="trusty-memory"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -472,7 +472,6 @@ jobs:
           # no standalone binary target this workflow can build/package/upload:
           #
           #   trusty-common      — shared library (thiserror error types, memory-core, …)
-          #   trusty-bm25-daemon — binary ships INSIDE trusty-memory (#1318)
           #   trusty-embedderd   — binary ships INSIDE trusty-search (#1318)
           #   trusty-progress    — shared progress-reporting library
           #   trusty-agents-common / trusty-agents-local — internal libs (publish=false)
@@ -501,7 +500,7 @@ jobs:
             echo "  trusty-analyze, trusty-review, trusty-mpm, trusty-git-analytics (tga),"
             echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias)."
             echo "Library-only / internal crates (green-skip, no standalone binary):"
-            echo "  trusty-common, trusty-bm25-daemon, trusty-embedderd, trusty-progress,"
+            echo "  trusty-common, trusty-embedderd, trusty-progress,"
             echo "  trusty-agents*, trusty-mpm-gui, tc-services,"
             echo "  trusty-cto-db, trusty-gworkspace, and any future library crate."
             echo "If '$CRATE' SHOULD produce a released binary, add a config branch for it"
@@ -2147,7 +2146,7 @@ jobs:
           # INSTALL_BINS. The trusty-console case below installs only its own bin.
           case "${CRATE}" in
             trusty-search)   INSTALL_BINS="trusty-search trusty-embedderd" ;;
-            trusty-memory)   INSTALL_BINS="trusty-memory trusty-bm25-daemon" ;;
+            trusty-memory)   INSTALL_BINS="trusty-memory" ;;
             trusty-analyze)  INSTALL_BINS="trusty-analyze" ;;
             trusty-review)   INSTALL_BINS="trusty-review" ;;
             trusty-mpm)      INSTALL_BINS="tm trusty-mpm" ;;

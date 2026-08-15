@@ -259,11 +259,10 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
         (None, None)
     };
 
-    // Keep a handle to the BM25 supervisor (if any) so we can call
-    // `shutdown()` on the exit path. Cloning here is cheap (`Arc`) and
-    // detaches the lifetime of the supervisor from the `state` move into
-    // the router below.
-    let bm25_supervisor = state.bm25_supervisor.clone();
+    // Keep a handle to the BM25 lane (if any) so we can flush it on the exit
+    // path. Cloning here is cheap (`Arc`) and detaches the lane's lifetime from
+    // the `state` move into the router below.
+    let bm25 = state.bm25.clone();
 
     // #3304: trust the resolved bind address as a self-origin (non-loopback
     // binds only; `from_bind_addrs` drops loopback) for the router-wide write
@@ -297,13 +296,13 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
         let _ = std::fs::remove_file(p);
     }
 
-    // Issue #193: gracefully reap every spawned BM25 daemon before the
-    // process exits so each one gets a chance to flush its snapshot and
-    // unlink its socket. `kill_on_drop=true` on the children would
-    // SIGKILL them on Drop anyway, but that skips the daemon's own
-    // shutdown sequence and leaves stale sockets behind.
-    if let Some(supervisor) = bm25_supervisor {
-        supervisor.shutdown().await;
+    // #5329: flush every resident BM25 snapshot before the process exits. The
+    // lane coalesces writes on a timer, so without this the last interval's
+    // worth of indexing would be lost on every clean shutdown. This replaces
+    // the daemon-era SIGTERM-and-reap sequence, and unlike it there is no
+    // window in which a SIGKILL can land mid-flush.
+    if let Some(lane) = bm25 {
+        lane.shutdown().await;
     }
 
     serve_result?;

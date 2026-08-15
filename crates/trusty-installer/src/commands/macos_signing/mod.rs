@@ -149,8 +149,10 @@ pub const MPM_SET: &str = "trusty-mpm";
 pub const AGENTS_SET: &str = "trusty-agents";
 
 /// The `trusty-memory` signable set: every binary `cargo install --path
-/// crates/trusty-memory` produces — `trusty-memory`, the bundled
-/// `trusty-bm25-daemon`, and the deprecated `trusty-memory-mcp-bridge` shim.
+/// crates/trusty-memory` produces — `trusty-memory` and the deprecated
+/// `trusty-memory-mcp-bridge` shim. #5329 removed the third,
+/// `trusty-bm25-daemon`: BM25 runs in-process now, so that binary is no longer
+/// built, installed, or signed.
 ///
 /// Why (owner ruling 2026-08-06): same cdhash-instability class as
 /// #873/#2721/#4277. `trusty-memory setup` and `trusty-memory migrate` walk
@@ -244,11 +246,6 @@ const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
     // on disk, and omitting it would leave an installed binary ad-hoc for
     // exactly the #2721 reason.
     ("trusty-memory", MEMORY_SET, "com.trusty.trusty-memory"),
-    (
-        "trusty-bm25-daemon",
-        MEMORY_SET,
-        "com.trusty.trusty-bm25-daemon",
-    ),
     (
         "trusty-memory-mcp-bridge",
         MEMORY_SET,

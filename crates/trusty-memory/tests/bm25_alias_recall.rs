@@ -11,17 +11,19 @@
 //!
 //! The divergence is between a RESOLVED handle and a REQUESTED slug, so a mock
 //! cannot show it: this test registers a real alias, resolves it through the
-//! real registry, and drives a real `trusty-bm25-daemon` over its real socket.
+//! real registry, and drives the real lexical lane.
 //!
-//! What: `#[ignore]`d because it needs the daemon binary. Run with
-//! `cargo test -p trusty-memory --test bm25_alias_recall -- --include-ignored`.
+//! What: #5329 removed this file's `#[ignore]`. It was there because the test
+//! needed a built `trusty-bm25-daemon` binary on disk, which CI does not
+//! guarantee — so the strongest #5036 regression test ran only when someone
+//! remembered `--include-ignored`. The in-process lane needs no binary, so this
+//! now runs in the default `cargo test -p trusty-memory`.
 //!
 //! Test: this *is* the test file.
 
 mod alias_lane;
 
 use serde_json::json;
-use trusty_common::bm25_client::socket_path_for_palace;
 use trusty_common::memory_core::palace::{Drawer, PalaceId};
 use trusty_memory::bm25_backfill::run_startup_sweep;
 use trusty_memory::tools::dispatch_tool;
@@ -32,9 +34,7 @@ use trusty_memory::tools::dispatch_tool;
 /// What: seeds one drawer, sweeps, then recalls THROUGH THE ALIAS on the
 /// embedder-warming path — where the lexical lane is the only lane, so a
 /// vector hit cannot mask its result — and asserts the drawer comes back.
-/// Test: this test itself. Against the parent commit the lane addresses the
-/// default palace's socket and the recall returns nothing.
-#[ignore = "requires trusty-bm25-daemon binary on disk; run with --include-ignored"]
+/// Test: this test itself.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_aliased_recall_reads_the_corpus_the_backfill_wrote() {
     let fx = alias_lane::Aliased::new("r");
@@ -86,11 +86,13 @@ async fn an_aliased_recall_reads_the_corpus_the_backfill_wrote() {
         fx.canonical,
     );
 
-    // And the lane must never have addressed the requested slug: a daemon
-    // spawned under the alias name is the bug, even when it happens to be empty.
+    // And the lane must never have addressed the requested slug. The daemon-era
+    // form of this assertion was "no socket exists under the alias name"; the
+    // in-process form is "no index directory was ever created under it", since
+    // `Bm25Lane::with_index` creates one the first time a palace is touched.
     assert!(
-        !socket_path_for_palace(&fx.alias).exists(),
-        "#5036: no BM25 daemon may be started for the alias slug — the lane is \
+        !fx.state.data_root.join(&fx.alias).join("bm25").exists(),
+        "#5036: no BM25 index may be created for the alias slug — the lane is \
          keyed on the resolved palace id"
     );
 

@@ -944,7 +944,7 @@ async fn run_serve(
         .with_default_palace(palace)
         .with_log_buffer(log_buffer)
         .with_error_store(error_store)
-        .with_bm25_client_from_env()
+        .with_bm25_lane_from_env()
         .with_multi_tenant_mode_from_env();
     spawn_startup_tasks(&state);
     if let Some(addr) = http {

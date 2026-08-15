@@ -66,7 +66,7 @@ cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-memory --lo
 
 This builds from the latest commit on `main` and installs the binary to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
 
-Installing `trusty-memory` produces four binaries in one command: `trusty-memory`, `trusty-memory-mcp-bridge` (deprecated shim — forwards to `serve --stdio`), `trusty-bm25-daemon`, and `trusty-console`.
+Installing `trusty-memory` produces two binaries in one command: `trusty-memory` and `trusty-memory-mcp-bridge` (deprecated shim — forwards to `serve --stdio`). `trusty-console` was de-bundled in #1318 and `trusty-bm25-daemon` in #5329 — BM25 now runs inside the memory daemon.
 
 To install a specific version:
 ```bash

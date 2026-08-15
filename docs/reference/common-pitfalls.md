@@ -25,7 +25,7 @@ Otherwise every library consumer pulls in the full axum + tower stack.
 
 🟡 **Editing a shared crate without propagating changes** — modifying
 `trusty-common` (or its consolidated `symgraph` / `embedder` / `mcp` modules),
-`trusty-embedderd`, or `trusty-bm25-daemon` can silently break dependents. Always run `cargo check` (workspace-wide) and
+or `trusty-embedderd` can silently break dependents. Always run `cargo check` (workspace-wide) and
 `cargo test -p <consumer>` for every crate that imports the edited library.
 
 🟡 **Skipping proportional documentation on new public items** — clippy does

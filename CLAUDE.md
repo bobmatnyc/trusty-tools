@@ -273,7 +273,7 @@ fixed, ratchet-allowlist mechanics, and refactor history:
 [docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
-(`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, etc.) define structured error enums with
+(`trusty-common`, `trusty-embedderd`, etc.) define structured error enums with
 `#[derive(thiserror::Error)]`. Binary and daemon crates use `anyhow::Result`
 throughout.
 

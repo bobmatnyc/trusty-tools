@@ -32,10 +32,11 @@
 # precondition), never that a particular grant will survive.
 #
 # What: Builds+installs trusty-memory from local source (`cargo install
-# --path crates/trusty-memory --locked`), then codesigns ALL THREE installed
-# binaries — `trusty-memory` (`com.trusty.trusty-memory`),
-# `trusty-bm25-daemon` (`com.trusty.trusty-bm25-daemon`), and the deprecated
-# `trusty-memory-mcp-bridge` shim (`com.trusty.trusty-memory-mcp-bridge`) —
+# --path crates/trusty-memory --locked`), then codesigns BOTH installed
+# binaries — `trusty-memory` (`com.trusty.trusty-memory`) and the deprecated
+# `trusty-memory-mcp-bridge` shim (`com.trusty.trusty-memory-mcp-bridge`).
+# #5329 removed the third, `trusty-bm25-daemon`: BM25 runs in-process now, so
+# `cargo install trusty-memory` no longer produces that binary —
 # by shelling out to `tctl sign trusty-memory`, the single source of truth for
 # trusty-* codesign flags and identifiers
 # (`crates/trusty-installer/src/commands/macos_signing/mod.rs`, #2558). This
@@ -92,7 +93,6 @@ set -euo pipefail
 
 CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
 readonly MEMORY_BIN="$CARGO_BIN_DIR/trusty-memory"
-readonly BM25_BIN="$CARGO_BIN_DIR/trusty-bm25-daemon"
 readonly BRIDGE_BIN="$CARGO_BIN_DIR/trusty-memory-mcp-bridge"
 
 # The CODESIGN identifiers `tctl sign trusty-memory` applies, mirrored here only
@@ -103,9 +103,8 @@ readonly BRIDGE_BIN="$CARGO_BIN_DIR/trusty-memory-mcp-bridge"
 # `*_IDENTIFIER=` naming is what marks them as codesign identifiers, matching
 # install-trusty-mpm-signed.sh and install-trusty-agents-signed.sh.
 # #4868: the previous inline `-> com.trusty.…` narration carried no such marker,
-# so the drift scan read all three as unowned launchd labels.
+# so the drift scan read them as unowned launchd labels.
 readonly MEMORY_IDENTIFIER="com.trusty.trusty-memory"
-readonly BM25_IDENTIFIER="com.trusty.trusty-bm25-daemon"
 readonly BRIDGE_IDENTIFIER="com.trusty.trusty-memory-mcp-bridge"
 
 # Sign identity: auto-detected by `tctl sign` if not overridden. Exported so
@@ -183,7 +182,7 @@ run_cargo_install() {
 
     info "cargo install complete. Installed binaries:"
     local bin
-    for bin in "$MEMORY_BIN" "$BM25_BIN" "$BRIDGE_BIN"; do
+    for bin in "$MEMORY_BIN" "$BRIDGE_BIN"; do
         if [[ -f "$bin" ]]; then
             printf '  %s\n' "$bin" >&2
         else
@@ -206,7 +205,6 @@ run_sign() {
     if [[ "$TRUSTY_CODESIGN_DRY_RUN" == "1" ]]; then
         info "[DRY RUN] Would run: tctl sign trusty-memory --dir $CARGO_BIN_DIR"
         info "[DRY RUN]   trusty-memory            -> $MEMORY_IDENTIFIER"
-        info "[DRY RUN]   trusty-bm25-daemon       -> $BM25_IDENTIFIER"
         info "[DRY RUN]   trusty-memory-mcp-bridge -> $BRIDGE_IDENTIFIER"
         return 0
     fi
