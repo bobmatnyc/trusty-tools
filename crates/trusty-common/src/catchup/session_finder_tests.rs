@@ -704,3 +704,144 @@ fn claude_mpm_session_with_no_paused_at_is_dated_by_mtime() {
     );
     assert_eq!(out.dropped_undatable, 0);
 }
+
+// ── Code Contract tests (#5724, ADR-0047) ────────────────────────────────────
+//
+// One test per contract stated in a `# Code Contract` block. These are written
+// to fail if the CONTRACT changes, not merely if the implementation does — the
+// distinction that matters, because a contract can change under a byte-
+// identical signature and no static differ can see it.
+
+/// Why: the canonical instance the whole Code Contract mechanism exists for.
+/// `latest_trusty_mpm_snapshot`'s signature is byte-identical from
+/// trusty-common 0.24.2 through 0.34.0 while its precondition inverted (#5272):
+/// `None` for the session id used to mean "give me the newest snapshot overall"
+/// and now means "nothing is attributable to me". cargo-semver-checks and the
+/// type differ both report clean across that change.
+///
+/// This test would FAIL against the pre-#5272 implementation: the store it
+/// builds holds two well-formed, logged, recent snapshots, so the old
+/// newest-overall fallback returned `Some(session-20260809-020000.md)` where
+/// this asserts `None`.
+/// What: asserts the `None`-session-id postcondition holds even when the store
+/// is full of snapshots that would have matched under the old reading.
+/// Test: itself.
+#[test]
+fn contract_latest_snapshot_none_session_id_is_none() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".trusty-mpm").join("sessions");
+    fs::create_dir_all(&sdir).unwrap();
+
+    // Two attributable snapshots. Under the pre-#5272 "newest pause overall"
+    // fallback, an anonymous caller was handed the later of these.
+    write_file(&sdir, "session-20260809-010155.md", "## Summary\nA's work");
+    log_pause(&sdir, SESSION_A, "session-20260809-010155.md", "t1");
+    write_file(&sdir, "session-20260809-020000.md", "## Summary\nB's work");
+    log_pause(&sdir, SESSION_B, "session-20260809-020000.md", "t2");
+
+    // Postcondition: `None` in, `None` out — for every project_dir, including
+    // one holding snapshots that would have matched before #5272.
+    assert_eq!(
+        latest_trusty_mpm_snapshot(tmp.path(), None),
+        None,
+        "an unidentified caller must not be handed another session's snapshot"
+    );
+
+    // And the contract's other half: an identified caller still gets its own,
+    // so the assertion above is not passing merely because resolution is broken.
+    assert_eq!(
+        latest_trusty_mpm_snapshot(tmp.path(), Some(SESSION_A)),
+        Some(sdir.join("session-20260809-010155.md")),
+    );
+}
+
+/// Why: #5072 inverted this predicate's treatment of an undatable session, and
+/// the inversion silently emptied a real project's digest. The contract states
+/// a PARTITION, so the test asserts the partition rather than one example.
+/// What: every input session lands in exactly one of three buckets — kept,
+/// counted as undatable, or datable-but-not-after-the-watermark — and the three
+/// buckets account for the whole input.
+/// Test: itself.
+#[test]
+fn contract_filter_sessions_since_partitions_the_input() {
+    let tmp = TempDir::new().unwrap();
+    let before = "2026-08-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let watermark = "2026-08-05T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let after = "2026-08-09T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+
+    let mk = |paused_at: Option<DateTime<Utc>>| PausedSession::TrustyMpm {
+        path: tmp.path().join("s.md"),
+        paused_at,
+        summary: String::new(),
+        git_context: None,
+        in_progress: None,
+        next_steps: None,
+        tmux_window: None,
+    };
+
+    let sessions = vec![
+        mk(Some(after)),     // kept
+        mk(Some(before)),    // datable, does not postdate
+        mk(None),            // undatable -> withheld, and counted
+        mk(Some(watermark)), // exactly at the watermark: STRICTLY greater, so out
+        mk(Some(after)),     // kept
+    ];
+    let total = sessions.len();
+
+    let out = filter_sessions_since(sessions, Some(watermark));
+
+    assert_eq!(
+        out.kept.len(),
+        2,
+        "only the two strictly-after sessions survive"
+    );
+    assert_eq!(
+        out.dropped_undatable, 1,
+        "the undatable session is withheld AND counted"
+    );
+    // The partition invariant: kept + counted never exceeds the input, and the
+    // shortfall is exactly the datable-but-too-old sessions.
+    assert!(out.kept.len() + out.dropped_undatable <= total);
+    assert_eq!(total - out.kept.len() - out.dropped_undatable, 2);
+
+    // Postcondition: no watermark returns everything, and counts nothing.
+    let all = vec![mk(Some(after)), mk(None), mk(Some(before))];
+    let out = filter_sessions_since(all, None);
+    assert_eq!(out.kept.len(), 3);
+    assert_eq!(out.dropped_undatable, 0);
+}
+
+/// Why: `sort_key()` returning `None` is what `filter_sessions_since` keys its
+/// fail-closed decision on. Before #5072 the caller read `None` as "always
+/// include" via `is_none_or`; the contract now states it means EXCLUDED. A test
+/// that only checked sorting would not notice that meaning flipping back.
+/// What: an undatable session is excluded by a watermark and included without
+/// one — the two halves of what `None` now means.
+/// Test: itself.
+#[test]
+fn contract_sort_key_none_means_excluded_not_always_included() {
+    let tmp = TempDir::new().unwrap();
+    let undatable = PausedSession::TrustyMpm {
+        path: tmp.path().join("never-written.md"),
+        paused_at: None,
+        summary: String::new(),
+        git_context: None,
+        in_progress: None,
+        next_steps: None,
+        tmux_window: None,
+    };
+    assert!(
+        undatable.sort_key().is_none(),
+        "precondition for the rest of this test"
+    );
+
+    // A watermark arbitrarily far in the past still excludes it. Under
+    // `is_none_or` this was admitted by EVERY watermark, forever.
+    let ancient = "1990-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let out = filter_sessions_since(vec![undatable], Some(ancient));
+    assert!(
+        out.kept.is_empty(),
+        "`None` must mean excluded, not always-included"
+    );
+    assert_eq!(out.dropped_undatable, 1);
+}

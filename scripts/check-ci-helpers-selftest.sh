@@ -429,10 +429,15 @@ assert_eq "df prints nothing at all"    "purge"    "$(disk_decision_real_df '')"
 assert_eq "df prints only a header"     "purge"    "$(disk_decision_real_df 'Avail')"
 
 # Wiring: the script being correct proves nothing if a job still inlines the
-# ungated `rm -rf`. All four jobs that reclaim disk must route through it.
+# ungated `rm -rf`. Every job that reclaims disk must route through it.
+#
+# 4 -> 5: the `test-doc` job was split out of `test-shard` (the doctests used
+# to be a `matrix.shard == 1` step). It does its own full workspace build and
+# so carries the same disk pressure the other four do, which is why it calls
+# the helper rather than being exempted from this count.
 assert_eq "ci.yml has no inlined SDK purge left" "0" \
   "$(grep -c 'sudo rm -rf /usr/share/dotnet' "${ci_wf}" || true)"
-assert_eq "all four disk-reclaim jobs call the helper" "4" \
+assert_eq "all five disk-reclaim jobs call the helper" "5" \
   "$(grep -c 'bash scripts/ci-free-disk-space.sh' "${ci_wf}" || true)"
 
 # ---------------------------------------------------------------------------

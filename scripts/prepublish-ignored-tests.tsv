@@ -1,0 +1,55 @@
+# Ignored tests the pre-publish gate RUNS (scripts/check_ignored_tests.sh).
+#
+# Every row names an `#[ignore]`d test that the gate executes with
+# `--run-ignored all` before a publish. A row has to state what the test needs,
+# because the only reason a test is on this list rather than the unselected
+# remainder is that a hosted Linux runner can give it what it wants.
+#
+# WHAT QUALIFIES. The test needs nothing beyond a HuggingFace model download —
+# which the workflow pre-seeds and caches — and the workspace build. It must not
+# need an API key, a live daemon, a compiled binary on disk, a Python/torch
+# venv, tmux, macOS hardware, or minutes of soak time. Those are the reasons the
+# other 149 ignored tests stay unselected; see the baseline note at the bottom.
+#
+# ADDING A ROW is how you widen the gate, and it is always welcome. Removing one
+# narrows the gate and needs a reason in the PR body.
+#
+# A ROW THAT MATCHES NOTHING IS A HARD FAILURE, not a silent no-op. A renamed or
+# deleted test would otherwise shrink this gate while the file still looked
+# complete — the stale-manifest failure mode. The gate re-checks every row
+# against `cargo nextest list` on every run.
+#
+# Format (tab-separated):  <package>	<exact test name>	<what it needs>
+
+trusty-agents	memory::embed::tests::smoke_single_embedding_shape_and_finiteness	HuggingFace ONNX model download; no key, no daemon, no binary
+trusty-agents	memory::embed::tests::batch_returns_distinct_vectors_per_input	HuggingFace ONNX model download; no key, no daemon, no binary
+trusty-agents	memory::embed::tests::semantic_sanity_paraphrase_beats_unrelated	HuggingFace ONNX model download; asserts paraphrase similarity ordering
+trusty-common	embedder::tests::fastembed_returns_correct_dim	the real fastembed AllMiniLML6V2Q model (~22 MB), pre-seeded by the workflow
+trusty-common	embedder::tests::fastembed_cache_hit_is_idempotent	the real fastembed model; asserts a second init reuses the cache
+trusty-common	embedder::provider_tests::fast_embedder_model_name_reports_fp32_default	model registry lookup only — the fp32 default is the #3493 CoreML regression guard
+trusty-common	embedder::provider_tests::fast_embedder_model_name_reports_int8_opt_in	model registry lookup only — the int8 opt-in path
+trusty-memory	web::tests::health_tests::health_endpoint_returns_ok	loads the default ONNX embedder in-process; no daemon
+trusty-memory	web::tests::health_tests::health_endpoint_includes_resource_fields	loads the default ONNX embedder in-process; no daemon
+trusty-memory	web::tests::health_tests::health_endpoint_round_trip_on_fresh_install_is_ok	loads the default ONNX embedder; fresh-install path a published daemon runs at first start
+trusty-memory	web::tests::health_tests::health_endpoint_round_trip_with_palace_is_ok	loads the default ONNX embedder; palace-backed round trip
+
+# THE UNSELECTED REMAINDER. 160 ignored tests are enumerable in this workspace;
+# the 11 rows above run, and 149 do not. The gate prints that number on every
+# run, grouped by crate, and FAILS if it grows — so a new ignored test either
+# joins the list above or forces this number up in a reviewed diff.
+#
+# WHY 149 ARE NOT RUN. Sampled reasons, from their own `#[ignore]` strings:
+# API keys this workflow does not hold (OPENROUTER, ANTHROPIC, FIREWORKS,
+# TOGETHER, ATLASCLOUD, OPENAI, AWS), a live trusty-search daemon on :7878, a
+# compiled trusty-bm25-daemon / trusty-embedderd binary on disk, a bootstrapped
+# torch venv, a real tmux host — and one pair with mutually exclusive
+# requirements ("requires claude binary absent from PATH", "only runs when tmux
+# is absent from PATH") that no single runner can satisfy at once.
+#
+# 321 of the ~442 `#[ignore]` attributes in the tree carry NO reason string at
+# all, which is why this is a count with a ratchet and not a complete per-test
+# manifest: classifying them is real work that does not belong in the PR that
+# builds the gate.
+#
+# LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
+# UNSELECTED-BASELINE: 149

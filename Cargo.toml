@@ -442,3 +442,29 @@ opt-level = 0
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+# Build profile for CI's trusty-search daemon smoke test ONLY. Never used for
+# anything that ships.
+#
+# That job builds `-p trusty-search` at full `release` — opt-level 3 plus thin
+# LTO, ~210s median — to start the daemon and assert `/health` returns
+# `status=ok`. The assertion itself takes 0s, and it exercises process startup
+# and HTTP wiring, neither of which is sensitive to optimisation level. Thin
+# LTO across trusty-search's dependency graph (ort/onnxruntime, tree-sitter,
+# usearch, tantivy) is the bulk of that time and buys the check nothing.
+#
+# This IS a deliberate coverage trade, made knowingly by the repo owner: the
+# smoke binary is still optimised, but it is no longer byte-identical to what
+# ships. A release-only regression — one that needs opt-level 3 or cross-crate
+# LTO inlining to appear — would no longer be caught by the smoke test. It was
+# not catching that class of bug reliably at `release` either; it asserts one
+# HTTP field.
+#
+# `inherits = "release"` rather than "dev": `debug_assertions` stays off, so
+# the daemon runs the same code paths as a release build. Only the codegen
+# effort changes.
+[profile.ci-smoke]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = 1
