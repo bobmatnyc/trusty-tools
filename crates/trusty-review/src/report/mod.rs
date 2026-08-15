@@ -39,6 +39,8 @@ pub mod synthesize_digest;
 pub mod synthesize_guard;
 pub mod synthesize_prompt;
 pub mod template;
+// #5405: the board-correlation figures tga hands over beside the manifest.
+pub mod ticketing;
 
 // ── Re-exports for convenience ─────────────────────────────────────────────
 
@@ -72,3 +74,4 @@ pub use reporter::Reporter;
 pub use scan::{Framework, RepoScan, scan_repo};
 pub use synthesize::{FindingProse, RiskRow, Synthesis, SynthesisError, Synthesizer};
 pub use template::{DEFAULT_TEMPLATE, TemplateLoader, parse_section_instructions};
+pub use ticketing::{TicketingSummary, load_ticketing};

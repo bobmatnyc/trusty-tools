@@ -62,6 +62,8 @@ fn model_with(repos: Vec<RepositoryReport>, investigation: Option<Investigation>
         benchmark: None,
         investigation,
         section_instructions: Default::default(),
+        // #5405: the digest does not read the board figures.
+        ticketing: None,
     }
 }
 

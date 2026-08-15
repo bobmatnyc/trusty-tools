@@ -162,6 +162,38 @@ impl CorrelationFilter {
     }
 }
 
+/// Every board source that has at least one linked work item, sorted.
+///
+/// Why (#5405): the DD report states which boards the correlation figures came
+/// from, and "which boards" must be read from the data rather than from the
+/// config — a source configured but never synced would otherwise be named in a
+/// report that contains none of its items. Restricting to LINKED items keeps
+/// the list honest in the other direction too: a board that was pulled but
+/// matched no commit is not evidence of a correlated source.
+/// What: `SELECT DISTINCT` over `commit_work_items.work_item_source`, ordered
+/// so two runs over the same database render the same line. Read-only.
+/// Test: `tests::sources_name_only_boards_with_a_linked_item`.
+///
+/// # Errors
+///
+/// Returns [`TgaError::DbError`] when the query fails.
+pub fn linked_work_item_sources(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT work_item_source FROM commit_work_items \
+             ORDER BY work_item_source",
+        )
+        .map_err(TgaError::from)?;
+    let mapped = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(TgaError::from)?;
+    let mut out = Vec::new();
+    for row in mapped {
+        out.push(row.map_err(TgaError::from)?);
+    }
+    Ok(out)
+}
+
 /// Count commits and work items by link status.
 ///
 /// Why: the results view's header, and the only cheap way to state coverage
@@ -305,6 +337,24 @@ mod tests {
             params![sha, message, ticket],
         )
         .expect("insert commit");
+    }
+
+    /// #5405: the DD report names the boards its figures came from, so the list
+    /// must describe links that exist — not every board that was pulled. A
+    /// synced board whose items no commit cites is not a correlated source.
+    #[test]
+    fn sources_name_only_boards_with_a_linked_item() {
+        let db = Database::open_in_memory().expect("open");
+        insert_commit(db.connection(), "aaa", "PROJ-1 x", Some("PROJ-1"));
+        upsert_work_item(db.connection(), &work_item("PROJ-1", "jira")).expect("jira");
+        upsert_work_item(db.connection(), &work_item("ENG-7", "linear")).expect("linear");
+        link_commit_work_item(db.connection(), "aaa", "PROJ-1", "jira").expect("link");
+
+        assert_eq!(
+            linked_work_item_sources(db.connection()).expect("sources"),
+            vec!["jira".to_string()],
+            "linear was synced but never linked, so it is not a source"
+        );
     }
 
     #[test]

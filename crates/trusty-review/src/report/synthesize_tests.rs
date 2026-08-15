@@ -177,6 +177,8 @@ fn fixture_model(findings: Vec<MetricFinding>) -> ReportModel {
         benchmark: None,
         investigation: None,
         section_instructions: Default::default(),
+        // #5405: synthesis does not read the board figures.
+        ticketing: None,
     }
 }
 

@@ -128,6 +128,14 @@ pub struct ReportModel {
     /// narrative.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub section_instructions: std::collections::BTreeMap<String, String>,
+    /// The run's commit ↔ board-item correlation figures (#5405).
+    ///
+    /// Why: engagement-wide, not per repository — see
+    /// [`super::ticketing`]. `None` when the manifest declared no artifact,
+    /// which renders the section unpopulated and names it under Gaps & Caveats.
+    /// Test: `reporter_tests.rs::reporter_states_ticketing_coverage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticketing: Option<super::ticketing::TicketingSummary>,
 }
 
 /// Per-repository resolved data mapped to one `per_application` block.
@@ -224,6 +232,16 @@ impl ReportModel {
             benchmark: None,
             investigation: None,
             section_instructions: std::collections::BTreeMap::new(),
+            // #5405: a declared artifact that cannot be read is a producer bug
+            // and fails the build, exactly as a declared metrics file does —
+            // degrading it to an empty section is the silent omission this
+            // ticket exists to remove.
+            ticketing: manifest
+                .report
+                .ticketing
+                .as_ref()
+                .map(|p| super::ticketing::load_ticketing(&resolve(manifest_dir, p)))
+                .transpose()?,
         })
     }
 }
