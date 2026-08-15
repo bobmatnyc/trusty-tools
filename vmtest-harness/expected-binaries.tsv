@@ -16,6 +16,8 @@ trusty-console	trusty-console	trusty-console	src/main.rs	-	yes	present	present	p
 trusty-agents	trusty-agents	tagent	src/main.rs	-	no	-	-	-
 trusty-agents-ui	trusty-agents/ui/src-tauri	trusty-agents-ui	src/main.rs	-	no	-	-	-
 trusty-agents-local	trusty-agents-local	trusty-agents-local	src/main.rs	-	no	-	-	-
+trusty-audit	trusty-audit	trusty-audit	src/main.rs	-	no	-	-	-
+trusty-audit	trusty-audit	taudit	src/main.rs	-	no	-	-	-
 trusty-channels	trusty-channels	slack-mcp	src/bin/slack-mcp.rs	-	no	-	-	-
 trusty-channels	trusty-channels	telegram-mcp	src/bin/telegram-mcp.rs	-	no	-	-	-
 trusty-code-gui	trusty-code-gui	trusty-code-gui	src/main.rs	-	no	-	-	-
