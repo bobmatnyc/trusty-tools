@@ -74,6 +74,35 @@ async fn open_test_handle(name: &str) -> Arc<PalaceHandle> {
     handle
 }
 
+/// A [`DreamConfig`] whose semantic phase is switched off.
+///
+/// Why: `DreamConfig::default()` leaves `semantic.enabled = true` with an empty
+/// `openrouter_api_key`, and `build_consolidator_from_config` resolves that
+/// empty key against the PROCESS environment. On a machine with no
+/// `OPENROUTER_API_KEY` the Ollama branch rejects the default cloud model id,
+/// the phase disables itself, and these tests look deterministic. Let any test
+/// in this binary call `load_env_local_once` first — it folds the developer's
+/// real `.env.local` into the process environment — and the identical config
+/// instead builds an `OpenRouterInference` and issues live, billed LLM calls
+/// whose merge actions add and supersede drawers, changing the very counts
+/// these tests assert on. Every test below that exercises dedup, prune,
+/// compaction, stats or the recall benchmark reads no credential and wants no
+/// network, so it says so rather than inheriting whichever answer the machine
+/// happens to give.
+/// What: `DreamConfig::default()` with `semantic.enabled = false`, which makes
+/// `build_consolidator_from_config` return `Ok(None)` before it reads any
+/// environment variable.
+/// Test: `dedup_only_config_ignores_an_ambient_openrouter_key`.
+fn dedup_only_config() -> DreamConfig {
+    DreamConfig {
+        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..DreamConfig::default()
+    }
+}
+
 /// Why: Two near-identical drawers should collapse to one after a dream
 /// cycle so the L1 cache isn't filled with duplicates.
 /// What: Insert two drawers with the same content (verbatim — embeddings
@@ -103,7 +132,7 @@ async fn dream_cycle_merges_duplicates() {
         .unwrap();
     assert_eq!(handle.drawers.read().len(), 2);
 
-    let dreamer = Dreamer::new(DreamConfig::default());
+    let dreamer = Dreamer::new(dedup_only_config());
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
     assert_eq!(stats.merged, 1, "expected exactly one merge");
@@ -137,7 +166,7 @@ async fn dream_cycle_prunes_low_importance() {
     }
     assert_eq!(handle.drawers.read().len(), 1);
 
-    let dreamer = Dreamer::new(DreamConfig::default());
+    let dreamer = Dreamer::new(dedup_only_config());
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
     assert_eq!(stats.pruned, 1, "expected exactly one prune");
@@ -180,7 +209,7 @@ async fn dream_cycle_prunes_at_floor_importance() {
     }
     assert_eq!(handle.drawers.read().len(), 1);
 
-    let dreamer = Dreamer::new(DreamConfig::default());
+    let dreamer = Dreamer::new(dedup_only_config());
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
     assert_eq!(
@@ -206,7 +235,7 @@ async fn dreamer_shutdown_terminates_loop() {
     registry.register_arc(handle);
     let dreamer = Arc::new(Dreamer::new(DreamConfig {
         idle_secs: 10,
-        ..DreamConfig::default()
+        ..dedup_only_config()
     }));
     let (tx, rx) = tokio::sync::watch::channel(false);
     let join = dreamer.clone().start_with_shutdown(registry, id, rx);
@@ -250,7 +279,7 @@ async fn dream_loop_does_not_pin_palace_handle() {
     // never peeks the registry during this test and holds no handle Arc.
     let dreamer = Arc::new(Dreamer::new(DreamConfig {
         idle_secs: 3600,
-        ..DreamConfig::default()
+        ..dedup_only_config()
     }));
     let (_tx, rx) = tokio::sync::watch::channel(false);
     let _join = dreamer.start_with_shutdown(registry.clone(), id.clone(), rx);
@@ -326,7 +355,7 @@ async fn dream_cycle_compacts_orphaned_vectors() {
     // don't trigger an accidental merge against the orphan vectors.
     let dreamer = Dreamer::new(DreamConfig {
         dedup_threshold: 0.999,
-        ..DreamConfig::default()
+        ..dedup_only_config()
     });
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
@@ -366,7 +395,7 @@ async fn dream_stats_persisted_after_cycle() {
         .await
         .unwrap();
 
-    let dreamer = Dreamer::new(DreamConfig::default());
+    let dreamer = Dreamer::new(dedup_only_config());
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
     let data_dir = handle.data_dir.clone().expect("data_dir set");
@@ -404,7 +433,7 @@ async fn closet_refresh_builds_index() {
         .await
         .unwrap();
 
-    let dreamer = Dreamer::new(DreamConfig::default());
+    let dreamer = Dreamer::new(dedup_only_config());
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
     assert!(
         stats.closets_updated > 0,
@@ -441,7 +470,7 @@ async fn dream_cycle_toggles_is_compacting() {
     assert!(!handle.is_compacting(), "guard must clear on drop");
 
     // Full cycle still clears the flag on exit.
-    let dreamer = Dreamer::new(DreamConfig::default());
+    let dreamer = Dreamer::new(dedup_only_config());
     let _stats = dreamer.dream_cycle(&handle).await.unwrap();
     assert!(
         !handle.is_compacting(),
@@ -483,7 +512,7 @@ async fn dream_content_prune_drops_blocklist_drawer() {
         .unwrap();
     assert_eq!(handle.drawers.read().len(), 2);
 
-    let dreamer = Dreamer::new(DreamConfig::default());
+    let dreamer = Dreamer::new(dedup_only_config());
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
     assert_eq!(
@@ -526,7 +555,7 @@ async fn dream_content_prune_drops_short_drawer() {
         .unwrap();
     assert_eq!(handle.drawers.read().len(), 2);
 
-    let dreamer = Dreamer::new(DreamConfig::default());
+    let dreamer = Dreamer::new(dedup_only_config());
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
     assert_eq!(
@@ -560,7 +589,7 @@ async fn dream_content_prune_keeps_good_drawer() {
         .unwrap();
     assert_eq!(handle.drawers.read().len(), 1);
 
-    let dreamer = Dreamer::new(DreamConfig::default());
+    let dreamer = Dreamer::new(dedup_only_config());
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
     assert_eq!(
@@ -842,6 +871,9 @@ async fn dream_cycle_semantic_consolidation_invalid_model_disables_once() {
         .await
         .unwrap();
 
+    // Deliberately the real default: this test is ABOUT the semantic phase's
+    // validation path, so it must keep `semantic.enabled = true` and rely on
+    // `EnvVarGuard::remove` above for its hermeticity.
     let dreamer = Dreamer::new(DreamConfig::default());
     assert!(!dreamer.is_semantic_consolidation_disabled());
 
@@ -1120,7 +1152,7 @@ async fn dream_cycle_records_drawer_counts() {
 
     let dreamer = Dreamer::new(DreamConfig {
         dedup_threshold: 0.999, // nothing deduped
-        ..DreamConfig::default()
+        ..dedup_only_config()
     });
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
@@ -1163,7 +1195,7 @@ async fn dream_cycle_compression_ratio_nonzero_after_dedup() {
         .unwrap();
     assert_eq!(handle.drawers.read().len(), 2);
 
-    let dreamer = Dreamer::new(DreamConfig::default());
+    let dreamer = Dreamer::new(dedup_only_config());
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
     assert_eq!(stats.drawers_before, 2, "two drawers before cycle");
@@ -1245,7 +1277,7 @@ async fn dream_cycle_records_recall_scores() {
 
     let dreamer = Dreamer::new(DreamConfig {
         dedup_threshold: 0.999, // nothing removed
-        ..DreamConfig::default()
+        ..dedup_only_config()
     });
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
@@ -1289,7 +1321,7 @@ async fn dream_stats_effectiveness_fields_persisted() {
 
     let dreamer = Dreamer::new(DreamConfig {
         dedup_threshold: 0.999,
-        ..DreamConfig::default()
+        ..dedup_only_config()
     });
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
@@ -1342,7 +1374,7 @@ async fn dream_cycle_recall_benchmark_disabled() {
     let dreamer = Dreamer::new(DreamConfig {
         recall_benchmark_enabled: false,
         dedup_threshold: 0.999, // nothing removed
-        ..DreamConfig::default()
+        ..dedup_only_config()
     });
     let stats = dreamer.dream_cycle(&handle).await.unwrap();
 
@@ -1762,20 +1794,64 @@ struct EnvVarGuard {
 impl EnvVarGuard {
     fn remove(key: &'static str) -> Self {
         let previous = std::env::var(key).ok();
-        // Safety: test-only; single-threaded test execution.
+        // Safety: test-only; every caller is `#[serial(dotenv_credential_env)]`.
         unsafe { std::env::remove_var(key) };
+        Self { key, previous }
+    }
+
+    /// Set `key` to `value` for the guard's lifetime.
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        // Safety: test-only; every caller is `#[serial(dotenv_credential_env)]`.
+        unsafe { std::env::set_var(key, value) };
         Self { key, previous }
     }
 }
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        // Safety: test-only; single-threaded test execution.
+        // Safety: test-only; every caller is `#[serial(dotenv_credential_env)]`.
         match &self.previous {
             Some(v) => unsafe { std::env::set_var(self.key, v) },
             None => unsafe { std::env::remove_var(self.key) },
         }
     }
+}
+
+/// Why: pins both halves of the reason [`dedup_only_config`] exists.
+/// `DreamConfig::default()` resolves its empty `openrouter_api_key` against the
+/// PROCESS environment, so once anything in this binary calls
+/// `load_env_local_once` — which folds the developer's real `.env.local` into
+/// that environment — every dedup/prune/stats test built on the default config
+/// silently acquired a live OpenRouter backend and issued billed LLM calls
+/// whose merge actions moved the drawer counts those tests assert on. That is
+/// the intermittency behind `dream_cycle_merges_duplicates` and
+/// `dream_cycle_compression_ratio_nonzero_after_dedup`.
+/// What: with a fixture key in the environment, asserts the dedup-only config
+/// builds NO backend while the default config builds one. Constructing a
+/// backend issues no request, so this reaches no network and needs no real
+/// credential.
+/// Test: itself.
+#[test]
+#[serial(dotenv_credential_env)]
+fn dedup_only_config_ignores_an_ambient_openrouter_key() {
+    let _guard = EnvVarGuard::set("OPENROUTER_API_KEY", "sk-or-v1-fixture-not-a-real-key");
+
+    assert!(
+        super::cycle::build_consolidator_from_config(&dedup_only_config())
+            .expect("a disabled semantic phase is not an error")
+            .is_none(),
+        "dedup-only config must build no inference backend, so the ambient \
+         key is never read and no LLM call can be issued"
+    );
+
+    assert!(
+        super::cycle::build_consolidator_from_config(&DreamConfig::default())
+            .expect("a resolvable cloud key passes model validation")
+            .is_some(),
+        "default config turns an ambient OPENROUTER_API_KEY into a live \
+         backend — the behaviour the dedup tests used to inherit by accident"
+    );
 }
 
 /// Why (#5187): `merge_into` capped the merged drawer with a raw
