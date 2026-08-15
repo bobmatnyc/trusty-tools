@@ -78,7 +78,7 @@ impl EffortSize {
     /// Why: matches the string stored by the bash script so JOIN queries and
     /// reports can group by size uniformly.
     /// What: `"XS"` | `"S"` | `"M"` | `"L"` | `"XL"`.
-    /// Test: checked by [`tests::size_labels_match_spec`].
+    /// Test: checked by `tests::size_labels_match_spec`.
     pub fn label(self) -> &'static str {
         match self {
             EffortSize::Xs => "XS",
@@ -169,7 +169,7 @@ pub fn effort_tshirt(size: EffortSize) -> i64 {
 /// Why: the bash script uses the same thresholds; keeping them in one place
 /// makes it trivial to verify parity.
 /// What: `score ≤ 6 → XS`, `(6,10] → S`, `(10,14] → M`, `(14,18] → L`, `>18 → XL`.
-/// Test: [`tests::thresholds_match_spec`].
+/// Test: `tests::thresholds_match_spec`.
 pub fn size_for_score(score: f64) -> EffortSize {
     if score <= THRESHOLD_XS {
         EffortSize::Xs
@@ -190,7 +190,7 @@ pub fn size_for_score(score: f64) -> EffortSize {
 /// that include test coverage, lowering their effective effort score.
 /// What: checks the path (case-insensitively) against a fixed set of patterns
 /// that cover Rust, TypeScript, JavaScript, and generic `tests/` directories.
-/// Test: [`tests::test_file_detection`].
+/// Test: `tests::test_file_detection`.
 ///
 /// Patterns (all case-insensitive):
 /// - Contains `/tests/` or starts with `tests/`
@@ -246,7 +246,7 @@ pub fn is_test_file(path: &str) -> bool {
 /// compute script so both storage paths produce the same T-shirt size.
 /// What: given per-file diff records (path + insertions + deletions), computes
 /// LoC, test_LoC, tests_factor, the v1 score, and the bucketed size.
-/// Test: [`tests::formula_known_values`], [`tests::formula_empty_commit`],
+/// Test: `tests::formula_known_values`, `tests::formula_empty_commit`,
 /// and the cross-validation integration test in `tests::effort_cross_validate`
 /// (marked `#[ignore]` until the parallel bash PR lands).
 ///

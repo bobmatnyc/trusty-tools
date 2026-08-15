@@ -201,7 +201,8 @@ impl SearchAppState {
         self.embed_pool.read().await.clone()
     }
 
-    /// Builder-style: attach the daemon's shared [`LogBuffer`] so the
+    /// Builder-style: attach the daemon's shared
+    /// [`LogBuffer`](trusty_common::log_buffer::LogBuffer) so the
     /// `GET /logs/tail` endpoint serves the same lines the tracing subscriber
     /// captures.
     ///
@@ -331,7 +332,8 @@ impl SearchAppState {
         let _ = self.embedder_ready_tx.send(true);
     }
 
-    /// Install the concrete [`SwitchableEmbedder`] handle produced by
+    /// Install the concrete
+    /// [`SwitchableEmbedder`](crate::service::embedder_supervisor::SwitchableEmbedder) handle produced by
     /// `build_embedder()` (epic #3524 slice 6 — PR 1/5).
     ///
     /// Why: called from the same background init task, ideally at the same
@@ -359,7 +361,8 @@ impl SearchAppState {
         self.switchable_embedder.store(Some(switchable));
     }
 
-    /// Snapshot the currently-installed [`SwitchableEmbedder`] handle, or
+    /// Snapshot the currently-installed
+    /// [`SwitchableEmbedder`](crate::service::embedder_supervisor::SwitchableEmbedder) handle, or
     /// `None` while the daemon is still warming up (or, briefly, between
     /// `install_switchable_embedder` and `install_embedder` — see that
     /// method's ordering note).

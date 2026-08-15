@@ -983,7 +983,7 @@ pub struct FailureSignal {
     pub on_branch: Option<String>,
 
     /// Regex over the commit message. `None` = no regex filter.
-    /// Validated at load via [`Config::validate_dora_signals`].
+    /// Validated at load via `Config::validate_dora_signals`.
     #[serde(default)]
     pub commit_message_pattern: Option<String>,
 

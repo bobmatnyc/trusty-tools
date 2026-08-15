@@ -257,8 +257,8 @@ pub(crate) fn command_legend(launch_slot: Option<u32>) -> Vec<String> {
 
 /// Build the restart-confirmation hint shared by both #2148 restart prompts.
 ///
-/// Why: those two prompts read as a yes/no question ("[Enter] does NOT restart
-/// — type [1] to confirm the restart") while naming no refusal key. `n` is the
+/// Why: those two prompts read as a yes/no question ("\[Enter\] does NOT restart
+/// — type \[1\] to confirm the restart") while naming no refusal key. `n` is the
 /// universal "no", and since #4965 it is also the launch-new alias — so an
 /// operator declining a restart with `n` got a real cloned, spawned, attached
 /// session instead of a decline. The grammar is correct and stays; the prompts

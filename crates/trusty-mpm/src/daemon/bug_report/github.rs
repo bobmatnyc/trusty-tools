@@ -34,7 +34,7 @@
 //!
 //! ## Rate-limit guard
 //!
-//! [`github_client::RealGithubClient`] refuses to file more than
+//! [`github_client::RealGithubClient`](crate::daemon::bug_report::github_client::RealGithubClient) refuses to file more than
 //! [`MAX_ISSUES_PER_CALL`] issues in a single `file_issue` invocation
 //! (currently 1) to prevent accidental spam if the caller loops.
 //!
@@ -45,7 +45,7 @@
 //!   [`extract_fingerprint`]).
 //! - [`super::github_client`]: `RealGithubClient` — the `reqwest::blocking`
 //!   transport that implements [`GithubApi`].
-//! - [`super::github_tests`]: unit tests (mock-based, no network).
+//! - `super::github_tests`: unit tests (mock-based, no network).
 //!
 //! Test: `tests::token_resolution_*`, `tests::label_mapping_*`,
 //!       `tests::dedup_marker_*`, `tests::mock_create_path`,

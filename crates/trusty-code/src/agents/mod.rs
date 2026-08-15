@@ -27,6 +27,8 @@
 //! `load_all_agents_falls_back_to_embedded_when_disk_empty`,
 //! `load_all_agents_falls_back_to_embedded_when_disk_all_invalid`, and
 //! `load_all_agents_disk_wins_when_present` cover the fallback threshold.
+//!
+//! [`discover_agents`]: crate::agents::discover_agents
 
 pub mod config;
 pub mod md_loader;

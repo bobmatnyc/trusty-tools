@@ -6,7 +6,7 @@
 //! source data.  This module is the report-side analogue of the pipeline's
 //! verdict-integrity posture: after the model injects prose, every digit
 //! sequence in that prose MUST trace back to a number already present in the
-//! deterministic [`ReportModel`].  A violation rejects the field (fail-closed) —
+//! deterministic [`ReportModel`](crate::report::ReportModel).  A violation rejects the field (fail-closed) —
 //! it is never partially trusted.
 //! What: [`allowed_numbers`] builds the canonical set of numbers the source model
 //! actually contains (walking the serialized model); [`verify_prose`] checks that

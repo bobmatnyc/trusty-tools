@@ -7,7 +7,7 @@
 //! there is nowhere for logic to accumulate outside the API the Tauri shell will
 //! call (#5502's permanent constraint).
 //!
-//! What: [`Cli`], the clap parser; [`Cli::command`], which maps a parse onto
+//! What: [`Cli`], the clap parser; `Cli::command`, which maps a parse onto
 //! exactly one [`Command`]; and [`render`], which turns an [`Outcome`] into the
 //! text the CLI prints. Both mappings are exhaustive matches over the
 //! capability enums, so adding a capability without a CLI path — or without a

@@ -114,7 +114,7 @@ pub struct DelegationOutcome {
 /// failure, so it can render each appropriately and stay panic-free.
 /// What: [`Degraded`](DelegationError::Degraded) — no inference for decompose;
 /// [`Goal`](DelegationError::Goal) — a goal-store error (create/link/update/gate);
-/// [`Control`](DelegationError::Control) — a session-control error during launch.
+/// `Control` — a session-control error during launch.
 /// Test: `delegate_tests.rs::delegate_degraded_without_provider`.
 #[derive(Debug, thiserror::Error)]
 pub enum DelegationError {

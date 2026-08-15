@@ -79,7 +79,7 @@ fn env_tier(provider: &str) -> Option<String> {
 /// `KeyStore` rather than erroring — a missing home directory or an
 /// unavailable keychain degrades the backend, it doesn't break credential
 /// resolution (env-var-only usage still works).
-/// What: behind the `keyring-store` feature, probes [`KeyringStore`] first
+/// What: behind the `keyring-store` feature, probes `KeyringStore` first
 /// (see its docs for the probe/cache semantics) and returns it when
 /// available; otherwise constructs [`FileKeyStore::new`], falling back to
 /// [`MemoryKeyStore`] only in the (CI/container) case where

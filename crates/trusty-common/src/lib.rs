@@ -29,6 +29,12 @@
 //! **This escape hatch is intended for testing only.** Do not set it in
 //! production deployments; rely on the OS-standard data directory instead.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 // #4901: a feature-less `cargo test -p trusty-common` must not report success
 // over the 25+ modules it never compiled.
 //

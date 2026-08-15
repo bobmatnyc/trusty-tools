@@ -101,7 +101,7 @@ impl KnowledgeGraph {
 
     /// Number of directed edges in the in-memory adjacency.
     ///
-    /// Why: Companion to [`node_count`] for dashboards that surface graph
+    /// Why: Companion to `node_count` for dashboards that surface graph
     /// density at a glance. Counted from the adjacency (not the redb
     /// triple table) because parallel edges between the same pair of nodes
     /// collapse into one petgraph edge; the adjacency view is what every

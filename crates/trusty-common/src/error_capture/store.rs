@@ -66,7 +66,7 @@ impl ErrorStore {
     ///      clone between the tracing layer and the query API.
     /// What: resolves the app data dir, opens `errors.jsonl` in append mode,
     ///      and loads existing records into the ring buffer via
-    ///      [`ErrorStore::load_from_disk`]. If the data dir or file cannot be
+    ///      `ErrorStore::load_from_disk`. If the data dir or file cannot be
     ///      opened, the store operates in memory-only mode (ring buffer only).
     ///      Returns an operational store regardless.
     /// Test: `store_round_trip_write_read`.

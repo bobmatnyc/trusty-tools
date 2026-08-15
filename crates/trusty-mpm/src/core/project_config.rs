@@ -29,6 +29,11 @@
 //! Test: `project_config_parses_worktree`, `project_config_rejects_unknown_key`,
 //! `project_config_absent_is_none`, `project_config_rejects_wrong_type`,
 //! `project_config_empty_file_is_all_none` in `project_config_tests.rs`.
+//!
+//! [`PROJECT_CONFIG_FILE`]: crate::core::project_config::PROJECT_CONFIG_FILE
+//! [`ProjectLevelConfig::from_toml`]: crate::core::project_config::ProjectLevelConfig::from_toml
+//! [`ProjectLevelConfig::load`]: crate::core::project_config::ProjectLevelConfig::load
+//! [`load_or_report`]: crate::core::project_config::load_or_report
 
 use std::path::{Path, PathBuf};
 
@@ -192,7 +197,7 @@ impl ProjectLevelConfig {
 /// COMMITTED, so one bad push would otherwise break every session for every
 /// operator on the project at once — a far worse outcome than the setting not
 /// applying. The error contract therefore matches the harness manifest's
-/// (HR-2, [`crate::core::manifest::resolve`]): a broken layer is skipped, never
+/// (HR-2, [`crate::core::manifest::resolve`](crate::core::catchup::resolve)): a broken layer is skipped, never
 /// fatal.
 ///
 /// Skipped is not silent. The file's values are REJECTED WHOLESALE — nothing in

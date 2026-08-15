@@ -20,13 +20,16 @@
 //! error a handler returns; the router converts it into the JSON-RPC error
 //! envelope.
 //!
-//! `#2054` adds [`context::ConnectionContext`]: every handler now also
+//! `#2054` adds [`context::ConnectionContext`](crate::jsonrpc::ConnectionContext): every handler now also
 //! receives the calling connection's context, which is how `session.attach`
 //! pushes server-initiated notifications (session lifecycle events) back to
 //! that connection asynchronously, outside the normal request/response
 //! cycle — see `context`'s module docs for the STDIO-vs-HTTP distinction.
 //!
 //! Test: see `error::tests`, `router::tests`, and `context::tests`.
+//!
+//! [`Router`]: crate::jsonrpc::Router
+//! [`RpcError`]: crate::jsonrpc::RpcError
 
 pub mod context;
 pub mod error;

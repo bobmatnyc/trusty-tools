@@ -31,6 +31,17 @@
 //! submodule in place against a minimal mock; the two real backends are
 //! covered by their owning crates' test suites (see each module's doc
 //! pointers above).
+//!
+//! [`WorkstreamConnector`]: crate::connectors::WorkstreamConnector
+//! [`CreateSessionReq`]: crate::connectors::CreateSessionReq
+//! [`BackendParams`]: crate::connectors::BackendParams
+//! [`SessionInfo`]: crate::connectors::SessionInfo
+//! [`SessionStatus`]: crate::connectors::SessionStatus
+//! [`AttachHandle`]: crate::connectors::AttachHandle
+//! [`AgentSpec`]: crate::connectors::AgentSpec
+//! [`DelegateHandle`]: crate::connectors::DelegateHandle
+//! [`ConnectorError`]: crate::connectors::ConnectorError
+//! [`ConnectorTestKit`]: crate::connectors::ConnectorTestKit
 
 mod connector;
 mod error;

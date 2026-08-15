@@ -24,6 +24,11 @@
 //!
 //! Test: `cargo test -p trusty-mpm` exercises the tool catalog, argument
 //! parsing, and dispatch against an in-memory mock backend.
+//!
+//! [`tools::TOOL_CATALOG`]: crate::mcp::tools::TOOL_CATALOG
+//! [`OrchestratorBackend`]: crate::mcp::OrchestratorBackend
+//! [`dispatch`]: crate::mcp::dispatch
+//! [`Request`]: trusty_common::mcp::Request
 
 use async_trait::async_trait;
 use serde_json::{Value, json};

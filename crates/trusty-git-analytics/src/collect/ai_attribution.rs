@@ -23,7 +23,7 @@
 //! directly; these two functions cover message-only callers and keep the
 //! pre-#5249 signatures working.
 //!
-//! Test: unit tests in [`tests`] at the bottom of this file, and
+//! Test: unit tests in `tests` at the bottom of this file, and
 //! `collect::ai_markers::tests` for the marker engine itself.
 
 use std::sync::OnceLock;

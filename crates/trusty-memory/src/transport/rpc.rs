@@ -23,7 +23,7 @@
 //!     `tools/call`, `palace_*`, `memory_*`, `kg_*`, `add_alias`,
 //!     `discover_aliases`, `get_prompt_context`, `list_prompt_facts`,
 //!     `remove_prompt_fact`, `memory_send_message`, and `hook_fired` to the
-//!     existing handlers in [`crate::tools`] / [`crate::lib`]. Unknown
+//!     existing handlers in [`crate::tools`] / `crate::lib`. Unknown
 //!     methods return `-32601 Method not found`.
 //!
 //! Test: see `dispatch_palace_list_returns_empty_array_initially`,
@@ -43,7 +43,7 @@ use trusty_common::mcp::initialize_response;
 /// internal error). Centralising them as constants prevents drift
 /// between transports.
 /// Test: `dispatch_unknown_method_returns_method_not_found` asserts
-/// the value of [`METHOD_NOT_FOUND`].
+/// the value of `METHOD_NOT_FOUND`.
 pub mod error_codes {
     /// Invalid JSON was received (used by transport parsers, not
     /// [`super::dispatch`] which only sees already-parsed values).

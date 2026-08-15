@@ -21,6 +21,14 @@
 //! tests and `crates/trusty-common/tests/inference_foundation.rs`; the
 //! deprecated credential alias by
 //! `deprecated_inference_alias_still_resolves`.
+//!
+//! [`types`]: crate::inference::types
+//! [`InferenceError`]: crate::inference::InferenceError
+//! [`InferenceAdapter`]: crate::inference::InferenceAdapter
+//! [`registry`]: crate::inference::registry
+//! [`configurator`]: crate::inference::configurator
+//! [`Configurator`]: configurator::Configurator
+//! [`test_support`]: crate::inference::test_support
 
 /// Deprecated compatibility alias for [`crate::credentials`] (#4564).
 ///

@@ -1092,7 +1092,7 @@ pub(crate) fn untracked_ancestor_message(git_root: &std::path::Path) -> String {
 /// exactly right for a genuinely unmanaged directory — but it says nothing
 /// about whether THIS pane is a managed session's own pane whose daemon
 /// record simply has not settled the Active -> Stopped race yet (the same
-/// race [`super::guided_inplace::fetch_managed_session_until_stopped`] bounds
+/// race `super::guided_inplace::fetch_managed_session_until_stopped` bounds
 /// for `try_inplace_relaunch`'s own gate at the top of `run_guided_default`).
 /// Separating this decision from the I/O (the env lookup, and the retry
 /// itself) keeps it exhaustively unit-testable.

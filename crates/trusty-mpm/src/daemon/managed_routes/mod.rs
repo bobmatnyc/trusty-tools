@@ -112,7 +112,7 @@ pub struct SpawnRequest {
     /// Optional runtime selector (`"claude-code"` | `"tcode"`).
     ///
     /// Absent or null → the default Claude Code path, so existing callers are
-    /// unaffected. Parsed via [`crate::runtime::RuntimeKind::from_str`]; an
+    /// unaffected. Parsed via `crate::runtime::RuntimeKind::from_str`; an
     /// unrecognized value yields a `400 Bad Request`.
     pub runtime: Option<String>,
     /// Optional ephemeral marker (#1508): `true` tags this as a test/throwaway
@@ -897,8 +897,8 @@ pub async fn resume_managed_session(
 /// removal-free teardown when asked.
 /// What: `record_only` (default `false`, `#[serde(default)]` keeps every
 /// existing caller's plain POST unaffected) selects
-/// [`SessionManager::decommission_record_only`] instead of
-/// [`SessionManager::decommission`].
+/// [`SessionManager::decommission_record_only`](crate::session_manager::SessionManager::decommission_record_only) instead of
+/// [`SessionManager::decommission`](crate::session_manager::decommission).
 /// Test: `decommission_record_only_never_removes_existing_workspace`
 /// (`session_manager::tests`).
 #[derive(Debug, serde::Deserialize)]
@@ -913,7 +913,7 @@ pub struct DecommissionQuery {
 /// decommission is terminal — no further `resume` is possible.
 /// What: delegates to SessionManager::decommission (kills runtime, removes
 /// workspace dir when owned, marks record Decommissioned) — or, when
-/// `?record_only=true`, to [`SessionManager::decommission_record_only`]
+/// `?record_only=true`, to [`SessionManager::decommission_record_only`](crate::session_manager::SessionManager::decommission_record_only)
 /// (never touches disk). Returns a [`DecommissionResponse`] that includes
 /// `workspace_removed` so callers can display an honest message reflecting
 /// whether the filesystem was actually mutated (e.g. adopted/local-path

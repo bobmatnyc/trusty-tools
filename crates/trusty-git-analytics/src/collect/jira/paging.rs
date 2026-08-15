@@ -20,7 +20,7 @@
 //! again.
 //!
 //! Why an offset survives at all: JQL date literals are minute-resolution
-//! (`"yyyy-MM-dd HH:mm"`, see [`super::sync::jql_date`]), and JQL offers no
+//! (`"yyyy-MM-dd HH:mm"`, see [`super::sync::jql_date`](crate::collect::jira::jql_time::jql_date)), and JQL offers no
 //! tiebreak key, so a pure keyset walk cannot make progress through a minute
 //! containing more tickets than one page. Inside a single minute the pager
 //! therefore falls back to offset paging — bounding the residual race to

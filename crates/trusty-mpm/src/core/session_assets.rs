@@ -118,7 +118,7 @@ pub fn session_plan(record: &SessionRecord) -> (FrameworkPaths, HarnessPlan) {
 /// [`CatalogHashes`] — see the module doc for the full #2444 review
 /// rationale. Reads only this session's OWN deployed manifest + on-disk
 /// files; performs zero catalog I/O.
-/// What: loads this session's deployed [`AgentManifest`]/[`SkillManifest`]
+/// What: loads this session's deployed `AgentManifest`/`SkillManifest`
 /// from `fw.agent_deploy_dir()`/`fw.claude_skills_dir()` and delegates to
 /// [`CatalogHashes::detect`] with `plan`'s selection predicates.
 /// Test: `session_asset_staleness_with_catalog_matches_uncached_result`.
@@ -148,7 +148,7 @@ pub fn session_asset_staleness_with_catalog(
 /// exempted it from `for_managed_project`'s per-workspace rewrite — so every
 /// session in a `tm ls` listing resolves it to the SAME path and was reading
 /// the same 42 files over and over. Hoisting that read to the batch caller
-/// ([`crate::daemon::managed_routes::summary::staleness_inputs`]) mirrors
+/// (`crate::daemon::managed_routes::summary::staleness_inputs`) mirrors
 /// exactly what #2444's review already did for the CATALOG half: compute the
 /// shared part once, fan out only the part that genuinely differs per session.
 ///

@@ -38,7 +38,7 @@
 //! sites are therefore treated as adversarial and validated BEFORE any
 //! filesystem join, exactly like `agents::protocol::validate_agent_name`
 //! already treats a caller-supplied catalog name:
-//! [`load_plugin_root`] validates a `plugin.json` `agents`/`skills`
+//! `load_plugin_root` validates a `plugin.json` `agents`/`skills`
 //! override (a `PathBuf::join` of an absolute or `..`-bearing override
 //! escapes `plugin_dir` outright — code-critic PR #3547 review, CRITICAL 1)
 //! and [`is_valid_namespaced_name`] validates every caller-supplied
@@ -62,6 +62,14 @@
 //! `agents_dir`/`skills_dir` — since `canonicalize` resolves every symlink
 //! in the path, not just the final component, one check catches a
 //! symlinked leaf file, a symlinked intermediate directory, or both.
+//!
+//! [`PluginRoot`]: crate::plugins::PluginRoot
+//! [`discover_plugin_roots`]: crate::plugins::discover_plugin_roots
+//! [`project_root_two_levels_up`]: crate::plugins::project_root_two_levels_up
+//! [`is_valid_namespaced_name`]: crate::plugins::is_valid_namespaced_name
+//! [`agents::find_plugin_agent_config`]: crate::plugins::agents::find_plugin_agent_config
+//! [`skills::resolve_plugin_skill_body`]: crate::plugins::skills::resolve_plugin_skill_body
+//! [`path_is_contained`]: crate::plugins::path_is_contained
 
 pub mod agents;
 pub mod skills;
@@ -77,7 +85,7 @@ const PLUGINS_DIRNAME: &str = "plugins";
 /// surfaces (commands/hooks/MCP) — present but intentionally unimplemented,
 /// per #3539's scope.
 ///
-/// Why: names the exact set [`load_plugin_root`] checks for so a plugin
+/// Why: names the exact set `load_plugin_root` checks for so a plugin
 /// author sees a debug log explaining why e.g. its `hooks` declaration had
 /// no effect, rather than silent nothing.
 const LATER_PHASE_MANIFEST_KEYS: &[&str] = &["commands", "hooks", "mcpServers", "mcp"];
@@ -115,7 +123,7 @@ pub struct PluginRoot {
 /// when present, Phase 1 only acts on `name`/`agents`/`skills` — every
 /// other key (description, version, author, and the later-phase
 /// `commands`/`hooks`/`mcpServers`) is captured in `other` purely so
-/// [`load_plugin_root`] can detect and log the later-phase ones, never to
+/// `load_plugin_root` can detect and log the later-phase ones, never to
 /// drive behavior.
 /// Test: `tests::discover_plugin_roots_honors_manifest_name_override`,
 /// `tests::discover_plugin_roots_honors_path_overrides`,
@@ -138,7 +146,7 @@ struct PluginManifest {
 /// [`skills::discover_plugin_skills`], and the namespaced-name resolvers in
 /// both submodules all build on.
 /// What: each immediate subdirectory of `.claude/plugins/` is one plugin
-/// root, resolved via [`load_plugin_root`]. A missing/unreadable
+/// root, resolved via `load_plugin_root`. A missing/unreadable
 /// `.claude/plugins/` directory yields an empty list (never an error — a
 /// project simply using no plugins is the common case, mirroring
 /// `agents::discover_agents`'s missing-dir handling). Non-directory entries

@@ -2,7 +2,7 @@
 //!
 //! ## Supplemental rule files (`rules_files`)
 //!
-//! [`ClassificationConfig::rules_files`] accepts either a single path
+//! [`ClassificationConfig::rules_files`](crate::core::config::ClassificationConfig::rules_files) accepts either a single path
 //! (backward-compat alias `rules_file`) or a list of paths. Files are loaded
 //! **in order**: each file's [`RuleSet`] is merged into the accumulator via
 //! [`RuleSet::merge`]. Later files win on conflicting rule IDs.
@@ -19,7 +19,7 @@
 //!
 //! ## Repo-category fallback (`repo_categories`)
 //!
-//! [`ClassificationConfig::repo_categories`] is a map from repo name (or a
+//! [`ClassificationConfig::repo_categories`](crate::core::config::ClassificationConfig::repo_categories) is a map from repo name (or a
 //! simple `*`-glob) to a default subcategory name. When the classification
 //! cascade produces an `"uncategorized"` / `"catch-all"` verdict OR a verdict
 //! below the configured `confidence_threshold`, and the commit's repository

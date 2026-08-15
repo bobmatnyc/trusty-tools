@@ -622,7 +622,7 @@ impl MemoryService {
     /// that was never stored used to answer `204 No Content`, the same as a
     /// real delete — this now 404s, matching `delete_palace`.
     /// What: parses the drawer UUID, calls `PalaceHandle::forget`, deletes the
-    /// drawer's BM25 document, maps [`ForgetOutcome::NotFound`] to
+    /// drawer's BM25 document, maps `ForgetOutcome::NotFound` to
     /// `ServiceError::not_found`, and emits `DrawerDeleted` only when a drawer
     /// was actually removed. #5053: the lexical delete runs on this path for
     /// the same reason it runs on the MCP one — `HTTP DELETE` and

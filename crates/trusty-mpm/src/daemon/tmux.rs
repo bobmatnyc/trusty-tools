@@ -505,7 +505,7 @@ impl TmuxDriver {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    /// Enumerate every pane as a structured [`orphan_gc::PaneInfo`] row.
+    /// Enumerate every pane as a structured [`orphan_gc::PaneInfo`](crate::daemon::orphan_gc::PaneInfo) row.
     ///
     /// Why: the orphan-GC must reconcile live tmux against the registries, and
     /// to decide whether a session is idle it needs each pane's
@@ -516,7 +516,7 @@ impl TmuxDriver {
     /// session in a single tmux call.
     /// What: runs
     /// `tmux list-panes -a -F "#{session_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_id}"`
-    /// and parses each row into a [`orphan_gc::PaneInfo`]. A tab delimiter avoids
+    /// and parses each row into a [`orphan_gc::PaneInfo`](crate::daemon::orphan_gc::PaneInfo). A tab delimiter avoids
     /// colliding with the colons in session names. An empty tmux server (`no
     /// server running`) yields an empty `Vec` rather than an error, so a quiet
     /// host reaps nothing rather than failing the sweep.
@@ -573,7 +573,7 @@ impl TmuxDriver {
         })
     }
 
-    /// List every tmux session, tagged with its [`SessionOrigin`].
+    /// List every tmux session, tagged with its [`SessionOrigin`](crate::core::external_session::SessionOrigin).
     ///
     /// Why: the universal-session dashboard manages *all* tmux sessions, not
     /// just the ones trusty-mpm created; each row must carry its origin so the

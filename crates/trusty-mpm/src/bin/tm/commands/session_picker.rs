@@ -152,7 +152,7 @@ pub(crate) enum PickerDecision {
 /// (#3483) are the `tm ls` inline sort-keyword + filter grammar
 /// ([`parse_ls_terms`]) re-applied on every re-fetch inside [`run_tty_picker`]'s
 /// loop so the picker's ordering/filtering never drifts from the initial menu.
-/// Test: constructed by `guided::try_show_picker` and [`run_ls_connector`];
+/// Test: constructed by `guided::try_show_picker` and [`run_ls_connector`](crate::commands::session_ls_connector::run_ls_connector);
 /// behavior is covered by the picker's e2e path.
 pub(crate) struct PickerScope {
     /// `owner/repo` slug to filter by, or `None` for every managed session.
@@ -507,7 +507,7 @@ pub(crate) fn filter_sessions_by_term(
 /// session they're actively connected to never scrolls below a merely-recent
 /// stopped one.
 /// What: `0` when `s.attached` (a client is connected RIGHT NOW — the
-/// strongest signal, mirrors [`session_picker_render::state_color`]'s own
+/// strongest signal, mirrors [`session_picker_render::state_color`](crate::commands::session_picker_render::state_color)'s own
 /// precedence); `1` for `state == "active"` (not attached); `2` for every
 /// other state. Lower sorts first.
 /// Test: `sort_sessions_recent_groups_attached_before_active_before_stopped`,
@@ -584,7 +584,7 @@ fn recency_key(s: &ManagedSessionSummary) -> &str {
 /// What: [`fetch_managed_raw`], then [`parse_managed_sessions`], then
 /// [`super::session_picker_prune::prune_and_report`] — every session confirmed
 /// dead on TWO consecutive listings is cleared from the registry (capped per
-/// call) instead of sitting in the list forever printing "use [d<N>] to remove
+/// call) instead of sitting in the list forever printing "use `d<N>` to remove
 /// the record" — and only THEN [`scope_for_display`]. That order is
 /// load-bearing (#4994): the default view now hides dead rows, so scoping first
 /// would hand the prune a list with its own targets already removed.

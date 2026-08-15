@@ -21,6 +21,10 @@
 //! Test: `daemon_path_*` and `resolve_binary_*` unit tests below. The module is
 //! cross-platform (the well-known dirs are macOS/Linux-oriented but harmless
 //! elsewhere) so it is not gated behind `#[cfg(target_os = "macos")]`.
+//!
+//! [`daemon_path_dirs`]: crate::bin_resolve::daemon_path_dirs
+//! [`daemon_path_env`]: crate::bin_resolve::daemon_path_env
+//! [`resolve_binary`]: crate::bin_resolve::resolve_binary
 
 use std::path::{Path, PathBuf};
 
@@ -357,7 +361,7 @@ pub fn canonical_bin_dir() -> Option<PathBuf> {
 ///
 /// Why: extracting the rule from the env/home reads makes it testable without
 /// mutating process-global state, so the tests stay safe under the parallel
-/// harness. It is also what lets [`crate::update::candidate_bin_dirs`], which is
+/// harness. It is also what lets `crate::update::candidate_bin_dirs`, which is
 /// already parameterised over explicit `home`/`cargo_home` inputs, share the
 /// same rule rather than restating it.
 ///

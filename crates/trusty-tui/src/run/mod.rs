@@ -104,7 +104,7 @@ const SCROLL_DELTA: isize = 3;
 /// [`run`]'s engine-dispatch wrapper.
 /// Test: [`crate::app::ReplApp`]'s implementation is exercised via
 /// `crate::app::reduce::tests`; this module's own dispatch wiring is
-/// exercised in [`tests::dispatch_pending`] below.
+/// exercised in `tests::dispatch_pending` below.
 pub trait TuiModel {
     /// Whether the render loop should exit after the current frame.
     fn should_quit(&self) -> bool;
@@ -237,7 +237,7 @@ fn classify(ev: CtEvent) -> Option<ReplEvent> {
 /// joins — bounded to roughly one poll interval, not "whenever the user
 /// next presses a key" (the shutdown hang described in the module doc
 /// comment).
-/// Test: [`tests::key_reader_guard_drop_completes_promptly_without_a_keypress`].
+/// Test: `tests::key_reader_guard_drop_completes_promptly_without_a_keypress`.
 pub struct KeyReaderGuard {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -274,7 +274,7 @@ impl Drop for KeyReaderGuard {
 /// fails (the receiver dropped). Each polled event is classified by
 /// [`classify`]; `None` results (filtered keys, unhandled mouse events) are
 /// silently dropped.
-/// Test: [`tests::key_reader_guard_drop_completes_promptly_without_a_keypress`]
+/// Test: `tests::key_reader_guard_drop_completes_promptly_without_a_keypress`
 /// proves the returned guard's `Drop` doesn't block on a keystroke; the
 /// event-classification logic itself is covered directly via [`classify`]'s
 /// tests (no TTY needed for those).
@@ -316,10 +316,10 @@ pub fn spawn_key_reader(tx: UnboundedSender<ReplEvent>) -> KeyReaderGuard {
 /// `rx` closes (all senders dropped — mirrors
 /// `crates/trusty-agents/src/repl/tui/run.rs::event_loop`'s `None => return
 /// Ok(())`). Returns the final model so callers/tests can inspect it.
-/// Test: [`tests::event_loop_applies_events_and_redraws`],
-/// [`tests::event_loop_stops_when_model_requests_quit`],
-/// [`tests::event_loop_stops_when_channel_closes`],
-/// [`tests::event_loop_redraws_on_tick_even_without_events`].
+/// Test: `tests::event_loop_applies_events_and_redraws`,
+/// `tests::event_loop_stops_when_model_requests_quit`,
+/// `tests::event_loop_stops_when_channel_closes`,
+/// `tests::event_loop_redraws_on_tick_even_without_events`.
 pub async fn event_loop<B, M>(
     terminal: &mut Terminal<B>,
     mut model: M,

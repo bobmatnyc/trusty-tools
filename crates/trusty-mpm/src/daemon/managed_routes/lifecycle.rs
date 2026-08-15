@@ -141,7 +141,7 @@ pub struct SpawnParams {
     /// Why: the #1707 in-project reconnect pre-flight silently ADOPTS an
     /// existing live session for the same `source_id` (returning it instead of
     /// spawning). A surface that explicitly means "launch a NEW session" — the
-    /// `tm` picker's "[N] launch new session" choice, `tm session new`/`session
+    /// `tm` picker's "\[N\] launch new session" choice, `tm session new`/`session
     /// start` — would otherwise have its `--task` injected into an unrelated
     /// live session. `true` SKIPS the reconnect pre-flight (always spawns
     /// fresh); `false` (the default, so programmatic/idempotent callers — MCP
@@ -1466,7 +1466,7 @@ pub(super) async fn front_gate_or_escalate(
 /// centralising avoids the MCP path silently resuming without re-spawning.
 /// What: calls [`crate::session_manager::SessionManager::resume`] (which performs
 /// the existence + state check in a SINGLE round-trip — no pre-flight `get`, so
-/// no TOCTOU window) and maps its typed [`ManagedError`] into a typed
+/// no TOCTOU window) and maps its typed [`ManagedError`](crate::session_manager::ManagedError) into a typed
 /// [`ResumeManagedError`] (`NotFound`/`InvalidState`/`Other`). It then re-spawns
 /// the SAME runtime backend in the fresh tmux session (no re-clone) and returns
 /// the final record.
@@ -1499,10 +1499,10 @@ pub(super) async fn front_gate_or_escalate(
 ///
 /// #2647 worktree/upstream sync: before the statusline self-heal, every
 /// resume also calls
-/// [`crate::core::session_launch::sync_worktree_with_upstream`] (fetch +
+/// `crate::core::session_launch::sync_worktree_with_upstream` (fetch +
 /// fast-forward-only merge — never resets the branch, never touches
 /// uncommitted changes) and
-/// [`crate::core::session_launch::self_heal_claude_md`] (strips legacy #2170
+/// `crate::core::session_launch::self_heal_claude_md` (strips legacy #2170
 /// delegation-directive pollution from `CLAUDE.md`, including when it is an
 /// uncommitted diff the fast-forward alone cannot touch). Both are
 /// best-effort and never block the resume — a long-lived session worktree

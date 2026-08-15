@@ -19,6 +19,11 @@
 //! Test: `task::executor::tests::*`, `task::protocol::tests::*`,
 //! `task::sink::tests::*`, `task::mock_llm::tests::*`; the full flow
 //! end-to-end (a real subprocess) in `tests/task_e2e.rs`.
+//!
+//! [`protocol::register`]: crate::task::protocol::register
+//! [`executor::spawn_task_run`]: crate::task::executor::spawn_task_run
+//! [`sink::SessionToolEventSink`]: crate::task::sink::SessionToolEventSink
+//! [`mock_llm`]: crate::task::mock_llm
 
 pub mod executor;
 pub mod mock_llm;

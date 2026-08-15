@@ -85,7 +85,7 @@ pub async fn chat_oneshot(
 /// that don't need tool calling can hit Bedrock with the same shape.
 /// What: Sends a single user message with a system prompt, returns the
 /// assistant's joined text and token usage.
-/// Test: `bedrock_smoke_test` (#[ignore], requires AWS credentials).
+/// Test: `bedrock_smoke_test` (#\[ignore\], requires AWS credentials).
 pub async fn chat(
     client: &BedrockClient,
     model_id: &str,

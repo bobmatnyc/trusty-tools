@@ -7,7 +7,7 @@
 //! resolve through the 3-tier precedence. This logic is identical whether the
 //! caller is the ordinary session-launch path (`core::session_launch`) or the
 //! standalone `tm install` deploy — both call
-//! [`agent_deployer::deploy_agents_filtered`] and then need to (a) fold every
+//! [`agent_deployer::deploy_agents_filtered`](crate::core::agent_deployer::deploy_agents_filtered) and then need to (a) fold every
 //! deployed agent's declared skills into the skill-deploy `select` predicate
 //! and (b) log the resolution outcome. Centralising it here keeps the two
 //! call sites from re-implementing (and silently diverging on) the same

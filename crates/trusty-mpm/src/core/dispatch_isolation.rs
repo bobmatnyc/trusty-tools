@@ -46,6 +46,9 @@
 //! the line sits now: writes, not proximity to writes.
 //!
 //! Test: the `#[cfg(test)]` suite below.
+//!
+//! [`isolation_separates_working_tree`]: crate::core::dispatch_isolation::isolation_separates_working_tree
+//! [`agent_mutates_files`]: crate::core::dispatch_isolation::agent_mutates_files
 
 use serde_json::Value;
 use trusty_agents_common::agents::metadata::agent_metadata_from_str;

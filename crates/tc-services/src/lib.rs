@@ -11,6 +11,12 @@
 //! them in whatever tool abstraction they use.
 //! Test: Per-module unit tests; see `cto_db`.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 pub mod cto_db; // CTO SQLite service (migrated from trusty-agents, #484 Phase 1)
 pub mod granola; // Native Granola API client (#488 Phase 2)
 pub mod gworkspace; // Google Workspace bridge — Calendar + Tasks (#488 Phase 2)

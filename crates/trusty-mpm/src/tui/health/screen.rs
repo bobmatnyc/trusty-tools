@@ -342,7 +342,7 @@ pub(crate) fn format_count_suffix(n: u64, suffix: char) -> String {
     }
 }
 
-/// Build the tab bar header text ("[1]HEALTH  [2]LOGS  [3]SEARCH").
+/// Build the tab bar header text ("\[1\]HEALTH  \[2\]LOGS  \[3\]SEARCH").
 ///
 /// Why: pure helper so the active-tab highlighting is testable.
 /// What: returns `(label, active)` pairs the renderer styles.

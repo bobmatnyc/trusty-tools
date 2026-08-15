@@ -117,7 +117,7 @@ pub struct HealthReport {
     pub managed_pending_decisions: usize,
 }
 
-/// The structured, UI-agnostic outcome of executing a [`crate::TrustyCommand`].
+/// The structured, UI-agnostic outcome of executing a [`crate::TrustyCommand`](crate::client::TrustyCommand).
 ///
 /// Why: keeping the result structured (not a string) lets each UI format it in
 /// its own idiom; an error variant keeps a dead daemon renderable.

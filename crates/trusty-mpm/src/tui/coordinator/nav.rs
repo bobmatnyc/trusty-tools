@@ -2,7 +2,7 @@
 //!
 //! Why: Child #2 (#1386) landed live polling but rendered the unified list with
 //! a plain, non-scrolling `List` whose selection was a bare `usize` on
-//! [`CoordinatorState`]. STUI-1 (#1278) needs a numbered, scrollable list that
+//! [`CoordinatorState`](crate::tui::coordinator::state::CoordinatorState). STUI-1 (#1278) needs a numbered, scrollable list that
 //! shows at least five rows, scrolls with the arrow keys + Page-Up/Page-Down,
 //! highlights the selected row, and — crucially — PRESERVES the selection and
 //! the scroll offset across the timer re-polls Child #2 added (a refresh must not

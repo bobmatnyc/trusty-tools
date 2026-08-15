@@ -24,6 +24,9 @@
 //! offline, no subprocess), `cli_client::render::tests` (formatting).
 //! End-to-end, real-subprocess coverage lives in `tests/cli_e2e.rs`, which
 //! drives the actual `tcode` binary as a black box.
+//!
+//! [`stdio::StdioRpcClient`]: crate::cli_client::stdio::StdioRpcClient
+//! [`render`]: crate::cli_client::render
 
 pub mod render;
 pub mod stdio;

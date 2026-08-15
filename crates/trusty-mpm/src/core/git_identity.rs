@@ -176,7 +176,7 @@ pub fn resolve_for_config(
 
 /// Resolve the effective [`GithubConfig`] for `repo_url` — the SAME
 /// project-over-global precedence [`resolve_for_config`] applies internally
-/// — exposed so a caller that needs the pre-[`GhEnv`] config (the #2081/#3312
+/// — exposed so a caller that needs the pre-[`GhEnv`](crate::core::gh_identity::GhEnv) config (the #2081/#3312
 /// account-enforcement decision) does not have to reimplement the project
 /// lookup and risk diverging from it.
 ///

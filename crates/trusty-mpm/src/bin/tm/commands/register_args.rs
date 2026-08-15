@@ -56,7 +56,7 @@ const NON_REPO_SEGMENTS: &[&str] = &[
 /// Why: the pre-review code asked one question — "does it contain a `/`?" — and
 /// that conflated three different things. Naming the cases makes each one's
 /// outcome a deliberate choice instead of a fallthrough.
-/// What: `Url` parses as today; `Shorthand` resolves against [`SHORTHAND_HOST`];
+/// What: `Url` parses as today; `Shorthand` resolves against `SHORTHAND_HOST`;
 /// `RelativePath` is refused because it is resolved against the process cwd but
 /// cloned later from elsewhere; `Other` is either the alias positional or
 /// garbage, decided by the caller from how many positionals there were.

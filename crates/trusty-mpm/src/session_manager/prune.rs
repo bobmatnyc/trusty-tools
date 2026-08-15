@@ -531,7 +531,7 @@ impl SessionManager {
     /// then per record —
     /// - a non-`Decommissioned` match → [`decommission`](Self::decommission) it
     ///   (kill runtime + remove workspace + tombstone) → [`PruneAction::Decommissioned`];
-    /// - a `Decommissioned` match → [`SessionStore::remove`] it from the store
+    /// - a `Decommissioned` match → [`SessionStore::remove`](crate::session_manager::SessionStore::remove) it from the store
     ///   (compaction) → [`PruneAction::Removed`].
     ///
     /// When `dry_run` is true NOTHING is mutated — the returned [`PruneOutcome`]
@@ -666,7 +666,7 @@ impl SessionManager {
     /// so the file stops growing unbounded. This is the single-record compaction
     /// primitive [`prune_managed`](Self::prune_managed) uses for the
     /// `Decommissioned` filter, exposed for direct callers.
-    /// What: removes the record keyed by `id` via [`SessionStore::remove`] and
+    /// What: removes the record keyed by `id` via [`SessionStore::remove`](crate::session_manager::SessionStore::remove) and
     /// persists. A not-present id is a no-op warning inside `remove`.
     /// Test: `compact_record_removes_from_store`.
     pub async fn compact_record(&self, id: &ManagedSessionId) -> Result<(), ManagedError> {

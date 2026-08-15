@@ -13,7 +13,7 @@
 //! single act is what unsticks the pipeline: the stem stops being classified
 //! project-custom by [`crate::skills::tiers::list_project_custom_stems`], so
 //! the next [`crate::skills::tiers::deploy_all_skill_tiers`] plans it into
-//! `bundled_deploy`, and [`crate::skills::deployer::deploy_one_file`] then
+//! `bundled_deploy`, and `crate::skills::deployer::deploy_one_file` then
 //! sees "managed, checksum matches, content differs" — its existing safe-
 //! refresh branch. No new write path, no new ownership rule; the adoption is
 //! the whole fix and the refresh is the machinery that already worked.

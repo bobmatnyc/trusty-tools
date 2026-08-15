@@ -32,6 +32,11 @@
 //! Test: the `tests` module below covers every parser shape and every state
 //! transition; `supervision_rejects_a_child_that_inherited_xpc_service_name` is
 //! the #4469 regression proof.
+//!
+//! [`launchd_supervision`]: crate::supervision::launchd_supervision
+//! [`LaunchdSupervision`]: crate::supervision::LaunchdSupervision
+//! [`LaunchdSupervision::Unknown`]: crate::supervision::LaunchdSupervision::Unknown
+//! [`is_launchd_supervised`]: crate::update::is_launchd_supervised
 
 /// What launchd says about THIS process — three states, not two.
 ///

@@ -46,10 +46,10 @@ const MAX_COMMANDS: usize = 4;
 /// `{user_label} · {label}` identity line; right column is the title,
 /// recent activity, and commands. Column widths are computed from `width`,
 /// widened enough to fit the art (if present) unclipped.
-/// Test: [`tests::banner_lines_top_and_bottom_rules_present`],
-/// [`tests::banner_lines_includes_identity_and_title`],
-/// [`tests::banner_lines_lists_recent_activity_and_commands`],
-/// [`tests::banner_lines_renders_with_no_art_or_commands`].
+/// Test: `tests::banner_lines_top_and_bottom_rules_present`,
+/// `tests::banner_lines_includes_identity_and_title`,
+/// `tests::banner_lines_lists_recent_activity_and_commands`,
+/// `tests::banner_lines_renders_with_no_art_or_commands`.
 pub fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
     let art_width = app
         .banner_art

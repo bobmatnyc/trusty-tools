@@ -34,7 +34,7 @@
 /// also owns, which would drive `RelaunchInPlace` against the wrong (dead)
 /// record while a live session sharing that name sits in a sibling pane — the
 /// exact hijack class #2456/#2680 fixed elsewhere.
-/// [`SessionManager::capture_pane_by_tmux_name`] (`session_manager/manager.rs`)
+/// `SessionManager::capture_pane_by_tmux_name` (`session_manager/manager.rs`)
 /// already carries the identical guard for the same reason (idle-reaper pane
 /// capture) — this mirrors it.
 /// What: collects every record matching `current_session_name` OR

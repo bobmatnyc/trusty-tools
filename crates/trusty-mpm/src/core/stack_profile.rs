@@ -17,7 +17,7 @@
 //! (single source of truth, also used for agent-roster scoping) and renders a
 //! Markdown section — either the detected language engineers (route code work to
 //! them, use the project's own quality gate) or a neutral "not auto-detected"
-//! block that forbids defaulting and requires a Research pass. [`resolve_pm_prompt`]
+//! block that forbids defaulting and requires a Research pass. [`resolve_pm_prompt`](crate::core::instruction_overrides::resolve_pm_prompt)
 //! ([`crate::core::instruction_overrides`]) slots the section into the prompt.
 //! Test: `detected_rust_lists_rust_engineer`, `detected_nextjs_lists_ts_family`,
 //! `detected_polyglot_lists_both_families`, `undetected_is_neutral_no_default`,

@@ -47,6 +47,8 @@
 //! 1,100 SLOC and frozen at its line-cap budget — the same reason
 //! [`super::managed_routes::reconcile`] gives.
 //! Test: `shared_tree_dispatch_route_*` below.
+//!
+//! [`super::managed_routes::reconcile`]: crate::daemon::managed_routes::reconcile
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

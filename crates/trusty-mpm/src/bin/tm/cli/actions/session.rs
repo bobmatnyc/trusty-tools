@@ -159,7 +159,7 @@ pub(crate) enum SessionAction {
         ///
         /// `claude-code` runs Claude Code over OAuth (the default, unchanged
         /// behavior); `tcode` runs trusty-code against the direct Anthropic API
-        /// (the `ANTHROPIC_API_KEY` path). Typed as [`RuntimeKind`] (a
+        /// (the `ANTHROPIC_API_KEY` path). Typed as `RuntimeKind` (a
         /// `clap::ValueEnum`) so an unsupported value is rejected at parse time
         /// with a "possible values" hint, not silently forwarded to the daemon.
         #[arg(long, default_value = "claude-code", value_enum)]
@@ -272,7 +272,7 @@ pub(crate) enum SessionAction {
         /// Managed session id.
         id: String,
     },
-    /// [DEPRECATED] Stop a managed session's runtime — use `stop` instead.
+    /// \[DEPRECATED\] Stop a managed session's runtime — use `stop` instead.
     ///
     /// Why: legacy verbose verb retained for backward compatibility (#1205).
     /// Invoking it prints a deprecation notice and behaves like `stop`
@@ -284,7 +284,7 @@ pub(crate) enum SessionAction {
         /// Managed session id.
         id: String,
     },
-    /// [DEPRECATED] Stop a managed session's runtime — use `stop` instead.
+    /// \[DEPRECATED\] Stop a managed session's runtime — use `stop` instead.
     ///
     /// Why: `runtime-stop` was renamed to `stop` in #1205; the old spelling
     /// still parses but emits a deprecation notice steering operators to `stop`.
@@ -295,7 +295,7 @@ pub(crate) enum SessionAction {
         /// Managed session id.
         id: String,
     },
-    /// [DEPRECATED] Resume a stopped managed session — use `resume` instead.
+    /// \[DEPRECATED\] Resume a stopped managed session — use `resume` instead.
     ///
     /// Why: `managed-resume` was renamed to `resume` in #1205; the old spelling
     /// still parses but emits a deprecation notice steering operators to `resume`.

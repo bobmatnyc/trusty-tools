@@ -16,7 +16,7 @@
 //! it once per process, and consults it only when the shipped markers return
 //! no verdict; nothing here touches `Config`, the CLI, or any existing
 //! signature.
-//! Test: [`tests`] below, plus `tests/ai_markers_operator_file.rs` and
+//! Test: `tests` below, plus `tests/ai_markers_operator_file.rs` and
 //! `tests/ai_markers_bad_file.rs`, which drive the whole path through
 //! `ai_markers::detect` in their own processes.
 //!
@@ -64,7 +64,7 @@ pub const MAX_MARKERS: usize = 256;
 /// with a different key, e.g. `X-AI-Model:`), and `Email` against the author
 /// and committer addresses.
 /// Test: `crate::collect::ai_markers::tests::trailer_scope_does_not_match_body_prose`,
-/// and [`tests::yaml_scopes_deserialize`] for the YAML spellings.
+/// and `tests::yaml_scopes_deserialize` for the YAML spellings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -85,7 +85,7 @@ pub enum MarkerScope {
 /// file may name, so an impossible entry cannot be written in the first place.
 /// What: deserializes from `full_agentic` / `ide_assisted`, the same strings
 /// [`AgenticMode::as_str`] persists.
-/// Test: [`tests::marker_mode_maps_to_agentic_mode`].
+/// Test: `tests::marker_mode_maps_to_agentic_mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -115,7 +115,7 @@ impl MarkerMode {
 /// `regex` crate expression applied to whichever text `scope` names. Patterns
 /// are matched unanchored — write `(?i)` for case-insensitivity and `\b` or an
 /// address fragment to keep a human co-author from tripping the marker.
-/// Test: [`tests::spec_round_trips_from_yaml`].
+/// Test: `tests::spec_round_trips_from_yaml`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -158,7 +158,7 @@ impl MarkerSpec {
 /// ignored, at either level: a typo'd `patern:` that silently produced a
 /// marker-less config would be indistinguishable from an operator who
 /// configured nothing, which is the failure this file exists to prevent.
-/// Test: [`tests::unknown_key_is_rejected`], [`tests::empty_document_is_empty`].
+/// Test: `tests::unknown_key_is_rejected`, `tests::empty_document_is_empty`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -221,7 +221,7 @@ impl MarkerConfig {
     /// `mode` spelling is an error, not a skipped entry. Pattern validity is
     /// NOT checked here; it is checked once at compile time in
     /// `ai_markers`, so no expression is compiled twice.
-    /// Test: [`tests::spec_round_trips_from_yaml`], [`tests::unknown_key_is_rejected`].
+    /// Test: `tests::spec_round_trips_from_yaml`, `tests::unknown_key_is_rejected`.
     ///
     /// # Errors
     ///
@@ -250,7 +250,7 @@ impl MarkerConfig {
     /// [`MarkerConfigError::Read`] if the file cannot be read,
     /// [`MarkerConfigError::Parse`] if it does not deserialize.
     ///
-    /// Test: [`tests::load_from_reports_a_missing_file`].
+    /// Test: `tests::load_from_reports_a_missing_file`.
     pub fn load_from(path: &Path) -> Result<Self, MarkerConfigError> {
         let text = std::fs::read_to_string(path)?;
         Self::from_yaml_str(&text)
@@ -275,7 +275,7 @@ impl MarkerConfig {
 /// What: [`ENV_AI_MARKERS`] when set and non-empty, else
 /// [`DEFAULT_MARKER_FILE`]; either way a leading `~` is expanded. The path is
 /// resolved, never required — an absent file is the normal case.
-/// Test: [`tests::env_var_overrides_default_path`].
+/// Test: `tests::env_var_overrides_default_path`.
 pub fn marker_file_path() -> PathBuf {
     let raw = match std::env::var(ENV_AI_MARKERS) {
         Ok(v) if !v.trim().is_empty() => v,

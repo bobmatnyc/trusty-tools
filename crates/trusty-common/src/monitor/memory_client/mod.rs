@@ -5,7 +5,7 @@
 //! `/api/v1/palaces`). Keeping it in its own module mirrors `search_client` and
 //! isolates the wire shapes the memory panel renders.
 //! What: [`MemoryClient`] wraps a base URL and a pooled `reqwest::Client`; a
-//! `fetch_all` helper folds the status and palace calls into [`MemoryData`].
+//! `fetch_all` helper folds the status and palace calls into [`MemoryData`](crate::monitor::dashboard::MemoryData).
 //! Test: `cargo test -p trusty-common --features monitor-tui` covers URL
 //! resolution and base-URL storage; live endpoints are covered by the daemon's
 //! own suite.

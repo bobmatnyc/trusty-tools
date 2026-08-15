@@ -10,6 +10,9 @@
 //! meaningful content was produced or `None` to indicate the assembler should
 //! skip this section entirely.
 //! Test: `catchup::tests::pm_catchup_context_does_not_panic_on_empty_repo`.
+//!
+//! [`pm_catchup_context`]: crate::catchup::pm_catchup_context
+//! [`CatchupOptions`]: trusty_common::catchup::CatchupOptions
 
 use std::path::Path;
 

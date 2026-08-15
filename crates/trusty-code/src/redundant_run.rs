@@ -33,6 +33,9 @@
 //! `agent_loop::tests::redundant_test_rerun_is_suppressed`,
 //! `agent_loop::tests::test_rerun_after_edit_is_not_suppressed`, and
 //! `agent_loop::tests::redundant_rerun_suppression_logs_info`.
+//!
+//! [`is_redundant_test_rerun`]: crate::redundant_run::is_redundant_test_rerun
+//! [`REDUNDANT_RERUN_MESSAGE`]: crate::redundant_run::REDUNDANT_RERUN_MESSAGE
 
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::BASH_TOOL_NAME;

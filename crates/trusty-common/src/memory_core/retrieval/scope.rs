@@ -104,7 +104,7 @@ pub fn scope_admits(allowed: &Option<HashSet<Uuid>>, room_id: Uuid) -> bool {
 /// What: resolves the wing to its room set BEFORE taking the drawer read guard
 /// — that resolution is a redb read transaction, and holding the lock across
 /// I/O would stall every writer on the palace for its duration — then applies
-/// the same tag filter, [`drawer_listing_order`] ranking, and truncation
+/// the same tag filter, `drawer_listing_order` ranking, and truncation
 /// `list_drawers` uses.
 /// Test: `wing_scope_returns_only_that_wings_drawers`,
 /// `list_drawers_in_wing_keeps_the_newest_drawer_within_an_importance_tie`.

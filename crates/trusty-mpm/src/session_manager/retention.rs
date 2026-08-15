@@ -27,10 +27,12 @@
 //! directory, a git branch, or any other file — see [`retention_verdict`]'s
 //! `workspace_needs_protection` parameter for the guard that keeps a
 //! record-only eviction from becoming a filesystem deletion by proxy, and
-//! [`workspace_needs_protection`] for which workspaces that guard now covers
+//! `workspace_needs_protection` for which workspaces that guard now covers
 //! and why an undetermined answer counts as protected.
 //!
 //! Test: `retention_tests.rs`.
+//!
+//! [`inferred_terminal_at`]: crate::session_manager::retention::inferred_terminal_at
 
 use chrono::{DateTime, Duration, Utc};
 use tracing::{info, warn};
@@ -40,7 +42,7 @@ use super::record::{ManagedSessionId, SessionRecord};
 
 /// How long a record stays in the store after entering a terminal state.
 ///
-/// Why (#5327): protecting a worktree is [`workspace_needs_protection`]'s job,
+/// Why (#5327): protecting a worktree is `workspace_needs_protection`'s job,
 /// and it holds a record for as long as there is one, at any age. All the clock
 /// has to buy is the span in which an operator can still act on a record that
 /// is already dead — a `NUM` read off a listing, or the #2777 in-pane revive,
@@ -269,7 +271,7 @@ fn workspace_needs_protection(
 /// purely a persisted timestamp: "no worktree behind this workspace" is a live
 /// filesystem observation, and an external volume that unmounts between ticks
 /// answers `Ok(false)` — genuinely absent, indistinguishable from deleted —
-/// which [`workspace_needs_protection`]'s error handling cannot catch.
+/// which `workspace_needs_protection`'s error handling cannot catch.
 /// Requiring the same verdict on two ticks ~60s apart costs one to two minutes
 /// against a 24-hour window and rules that case out. #5327 kept it unchanged
 /// and unrelaxed: shortening the window makes this sweep act sooner, which
@@ -313,7 +315,7 @@ impl SessionManager {
     /// the in-memory slot registry. Nothing on disk outside the store file is
     /// read for deletion, opened for writing, or removed. It reads the config
     /// once per sweep to resolve the worktree base names, and otherwise its only
-    /// filesystem calls are [`workspace_needs_protection`]'s two `try_exists`
+    /// filesystem calls are `workspace_needs_protection`'s two `try_exists`
     /// probes — every answer they can give other than "the workspace is gone" or
     /// "it is a plain directory with no ownership sentinel" means KEEP.
     /// What: three phases, mirroring `prune_orphaned_worktrees`'s #1845 item-9

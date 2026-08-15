@@ -228,10 +228,11 @@ impl SessionControl for DaemonSessionControl {
         Ok(serde_json::json!({ "ok": true }))
     }
 
-    /// Inject text via the manager, dispatched per [`Submit`] (#1461).
+    /// Inject text via the manager, dispatched per `Submit` (#1461).
     ///
     /// Why: the production wiring of the harness-agnostic write verb. It forwards
-    /// to [`SessionManager::inject`], which dispatches the keystroke intent onto
+    /// to [`SessionManager::inject`](crate::session_manager::SessionManager::inject),
+    /// which dispatches the keystroke intent onto
     /// the real tmux driver (literal+Enter / literal / C-c).
     /// What: parses the id, then calls `inject`, mapping a manager failure onto
     /// `Backend` (the pane/tmux failure class).
@@ -253,7 +254,7 @@ impl SessionControl for DaemonSessionControl {
     /// Observe the session's raw surface — LLM-FREE (#1461).
     ///
     /// Why: the production wiring of the always-available read verb. It forwards
-    /// to [`SessionManager::observe`], which never touches the LLM.
+    /// to [`SessionManager::observe`](crate::daemon::services::delegation_tracker::observe), which never touches the LLM.
     /// What: parses the id and returns the [`RawObservation`] (pane + liveness +
     /// pending fields). `NotFound` is preserved for a genuinely-absent session.
     /// Test: `observe_returns_raw_pane_without_llm`, `observe_reports_runtime_active`.

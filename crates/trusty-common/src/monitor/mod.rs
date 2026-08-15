@@ -17,6 +17,15 @@
 //! monitor tui` calls [`memory_tui::run`].
 //! Test: `cargo test -p trusty-common --features monitor-tui` covers the pure
 //! state, rendering, and client pieces of both TUIs.
+//!
+//! [`search_tui`]: crate::monitor::search_tui
+//! [`memory_tui`]: crate::monitor::memory_tui
+//! [`search_client`]: crate::monitor::search_client
+//! [`memory_client`]: crate::monitor::memory_client
+//! [`dashboard`]: crate::monitor::dashboard
+//! [`utils`]: crate::monitor::utils
+//! [`search_tui::run`]: crate::monitor::search_tui::run
+//! [`memory_tui::run`]: crate::monitor::memory_tui::run
 
 pub mod dashboard;
 pub mod memory_client;

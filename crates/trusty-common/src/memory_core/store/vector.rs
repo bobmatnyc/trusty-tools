@@ -469,7 +469,7 @@ impl UsearchStore {
     /// group whose keys did not parse shrank to nothing, so `is_clean()`
     /// answered true over a real collision and `repair_aliases` returned
     /// `Clean` without touching it. The keys are carried now, and
-    /// [`AliasAudit::is_clean`] consults the row-vs-distinct arithmetic rather
+    /// [`AliasAudit::is_clean`](crate::memory_core::retrieval::AliasAudit::is_clean) consults the row-vs-distinct arithmetic rather
     /// than the id list alone.
     /// What: delegates to `HnswStore::audit_aliases` and splits each collision
     /// group's keys into drawer ids and unnameable leftovers, alongside the two
@@ -511,7 +511,7 @@ impl UsearchStore {
     /// What: delegates to `HnswStore::unalias` and splits the freed raw keys
     /// into parseable drawer ids and unnameable leftovers. The freed drawers
     /// then read as ordinary "missing" to `embed_health`. Callers should route
-    /// through [`PalaceHandle::repair_aliases`], which adds the dry run and the
+    /// through [`PalaceHandle::repair_aliases`](crate::memory_core::PalaceHandle::repair_aliases), which adds the dry run and the
     /// post-repair verification; this is the raw primitive.
     /// Test: `unalias_marks_the_whole_group_for_reembed`,
     /// `repair_aliases_never_reports_success_over_a_partial_repair`.

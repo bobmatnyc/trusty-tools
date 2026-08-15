@@ -225,7 +225,7 @@ pub(crate) fn path_cmd(paths: &ManagedPaths, alias: &str) -> anyhow::Result<()> 
 /// The shared `<root>/claude-config/` CLAUDE_CONFIG_DIR is intentionally
 /// untouched — it is shared across all aliases and must not be wiped by a
 /// single-alias removal.
-/// What: removes the registry entry via [`ManagedRegistry::remove`], saves the
+/// What: removes the registry entry via `ManagedRegistry::remove`, saves the
 /// updated registry, then deletes `<root>/projects/<alias>/` with
 /// `fs::remove_dir_all`. Errors clearly when the alias is unknown in the
 /// registry. The project dir deletion is best-effort (succeeds even if the

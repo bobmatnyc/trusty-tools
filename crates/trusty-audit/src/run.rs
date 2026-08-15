@@ -760,7 +760,7 @@ fn absolute_checkout(work: &WorkDir, path: &Path) -> PathBuf {
 /// indefinite hang into a recorded failure, not to bound normal work. It is
 /// per repository, not per sweep.
 /// Test: `super::run_tests::a_hung_child_is_killed_and_recorded`, which uses
-/// [`sweep_with_timeout`] rather than waiting for this value.
+/// `sweep_with_timeout` rather than waiting for this value.
 pub const PER_REPO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
 
 /// Spawn the pinned `tga audit` and turn its exit into a per-repo verdict.

@@ -29,6 +29,11 @@
 //! registers the index or leaves the entry parked.
 //!
 //! Test: `timeout_recovery_*` unit tests below.
+//!
+//! [`ColdIndexStore`]: crate::service::lazy_loader::ColdIndexStore
+//! [`recover_timed_out_indexes`]: crate::service::timeout_recovery::recover_timed_out_indexes
+//! [`spawn_timeout_recovery_ticker`]: crate::service::timeout_recovery::spawn_timeout_recovery_ticker
+//! [`MAX_RECOVERY_ATTEMPTS`]: crate::service::timeout_recovery::MAX_RECOVERY_ATTEMPTS
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -52,6 +52,9 @@
 //! Test: `canonical_consts_match_the_convention`, `sub_unit_labels_extend_their_base`,
 //! `legacy_labels_are_never_canonical`, `every_legacy_label_resolves_to_one_service`,
 //! `no_stray_launchd_label_literals_in_workspace_sources`.
+//!
+//! [`canonical_label`]: crate::launchd_labels::canonical_label
+//! [`SERVICES`]: crate::launchd_labels::SERVICES
 
 /// Reverse-DNS domain prefix shared by every trusty-* LaunchAgent.
 ///

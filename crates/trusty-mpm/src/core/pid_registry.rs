@@ -67,7 +67,7 @@ const PID_FILE_EXT: &str = "pid";
 /// [`is_claude`](ProcessProbe::is_claude) — plus a [`terminate`](ProcessProbe::terminate)
 /// action seam so the sweep's SIGTERM is also test-observable. The production
 /// impl ([`OsProcessProbe`]) delegates to `crate::core::process`.
-/// Test: [`FakeProbe`] in the `tests` submodule drives the decision matrix.
+/// Test: `FakeProbe` in the `tests` submodule drives the decision matrix.
 pub trait ProcessProbe {
     /// True if a process with this PID currently exists.
     ///

@@ -14,6 +14,13 @@
 //! import from one stable path (`trusty_mpm::driver::*`).
 //! Test: each submodule carries its own pure unit tests; run
 //! `cargo test -p trusty-mpm driver::`.
+//!
+//! [`evaluate_autonomy_tier`]: crate::driver::evaluate_autonomy_tier
+//! [`AutonomyTier`]: crate::driver::AutonomyTier
+//! [`AutonomyDecision`]: crate::driver::AutonomyDecision
+//! [`GuardrailSignals`]: crate::driver::GuardrailSignals
+//! [`SessionCorrelation`]: crate::driver::SessionCorrelation
+//! [`ScopeCheck`]: crate::driver::ScopeCheck
 
 pub mod correlation;
 pub mod disposition;

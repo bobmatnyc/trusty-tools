@@ -481,7 +481,8 @@ pub struct SearchAppState {
     /// [`SearchAppState::with_allowlist_paths`].
     /// Test: every test in `tests_allowlist_gate_767.rs`.
     pub allowlist_paths: crate::allowlist::AllowlistPaths,
-    /// Concrete handle to the currently-installed [`SwitchableEmbedder`]
+    /// Concrete handle to the currently-installed
+    /// [`SwitchableEmbedder`](crate::service::embedder_supervisor::SwitchableEmbedder)
     /// (epic #3524 slice 6 — PR 1/5).
     ///
     /// Why: `embedder_slot` only holds the trait-object view

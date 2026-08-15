@@ -32,6 +32,9 @@
 //!   path self-deadlocks: the second acquisition uses a different descriptor.
 //! - **Blocking.** Acquisition blocks the calling thread. Async callers must
 //!   run it on a blocking-safe thread (e.g. `tokio::task::spawn_blocking`).
+//!
+//! [`with_exclusive_lock`]: crate::file_lock::with_exclusive_lock
+//! [`lock_path`]: crate::file_lock::lock_path
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};

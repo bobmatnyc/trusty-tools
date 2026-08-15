@@ -26,6 +26,12 @@
 //! Test: `cargo test -p trusty-agents-common skills::` exercises every
 //! submodule in place; `cargo test -p trusty-mpm` exercises the re-exported
 //! call sites end-to-end.
+//!
+//! [`manifest`]: crate::skills::manifest
+//! [`deployer`]: crate::skills::deployer
+//! [`tiers`]: crate::skills::tiers
+//! [`unmanaged`]: crate::skills::unmanaged
+//! [`reconcile`]: crate::skills::reconcile
 
 pub mod deployer;
 pub mod manifest;

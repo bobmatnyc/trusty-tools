@@ -260,7 +260,7 @@ impl MemoryService {
     /// are degree-1 leaves and only 7.2% have degree >= 5, so a
     /// top-degree slice carries essentially all of the visible structure and
     /// everything else stays one click away.
-    /// What: runs [`KnowledgeGraph::top_degree_subgraph`] over the resident
+    /// What: runs `KnowledgeGraph::top_degree_subgraph` over the resident
     /// adjacency (O(V log V + E), no disk I/O) and pairs the result with the
     /// palace-wide totals the header needs to report honestly.
     /// Test: `kg_graph_seed_ranks_by_degree`, `kg_graph_seed_clamps_limit`.
@@ -290,7 +290,7 @@ impl MemoryService {
     /// Why: click-to-expand needs "what points AT this node", which no HTTP
     /// endpoint could answer — `kg_query` is a subject prefix scan. Bounding
     /// the hops keeps one click on a hub from pulling the whole palace.
-    /// What: delegates to [`KnowledgeGraph::expand_neighbors`]. `direction`
+    /// What: delegates to `KnowledgeGraph::expand_neighbors`. `direction`
     /// and `max_hops` are already validated/clamped by the HTTP layer; they
     /// are echoed back so the client can see what actually ran.
     /// Test: `kg_neighbors_returns_incoming_edges`, `kg_neighbors_clamps_max_hops`.

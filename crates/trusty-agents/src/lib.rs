@@ -18,6 +18,12 @@
 //! Test: Compile-tested by the workspace build; the facade's plugin seam is
 //!       covered by `agent_plugin_lookup_returns_matching_plugin`.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 /// Re-export the harness adapter framework from trusty-agents-common.
 ///
 /// Why: Moved to trusty-agents-common in Wave 1 (issue #862, refs #830/#832) so

@@ -121,7 +121,7 @@ pub fn base_id(spec_id: &str) -> &str {
 /// the first layer, not the only one.
 /// What: returns `true` when any `/`- or `\`-split segment equals `..`, when
 /// `path` begins with `/` or `\`, when `path` begins with a Windows drive
-/// prefix (`C:`), or when [`Path::is_absolute`] reports true for the host
+/// prefix (`C:`), or when `Path::is_absolute` reports true for the host
 /// platform's own notion of absolute (belt-and-suspenders for native builds).
 /// Test: `super::tests::grammar_rejects_traversal`,
 /// `super::tests::grammar_rejects_absolute`.

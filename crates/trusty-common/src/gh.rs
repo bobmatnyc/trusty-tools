@@ -28,6 +28,16 @@
 //! rejection, and JSON parse failure — all without a real `gh` install, by
 //! pointing `PATH`-independent spawns at a nonexistent binary and by
 //! exercising the pure `GhOutput` policy combinators directly.
+//!
+//! [`GhCommand`]: crate::gh::GhCommand
+//! [`GhCommand::output_blocking`]: crate::gh::GhCommand::output_blocking
+//! [`GhCommand::output`]: crate::gh::GhCommand::output
+//! [`GhOutput`]: crate::gh::GhOutput
+//! [`GhCommand::stdout`]: crate::gh::GhCommand::stdout
+//! [`GhCommand::nonempty_stdout`]: crate::gh::GhCommand::nonempty_stdout
+//! [`GhCommand::json`]: crate::gh::GhCommand::json
+//! [`gh_available`]: crate::gh::gh_available
+//! [`GhError::NotInstalled`]: crate::gh::GhError::NotInstalled
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};

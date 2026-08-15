@@ -19,6 +19,9 @@
 //! Test: `tests` below — a valid signature, a wrong secret, an empty secret, a
 //! missing `sha256=` prefix, non-hex, a truncated digest, and a body mutated by
 //! one byte.
+//!
+//! [`verify_github_signature`]: crate::webhook_hmac::verify_github_signature
+//! [`SignatureVerdict`]: crate::webhook_hmac::SignatureVerdict
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;

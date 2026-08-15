@@ -2,7 +2,7 @@
 //!
 //! Why: before this module, three things described the same verb set and could
 //! silently drift: the `/help` body (hand-written in `command.rs`), the typed
-//! [`TrustyCommand`] enum, and the SM prompt's `SM_TOOLS.md` prose. The catalog
+//! [`TrustyCommand`](crate::client::TrustyCommand) enum, and the SM prompt's `SM_TOOLS.md` prose. The catalog
 //! collapses them into one structured registry. Every adapter renders its help
 //! from the same [`CommandSpec`] list, and the SM prompt's tool surface is
 //! rendered from the same registry, so a new verb is described in exactly one
@@ -10,7 +10,7 @@
 //! chat-core nucleus (see `docs/specs/chat-core.md`, SPEC-CHAT-CORE-01).
 //! What: [`CommandSpec`] is one entry per operator verb — its canonical name,
 //! aliases, argument list, one-line summary, and the [`SpecKind`] that ties it
-//! to a [`TrustyCommand`] variant (or marks it SM-only). [`catalog`] returns the
+//! to a [`TrustyCommand`](crate::client::TrustyCommand) variant (or marks it SM-only). [`catalog`] returns the
 //! full registry; [`help_text`] renders the `/help` body; [`render_sm_tools`]
 //! renders the `SM_TOOLS.md` prompt section. A unit test asserts the committed
 //! `SM_TOOLS.md` byte-matches [`render_sm_tools`] so the two can never diverge.
@@ -24,7 +24,7 @@ mod sm_tools;
 
 pub use sm_tools::{render_sm_tools, sm_ops_verbs, sm_session_verbs};
 
-/// How a catalog entry relates to the typed [`TrustyCommand`] surface.
+/// How a catalog entry relates to the typed [`TrustyCommand`](crate::client::TrustyCommand) surface.
 ///
 /// Why: most catalog verbs map onto a `TrustyCommand` variant an adapter can
 /// dispatch, but a few SM prompt verbs (memory, goals) are SM-only — the SM
@@ -67,7 +67,7 @@ pub struct CommandSpec {
     pub args: &'static str,
     /// One-line operator-facing summary.
     pub summary: &'static str,
-    /// How the entry relates to the typed [`TrustyCommand`] surface.
+    /// How the entry relates to the typed [`TrustyCommand`](crate::client::TrustyCommand) surface.
     pub kind: SpecKind,
 }
 

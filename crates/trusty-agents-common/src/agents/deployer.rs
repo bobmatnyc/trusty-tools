@@ -60,8 +60,8 @@ use crate::agents::metadata::agent_metadata_from_str;
 /// outcome to render that summary and to know whether any work was skipped.
 /// What: filenames grouped into freshly written, skipped (user-modified),
 /// unchanged (checksum already current), and silently adopted (untracked but
-/// byte-identical to the fresh composition — see [`adopted`]).
-/// [`untracked_modified`] is a subset of `skipped`: files that were absent
+/// byte-identical to the fresh composition — see `adopted`).
+/// `untracked_modified` is a subset of `skipped`: files that were absent
 /// from the manifest AND differ from the fresh composition, which is the
 /// specific case `--reset-agents` exists to resolve (issue #2504).
 /// Test: every `deploy_*` test asserts on these vectors.

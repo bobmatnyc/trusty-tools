@@ -67,6 +67,9 @@
 //! `post_index_file_exhausts_retries_and_returns_send_failed` in the `tests`
 //! module below, plus the #2798 saturation test
 //! `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`.
+//!
+//! [`ensure_project_indexed`]: crate::search_index::ensure_project_indexed
+//! [`index_files_best_effort`]: crate::search_index::index_files_best_effort
 
 use std::path::Path;
 

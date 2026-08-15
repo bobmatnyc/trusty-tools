@@ -15,6 +15,9 @@
 //! `cargo run -- status` from inside this repo → prints `[trusty-search]`
 //! detected via `.git`. `cargo test --workspace` → all tests pass.
 
+// See the rationale on the library crate root.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 mod commands;
 mod detect;
 

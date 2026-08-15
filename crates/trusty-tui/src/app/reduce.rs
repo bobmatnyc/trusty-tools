@@ -49,7 +49,7 @@ const PAGE_SCROLL: isize = 10;
 /// What: dispatches on every [`ReplEvent`] variant (see the module doc
 /// comment for what's out of scope). `Key` events are further dispatched by
 /// [`apply_key`].
-/// Test: [`tests`] below cover every variant this function actually changes
+/// Test: `tests` below cover every variant this function actually changes
 /// state for.
 pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
     match ev {

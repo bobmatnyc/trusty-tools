@@ -37,6 +37,9 @@
 //! Test: `page_stops_at_the_budget`, `page_always_makes_progress`,
 //! `bound_catchup_leaves_a_fitting_digest_alone`,
 //! `paging_reaches_every_session_in_order`.
+//!
+//! [`bound_catchup`]: crate::daemon::catchup_bounds::bound_catchup
+//! [`BoundedCatchup::truncation_notice`]: crate::daemon::catchup_bounds::BoundedCatchup::truncation_notice
 
 use serde::Serialize;
 use trusty_common::catchup::git::CommitSummary;

@@ -49,7 +49,7 @@ pub(crate) async fn telegram(url: &str, cmd: TelegramCmd) -> anyhow::Result<()> 
 /// Why: pairing the Telegram bot to this daemon needs an out-of-band shared
 /// secret; `tm telegram pair` asks the local daemon for a short code and prints
 /// both the `/pair` command and a `t.me` deep link the operator can use.
-/// What: calls `POST /pair/request` via the shared [`CommandExecutor`] and
+/// What: calls `POST /pair/request` via the shared `CommandExecutor` and
 /// prints the code, its TTL, the `/pair <code>` command, and the deep link.
 /// Test: covered by the executor's `pair_request_returns_code` test.
 async fn telegram_pair(url: &str) -> anyhow::Result<()> {
@@ -79,7 +79,7 @@ async fn telegram_pair(url: &str) -> anyhow::Result<()> {
 ///
 /// Why: operators need to know whether a Telegram chat is already paired with
 /// the daemon — and which one — without digging through logs.
-/// What: calls `GET /pair/status` via the shared [`DaemonClient`] and prints
+/// What: calls `GET /pair/status` via the shared `DaemonClient` and prints
 /// `paired` plus the registered `chat_id`, or `unpaired` when no chat is bound.
 /// Test: covered by the client's `pair_status_deserializes` test.
 async fn telegram_status(url: &str) -> anyhow::Result<()> {

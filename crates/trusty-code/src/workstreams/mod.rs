@@ -30,7 +30,7 @@
 //! [`Workstream`] (the domain record — see [`model`]); [`WorkstreamStore`]
 //! (the flat-JSON, atomic-write, fingerprint-reload store plus boot
 //! reconciliation — see [`store`]); path/filename derivation from the
-//! daemon's [`crate::binding::ProjectBinding`] (see [`path`]); (issue #3294)
+//! daemon's [`crate::binding::ProjectBinding`] (see `path`); (issue #3294)
 //! [`activation`] — the activation-lock exclusivity layer above the store
 //! (`ActiveConflict`/force-switch semantics `WorkstreamStore::set_active`
 //! deliberately left out) — [`protocol`], the full `workstream.*`
@@ -55,6 +55,17 @@
 //!
 //! Test: `cargo test -p trusty-code workstreams::` exercises every submodule
 //! in place; see each submodule's own `Test:` line for specifics.
+//!
+//! [`Workstream`]: crate::workstreams::Workstream
+//! [`WorkstreamId`]: crate::workstreams::WorkstreamId
+//! [`WorkstreamState`]: crate::workstreams::WorkstreamState
+//! [`model`]: crate::workstreams::model
+//! [`WorkstreamStore`]: crate::workstreams::WorkstreamStore
+//! [`store`]: crate::workstreams::store
+//! [`activation`]: crate::workstreams::activation
+//! [`protocol`]: crate::workstreams::protocol
+//! [`sse`]: crate::workstreams::sse
+//! [`store::WorkstreamStore`]: crate::workstreams::store::WorkstreamStore
 
 pub mod activation;
 pub mod model;

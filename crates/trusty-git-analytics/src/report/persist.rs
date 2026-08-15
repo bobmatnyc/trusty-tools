@@ -74,7 +74,7 @@ fn computed_at_secs() -> i64 {
 ///
 /// # Errors
 ///
-/// Returns [`ReportError::Core`] if any SQLite operation fails.
+/// Returns [`ReportError::Core`](crate::report::ReportError::Core)(crate::report::ReportError::Core) if any SQLite operation fails.
 pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize> {
     if data.weekly_activity.is_empty() {
         return Ok(0);
@@ -211,7 +211,7 @@ pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize>
 ///
 /// # Errors
 ///
-/// Returns [`ReportError::Core`] if any SQLite operation fails.
+/// Returns [`ReportError::Core`](crate::report::ReportError::Core)(crate::report::ReportError::Core) if any SQLite operation fails.
 pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize> {
     if data.weekly_activity.is_empty() {
         return Ok(0);

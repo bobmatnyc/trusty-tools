@@ -18,6 +18,9 @@
 //! Test: `splash_art_is_nonempty`, `splash_art_contains_wordmark_glyphs`,
 //! `shade_bucket_buckets_block_glyphs_amber`,
 //! `shade_bucket_default_bucket_for_unclassified_glyph` below.
+//!
+//! [`TRUSTY_SPLASH_ART`]: crate::banner::TRUSTY_SPLASH_ART
+//! [`shade_bucket`]: crate::banner::shade_bucket
 
 /// Embedded trusty splash art: three compact block-robot faces plus the
 /// dot-matrix "TRUSTY" wordmark.

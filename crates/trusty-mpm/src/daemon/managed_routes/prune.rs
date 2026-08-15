@@ -106,7 +106,7 @@ fn default_dry_run() -> bool {
 /// directories. This endpoint removes them safely, never touching a directory
 /// that belongs to an active session.
 /// What: collects active workspace paths and the managed workspace root, then
-/// delegates to [`SessionManager::prune_orphaned_worktrees`]. Returns
+/// delegates to [`SessionManager::prune_orphaned_worktrees`](crate::session_manager::SessionManager::prune_orphaned_worktrees). Returns
 /// `{ dry_run, paths: ["..."], owner_unknown_paths: ["..."], skipped_dirty: [...] }`
 /// (#3649 added the second field: worktrees conservatively skipped because
 /// their ownership sentinel had no resolvable owner — never auto-deleted,

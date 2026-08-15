@@ -6,7 +6,7 @@
 //! `~/.claude.json` file —
 //! [`crate::core::home_trust_seed::preseed_home_trust`] (workspace trust +
 //! renderer-upsell dismissal) and
-//! [`crate::core::session_launch::settings::preseed_workspace_trust`]
+//! `crate::core::session_launch::settings::preseed_workspace_trust`
 //! (workspace trust + `enabledMcpjsonServers` approval). Both run inside the
 //! daemon, which provisions and spawns sessions CONCURRENTLY: the workspace
 //! provisioner calls the former and then, via `prepare_session`, the latter,

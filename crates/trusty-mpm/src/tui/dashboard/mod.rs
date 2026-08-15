@@ -325,7 +325,7 @@ impl DashboardState {
     }
 }
 
-/// Render a [`SessionStatus`] as a status indicator glyph.
+/// Render a [`SessionStatus`](crate::core::session::SessionStatus) as a status indicator glyph.
 ///
 /// Why: the sidebar shows a compact coloured indicator per session so the
 /// operator's eye jumps to trouble; centralising the mapping keeps the row

@@ -12,6 +12,9 @@
 //! appends a provenance note so the model knows the context was clipped. A
 //! missing file yields `None`, never an error.
 //! Test: `project_context::tests` cover present/oversized/missing/positioning.
+//!
+//! [`load_project_context`]: crate::project_context::load_project_context
+//! [`MAX_CONTEXT_BYTES`]: crate::project_context::MAX_CONTEXT_BYTES
 
 use std::path::{Path, PathBuf};
 

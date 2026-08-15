@@ -16,7 +16,7 @@
 //! down/unreachable/misconfigured subsystem is folded into the report as a
 //! reportable state, not an `Err`. Submodules: [`daemons`] (daemon `/health`
 //! probes), [`credentials`] (provider key tiers), [`registry_counts`] (agent/
-//! skill discovery counts), [`format`] (human-readable rendering).
+//! skill discovery counts), [`format`](crate::system_status::format) (human-readable rendering).
 //! Test: `tests` below cover report assembly (unknown agent name, JSON
 //! shape, a `/model`-override-aware report); per-subsystem behaviour is
 //! tested in each submodule.

@@ -51,7 +51,7 @@
 /// reset, each gated by that workspace's OWN resolved harness plan (so an
 /// agent one project's manifest excludes is never resurrected there — the
 /// #2462 cross-warning). Only takes effect when `reset_agents` is `Some`.
-/// What: resolves [`FrameworkPaths::default`], calls [`install_to`], removes a
+/// What: resolves `FrameworkPaths::default`, calls [`install_to`], removes a
 /// stale pre-#4752 `instructions/INSTRUCTIONS.md`, deploys agents and skills,
 /// optionally resets the requested agent scope (user-level, then every intact
 /// session workspace when requested), then calls [`install_claude_hooks`].
@@ -402,7 +402,7 @@ pub(crate) fn mpm_hook_additions() -> serde_json::Value {
     trusty_mpm::core::standalone::hooks::mpm_hook_additions()
 }
 
-/// Render per-file status lines for an agent [`DeployResult`].
+/// Render per-file status lines for an agent `DeployResult`.
 ///
 /// Why: `install` and `session start` both print agent deploy results; one
 /// formatter keeps the output identical and the call sites small. Issue
@@ -414,7 +414,7 @@ pub(crate) fn mpm_hook_additions() -> serde_json::Value {
 /// file, a `~ <file> (skipped — user-modified)` line per skipped file the
 /// manifest already tracked with a diverged checksum, a `= <file>
 /// (unchanged)` line per already-current file, and — ONLY when
-/// [`DeployResult::untracked_modified`] is non-empty — one trailing summary
+/// `DeployResult::untracked_modified` is non-empty — one trailing summary
 /// line naming the count and `tm install --reset-agents` (not one line per
 /// file, to stay readable when dozens of files predate manifest tracking).
 /// Test: covered indirectly by `install_writes_all_artifacts`.
@@ -465,7 +465,7 @@ pub(crate) fn deploy_report_lines(
     lines
 }
 
-/// Render per-file status lines plus a summary for a [`ResetResult`].
+/// Render per-file status lines plus a summary for a `ResetResult`.
 ///
 /// Why: `--reset-agents` (issue #2504) can touch dozens of files at once;
 /// the operator needs both the per-file detail and a one-line total so a
@@ -473,7 +473,7 @@ pub(crate) fn deploy_report_lines(
 /// What: a `\u{27f3} <file> (recomposed, backed up)` or `\u{27f3} <file>
 /// (recomposed)` line per rewritten file, a `\u{25c6} <file> (adopted)` line
 /// per already-current file, a `? <name>` line per requested name with no
-/// matching source agent, and — for a [`reset_project_agents`](trusty_mpm::core::agent_reset::reset_project_agents)
+/// matching source agent, and — for a `reset_project_agents`
 /// result (issue #2508) — a `\u{2298} <name> (excluded by this workspace's
 /// manifest)` line per requested name the target's own harness plan rejected,
 /// followed by one summary line with all five totals.
@@ -521,14 +521,14 @@ pub(crate) fn reset_report_lines(
     lines
 }
 
-/// Render a [`deploy_skills`] result into human-readable status lines.
+/// Render a `deploy_skills` result into human-readable status lines.
 ///
 /// Why: skills deploy alongside agents during `tm install`, and the operator
 /// needs the same per-file feedback (deployed / skipped / unchanged) so a
 /// fresh install visibly populates `~/.claude/skills/` instead of leaving the
 /// directory silently empty (#386). Unlike agents, skills carry no inheritance,
 /// so there is no composed-chain to show — a plain content copy is reported.
-/// What: maps each filename in the [`DeployStats`] vectors to a status line
+/// What: maps each filename in the `DeployStats` vectors to a status line
 /// using the same glyph vocabulary as [`deploy_report_lines`] (`\u{2713}`
 /// deployed, `~` skipped, `=` unchanged).
 /// Test: `install_then_deploy_deploys_skills` asserts a deployed skill line

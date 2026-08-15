@@ -23,9 +23,9 @@
 /// interior blank lines (which carry paragraph-break meaning) intact.
 /// What: Trims trailing whitespace first, then drops leading whitespace-only
 /// lines one at a time. Interior blank lines are untouched.
-/// Test: [`tests::trim_surrounding_blank_lines_strips_leading_and_trailing`],
-/// [`tests::trim_surrounding_blank_lines_preserves_when_no_blanks`],
-/// [`tests::trim_surrounding_blank_lines_empty_input`].
+/// Test: `tests::trim_surrounding_blank_lines_strips_leading_and_trailing`,
+/// `tests::trim_surrounding_blank_lines_preserves_when_no_blanks`,
+/// `tests::trim_surrounding_blank_lines_empty_input`.
 pub fn trim_surrounding_blank_lines(s: &str) -> String {
     let trimmed_end = s.trim_end();
     let mut start = 0usize;
@@ -58,9 +58,9 @@ pub fn trim_surrounding_blank_lines(s: &str) -> String {
 /// tight, compact response block.
 /// What: Returns a string where every whitespace-only line is dropped;
 /// non-blank lines are preserved verbatim and rejoined with single `\n`s.
-/// Test: [`tests::strip_interior_blank_lines_drops_all_blanks`],
-/// [`tests::strip_interior_blank_lines_drops_single_blank`],
-/// [`tests::strip_interior_blank_lines_treats_whitespace_only_as_blank`].
+/// Test: `tests::strip_interior_blank_lines_drops_all_blanks`,
+/// `tests::strip_interior_blank_lines_drops_single_blank`,
+/// `tests::strip_interior_blank_lines_treats_whitespace_only_as_blank`.
 pub fn strip_interior_blank_lines(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut first = true;

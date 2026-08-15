@@ -137,7 +137,7 @@ UNVERIFIABLE) and `reason` (one short sentence)."#
 /// diff cannot settle instead of being forced into a binary choice.  The schema
 /// is declared in
 /// its natural shape and then made OpenAI strict-mode compliant in one pass by
-/// [`enforce_strict_mode`] (every object node gets `additionalProperties:false`
+/// [`enforce_strict_mode`](crate::llm::enforce_strict_mode) (every object node gets `additionalProperties:false`
 /// and all properties listed in `required`).  `reason` thus becomes required
 /// for strict providers; the `VerifyJudgment` deserializer keeps
 /// `#[serde(default)]` on it so lenient providers that omit it still parse.

@@ -13,6 +13,11 @@
 //! one shared layer.
 //! Test: `cargo test -p trusty-mpm-client` covers URL construction, the command
 //! model, and the executor against an in-process test daemon.
+//!
+//! [`DaemonClient`]: crate::client::DaemonClient
+//! [`TrustyCommand`]: crate::client::TrustyCommand
+//! [`CommandResult`]: crate::client::CommandResult
+//! [`CommandExecutor`]: crate::client::CommandExecutor
 
 pub mod catalog;
 pub mod command;

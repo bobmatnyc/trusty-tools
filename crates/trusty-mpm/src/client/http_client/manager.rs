@@ -25,7 +25,7 @@
 //!    degrade gracefully without a second call. `chat.rs`'s 400/502/503
 //!    branches return `{ error, message }` with an actionable `message`
 //!    (never a `reply`, since there is no assistant text to synthesize).
-//!    [`Self::manager_digest`]/[`Self::manager_chat`] therefore parse the
+//!    `Self::manager_digest`/`Self::manager_chat` therefore parse the
 //!    response body FIRST, regardless of status code, and only fall back to
 //!    treating the response as a hard error when the body carries neither
 //!    shape — never blindly call `response_or_body_error` (which would
@@ -34,7 +34,7 @@
 //!    answers `404` for a legitimate, mounted request — `scope=project:<name>`
 //!    naming an unregistered project (`"project '{name}' is not registered"`).
 //!    Treating every `404` as "upgrade your daemon" would misreport a typo'd
-//!    project name as a version problem. [`Self::manager_endpoint_available`]
+//!    project name as a version problem. `Self::manager_endpoint_available`
 //!    feature-detects via the already-live `GET /api/v1/manager/version`
 //!    (`version.rs`'s `advertised_endpoints`, flips `available: true` once
 //!    WI-3/WI-4 land) and only degrades to `Ok(None)` when the endpoint is

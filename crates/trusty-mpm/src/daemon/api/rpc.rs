@@ -19,6 +19,9 @@
 //! Test: `is_loopback_accepts_v4_v6_loopback`, `is_loopback_rejects_public`, and
 //! the daemon integration test `rpc_rejects_non_loopback_peer` /
 //! `rpc_dispatches_tools_list_for_loopback`.
+//!
+//! [`is_loopback`]: crate::daemon::api::rpc::is_loopback
+//! [`StateBackend`]: crate::daemon::mcp_backend::StateBackend
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;

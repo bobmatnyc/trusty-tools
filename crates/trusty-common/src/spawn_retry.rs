@@ -30,6 +30,9 @@
 //! driver: which outcomes re-invoke the attempt, and how many times. The other
 //! half — that a started child's failures never carry errno 26 — is an OS
 //! property, asserted in the docs and unprovable here.
+//!
+//! [`retry_on_etxtbsy`]: crate::spawn_retry::retry_on_etxtbsy
+//! [`retry_on_etxtbsy_async`]: crate::spawn_retry::retry_on_etxtbsy_async
 
 use std::io;
 use std::time::Duration;
