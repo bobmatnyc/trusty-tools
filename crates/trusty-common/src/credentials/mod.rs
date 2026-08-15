@@ -63,6 +63,11 @@
 
 pub mod authority;
 mod dotenv;
+// #3451: the single shared test-only `EnvVarGuard`, consolidated from three
+// prior copies (this module's `resolver::tests`, `memory_core::dream::tests`,
+// and `memory_core::semantic_consolidation::tests`).
+#[cfg(test)]
+pub(crate) mod env_guard;
 mod error;
 mod file_store;
 mod handle;

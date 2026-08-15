@@ -1,6 +1,7 @@
 use super::guard::CompactionGuard;
 use super::helpers::{MERGED_CONTENT_CAP, char_safe_prefix, merge_into, now_secs};
 use super::*;
+use crate::credentials::env_guard::EnvVarGuard;
 use crate::memory_core::palace::{Palace, PalaceId, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -798,9 +799,10 @@ async fn dream_cycle_semantic_consolidation_skips_task_drawers() {
 #[tokio::test]
 // Audit finding (same class as #3607/#3608): `OPENROUTER_API_KEY` is also
 // mutated by `credentials::{resolver,dotenv}::tests` under
-// `#[serial(dotenv_credential_env)]`. This file's `EnvVarGuard` has no lock
-// of its own, so join that same serial group rather than relying on the
-// (false) assumption that this is the only mutator of the var.
+// `#[serial(dotenv_credential_env)]`. The shared `EnvVarGuard` (#3451,
+// `credentials::env_guard`) has no lock of its own, so join that same serial
+// group rather than relying on the (false) assumption that this is the only
+// mutator of the var.
 #[serial(dotenv_credential_env)]
 async fn dream_cycle_semantic_consolidation_no_inference() {
     // Ensure no env key is set for this test.
@@ -1779,43 +1781,6 @@ async fn apply_consolidation_result_keeps_original_when_kg_write_fails() {
         superseded_ids.is_empty(),
         "original must NOT be marked evictable when the superseded_by KG write failed"
     );
-}
-
-// ─── RAII env-var guard for tests ────────────────────────────────────────
-//
-// Safety: test-only; the tokio::test macro with default settings uses the
-// current-thread runtime so env-var mutation is single-threaded.
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<String>,
-}
-
-impl EnvVarGuard {
-    fn remove(key: &'static str) -> Self {
-        let previous = std::env::var(key).ok();
-        // Safety: test-only; every caller is `#[serial(dotenv_credential_env)]`.
-        unsafe { std::env::remove_var(key) };
-        Self { key, previous }
-    }
-
-    /// Set `key` to `value` for the guard's lifetime.
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var(key).ok();
-        // Safety: test-only; every caller is `#[serial(dotenv_credential_env)]`.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        // Safety: test-only; every caller is `#[serial(dotenv_credential_env)]`.
-        match &self.previous {
-            Some(v) => unsafe { std::env::set_var(self.key, v) },
-            None => unsafe { std::env::remove_var(self.key) },
-        }
-    }
 }
 
 /// Why: pins both halves of the reason [`dedup_only_config`] exists.
