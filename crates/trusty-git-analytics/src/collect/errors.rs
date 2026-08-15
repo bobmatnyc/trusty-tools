@@ -141,6 +141,29 @@ pub enum CollectError {
         pages: usize,
     },
 
+    /// A Linear GraphQL call returned a non-success status, with its body kept.
+    ///
+    /// Why (#5665): Linear answers an absent issue with HTTP 200 and
+    /// `data.issue: null`, so a non-2xx never means "issue not found" — it
+    /// means the call failed. Folding both into `Ok(None)` made a rejected API
+    /// key indistinguishable from a missing issue: a whole run against an
+    /// invalid-but-present key made 369 rejected calls, wrote zero rows, and
+    /// exited 0 with no diagnostic. The body is kept because Linear puts the
+    /// only actionable text there ("You need to authenticate to access this
+    /// operation.").
+    #[error("Linear API error (HTTP {status}) for {identifier}: {message}")]
+    LinearApi {
+        /// HTTP status returned by Linear.
+        status: u16,
+        /// Issue identifier the call was for, e.g. `ENG-123`.
+        identifier: String,
+        /// Linear's response body, scrubbed of the client's API key and then
+        /// truncated. Scrubbing precedes truncation so a key straddling the
+        /// cut cannot survive as an unmatchable prefix — see
+        /// `collect::linear::client::redacted_body_excerpt`.
+        message: String,
+    },
+
     /// The remote asked us to slow down (HTTP 429 / 503).
     ///
     /// Distinguished from [`CollectError::Http`] so retry logic can honour a

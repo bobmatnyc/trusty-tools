@@ -189,15 +189,42 @@ Exits 0 (clean), 1 (type changes, listed on stdout) or 3 (no verdict, reason on
 stderr). Every unrecognised shape raises Unrecognised, which becomes exit 3 —
 rendering an unknown node as a placeholder would make two different unknowns
 compare equal, which is the one way this could report a false clean.
+
+The document loader, the type renderer, and the public-surface WALK live in
+`scripts/lib/rustdoc_walk.py`, shared with `scripts/extract_contracts.py`
+(#5724). What stays here is only this gate's own job: turning each walked
+position into a TYPE rendering, and comparing two sets of them. The walk itself
+decides what "the public surface" means, and this repo's common-entry-point rule
+makes a second copy of that judgement a defect.
 """
 
-import json
+import os
 import sys
 
+_LIB = os.environ.get("RUSTDOC_WALK_LIB")
+if not _LIB:
+    print(
+        "NO VERDICT: RUSTDOC_WALK_LIB is unset, so the shared rustdoc walker "
+        "could not be located. Nothing was compared.",
+        file=sys.stderr,
+    )
+    sys.exit(3)
+sys.path.insert(0, _LIB)
+
+try:
+    from rustdoc_walk import Unrecognised, SurfaceWalker, load, render_type
+except ImportError as e:
+    print(
+        "NO VERDICT: the shared rustdoc walker at %s could not be imported (%s). "
+        "Nothing was compared." % (_LIB, e),
+        file=sys.stderr,
+    )
+    sys.exit(3)
+
 # Bump ONLY after re-reading the rustdoc-types changelog for the versions being
-# added and confirming the node shapes below still hold. An unlisted version is
-# a NO VERDICT, which is the safe direction: a schema this differ half-
-# understands would compare rendering differences and call them API changes.
+# added and confirming the node shapes still hold. An unlisted version is a NO
+# VERDICT, which is the safe direction: a schema this differ half-understands
+# would compare rendering differences and call them API changes.
 #
 # 61 was added because the list said (57,) while every rustdoc on the machine
 # emitted 61, so `--crate <anything>` exited 3 and this differ compared nothing
@@ -211,362 +238,55 @@ import sys
 # that the toolchain has moved past it. Only running the differ on rustdoc JSON
 # the CURRENT toolchain produced can do that, and nothing does — see
 # docs/reference/semver-gate.md, "The staleness this cannot detect".
+#
+# This is deliberately NOT shared with extract_contracts.py. The documents this
+# gate reads are built by cargo-semver-checks' pinned nightly; the extractor's
+# are built by the repo's own. One constant would force whichever moved first to
+# accept a schema it had not been checked against.
 SUPPORTED_FORMAT_VERSIONS = (57, 61)
 
 NO_VERDICT = 3
 
 
-class Unrecognised(Exception):
-    pass
+def type_positions(doc):
+    """Render every public TYPE position in `doc` to a canonical string.
 
-
-# --- type rendering --------------------------------------------------------
-#
-# Renders a rustdoc `Type` node to a canonical string. Item ids are NEVER part
-# of the rendering: they are assigned per build and would differ between two
-# documents of identical source.
-
-
-def render_type(t):
-    if t is None:
-        return "()"  # rustdoc writes a missing return type as null
-    if isinstance(t, str):
-        if t == "infer":
-            return "_"
-        raise Unrecognised("type node (bare string) %r" % t)
-    if not isinstance(t, dict) or len(t) != 1:
-        raise Unrecognised("type node %r" % (sorted(t) if isinstance(t, dict) else t,))
-    kind, body = next(iter(t.items()))
-    if kind == "primitive" or kind == "generic":
-        return body
-    if kind == "resolved_path":
-        return body["path"] + render_args(body.get("args"))
-    if kind == "borrowed_ref":
-        return "&%s%s" % ("mut " if body.get("is_mutable") else "", render_type(body["type"]))
-    if kind == "raw_pointer":
-        return "*%s %s" % ("mut" if body.get("is_mutable") else "const", render_type(body["type"]))
-    if kind == "tuple":
-        return "(%s)" % ", ".join(render_type(x) for x in body)
-    if kind == "slice":
-        return "[%s]" % render_type(body)
-    if kind == "array":
-        return "[%s; %s]" % (render_type(body["type"]), body.get("len"))
-    if kind == "pat":
-        return "%s is <pattern>" % render_type(body["type"])
-    if kind == "impl_trait":
-        return "impl %s" % " + ".join(render_bound(b) for b in body)
-    if kind == "dyn_trait":
-        parts = [render_path(p["trait"]) for p in body.get("traits", [])]
-        if body.get("lifetime"):
-            parts.append(body["lifetime"])
-        return "dyn %s" % " + ".join(parts)
-    if kind == "qualified_path":
-        base = render_type(body["self_type"])
-        tr = body.get("trait")
-        if tr:
-            base = "<%s as %s>" % (base, render_path(tr))
-        return "%s::%s%s" % (base, body["name"], render_args(body.get("args")))
-    if kind == "function_pointer":
-        sig = body["sig"]
-        return "fn(%s) -> %s" % (
-            ", ".join(render_type(p[1]) for p in sig["inputs"]),
-            render_type(sig.get("output")),
-        )
-    raise Unrecognised("type variant %r" % kind)
-
-
-def render_path(p):
-    return p["path"] + render_args(p.get("args"))
-
-
-def render_args(a):
-    if a is None:
-        return ""
-    if isinstance(a, str):
-        if a == "return_type_notation":
-            return "(..)"
-        raise Unrecognised("generic-args node (bare string) %r" % a)
-    kind, body = next(iter(a.items()))
-    if kind == "angle_bracketed":
-        parts = [render_arg(x) for x in body.get("args", [])]
-        for c in body.get("constraints", []):
-            parts.append(c["name"] + render_constraint(c))
-        return "<%s>" % ", ".join(parts) if parts else ""
-    if kind == "parenthesized":
-        return "(%s) -> %s" % (
-            ", ".join(render_type(x) for x in body.get("inputs", [])),
-            render_type(body.get("output")),
-        )
-    if kind == "return_type_notation":
-        return "(..)"
-    raise Unrecognised("generic-args variant %r" % kind)
-
-
-def render_arg(x):
-    if isinstance(x, str):
-        if x == "infer":
-            return "_"
-        raise Unrecognised("generic-arg node (bare string) %r" % x)
-    kind, body = next(iter(x.items()))
-    if kind == "lifetime":
-        return body
-    if kind == "type":
-        return render_type(body)
-    if kind == "const":
-        return str(body.get("expr"))
-    if kind == "infer":
-        return "_"
-    raise Unrecognised("generic-arg variant %r" % kind)
-
-
-def render_constraint(c):
-    b = c.get("binding")
-    if b is None:
-        return ""
-    if isinstance(b, str):
-        raise Unrecognised("assoc-item constraint (bare string) %r" % b)
-    kind, body = next(iter(b.items()))
-    if kind == "equality":
-        if "type" in body:
-            return " = %s" % render_type(body["type"])
-        if "constant" in body:
-            return " = %s" % body["constant"].get("expr")
-        raise Unrecognised("equality binding %r" % sorted(body))
-    if kind == "constraint":
-        return ": %s" % " + ".join(render_bound(x) for x in body)
-    raise Unrecognised("assoc-item-constraint variant %r" % kind)
-
-
-def render_bound(b):
-    if isinstance(b, str):
-        raise Unrecognised("generic-bound node (bare string) %r" % b)
-    kind, body = next(iter(b.items()))
-    if kind == "trait_bound":
-        return render_path(body["trait"])
-    if kind == "outlives":
-        return body
-    if kind == "use":
-        return "use<..>"
-    raise Unrecognised("generic-bound variant %r" % kind)
-
-
-# --- surface walk ----------------------------------------------------------
-#
-# Walks from the crate root through public modules, collecting one entry per
-# TYPE POSITION rather than per item, so a report names which parameter moved
-# instead of printing two whole signatures for the reader to diff by eye.
-
-
-class Walker:
-    def __init__(self, doc):
-        self.index = doc["index"]
-        self.root = doc["root"]
-        self.out = {}
-        self.seen = set()
-
-    def item(self, iid):
-        it = self.index.get(str(iid))
-        if it is None and not isinstance(iid, str):
-            it = self.index.get(iid)
-        if it is None:
-            raise Unrecognised("item id %r is referenced but absent from the index" % (iid,))
-        return it
-
-    @staticmethod
-    def public(it):
-        return it.get("visibility") == "public"
-
-    def run(self):
-        root = self.item(self.root)
-        if "module" not in root["inner"]:
-            raise Unrecognised("crate root item is not a module")
-        self.module(self.root, [root.get("name") or "crate"])
-        return self.out
-
-    def module(self, mid, prefix):
-        key = ("mod", str(mid), "::".join(prefix))
-        if key in self.seen:
-            return
-        self.seen.add(key)
-        for cid in self.item(mid)["inner"]["module"]["items"]:
-            self.child(cid, prefix)
-
-    def child(self, cid, prefix):
-        it = self.item(cid)
+    Why: keyed per position rather than per item so a report names the parameter
+      that moved instead of printing two whole signatures to diff by eye.
+    What: consumes `SurfaceWalker.walk()` and renders the type at each position.
+      Item KINDS that carry no type of their own — modules, structs, enums,
+      traits, variants — are walked for their children and contribute no key.
+    Test: `scripts/check_semver_types_selftest.sh`.
+    """
+    out = {}
+    for kind, qual, it in SurfaceWalker(doc).walk():
         inner = it["inner"]
-        kind = next(iter(inner))
-        if kind == "use":
-            self.reexport(inner["use"], prefix)
-            return
-        name = it.get("name")
-        if not self.public(it) or name is None:
-            return
-        self.emit(kind, inner, cid, prefix + [name])
-
-    def reexport(self, u, prefix):
-        """`pub use` — part of the public surface, and often the only path to it.
-
-        A re-export of a foreign crate's item is not this crate's surface to
-        keep, so it is passed over rather than treated as an unknown shape.
-        """
-        tid = u.get("id")
-        if tid is None:
-            return
-        it = self.index.get(str(tid)) or (
-            self.index.get(tid) if not isinstance(tid, str) else None
-        )
-        if it is None or it.get("crate_id") != 0:
-            return
-        if u.get("is_glob"):
-            if "module" in it["inner"]:
-                self.module(tid, prefix)
-            return
-        key = ("use", str(tid), "::".join(prefix), u.get("name") or "")
-        if key in self.seen:
-            return
-        self.seen.add(key)
-        inner = it["inner"]
-        self.emit(next(iter(inner)), inner, tid, prefix + [u.get("name") or it.get("name") or "?"])
-
-    def emit(self, kind, inner, iid, path):
-        qual = "::".join(path)
-        if kind == "module":
-            self.module(iid, path)
-        elif kind == "function":
-            self.function(qual, inner["function"])
-        elif kind == "constant":
-            self.out["const %s" % qual] = render_type(inner["constant"]["type"])
-        elif kind == "static":
-            self.out["static %s" % qual] = render_type(inner["static"]["type"])
-        elif kind == "type_alias":
-            self.out["type %s" % qual] = render_type(inner["type_alias"]["type"])
-        elif kind == "struct":
-            self.struct(path, inner["struct"])
-        elif kind == "enum":
-            self.enum(path, inner["enum"])
-        elif kind == "union":
-            self.union(path, inner["union"])
-        elif kind == "trait":
-            self.trait(path, inner["trait"])
-
-    def function(self, qual, fn):
-        sig = fn["sig"]
-        for i, pair in enumerate(sig["inputs"]):
-            # Keyed by POSITION as well as name: renaming a parameter is not an
-            # API change, but the position it sits in is what a caller passes.
-            self.out["fn %s(#%d %s)" % (qual, i, pair[0])] = render_type(pair[1])
-        self.out["fn %s -> " % qual] = render_type(sig.get("output"))
-
-    def struct(self, path, st):
-        kind = st["kind"]
-        if isinstance(kind, dict) and "plain" in kind:
-            for fid in kind["plain"]["fields"]:
-                self.named_field(fid, path)
-        elif isinstance(kind, dict) and "tuple" in kind:
-            for i, fid in enumerate(kind["tuple"]):
-                self.positional_field(fid, path, i)
-        self.impls(path, st.get("impls", []))
-
-    def union(self, path, un):
-        for fid in un.get("fields", []):
-            self.named_field(fid, path)
-        self.impls(path, un.get("impls", []))
-
-    def named_field(self, fid, path):
-        f = self.item(fid)
-        if not self.public(f):
-            return
-        self.out["field %s.%s" % ("::".join(path), f.get("name"))] = render_type(
-            f["inner"]["struct_field"]
-        )
-
-    def positional_field(self, fid, path, i):
-        if fid is None:  # a stripped (non-public) tuple field
-            return
-        f = self.item(fid)
-        if not self.public(f):
-            return
-        self.out["field %s.%d" % ("::".join(path), i)] = render_type(f["inner"]["struct_field"])
-
-    def enum(self, path, en):
-        for vid in en.get("variants", []):
-            v = self.item(vid)
-            vk = v["inner"]["variant"]["kind"]
-            vpath = path + [v.get("name") or "?"]
-            if isinstance(vk, dict) and "tuple" in vk:
-                for i, fid in enumerate(vk["tuple"]):
-                    self.positional_field(fid, vpath, i)
-            elif isinstance(vk, dict) and "struct" in vk:
-                for fid in vk["struct"]["fields"]:
-                    f = self.item(fid)
-                    self.out["field %s.%s" % ("::".join(vpath), f.get("name"))] = render_type(
-                        f["inner"]["struct_field"]
-                    )
-        self.impls(path, en.get("impls", []))
-
-    def trait(self, path, tr):
-        for iid in tr.get("items", []):
-            self.assoc(self.item(iid), "::".join(path))
-
-    def impls(self, path, impl_ids):
-        """Inherent and real trait impls. Synthetic and blanket impls are skipped.
-
-        Both are rustdoc's rendering of impls the crate never wrote — auto
-        traits, and every `impl<T: Display> ToString for T` in core — so they
-        move with the toolchain rather than with this crate's API.
-        """
-        owner = "::".join(path)
-        for iid in impl_ids:
-            im = self.item(iid)["inner"]["impl"]
-            if im.get("is_synthetic") or im.get("blanket_impl"):
-                continue
-            tr = im.get("trait")
-            for mid in im.get("items", []):
-                it = self.item(mid)
-                if tr is None:
-                    if not self.public(it):
-                        continue
-                    self.assoc(it, owner)
-                else:
-                    # Qualified, because an inherent `new` and a trait `new` are
-                    # two different callables on the same type.
-                    self.assoc(it, "<%s as %s>" % (owner, render_path(tr)))
-
-    def assoc(self, it, owner):
-        inner = it["inner"]
-        kind = next(iter(inner))
-        qual = "%s::%s" % (owner, it.get("name") or "?")
         if kind == "function":
-            self.function(qual, inner["function"])
+            sig = inner["function"]["sig"]
+            for i, pair in enumerate(sig["inputs"]):
+                # Keyed by POSITION as well as name: renaming a parameter is not
+                # an API change, but the position it sits in is what a caller
+                # passes.
+                out["fn %s(#%d %s)" % (qual, i, pair[0])] = render_type(pair[1])
+            out["fn %s -> " % qual] = render_type(sig.get("output"))
+        elif kind == "constant":
+            out["const %s" % qual] = render_type(inner["constant"]["type"])
+        elif kind == "static":
+            out["static %s" % qual] = render_type(inner["static"]["type"])
+        elif kind == "type_alias":
+            out["type %s" % qual] = render_type(inner["type_alias"]["type"])
+        elif kind in ("field", "index_field"):
+            out["field %s" % qual] = render_type(inner["struct_field"])
         elif kind == "assoc_const":
-            self.out["assoc const %s" % qual] = render_type(inner["assoc_const"]["type"])
+            out["assoc const %s" % qual] = render_type(inner["assoc_const"]["type"])
         elif kind == "assoc_type":
             t = inner["assoc_type"].get("type")
             if t is not None:
-                self.out["assoc type %s" % qual] = render_type(t)
+                out["assoc type %s" % qual] = render_type(t)
+    return out
 
 
 # --- driver ----------------------------------------------------------------
-
-
-def load(path, label):
-    try:
-        with open(path) as fh:
-            doc = json.load(fh)
-    except OSError as e:
-        raise Unrecognised("%s rustdoc JSON %s could not be read: %s" % (label, path, e))
-    except ValueError as e:
-        raise Unrecognised("%s rustdoc JSON %s did not parse: %s" % (label, path, e))
-    if not isinstance(doc, dict) or "index" not in doc or "root" not in doc:
-        raise Unrecognised("%s file %s is JSON but not a rustdoc document" % (label, path))
-    fv = doc.get("format_version")
-    if fv not in SUPPORTED_FORMAT_VERSIONS:
-        raise Unrecognised(
-            "%s rustdoc JSON %s has format_version %r; this differ understands %s. "
-            "Add the version to SUPPORTED_FORMAT_VERSIONS only after checking the "
-            "node shapes it changed." % (label, path, fv, list(SUPPORTED_FORMAT_VERSIONS))
-        )
-    return doc
 
 
 def main(argv):
@@ -575,16 +295,16 @@ def main(argv):
         return NO_VERDICT
     base_path, cur_path = argv[1], argv[2]
     try:
-        base_doc = load(base_path, "baseline")
-        cur_doc = load(cur_path, "current")
+        base_doc = load(base_path, "baseline", SUPPORTED_FORMAT_VERSIONS)
+        cur_doc = load(cur_path, "current", SUPPORTED_FORMAT_VERSIONS)
         if base_doc["format_version"] != cur_doc["format_version"]:
             raise Unrecognised(
                 "the two documents were written by different rustdoc JSON schemas "
                 "(%r vs %r); differences between them would be rendering, not API"
                 % (base_doc["format_version"], cur_doc["format_version"])
             )
-        base = Walker(base_doc).run()
-        cur = Walker(cur_doc).run()
+        base = type_positions(base_doc)
+        cur = type_positions(cur_doc)
     except Unrecognised as e:
         print("NO VERDICT: %s" % e, file=sys.stderr)
         return NO_VERDICT
@@ -774,7 +494,11 @@ echo "  current:  ${CURRENT_JSON}"
 
 RUN_LOG="${SCRATCH}/typediff.out"
 rc=0
-python3 "$PY_HELPER" "$BASELINE_JSON" "$CURRENT_JSON" > "$RUN_LOG" 2> "${SCRATCH}/typediff.err" || rc=$?
+# The walk itself lives in scripts/lib/rustdoc_walk.py, shared with
+# extract_contracts.py. Passed by path rather than discovered, so a helper run
+# from a scratch dir cannot silently import some other `rustdoc_walk`.
+RUSTDOC_WALK_LIB="${REPO_ROOT}/scripts/lib" \
+  python3 "$PY_HELPER" "$BASELINE_JSON" "$CURRENT_JSON" > "$RUN_LOG" 2> "${SCRATCH}/typediff.err" || rc=$?
 cat "$RUN_LOG"
 cat "${SCRATCH}/typediff.err" >&2
 
