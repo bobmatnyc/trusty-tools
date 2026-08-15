@@ -23,10 +23,10 @@ const USER_AGENT_VALUE: &str = "trusty-git-analytics/0.1";
 /// Linear GraphQL endpoint.
 const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
 
-/// Characters of a non-success response body carried into the error message.
+/// Characters of a Linear-authored payload carried into operator-visible text.
 ///
 /// Linear's auth rejection is under 300 bytes; the cap only stops a large
-/// HTML error page from being pasted into `stats.errors`.
+/// HTML error page from being pasted into `stats.errors` or a warn log.
 const MAX_ERROR_BODY_CHARS: usize = 500;
 
 /// A Linear issue fetched from the API.
@@ -49,7 +49,8 @@ pub struct LinearIssue {
 }
 
 /// Async Linear GraphQL client.
-#[derive(Debug)]
+///
+/// `Debug` is implemented by hand, not derived — see the impl below (#5733).
 pub struct LinearClient {
     client: Client,
     api_key: String,
@@ -59,6 +60,36 @@ pub struct LinearClient {
     /// [`LinearClient::with_endpoint`] so a mock server can answer, which is
     /// what makes the #5665 auth-failure arm assertable without a live key.
     endpoint: String,
+}
+
+/// What [`LinearClient`]'s `Debug` prints in place of the API key.
+const REDACTED_API_KEY: &str = "<redacted>";
+
+/// Redacting `Debug`: the derived one printed `api_key` verbatim (#5733).
+///
+/// Why: a derived `Debug` puts the live key into every `{:?}` of the client —
+/// a `tracing` field, an `anyhow` context, a panic message. No call site did
+/// that when this was written, so the fix is by construction: the type can no
+/// longer disclose the key, and a future call site needs no audit.
+/// What: renders `endpoint`, the field worth debugging, and replaces `api_key`
+/// with [`REDACTED_API_KEY`] — no prefix, no length, nothing derived from the
+/// value. The mask is unconditional because `LinearConfig::api_key` is an
+/// unvalidated `Option<String>` and nothing checks the key's shape: a
+/// fingerprint helper that echoes a head — such as
+/// [`trusty_common::credentials::redact_secret`], which returns the first four
+/// characters of any input longer than four — discloses four characters of
+/// real entropy for a key that is not `lin_`-prefixed. A guarantee that holds
+/// only for well-formed keys is not one this path can state. The `reqwest`
+/// client carries no credential (the key goes on a per-request header) and is
+/// dropped as noise; `finish_non_exhaustive` marks the elision.
+/// Test: `debug_never_renders_the_api_key`.
+impl std::fmt::Debug for LinearClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinearClient")
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &REDACTED_API_KEY)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LinearClient {
@@ -112,7 +143,8 @@ impl LinearClient {
     /// API key produces.
     /// Test: `fetch_issue_errors_on_auth_failure`,
     /// `fetch_issue_errors_on_server_failure`,
-    /// `fetch_issue_returns_none_for_absent_issue`.
+    /// `fetch_issue_returns_none_for_absent_issue`,
+    /// `graphql_errors_are_scrubbed_before_they_reach_the_log`.
     ///
     /// # Errors
     ///
@@ -163,11 +195,14 @@ impl LinearClient {
         let json: serde_json::Value = resp.json().await.map_err(CollectError::Http)?;
 
         // GraphQL errors are returned with 200 OK; check for errors array.
-        if let Some(errors) = json.get("errors").and_then(|v| v.as_array()) {
-            if !errors.is_empty() {
+        if let Some(errors) = json.get("errors") {
+            if errors.as_array().is_some_and(|a| !a.is_empty()) {
+                // #5733: Linear authored this array, so it can quote the key
+                // back — scrub before it reaches an operator's stderr.
+                let detail = redacted_body_excerpt(&errors.to_string(), &self.api_key);
                 tracing::warn!(
                     identifier = %identifier,
-                    errors = ?errors,
+                    errors = %detail,
                     "Linear GraphQL errors"
                 );
                 return Ok(None);
@@ -326,13 +361,14 @@ pub fn store_linear_issues(db: &Database, issues: &[LinearIssue]) -> crate::core
     Ok(count)
 }
 
-/// A credential-free excerpt of a non-success response body, capped at
+/// A credential-free excerpt of a Linear-authored response payload, capped at
 /// [`MAX_ERROR_BODY_CHARS`] characters.
 ///
-/// Why: the body is text this process did not author, and it now reaches an
-/// operator's terminal via `stats.errors` where it previously vanished into a
-/// `tracing::warn!`. A provider that echoes the submitted key back ("your key
-/// `lin_api_…` is invalid") would put a live credential there.
+/// Why: the payload is text this process did not author, and it reaches an
+/// operator either through `stats.errors` (the non-2xx body) or through
+/// `tracing::warn!` (the 200-with-GraphQL-errors array, #5733). A provider that
+/// echoes the submitted key back ("your key `lin_api_…` is invalid") would put
+/// a live credential in both. Both paths route here so the guard lands once.
 /// What: scrubs `api_key` out of the raw body through
 /// [`trusty_common::credentials::scrub_secrets`] FIRST, then trims and
 /// truncates — the #5239 ordering. Truncating first would cut a credential
@@ -344,7 +380,8 @@ pub fn store_linear_issues(db: &Database, issues: &[LinearIssue]) -> crate::core
 /// Test: `redacted_body_excerpt_scrubs_before_truncating`,
 /// `redacted_body_excerpt_clips_long_input`,
 /// `redacted_body_excerpt_keeps_short_input`,
-/// `an_api_key_echoed_in_the_error_body_never_reaches_the_message`.
+/// `an_api_key_echoed_in_the_error_body_never_reaches_the_message`,
+/// `graphql_errors_are_scrubbed_before_they_reach_the_log`.
 ///
 /// This removes the one credential this client holds. Per `scrub_secrets`'s own
 /// contract the result is lower-risk, not proven secret-free: a key under
@@ -543,6 +580,122 @@ mod tests {
             "a prefix of the key survived the cut — truncation ran first: {out}"
         );
         assert!(out.contains("[REDACTED]"), "key was not scrubbed: {out}");
+    }
+
+    /// Endpoint used by [`client_holding`]. Distinct from every key fixture, so
+    /// a "did the key survive" assertion cannot be satisfied by this instead.
+    const PROBE_ENDPOINT: &str = "http://endpoint.invalid/graphql";
+
+    /// Build a client holding `key` verbatim.
+    ///
+    /// Bypasses [`LinearClient::new`], which rejects an empty key — that arm is
+    /// why the empty case is otherwise unreachable, and `Debug` lives on the
+    /// type rather than on the constructor.
+    fn client_holding(key: &str) -> LinearClient {
+        LinearClient {
+            client: Client::new(),
+            api_key: key.to_string(),
+            endpoint: PROBE_ENDPOINT.to_string(),
+        }
+    }
+
+    /// The #5733 regression. `LinearClient` derived `Debug` over `api_key`, so
+    /// any `{:?}` of the client — a tracing field, an `anyhow` context, a panic
+    /// message — printed the live Linear key. Nothing formatted the client at
+    /// the time, which made the exposure latent rather than absent: it lived in
+    /// the type, so the next call site to debug-format one would have leaked
+    /// without touching this file.
+    ///
+    /// The shapes matter because nothing validates the key's format:
+    /// `LinearConfig::api_key` is a plain `Option<String>`. A masking rule that
+    /// echoed a fixed-length head would be safe only for `lin_`-prefixed keys
+    /// and would disclose real entropy for the rest, so the table covers a key
+    /// with no recognisable prefix, keys at and under a head length, and empty.
+    #[test]
+    fn debug_never_renders_the_api_key() {
+        // No single-character key here: `rendered` contains the mask and the
+        // endpoint, so a one-letter needle trips `contains` against those and
+        // fails a correct mask. Same trap `redact_secret`'s own contract test
+        // documents. Two characters is the shortest honest case.
+        let cases: &[(&str, &str)] = &[
+            (FAKE_API_KEY, "the lin_-prefixed key production expects"),
+            (
+                "9f3Kq7Zt2Wm4Bx8Lv6Nc1Rd5Ph0Sj",
+                "no prefix: entropy up front",
+            ),
+            ("ab7Q", "exactly a four-character head"),
+            ("x9", "shorter than a head"),
+            ("", "empty — unreachable via new(), guarded anyway"),
+        ];
+
+        for (key, why) in cases {
+            let client = client_holding(key);
+            let compact = format!("{client:?}");
+            let pretty = format!("{client:#?}");
+
+            for rendered in [&compact, &pretty] {
+                if !key.is_empty() {
+                    assert!(
+                        !rendered.contains(key),
+                        "{why}: the whole key reached Debug output: {rendered}"
+                    );
+                    // A head-echoing mask would pass the check above and still
+                    // disclose the first characters, which is the #5733 gap.
+                    let head: String = key.chars().take(4).collect();
+                    assert!(
+                        !rendered.contains(&head),
+                        "{why}: a leading fragment of the key survived: {rendered}"
+                    );
+                }
+                assert!(
+                    rendered.contains(REDACTED_API_KEY),
+                    "{why}: the key field was not masked: {rendered}"
+                );
+                assert!(
+                    rendered.contains("endpoint.invalid"),
+                    "{why}: redaction must not cost the endpoint, the field \
+                     worth debugging: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// The other half of #5733: Linear answers 200 with an `errors` array, and
+    /// that array is text this process did not author. A provider that quotes
+    /// the submitted key back put it on an operator's stderr on every such
+    /// response — not a rare path. `Ok(None)` stays the answer (#5665); only
+    /// the logging changes.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn graphql_errors_are_scrubbed_before_they_reach_the_log() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [{
+                    "message": format!("API key {FAKE_API_KEY} lacks the read scope")
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let got = mock_client(&server.uri())
+            .fetch_issue("ENG-1")
+            .await
+            .expect("a 200 carrying GraphQL errors is still a successful call");
+        assert!(got.is_none(), "the #5665 control flow is deliberately kept");
+
+        assert!(
+            !logs_contain(FAKE_API_KEY),
+            "the key reached the operator's terminal"
+        );
+        assert!(logs_contain("[REDACTED]"), "the key was not scrubbed");
+        assert!(
+            logs_contain("lacks the read scope"),
+            "redaction must not cost the reader Linear's diagnosis"
+        );
     }
 
     /// Build a client pointed at `endpoint`, holding [`FAKE_API_KEY`].
