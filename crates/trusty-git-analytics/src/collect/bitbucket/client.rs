@@ -47,7 +47,9 @@ const RETRY_BASE_MS: u64 = 1000;
 ///
 /// Bearer wins when both modes are populated — repo / workspace access
 /// tokens supersede legacy App Passwords.
-#[derive(Debug, Clone)]
+// #5770: no `Debug` derive, deliberately — both variants carry a live
+// Bitbucket credential, and nothing formats one, so the derive was pure risk.
+#[derive(Clone)]
 enum BbAuth {
     /// `Authorization: Bearer <token>` (workspace or repository access token).
     Bearer(String),
