@@ -1917,6 +1917,27 @@ async fn a_search_daemon_that_never_comes_up_refuses_the_audit() {
     );
 }
 
+/// What a search-guard call in this fixture waits on: a real forked `sh` reaching
+/// its `touch`. Only the OS scheduler decides when that happens, so the ceiling
+/// has to absorb a loaded machine. `spin_until_ready` polls every 50ms and returns
+/// on the first 200, so a wide ceiling costs an idle run nothing.
+#[cfg(unix)]
+const FORK_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// What an analyze-guard call in this fixture waits on: nothing. Forward, the flag
+/// already exists and `probe_once` returns before any poll; reversed, no code path
+/// creates the flag, so this deadline expiring IS the assertion. Kept short only so
+/// the refusal is prompt — what makes that refusal CORRECT is the absent flag the
+/// test checks, which no ceiling however wide could turn into a pass.
+#[cfg(unix)]
+const ANALYZE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// #5724 in one line: these two must not collapse back into a single per-direction
+/// budget. That collapse is what handed a forking call the non-forking call's
+/// deadline. Compile-time, so re-collapsing them never reaches a test run.
+#[cfg(unix)]
+const _: () = assert!(ANALYZE_BUDGET.as_secs() < FORK_BUDGET.as_secs());
+
 /// The two-daemon fixture the ordering test below drives in both directions.
 ///
 /// Returns a search guard and an analyze guard sharing one "trusty-search is up"
@@ -1926,14 +1947,13 @@ async fn a_search_daemon_that_never_comes_up_refuses_the_audit() {
 /// exists, which is what an analyze daemon that has been up for days does while
 /// its trusty-search is dead.
 ///
-/// `budget` is the readiness budget both guards get. The caller sets it per
-/// direction: a direction that waits on a real forked process needs a real one,
-/// and a direction whose flag is never created is decided by the fixture rather
-/// than by the clock.
+/// #5724: each guard's budget is a property of what THAT guard waits on, not of
+/// the direction the caller is driving. The budget used to be one per-direction
+/// argument, which handed the reversed direction's trailing search-guard call the
+/// 2s deadline chosen for its analyze call — and that call forks a real process.
 #[cfg(unix)]
 async fn degraded_stack(
     dir: &std::path::Path,
-    budget: std::time::Duration,
 ) -> (SearchGuard, crate::audit::AnalyzeGuard, std::path::PathBuf) {
     let flag = dir.join("trusty-search-is-up");
     let search_stub = stub_binary(
@@ -1947,9 +1967,9 @@ async fn degraded_stack(
     let analyze_stub = stub_binary(dir, "trusty-analyze-stub", "#!/bin/sh\nexit 1\n");
 
     let mut search = search_guard_on(serve_health_gated_on(flag.clone()).await, &search_stub);
-    search.startup_timeout = budget;
+    search.startup_timeout = FORK_BUDGET;
     let mut analyze = guard_on(serve_health_gated_on(flag.clone()).await, &analyze_stub);
-    analyze.startup_timeout = budget;
+    analyze.startup_timeout = ANALYZE_BUDGET;
 
     (search, analyze, flag)
 }
@@ -1973,18 +1993,16 @@ async fn degraded_stack(
 /// them pass. `the_audit_command_runs_the_search_guard_before_the_analyze_guard`
 /// pins that order at the call site.
 ///
-/// The two directions get different readiness budgets, and the short one is not
-/// what decides the failure: the reversed direction's flag file is never created
-/// by anything, which the assertion below states outright, so waiting longer
-/// changes nothing. The forward direction waits on a real forked process, which
-/// needs a budget wide enough to survive a loaded machine.
+/// The two guards get different readiness budgets — see [`FORK_BUDGET`] and
+/// [`ANALYZE_BUDGET`] for which wait each one bounds. The asymmetry is per GUARD,
+/// not per direction: both directions run a search guard that forks, and the
+/// reversed direction runs one after its analyze guard has already refused.
 #[cfg(unix)]
 #[tokio::test]
 async fn the_search_guard_recovers_a_stale_degraded_analyze_daemon() {
     // The fixed order, as `crate::commands::audit::run` runs it.
     let ok_dir = tempfile::tempdir().expect("create a temp dir");
-    let (search, analyze, flag) =
-        degraded_stack(ok_dir.path(), std::time::Duration::from_secs(20)).await;
+    let (search, analyze, flag) = degraded_stack(ok_dir.path()).await;
     assert!(!flag.exists(), "trusty-search starts this run down");
 
     ensure_search_daemon_with(&search)
@@ -2000,8 +2018,7 @@ async fn the_search_guard_recovers_a_stale_degraded_analyze_daemon() {
 
     // The reverse order, against an identical fixture.
     let bad_dir = tempfile::tempdir().expect("create a temp dir");
-    let (search, analyze, flag) =
-        degraded_stack(bad_dir.path(), std::time::Duration::from_secs(2)).await;
+    let (search, analyze, flag) = degraded_stack(bad_dir.path()).await;
     let err = crate::audit::ensure_analyze_daemon_with(&analyze)
         .await
         .expect_err("running the analyze guard first must refuse the audit");
@@ -2010,13 +2027,21 @@ async fn the_search_guard_recovers_a_stale_degraded_analyze_daemon() {
         "the analyze preflight must fail at its readiness poll against the live 503, got: {}",
         err.cause
     );
+    // This, not the budget, is why the refusal is correct: no code path created the
+    // flag, so no ceiling however wide would have turned this into a pass.
     assert!(
         !flag.exists(),
         "nothing in the analyze preflight starts trusty-search — that is the defect"
     );
+    // Forks a real process, exactly as the forward direction's call does, so it
+    // gets the same `FORK_BUDGET` rather than the analyze guard's 2s (#5724).
     ensure_search_daemon_with(&search)
         .await
         .expect("the search guard still works; it was simply run too late");
+    assert!(
+        flag.exists(),
+        "the late search guard must still have started the daemon"
+    );
 }
 
 /// #5670: the call site keeps the two preflights in the order the test above
