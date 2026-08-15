@@ -413,11 +413,12 @@ Publish-time `[patch.crates-io]` semantics are in
 
 ## Parallel Worktree Discipline
 
-Generic worktree discipline — main checkout inspection-only, provisioning off
-`origin/main`, branch-is-the-workstream, one worktree per independently
-reviewable PR outcome, subagent confinement, cleanup — lives in
-`Skill(skill="tm-workflow")`. It applies here in full. What follows is only what
-this repo adds.
+Generic worktree discipline — main checkout read-only for source (mechanically
+enforced; [ADR-0044](docs/adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
+[ADR-0048](docs/adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md)), provisioning off `origin/main`,
+branch-is-the-workstream, one worktree per independently reviewable PR outcome,
+subagent confinement, cleanup — lives in `Skill(skill="tm-workflow")`. It
+applies here in full. What follows is only what this repo adds.
 
 **End-to-end delivery chain:** accepted outcome → optional issue → worktree
 branch → one cohesive PR → applicable Rust gates → trusty-review gate →

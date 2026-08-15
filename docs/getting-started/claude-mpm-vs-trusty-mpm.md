@@ -5,7 +5,7 @@
 **trusty-mpm** (`tm`) is the **Rust** successor to the Python `claude-mpm` project. Both are session orchestrators, but trusty-mpm is a rebuilt, production-grade system with:
 - **Single binary:** `tm` (instead of scattered Python packages)
 - **Managed daemons:** Runs trusty-memory and trusty-search as system services, not ad-hoc
-- **Per-session git worktrees:** Each session gets its own isolated branch, automatically cleaned up on decommission
+- **Main-checkout by default, worktrees on request:** A session runs on the project's main checkout unless launched with `--worktree`; a main-checkout session and every agent it dispatches may write documents and configuration only, and a dispatched agent that writes is automatically granted its own git worktree, cleaned up on decommission
 - **MCP-native storage:** Memory and search are full MCP servers, not REST wrappers
 
 **Install trusty-mpm now:**
@@ -48,8 +48,8 @@ Both systems use the same **agent orchestration framework**:
 | **Primary binary** | `claude-mpm` (Python entry point) | `tm` / `trusty-mpm` (single binary) |
 | **Memory storage** | In-process or external API | Full MCP daemon (`trusty-memory` on port 7070) |
 | **Code search** | External REST API only | Full MCP daemon (`trusty-search` on port 7878) |
-| **Session management** | Ad-hoc tmux windows; manual cleanup | Managed git worktrees; auto-decommission |
-| **Session isolation** | Shared global state | Per-worktree branch + scoped memory palace |
+| **Session management** | Ad-hoc tmux windows; manual cleanup | Main checkout by default, `--worktree` opt-in; auto-decommission |
+| **Session isolation** | Shared global state | Mechanically enforced main-checkout write boundary + scoped memory palace |
 | **MCP servers** | Ad-hoc wrappers | Native MCP stdio + HTTP transports |
 | **Configuration** | Scattered YAML/ENV files | Unified `~/.trusty-tools/config/` + project overrides |
 | **Daemon lifecycle** | Manual start/stop | System services (launchd/systemd) |
@@ -87,12 +87,22 @@ tctl install trusty-mpm
 - All sessions share the main checkout or rely on `[patch.crates-io]` trickery.
 
 **trusty-mpm:**
-- Creates a dedicated **git worktree** per session, branched off `main`.
-- Session name is semantic (e.g., `.worktrees/tm-myproject-01/`) — stable across restarts.
-- Worktree is **automatically decommissioned** when the session ends (branch + directory removed).
-- Each session runs in an isolated branch; changes don't leak to main.
+- A session runs on the project's **main checkout** by default — several sessions
+  sharing one checkout is the normal, intended arrangement, not a hazard.
+  `tm launch --worktree` opts a session into its own dedicated git worktree
+  instead, branched off `main`.
+- A main-checkout session, and every agent it dispatches, may write documents
+  and configuration only; source edits and `git commit` are denied there,
+  mechanically — not left to convention.
+- A dispatched agent that writes is automatically granted its own git worktree
+  the moment its session is standing in a main checkout, so it never collides
+  with another session's uncommitted work.
+- A worktree — session-requested or agent-granted — is **automatically
+  decommissioned** when the work it holds is done (branch + directory
+  removed).
 
-**Impact:** You can safely have 5 parallel sessions, each in a different branch, without branch-collision chaos or manual cleanup.
+**Impact:** You can safely have 5 parallel sessions sharing one checkout, each
+dispatching writers, without branch-collision chaos or manual cleanup.
 
 See [Architecture: Memory, Sessions, Search](../../crates/trusty-mpm/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md) for the full design.
 
@@ -160,7 +170,7 @@ If you have an existing Claude Code project that was set up with claude-mpm or s
    tm
    ```
 
-Your project is now managed by trusty-mpm. All future sessions will run under the trusty-mpm framework with git worktrees, managed memory, and persistent search indexes.
+Your project is now managed by trusty-mpm. All future sessions will run under the trusty-mpm framework on the main checkout by default (worktrees on request or when an agent it dispatches needs to write), with managed memory and persistent search indexes.
 
 ---
 
