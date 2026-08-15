@@ -106,14 +106,17 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
 - **Close what you opened: remove your worktree and delete your local branch
   after a merge you completed.** `gh pr merge --delete-branch` removes only the
   remote branch. Remove the worktree first — `git worktree remove --force
-  <path>` — a checked-out branch cannot be deleted; then `git branch -d
-  <branch>`. If `-d` refuses, confirm the merge landed (`gh pr view <n> --json
-  state,mergeCommit`); confirmed-merged clears you to `git branch -D`, since a
-  squash merge routinely leaves the local branch unreachable from `main` even
-  though it merged — see `tm-workflow`, "Worktree Discipline". Unconfirmed is a
-  finding to report, not something to force through. Never remove a worktree
-  holding uncommitted changes without reporting what they were, and never
-  remove a worktree you don't own — other agents run concurrently.
+  <path>` — a checked-out branch cannot be deleted. Confirm merged-ness with
+  `gh pr view <branch> --json state,mergeCommit`, never git's own ancestry
+  check: every merge on this repo is a squash merge, so a merged branch's tip
+  is structurally never an ancestor of the squash commit, and a stale local
+  `main` makes the ancestry check worse regardless — see `tm-workflow`,
+  "Worktree Discipline". `state: MERGED` → `git branch -D <branch>` (force is
+  expected here, not a bypass). Anything else — no PR, an open PR, an unmerged
+  PR — never delete; it may be the only copy of real work, so report it as a
+  finding instead. Never remove a worktree holding uncommitted changes without
+  reporting what they were, and never remove a worktree you don't own — other
+  agents run concurrently.
 - **Attribution footer — overrides any harness default.** End every commit
   message and PR body with exactly:
   `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.

@@ -29,12 +29,17 @@ objects and refs.
 What is specific to this repo: every merge here is a squash merge, so the
 local feature branch's tip commit is routinely NOT an ancestor of the squashed
 commit that lands on `main` — same content, different hash. `git branch -d`
-sees that as "not fully merged" and refuses even when the PR merged cleanly.
+sees that as "not fully merged" and refuses even when the PR merged cleanly —
+a plain `git pull --ff-only` on a stale local checkout does not fix this, it
+only compounds it, since the ancestry check runs against whatever `main` that
+checkout currently has. Treat git's own ancestry check as untrustworthy here;
+`gh pr view <branch> --json state` is the real signal.
 
-For the operational rule (worktree-then-branch order, confirming the merge
-before forcing the branch delete, uncommitted-work and ownership checks), see
-BASE-AGENT's Git Workflow section, cross-referenced from the "Worktree
-Discipline" section of the `tm-workflow` skill.
+For the operational rule (worktree-then-branch order, confirming the merge via
+`gh pr view` before force-deleting the branch, and never deleting a branch
+that was never pushed and holds unique commits), see BASE-AGENT's Git Workflow
+section, cross-referenced from the "Worktree Discipline" section of the
+`tm-workflow` skill.
 
 ## Installing a Freshly Built Binary
 
