@@ -12,6 +12,7 @@
 //! - `PhaseRecord` — per-phase duration + token snapshot
 //! - `PerfTotals` — rolled-up totals across all phases in a run
 //! - `PerfRecord` — full run record (persisted to `docs/performance/runs/`)
+//!
 //! `PerfCollector` (stateful, tokio-dependent) is NOT here — it stays in
 //! `trusty-agents::perf`.
 //! Test: `token_usage_default_is_zeros`, `token_usage_accumulates` in
