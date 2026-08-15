@@ -527,12 +527,150 @@ check4_version_not_live() {
 # would be advising a version change on no evidence. Either way the publish
 # still stops.
 check5_semver() {
-  local log="${TMP_SEMVER}" rc=0
+  local log="${TMP_SEMVER}" rc=0 decision=0
 
   SKIP_UI_BUILD=1 bash "${REPO_ROOT}/scripts/check_semver.sh" \
     --crate "$PKG_NAME" > "$log" 2>&1 || rc=$?
 
-  semver_decide "$rc" "$log" "$PKG_NAME" "$VERSION"
+  semver_decide "$rc" "$log" "$PKG_NAME" "$VERSION" || decision=$?
+
+  # The type differ runs SECOND because it reads what the run above cached under
+  # target/semver-checks/ — it builds nothing, so ordering is the whole cost.
+  # Its outcome never changes `decision`; see semver_types_decide for why that
+  # is chosen rather than incidental.
+  semver_types_advisory "$PKG_NAME" "$SEMVER_GATE_COMPARED"
+
+  return "$decision"
+}
+
+# ---------------------------------------------------------------------------
+# semver_types_advisory <package> — run scripts/check_semver_types.sh over the
+# rustdoc JSON check_semver.sh just cached, and report. ALWAYS returns 0.
+#
+# Why this exists: cargo-semver-checks 0.50.0 compares no types, so the check
+# above passes a return type changing Vec<T> -> Result<Vec<T>> without comment —
+# measured on tga 2.19.0 -> 2.19.1, which reported `223 checks: 223 pass`. The
+# differ closes that, and until now nothing executed it: CHECK 5 named it in a
+# [PASS] line and left running it to whoever read that line. A check nobody runs
+# reports nothing, which is how it was possible for the differ to sit broken for
+# its entire life without a single failing run to say so.
+#
+# WHY ADVISORY, deliberately and not by accident: the differ compares rendered
+# types, and a lifetime rename or a re-export path shift is a real signature
+# difference that no caller has to care about. Giving that a veto over `cargo
+# publish` would buy a release-blocking gate its first false positive, and a
+# release gate people learn to override is worth less than no gate. The value
+# here is that it EXECUTES against a real crate every release and prints what it
+# found; escalating it to a blocker is a separate decision with its own evidence.
+semver_types_advisory() {
+  local pkg="$1" gate_compared="${2:-0}" log rc=0
+
+  # --- THE CACHE MUST BE ONE THIS RUN BUILT. Every SKIP branch in
+  #     check_semver.sh `continue`s BEFORE invoking cargo-semver-checks, so a
+  #     skipped crate gets no fresh rustdoc — TSV exclusion, publish = false, no
+  #     library target, no baseline on crates.io, all seven of them. The differ
+  #     reads target/semver-checks/ off the filesystem and cannot tell a
+  #     directory this run wrote from one an out-of-band invocation left behind
+  #     at the same version string. trusty-mpm is the live case: TSV-excluded and
+  #     published through this very path, so a stale local-trusty_mpm-<ver>-*/
+  #     would be diffed against source that is not HEAD and reported as [PASS].
+  #
+  #     This is a CALL-SITE CONDITION, not a filesystem heuristic — no mtime, no
+  #     content hash, nothing to tune or go subtly wrong. The gate already knows
+  #     whether it compared this crate; an mtime guard would be a second, weaker
+  #     answer to a question already answered exactly. A run that compared
+  #     nothing declines to read any cache at all.
+  if [ "$gate_compared" -lt 1 ] 2>/dev/null || [ -z "$gate_compared" ]; then
+    SEMVER_TYPES_ADVISORY="the type differ was not run — the gate compared nothing this run"
+    echo "[WARN] semver-types: NOT RUN — the gate compared 0 crate(s) this run, so no" >&2
+    echo "       rustdoc was built for ${pkg} and any cache on disk is left over from" >&2
+    echo "       an earlier invocation. Reading it would compare source that is not" >&2
+    echo "       HEAD and report the answer as though it were this release's." >&2
+    echo "       Nothing is known about whether a type moved. Not a clean result, and" >&2
+    echo "       not a blocker — CHECK 5 above already said what it did or did not" >&2
+    echo "       verify, and its [SKIP]/[WARN] line is the one to read." >&2
+    echo "       A TSV-excluded crate (scripts/semver-checks-crate-exclusions.tsv)" >&2
+    echo "       can never produce a cache through the gate; comparing its types" >&2
+    echo "       needs two rustdoc JSON documents built by hand and passed with" >&2
+    echo "         bash scripts/check_semver_types.sh --baseline-json <a> --current-json <b>" >&2
+    return 0
+  fi
+
+  log="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.semvertypes.XXXXXX")"
+  bash "${REPO_ROOT}/scripts/check_semver_types.sh" --crate "$pkg" > "$log" 2>&1 || rc=$?
+
+  semver_types_decide "$rc" "$log" "$pkg"
+  rm -f "$log"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# semver_types_decide <differ-exit> <differ-log> <package> — turn one differ run
+# into output. Split from the run for the same reason semver_decide is: the
+# decision is the part worth testing and the run needs a warm four-minute cache.
+# Driven against captured differ output by scripts/preflight-check5-selftest.sh.
+#
+# THREE OUTCOMES, and the third is the one this function exists to keep
+# distinct. #5620 is this repo's instance of "did not examine" and "found
+# nothing wrong" being printed with the same word, and an advisory check is
+# where that mistake is cheapest to repeat: a differ that cannot run costs
+# nothing visible, so a silent skip would look exactly like a clean release
+# forever.
+#
+#   [PASS] the differ ran and compared >= 1 position, and none changed.
+#   [WARN] the differ ran and found type changes. Listed, publish PROCEEDS.
+#   [WARN] the differ did NOT reach a verdict — cold cache, unreadable document,
+#          a format_version it does not understand, or any other nonzero exit.
+#          Says so in those words, and never borrows the PASS label.
+#
+# The count is read, not assumed. `compared: N public item(s); M changed` is the
+# differ's own marker and a run that exits 0 without it has malfunctioned, so
+# that lands in the third outcome rather than the first — 0 compared and [PASS]
+# stay unreachable together, the invariant semver_decide already holds.
+semver_types_decide() {
+  local rc="$1" log="$2" pkg="$3"
+  local marker compared changed
+
+  marker="$(grep -E '^compared: [0-9]+ public item\(s\)' "$log" 2>/dev/null | tail -1)"
+  compared="$(printf '%s' "$marker" | sed -n 's/^compared: \([0-9][0-9]*\) public item(s).*/\1/p')"
+  changed="$(printf '%s' "$marker" | sed -n 's/.*; \([0-9][0-9]*\) changed.*/\1/p')"
+
+  if [ -n "$compared" ] && [ "$compared" -ge 1 ] && [ -n "$changed" ]; then
+    if [ "$rc" -eq 0 ] && [ "$changed" -eq 0 ]; then
+      echo "[PASS] semver-types: ${compared} public item position(s) compared for ${pkg}, 0 type change(s)." >&2
+      echo "       This is the check cargo-semver-checks cannot make; it ran and found nothing." >&2
+      return 0
+    fi
+
+    if [ "$rc" -eq 1 ] && [ "$changed" -ge 1 ]; then
+      SEMVER_TYPES_ADVISORY="${changed} public type change(s) across ${compared} compared position(s)"
+      echo "[WARN] semver-types: ${changed} TYPE CHANGE(S) in ${pkg}'s public API, across" >&2
+      echo "       ${compared} compared position(s). ADVISORY — the publish is not blocked." >&2
+      grep -E '^CHANGED ' "$log" | sed 's/^/       /' >&2 || true
+      echo "       cargo-semver-checks compares no types, so none of these appear in" >&2
+      echo "       CHECK 5 above however strict it is. Each is source-breaking for a" >&2
+      echo "       caller that named the old type." >&2
+      echo "       Confirm every one was intended, and that the version bump carries" >&2
+      echo "       them — 0.x crates in the MINOR position, 1.x+ in MAJOR." >&2
+      return 0
+    fi
+  fi
+
+  # --- NO VERDICT. Never [PASS], never a failure. The differ could not answer,
+  #     and the only wrong move is letting that read as agreement.
+  SEMVER_TYPES_ADVISORY="the type differ reached NO VERDICT (exit ${rc})"
+  echo "[WARN] semver-types: NO VERDICT — the type differ did not run to a conclusion" >&2
+  echo "       for ${pkg} (exit ${rc}). Nothing is known either way about whether a" >&2
+  echo "       type moved. This is NOT a clean result, and it does not block the" >&2
+  echo "       publish either: CHECK 5 above is the gate, this is advice that was" >&2
+  echo "       unavailable." >&2
+  sed 's/^/       /' "$log" >&2
+  echo "       Usual causes: a cold target/semver-checks/ cache, a rustdoc" >&2
+  echo "       format_version the differ does not list, or an unreadable document." >&2
+  echo "       To get the advice back:" >&2
+  echo "         bash scripts/check_semver.sh --crate ${pkg}   # warms the cache" >&2
+  echo "         bash scripts/check_semver_types.sh --crate ${pkg}" >&2
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -581,9 +719,9 @@ check5_semver() {
 #            missed, all 7 type substitutions. trusty-common 0.32.0 -> 0.33.0
 #            changed KgStoreRedb::count_active_triples from u64 to Result<u64>
 #            and this gate reported `196 checks: 196 pass`.
-#            scripts/check_semver_types.sh compares the types; it is not wired
-#            into this decision, and the PASS line names it so a clean run points
-#            at what it did not look at.
+#            scripts/check_semver_types.sh compares the types and now RUNS from
+#            this check — semver_types_advisory below, on its own output line.
+#            It is advisory by choice and cannot fail the publish.
 #     [SKIP] 0 compared because no comparison was POSSIBLE — no baseline on
 #            crates.io, no library target, or a row in
 #            semver-checks-crate-exclusions.tsv. A fact about the crate, already
@@ -621,6 +759,16 @@ check5_semver() {
 # Test: scripts/preflight-check5-selftest.sh.
 # ---------------------------------------------------------------------------
 SEMVER_NOT_VERIFIED=""
+
+# Set by semver_types_decide when the differ found changes or could not answer.
+# Advisory only: it never contributes to FAILURES, it only keeps the final
+# summary line from reading as though nothing was outstanding.
+SEMVER_TYPES_ADVISORY=""
+
+# How many crates the gate actually COMPARED this run, set by semver_decide.
+# The type differ reads it to decide whether a cache exists that THIS run built.
+# Starts at 0 so a semver_decide that never reached the count leaves it refusing.
+SEMVER_GATE_COMPARED=0
 
 semver_decide() {
   local rc="$1" log="$2" pkg="$3" version="$4"
@@ -687,12 +835,13 @@ semver_decide() {
   #     advice. Either one examined the API.
   if [ -z "$blind_why" ]; then
     compared=$((checked + inventoried))
+    SEMVER_GATE_COMPARED="$compared"
     if [ "$compared" -ge 1 ]; then
       echo "[PASS] semver: ${compared} crate(s) compared against their previous crates.io release." >&2
-      echo "       Every existence-and-shape lint passed. NO TYPE WAS COMPARED —" >&2
+      echo "       Every existence-and-shape lint passed. NO TYPE WAS COMPARED HERE —" >&2
       echo "       cargo-semver-checks 0.50.0 has no lint that reads one, so a return" >&2
-      echo "       type changing u64 -> Result<u64> passes here. For that:" >&2
-      echo "         bash scripts/check_semver_types.sh --crate ${pkg}" >&2
+      echo "       type changing u64 -> Result<u64> passes this check. The semver-types" >&2
+      echo "       line below is what looked at that, and it is advisory." >&2
       echo "       ${summary}" >&2
       return 0
     fi
@@ -931,6 +1080,11 @@ if [ -n "${SEMVER_NOT_VERIFIED:-}" ]; then
   # an operator is most likely to read on its own.
   echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 8 checks, but the" >&2
   echo "  public API was NOT VERIFIED: ${SEMVER_NOT_VERIFIED}. See the check 5 line above." >&2
+elif [ -n "${SEMVER_TYPES_ADVISORY:-}" ]; then
+  # The type differ blocks nothing, so without this the summary would say
+  # "safe to publish" over a listed set of type changes nobody has confirmed.
+  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 8 checks." >&2
+  echo "  ADVISORY, not blocking: ${SEMVER_TYPES_ADVISORY}. See the semver-types line above." >&2
 else
   echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 8 checks. Safe to publish." >&2
 fi

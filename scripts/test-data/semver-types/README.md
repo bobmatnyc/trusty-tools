@@ -43,16 +43,68 @@ target/semver-checks/local-lintprobe-<version>-<target>-<hash>/target/doc/lintpr
 To regenerate: build a crate from `probe-base.rs` at 0.1.0 and from
 `probe-cur.rs` at 0.2.0, run `cargo semver-checks` over each, and take that file.
 
-**Two reductions were applied**, both to what the differ never reads:
+**Three reductions were applied**, all to what the differ never reads:
 
 - `span`, `docs` and `links` are nulled on every item. `span` holds the absolute
   path of the machine that built it, which has no business in a fixture.
+- `external_crates.*.path` is nulled. Same category as `span` and missed when
+  these fixtures were first captured: it held
+  `/Users/<user>/.rustup/toolchains/<channel>-<target>/lib/rustlib/...` for each
+  of the 19 external crates, 19 leaks per document. Nulled rather than removed,
+  so the entry keeps its shape — the same treatment `span` gets, and the differ
+  reads neither.
 - `paths` is filtered to this crate's own entries. It is rustdoc's whole-universe
   path map — 219 KB of the 250 KB original — and `check_semver_types.sh` renders
   types from the type nodes themselves, never from that map.
 
+🔴 **Treat this list as incomplete when capturing a new fixture.** It said "two
+reductions" and was wrong by one for as long as these fixtures have existed;
+`external_crates.*.path` survived review because a line-grep over a 54 KB
+minified document does not find it. Do not eyeball a fixture — walk every string
+leaf of the parsed JSON and check each one for an absolute path, username,
+hostname, or toolchain-specific string. rustdoc adds fields as its schema moves,
+so the next capture may carry a fourth.
+
+`html_root_url` is deliberately KEPT. It is a public docs.rust-lang.org URL and
+names only the release channel the fixture was captured on, which is provenance
+rather than a leak.
+
 Everything the differ does read is verbatim, including the 45 synthetic and
 blanket impls, which is what proves it skips them.
+
+## The format-61 pair
+
+`probe-v61-base.json` / `probe-v61-cur.json`, sources beside them as
+`probe-v61-base.rs` / `probe-v61-cur.rs`. Same nine breaks as the pair above plus
+a tenth — `S::async_ret`, `Vec<u64>` -> `Result<Vec<u64>, String>` — at
+rustdoc-JSON `format_version` 61.
+
+**Why a second pair exists.** The differ shipped with
+`SUPPORTED_FORMAT_VERSIONS = (57,)` while every rustdoc on the machine emitted
+61, so `--crate <anything>` exited 3 and it compared nothing on any real crate.
+Its self-test stayed green the whole time, because the format-57 fixtures above
+were the only documents it ever read. A differ pinned to a schema version needs a
+fixture at the version the toolchain actually emits, or "the tests pass" and "the
+tool works" come apart with nothing to say so.
+
+**Why the async row.** rustdoc records an `async fn` UN-DESUGARED: `sig.output`
+holds the inner type, not the `impl Future` the source implies. So an async
+return is an ordinary type position and needs no special handling — verified, not
+assumed. Pinning it means a future schema that starts recording the desugared
+future instead fails here, rather than silently comparing every async return
+equal.
+
+**To regenerate**, or to add a pair at the next format version:
+
+```
+cargo +nightly rustdoc -- -Zunstable-options --output-format json
+```
+
+over a crate named `lintprobe` built from each `.rs`, then apply the reductions
+described above and re-check every string leaf, since that list has already been
+wrong once. `scripts/check_semver_types_selftest.sh` case 15
+asserts every version in `SUPPORTED_FORMAT_VERSIONS` has a pair behind it, so
+adding a version to that tuple without a fixture fails the self-test.
 
 ## Derived fixtures
 

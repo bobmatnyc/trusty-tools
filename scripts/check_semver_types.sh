@@ -226,11 +226,24 @@ except ImportError as e:
 # VERDICT, which is the safe direction: a schema this differ half-understands
 # would compare rendering differences and call them API changes.
 #
+# 61 was added because the list said (57,) while every rustdoc on the machine
+# emitted 61, so `--crate <anything>` exited 3 and this differ compared nothing
+# on any real crate. It read only its own committed format-57 fixtures, so its
+# self-test stayed green throughout and nothing said the tool was inert. The
+# format-61 fixture pair exists so that cannot recur silently — see
+# scripts/test-data/semver-types/README.md.
+#
+# THE STALENESS IS STRUCTURAL, not fixed by this entry. A frozen fixture proves
+# the differ still reads the version it was captured at; it can never notice
+# that the toolchain has moved past it. Only running the differ on rustdoc JSON
+# the CURRENT toolchain produced can do that, and nothing does — see
+# docs/reference/semver-gate.md, "The staleness this cannot detect".
+#
 # This is deliberately NOT shared with extract_contracts.py. The documents this
 # gate reads are built by cargo-semver-checks' pinned nightly; the extractor's
 # are built by the repo's own. One constant would force whichever moved first to
 # accept a schema it had not been checked against.
-SUPPORTED_FORMAT_VERSIONS = (57,)
+SUPPORTED_FORMAT_VERSIONS = (57, 61)
 
 NO_VERDICT = 3
 
@@ -424,6 +437,19 @@ for p in meta["packages"]:
   shopt -u nullglob
 
   pick_one "${CUR_MATCHES[@]:-}"
+  # The remedy above is a dead end for a crate check_semver.sh SKIPS: every skip
+  # branch `continue`s before invoking cargo-semver-checks, so re-running the
+  # gate builds nothing and the operator loops. Say so rather than let them find
+  # out by repeating the command.
+  cold_cache_caveat() {
+    echo "            If that command reports SKIP for ${PKG}, it will never populate"
+    echo "            this cache — a TSV-excluded crate, one with publish = false, no"
+    echo "            library target, or no baseline on crates.io is skipped before any"
+    echo "            rustdoc is built. Comparing its types needs two documents built"
+    echo "            by hand and passed directly:"
+    echo "              bash ${0##*/} --baseline-json <a.json> --current-json <b.json>"
+  }
+
   if [[ "$PICK_COUNT" -eq 0 ]]; then
     {
       echo "NO VERDICT: no cached rustdoc JSON for ${PKG} ${PKG_VERSION} under"
@@ -431,6 +457,7 @@ for p in meta["packages"]:
       echo "            Nothing was compared. Build the cache first — it is the same"
       echo "            rustdoc the existing gate needs anyway:"
       echo "              bash scripts/check_semver.sh --crate ${PKG}"
+      cold_cache_caveat
     } >&2
     exit "$EXIT_NO_VERDICT"
   fi
@@ -446,6 +473,7 @@ for p in meta["packages"]:
       echo "            ${CACHE_ROOT}/cache/"
       echo "            Nothing was compared. Build the cache first:"
       echo "              bash scripts/check_semver.sh --crate ${PKG}"
+      cold_cache_caveat
     } >&2
     exit "$EXIT_NO_VERDICT"
   fi
