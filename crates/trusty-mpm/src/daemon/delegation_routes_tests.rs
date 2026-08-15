@@ -161,6 +161,64 @@ async fn a_grant_and_the_tracker_converge_in_either_order() {
     }
 }
 
+#[test]
+fn a_grant_and_the_tracker_race_without_losing_the_isolation() {
+    // What `dispatch_record` exists for, and the only test that can fail if it
+    // is deleted. The sibling above drives both writers sequentially on one
+    // thread: it proves the two ARRIVAL ORDERS converge, and proves nothing
+    // about the locked window between a writer's find and its insert.
+    //
+    // Two ways the unguarded interleaving loses. If `observe` inserts between
+    // `record_granted_isolation`'s find and `on_dispatch_locked`'s own find,
+    // that second find hits and returns early — one record, isolation `None`,
+    // a silent lost update. If neither find sees the other, both insert — two
+    // records for one dispatch, and the unisolated one decides later denies.
+    // Both assertions below are needed; neither alone catches both shapes.
+    const ROUNDS: usize = 300;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    for round in 0..ROUNDS {
+        let (state, _dir, session) = hermetic();
+        let payload = unisolated_hook_payload("toolu_race");
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+                crate::daemon::services::delegation_tracker::observe(
+                    &state,
+                    session,
+                    HookEvent::PreToolUse,
+                    &payload,
+                );
+            });
+            barrier.wait();
+            rt.block_on(granted_call(
+                &state,
+                session,
+                dispatch(
+                    "/repo",
+                    "rust-engineer",
+                    Some("worktree"),
+                    Some("toolu_race"),
+                ),
+            ));
+        });
+
+        let records = state.delegations_for(session);
+        assert_eq!(
+            records.len(),
+            1,
+            "round {round}: one dispatch must leave one record, got {records:?}"
+        );
+        assert_eq!(
+            records[0].isolation.as_deref(),
+            Some("worktree"),
+            "round {round}: the grant must not be lost to the tracker's insert"
+        );
+    }
+}
+
 #[tokio::test]
 async fn granted_worktree_route_records_nothing_without_isolation_or_a_tool_use_id() {
     // Both keys are load-bearing. Without `tool_use_id` the record could never
@@ -178,6 +236,43 @@ async fn granted_worktree_route_records_nothing_without_isolation_or_a_tool_use_
         assert!(!body.claimed);
         assert!(state.delegations_for(session).is_empty());
     }
+}
+
+#[tokio::test]
+async fn record_granted_isolation_refuses_a_non_separating_mode() {
+    // The rule lives in the WRITER, not only in the route's eligibility test.
+    // This function exists to erase a record that names a writer as sharing the
+    // checkout, so a caller handing it `isolation: "inline"` would write that
+    // phantom over a correct record — the exact inverse of its purpose.
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "rust-engineer",
+        "/repo",
+        Some("worktree"),
+        Some("toolu_x"),
+        DelegationStatus::Running,
+    );
+    for mode in ["inline", "Worktree", "worktrees", ""] {
+        let payload = serde_json::json!({
+            "cwd": "/repo",
+            "tool": "Agent",
+            "tool_use_id": "toolu_x",
+            "input": {"subagent_type": "rust-engineer", "isolation": mode},
+        });
+        assert!(
+            !crate::daemon::services::delegation_tracker::record_granted_isolation(
+                &state, session, &payload
+            ),
+            "{mode:?} does not separate the working tree and must not be recorded"
+        );
+    }
+    assert_eq!(
+        state.delegations_for(session)[0].isolation.as_deref(),
+        Some("worktree"),
+        "a correct record must survive every refused call"
+    );
 }
 
 #[tokio::test]

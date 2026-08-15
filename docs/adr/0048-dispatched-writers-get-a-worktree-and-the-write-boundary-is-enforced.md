@@ -217,6 +217,25 @@ leave the boundary unenforced. The owner's ruling is that both close together.
   directory inside the same checkout remains invisible. The deny message names
   the checkout root rather than the command's directory, since that is the tree
   whose HEAD is at stake.
+- **The `granted-worktree` route adds no capability a client did not already
+  have.** It was examined as a possible authorization hole: any loopback client
+  can post a grant naming someone else's `tool_use_id`, clear that record's
+  unisolated flag, and unblock a HEAD move the guard would otherwise deny. The
+  hole is real and it predates this route — the `hook_event` MCP tool already
+  lets the same client post a `SubagentStop` that terminalizes the same record,
+  which clears the deny outright rather than merely relabelling it. So this
+  changes the wording of an existing exposure, not its extent, and the boundary
+  that actually contains it is [ADR-0018](0018-loopback-only-doctrine.md)'s
+  loopback-only bind. Recording it here so a later reader does not have to
+  re-derive that it was considered.
+- **A stale record now blocks more than it used to.** Computing the #4480
+  verdict before the grant means a record nothing ever closed stops blocking
+  only UNISOLATED dispatch and starts blocking every WRITER dispatch from that
+  checkout — and decision 3 makes `Unknown` a writer, so that is most of them,
+  for the six hours of `RUNNING_STALE_AFTER_SECS`. The two operator escape
+  hatches still lift it, and an explicitly-declared `isolation: "worktree"`
+  passes untouched, so this is friction rather than a lockout. The deny names
+  the possibility so a reader can recognise it instead of retrying.
 - **The deny attributes its claim to the daemon's records rather than asserting
   it.** This is decision 6 applied to accuracy, not just to remedies: the hook
   process knows what the records SAY, and a record can be wrong in both

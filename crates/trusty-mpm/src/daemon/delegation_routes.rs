@@ -93,9 +93,21 @@ pub struct SharedTreeDispatchRequest {
 /// What: `agents` holds one entry per live unisolated writer, deduplicated with
 /// a count so two concurrent `rust-engineer`s render as one row rather than a
 /// repeated name. `total` is the number of delegations, not of distinct names.
-/// `claimed` reports whether this call took the directory; it is diagnostic —
-/// the guard decides on `agents` alone, so an older guard that ignores the field
-/// behaves identically.
+/// `claimed` reports whether this call WROTE anything, and what that write was
+/// depends on which route answered. On
+/// [`shared_tree_dispatch_route`] it means the directory was reserved for an
+/// unisolated dispatch. On [`granted_worktree_route`] it means the granted
+/// isolation was recorded — an isolated dispatch reserves nothing, so there is
+/// no directory to take. The two share the field because both answer the same
+/// question the caller asks of it: did the daemon act, or only look? A single
+/// name for "the daemon wrote" keeps an older guard that ignores the field
+/// behaving identically on both.
+///
+/// Since #5769 that field is no longer purely diagnostic on the granted route:
+/// the guard reads it to tell "the checkout is free" from "the daemon declined
+/// to record", which are otherwise the same empty answer. A daemon too old to
+/// send it reads as not-written, which is the conservative direction — see
+/// `pm_guard_dispatch::warn_on_unrecorded_grant`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SharedTreeWritersResponse {
     /// Distinct agent names, each with how many of its delegations are live.

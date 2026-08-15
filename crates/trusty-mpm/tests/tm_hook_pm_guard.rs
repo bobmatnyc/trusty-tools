@@ -846,6 +846,40 @@ fn run_pm_guard_at(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String
     run_pm_guard_at_with_env(stdin_json, url, cwd, &[])
 }
 
+/// [`run_pm_guard_at`] returning STDERR instead of stdout.
+///
+/// Why (#5769): one guard signal is deliberately not a verdict. When the daemon
+/// answers but records nothing — an older daemon 404ing the granted-worktree
+/// route is the realistic shape — the grant is still emitted, because failing
+/// closed on version skew would block every dispatch from a main checkout. The
+/// only trace is a stderr line, and stdout-only helpers cannot see it, so a
+/// silent regression there would leave every test green.
+/// What: as [`run_pm_guard_at`], but hands back the child's stderr.
+fn run_pm_guard_at_stderr(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String {
+    let bin = env!("CARGO_BIN_EXE_tm");
+    let mut child = Command::new(bin)
+        .args(["--url", url, "hook", "--pm-guard"])
+        .current_dir(cwd)
+        .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
+        .env_remove("CLAUDE_MPM_SUB_AGENT")
+        .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
+        .env_remove("TM_MANAGED_SESSION_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn `tm hook --pm-guard`");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(stdin_json.as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait");
+    assert!(output.status.success(), "the guard must always exit 0");
+    String::from_utf8(output.stderr).expect("stderr is utf8")
+}
+
 /// [`run_pm_guard_at`] with extra environment, for the rules that must fire
 /// THROUGH an automatic subagent marker (`CLAUDE_MPM_SUB_AGENT`) or yield to an
 /// operator escape hatch. Those cases need the daemon URL as well, which
@@ -1566,8 +1600,14 @@ fn pm_guard_denies_a_granted_dispatch_beside_a_live_writer() {
     let stdout = run_pm_guard_at(&payload, &url, &repo);
     assert_denied(&stdout);
     assert!(
-        stdout.contains("#4480") && stdout.contains("python-engineer"),
+        stdout.contains("ADR-0048") && stdout.contains("python-engineer"),
         "the deny must name the rule and the sibling already in the tree: {stdout}"
+    );
+    // It must NOT be #4480's text, whose remedy is the isolation this guard had
+    // already built and then declined to emit.
+    assert!(
+        !stdout.contains("Concurrent shared-worktree dispatch denied"),
+        "the granted path needs its own reason, not the one it contradicts: {stdout}"
     );
 }
 
@@ -1608,6 +1648,53 @@ fn pm_guard_records_the_granted_isolation_it_emits() {
     assert_eq!(
         posted["input"]["isolation"], "worktree",
         "the daemon must be told the isolation that was granted: {posted}"
+    );
+    // The fourth eligibility input, and the one nothing else would catch: if
+    // `build_hook_payload` ever stopped stamping `tool`, the route classifies
+    // the POST ineligible, records nothing, and the whole fix no-ops.
+    assert_eq!(
+        posted["tool"], "Agent",
+        "the route re-derives eligibility from `tool`: {posted}"
+    );
+}
+
+#[test]
+fn pm_guard_warns_when_a_granted_worktree_is_not_recorded() {
+    // #5769: an empty writer list is NOT proof the grant was recorded. A daemon
+    // older than the granted-worktree route 404s it, a malformed body parses to
+    // nothing — and both arrive as the same empty answer the free-checkout case
+    // produces. Reading only the writer list made every one of those a silent
+    // no-op that put the phantom straight back. The guard still GRANTS (failing
+    // closed on version skew would block every dispatch from a main checkout),
+    // so the warning is the whole observable difference.
+    let (_dir, repo) = main_checkout_fixture();
+    let payload = tool_payload_at(
+        "Agent",
+        r#"{"subagent_type":"rust-engineer","prompt":"x"}"#,
+        &repo,
+        r#""session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_grant","#,
+    );
+
+    // Answered, empty, and recorded nothing — the divergence.
+    for body in [
+        r#"{"agents":[],"total":0,"claimed":false}"#,
+        // A daemon too old to send the field at all reads as not-recorded.
+        r#"{"agents":[],"total":0}"#,
+    ] {
+        let url = spawn_writers_mock(body);
+        let stderr = run_pm_guard_at_stderr(&payload, &url, &repo);
+        assert!(
+            stderr.contains("recorded nothing") && stderr.contains("#5769"),
+            "an unrecorded grant must warn, got stderr: {stderr:?}"
+        );
+    }
+
+    // The ordinary case: the daemon recorded it, and the guard stays silent.
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0,"claimed":true}"#);
+    let stderr = run_pm_guard_at_stderr(&payload, &url, &repo);
+    assert!(
+        !stderr.contains("recorded nothing"),
+        "a recorded grant must not warn, got stderr: {stderr:?}"
     );
 }
 

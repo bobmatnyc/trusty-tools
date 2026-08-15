@@ -100,7 +100,7 @@ use crate::core::agent::{
     Delegation, DelegationId, DelegationSource, DelegationStatus, ModelTier, TOOL_RESPONSE_KEYS,
     is_subagent_dispatch_tool,
 };
-use crate::core::dispatch_isolation::dispatch_isolation;
+use crate::core::dispatch_isolation::{dispatch_isolation, isolation_separates_working_tree};
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
@@ -235,17 +235,28 @@ fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
 /// none exists — in which case the tracker's own later hook is a no-op on
 /// `tool_use_id` and the granted isolation survives.
 ///
-/// A payload with no `tool_use_id` records NOTHING and returns `false`. Without
-/// that key the record could not be found again, so creating one would leave a
-/// second, unisolated record beside the tracker's — the phantom duplicated
-/// rather than removed.
+/// Two payloads record NOTHING and return `false`, and both rules live HERE
+/// rather than in the caller. One with no `tool_use_id`: without that key the
+/// record could not be found again, so creating one would leave a second,
+/// unisolated record beside the tracker's — the phantom duplicated rather than
+/// removed. And one whose `isolation` does not
+/// [`isolation_separates_working_tree`]: this function's whole purpose is to
+/// erase a record that names a writer as sharing the checkout, so writing a
+/// non-separating mode over a correct record would write the very phantom it
+/// exists to remove. The route that calls this re-derives the same test to
+/// decide eligibility; keeping it in the writer as well means a second caller,
+/// or a refactor of that route, cannot reach the write without it.
 /// Test: `a_grant_and_the_tracker_converge_in_either_order`,
-/// `a_grant_without_a_tool_use_id_records_nothing`.
+/// `record_granted_isolation_refuses_a_non_separating_mode`.
 pub fn record_granted_isolation(state: &DaemonState, session: SessionId, payload: &Value) -> bool {
     let Some(tool_use_id) = field(payload, "tool_use_id") else {
         return false;
     };
-    let Some(isolation) = dispatch_isolation(payload.get("input")).map(str::to_string) else {
+    let declared = dispatch_isolation(payload.get("input"));
+    if !isolation_separates_working_tree(declared) {
+        return false;
+    }
+    let Some(isolation) = declared.map(str::to_string) else {
         return false;
     };
     let _guard = state.dispatch_record_guard();

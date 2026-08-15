@@ -399,8 +399,20 @@ pub(crate) async fn live_shared_tree_writers_in(
 /// has recorded the granted isolation inside the same critical section that
 /// produced the answer. Every daemon failure answers empty, so a down daemon
 /// grants — the fail-open direction the sibling guard commits to.
+///
+/// **An empty answer is not proof the grant was recorded, so it is checked
+/// rather than assumed.** Reading only the writer list would make every way the
+/// daemon can decline to record — an unparseable body, a 404 from a daemon
+/// older than this route, an eligibility test this binary and that daemon
+/// disagree on — indistinguishable from "the checkout is free". The grant would
+/// be emitted, nothing recorded, and the phantom this whole path exists to
+/// remove would come back silently. So the parsed body is kept and
+/// [`eligibility_diverged`] is asked before returning ALLOW, which is the same
+/// question and the same treatment of a missing `claimed` the sibling path has
+/// used since #5324.
 /// Test: `pm_guard_denies_a_granted_dispatch_beside_a_live_writer`,
-/// `pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout`.
+/// `pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout`,
+/// `pm_guard_warns_when_a_granted_worktree_is_not_recorded`.
 pub(crate) async fn evaluate_granted_worktree(
     url: &str,
     session_id: &str,
@@ -411,19 +423,93 @@ pub(crate) async fn evaluate_granted_worktree(
 ) -> Option<String> {
     let mut granted = payload.clone();
     granted["tool_input"] = updated_input.clone();
-    let live = post_shared_tree(url, session_id, cwd, &granted, GRANTED_WORKTREE_ROUTE)
-        .await
-        .as_ref()
-        .map(writers_in)
-        .unwrap_or_default();
+    let body = post_shared_tree(url, session_id, cwd, &granted, GRANTED_WORKTREE_ROUTE).await;
+    let live = body.as_ref().map(writers_in).unwrap_or_default();
     if live.is_empty() {
+        warn_on_unrecorded_grant(body.as_ref(), &live, cwd);
         return None;
     }
-    Some(deny_reason(
+    Some(granted_deny_reason(
         dispatch_agent(tool_input).unwrap_or("this"),
         cwd,
         &live,
     ))
+}
+
+/// Warn when a granted worktree was not recorded against the checkout (#5769).
+///
+/// Why: the grant is emitted on an empty answer, and this path fails open at
+/// every step — so "nobody is here" and "I could not reach the daemon" and "the
+/// daemon refused to record" all arrive as the same empty vec. Only one of the
+/// three leaves the delegation record uncorrected, and that is the state the
+/// HEAD-move rule then denies a `git pull` on for six hours. The one signal
+/// separating them is `claimed`, and discarding it discards the signal.
+/// What: one stderr line, which Claude Code surfaces without it reaching the
+/// hook's stdout verdict. It does NOT deny: a daemon that predates this route
+/// answers 404, and denying on that would fail CLOSED on version skew — every
+/// dispatch from a main checkout blocked by an old daemon.
+/// Test: `pm_guard_warns_when_a_granted_worktree_is_not_recorded`.
+fn warn_on_unrecorded_grant(body: Option<&Value>, live: &[String], cwd: &Path) {
+    // No body at all is the unreachable-daemon arm, already covered by this
+    // module's fail-open contract; the interesting case is a daemon that
+    // answered and still recorded nothing.
+    let Some(body) = body else {
+        return;
+    };
+    if !eligibility_diverged(body, live) {
+        return;
+    }
+    eprintln!(
+        "tm hook --pm-guard: granted a worktree in {} but the daemon recorded nothing (#5769). \
+         The dispatch's delegation record therefore still reads as unisolated, so this agent will \
+         be named as writing in this checkout and `git pull` here will be denied until the record \
+         goes stale. The usual cause is a running daemon older than the `tm` on PATH, built \
+         before the granted-worktree route existed — restart the daemon (`tm restart`) to clear \
+         it. Granting anyway: this path fails open by design.",
+        cwd.display()
+    );
+}
+
+/// Build the deny message for a granted dispatch the checkout is not free for.
+///
+/// Why: [`deny_reason`]'s remedy is "re-dispatch with `isolation: \"worktree\"`",
+/// which reads as self-contradictory here — the guard had already built exactly
+/// that rewrite and then declined to emit it. The reason this path denies is
+/// different from #4480's: the isolation is available, but the guard cannot rely
+/// on the harness applying its `updatedInput` rewrite, and while another writer
+/// holds the checkout an unapplied rewrite is the reported harm rather than a
+/// hypothetical one.
+///
+/// The reorder this text belongs to also widens what a stale record blocks. A
+/// record nothing ever closed used to block only an unisolated dispatch;
+/// it now blocks every dispatch of a writer — and `Unknown` is a writer — from
+/// this checkout, for the six hours of `RUNNING_STALE_AFTER_SECS`. The two
+/// operator escape hatches still lift it, so that is friction rather than a
+/// lockout, and the message names the possibility so a reader can recognise it.
+/// What: names ADR-0048, the sibling the daemon reports, the directory, and the
+/// three ways forward — dispatch with explicit isolation, serialize, or report a
+/// record believed stale.
+/// Test: `granted_deny_reason_does_not_offer_the_isolation_it_already_built`.
+fn granted_deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
+    let mut names: Vec<&str> = live.iter().map(String::as_str).collect();
+    names.sort_unstable();
+    names.dedup();
+    format!(
+        "Dispatch denied in a shared main checkout (ADR-0048): {} is a project's main checkout, \
+         and the daemon's delegation records name {} as running there with no worktree of its \
+         own — possibly dispatched by a different session standing in the same directory. This \
+         {agent} dispatch was granted a worktree of its own, but that grant is a rewrite of the \
+         dispatch's arguments and this guard cannot confirm the harness applied it; if it did \
+         not, a second file-mutating agent joins the same git HEAD, which is the reported \
+         failure — a commit landing on another workstream's branch, with no error at any step. \
+         Re-issue this dispatch with `isolation: \"worktree\"` declared explicitly, which needs \
+         no rewrite to be applied. If isolation is unavailable here, serialize instead: dispatch \
+         one file-mutating agent at a time. If you believe that record is stale — the agent \
+         finished without its stop signal reaching the daemon — say so rather than retrying, \
+         since nothing here can tell a finished agent from a running one.",
+        cwd.display(),
+        names.join(", ")
+    )
 }
 
 /// The route that answers and claims for an unisolated dispatch (#4480).
@@ -643,6 +729,41 @@ mod tests {
                 "the deny must not advise waiting on an agent that may never report \
                  (found {banned:?}): {reason}"
             );
+        }
+    }
+
+    #[test]
+    fn granted_deny_reason_does_not_offer_the_isolation_it_already_built() {
+        // #5769: this path denies a dispatch the guard had ALREADY rewritten to
+        // carry `isolation: "worktree"`. Reusing #4480's text told the reader to
+        // do the thing the guard had just done and declined to emit, which reads
+        // as arbitrary and gets retried identically.
+        let reason = granted_deny_reason(
+            "rust-engineer",
+            Path::new("/repo/main"),
+            &["python-engineer".to_string(), "python-engineer".to_string()],
+        );
+        assert!(reason.contains("ADR-0048"), "{reason}");
+        assert!(reason.contains("/repo/main"), "{reason}");
+        // The sibling is named once, and attributed rather than asserted.
+        assert_eq!(reason.matches("python-engineer").count(), 1, "{reason}");
+        assert!(
+            reason.contains("the daemon's delegation records name"),
+            "{reason}"
+        );
+        // It must say WHY a grant is not enough here — the rewrite may not be
+        // applied — rather than offering the grant back as the remedy.
+        assert!(
+            reason.contains("cannot confirm the harness applied it"),
+            "{reason}"
+        );
+        assert!(reason.contains("declared explicitly"), "{reason}");
+        assert!(reason.contains("serialize"), "{reason}");
+        // A stale record is the friction case the reorder widened; naming it is
+        // what lets a reader recognise it instead of retrying.
+        assert!(reason.contains("stale"), "{reason}");
+        for banned in ["wait for", "wait on", "wait until", "waiting for"] {
+            assert!(!reason.contains(banned), "found {banned:?}: {reason}");
         }
     }
 

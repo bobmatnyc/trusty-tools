@@ -618,8 +618,11 @@ impl DaemonState {
     /// the same lifecycle, the same liveness, and the same staleness sweep. No
     /// second kind of state and no new expiry are introduced.
     ///
-    /// `record` must not take this lock again (it is not reentrant), must not
-    /// block, and must not await.
+    /// `record` must not take THIS lock again — it is not reentrant — and must
+    /// not await. It MAY take [`Self::dispatch_record_guard`], and both of the
+    /// closures passed today do: that is the documented lock order, and taking
+    /// the two in the other order is what would deadlock. It must not block on
+    /// anything else.
     ///
     /// It takes no session (ADR-0048). [`Self::live_shared_tree_writers`] spans
     /// every session, so a guard in one session now sees a writer another
