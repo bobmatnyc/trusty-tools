@@ -1,0 +1,19 @@
+# Duplicate-version ratchet baseline for scripts/check_deny_duplicates.sh.
+#
+# The number below is how many crates appear at more than one version in this
+# workspace's dependency graph, as counted by `cargo deny check bans` with the
+# policy in deny.toml. Measured 2026-08-15 at e39183c3, with the default feature set (NOT --all-features).
+#
+# The gate FAILS when the live count exceeds this number, so a dependency bump
+# that introduces a new duplicate has to be noticed and justified. It PASSES and
+# asks you to lower this number when the count drops.
+#
+# LOWERING IT IS ALWAYS WELCOME. Raising it is a review decision that belongs in
+# the PR body, not a quiet edit.
+#
+# The three worst offenders today are base64, derive_more and lru, each at three
+# versions. `cargo deny check bans` prints the full list and the dependency path
+# to every copy.
+#
+# One bare integer, first non-comment line:
+83

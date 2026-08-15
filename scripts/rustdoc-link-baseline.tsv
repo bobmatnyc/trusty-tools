@@ -1,0 +1,33 @@
+# Per-crate broken intra-doc link baseline (scripts/check_rustdoc_links.sh).
+#
+# A RATCHET, not a target. Each row records how many broken links a crate has
+# today; the gate fails when a crate exceeds its row, when a crate with no row
+# has any at all, or when a crate that has a row was never documented.
+#
+# LOWERING A ROW IS ALWAYS WELCOME AND NEVER REQUIRED. Fix links in the PR that
+# touches the file anyway, then run:
+#     bash scripts/check_rustdoc_links.sh --update-baseline
+# Deleting a row entirely is the goal state for every crate here.
+#
+# RAISING A ROW IS A REVIEW DECISION, not a way to make a red gate green. A
+# broken link on docs.rs cannot be fixed without publishing a new version, so
+# the cost of letting one through is a wasted version number.
+#
+# Regenerate with: bash scripts/check_rustdoc_links.sh --update-baseline
+# Format (tab-separated):  <crate-directory>	<broken-link-count>
+trusty-agents	11
+trusty-agents-common	61
+trusty-analyze	1
+trusty-audit	2
+trusty-channels	2
+trusty-code	125
+trusty-common	200
+trusty-git-analytics	43
+trusty-gworkspace	1
+trusty-installer	4
+trusty-memory	17
+trusty-mpm	256
+trusty-review	7
+trusty-search	29
+trusty-sld-lint	2
+trusty-tui	91

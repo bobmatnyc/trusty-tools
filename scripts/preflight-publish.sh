@@ -17,7 +17,7 @@
 #   absolute stop.
 #
 # What: given a crate (by package name or crates/ directory name) and,
-#   optionally, an explicit version, runs SEVEN independent checks and exits
+#   optionally, an explicit version, runs EIGHT independent checks and exits
 #   nonzero if any of them fail:
 #
 #   CHECK 1 (merged-main): after `git fetch origin main`, current HEAD's
@@ -153,6 +153,38 @@
 #     No override flag. The remedy is one command:
 #     `make -C crates/<crate> release-prep` then commit the regenerated bundle.
 #
+#   CHECK 8 (the pre-publish gate ran and was green for THIS commit):
+#     queries the GitHub Actions API for a `Pre-publish gate` workflow run whose
+#     head SHA is the commit about to be published, and requires one to have
+#     concluded `success`.
+#
+#     WHY A LOCAL SCRIPT HAS TO ASK THIS. `.github/workflows/pre-publish.yml`
+#     runs `cargo doc` (broken intra-doc links), `cargo audit`, `cargo deny`, the
+#     `#[ignore]`d ONNX/embedder tests and the Code Contracts gates. Every one of
+#     them guards something a publish makes permanent. But `cargo publish` runs
+#     on a laptop, and a red workflow cannot reach out and stop it — which is
+#     exactly the reasoning that put CHECK 5 in this script rather than leaving
+#     SemVer to CI. A gate nobody is required to consult is a gate that gets
+#     consulted right up until the release that matters.
+#
+#     IT FAILS CLOSED, and the two failing states are DIFFERENT FACTS reported
+#     differently. No run at all for this SHA is [FAIL] "never ran" — not a
+#     pass, because "we did not check" and "we checked and it was fine" are the
+#     conflation this repo has been bitten by twice (#5620, #5723). A run that
+#     exists and concluded anything other than success is [FAIL] "red gate".
+#     An unreachable API is [FAIL] too: an answer this check could not obtain is
+#     not a green one.
+#
+#     THE OVERRIDE TAKES A REASON, NEVER A BOOLEAN, matching
+#     PREFLIGHT_SEMVER_UNVERIFIED:
+#
+#         PREFLIGHT_GATE_UNVERIFIED="pre-publish gate has never run against this
+#                                    tag; dispatched manually and reviewed by hand"
+#
+#     echoed verbatim into a [WARN] line and into the final summary. `=1` records
+#     that a publish bypassed the gate without recording why, and why is the
+#     whole content of the disclosure.
+#
 # Crate + version resolution: accepts EITHER
 #     scripts/preflight-publish.sh <crate-name-or-dir> [version]
 #   or, when [version] is omitted, reads the version from that crate's
@@ -167,7 +199,7 @@
 #   check-publish-ready.sh does, to avoid a second, divergent lookup
 #   convention in this workspace.
 #
-#   --check-only     run all 7 checks unconditionally (never short-circuits)
+#   --check-only     run all 8 checks unconditionally (never short-circuits)
 #                     and print one [PASS]/[FAIL] line per check, then a
 #                     one-line summary. Useful to preview status without
 #                     assuming you are mid-publish. Exit code is still
@@ -770,6 +802,97 @@ check7_ui_bundle() {
   return 1
 }
 
+# ===========================================================================
+# CHECK 8 — the pre-publish gate ran, and was green, for this exact commit
+# ===========================================================================
+# Delegated to `gh` rather than curl because the Actions API needs
+# authentication and `gh` already holds the credential CHECK 2 just validated.
+#
+# The SHA compared is HEAD, which CHECK 1 has already established is
+# origin/main (or has WARNed that it is not). Asking about a different commit
+# than the one being published would make this check decorative.
+GATE_NOT_VERIFIED=""
+
+check8_prepublish_gate() {
+  local sha runs count green rc=0
+
+  if ! command -v gh >/dev/null 2>&1; then
+    gate_unverified "the 'gh' CLI is not installed, so the gate's status could not be read"
+    return $?
+  fi
+
+  sha="$(git rev-parse HEAD)"
+
+  # `|| rc=$?` rather than a bare call: a network failure must reach the
+  # unverified path below, not abort the script under `set -e`.
+  runs="$(gh api "repos/bobmatnyc/trusty-tools/actions/runs?head_sha=${sha}&per_page=100" \
+    --jq '[.workflow_runs[] | select(.name == "Pre-publish gate")
+           | {conclusion, status, html_url}]' 2>/dev/null)" || rc=$?
+
+  if [ "$rc" -ne 0 ] || [ -z "$runs" ]; then
+    gate_unverified "the GitHub Actions API could not be reached (gh exited ${rc})"
+    return $?
+  fi
+
+  count="$(printf '%s' "$runs" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)"
+  if [ "$count" -eq 0 ]; then
+    echo "[FAIL] prepublish-gate: NO 'Pre-publish gate' run exists for ${sha}." >&2
+    echo "       The broken-link, cargo-audit, cargo-deny, ignored-test and contract" >&2
+    echo "       gates have never executed against this tree. That is not the same" >&2
+    echo "       as them passing, and this script will not treat it as such." >&2
+    echo "       Remedy — dispatch it against this commit and wait for it:" >&2
+    echo "         gh workflow run pre-publish.yml --ref \$(git rev-parse --abbrev-ref HEAD)" >&2
+    echo "       If it genuinely cannot run for this release, record why:" >&2
+    echo "         PREFLIGHT_GATE_UNVERIFIED=\"<why>\" scripts/preflight-publish.sh ${PKG_NAME}" >&2
+    return 1
+  fi
+
+  green="$(printf '%s' "$runs" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(1 for r in d if r.get("status")=="completed" and r.get("conclusion")=="success"))' 2>/dev/null || echo 0)"
+
+  if [ "$green" -ge 1 ]; then
+    echo "[PASS] prepublish-gate: ${green} green 'Pre-publish gate' run(s) for ${sha}." >&2
+    return 0
+  fi
+
+  echo "[FAIL] prepublish-gate: 'Pre-publish gate' has run for ${sha} but NO run" >&2
+  echo "       concluded 'success':" >&2
+  printf '%s\n' "$runs" | sed 's/^/       /' >&2
+  echo "       Publishing over a red release gate is the CHECK 5 mistake in a new" >&2
+  echo "       place: the gate ran, said no, and the upload happened anyway." >&2
+  echo "       Fix what it found and re-run it. A still-running gate is not a" >&2
+  echo "       green one — wait for it." >&2
+  return 1
+}
+
+# gate_unverified <why> — the gate's status could not be READ (no gh, no
+# network). Distinct from a red gate and from an absent one: those are answers,
+# this is the absence of one. Permitted only with a recorded reason, on the same
+# terms as PREFLIGHT_SEMVER_UNVERIFIED.
+gate_unverified() {
+  local why="$1"
+  if [ -n "${PREFLIGHT_GATE_UNVERIFIED+x}" ]; then
+    if [ -z "$(printf '%s' "${PREFLIGHT_GATE_UNVERIFIED}" | tr -d '[:space:]')" ]; then
+      echo "[FAIL] prepublish-gate: PREFLIGHT_GATE_UNVERIFIED is set but empty." >&2
+      echo "       This override records WHY a publish skipped the release gate, so" >&2
+      echo "       it takes a reason, not a flag." >&2
+      return 1
+    fi
+    GATE_NOT_VERIFIED="pre-publish gate NOT consulted — ${PREFLIGHT_GATE_UNVERIFIED}"
+    echo "[WARN] prepublish-gate: UNVERIFIED — ${why}." >&2
+    echo "       Reason given: ${PREFLIGHT_GATE_UNVERIFIED}" >&2
+    echo "       Nothing confirmed the broken-link, audit, deny, ignored-test or" >&2
+    echo "       contract gates ran against this commit." >&2
+    return 0
+  fi
+  echo "[FAIL] prepublish-gate: could not determine whether the release gate passed —" >&2
+  echo "       ${why}." >&2
+  echo "       An answer this check could not obtain is not a green one." >&2
+  echo "       If this release must proceed anyway, record why:" >&2
+  echo "         PREFLIGHT_GATE_UNVERIFIED=\"<why>\" scripts/preflight-publish.sh ${PKG_NAME}" >&2
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Scratch temp file for check 4's curl response body. Created once up front
 # and cleaned up via a script-scoped EXIT trap (matches check_line_cap.sh's
@@ -782,7 +905,7 @@ TMP_UIBUNDLE="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.uibundle.XXXXXX")"
 trap 'rm -f "$TMP_BODY" "$TMP_SEMVER" "$TMP_PARITY" "$TMP_UIBUNDLE"' EXIT
 
 # ---------------------------------------------------------------------------
-# Run all 7 checks. Always run every check (rather than short-circuiting) so
+# Run all 8 checks. Always run every check (rather than short-circuiting) so
 # --check-only and normal mode share one code path and a single run always
 # reports the full picture — a partial preflight is how gaps get missed.
 # ---------------------------------------------------------------------------
@@ -794,6 +917,7 @@ check4_version_not_live; [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check5_semver;           [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check6_tag_parity;       [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check7_ui_bundle;        [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check8_prepublish_gate;  [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 set -e
 
 if [ "$FAILURES" -gt 0 ]; then
@@ -805,10 +929,15 @@ if [ -n "${SEMVER_NOT_VERIFIED:-}" ]; then
   # #5620: "passed all 7 checks" must not absorb a check-5 outcome that verified
   # nothing. The same distinction the check line draws, drawn again at the line
   # an operator is most likely to read on its own.
-  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 7 checks, but the" >&2
+  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 8 checks, but the" >&2
   echo "  public API was NOT VERIFIED: ${SEMVER_NOT_VERIFIED}. See the check 5 line above." >&2
 else
-  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 7 checks. Safe to publish." >&2
+  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 8 checks. Safe to publish." >&2
+fi
+if [ -n "${GATE_NOT_VERIFIED:-}" ]; then
+  # Same reasoning as the SEMVER_NOT_VERIFIED line above: "passed all 8 checks"
+  # must not absorb a check-8 outcome that read nothing.
+  echo "preflight-publish: NOTE — ${GATE_NOT_VERIFIED}. See the check 8 line above." >&2
 fi
 echo "preflight-publish: after 'cargo publish', confirm what cargo actually recorded:" >&2
 echo "  scripts/check-tag-publish-parity.sh --vcs-info auto ${PKG_NAME} ${VERSION}" >&2
