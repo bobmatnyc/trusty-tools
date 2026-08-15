@@ -233,6 +233,22 @@ jobs:
         if: steps.crate.outputs.have_work == 'true'
         run: bash scripts/check_semver_selftest.sh
 
+      # cargo-semver-checks 0.50.0 compares NO TYPES: substitute any type and
+      # the item still exists with the same name and arity, so every lint
+      # passes. Against a 9-break probe crate at --release-type patch it caught
+      # 2 and missed 7, all 7 type substitutions; trusty-common 0.32.0 -> 0.33.0
+      # changed a return from u64 to Result<u64> and the step below reported
+      # `196 checks: 196 pass`. scripts/check_semver_types.sh closes that, and
+      # this proves it still catches all seven.
+      #
+      # Gated the same way as the selftest above, not because it is expensive —
+      # it reads two committed rustdoc JSON documents and builds nothing — but
+      # because its --crate cases need `cargo metadata`, and the toolchain step
+      # is itself gated on there being a release under test.
+      - name: Type-differ selftest (must catch what the lints miss)
+        if: steps.crate.outputs.have_work == 'true'
+        run: bash scripts/check_semver_types_selftest.sh
+
       # The two nonzero statuses are annotated differently ON PURPOSE (#5289).
       # Exit 1 is a computed verdict that says break; exit 3 means the gate never
       # compared anything, and reporting that as "your API changed" is the lie
