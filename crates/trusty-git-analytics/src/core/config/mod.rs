@@ -1005,7 +1005,13 @@ fn default_failure_window_hours() -> u32 {
 /// resolver, and org-discovery paths throughout `tga collect`.
 /// Test: `github_config_serde_*` tests in this module; org/reviewer fields
 /// tested in `collect::github::org_discovery` and `reviewer_store` tests.
+///
+/// `#[non_exhaustive]` since #5219, which added `fetch_on_reference`. A config
+/// section grows a knob whenever a provider learns an option, and every
+/// addition is otherwise a SemVer-major break for a published crate — build one
+/// with `..Default::default()`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct GithubConfig {
     /// Personal access token (often sourced from `GITHUB_TOKEN`).
     #[serde(default)]
@@ -1078,11 +1084,14 @@ pub struct GithubConfig {
     /// Whether to fetch the GitHub issues referenced by commit messages and
     /// write them into `work_items`.
     ///
-    /// Defaults to `false` (#5219), matching `linear.fetch_on_reference` and
-    /// `pm.azure_devops.fetch_on_reference`. GitHub is configured in nearly
-    /// every `tga` config for pull requests alone, and `#N` is the commonest
-    /// reference shape there is — enabling this by default would spend a
-    /// token's hourly budget on issue lookups nobody asked for.
+    /// Defaults to `false` (#5219), unlike `linear.fetch_on_reference` and
+    /// `pm.azure_devops.fetch_on_reference`, which default to `true`. GitHub is
+    /// configured in nearly every `tga` config for pull requests alone, and
+    /// `#N` is the commonest reference shape there is — defaulting this on
+    /// would spend a token's hourly budget on issue lookups nobody asked for,
+    /// for every user who had configured GitHub for something else. Linear and
+    /// ADO carry no such risk: configuring either is already a statement that
+    /// its board is the one this repository's commits reference.
     #[serde(default)]
     pub fetch_on_reference: bool,
 }
@@ -1153,7 +1162,11 @@ pub struct BitbucketConfig {
 }
 
 /// JIRA Cloud / Server integration settings.
+///
+/// `#[non_exhaustive]` since #5219, which added `fetch_on_reference` — same
+/// reasoning as [`GithubConfig`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct JiraConfig {
     /// Base URL of the JIRA instance.
     #[serde(default)]
@@ -1233,11 +1246,12 @@ pub struct JiraConfig {
     /// Whether to fetch the JIRA issues referenced by commit messages and
     /// write them into `work_items`.
     ///
-    /// Defaults to `false` (#5219), matching `linear.fetch_on_reference` and
-    /// `pm.azure_devops.fetch_on_reference`. `tga jira sync` is a separate,
-    /// explicitly-invoked path that populates the transition and comment
-    /// tables; this flag governs only the reference-driven `work_items` pull
-    /// that runs inside `tga collect`.
+    /// Defaults to `false` (#5219), unlike `linear.fetch_on_reference` and
+    /// `pm.azure_devops.fetch_on_reference`, which default to `true`. A JIRA
+    /// config already drives `tga jira sync`, a separate and explicitly
+    /// invoked path that populates the transition and comment tables — so
+    /// having JIRA configured says nothing about wanting a reference-driven
+    /// issue pull inside `tga collect`, which is all this flag governs.
     #[serde(default)]
     pub fetch_on_reference: bool,
 }

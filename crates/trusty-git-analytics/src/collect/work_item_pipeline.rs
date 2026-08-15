@@ -14,11 +14,13 @@
 //! Test: this module's own `tests`.
 //!
 //! Linear is deliberately NOT routed through here — see
-//! [`fetch_on_reference`]. It keeps [`crate::collect::linear_pipeline`],
-//! which writes `linear_issues` in the same pass and applies
-//! `linear.team_keys` before fetching; both are outside what [`PmAdapter`]
-//! expresses, and routing `work_items` through this module while
-//! `linear_issues` stayed behind would fetch every Linear issue twice per run.
+//! [`fetch_on_reference`]. It keeps [`crate::collect::linear_pipeline`], which
+//! writes `linear_issues` in the same pass: that table is provider-specific, so
+//! routing `work_items` through this module while it stayed behind would fetch
+//! every Linear issue twice per run. `linear.team_keys` filtering is a second,
+//! lesser reason — an implementation gap rather than a limit of the trait,
+//! since `with_ticket_regex` shows how per-provider config threads in at
+//! construction.
 
 use std::collections::{HashMap, HashSet};
 

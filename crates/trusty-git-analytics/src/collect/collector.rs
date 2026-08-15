@@ -484,9 +484,9 @@ impl CollectionPipeline {
         linear_pipeline::fetch_and_store_linear_issues(db, &self.config, &mut stats).await;
 
         // #5219: JIRA, GitHub Issues and Azure DevOps all reach `work_items`
-        // through one `PmAdapter`-driven pass. Linear stays above — it writes
-        // `linear_issues` in the same pass and filters by `linear.team_keys`,
-        // neither of which the trait expresses.
+        // through one `PmAdapter`-driven pass. Linear stays above because it
+        // writes the provider-specific `linear_issues` in the same pass; see
+        // `work_item_pipeline`'s module doc.
         work_item_pipeline::fetch_and_persist_work_items(db, &self.config, &mut stats).await;
 
         Ok(stats)
