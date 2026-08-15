@@ -90,6 +90,16 @@ struct ExtractPatterns {
     jira_anchored: Regex,
     /// GitHub bare issue reference: `#123`.
     gh_bare: Regex,
+    /// #5734: JIRA/Linear key anchored to the start of one `/`-separated
+    /// branch-name segment. Distinct from [`Self::jira_anchored`] only in its
+    /// right boundary, which must also accept `-` and `_` because a branch
+    /// slug runs the key straight into its description
+    /// (`feature/PROJ-123-add-thing`).
+    jira_branch_segment: Regex,
+    /// #5734: GitHub action-keyword reference with the issue number captured
+    /// (`Closes #5734`). [`TicketPatterns::gh_action`] only answers whether one
+    /// is present; this one yields the `#N` to store.
+    gh_action_ref: Regex,
 }
 
 /// Global, lazily-initialized extraction pattern set.
@@ -110,6 +120,14 @@ fn extract_patterns() -> &'static ExtractPatterns {
             jira_anchored: Regex::new(r"^([A-Z][A-Z0-9]*-\d+)(?:$|[\s:,.;)\]])")
                 .expect("jira_anchored pattern compiles"),
             gh_bare: Regex::new(r"(?:^|\s)(#\d+)\b").expect("gh_bare extract pattern compiles"),
+            // #5734: same `^`-anchoring as `jira_anchored`, so a tail segment of
+            // a longer identifier stays unreachable here too.
+            jira_branch_segment: Regex::new(r"^([A-Z][A-Z0-9]*-\d+)(?:$|[-_./\s])")
+                .expect("jira_branch_segment pattern compiles"),
+            gh_action_ref: Regex::new(
+                r"(?i)\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+(#\d+)\b",
+            )
+            .expect("gh_action_ref pattern compiles"),
         }
     })
 }
@@ -261,6 +279,114 @@ pub fn extract_ticket_id(message: &str) -> Option<String> {
     }
 
     None
+}
+
+/// The ticket key a branch NAME declares, if any.
+///
+/// Why: #5734 — `feature/PROJ-123-thing` names its work item as deliberately as
+/// a commit subject does, and nothing harvested it. The rule has to be as tight
+/// as #5199's, because a branch called `fix/ADR-0029-followup` is the same
+/// shape as a real key: #5199 measured 466 false keys across 178 prefixes on
+/// this repository's commit bodies, and re-admitting them through a branch name
+/// would undo that work through a side door.
+///
+/// What: strips a leading `refs/heads/` (Azure DevOps reports full refs), then
+/// tries each `/`-separated segment in order and returns the first key anchored
+/// at that segment's START. The right boundary accepts `-` and `_` as well as
+/// end-of-segment, because a branch slug runs the key into its description with
+/// no space. [`DOC_REF_PREFIXES`] is applied unchanged, so `ADR`, `DOC`, `RFC`
+/// and `SPEC` are rejected here exactly as they are in a commit subject.
+/// Anchoring at `^` also keeps `SPEC-INSTALLER-01` from yielding
+/// `INSTALLER-01`, the tail-segment case #5199 closed.
+///
+/// A wrong key here is contained the same way #5199's are:
+/// [`crate::collect::correlate_commits`] only links a key that matches a row
+/// already in `work_items`, so a bad key becomes a reported gap, never an
+/// invented link.
+///
+/// Measured over this repository's 2376 merged pull requests, this yields
+/// ZERO keys — branch names here are lowercase (`fix/5734-slug`). That is a
+/// property of this repository's conventions, not of the extractor.
+///
+/// Test: `tests::branch_ticket_key_reads_the_key_a_branch_declares`,
+/// `tests::branch_ticket_key_rejects_documentation_prefixes`.
+///
+/// # Examples
+///
+/// ```
+/// use tga::collect::ticket::branch_ticket_key;
+///
+/// assert_eq!(branch_ticket_key("feature/PROJ-123-thing"), Some("PROJ-123".to_string()));
+/// assert_eq!(branch_ticket_key("refs/heads/ENG-7"), Some("ENG-7".to_string()));
+/// // #5199's rejection rules apply here unchanged.
+/// assert_eq!(branch_ticket_key("fix/ADR-0029-followup"), None);
+/// assert_eq!(branch_ticket_key("fix/5734-harvest-refs"), None);
+/// ```
+pub fn branch_ticket_key(branch: &str) -> Option<String> {
+    let p = extract_patterns();
+    let trimmed = branch
+        .trim()
+        .strip_prefix("refs/heads/")
+        .unwrap_or(branch.trim());
+    for segment in trimmed.split('/') {
+        let Some(key) = p
+            .jira_branch_segment
+            .captures(segment)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string())
+        else {
+            continue;
+        };
+        // #5734: the same deny-list #5199 applied to a commit subject.
+        if !is_doc_reference(&key) {
+            return Some(key);
+        }
+    }
+    None
+}
+
+/// The issue reference a pull-request BODY declares, if any.
+///
+/// Why: #5734 — a PR body routinely carries `Closes #N` for work the commit
+/// subject never names, and none of it was harvested. What it must NOT do is
+/// re-admit the noise #5199 removed: an unrestricted JIRA-shaped scan over this
+/// repository's 2433 PR bodies returns 2501 matches across 423 distinct keys,
+/// led by `DOC-39` (88), `DOC-48` (63) and `ADR-0024` (46) — five times the
+/// false-key volume #5199 deleted from commit bodies. Gating that scan on an
+/// action keyword does not rescue it either: `Closes <JIRA-key>` appears 8
+/// times and 6 are `ADR-0038`, `ADR-0032`, `DOC-56`, `DOC-29`,
+/// `RUSTSEC-2026` and a `HIGH-1` severity label.
+///
+/// What: reads ONLY an action-keyword GitHub reference — `closes #N`,
+/// `fixes #N`, `resolves #N` and their tense variants — and returns the `#N`.
+/// No JIRA/Linear pattern runs against a PR body at all, and a BARE `#N` is
+/// rejected as well: bare refs fire on 147 further bodies here, which is the
+/// #445 over-counting the bare pattern was excluded from [`is_ticketed`] for.
+/// A body must name its issue with an action keyword to be believed.
+///
+/// Measured over this repository, this recovers a genuine issue reference for
+/// 51 merged commits whose subject declares no key.
+///
+/// Test: `tests::pr_body_ticket_key_needs_an_action_keyword`,
+/// `tests::pr_body_ticket_key_never_reads_a_jira_shaped_token`.
+///
+/// # Examples
+///
+/// ```
+/// use tga::collect::ticket::pr_body_ticket_key;
+///
+/// assert_eq!(pr_body_ticket_key("Rework the guard.\n\nCloses #5734"), Some("#5734".to_string()));
+/// // A bare mention is not a declaration.
+/// assert_eq!(pr_body_ticket_key("Supersedes #123, see #456"), None);
+/// // The #5199 noise class never reaches a key.
+/// assert_eq!(pr_body_ticket_key("Per DOC-39 and ADR-0024, fixes UTF-8 handling"), None);
+/// ```
+pub fn pr_body_ticket_key(body: &str) -> Option<String> {
+    extract_patterns()
+        .gh_action_ref
+        .captures(body)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
 }
 
 #[cfg(test)]
@@ -551,5 +677,119 @@ mod tests {
     fn empty_message_is_not_ticketed() {
         assert!(!is_ticketed(""));
         assert!(!is_ticketed("\n\n"));
+    }
+
+    // ── #5734: branch names ───────────────────────────────────────────────
+
+    /// Why: #5734 — the branch shapes a real workflow produces must all
+    /// resolve, whichever `/`-separated segment carries the key.
+    /// What: bare, prefixed, nested and full-ref forms yield the key.
+    /// Test: this test itself.
+    #[test]
+    fn branch_ticket_key_reads_the_key_a_branch_declares() {
+        for (branch, want) in [
+            ("PROJ-123", "PROJ-123"),
+            ("PROJ-123-add-thing", "PROJ-123"),
+            ("feature/PROJ-123-thing", "PROJ-123"),
+            ("feature/ENG-7_login", "ENG-7"),
+            ("bobmatnyc/feature/API-9", "API-9"),
+            ("refs/heads/feature/BB-2746-auth", "BB-2746"),
+            ("refs/heads/SRE-3104", "SRE-3104"),
+        ] {
+            assert_eq!(
+                branch_ticket_key(branch),
+                Some(want.to_string()),
+                "branch: {branch:?}"
+            );
+        }
+    }
+
+    /// Why: #5734's central risk — a branch named `fix/ADR-0029-followup` is
+    /// exactly the shape #5199 spent its effort excluding, and harvesting one
+    /// would reintroduce that noise through a side door.
+    /// What: every [`DOC_REF_PREFIXES`] entry is rejected in a branch name, the
+    /// hyphenated-tail case stays unreachable, and a lowercase or
+    /// numeric-leading branch yields nothing.
+    /// Test: this test itself.
+    #[test]
+    fn branch_ticket_key_rejects_documentation_prefixes() {
+        for branch in [
+            "fix/ADR-0029-followup",
+            "docs/DOC-67-rewrite",
+            "chore/RFC-2119-sweep",
+            "feat/SPEC-14-tightened",
+            "refs/heads/ADR-0034",
+            // The tail of a longer identifier is unreachable, as in a subject.
+            "feat/SPEC-INSTALLER-01-detect",
+            // This repository's own convention: lowercase type, numeric slug.
+            "fix/5734-harvest-branch-and-pr-refs",
+            "feat/pre-publish-sha-targeting-5740",
+            "main",
+            "",
+        ] {
+            assert_eq!(branch_ticket_key(branch), None, "branch: {branch:?}");
+        }
+    }
+
+    // ── #5734: pull-request bodies ────────────────────────────────────────
+
+    /// Why: #5734 — a PR body's `Closes #N` is the reference worth harvesting;
+    /// a bare mention is the #445 over-counting that fires on 147 further
+    /// bodies in this repository alone.
+    /// What: action-keyword forms and their tense variants yield the `#N`;
+    /// bare mentions yield nothing.
+    /// Test: this test itself.
+    #[test]
+    fn pr_body_ticket_key_needs_an_action_keyword() {
+        for (body, want) in [
+            ("Closes #5734", "#5734"),
+            ("Rework the guard.\n\nCloses #5734\n", "#5734"),
+            ("fixes #99 and tidies up", "#99"),
+            ("RESOLVED #7", "#7"),
+            ("This closed #42 at last", "#42"),
+        ] {
+            assert_eq!(
+                pr_body_ticket_key(body),
+                Some(want.to_string()),
+                "body: {body:?}"
+            );
+        }
+        for body in [
+            "Supersedes #123, see #456",
+            "Follow-up to #5199.",
+            "#5734 is the tracking issue",
+            "no reference at all",
+            "",
+        ] {
+            assert_eq!(pr_body_ticket_key(body), None, "body: {body:?}");
+        }
+    }
+
+    /// Why: #5734 — the measured reason no JIRA/Linear pattern runs over a PR
+    /// body. An unrestricted scan of this repository's 2433 bodies returns
+    /// 2501 matches across 423 keys led by `DOC-39`, `DOC-48` and `ADR-0024`;
+    /// gating on an action keyword still leaves `RUSTSEC-2026` and a `HIGH-1`
+    /// severity label. Both routes are closed, not filtered.
+    /// What: none of these bodies yields a JIRA-shaped key, including the ones
+    /// where an action keyword sits directly in front of it.
+    /// Test: this test itself.
+    #[test]
+    fn pr_body_ticket_key_never_reads_a_jira_shaped_token() {
+        for body in [
+            "Per DOC-39 the manifest is an allowlist.",
+            "Implements ADR-0024 and DOC-48.",
+            "fixes UTF-8 filename handling",
+            "closes RUSTSEC-2026-0187",
+            "resolves HIGH-1 from the audit",
+            "Fixes PROJ-123 in the tracker",
+            "SHA-256 digest pinned; ISO-8601 offsets kept",
+        ] {
+            assert_eq!(pr_body_ticket_key(body), None, "body: {body:?}");
+        }
+        // A body that names BOTH still yields only the GitHub reference.
+        assert_eq!(
+            pr_body_ticket_key("Per ADR-0034 the relay spools durably.\n\nCloses #5089\n"),
+            Some("#5089".to_string())
+        );
     }
 }

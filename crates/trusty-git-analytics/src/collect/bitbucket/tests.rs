@@ -552,6 +552,8 @@ fn sample_pr(repository: &str, pr_number: u64, state: PrState, fetched_at: &str)
         merged_at: None,
         commit_shas: "[]".to_string(),
         fetched_at: fetched_at.to_string(),
+        head_ref: None,
+        body_ticket_id: None,
     }
 }
 

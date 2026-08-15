@@ -26,6 +26,24 @@ pub(crate) struct ApiPull {
     pub(crate) merged_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub(crate) merge_commit_sha: Option<String>,
+    /// #5734: source-branch block. Already present in this same list response —
+    /// harvesting it costs no extra request and no extra rate-limit budget.
+    #[serde(default)]
+    pub(crate) head: Option<ApiPullRef>,
+    /// #5734: PR description. Scanned once at fetch time for an action-keyword
+    /// issue reference; the prose itself is never persisted.
+    #[serde(default)]
+    pub(crate) body: Option<String>,
+}
+
+/// Internal wire type for the `head` block of a pull request (#5734).
+///
+/// Only `ref` is deserialized: `head.repo` is null for a PR from a deleted
+/// fork, but `head.ref` survives that, so the branch name stays readable.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ApiPullRef {
+    #[serde(rename = "ref")]
+    pub(crate) ref_name: String,
 }
 
 /// Internal wire type for an author / actor embedded in PR payloads.
