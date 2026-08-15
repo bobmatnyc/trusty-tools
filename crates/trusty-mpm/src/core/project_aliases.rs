@@ -289,16 +289,32 @@ pub(crate) fn is_worktree_path(path: &Path) -> bool {
 /// `is_main_checkout_rejects_worktrees`,
 /// `is_main_checkout_rejects_a_non_repository`.
 pub fn is_main_checkout(path: &Path) -> bool {
+    main_checkout_root(path).is_some()
+}
+
+/// The main checkout `path` belongs to, when it belongs to one.
+///
+/// Why: [`is_main_checkout`] answers whether the directory is protected, but two
+/// callers also need to know WHICH checkout — the guard that keys a
+/// delegation-writer query by directory, and any deny that names the tree. A
+/// subdirectory of a checkout shares its HEAD, so `/repo/crates/foo` and `/repo`
+/// are the same hazard and must resolve to the same key; resolving that
+/// separately in the guard would be a second definition of the same question.
+/// What: the first ancestor of `path` carrying a `.git` DIRECTORY, or `None`
+/// when `path` is a linked worktree, sits under a worktree segment, or has no
+/// `.git` ancestor at all. Same two `stat`s and same symlink limit as
+/// [`is_main_checkout`], which is now this function's `is_some()`.
+/// Test: `main_checkout_root_resolves_a_subdirectory_to_the_checkout`,
+/// `is_main_checkout_rejects_worktrees`.
+pub fn main_checkout_root(path: &Path) -> Option<PathBuf> {
     if is_worktree_path(path) {
-        return false;
+        return None;
     }
-    let Some(root) = find_git_root(path) else {
-        return false;
-    };
+    let root = find_git_root(path)?;
     if is_worktree_path(&root) {
-        return false;
+        return None;
     }
-    root.join(".git").is_dir()
+    root.join(".git").is_dir().then_some(root)
 }
 
 /// Probe whether `path` is a linked git worktree using git itself.
@@ -544,6 +560,29 @@ mod tests {
             !is_main_checkout(&elsewhere),
             "a `.git` FILE marks a linked worktree, wherever it lives"
         );
+    }
+
+    #[test]
+    fn main_checkout_root_resolves_a_subdirectory_to_the_checkout() {
+        // #5769: a delegation record is stamped with the directory `tm hook`
+        // ran in, and two directories inside one checkout share one HEAD. A
+        // subdirectory must therefore resolve to the SAME key as the root, or a
+        // `cd crates/foo && git pull` keys a directory no record can match.
+        let dir = TempDir::new().expect("tmpdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
+        std::fs::create_dir_all(repo.join("crates/trusty-mpm/src")).expect("mkdir src");
+        assert_eq!(main_checkout_root(&repo), Some(repo.clone()));
+        assert_eq!(
+            main_checkout_root(&repo.join("crates/trusty-mpm/src")),
+            Some(repo)
+        );
+        // The three `None` arms `is_main_checkout` reports as `false`.
+        let elsewhere = dir.path().join("linked-wt");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir linked");
+        std::fs::write(elsewhere.join(".git"), "gitdir: /repo/.git/worktrees/x").expect("write");
+        assert_eq!(main_checkout_root(&elsewhere), None);
+        assert_eq!(main_checkout_root(dir.path()), None);
     }
 
     #[test]
