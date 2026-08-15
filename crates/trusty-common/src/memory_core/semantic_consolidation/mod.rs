@@ -28,6 +28,7 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::env_guard::EnvVarGuard;
     use crate::memory_core::palace::Drawer;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -131,7 +132,7 @@ mod tests {
         // the very var this test just cleared, mid-assertion (the #3464
         // mechanism). Forcing it now makes the clear below the last word.
         crate::credentials::load_env_local_once();
-        let _guard = EnvVarGuard::clear("OPENROUTER_API_KEY");
+        let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
         assert!(!inference_available("", false));
         assert!(!inference_available("   ", false));
     }
@@ -161,9 +162,10 @@ mod tests {
     /// process environment before picking a backend; `resolve_openrouter_api_key`
     /// must do the same so every caller (including
     /// `trusty-memory::dream_config_from_user_config`) agrees on the
-    /// resolved key. `#[serial(dotenv_credential_env)]` + a local
-    /// `EnvVarGuard` avoid racing other tests that read/write the same real
-    /// env var — the named group joins the SAME lock used by
+    /// resolved key. `#[serial(dotenv_credential_env)]` + the shared
+    /// `credentials::env_guard::EnvVarGuard` (#3451) avoid racing other tests
+    /// that read/write the same real env var — the named group joins the
+    /// SAME lock used by
     /// `credentials::{resolver,dotenv}::tests` and
     /// `memory_core::dream::tests` (audit finding, same class as
     /// #3607/#3608: a bare unnamed `#[serial]` here does NOT coordinate with
@@ -174,50 +176,6 @@ mod tests {
     fn resolve_openrouter_api_key_falls_back_to_env() {
         let _guard = EnvVarGuard::set("OPENROUTER_API_KEY", "sk-from-env");
         assert_eq!(resolve_openrouter_api_key(""), "sk-from-env");
-    }
-
-    // ─── RAII env-var guard for tests (mirrors
-    // trusty_common::memory_core::dream::tests::EnvVarGuard) ───────────────
-    //
-    // Safety: test-only; `#[serial_test::serial(dotenv_credential_env)]` on
-    // every caller serialises access to the real process environment across
-    // test threads (and across the other files sharing this named group).
-
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            // Safety: test-only; caller is `#[serial]`.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-
-        /// Remove `key` for the guard's lifetime, restoring it on drop (#4407).
-        ///
-        /// Why: a test asserting "behaviour X holds when this var is UNSET" must
-        /// make it unset, not assume the ambient shell left it that way — see
-        /// `inference_available_false_without_key`, which failed on any machine
-        /// with a real `OPENROUTER_API_KEY` exported.
-        fn clear(key: &'static str) -> Self {
-            let previous = std::env::var(key).ok();
-            // Safety: test-only; caller is `#[serial]`.
-            unsafe { std::env::remove_var(key) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            // Safety: test-only; caller is `#[serial]`.
-            match &self.previous {
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
     }
 
     /// Why: `parse_consolidation_actions` must extract actions from raw JSON.
