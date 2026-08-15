@@ -21,6 +21,8 @@ pub mod persist;
 pub mod pipeline;
 pub mod templates;
 pub mod ticketed_stats;
+// #5405: the board-correlation figures the DD report renders.
+pub mod ticketing;
 
 pub use dd_manifest::{
     build_dd_manifest, DdManifest, DdManifestError, DdManifestOptions, DdReportSection,
@@ -31,6 +33,7 @@ pub use models::ReportData;
 pub use period_trends::{query_author_period_trends, AuthorPeriodSummary};
 pub use pipeline::{ReportPipeline, ReportStats};
 pub use ticketed_stats::{compute_ticketed_stats, TicketedStats};
+pub use ticketing::{build_ticketing_summary, TicketingSummary, TICKETING_SCHEMA_VERSION};
 
 #[cfg(test)]
 mod tests;

@@ -4,8 +4,8 @@
 //! result once, under time pressure. DOC-67 §2 makes that literal — nothing in
 //! this module prompts, waits for input, or needs a terminal.
 //! What: [`run_full_sweep`], the library entry point that drives tga's eight
-//! data-collection subcommands end to end, plus the per-stage outcome types it
-//! returns. The `tga audit` command (`crate::commands::audit`) owns
+//! data-collection subcommands end to end — plus the commit ↔ board-item
+//! correlation pass (#5405) — and the per-stage outcome types it returns. The `tga audit` command (`crate::commands::audit`) owns
 //! orchestration and reporting; this module owns stage sequencing and nothing
 //! else.
 //! Test: `audit::tests`.

@@ -29,6 +29,9 @@ use tga::core::db::Database;
 use tga::report::dd_manifest::{
     build_dd_manifest, configured_secrets, dd_repository_entries, DdManifestOptions,
 };
+// #5405: the board-correlation figures the DD report renders.
+use tga::report::build_ticketing_summary;
+use trusty_common::credentials::scrub_secrets;
 
 /// Arguments for `tga audit`.
 ///
@@ -208,6 +211,24 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     let indexed = ensure_repositories_indexed(&dd_repository_entries(&config, &base_dir)).await;
     gaps.extend(index_gap_lines(&indexed, &secrets));
 
+    // #5405: the board-correlation figures the report renders. A write failure
+    // is named in Gaps & Caveats rather than aborting — DOC-67 §9's rule that an
+    // unassessed dimension is stated, never silently absent.
+    let ticketing = match ticketing_artifact(&stats, db, &output) {
+        Ok(path) => path,
+        Err(e) => {
+            gaps.push(scrub_secrets(
+                &format!(
+                    "Ticketing correlation: the sweep linked commits to board items, but the \
+                     figures could not be written to {TICKETING_FILE} ({e:#}). The report states \
+                     no board coverage for this run."
+                ),
+                &secrets,
+            ));
+            None
+        }
+    };
+
     gaps.push(DATA_HANDLING_NOTE.to_string());
     let manifest = build_dd_manifest(
         &config,
@@ -217,6 +238,7 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
             client: args.client.clone(),
             gaps,
             base_dir,
+            ticketing,
         },
     )?;
 
@@ -229,6 +251,44 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
 
 /// Filename of the DD manifest written into the audit's output directory.
 const MANIFEST_FILE: &str = "manifest.toml";
+
+/// Filename of the ticketing artifact, beside the manifest (#5405).
+const TICKETING_FILE: &str = "ticketing.json";
+
+/// Write the run's board-correlation figures beside the manifest.
+///
+/// Why (#5405): the sweep synced `work_items` and joined them to `commits`, and
+/// the DD report read none of it. This is the artifact that carries those
+/// figures across the tga→trusty-review process boundary.
+/// What: returns the manifest-relative path when the correlation stage
+/// succeeded and the file was written, and `None` when that stage failed — in
+/// which case its own gap line already names the omission, so writing figures
+/// from a half-run join would be worse than stating there are none. The path is
+/// relative because trusty-review resolves it against the MANIFEST's directory.
+/// Test: `tests::a_failed_correlation_stage_writes_no_ticketing_artifact`,
+/// `tests::a_succeeded_correlation_stage_writes_the_artifact`.
+///
+/// # Errors
+///
+/// Propagates the database read and the file write; the caller turns either
+/// into a named gap rather than a failed run.
+fn ticketing_artifact(
+    stats: &AuditSweepStats,
+    db: &Database,
+    output: &Path,
+) -> anyhow::Result<Option<PathBuf>> {
+    let correlated = stats
+        .outcomes
+        .iter()
+        .any(|o| o.stage == SweepStage::Correlate && !o.status.is_failure());
+    if !correlated {
+        return Ok(None);
+    }
+
+    let summary = build_ticketing_summary(db.connection())?;
+    std::fs::write(output.join(TICKETING_FILE), summary.to_json()?)?;
+    Ok(Some(PathBuf::from(TICKETING_FILE)))
+}
 
 /// Invoke `trusty-review report` and report what it produced.
 ///
@@ -378,6 +438,7 @@ mod tests {
     use std::time::Instant;
 
     use tga::audit::{AuditSweepStats, StaleFetch, SweepStage};
+    use tga::core::db::Database;
 
     use super::write_stage_report;
 
@@ -479,6 +540,52 @@ mod tests {
         assert!(
             stale_row.contains("ok (2 stale)"),
             "the row must count the repositories that fell back: {stale_row}"
+        );
+    }
+
+    /// #5405: the artifact is written only on the strength of a correlation
+    /// stage that actually succeeded. A failed one leaves `None`, so the
+    /// manifest declares nothing and the report states the absence instead of
+    /// rendering figures from a half-completed join.
+    #[test]
+    fn a_failed_correlation_stage_writes_no_ticketing_artifact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("tga.db")).expect("open db");
+
+        let mut stats = AuditSweepStats::default();
+        stats.record(
+            SweepStage::Correlate,
+            Instant::now(),
+            Err(anyhow::anyhow!("database is locked")),
+        );
+
+        let path = super::ticketing_artifact(&stats, &db, dir.path()).expect("no hard failure");
+        assert_eq!(path, None, "a failed correlation stage declares nothing");
+        assert!(
+            !dir.path().join(super::TICKETING_FILE).exists(),
+            "no artifact may be written for a failed correlation stage"
+        );
+    }
+
+    /// #5405: the other direction — a succeeded stage writes the file and
+    /// returns the MANIFEST-RELATIVE path, because trusty-review resolves it
+    /// against the manifest's directory rather than tga's working directory.
+    #[test]
+    fn a_succeeded_correlation_stage_writes_the_artifact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("tga.db")).expect("open db");
+
+        let mut stats = AuditSweepStats::default();
+        stats.record(SweepStage::Correlate, Instant::now(), Ok(()));
+
+        let path = super::ticketing_artifact(&stats, &db, dir.path()).expect("write");
+        assert_eq!(path, Some(std::path::PathBuf::from(super::TICKETING_FILE)));
+
+        let written = std::fs::read_to_string(dir.path().join(super::TICKETING_FILE))
+            .expect("artifact written");
+        assert!(
+            written.contains("\"commits\"") && written.contains("\"work_items\""),
+            "the artifact must carry the board counts: {written}"
         );
     }
 }

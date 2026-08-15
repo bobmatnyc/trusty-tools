@@ -412,6 +412,8 @@ fn round_trips_through_the_review_schema() {
         analyst: Some("An".to_string()),
         client: None,
         gaps: vec!["one gap".to_string()],
+        // #5405: the ticketing artifact's manifest-relative path.
+        ticketing: Some(PathBuf::from("ticketing.json")),
         ..Default::default()
     };
     let toml = build_dd_manifest(&cfg, &opts)
@@ -425,13 +427,44 @@ fn round_trips_through_the_review_schema() {
     let parsed: toml::Value = toml::from_str(&toml).expect("valid TOML");
     assert_eq!(parsed["report"]["title"].as_str(), Some("T"));
     assert_eq!(parsed["report"]["gaps"].as_array().map(Vec::len), Some(1));
+    // #5405: the ticketing key rides on `[report]`, not on a repository entry —
+    // the figures are database-wide, and `RepositoryEntry.metrics` would block
+    // the live `--analyze` fetch for whichever repo carried it.
+    assert_eq!(
+        parsed["report"]["ticketing"].as_str(),
+        Some("ticketing.json")
+    );
     let repos = parsed["repositories"].as_array().expect("array of tables");
     assert_eq!(repos.len(), 2);
     for repo in repos {
         assert!(repo.get("path").is_some(), "local source key required");
         assert!(repo.get("remote").is_none(), "exactly one source key");
         assert!(repo.get("name").is_some());
+        assert!(
+            repo.get("metrics").is_none(),
+            "#5405: ticketing must never be routed through the metrics field"
+        );
     }
+}
+
+/// #5405: a run whose correlation stage failed writes no artifact, so the key is
+/// absent — which is exactly what an older trusty-review, and a hand-written
+/// manifest, present. The absence must serialize as a missing key rather than a
+/// null, because a null is not a path and the loader would have to special-case
+/// it.
+#[test]
+fn an_absent_ticketing_artifact_omits_the_key() {
+    let cfg = config_with_repos(&[("/src/a", Some("A"))]);
+    let toml = build_dd_manifest(&cfg, &options("T"))
+        .expect("builds")
+        .to_toml()
+        .expect("serializes");
+
+    let parsed: toml::Value = toml::from_str(&toml).expect("valid TOML");
+    assert!(
+        parsed["report"].get("ticketing").is_none(),
+        "an absent artifact must omit the key entirely: {toml}"
+    );
 }
 
 /// Why: tga resolves a relative repository path against its working directory

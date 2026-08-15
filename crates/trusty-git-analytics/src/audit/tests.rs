@@ -14,8 +14,11 @@ use crate::core::progress::{ProgressBus, Stage};
 ///
 /// Data-flow order, not DOC-67 §5's prose order — deployments and incidents
 /// populate what dora reduces, and report renders what everything else wrote.
-const EXPECTED_ORDER: [SweepStage; 8] = [
+/// #5405 puts correlate immediately after collect, which is where every
+/// production writer of `work_items` runs.
+const EXPECTED_ORDER: [SweepStage; 9] = [
     SweepStage::Collect,
+    SweepStage::Correlate,
     SweepStage::Classify,
     SweepStage::JiraSync,
     SweepStage::Deployments,
@@ -123,7 +126,7 @@ async fn sweep_runs_every_stage_in_order_and_survives_failures() {
 
     let stages: Vec<_> = stats.outcomes.iter().map(|o| o.stage).collect();
     assert_eq!(stages, EXPECTED_ORDER.to_vec());
-    // The "stage N of 8" denominator in the progress start events is this
+    // The "stage N of 9" denominator in the progress start events is this
     // constant; a stage added without updating it would lie to the operator.
     assert_eq!(stages.len(), super::sweep::TOTAL_STAGES);
 
@@ -147,6 +150,47 @@ async fn sweep_runs_every_stage_in_order_and_survives_failures() {
         &EXPECTED_ORDER[jira_index + 1..],
         "stages after the failing jira-sync stage should still have run, but were missing"
     );
+}
+
+/// #5405's second closure condition: `correlate_commits` runs as part of the
+/// sweep, not only from `tga tui`. Before this change the sweep had no
+/// correlation stage at all, so the board data it synced was never joined to
+/// the commits and the report had nothing to read.
+///
+/// Asserts SUCCEEDED, not merely present: the pass needs no credentials and no
+/// network, so on an empty database it must complete rather than be recorded as
+/// a named gap.
+#[tokio::test]
+async fn sweep_runs_the_correlation_pass() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
+    let options = SweepOptions {
+        output: Some(dir.path().join("out")),
+        weeks: None,
+    };
+
+    let stats = run_full_sweep(&Config::default(), &mut db, &options, None)
+        .await
+        .expect("sweep");
+
+    let correlate = stats
+        .outcomes
+        .iter()
+        .find(|o| o.stage == SweepStage::Correlate)
+        .expect("the sweep must run a correlation stage");
+    assert_eq!(
+        correlate.status,
+        StageStatus::Succeeded,
+        "correlation needs no credentials, so it must not fail: {:?}",
+        correlate.status
+    );
+
+    // Immediately after collect: every production writer of `work_items` runs
+    // inside that stage, so a later position would join against a board the
+    // sweep had not finished assembling.
+    let stages: Vec<_> = stats.outcomes.iter().map(|o| o.stage).collect();
+    assert_eq!(stages[0], SweepStage::Collect);
+    assert_eq!(stages[1], SweepStage::Correlate);
 }
 
 #[tokio::test]

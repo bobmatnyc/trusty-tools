@@ -83,6 +83,11 @@ pub struct DdManifestOptions {
     pub client: Option<String>,
     /// Gaps & Caveats lines for areas this run could not assess.
     pub gaps: Vec<String>,
+    /// Ticketing artifact filename, relative to the manifest (#5405).
+    ///
+    /// `None` when the sweep's correlation stage failed and no artifact was
+    /// written; see [`DdReportSection::ticketing`].
+    pub ticketing: Option<PathBuf>,
     /// Directory a relative `RepositoryConfig.path` is relative to.
     ///
     /// Why: tga resolves a relative repository path against the process's
@@ -130,6 +135,23 @@ pub struct DdReportSection {
     /// Named unassessed areas; omitted from the TOML when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<String>,
+    /// Path to the run's ticketing artifact, relative to this manifest (#5405).
+    ///
+    /// Why: the board-correlation figures are database-wide, not per
+    /// repository, so they belong to the `[report]` section rather than to a
+    /// `[[repositories]]` entry. Routing them through `RepositoryEntry.metrics`
+    /// instead would be actively wrong: that field's "declared metrics always
+    /// win" precedence would block the live `--analyze` fetch for the repository
+    /// carrying it.
+    /// What: the filename [`crate::report::ticketing`] wrote beside this
+    /// manifest, or `None` when the correlation stage failed — in which case the
+    /// failure already reached `gaps` as a named stage failure, so the report
+    /// states the absence rather than rendering a silently missing section.
+    /// Omitted from the TOML when absent, which is what an older trusty-review
+    /// (and a hand-written manifest) sees.
+    /// Test: `super::dd_manifest_tests::round_trips_through_the_review_schema`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticketing: Option<PathBuf>,
 }
 
 /// One audited repository.
@@ -207,6 +229,9 @@ pub fn build_dd_manifest(
             analyst: opts.analyst.as_deref().map(&clean),
             client: opts.client.as_deref().map(&clean),
             gaps: opts.gaps.iter().map(|g| clean(g)).collect(),
+            // #5405: a filename this crate chose, never operator text — so it
+            // carries no credential to scrub.
+            ticketing: opts.ticketing.clone(),
         },
         repositories,
     })

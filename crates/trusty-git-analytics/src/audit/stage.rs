@@ -4,7 +4,7 @@
 //! and forbids a failed stage from reading as a clean pass. Both obligations
 //! need the same thing: a value the caller can inspect afterwards that says
 //! which stages ran, which failed, and why. These types are that value.
-//! What: [`SweepStage`] (the fixed eight-stage vocabulary), [`StageStatus`],
+//! What: [`SweepStage`] (the fixed nine-stage vocabulary), [`StageStatus`],
 //! [`StageOutcome`], and [`AuditSweepStats`] (the ordered record).
 //! Test: `super::tests` covers ordering, failure capture, and the summary
 //! rendering, including a stage that fails.
@@ -18,14 +18,23 @@ use std::time::{Duration, Instant};
 /// section, so a stage needs a stable identity that survives into the
 /// orchestrator's output rather than being a bare string built at the call
 /// site.
-/// What: the eight data-collection subcommands DOC-67 §4 enumerates, in the
-/// order [`super::run_full_sweep`] executes them.
+/// What: the eight data-collection subcommands DOC-67 §4 enumerates plus the
+/// correlation pass (#5405), in the order [`super::run_full_sweep`] executes
+/// them.
 /// Test: `super::tests::sweep_runs_every_stage_in_order_and_survives_failures`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SweepStage {
     /// `tga collect` — walk the configured repositories into `commits`.
     Collect,
+    /// The deterministic commit ↔ board-item join (#5405).
+    ///
+    /// Runs immediately after [`Self::Collect`] because every production writer
+    /// of `work_items` runs inside that stage — Azure DevOps
+    /// (`collect::collector`) and Linear (`collect::linear_pipeline`). `jira
+    /// sync` writes `fact_ticket_transitions`, not `work_items` (#5219), so it
+    /// does not constrain this position.
+    Correlate,
     /// `tga classify` — run the four-tier classification cascade.
     Classify,
     /// `tga jira sync` — ingest JIRA transitions and comments.
@@ -47,6 +56,7 @@ impl SweepStage {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Collect => "collect",
+            Self::Correlate => "correlate",
             Self::Classify => "classify",
             Self::JiraSync => "jira sync",
             Self::Deployments => "deployments collect",
