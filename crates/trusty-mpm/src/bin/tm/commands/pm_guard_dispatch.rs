@@ -63,6 +63,14 @@
 //! dispatch in the system, while a false ALLOW merely reproduces the behaviour
 //! that shipped before this module.
 //!
+//! **A second caller reads the same answer without claiming (ADR-0048
+//! decision 10).** [`live_shared_tree_writers`] is the query half on its own,
+//! for the Bash rule that denies a HEAD-moving `pull`/`merge`/`rebase` in a
+//! main checkout another session's writer is standing in. It shares this
+//! module's route, projection, and timeouts, and claims nothing: the route
+//! re-derives eligibility from the payload, and a `Bash` call is not a dispatch
+//! tool, so the record closure never runs.
+//!
 //! Cost: the daemon call is made only after the dispatch itself is classified as
 //! a shared-tree writer, so a research, review, or QA dispatch — and every
 //! non-dispatch tool call, which is essentially all traffic — pays nothing.
@@ -278,31 +286,84 @@ pub(crate) async fn claim_shared_tree(
     cwd: &Path,
     payload: &Value,
 ) -> Vec<String> {
-    if session_id.is_empty() {
+    let Some(body) = post_shared_tree(url, session_id, cwd, payload).await else {
         return Vec::new();
+    };
+    let live = writers_in(&body);
+    warn_on_eligibility_divergence(&body, &live);
+    live
+}
+
+/// Who is already writing in `cwd`, asked without claiming it (ADR-0048
+/// decision 10).
+///
+/// Why: the HEAD-moving Bash rule needs the same directory-keyed answer the
+/// dispatch guard needs — `DaemonState::live_shared_tree_writers` is keyed by
+/// DIRECTORY rather than by session precisely so a writer another session put
+/// in this checkout is visible — but it must not take the directory: a `git
+/// pull` is not a dispatch, and recording one as a delegation would occupy a
+/// tree nothing will ever release. It goes through the same route rather than a
+/// second one so both callers read one answer built one way.
+/// What: POSTs the Bash call's own payload to the shared-tree route. The route
+/// re-derives eligibility from `tool` and the agent name, and `Bash` is not a
+/// dispatch tool, so `claim_shared_tree_dispatch` is handed `eligible = false`
+/// and its record closure never runs — the call is a pure read by construction,
+/// not by the caller's promise. Every failure arm of [`post_shared_tree`]
+/// returns an empty vec, which the caller reads as ALLOW.
+/// Test: `shared_tree_dispatch_route_answers_a_bash_query_without_claiming` in
+/// `crate::daemon::delegation_routes` pins the no-claim half daemon-side;
+/// `pm_guard_allows_a_pull_when_the_daemon_is_unreachable` in
+/// `tests/tm_hook_pm_guard.rs` pins the fail-open half.
+pub(crate) async fn live_shared_tree_writers(
+    url: &str,
+    session_id: &str,
+    cwd: &Path,
+    payload: &Value,
+) -> Vec<String> {
+    post_shared_tree(url, session_id, cwd, payload)
+        .await
+        .as_ref()
+        .map(writers_in)
+        .unwrap_or_default()
+}
+
+/// POST one call to the shared-tree route and return its parsed body.
+///
+/// Why: split from [`claim_shared_tree`] so the claiming and the read-only
+/// callers share one wire contract — the endpoint, the payload projection, and
+/// the timeout bounds are the parts a second copy would drift on.
+/// What: `None` on EVERY failure — empty session id, client build, transport,
+/// non-2xx, unparseable body — which both callers read as "nobody else is
+/// here". Sent under the same tight connect/total bounds `pm_guard`'s audit
+/// POSTs use (500 ms / 2 s), because this call sits inside a `PreToolUse`
+/// budget.
+/// Test: `claim_shared_tree_is_empty_when_the_daemon_is_unreachable`,
+/// `claim_shared_tree_is_empty_without_a_session_id`.
+async fn post_shared_tree(
+    url: &str,
+    session_id: &str,
+    cwd: &Path,
+    payload: &Value,
+) -> Option<Value> {
+    if session_id.is_empty() {
+        return None;
     }
-    let Ok(client) = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_millis(500))
         .timeout(std::time::Duration::from_secs(2))
         .build()
-    else {
-        return Vec::new();
-    };
+        .ok()?;
     let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/shared-tree-dispatch");
     let mut forwarded = build_hook_payload(&cwd.display().to_string(), Some(payload), None);
     project_dispatch_input(&mut forwarded);
     let body = serde_json::json!({ "payload": forwarded });
-    let Ok(response) = client.post(&endpoint).json(&body).send().await else {
-        return Vec::new();
-    };
-    let Ok(response) = response.error_for_status() else {
-        return Vec::new();
-    };
-    let Ok(body) = response.json::<Value>().await else {
-        return Vec::new();
-    };
-    let live: Vec<String> = body
-        .get("agents")
+    let response = client.post(&endpoint).json(&body).send().await.ok()?;
+    response.error_for_status().ok()?.json::<Value>().await.ok()
+}
+
+/// The live writers named in a shared-tree answer.
+fn writers_in(body: &Value) -> Vec<String> {
+    body.get("agents")
         .and_then(Value::as_array)
         .map(|rows| {
             rows.iter()
@@ -310,9 +371,7 @@ pub(crate) async fn claim_shared_tree(
                 .map(str::to_owned)
                 .collect()
         })
-        .unwrap_or_default();
-    warn_on_eligibility_divergence(&body, &live);
-    live
+        .unwrap_or_default()
 }
 
 /// Warn when the daemon answered "nobody here" but claimed nothing (#5324).

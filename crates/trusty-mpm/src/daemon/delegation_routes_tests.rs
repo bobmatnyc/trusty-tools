@@ -377,6 +377,44 @@ async fn shared_tree_dispatch_route_does_not_reserve_a_non_dispatch_tool() {
 }
 
 #[tokio::test]
+async fn shared_tree_dispatch_route_answers_a_bash_query_without_claiming() {
+    // ADR-0048 decision 10: the HEAD-moving Bash rule reads this route through
+    // `pm_guard_dispatch::live_shared_tree_writers`, which sends the Bash call's
+    // own payload — `tool: "Bash"` and an `input` projected to nothing. Two
+    // halves of that contract are pinned here, because the rule depends on both.
+    // It must ANSWER: a `git pull` beside a live writer is the deny this exists
+    // for. And it must claim NOTHING: a pull is not a dispatch, and a claim it
+    // took would occupy a directory no `SubagentStop` will ever release.
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "rust-engineer",
+        "/repo",
+        None,
+        Some("toolu_A"),
+        DelegationStatus::Running,
+    );
+    let req = SharedTreeDispatchRequest {
+        payload: serde_json::json!({
+            "cwd": "/repo",
+            "tool": "Bash",
+            "input": {},
+            "tool_use_id": "toolu_pull",
+        }),
+    };
+    let body = call(&state, session, req).await;
+    assert_eq!(body.total, 1, "the live writer must be reported");
+    assert_eq!(body.agents[0].agent, "rust-engineer");
+    assert!(!body.claimed, "a Bash query must never claim the tree");
+    assert_eq!(
+        state.delegations_for(session).len(),
+        1,
+        "no record may be added by a Bash query"
+    );
+}
+
+#[tokio::test]
 async fn shared_tree_dispatch_route_is_empty_without_a_cwd() {
     // Declared fail-open branch: with no directory in the payload there is
     // nothing to compare against and nothing to claim. Seeding a live writer

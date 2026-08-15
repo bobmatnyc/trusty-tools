@@ -105,6 +105,17 @@
 //! configuration, and everything in a worktree stay writable — that is
 //! ADR-0044's boundary, and the source-vs-not question is answered by the same
 //! [`SOURCE_CODE_EXTENSIONS`] the PM rule uses, so the two cannot drift apart.
+//! **Main-checkout HEAD move (ADR-0048 decision 10):** a fourth rule sits with
+//! those three and ahead of the same two exemptions.
+//! [`crate::commands::pm_guard_bash::main_checkout_head_move`] classifies
+//! `git pull`, `git merge` and `git rebase` aimed at a main checkout, and the
+//! call site then asks
+//! [`crate::commands::pm_guard_dispatch::live_shared_tree_writers`] — the
+//! daemon's directory-keyed writer query, the same one the #4480 dispatch guard
+//! decides on — who else is writing there. The deny fires only when both halves
+//! are positively answered, so a solo session's `git pull` in its own checkout
+//! is untouched and an unreachable daemon allows. `git fetch` is never
+//! classified at all (decision 9), and the deny names it as the first remedy.
 //! **Worktree grant for dispatched writers (ADR-0048):** enforcement alone
 //! would block all work, because a dispatched writer in a main checkout had
 //! nowhere else to write —
@@ -158,7 +169,7 @@ use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_pa
 use crate::commands::pm_guard_bash::{
     SHELL_EDIT_REASON, evaluate_bash_command, evaluate_main_checkout_commit_command,
     evaluate_main_checkout_destructive_command, evaluate_worktree_add_command,
-    extract_shell_edit_target,
+    extract_shell_edit_target, head_move_deny_reason, main_checkout_head_move,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_cost;
@@ -370,6 +381,26 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             audit_denied_tool(url, session_id, tool_name, &reason).await;
             println!("{}", build_pretooluse_deny_response(&reason));
             return Ok(());
+        }
+        // ABSOLUTE guard (ADR-0048 decision 10) — the same placement and the
+        // same reason as the three above. `git pull`, `merge` and `rebase` move
+        // the shared HEAD under whoever else is standing on it. Unlike its
+        // neighbours the verb alone is not the whole decision: the directory
+        // must be a main checkout AND the daemon must report another live
+        // writer in it, so a solo session updating its own checkout is never
+        // denied and a daemon that cannot answer allows. The query is made only
+        // after both lexical halves match, so ordinary Bash traffic never pays
+        // for it.
+        if let Some((verb, target)) = main_checkout_head_move(command, &hook_cwd) {
+            let live =
+                pm_guard_dispatch::live_shared_tree_writers(url, session_id, &target, &payload)
+                    .await;
+            if !live.is_empty() {
+                let reason = head_move_deny_reason(&verb, &target, &live);
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pretooluse_deny_response(&reason));
+                return Ok(());
+            }
         }
     }
 

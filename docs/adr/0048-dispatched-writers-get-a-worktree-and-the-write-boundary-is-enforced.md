@@ -102,18 +102,25 @@ leave the boundary unenforced. The owner's ruling is that both close together.
    whose PRs had already merged. A worktree cut from that base starts work on
    ground CI will not actually merge into — a correctness defect, not a
    tidiness one.
-10. **`git pull` is confined to a session's own worktree; a HEAD-moving pull is
-    not permitted in a shared main checkout.** `pull` is `fetch` plus a merge
-    or fast-forward of local `main`, which moves HEAD and can write the working
-    tree — the same hazard class as the branch-MOVING verbs
-    (`checkout <branch>`, `switch <branch>`, `merge`, `rebase`) this ADR
-    already leaves uncovered below. A worktree's HEAD belongs to the session
-    that owns it, so a pull there races nothing. The shared main checkout's
-    HEAD does not belong to one session, which is exactly the collision
-    decision 7's directory-keyed writer query exists to catch for edit-tool
-    writes and `commit` — and does not reach here, because `pm_guard_bash`'s
-    git-verb classification stops at the verbs it already names. This is the
-    same stated gap, not a new one.
+10. **`git pull`, `git merge` and `git rebase` are confined to a session's own
+    worktree; in a main checkout another session is writing in, they are
+    denied.** All three move HEAD and write the working tree of the directory
+    they run in. A worktree's HEAD belongs to the session that owns it, so the
+    move races nothing there. A shared main checkout's HEAD belongs to nobody,
+    and moving it changes the branch another session's uncommitted work is
+    sitting on with no error at any step. `pm_guard_bash::main_checkout`
+    classifies the three verbs and `pm_guard` then asks decision 7's
+    directory-keyed `live_shared_tree_writers` who else is writing in that
+    directory; the deny fires only when both answers are positive. The verb
+    alone is enough to classify because none of the three has a form that
+    leaves HEAD alone — there is no pathspec-versus-ref ambiguity to resolve,
+    which is the property `checkout` and `switch` lack and why they stay
+    uncovered (see Consequences). The deny names `git fetch` first, since that
+    is what most calls reaching it actually wanted, and a worktree second.
+    `--abort`, `--quit`, `--continue`, `--skip`, `--edit-todo` and
+    `--show-current-patch` are exempt: they resolve an operation that already
+    started, and refusing them would park the shared checkout mid-rebase with
+    no remedy reachable from there, which decision 6 forbids.
 
 ## Consequences
 
@@ -144,12 +151,28 @@ leave the boundary unenforced. The owner's ruling is that both close together.
   breaking change to a public method. `claim_shared_tree_dispatch` keeps its
   `session` argument, which now records the claim rather than filtering the
   answer.
-- **Branch-MOVING verbs are NOT covered.** `git checkout <branch>`,
-  `git switch <branch>`, `merge`, and `rebase` can still switch a branch under
-  another session, which is part of the same incident. They are left out
-  because their safe and unsafe forms differ by argument rather than by verb,
-  and a loose rule there costs false denies on ordinary work — the failure
-  #5356 was filed for. This is a stated gap, not an oversight.
+- **`git checkout <branch>` and `git switch <branch>` are NOT covered.** They
+  can still switch a branch under another session, which is part of the same
+  incident. `pull`, `merge` and `rebase` left this family under decision 10 and
+  are now enforced; these two stay out because their argument is genuinely
+  ambiguous. `git checkout foo` is a branch switch when `foo` is a ref and a
+  file restore when it is a path, and no lexical test tells them apart, so a
+  verb-level rule would deny `checkout -b` and every ordinary branch creation
+  along with the hazard — the false-deny failure #5356 was filed for. Covering
+  them needs a different mechanism than the one decision 10 uses, not a wider
+  version of it. This remains a stated gap.
+- **Decision 10 denies a demonstrated collision, not every HEAD move in a main
+  checkout.** A solo session running `git pull` in its own main checkout is
+  allowed, because the daemon reports no other writer there. That is a
+  deliberate narrowing of decision 10's "confined to a session's own worktree"
+  to what can be positively evidenced, and it is what keeps the rule off
+  ordinary work. Two residuals follow from it. The query sees live DELEGATED
+  writers, so a second session merely standing in the checkout with nothing
+  dispatched is invisible and its `pull` is allowed. And the branch fails open
+  at every step — an unreachable daemon, a malformed answer, an empty
+  `session_id`, or a directory the daemon recorded under a different spelling
+  all answer "nobody here". Both are the #4480 guard's own fail-open direction,
+  inherited with the query.
 - **A write performed through `Bash` rather than an edit tool** is classified by
   `pm_guard_bash`, which reaches a deny for the PM through `SHELL_EDIT_REASON`
   but does not carry the main-checkout dimension for dispatched agents. Also a
@@ -158,16 +181,25 @@ leave the boundary unenforced. The owner's ruling is that both close together.
   and `TRUSTY_MPM_PM_UNRESTRICTED` are human decisions, not automatic markers,
   and are unaffected — including the `.claude/settings.json` `env` self-exemption
   path tracked as #3981.
-- **Fetch needs no enforcement; pull in a shared main checkout does, and does
-  not have it.** Decision 9's half of the rule has nothing to check — `fetch`
-  is safe by construction, and no session can violate it by running one.
-  Decision 10's half is a real gap: `pm_guard_bash` classifies `reset --hard`,
-  `clean -fdx`, and `checkout -- <pathspec>`, but not `pull`, `merge`, or
-  `rebase`, so a HEAD-moving `pull` in a shared main checkout is the same
-  branch-moving-verb gap already named above, not a new one. Decision 7's
-  directory-keyed `live_shared_tree_writers` does not reach it either — that
-  query answers the isolation grant and the edit-tool/`commit` write boundary,
-  and nothing routes a Bash `pull` through it.
+- **Fetch needs no enforcement; pull in a shared main checkout has it.**
+  Decision 9's half of the rule has nothing to check — `fetch` is safe by
+  construction, and no session can violate it by running one. Decision 10's
+  half is enforced: `pm_guard_bash::main_checkout` classifies `pull`, `merge`
+  and `rebase` alongside `reset --hard`, `clean -fdx` and
+  `checkout -- <pathspec>`, and `pm_guard` routes the verdict through decision
+  7's directory-keyed `live_shared_tree_writers`. That query previously
+  answered only the isolation grant and the edit-tool/`commit` write boundary;
+  it now answers a Bash call too, through the same
+  `POST …/delegations/shared-tree-dispatch` route. The Bash call claims
+  nothing: the route re-derives eligibility from the payload and `Bash` is not
+  a dispatch tool, so its record closure never runs — a property of the route
+  rather than a promise from the caller.
+- **The HEAD-move rule pierces both automatic subagent exemptions**, for the
+  reason decision 4 gives and by the same mechanism: it is called from
+  `pm_guard()` inside the Bash block, ahead of Guard 1 (`CLAUDE_MPM_SUB_AGENT`)
+  and Guard 4 (the `agent_id` dispatch marker), which return ALLOW for exactly
+  the dispatched population the restriction binds. The two operator escape
+  hatches are untouched.
 
 ## Alternatives Considered
 
