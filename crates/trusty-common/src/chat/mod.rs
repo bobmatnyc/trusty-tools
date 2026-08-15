@@ -17,9 +17,10 @@
 //! [`auto_detect_local_provider`] which probes `{base_url}/v1/models` with a
 //! 1-second timeout.
 //!
-//! Test: `cargo test -p trusty-common` covers default config values, the
-//! unreachable-server path of `auto_detect_local_provider`, SSE delta
-//! streaming, and accumulation of streamed tool-call fragments.
+//! Test: `cargo test -p trusty-common --features unconditional-only` covers
+//! default config values, the unreachable-server path of
+//! `auto_detect_local_provider`, SSE delta streaming, and accumulation of
+//! streamed tool-call fragments.
 
 mod openai_compat;
 

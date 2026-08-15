@@ -7,6 +7,7 @@
 //! acceptance criterion AC-1..AC-7 plus the supporting linkage / extraction /
 //! precedence helpers.
 //! Test: this file is itself the test surface; `cargo test -p trusty-common
+//! --features unconditional-only
 //! --features intent-source` runs it.
 
 use async_trait::async_trait;

@@ -5,7 +5,8 @@
 //! which ignores `HOME`/`XDG_DATA_HOME`, so tests need a separate bypass.
 //! What: `resolve_data_dir` finds/creates the app data dir; `sanitize_data_root`
 //! validates any candidate path; `is_dir` is a convenience predicate.
-//! Test: `cargo test -p trusty-common` covers the full battery of data-dir tests.
+//! Test: `cargo test -p trusty-common --features unconditional-only` covers the
+//! full battery of data-dir tests.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};

@@ -6,7 +6,8 @@
 //! document) and "all-or-nothing publish".
 //! What: covers the sidecar path, absent-file creation, contention between
 //! concurrent writers, closure-rejection, and each error path.
-//! Test: this file IS the test module; run with `cargo test -p trusty-common`.
+//! Test: this file IS the test module; run with `cargo test -p trusty-common
+//! --features unconditional-only`.
 
 use super::*;
 use std::collections::HashMap;
