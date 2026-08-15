@@ -4,7 +4,7 @@ name = "tga"
 # touches src/**. `persist_work_items` is `pub` but lives in the private
 # `mod linear_pipeline;` (not re-exported), so it is unreachable outside the
 # crate and adds no public API surface.
-version = "2.19.1"
+version = "2.20.0"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for

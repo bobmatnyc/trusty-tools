@@ -6,6 +6,7 @@
 //! What: mirrors the original inline `#[cfg(test)] mod tests { … }` block;
 //! every test function is unchanged from the pre-split file.
 //! Test: this file IS the test suite — `cargo test -p trusty-common
+//! --features unconditional-only
 //! --features monitor-tui` picks it up automatically.
 
 use super::*;

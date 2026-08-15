@@ -49,6 +49,27 @@ crate's `Cargo.toml`, not the directory. Most match; the exceptions are in the
 Abbreviations & Aliases table below (notably `crates/trusty-git-analytics/` →
 `-p tga`). On "package not found", read the crate's `Cargo.toml`.
 
+🔴 **`trusty-common` takes `--features` on every test run (#4901).** Its
+`default` feature set is empty, so `cargo test -p trusty-common` compiles none
+of its 25+ gated modules: it ran 328 of the crate's ~2062 tests and exited 0 —
+including with a `memory_core` file that did not compile, which is how PR #4899
+reported a green gate before the correct code existed. That form is now a
+`compile_error!` rather than a false green. Name what you changed:
+
+```bash
+cargo test -p trusty-common --features memory-core,embedder-test-support  # memory_core
+cargo test -p trusty-common --features <feature>                          # any other gated module
+cargo test -p trusty-common --features unconditional-only                 # only the always-compiled surface
+```
+
+`cargo build` / `cargo check -p trusty-common` are unaffected — the guard is
+`cfg(test)`-scoped, so no consumer crate sees it. `--all-features` is not
+available (the three `embedder-*` ORT variants are mutually exclusive); whole-
+crate coverage comes from `cargo test --workspace`, where feature unification
+pulls in what the consumers enable. Other crates in this workspace can hide the
+same trap — before trusting a crate-scoped green, check whether the module you
+edited sits behind a non-default feature.
+
 ## Rust Test Ladder — how much testing this change needs
 
 🔴 **This ladder is the authoritative answer to "how much testing does this

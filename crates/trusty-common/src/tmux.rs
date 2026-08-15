@@ -22,10 +22,11 @@
 //! ordered recipe: scrollback options THEN `new-session`), and the
 //! [`DEFAULT_TMUX_HISTORY_LIMIT`]/[`DEFAULT_TMUX_MOUSE`]/
 //! [`DEFAULT_TMUX_ALTERNATE_SCREEN`] defaults.
-//! Test: `cargo test -p trusty-common -- tmux::` asserts the rendered argv
-//! for each command shape and the options-before-new-session ordering
-//! guarantee. Process-spawning is NOT tested here (no process is ever
-//! spawned by this module) — see each consumer crate's own tests for that.
+//! Test: `cargo test -p trusty-common --features unconditional-only -- tmux::`
+//! asserts the rendered argv for each command shape and the
+//! options-before-new-session ordering guarantee. Process-spawning is NOT
+//! tested here (no process is ever spawned by this module) — see each
+//! consumer crate's own tests for that.
 
 use serde::{Deserialize, Serialize};
 
