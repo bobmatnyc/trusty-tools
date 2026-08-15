@@ -314,11 +314,12 @@ than edits. The guard reads this from the bundled agent's own frontmatter
 (`dispatch_isolation.rs`), so a custom or project-local agent it does not ship is
 never denied — declare `isolation: "worktree"` for one that writes.
 
-Clean up after merge with `git worktree remove --force <path>` (which deletes the
-worktree directory and never the main checkout), then `git branch -D <branch>`
-and, when the squash-merge did not already do it, `git push origin --delete
-<branch>` — the branch goes last, because until the squash-merge lands it is the
-only durable copy of the workstream.
+Cleanup after merge is the agent's own job, stated once in BASE-AGENT's Git
+Workflow section: worktree removed first (git refuses to delete a checked-out
+branch), then the local branch. The remote branch is usually already gone via
+`gh pr merge --delete-branch`; when it isn't, `git push origin --delete
+<branch>` goes last, since until the squash-merge lands the branch is the only
+durable copy of the workstream.
 
 **Escape hatch — stash first.** If you genuinely must run one command from the
 main checkout, stash, operate, restore:

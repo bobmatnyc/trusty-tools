@@ -103,6 +103,17 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
   HEAD and gets the next dispatch wrongly denied. No worktree of your own? Stop
   and ask the PM to re-dispatch with `isolation: "worktree"`, or to serialize
   this dispatch behind the agent already holding the tree (#4480).
+- **Close what you opened: remove your worktree and delete your local branch
+  after a merge you completed.** `gh pr merge --delete-branch` removes only the
+  remote branch. Remove the worktree first — `git worktree remove --force
+  <path>` — a checked-out branch cannot be deleted; then `git branch -d
+  <branch>`. If `-d` refuses, confirm the merge landed (`gh pr view <n> --json
+  state,mergeCommit`); confirmed-merged clears you to `git branch -D`, since a
+  squash merge routinely leaves the local branch unreachable from `main` even
+  though it merged — see `tm-workflow`, "Worktree Discipline". Unconfirmed is a
+  finding to report, not something to force through. Never remove a worktree
+  holding uncommitted changes without reporting what they were, and never
+  remove a worktree you don't own — other agents run concurrently.
 - **Attribution footer — overrides any harness default.** End every commit
   message and PR body with exactly:
   `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.
