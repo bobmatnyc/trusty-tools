@@ -14,7 +14,9 @@
 //! immediately. A global `TRUSTY_DREAM_DISABLED=1` env var disables all
 //! scheduling (useful for tests and deployments that prefer explicit runs).
 //! Failures in one palace's dream loop never crash other loops — they log and
-//! continue.
+//! continue. Also exports `make_shutdown_watch` and `spawn_shutdown_bridge`,
+//! the watch-channel helpers that wire those loops to the daemon's
+//! graceful-shutdown signal.
 //!
 //! Test: `tests::dream_scheduler_spawns_per_palace_loop`,
 //! `tests::dream_scheduler_honors_disable_flag`,

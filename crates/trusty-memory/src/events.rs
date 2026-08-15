@@ -5,9 +5,10 @@
 //! dream completed, hook fired). Keeping the event enum, its hook/injection
 //! labels, and the best-effort log-open fallback together — separate from the
 //! `AppState` plumbing in `lib.rs` — keeps each file focused and under the
-//! SLOC cap.
-//! What: exports `DaemonEvent`, `HookType`, `InjectionKind`, and the
-//! crate-internal `open_activity_log_with_fallback` helper.
+//! SLOC cap (#1195).
+//! What: exports `DaemonEvent`, `HookType`, `InjectionKind` — re-exported at
+//! the crate root, so existing `trusty_memory::DaemonEvent` paths are
+//! unchanged — and the crate-internal `open_activity_log_with_fallback` helper.
 //! Test: `lib_tests` covers `type_str`/`palace_id`/`source` extraction, the
 //! serde round-trips, and the discard fallback branch.
 

@@ -1,7 +1,10 @@
 //! Unit tests for [`super::BitbucketClient`].
 //!
 //! Why: split from `client.rs` to keep that file under the 500-line cap
-//! while keeping the tests adjacent to the code they exercise.
+//! while keeping the tests adjacent to the code they exercise. The declaration
+//! carries `#[path]`, which overrides Rust's default resolution so a `mod
+//! tests;` inside a file module points at this sibling file rather than a
+//! subdirectory.
 //! What: covers JSON deserialisation, PR state mapping, pagination, auth
 //! resolution via [`super::resolve_auth`] with an injected env lookup
 //! (including env-expansion of `app_password` — issue #842 — and the

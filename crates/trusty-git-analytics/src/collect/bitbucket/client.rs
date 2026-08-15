@@ -518,11 +518,6 @@ impl PrProvider for BitbucketClient {
     }
 }
 
-/// Why: keeps `client.rs` under the 500-line file cap; all Bitbucket client
-/// unit tests live in the sibling `tests.rs` file.
-/// What: `#[path]` overrides Rust's default resolution so a `mod tests;`
-/// inside a file module points to the sibling file rather than a subdirectory.
-/// Test: see `tests.rs` for the full suite.
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;

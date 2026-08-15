@@ -5,11 +5,14 @@
 //! session record, and future external analysis tools. Placing the plain-data
 //! types here (without stateful collection or async I/O) lets every layer
 //! reference them without depending on the full `trusty-agents` binary crate.
+//! Moved to `trusty-agents-common` in Wave 2 (issue #867, refs #830/#832).
 //! What: Defines the four portable value types:
-//! - `TokenUsage` — per-LLM-call token counter (prompt/completion/cache)
+//! - `TokenUsage` — per-LLM-call token counter (prompt/completion/cache), also
+//!   used in `AgentOutput`
 //! - `PhaseRecord` — per-phase duration + token snapshot
 //! - `PerfTotals` — rolled-up totals across all phases in a run
 //! - `PerfRecord` — full run record (persisted to `docs/performance/runs/`)
+//!
 //! `PerfCollector` (stateful, tokio-dependent) is NOT here — it stays in
 //! `trusty-agents::perf`.
 //! Test: `token_usage_default_is_zeros`, `token_usage_accumulates` in

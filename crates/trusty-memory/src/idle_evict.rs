@@ -8,7 +8,8 @@
 //! have its whole handle dropped and be lazily re-opened on the next access
 //! (`PalaceRegistry::open_palace`). This module runs the periodic sweep that
 //! calls `PalaceRegistry::evict_idle`, mirroring `dream_scheduler`'s
-//! watch-channel shutdown wiring.
+//! watch-channel shutdown wiring. It is wired in `spawn_startup_tasks`, next to
+//! the dream scheduler.
 //!
 //! What: `spawn_idle_evict_ticker` reads `TRUSTY_MEMORY_IDLE_EVICT_SECS`
 //! (default 300; `0` disables) and, when enabled, spawns a background task that
