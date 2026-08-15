@@ -79,10 +79,10 @@ pub fn physical_footprint_mb(pid: u32) -> Option<u64> {
 /// OOM-kill. trusty-search shipped an `rss_limit_mb` it never compared against
 /// anything and grew to 2.2x that limit before the OOM killer intervened; the
 /// missing piece was a way to read another process's RSS at all. This is that
-/// entry point, and it lives here — next to [`physical_footprint_mb`] and
+/// entry point, and it lives here — next to `physical_footprint_mb` and
 /// [`SysMetrics`] — so every trusty-* supervisor reads child memory the same
 /// way instead of each growing its own `/proc` parser.
-/// What: on macOS, delegates to [`physical_footprint_mb`], which counts pages
+/// What: on macOS, delegates to `physical_footprint_mb`, which counts pages
 /// the memory compressor holds (the figure the kernel's Jetsam logic uses). On
 /// Linux, reads `VmRSS` from `/proc/<pid>/status`. Everywhere else, returns
 /// `None`. `None` means "cannot measure", never "measured zero" — callers must
@@ -163,13 +163,13 @@ impl SysMetrics {
     ///      delta window shrinks; `/health` is typically polled every 2 s so
     ///      this is not a concern in practice. On macOS the reported RSS is
     ///      the true physical footprint (issue #2165) — see
-    ///      [`physical_footprint_mb`] — rather than the getrusage-style
+    ///      `physical_footprint_mb` — rather than the getrusage-style
     ///      resident size, which undercounts memory the compressor is
     ///      currently holding for this process.
     /// What: refreshes this process's memory + CPU stats. Returns RSS in
     ///      whole megabytes and CPU as a percentage where `100.0` means one
     ///      fully-saturated core (sysinfo's convention — a process on 4 cores
-    ///      can exceed 100). RSS: macOS uses [`physical_footprint_mb`],
+    ///      can exceed 100). RSS: macOS uses `physical_footprint_mb`,
     ///      falling back to `sysinfo`'s `bytes / 1_048_576` reading if the
     ///      `libproc` call fails; all other platforms use the `sysinfo`
     ///      reading directly (Linux's `/proc/self/status` `VmRSS` — which
