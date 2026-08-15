@@ -140,6 +140,32 @@ pub enum ReportError {
         source: serde_json::Error,
     },
 
+    /// A ticketing artifact parsed, but declares a schema major this build does
+    /// not read (#5405).
+    ///
+    /// Why: tga and trusty-review are versioned and installed independently, so
+    /// skew is the normal case, and every field of the artifact carries
+    /// `#[serde(default)]`. A renamed count therefore parses to zero and renders
+    /// `0 of 412 commit(s) reference tracked work` — confident, wrong, and
+    /// silent. Refusing an unrecognised major routes that the same way an
+    /// unparseable artifact goes: a hard, named failure.
+    /// What: distinct from [`ReportError::Ticketing`] because the remedy
+    /// differs — that one is a producer bug, this one is a version mismatch the
+    /// operator resolves by aligning the two binaries.
+    #[error(
+        "ticketing artifact at {path} declares schema_version {found:?}, which this build cannot \
+         read; it reads schema major {supported} (an empty value means the artifact carried no \
+         schema_version)"
+    )]
+    TicketingSchema {
+        /// The ticketing artifact whose schema tag was refused.
+        path: PathBuf,
+        /// The `schema_version` the artifact declared; empty when absent.
+        found: String,
+        /// The schema major this build reads.
+        supported: u32,
+    },
+
     /// A filesystem I/O error while reading templates/metrics or writing output.
     #[error("I/O error in report pipeline at {path}: {source}")]
     Io {

@@ -33,19 +33,86 @@ fn parses_the_artifact_tga_writes() {
     assert_eq!(summary.sources, vec!["jira".to_string(), "linear".into()]);
 }
 
-/// Every field defaults, so an artifact from a different tga release still
-/// parses instead of failing the whole report over a key this build has not
-/// heard of.
+/// Within a major this build reads, an added key is not a failure: that is what
+/// every field's `#[serde(default)]` is for, and it keeps a tga that gained a
+/// field from breaking a report that does not need it.
 #[test]
-fn an_artifact_with_unknown_or_missing_keys_still_parses() {
+fn an_artifact_with_unknown_keys_still_parses() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("ticketing.json");
-    std::fs::write(&path, r#"{"commits": 7, "future_key": true}"#).expect("write");
+    std::fs::write(
+        &path,
+        r#"{"schema_version": "v0", "commits": 7, "future_key": true}"#,
+    )
+    .expect("write");
 
     let summary = load_ticketing(&path).expect("parses");
     assert_eq!(summary.commits, 7);
     assert_eq!(summary.commits_linked, 0);
     assert!(summary.sources.is_empty());
+}
+
+/// A newer MINOR of the same major is still readable — the added-field case
+/// above, tagged. Refusing it would make every additive tga change a
+/// coordinated release.
+#[test]
+fn an_artifact_with_a_newer_minor_of_a_known_major_still_parses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ticketing.json");
+    std::fs::write(
+        &path,
+        r#"{"schema_version": "v0.3", "commits": 412, "commits_linked": 260}"#,
+    )
+    .expect("write");
+
+    let summary = load_ticketing(&path).expect("a newer minor of a known major must load");
+    assert_eq!(summary.commits, 412);
+    assert_eq!(summary.commits_linked, 260);
+}
+
+/// #5405: tga and trusty-review are installed independently, so version skew is
+/// the normal case. An artifact from a major this build cannot read must fail
+/// the same way an unparseable one does. Parsing it leniently would render
+/// whatever `#[serde(default)]` produced — `0 of 0 commit(s)` — as a stated
+/// fact in a document an acquirer prices a deal from.
+#[test]
+fn an_artifact_from_an_unknown_schema_major_is_a_named_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ticketing.json");
+    // Well-formed JSON, every key this build knows, renamed counts it does not.
+    std::fs::write(
+        &path,
+        r#"{"schema_version": "v9", "commits": 412, "linked_commit_count": 260}"#,
+    )
+    .expect("write");
+
+    let err = load_ticketing(&path).expect_err("must refuse a major this build cannot read");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("ticketing.json") && rendered.contains("schema_version"),
+        "the error must name the artifact and the version mismatch: {rendered}"
+    );
+    assert!(
+        rendered.contains("v9"),
+        "the error must quote the version it refused: {rendered}"
+    );
+}
+
+/// Every tga that writes this artifact writes the tag, so an artifact without
+/// one was not produced by a recognised producer. It is refused rather than
+/// assumed to be v0 — assuming is how a truncated or hand-edited file renders
+/// as zeroed counts.
+#[test]
+fn an_artifact_with_no_schema_version_is_a_named_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ticketing.json");
+    std::fs::write(&path, r#"{"commits": 7, "commits_linked": 4}"#).expect("write");
+
+    let err = load_ticketing(&path).expect_err("an untagged artifact must not degrade to zeros");
+    assert!(
+        err.to_string().contains("schema_version"),
+        "the error must name the missing tag: {err}"
+    );
 }
 
 /// A declared artifact that will not parse is a producer bug, so it is a named

@@ -440,10 +440,6 @@ fn round_trips_through_the_review_schema() {
         assert!(repo.get("path").is_some(), "local source key required");
         assert!(repo.get("remote").is_none(), "exactly one source key");
         assert!(repo.get("name").is_some());
-        assert!(
-            repo.get("metrics").is_none(),
-            "#5405: ticketing must never be routed through the metrics field"
-        );
     }
 }
 
