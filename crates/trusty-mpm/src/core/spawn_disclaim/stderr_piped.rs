@@ -1,5 +1,5 @@
 //! Synchronous piped-stderr disclaimed spawn — the public, platform-agnostic
-//! half of [`macos::spawn_stderr_piped_disclaimed`] (the macOS
+//! half of `macos::spawn_stderr_piped_disclaimed` (the macOS
 //! `posix_spawn`-based implementation lives in `macos::stderr_piped`; this
 //! file holds the public API, the non-macOS/[`DISABLE_ENV`] fallback, and the
 //! shared [`StderrPipedSpawn`] return type both paths produce).
@@ -68,7 +68,7 @@ impl StderrPipedSpawn {
     /// the child exits or closes fd 2 itself, so waiting before draining a
     /// large-output child can deadlock on a full pipe buffer.
     /// What: reaps the native `Child` or, on the macOS-disclaimed path, the
-    /// raw pid via [`macos::wait_for`].
+    /// raw pid via `macos::wait_for`.
     /// Test: see [`disclaimed_stderr_piped_spawn`].
     pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
         match &mut self.handle {

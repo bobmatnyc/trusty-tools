@@ -1,5 +1,5 @@
 //! Synchronous piped-stdout disclaimed spawn — the public, platform-agnostic
-//! half of [`macos::spawn_stdout_piped_disclaimed`] (the macOS
+//! half of `macos::spawn_stdout_piped_disclaimed` (the macOS
 //! `posix_spawn`-based implementation lives in `macos::stdout_piped`; this
 //! file holds the public API, the non-macOS/[`DISABLE_ENV`] fallback, and the
 //! shared [`StdoutPipedSpawn`] return type both paths produce).
