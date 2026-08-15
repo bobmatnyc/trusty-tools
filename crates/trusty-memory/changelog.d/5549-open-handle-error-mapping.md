@@ -1,3 +1,0 @@
-Fixed
-
-- The HTTP surface no longer answers 404 when it cannot determine whether a palace exists. Both `open_handle` helpers — `web::error::open_handle` and `MemoryService::open_handle` — mapped every `PalaceRegistry::open_palace` failure to "palace not found", so a denied or transient read of `palace.json`, undecodable metadata, an open-queue timeout, or a redb write-lock conflict all told the client the palace does not exist. A genuine absence is still 404; anything else is now 500 and says the palace could not be loaded. This reaches every `/api/v1/palaces/{id}/kg*` route, the drawer CRUD and per-palace recall routes, `/api/v1/kg/gaps`, `/api/v1/kg/aliases`, and the three `/api/v1/messages` endpoints (#5549, ADR-0045).
