@@ -106,6 +106,7 @@ fn github_issue_maps_to_pm_ticket() {
         ticket_type: "issue".into(),
         labels,
         url: Some(url),
+        project: None,
         source: PmSource::GitHub,
         raw,
     };
@@ -229,7 +230,115 @@ fn adapters_are_object_safe_for_detect() {
     };
     let adapters = build_adapters(&cfg);
     let refs = adapters[0].detect_ticket_refs("see AB#7 and AB#8");
-    assert_eq!(refs, vec!["AB#7".to_string(), "AB#8".to_string()]);
+    // #5219: `build_adapters` now forwards `pm.azure_devops.ticket_regex`, and
+    // capture group 1 of `AB#(\d+)` is the bare number. The pipeline maps a
+    // detected reference onto the ticket's canonical `AB#N` id positionally, so
+    // the two shapes never have to agree — see
+    // `work_item_pipeline::tests::persist_tickets_maps_a_bare_ref_to_its_canonical_id`.
+    assert_eq!(refs, vec!["7".to_string(), "8".to_string()]);
+}
+
+/// #5219: `work_items.source` for Azure DevOps is `azdo`, not the
+/// `azure_devops` display label. Writing the label would orphan every ADO row
+/// already in a user's database and break DOC-70's provider tag.
+#[test]
+fn work_item_source_keeps_the_azdo_database_tag() {
+    assert_eq!(PmSource::AzureDevOps.work_item_source(), "azdo");
+    assert_eq!(PmSource::AzureDevOps.as_str(), "azure_devops");
+    assert_eq!(PmSource::Jira.work_item_source(), "jira");
+    assert_eq!(PmSource::GitHub.work_item_source(), "github");
+    assert_eq!(PmSource::Linear.work_item_source(), "linear");
+}
+
+/// #5219: `fetch_tickets` is positional — the caller pairs request `i` with
+/// result `i` to learn a reference's canonical id. ADO's `workitemsbatch`
+/// returns one flat list and drops unresolvable IDs (`errorPolicy=omit`), so
+/// the override has to restore the order itself. Here `AB#7` resolves, `AB#8`
+/// is omitted by the server, and `nonsense` never parses.
+#[tokio::test]
+async fn azdo_batch_fetch_preserves_request_order() {
+    use crate::core::config::AzureDevOpsConfig;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/_apis/wit/workitemsbatch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "value": [{
+                "id": 7,
+                "fields": {
+                    "System.Title": "Broken thing",
+                    "System.State": "Active",
+                    "System.WorkItemType": "Bug",
+                    "System.Tags": "alpha; beta",
+                    "System.TeamProject": "Widgets",
+                },
+            }],
+        })))
+        .mount(&server)
+        .await;
+
+    let cfg = AzureDevOpsConfig {
+        organization_url: server.uri(),
+        pat: "x".into(),
+        project: Some("Widgets".into()),
+        projects: vec![],
+        ticket_regex: r"(?i)\bAB#(\d+)\b".into(),
+        team_keys: vec![],
+        fetch_on_reference: true,
+        fetch_prs: false,
+    };
+    let adapter = AzureDevOpsAdapter::new(crate::collect::azdo::AzureDevOpsClient::new(cfg));
+
+    let results = adapter.fetch_tickets(&["AB#8", "AB#7", "nonsense"]).await;
+    assert_eq!(results.len(), 3);
+    assert!(
+        matches!(&results[0], Ok(None)),
+        "an omitted id is an authoritative not-found"
+    );
+    let ticket = results[1]
+        .as_ref()
+        .expect("no transport error")
+        .as_ref()
+        .expect("AB#7 resolved");
+    assert_eq!(
+        ticket.id, "AB#7",
+        "canonicalized to the correlate-able form"
+    );
+    assert_eq!(ticket.title, "Broken thing");
+    assert_eq!(
+        ticket.project.as_deref(),
+        Some("Widgets"),
+        "the ADO team project reaches work_items.project"
+    );
+    assert!(matches!(&results[2], Ok(None)), "unparseable id");
+}
+
+/// The complement: a failed batch must not read as three not-founds. Every
+/// requested position gets the error, which is what lets the pipeline tell an
+/// absent corpus from an empty one (#5219).
+#[tokio::test]
+async fn azdo_batch_fetch_reports_the_error_at_every_position() {
+    use crate::core::config::AzureDevOpsConfig;
+
+    let cfg = AzureDevOpsConfig {
+        organization_url: "https://dev.azure.com/myorg".into(),
+        // An empty PAT fails in `validate_credentials`, before any network call.
+        pat: String::new(),
+        project: Some("P".into()),
+        projects: vec![],
+        ticket_regex: r"(?i)\bAB#(\d+)\b".into(),
+        team_keys: vec![],
+        fetch_on_reference: true,
+        fetch_prs: false,
+    };
+    let adapter = AzureDevOpsAdapter::new(crate::collect::azdo::AzureDevOpsClient::new(cfg));
+
+    let results = adapter.fetch_tickets(&["AB#7", "AB#8"]).await;
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|r| r.is_err()), "results: {results:?}");
 }
 
 // ---------------------------------------------------------------------

@@ -21,6 +21,8 @@
 //! - [`ai_marker_config`] — operator-supplied markers, read from a file (#5414)
 //! - [`errors`] — module-level error type ([`CollectError`])
 //! - [`fault`] — severity-tagged non-fatal faults ([`CollectionFault`], #5655)
+//! - [`work_item_pipeline`] — the provider-agnostic `work_items` pull that
+//!   runs every [`PmAdapter`] over the commit corpus (#5219)
 
 pub mod ai_attribution;
 pub mod ai_marker_config;
@@ -46,6 +48,9 @@ mod pr_pipeline;
 pub mod pr_provider;
 pub mod ticket;
 pub mod weeks;
+// #5219: the provider-agnostic `work_items` pull, and the only production
+// caller of `build_adapters`.
+pub mod work_item_pipeline;
 
 pub use collector::{CollectionPipeline, CollectionStats};
 pub use correlate::{correlate_commits, CorrelationOutcome};
