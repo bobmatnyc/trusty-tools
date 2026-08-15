@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 
 use git2::Repository;
 use regex::Regex;
+use tga::collect::ai_attribution::AgenticMode;
 use tga::collect::ai_markers::{detect, detection_disclosure, CommitSignals};
 
 struct Commit {
@@ -120,6 +121,9 @@ fn catch_rate_on_trusty_tools_history() {
     let mut before = 0usize;
     let mut after = 0usize;
     let mut beyond_baseline = 0usize;
+    // #5250: how much of the marker-less remainder is a message git or the
+    // forge composed, rather than one an author wrote.
+    let mut unknown = 0usize;
     let mut by_tool: BTreeMap<&str, usize> = BTreeMap::new();
 
     for c in &commits {
@@ -143,6 +147,9 @@ fn catch_rate_on_trusty_tools_history() {
                 beyond_baseline += 1;
             }
         }
+        if d.mode == AgenticMode::Unknown {
+            unknown += 1;
+        }
     }
 
     let total = commits.len();
@@ -162,6 +169,28 @@ fn catch_rate_on_trusty_tools_history() {
     );
     let observed: Vec<String> = by_tool.iter().map(|(t, n)| format!("{t}={n}")).collect();
     println!("detections by tool: {}", observed.join(" "));
+    println!(
+        "#5250 unknown (rewrite fingerprint, no marker) = {unknown} ({:.2}% of all commits, \
+         {:.2}% of the {} with no marker)",
+        pct(unknown),
+        unknown as f64 * 100.0 / (total - after) as f64,
+        total - after
+    );
+
+    // #5250: `unknown` is a refinement of the marker-less remainder, so it can
+    // never exceed it. A predicate that started claiming a large share of the
+    // whole corpus would have stopped being the narrow, mechanism-backed rule
+    // this issue asked for.
+    assert!(
+        unknown <= total - after,
+        "unknown must be a subset of the marker-less commits: {unknown} of {}",
+        total - after
+    );
+    assert!(
+        pct(unknown) < 15.0,
+        "the rewrite-fingerprint predicate must stay narrow; got {:.2}% of all commits",
+        pct(unknown)
+    );
 
     assert!(
         pct(after) >= 85.0,
