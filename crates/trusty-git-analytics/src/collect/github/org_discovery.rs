@@ -261,6 +261,7 @@ mod tests {
             fetch_pr_reviews: true,
             review_fetch_concurrency: 1,
             ticket_regex: None,
+            fetch_on_reference: false,
         };
         let repo_cfg = RepositoryConfig {
             path: PathBuf::from("/tmp/widget"),

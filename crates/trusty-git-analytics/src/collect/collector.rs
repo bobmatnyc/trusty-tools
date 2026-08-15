@@ -17,6 +17,7 @@ use crate::collect::linear_pipeline;
 use crate::collect::notify;
 use crate::collect::pr_provider::PrProvider;
 use crate::collect::weeks::{clamp_week_to_range, weeks_in_range};
+use crate::collect::work_item_pipeline;
 use crate::core::config::Config;
 use crate::core::db::{self, Database};
 use crate::core::models::PullRequest;
@@ -465,16 +466,8 @@ impl CollectionPipeline {
                     warn!("Azure DevOps connection failed (non-fatal): {e}");
                 }
             }
-            if azdo_cfg.fetch_on_reference {
-                // #5219: `stats` is passed in so the fetch-failure arm can record
-                // its own stage failure instead of swallowing the error.
-                if let Err(e) = self
-                    .fetch_and_persist_azdo_work_items(db, &client, azdo_cfg, &mut stats)
-                    .await
-                {
-                    stats.fail_stage(format!("ADO work item persistence failed: {e}"));
-                }
-            }
+            // #5219: the ADO work-item pull moved to `work_item_pipeline`,
+            // which runs it through `PmAdapter` alongside JIRA and GitHub.
             if azdo_cfg.fetch_prs {
                 match self.fetch_and_persist_azdo_prs(db, azdo_cfg).await {
                     Ok(n) => {
@@ -489,6 +482,12 @@ impl CollectionPipeline {
         }
 
         linear_pipeline::fetch_and_store_linear_issues(db, &self.config, &mut stats).await;
+
+        // #5219: JIRA, GitHub Issues and Azure DevOps all reach `work_items`
+        // through one `PmAdapter`-driven pass. Linear stays above — it writes
+        // `linear_issues` in the same pass and filters by `linear.team_keys`,
+        // neither of which the trait expresses.
+        work_item_pipeline::fetch_and_persist_work_items(db, &self.config, &mut stats).await;
 
         Ok(stats)
     }
@@ -928,141 +927,6 @@ impl CollectionPipeline {
         Ok(count)
     }
 
-    /// Scan stored commit messages for `AB#N` references, batch-fetch the
-    /// referenced ADO work items, and persist them in `work_items` and
-    /// `commit_work_items`.
-    ///
-    /// The pipeline pulls `(sha, message)` from `commits`, computes the unique
-    /// set of referenced IDs, calls
-    /// [`AzureDevOpsClient::get_work_items`] in batches of up to 200, then
-    /// upserts the resulting rows and inserts join-table links.
-    ///
-    /// All work-item linking is done in a single transaction so that a partial
-    /// failure doesn't leave dangling rows.
-    ///
-    /// A failed batch fetch is recorded on `stats` as a stage failure (#5219):
-    /// the whole ADO corpus is absent when it happens, so `tga collect` must
-    /// exit non-zero rather than report an empty success.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`crate::collect::CollectError`] if reading commits or writing
-    /// to SQLite fails. An ADO API failure is recorded on `stats` instead.
-    async fn fetch_and_persist_azdo_work_items(
-        &self,
-        db: &mut Database,
-        client: &AzureDevOpsClient,
-        azdo_cfg: &crate::core::config::AzureDevOpsConfig,
-        stats: &mut CollectionStats,
-    ) -> Result<()> {
-        use crate::collect::azdo::extract_work_item_refs;
-        use std::collections::{BTreeSet, HashMap};
-
-        // The ticket_regex pattern is validated at config load
-        // (`Config::validate_ticket_regexes`), so compilation here cannot fail
-        // under normal flow. We still propagate the error rather than panic
-        // to keep the no-`unwrap()` invariant in library code from CLAUDE.md.
-        let ticket_re = regex::Regex::new(&azdo_cfg.ticket_regex).map_err(|e| {
-            crate::collect::CollectError::Config(format!(
-                "pm.azure_devops.ticket_regex {:?} failed to compile: {e}",
-                azdo_cfg.ticket_regex
-            ))
-        })?;
-
-        // 1. Pull (sha, message) pairs from the database.
-        let rows: Vec<(String, String)> = {
-            let conn = db.connection();
-            let mut stmt = conn.prepare("SELECT sha, message FROM commits")?;
-            let mapped = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            let mut out = Vec::new();
-            for r in mapped {
-                out.push(r?);
-            }
-            out
-        };
-
-        // 2. Build commit -> [work_item_id] map and the unique ID set.
-        let mut commit_refs: HashMap<String, Vec<u32>> = HashMap::new();
-        let mut all_ids: BTreeSet<u32> = BTreeSet::new();
-        for (sha, msg) in &rows {
-            let ids = extract_work_item_refs(&ticket_re, msg);
-            if !ids.is_empty() {
-                for id in &ids {
-                    all_ids.insert(*id);
-                }
-                commit_refs.insert(sha.clone(), ids);
-            }
-        }
-
-        if all_ids.is_empty() {
-            info!(
-                pattern = %azdo_cfg.ticket_regex,
-                "No work-item references found in commit messages; skipping ADO work item fetch",
-            );
-            return Ok(());
-        }
-
-        // 3. Batch-fetch the referenced work items.
-        let ids: Vec<u32> = all_ids.iter().copied().collect();
-        let items = match client.get_work_items(&ids).await {
-            Ok(v) => v,
-            Err(e) => {
-                // #5219: the whole ADO corpus is absent when the batch fetch
-                // fails; the old `warn!` + `Ok(())` exited 0 with zero rows.
-                stats.fail_stage(format!("ADO: fetch work items failed: {e}"));
-                return Ok(());
-            }
-        };
-        info!(
-            fetched = items.len(),
-            commits = commit_refs.len(),
-            "Fetched ADO work items for commits",
-        );
-
-        // 4. Persist work items and commit links in a single transaction.
-        let tx = db.connection_mut().transaction()?;
-        let fetched_ids: std::collections::HashSet<u32> = items.iter().map(|w| w.id).collect();
-        for w in &items {
-            let raw_json = serde_json::to_string(w).ok();
-            let tags_csv = if w.tags.is_empty() {
-                None
-            } else {
-                Some(w.tags.join(","))
-            };
-            let row = crate::core::db::WorkItemRow {
-                id: w.id.to_string(),
-                source: "azdo".to_string(),
-                title: w.title.clone(),
-                status: w.state.clone(),
-                item_type: w.work_item_type.clone(),
-                tags: tags_csv,
-                project: Some(w.team_project.clone()),
-                url: w.url.clone(),
-                raw_json,
-            };
-            crate::core::db::work_items::upsert_work_item(&tx, &row)?;
-        }
-        for (sha, ref_ids) in &commit_refs {
-            for id in ref_ids {
-                // Skip refs that ADO didn't return (deleted, scope-restricted)
-                // to avoid FK violations on the join table.
-                if !fetched_ids.contains(id) {
-                    continue;
-                }
-                crate::core::db::work_items::link_commit_work_item(
-                    &tx,
-                    sha,
-                    &id.to_string(),
-                    "azdo",
-                )?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Fetch ADO pull requests referenced by commit-message `Merged PR NNNN:`
     /// patterns and persist them (with reviewers) under provider `'azdo'`.
     ///
@@ -1188,95 +1052,4 @@ fn naive_date_end_utc(d: NaiveDate) -> DateTime<Utc> {
         .and_hms_opt(23, 59, 59)
         .expect("23:59:59 is always a valid time");
     Utc.from_utc_datetime(&ndt)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::config::AzureDevOpsConfig;
-
-    /// An ADO config whose empty PAT makes `get_work_items` fail in
-    /// `validate_credentials`, before any network call.
-    fn unauthenticated_azdo_config() -> AzureDevOpsConfig {
-        AzureDevOpsConfig {
-            organization_url: "https://dev.azure.com/myorg".into(),
-            pat: String::new(),
-            project: Some("P".into()),
-            projects: vec![],
-            ticket_regex: r"AB#(\d+)".into(),
-            team_keys: vec![],
-            fetch_on_reference: true,
-            fetch_prs: false,
-        }
-    }
-
-    fn insert_commit(db: &Database, sha: &str, message: &str) {
-        db.connection()
-            .execute(
-                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
-                                      repository) \
-                 VALUES (?1, 'A', 'a@x', '2026-01-01T00:00:00Z', ?2, 'repo')",
-                rusqlite::params![sha, message],
-            )
-            .expect("insert commit");
-    }
-
-    /// #5219: the ADO fetch-failure arm swallowed the error and returned
-    /// `Ok(())`, so a run whose every work item failed to fetch exited 0 with
-    /// an empty `work_items` table. The failure must reach `stage_failures`,
-    /// which is what `tga collect` turns into a non-zero exit (#5655).
-    #[tokio::test]
-    async fn azdo_fetch_failure_is_recorded_as_a_stage_failure() {
-        let mut db = Database::open_in_memory().expect("db");
-        insert_commit(&db, "sha1", "fix: AB#42 broken thing");
-
-        let azdo_cfg = unauthenticated_azdo_config();
-        let client = AzureDevOpsClient::new(azdo_cfg.clone());
-        let pipeline = CollectionPipeline::new(Config::default());
-        let mut stats = CollectionStats::default();
-
-        pipeline
-            .fetch_and_persist_azdo_work_items(&mut db, &client, &azdo_cfg, &mut stats)
-            .await
-            .expect("an API failure is non-fatal to the surrounding run");
-
-        assert_eq!(
-            stats.stage_failures().len(),
-            1,
-            "a failed ADO fetch must reach the exit code: {:?}",
-            stats.errors
-        );
-        let count: i64 = db
-            .connection()
-            .query_row(
-                "SELECT COUNT(*) FROM work_items WHERE source = 'azdo'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("count work_items");
-        assert_eq!(
-            count, 0,
-            "nothing was written, which is why it is a failure"
-        );
-    }
-
-    /// The complement: no `AB#` reference means nothing was ever fetched, so
-    /// there is no failure to report.
-    #[tokio::test]
-    async fn azdo_with_no_references_records_no_fault() {
-        let mut db = Database::open_in_memory().expect("db");
-        insert_commit(&db, "sha1", "chore: no ticket here");
-
-        let azdo_cfg = unauthenticated_azdo_config();
-        let client = AzureDevOpsClient::new(azdo_cfg.clone());
-        let pipeline = CollectionPipeline::new(Config::default());
-        let mut stats = CollectionStats::default();
-
-        pipeline
-            .fetch_and_persist_azdo_work_items(&mut db, &client, &azdo_cfg, &mut stats)
-            .await
-            .expect("no references is a clean no-op");
-
-        assert!(stats.errors.is_empty(), "faults: {:?}", stats.errors);
-    }
 }

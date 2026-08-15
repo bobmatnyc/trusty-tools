@@ -1074,6 +1074,17 @@ pub struct GithubConfig {
     /// to return an error.
     #[serde(default)]
     pub ticket_regex: Option<String>,
+
+    /// Whether to fetch the GitHub issues referenced by commit messages and
+    /// write them into `work_items`.
+    ///
+    /// Defaults to `false` (#5219), matching `linear.fetch_on_reference` and
+    /// `pm.azure_devops.fetch_on_reference`. GitHub is configured in nearly
+    /// every `tga` config for pull requests alone, and `#N` is the commonest
+    /// reference shape there is — enabling this by default would spend a
+    /// token's hourly budget on issue lookups nobody asked for.
+    #[serde(default)]
+    pub fetch_on_reference: bool,
 }
 
 fn default_fetch_pr_reviews() -> bool {
@@ -1218,6 +1229,17 @@ pub struct JiraConfig {
     /// to return an error.
     #[serde(default)]
     pub ticket_regex: Option<String>,
+
+    /// Whether to fetch the JIRA issues referenced by commit messages and
+    /// write them into `work_items`.
+    ///
+    /// Defaults to `false` (#5219), matching `linear.fetch_on_reference` and
+    /// `pm.azure_devops.fetch_on_reference`. `tga jira sync` is a separate,
+    /// explicitly-invoked path that populates the transition and comment
+    /// tables; this flag governs only the reference-driven `work_items` pull
+    /// that runs inside `tga collect`.
+    #[serde(default)]
+    pub fetch_on_reference: bool,
 }
 
 /// The current user's home directory, as `$HOME`.

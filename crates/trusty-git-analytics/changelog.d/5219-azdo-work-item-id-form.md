@@ -1,0 +1,5 @@
+Changed
+
+- Azure DevOps `work_items` rows are now keyed `AB#42` rather than a bare `42` (#5219). `collect::correlate_commits` looks a commit's ticket key up against `work_items.id`, and `collect::ticket::extract_ticket_id` yields `AB#42` for an ADO reference — so no ADO row a previous run wrote could ever be matched by the correlation pass. The shared writer stores the adapter's canonical id, which is the form correlation searches for. Rows written by an earlier version stay under their old numeric key until the next collect refreshes them; they are inert, not harmful, and can be removed with `DELETE FROM work_items WHERE source = 'azdo' AND id NOT LIKE 'AB#%'`.
+
+  `PmTicket` gains a `project` field, carrying what ADO reports as `System.TeamProject` into `work_items.project` — the column DOC-70's board axis filters on. The struct is now `#[non_exhaustive]` so the next field is not another break. `PmSource::work_item_source` is new: it returns the database vocabulary, which is `azdo` for Azure DevOps where `PmSource::as_str` returns the display label `azure_devops`.
