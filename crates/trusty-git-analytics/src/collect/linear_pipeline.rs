@@ -45,7 +45,7 @@ const LINEAR_ITEM_TYPE: &str = "Issue";
 /// What: no-ops unless `linear.fetch_on_reference` is set. Otherwise collects
 /// every `(sha, message)` pair, calls `fetch_referenced_issues`, and stores the
 /// result into BOTH `linear_issues` and the source-agnostic `work_items` /
-/// `commit_work_items` pair. Every failure — client init, query, either store —
+/// `commit_work_items` pair. Every failure — client init, query, fetch, either store —
 /// is recorded on `stats` as a stage failure and returns without aborting the
 /// surrounding run. The command turns that into a non-zero exit at the end
 /// (#5655); nothing here decides the exit code itself.
@@ -103,9 +103,9 @@ pub(super) async fn fetch_and_store_linear_issues(
                     {
                         Ok(issues) => issues,
                         Err(e) => {
-                            stats
-                                .errors
-                                .push(format!("Linear: fetch issues failed: {e}"));
+                            // #5727: the whole stage's data is absent — the walk
+                            // stops at the first failure and nothing is written.
+                            stats.fail_stage(format!("Linear: fetch issues failed: {e}"));
                             return;
                         }
                     };
