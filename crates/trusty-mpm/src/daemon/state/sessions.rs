@@ -503,6 +503,26 @@ impl DaemonState {
         self.delegations.insert(delegation.id.0, delegation);
     }
 
+    /// Hold the dispatch-record lock for the duration of one find-then-insert
+    /// (#5769).
+    ///
+    /// Why: see the `dispatch_record` field's own doc. Two writers describe one
+    /// dispatch — the tracker's `matcher: "*"` hook and the guard's grant POST —
+    /// and both resolve by `tool_use_id` before inserting, which a `DashMap`
+    /// cannot make atomic. Exposed as a guard rather than as a closure-taking
+    /// method because both takers already own their record logic and only need
+    /// it serialised.
+    /// What: blocks until the lock is free. `pub(crate)`, not `pub`: this is an
+    /// internal invariant between two modules of this crate, not an API a
+    /// consumer may hold.
+    ///
+    /// It is ALWAYS taken inside [`Self::claim_shared_tree_dispatch`]'s lock,
+    /// never around it. Take them in the other order and the two deadlock.
+    /// Test: `a_grant_and_the_tracker_converge_in_either_order`.
+    pub(crate) fn dispatch_record_guard(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.dispatch_record.lock()
+    }
+
     /// All delegations belonging to one session.
     pub fn delegations_for(&self, session: SessionId) -> Vec<Delegation> {
         self.delegations

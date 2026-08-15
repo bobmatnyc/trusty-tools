@@ -126,11 +126,16 @@
 //! `hookSpecificOutput.updatedInput` carrying the dispatch's own input with
 //! `isolation: "worktree"` added, so the harness provisions the worktree under
 //! `.claude/worktrees/` (ADR-0036) and reclaims it on completion. Trusty-mpm
-//! creates nothing, per ADR-0044 decision 4. It runs after the fan-out denial
-//! (so only the PM reaches it) and BEFORE the #4480 concurrency check, which
-//! must not deny a dispatch that is about to stop sharing the tree. Unlike its
-//! neighbours it does NOT fail open on an unknown agent — see that module's
-//! doc for why the fail-open direction stops at the main checkout.
+//! creates nothing, per ADR-0044 decision 4. It runs after the fan-out denial,
+//! so only the PM reaches it. Unlike its neighbours it does NOT fail open on an
+//! unknown agent — see that module's doc for why the fail-open direction stops
+//! at the main checkout. For the dispatches it handles it REPLACES the #4480
+//! check rather than skipping it (#5769): the grant is emitted only after
+//! [`crate::commands::pm_guard_dispatch::evaluate_granted_worktree`] has asked
+//! the daemon who holds this checkout, which both keeps the concurrency verdict
+//! alive if the harness ignores `updatedInput` and records the granted isolation
+//! so the tracker's original-payload record stops naming an isolated writer as a
+//! shared-checkout one.
 //! **Subagent fan-out denial (issue #4784):** [`pm_guard`] calls
 //! [`crate::commands::pm_guard_fanout::evaluate_subagent_fanout`] DIRECTLY,
 //! before Guards 1 and 4, denying `Task`/`Agent` when the calling session is
@@ -391,12 +396,21 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         // denied and a daemon that cannot answer allows. The query is made only
         // after both lexical halves match, so ordinary Bash traffic never pays
         // for it.
-        if let Some((verb, target)) = main_checkout_head_move(command, &hook_cwd) {
-            let live =
-                pm_guard_dispatch::live_shared_tree_writers(url, session_id, &target, &payload)
-                    .await;
+        if let Some((verb, target, root)) = main_checkout_head_move(command, &hook_cwd) {
+            // Two keys, not one (#5769): `tm hook` stamps a delegation's `cwd`
+            // from its own process directory, while `target` is resolved through
+            // `cd` and `git -C`. They name the same HEAD but need not be the
+            // same string, and a query on one alone matched nothing for a
+            // command run from a subdirectory of the checkout.
+            let live = pm_guard_dispatch::live_shared_tree_writers_in(
+                url,
+                session_id,
+                &[root.as_path(), target.as_path()],
+                &payload,
+            )
+            .await;
             if !live.is_empty() {
-                let reason = head_move_deny_reason(&verb, &target, &live);
+                let reason = head_move_deny_reason(&verb, &root, &live);
                 audit_denied_tool(url, session_id, tool_name, &reason).await;
                 println!("{}", build_pretooluse_deny_response(&reason));
                 return Ok(());
@@ -439,27 +453,52 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     }
 
     // ADR-0048 Part A: a dispatched writer standing in a main checkout is GIVEN
-    // a worktree rather than refused one. Placed after the fan-out deny (so a
-    // subagent's dispatch is already blocked and only the PM reaches here) and
-    // BEFORE the #4480 concurrency check below, which must not run at all on a
-    // dispatch that is about to be isolated — the rewritten dispatch no longer
-    // shares this tree, so denying it for a sibling in this tree would be a
-    // false deny, and a `PreToolUse` hook may print exactly one object anyway.
+    // a worktree rather than refused one. Placed after the fan-out deny, so a
+    // subagent's dispatch is already blocked and only the PM reaches here.
     //
-    // The daemon's own `matcher: "*"` tracker hook still records this dispatch
-    // from the ORIGINAL payload, so its delegation reads as unisolated. That
-    // record is inert: every dispatch from this main checkout takes this branch
-    // and returns before querying, so nothing ever reads it to deny with.
+    // It REPLACES the #4480 check below for the dispatches it handles rather
+    // than skipping it (#5769). Two things went wrong when it merely returned
+    // first. The concurrency verdict stopped being computed at all, so if the
+    // harness does not apply `hookSpecificOutput.updatedInput` for `Agent` — a
+    // property this binary cannot verify — a second unisolated writer that used
+    // to be denied was admitted, with the shell-write path and `git checkout
+    // <branch>` both known not to backstop it. And the daemon's `matcher: "*"`
+    // tracker recorded this dispatch from the ORIGINAL payload, so a writer the
+    // grant had just moved into its own worktree stayed named as writing in the
+    // shared checkout, and decision 10's HEAD-move rule below denied `git pull`
+    // there for the six hours of `RUNNING_STALE_AFTER_SECS`.
+    //
+    // `evaluate_granted_worktree` closes both in one daemon call: it asks who
+    // holds this checkout and, on an empty answer, records the granted isolation
+    // inside the same critical section. A non-empty answer denies instead of
+    // granting — the cost inversion ADR-0048 states for a main checkout, where a
+    // false deny costs a round trip and a false allow corrupts another session's
+    // branch.
     if !caller_is_subagent
         && let Some(grant) =
             pm_guard_worktree_grant::evaluate_worktree_grant(tool_name, tool_input, &hook_cwd)
     {
         match grant {
             pm_guard_worktree_grant::WorktreeGrant::Rewrite(updated_input) => {
-                println!(
-                    "{}",
-                    pm_guard_worktree_grant::build_worktree_grant_response(&updated_input)
-                );
+                match pm_guard_dispatch::evaluate_granted_worktree(
+                    url,
+                    session_id,
+                    &hook_cwd,
+                    &payload,
+                    tool_input,
+                    &updated_input,
+                )
+                .await
+                {
+                    Some(reason) => {
+                        audit_denied_tool(url, session_id, tool_name, &reason).await;
+                        println!("{}", build_pretooluse_deny_response(&reason));
+                    }
+                    None => println!(
+                        "{}",
+                        pm_guard_worktree_grant::build_worktree_grant_response(&updated_input)
+                    ),
+                }
             }
             pm_guard_worktree_grant::WorktreeGrant::Deny(reason) => {
                 audit_denied_tool(url, session_id, tool_name, reason).await;

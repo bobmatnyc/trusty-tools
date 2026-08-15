@@ -71,6 +71,17 @@
 //! re-derives eligibility from the payload, and a `Bash` call is not a dispatch
 //! tool, so the record closure never runs.
 //!
+//! **A third caller records what the guard GRANTED, on a route of its own
+//! (#5769).** [`evaluate_granted_worktree`] serves the ADR-0048 worktree grant,
+//! and it needs the opposite of what the route above provides: the grant's whole
+//! point is that the dispatch now declares isolation, which is exactly the
+//! payload `shares_the_callers_tree` rejects, so this route's record closure
+//! could never run for it. `…/delegations/granted-worktree` inverts the
+//! eligibility test and upserts instead of observing. Posting the ORIGINAL input
+//! here instead would be worse than doing nothing: eligibility would pass, an
+//! empty answer would CLAIM the directory, and the unisolated record the grant
+//! exists to correct would be written by the correcting call itself.
+//!
 //! Cost: the daemon call is made only after the dispatch itself is classified as
 //! a shared-tree writer, so a research, review, or QA dispatch — and every
 //! non-dispatch tool call, which is essentially all traffic — pays nothing.
@@ -286,7 +297,8 @@ pub(crate) async fn claim_shared_tree(
     cwd: &Path,
     payload: &Value,
 ) -> Vec<String> {
-    let Some(body) = post_shared_tree(url, session_id, cwd, payload).await else {
+    let Some(body) = post_shared_tree(url, session_id, cwd, payload, SHARED_TREE_ROUTE).await
+    else {
         return Vec::new();
     };
     let live = writers_in(&body);
@@ -320,12 +332,105 @@ pub(crate) async fn live_shared_tree_writers(
     cwd: &Path,
     payload: &Value,
 ) -> Vec<String> {
-    post_shared_tree(url, session_id, cwd, payload)
+    post_shared_tree(url, session_id, cwd, payload, SHARED_TREE_ROUTE)
         .await
         .as_ref()
         .map(writers_in)
         .unwrap_or_default()
 }
+
+/// Who is writing in any of `dirs`, asked without claiming (#5769).
+///
+/// Why: the HEAD-move rule keys its query by directory, but the directory a
+/// delegation record carries and the directory the command runs in are resolved
+/// by different code — `tm hook` stamps a record from its own process
+/// `current_dir()`, while the guard resolves the command's target through `cd`
+/// and `git -C`. `cd crates/foo && git pull` from a checkout root therefore
+/// queried `/repo/crates/foo` against records written at `/repo` and matched
+/// nothing, allowing the move. Both directories name the same HEAD, so both are
+/// asked.
+/// What: queries each distinct directory in order and STOPS at the first
+/// non-empty answer — the deny needs one positive answer, not a complete
+/// census, so the common deny path still costs one round trip. Every failure arm
+/// of [`post_shared_tree`] contributes nothing, so an unreachable daemon still
+/// answers "nobody here".
+/// Test: `head_move_query_asks_the_checkout_root_and_the_command_directory` in
+/// `tests/tm_hook_pm_guard.rs`.
+pub(crate) async fn live_shared_tree_writers_in(
+    url: &str,
+    session_id: &str,
+    dirs: &[&Path],
+    payload: &Value,
+) -> Vec<String> {
+    let mut asked: Vec<&Path> = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        if asked.contains(dir) {
+            continue;
+        }
+        asked.push(dir);
+        let live = live_shared_tree_writers(url, session_id, dir, payload).await;
+        if !live.is_empty() {
+            return live;
+        }
+    }
+    Vec::new()
+}
+
+/// Record the isolation the guard just granted, and learn who holds the
+/// checkout (#5769).
+///
+/// Why: two problems with one shape. The daemon's `matcher: "*"` tracker records
+/// this dispatch from the ORIGINAL payload, so a granted writer stays recorded
+/// as writing unisolated in the main checkout and ADR-0048 decision 10 then
+/// denies `git pull` there on a phantom for six hours. And the #4480 concurrency
+/// check no longer runs on a granted dispatch at all, because the grant returns
+/// first — so if the harness does not apply `updatedInput`, a second unisolated
+/// writer that used to be denied is now admitted. Both need the daemon, and both
+/// need it BEFORE the grant is emitted, so they are one call.
+///
+/// It posts to [`GRANTED_WORKTREE_ROUTE`] rather than the sibling one because
+/// that route re-derives eligibility with `shares_the_callers_tree`, which the
+/// rewritten input makes false — the record closure would never run. Posting the
+/// ORIGINAL input there instead would be worse than useless: eligibility would
+/// be true, an empty answer would CLAIM the directory, and the phantom this
+/// exists to remove would be recorded by the very call meant to correct it.
+/// What: `Some(reason)` (DENY) when the daemon names another live writer in this
+/// checkout; `None` (emit the grant) when it does not, in which case the daemon
+/// has recorded the granted isolation inside the same critical section that
+/// produced the answer. Every daemon failure answers empty, so a down daemon
+/// grants — the fail-open direction the sibling guard commits to.
+/// Test: `pm_guard_denies_a_granted_dispatch_beside_a_live_writer`,
+/// `pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout`.
+pub(crate) async fn evaluate_granted_worktree(
+    url: &str,
+    session_id: &str,
+    cwd: &Path,
+    payload: &Value,
+    tool_input: Option<&Value>,
+    updated_input: &Value,
+) -> Option<String> {
+    let mut granted = payload.clone();
+    granted["tool_input"] = updated_input.clone();
+    let live = post_shared_tree(url, session_id, cwd, &granted, GRANTED_WORKTREE_ROUTE)
+        .await
+        .as_ref()
+        .map(writers_in)
+        .unwrap_or_default();
+    if live.is_empty() {
+        return None;
+    }
+    Some(deny_reason(
+        dispatch_agent(tool_input).unwrap_or("this"),
+        cwd,
+        &live,
+    ))
+}
+
+/// The route that answers and claims for an unisolated dispatch (#4480).
+const SHARED_TREE_ROUTE: &str = "shared-tree-dispatch";
+
+/// The route that answers and records the isolation the guard granted (#5769).
+const GRANTED_WORKTREE_ROUTE: &str = "granted-worktree";
 
 /// POST one call to the shared-tree route and return its parsed body.
 ///
@@ -344,6 +449,7 @@ async fn post_shared_tree(
     session_id: &str,
     cwd: &Path,
     payload: &Value,
+    route: &str,
 ) -> Option<Value> {
     if session_id.is_empty() {
         return None;
@@ -353,7 +459,7 @@ async fn post_shared_tree(
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .ok()?;
-    let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/shared-tree-dispatch");
+    let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/{route}");
     let mut forwarded = build_hook_payload(&cwd.display().to_string(), Some(payload), None);
     project_dispatch_input(&mut forwarded);
     let body = serde_json::json!({ "payload": forwarded });

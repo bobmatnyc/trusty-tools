@@ -67,6 +67,152 @@ async fn call(
     body
 }
 
+/// Drive the granted-worktree route and unwrap its body.
+async fn granted_call(
+    state: &Arc<DaemonState>,
+    session: SessionId,
+    req: SharedTreeDispatchRequest,
+) -> SharedTreeWritersResponse {
+    let Json(body) =
+        granted_worktree_route(State(state.clone()), Path(session.0.to_string()), Json(req))
+            .await
+            .expect("route succeeds");
+    body
+}
+
+/// The `PreToolUse` payload the daemon's own `matcher: "*"` hook observes — the
+/// ORIGINAL dispatch, before the guard rewrote it.
+fn unisolated_hook_payload(tool_use_id: &str) -> Value {
+    serde_json::json!({
+        "cwd": "/repo",
+        "tool": "Agent",
+        "tool_use_id": tool_use_id,
+        "input": {"subagent_type": "rust-engineer", "description": "go"},
+    })
+}
+
+#[tokio::test]
+async fn a_grant_and_the_tracker_converge_in_either_order() {
+    // #5769, and the reason the fix is an upsert rather than a second call to
+    // `observe`. TWO writers describe one dispatch: this route, carrying the
+    // isolation `tm hook --pm-guard` granted, and the daemon's own `matcher: "*"`
+    // tracker hook, carrying the ORIGINAL unisolated payload. They fire on the
+    // same event and race, and `on_dispatch` returns early when the `tool_use_id`
+    // already exists — so an `observe`-based grant would correct the record only
+    // in the orders it happened to win. Both orders must converge on ONE isolated
+    // record, or `git pull` in this checkout is denied for the six hours of
+    // `RUNNING_STALE_AFTER_SECS` on a writer that is not there.
+    for guard_first in [true, false] {
+        let (state, _dir, session) = hermetic();
+        let original = unisolated_hook_payload("toolu_grant");
+        let granted = dispatch(
+            "/repo",
+            "rust-engineer",
+            Some("worktree"),
+            Some("toolu_grant"),
+        );
+
+        if guard_first {
+            let body = granted_call(&state, session, granted).await;
+            assert!(body.claimed, "an empty checkout must be claimed");
+            crate::daemon::services::delegation_tracker::observe(
+                &state,
+                session,
+                HookEvent::PreToolUse,
+                &original,
+            );
+        } else {
+            crate::daemon::services::delegation_tracker::observe(
+                &state,
+                session,
+                HookEvent::PreToolUse,
+                &original,
+            );
+            // Causality: the tracker's record IS the phantom at this point.
+            // Only an overwrite can clear it — `observe` would return early on
+            // the `tool_use_id` it already wrote and change nothing.
+            assert_eq!(state.delegations_for(session)[0].isolation, None);
+            let body = granted_call(&state, session, granted).await;
+            assert!(
+                body.claimed,
+                "the caller's own record is excluded, so the checkout is still free"
+            );
+        }
+
+        let records = state.delegations_for(session);
+        assert_eq!(
+            records.len(),
+            1,
+            "guard_first={guard_first}: one dispatch must leave one record, got {records:?}"
+        );
+        assert_eq!(
+            records[0].isolation.as_deref(),
+            Some("worktree"),
+            "guard_first={guard_first}: the granted isolation must survive both orders"
+        );
+        // The property the whole fix exists for: a later `git pull` in this
+        // checkout asks exactly this question, and a non-empty answer denies it.
+        assert!(
+            state
+                .live_shared_tree_writers(&PathBuf::from("/repo"), None)
+                .is_empty(),
+            "guard_first={guard_first}: a granted writer must not be named as writing here"
+        );
+    }
+}
+
+#[tokio::test]
+async fn granted_worktree_route_records_nothing_without_isolation_or_a_tool_use_id() {
+    // Both keys are load-bearing. Without `tool_use_id` the record could never
+    // be found again, so writing one would leave a SECOND record beside the
+    // tracker's — the phantom duplicated rather than removed. Without an
+    // isolating mode there is no grant to record, and this route must not become
+    // a way to claim a directory for an ordinary unisolated dispatch.
+    for req in [
+        dispatch("/repo", "rust-engineer", Some("worktree"), None),
+        dispatch("/repo", "rust-engineer", None, Some("toolu_x")),
+        dispatch("/repo", "rust-engineer", Some("nonsense"), Some("toolu_x")),
+    ] {
+        let (state, _dir, session) = hermetic();
+        let body = granted_call(&state, session, req).await;
+        assert!(!body.claimed);
+        assert!(state.delegations_for(session).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn granted_worktree_route_reports_a_live_writer_without_claiming() {
+    // The deny arm the reorder restored (#5769 finding 2): the grant is emitted
+    // only after this answer comes back empty, so a sibling already holding the
+    // checkout denies the dispatch instead of silently sharing it — which is
+    // what happened while the grant returned before the concurrency check.
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "python-engineer",
+        "/repo",
+        None,
+        Some("toolu_first"),
+        DelegationStatus::Running,
+    );
+    let body = granted_call(
+        &state,
+        session,
+        dispatch(
+            "/repo",
+            "rust-engineer",
+            Some("worktree"),
+            Some("toolu_second"),
+        ),
+    )
+    .await;
+    assert_eq!(body.total, 1);
+    assert_eq!(body.agents[0].agent, "python-engineer");
+    assert!(!body.claimed, "a denied dispatch must record nothing");
+    assert_eq!(state.delegations_for(session).len(), 1);
+}
+
 #[tokio::test]
 async fn shared_tree_dispatch_route_reports_live_unisolated_writers() {
     let (state, _dir, session) = hermetic();

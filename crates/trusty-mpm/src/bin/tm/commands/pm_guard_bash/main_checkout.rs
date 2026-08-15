@@ -71,6 +71,33 @@
 //! refused, and a daemon that cannot answer answers "nobody here", so this
 //! branch fails open exactly like the #4480 guard it borrows the query from.
 //!
+//! **Residuals specific to the HEAD-move rule, stated rather than hidden
+//! (#5769).** Four of them, each an ALLOW where a deny might be expected:
+//!
+//! * `--git-dir=` and `--work-tree=` are skipped when resolving the subcommand
+//!   name ([`shell_lex::git_subcommand`]) but are never resolved into a target
+//!   directory — only `cd` and `git -C` are. So
+//!   `git --git-dir=/repo/.git --work-tree=/repo pull`, run from anywhere,
+//!   resolves the running directory rather than `/repo` and is allowed when the
+//!   running directory is not itself a shared checkout. Closing it means
+//!   teaching [`git_verb_target_dir`] a third override, which the destructive
+//!   and commit rules would inherit — a wider change than this rule.
+//! * The deny quotes the daemon's delegation records, and a record can be wrong
+//!   in the ALLOW direction as well as the deny one. A grant whose isolation
+//!   POST failed (that path fails open) leaves a genuinely unisolated record for
+//!   an agent that does have a worktree, and the deny then names it. The text
+//!   attributes the claim for exactly this reason — see
+//!   [`head_move_deny_reason`].
+//! * The query is keyed by directory, and this rule asks two — the resolved
+//!   target and its checkout root. A record stamped at some THIRD directory
+//!   inside the same checkout (a hook that ran from another subdirectory) is
+//!   still invisible.
+//! * [`IN_PROGRESS_CONTROL_FLAGS`] is matched on the first tail token only, so a
+//!   real in-progress control that git would accept in a later position — none
+//!   exists today — would be denied rather than exempted. That is the fail
+//!   direction this carve-out can afford; the reverse cost a whole `git merge`
+//!   its deny.
+//!
 //! Test: `is_whole_tree_destructive_*`, `destructive_target_dir_*`,
 //! `commit_target_dir_*`, `main_checkout_head_move_*`,
 //! `starts_a_head_move_*` below;
@@ -81,7 +108,7 @@
 
 use std::path::{Path, PathBuf};
 
-use trusty_mpm::core::project_aliases::is_main_checkout;
+use trusty_mpm::core::project_aliases::{is_main_checkout, main_checkout_root};
 
 use super::{PathEnv, git_dash_c_override, resolve_target_path, split_shell_segments};
 use crate::commands::hook_rewrite::first_command_token;
@@ -151,17 +178,32 @@ pub(crate) fn evaluate_main_checkout_commit_command(command: &str, cwd: &Path) -
 /// is shared, and moving it changes the ground another session's uncommitted
 /// work is sitting on — with no error at any step, the same silence the commit
 /// rule above exists for.
-/// What: `Some((verb, directory))` when a segment [`starts_a_head_move`] and
-/// the directory it would act on [`is_main_checkout`]; `None` otherwise. It
-/// returns the pair rather than a reason because the deny is not decided here:
-/// the caller asks the daemon who else is live in that directory and denies
-/// only on a positive answer. See [`head_move_deny_reason`].
+/// What: `Some((verb, directory, checkout_root))` when a segment
+/// [`starts_a_head_move`] and the directory it would act on belongs to a main
+/// checkout. It returns those rather than a reason because the deny is not
+/// decided here: the caller asks the daemon who else is live and denies only on
+/// a positive answer. See [`head_move_deny_reason`].
+///
+/// **Why two directories and not one (#5769).** `directory` is what the command
+/// resolves to through `cd` and `git -C`; `checkout_root` is the main checkout
+/// that directory sits in. They differ whenever the command runs from a
+/// subdirectory, and the delegation records the caller queries are stamped from
+/// `tm hook`'s own process directory, which may be either. Both name one HEAD,
+/// so the caller asks both — and the test that the directory belongs to a
+/// checkout is now [`main_checkout_root`], not [`is_main_checkout`], which
+/// closes a second hole in the same place: `cd crates/foo && git pull` resolved
+/// a subdirectory, `is_main_checkout` on it was still true, and the query then
+/// keyed a directory no record could match.
 /// Test: `main_checkout_head_move_*`, and end to end in
 /// `tests/tm_hook_pm_guard.rs`.
-pub(crate) fn main_checkout_head_move(command: &str, cwd: &Path) -> Option<(String, PathBuf)> {
+pub(crate) fn main_checkout_head_move(
+    command: &str,
+    cwd: &Path,
+) -> Option<(String, PathBuf, PathBuf)> {
     let (verb, target) =
         git_verb_target_dir(command, cwd, &PathEnv::from_process(), starts_a_head_move)?;
-    is_main_checkout(&target).then_some((verb, target))
+    let root = main_checkout_root(&target)?;
+    Some((verb, target, root))
 }
 
 /// Flags that operate on an operation already in progress rather than start a
@@ -197,14 +239,22 @@ const IN_PROGRESS_CONTROL_FLAGS: &[&str] = &[
 /// them would leave the shared checkout parked mid-rebase, which is worse for
 /// every other session in it than letting the operation finish or unwind. The
 /// deny that matters is the one that stops the move from starting.
+///
+/// The carve-out is matched POSITIONALLY, on the first tail token only (#5769).
+/// Scanning the whole tail exempted any command carrying one of those strings
+/// anywhere in it, so `git merge -m "--continue" origin/main` — a real merge,
+/// with the flag as a commit message — passed straight through. Git itself
+/// accepts these only as the first argument, so the narrower match is also the
+/// accurate one.
 /// Test: `starts_a_head_move_covers_the_three_verbs`,
 /// `starts_a_head_move_allows_in_progress_control`,
+/// `starts_a_head_move_matches_in_progress_control_positionally`,
 /// `starts_a_head_move_ignores_everything_else`.
 fn starts_a_head_move(subcommand: &str, tail: &[String]) -> bool {
     matches!(subcommand, "pull" | "merge" | "rebase")
         && !tail
-            .iter()
-            .any(|t| IN_PROGRESS_CONTROL_FLAGS.contains(&t.as_str()))
+            .first()
+            .is_some_and(|t| IN_PROGRESS_CONTROL_FLAGS.contains(&t.as_str()))
 }
 
 /// Build the deny message for a blocked HEAD move.
@@ -215,20 +265,33 @@ fn starts_a_head_move(subcommand: &str, tail: &[String]) -> bool {
 /// here want updated refs, and `git fetch` gives exactly that with no HEAD move
 /// (ADR-0048 decision 9), so a reader who only needed `origin/main` refreshed is
 /// unblocked without provisioning anything.
-/// What: names the verb, the directory, the sibling agents already writing
-/// there, `git fetch` as the ref-updating remedy, a worktree as the
-/// merge-or-rebase remedy, and the forms this rule never blocks.
-/// Test: `head_move_deny_reason_names_the_verb_the_path_and_both_remedies`.
+/// What: names the verb, the directory, the sibling agents the daemon reports,
+/// `git fetch` as the ref-updating remedy, a worktree as the merge-or-rebase
+/// remedy, and the forms this rule never blocks.
+///
+/// **It attributes, rather than asserts (#5769).** The text used to state as
+/// fact that another agent "is already writing there without a worktree of its
+/// own". This process cannot know that — it knows only what the daemon's
+/// delegation records say, and a record can outlive its agent (nothing closes
+/// one whose `SubagentStop` never arrives, for `RUNNING_STALE_AFTER_SECS`) or
+/// misdescribe it (a granted dispatch whose isolation POST failed is recorded
+/// unisolated, fail-open). Saying whose claim it is keeps the deny honest and
+/// tells the reader where to look when it is wrong.
+/// Test: `head_move_deny_reason_names_the_verb_the_path_and_both_remedies`,
+/// `head_move_deny_reason_attributes_the_claim_to_the_daemon`.
 pub(crate) fn head_move_deny_reason(verb: &str, target: &Path, live: &[String]) -> String {
     let mut names: Vec<&str> = live.iter().map(String::as_str).collect();
     names.sort_unstable();
     names.dedup();
     format!(
         "HEAD-moving git command denied in a shared main checkout (ADR-0048): `git {verb}` moves \
-         HEAD and writes the working tree of {}, and {} is already writing there without a \
-         worktree of its own — possibly dispatched by a different session standing in the same \
-         directory. Moving HEAD under a live writer changes the branch its uncommitted work sits \
-         on, and git reports no error when it happens. If you need the remote refs updated, run \
+         HEAD and writes the working tree of {}, and the daemon's delegation records name {} as \
+         running there with no worktree of its own — possibly dispatched by a different session \
+         standing in the same directory. Moving HEAD under a live writer changes the branch its \
+         uncommitted work sits on, and git reports no error when it happens. If you \
+         believe that record is stale — the agent finished without its stop signal reaching the \
+         daemon — report it to the PM rather than retrying this command. If you need the remote \
+         refs updated, run \
          `git fetch` instead: it writes only `refs/remotes/origin/*` and never touches HEAD or \
          the working tree, so it is never blocked here — then branch and diff against \
          `origin/main` rather than local `main`, which only a pull moves. If you need the merge \
@@ -780,12 +843,50 @@ mod tests {
     }
 
     #[test]
+    fn starts_a_head_move_matches_in_progress_control_positionally() {
+        // #5769: the carve-out used to scan the whole tail, so any command
+        // carrying one of those strings anywhere — a commit message is the
+        // realistic shape — exempted itself from the rule.
+        for args in [
+            vec!["-m", "--continue", "origin/main"],
+            vec!["origin/main", "-m", "--abort"],
+        ] {
+            assert!(
+                starts_a_head_move("merge", &tail(&args)),
+                "`git merge {}` is a real merge and must still classify",
+                args.join(" ")
+            );
+        }
+        // The genuine form — the flag first — stays exempt.
+        assert!(!starts_a_head_move("rebase", &tail(&["--continue"])));
+    }
+
+    #[test]
+    fn main_checkout_head_move_resolves_a_subdirectory_to_the_checkout_root() {
+        // #5769: a delegation record is stamped from `tm hook`'s own process
+        // directory, so a command aimed at a subdirectory has to report the
+        // checkout root as well or the query keys a directory no record matches.
+        let checkout = main_checkout_dir();
+        let sub = checkout.path().join("crates/foo");
+        std::fs::create_dir_all(&sub).expect("mkdir sub");
+        let (verb, target, root) = main_checkout_head_move(
+            &format!("cd {} && git pull", sub.display()),
+            checkout.path(),
+        )
+        .expect("a pull from a subdirectory must resolve");
+        assert_eq!(verb, "pull");
+        assert_eq!(target, sub);
+        assert_eq!(root, checkout.path());
+    }
+
+    #[test]
     fn main_checkout_head_move_finds_the_checkout_and_skips_a_worktree() {
         let checkout = main_checkout_dir();
-        let (verb, target) = main_checkout_head_move("git pull --rebase", checkout.path())
+        let (verb, target, root) = main_checkout_head_move("git pull --rebase", checkout.path())
             .expect("a pull in a main checkout must resolve");
         assert_eq!(verb, "pull");
         assert_eq!(target, checkout.path());
+        assert_eq!(root, checkout.path());
 
         // A linked worktree carries a `.git` FILE. Its HEAD belongs to the one
         // session that owns it, so a pull there races nothing and must resolve
@@ -810,19 +911,19 @@ mod tests {
 
         // `-C` and `cd` both aim the verb at a checkout the hook is not
         // standing in — the two overrides the sibling rules already close.
-        let (_, via_dash_c) =
+        let (_, via_dash_c, _) =
             main_checkout_head_move(&format!("git -C {path} rebase origin/main"), outside.path())
                 .expect("-C must move the target");
         assert_eq!(via_dash_c, checkout.path());
 
-        let (_, via_cd) =
+        let (_, via_cd, _) =
             main_checkout_head_move(&format!("cd {path} && git pull"), outside.path())
                 .expect("cd must move the target");
         assert_eq!(via_cd, checkout.path());
 
         // A benign leading verb must not hide the HEAD move behind it — this is
         // the ordinary `git fetch && git pull` shape.
-        let (verb, _) = main_checkout_head_move("git fetch origin && git pull", checkout.path())
+        let (verb, _, _) = main_checkout_head_move("git fetch origin && git pull", checkout.path())
             .expect("the second segment must be classified");
         assert_eq!(verb, "pull");
     }
@@ -864,6 +965,23 @@ mod tests {
         // Both remedies: the cheap one (fetch) and the general one (worktree).
         assert!(reason.contains("git fetch"), "{reason}");
         assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+    }
+
+    #[test]
+    fn head_move_deny_reason_attributes_the_claim_to_the_daemon() {
+        // #5769: this process knows what the daemon's records SAY, never what
+        // another agent is doing. A record can outlive its agent, and a grant
+        // whose isolation POST failed is recorded unisolated — so stating the
+        // claim as fact made the deny assert something it could not check.
+        let reason = head_move_deny_reason("pull", Path::new("/repo/main"), &["qa".to_string()]);
+        assert!(
+            reason.contains("the daemon's delegation records name"),
+            "the claim must be attributed to its source: {reason}"
+        );
+        assert!(
+            !reason.contains("is already writing there"),
+            "the deny must not assert another agent's behaviour as fact: {reason}"
+        );
     }
 
     #[test]

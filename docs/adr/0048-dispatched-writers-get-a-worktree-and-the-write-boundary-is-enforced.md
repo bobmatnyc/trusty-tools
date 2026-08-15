@@ -5,7 +5,8 @@
 - **Scope:** crate `trusty-mpm` — `tm hook --pm-guard` (`pm_guard_worktree_grant`,
   `pm_guard_write_boundary`, `pm_guard_bash::main_checkout`), the agent
   classifier `core::dispatch_isolation`, and the daemon's
-  `DaemonState::live_shared_tree_writers`
+  `DaemonState::live_shared_tree_writers` plus the `granted-worktree`
+  delegation route that records what the guard granted
 - **Reversibility Cost:** Medium — the grant changes what every dispatch from a
   main checkout does, and the boundary changes what every session may write
   there; both are user-visible and both ship in one release
@@ -52,7 +53,10 @@ leave the boundary unenforced. The owner's ruling is that both close together.
    `hookSpecificOutput.updatedInput` carrying the dispatch's own `tool_input`
    with `isolation: "worktree"` added. This is a grant, not a refusal: it is
    applied by Claude Code as data, rather than depending on the model re-issuing
-   the dispatch after reading a denial.
+   the dispatch after reading a denial. The grant is reported to the daemon so
+   the dispatch's delegation record carries the isolation it was given, and it is
+   emitted only after that same call reports the checkout free — see
+   Consequences for why neither is optional.
 2. **Trusty-mpm still creates no worktrees.** ADR-0044 decision 4 is unchanged
    and this decision depends on it: the harness provisions the worktree under
    `.claude/worktrees/` per [ADR-0036](0036-all-worktrees-are-siblings-under-claude-worktrees.md)
@@ -118,8 +122,9 @@ leave the boundary unenforced. The owner's ruling is that both close together.
     uncovered (see Consequences). The deny names `git fetch` first, since that
     is what most calls reaching it actually wanted, and a worktree second.
     `--abort`, `--quit`, `--continue`, `--skip`, `--edit-todo` and
-    `--show-current-patch` are exempt: they resolve an operation that already
-    started, and refusing them would park the shared checkout mid-rebase with
+    `--show-current-patch` are exempt when they appear as the FIRST argument,
+    which is the only position git accepts them in: they resolve an operation
+    that already started, and refusing them would park the shared checkout mid-rebase with
     no remedy reachable from there, which decision 6 forbids.
 
 ## Consequences
@@ -132,17 +137,45 @@ leave the boundary unenforced. The owner's ruling is that both close together.
   false allow corrupts another session's branch — the reported harm, not a
   hypothetical one — and a false grant costs one worktree the harness reclaims
   when it is unchanged. A read-only CUSTOM agent dispatched from a main
-  checkout now pays for a worktree it does not need. That is the price of the
-  choice, and it is paid in disk rather than in correctness.
+  checkout now pays for a worktree it does not need.
+- **For a READER, that price is not paid in disk — it is paid in correctness,
+  and the rule is drawn back from three agents because of it.** A harness
+  worktree is cut from a COMMIT, so an agent dispatched into one reads a tree
+  without the session's uncommitted work and answers confidently about the wrong
+  one. That is tolerable for a writer, which is going to work on a branch
+  anyway; it is a wrong answer for a reader. `Explore` and `Plan` are Claude
+  Code's own dispatch targets, ship in no trusty-mpm bundle, and publish tool
+  sets carrying no write tool at all — they classified `Unknown` only because
+  the bundle scan had never heard of them. They are now positively `ReadsOnly`
+  (`READ_ONLY_HARNESS_AGENTS`) and are left in the session's tree.
+  `general-purpose` is deliberately NOT among them, despite carrying the same
+  wrong-tree cost: it publishes the full tool set, and in this project it is
+  also the identity a failed named-agent dispatch degrades into (#4451), so a
+  `general-purpose` delegation is routinely an engineer's work under another
+  name. Decision 3 holds for it.
 - **A `Task` dispatch that needs isolation is denied rather than rewritten.**
   `isolation` is an `Agent` parameter; injecting it into a tool whose schema
   rejects it would convert a guarded dispatch into a failed tool call. The deny
   names `Agent` as the remedy.
-- **A dispatch granted isolation is still recorded by the daemon's tracker as
-  unisolated**, because that tracker observes the original hook payload and
-  cannot see the rewrite. The record is inert: every dispatch from that main
-  checkout takes the grant branch and returns before querying, so nothing reads
-  it to deny with. It would matter if the grant were ever made conditional.
+- **The grant is RECORDED, and it asks the concurrency question before it is
+  emitted.** The first draft did neither, and decision 10 turned both omissions
+  into work-halting defects. The daemon's `matcher: "*"` tracker observes the
+  ORIGINAL hook payload, so a dispatch the grant had just moved into its own
+  worktree stayed recorded as writing unisolated in the shared checkout — and
+  decision 10 reads exactly those records, so `git pull` in that checkout was
+  denied on a phantom for the six hours of `RUNNING_STALE_AFTER_SECS`, which is
+  the release flow's own fast-forward step. The grant therefore posts the
+  isolation it granted to `…/delegations/granted-worktree`, which UPSERTS:
+  it overwrites `isolation` on an existing record, because the tracker's
+  observer returns early on a `tool_use_id` it already wrote and the two hooks
+  race on one event. Whichever arrives first, one isolated record results.
+  The same call answers who already holds the checkout, so the #4480 verdict is
+  computed BEFORE the grant rather than skipped by it: a dispatch made into a
+  checkout another writer holds is denied, and only an empty answer is granted.
+  Skipping it assumed the harness applies `hookSpecificOutput.updatedInput` for
+  `Agent`, which trusty-mpm cannot verify — and if it does not, a second
+  unisolated writer that decision 3 would have denied was simply admitted, with
+  neither the shell-write path nor `git checkout <branch>` backstopping it.
 - **Widening the writer query across sessions makes cross-session denies
   possible where none could occur before.** That is the point, and the grant is
   what keeps it rare: writers dispatched from a main checkout are isolated
@@ -173,6 +206,25 @@ leave the boundary unenforced. The owner's ruling is that both close together.
   `session_id`, or a directory the daemon recorded under a different spelling
   all answer "nobody here". Both are the #4480 guard's own fail-open direction,
   inherited with the query.
+- **"A directory the daemon recorded under a different spelling" was not
+  hypothetical, and is now half closed.** A delegation's `cwd` is stamped from
+  `tm hook`'s own process directory, while the rule resolves the command's
+  target through `cd` and `git -C` — so `cd crates/foo && git pull` keyed
+  `/repo/crates/foo` against records written at `/repo` and allowed the move.
+  Two directories name one HEAD, so the rule now resolves the target's main
+  checkout ROOT (`project_aliases::main_checkout_root`) and asks about both,
+  stopping at the first positive answer. A record stamped at some THIRD
+  directory inside the same checkout remains invisible. The deny message names
+  the checkout root rather than the command's directory, since that is the tree
+  whose HEAD is at stake.
+- **The deny attributes its claim to the daemon's records rather than asserting
+  it.** This is decision 6 applied to accuracy, not just to remedies: the hook
+  process knows what the records SAY, and a record can be wrong in both
+  directions — one whose `SubagentStop` never arrived outlives its agent, and a
+  grant whose isolation POST failed (that path fails open) describes an isolated
+  agent as unisolated. Stating "X is already writing there without a worktree of
+  its own" as fact was therefore a claim the guard could not check, and offered
+  a remedy the named agent might already have.
 - **A write performed through `Bash` rather than an edit tool** is classified by
   `pm_guard_bash`, which reaches a deny for the PM through `SHELL_EDIT_REASON`
   but does not carry the main-checkout dimension for dispatched agents. Also a

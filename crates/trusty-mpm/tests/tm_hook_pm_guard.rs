@@ -900,15 +900,56 @@ fn run_pm_guard_at_with_env(
 /// and returns the `http://127.0.0.1:PORT` base URL. The accept loop runs on a
 /// detached thread; the process exits with the test binary.
 fn spawn_writers_mock(body: &'static str) -> String {
+    spawn_capturing_writers_mock(body).0
+}
+
+/// [`spawn_writers_mock`] that also hands back what the guard actually sent.
+///
+/// Why (#5769): a mock answering a canned body regardless of the request cannot
+/// tell a correct query from a broken one. The HEAD-move rule keys its query by
+/// DIRECTORY, and the directory it sends has to be one a delegation record can
+/// carry — nothing pinned that, which is why a `cd`-into-a-subdirectory query
+/// keyed a path no record matches and allowed the move with the guard silently
+/// off. Capturing the body makes the key assertable.
+/// What: as [`spawn_writers_mock`], plus a handle whose `posted_cwd()` blocks
+/// briefly for the request and returns its `payload.cwd`. `None` means no
+/// request arrived, which is itself an assertable outcome.
+fn spawn_capturing_writers_mock(body: &'static str) -> (String, CapturedRequest) {
     use std::io::Read;
     use std::net::TcpListener;
+    use std::sync::mpsc;
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         if let Ok((mut socket, _)) = listener.accept() {
+            // Read until the body is complete: `Content-Length` bounds it, and a
+            // single `read` is not guaranteed to return the whole request.
+            let mut raw = Vec::new();
             let mut buf = [0u8; 4096];
-            let _ = socket.read(&mut buf);
+            loop {
+                match socket.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => raw.extend_from_slice(&buf[..n]),
+                }
+                let text = String::from_utf8_lossy(&raw).to_string();
+                let Some((head, rest)) = text.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        l.strip_prefix("content-length: ")
+                            .or(l.strip_prefix("Content-Length: "))
+                    })
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if rest.len() >= len {
+                    let _ = tx.send(rest.to_string());
+                    break;
+                }
+            }
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -916,7 +957,23 @@ fn spawn_writers_mock(body: &'static str) -> String {
             let _ = socket.write_all(response.as_bytes());
         }
     });
-    url
+    (url, CapturedRequest(rx))
+}
+
+/// The request body one [`spawn_capturing_writers_mock`] received.
+struct CapturedRequest(std::sync::mpsc::Receiver<String>);
+
+impl CapturedRequest {
+    /// The forwarded hook payload the guard sent, or `None` if nothing arrived.
+    fn posted(&self) -> Option<serde_json::Value> {
+        let raw = self
+            .0
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .ok()?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("the guard must POST valid JSON: {e}: {raw}"));
+        Some(parsed["payload"].clone())
+    }
 }
 
 #[test]
@@ -1490,6 +1547,71 @@ fn pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout() {
 }
 
 #[test]
+fn pm_guard_denies_a_granted_dispatch_beside_a_live_writer() {
+    // #5769 finding 2: the grant used to return BEFORE the #4480 concurrency
+    // check, so that verdict stopped being computed for every dispatch made from
+    // a main checkout. If the harness does not apply `updatedInput` — which this
+    // binary cannot verify — a second unisolated writer that used to be denied
+    // was simply admitted. The grant is now emitted only after the daemon says
+    // the checkout is free.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"python-engineer","count":1}],"total":1}"#);
+    let (_dir, repo) = main_checkout_fixture();
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"do the thing"}"#;
+    let payload = tool_payload_at(
+        "Agent",
+        input,
+        &repo,
+        r#""session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_grant","#,
+    );
+    let stdout = run_pm_guard_at(&payload, &url, &repo);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("#4480") && stdout.contains("python-engineer"),
+        "the deny must name the rule and the sibling already in the tree: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_records_the_granted_isolation_it_emits() {
+    // #5769 finding 1: the grant is worth nothing to the daemon unless the
+    // daemon hears about it — the tracker records the ORIGINAL payload, so the
+    // isolation has to be posted separately or every granted writer stays named
+    // as writing in the shared checkout. Two things are asserted: the POST is
+    // made at all, and it carries the `tool_use_id` the record is keyed by
+    // (without it the upsert cannot find the tracker's record and would create a
+    // second, unisolated one).
+    let (url, captured) = spawn_capturing_writers_mock(r#"{"agents":[],"total":0}"#);
+    let (_dir, repo) = main_checkout_fixture();
+    let payload = tool_payload_at(
+        "Agent",
+        r#"{"subagent_type":"rust-engineer","prompt":"x"}"#,
+        &repo,
+        r#""session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_grant","#,
+    );
+    let stdout = run_pm_guard_at(&payload, &url, &repo);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(
+        value["hookSpecificOutput"]["updatedInput"]["isolation"],
+        "worktree"
+    );
+    let posted = captured.posted().expect("the grant must be posted");
+    assert_eq!(
+        posted["cwd"],
+        repo.display().to_string(),
+        "the grant must be recorded against the checkout it was granted in"
+    );
+    assert_eq!(
+        posted["tool_use_id"], "toolu_grant",
+        "without the correlation key the upsert cannot find the tracker's record: {posted}"
+    );
+    assert_eq!(
+        posted["input"]["isolation"], "worktree",
+        "the daemon must be told the isolation that was granted: {posted}"
+    );
+}
+
+#[test]
 fn pm_guard_grants_a_worktree_to_an_unknown_agent_in_a_main_checkout() {
     // The deliberate divergence from #4480's fail-open: a custom or renamed
     // agent is indeterminate, and in a main checkout indeterminate resolves
@@ -1836,6 +1958,61 @@ fn pm_guard_allows_a_pull_when_the_daemon_answer_is_malformed() {
             "a {status_line} / {body} answer must fail OPEN, got: {stdout}"
         );
     }
+}
+
+#[test]
+fn head_move_query_asks_the_checkout_root_and_the_command_directory() {
+    // #5769 finding 4: nothing pinned WHICH directory the guard sends, so the
+    // query key and the recorder's key were free to disagree — and they did. A
+    // delegation's `cwd` is stamped from `tm hook`'s own process directory, so
+    // the key has to be a directory a record can carry: the checkout root for
+    // every form, including one aimed at a subdirectory.
+    let (_dir, repo) = main_checkout_fixture();
+    let outside = tempfile::tempdir().expect("tempdir");
+    let sub = repo.join("crates/trusty-mpm");
+
+    for (command, run_from) in [
+        ("git pull".to_string(), repo.clone()),
+        (
+            format!("cd {} && git pull", repo.display()),
+            outside.path().to_path_buf(),
+        ),
+        (
+            format!("git -C {} pull", repo.display()),
+            outside.path().to_path_buf(),
+        ),
+        // The bypass this finding is named for: a subdirectory of the checkout
+        // shares its HEAD, but keys a path no record was ever written at.
+        (format!("cd {} && git pull", sub.display()), repo.clone()),
+    ] {
+        let command = command.as_str();
+        let (url, captured) = spawn_capturing_writers_mock(
+            r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#,
+        );
+        let stdout = run_pm_guard_at(&head_move_payload(command, &run_from, ""), &url, &run_from);
+        assert_denied(&stdout);
+        let posted = captured.posted().expect("the guard must query the daemon");
+        assert_eq!(
+            posted["cwd"],
+            repo.display().to_string(),
+            "`{command}` must key the query by the checkout root the recorder stamps"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_head_move_carrying_an_in_progress_flag_as_a_value() {
+    // #5769 finding 7: the in-progress carve-out scanned the whole argv tail, so
+    // any command mentioning one of those strings exempted itself. `git merge -m
+    // "--continue" origin/main` is a real merge with a commit message.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    let (_dir, repo) = main_checkout_fixture();
+    let stdout = run_pm_guard_at(
+        &head_move_payload("git merge -m '--continue' origin/main", &repo, ""),
+        &url,
+        &repo,
+    );
+    assert_denied(&stdout);
 }
 
 #[test]

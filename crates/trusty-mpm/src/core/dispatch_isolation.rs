@@ -124,6 +124,29 @@ const FILE_MUTATING_ROLES: &[&str] = &[
 // #5650: role: qa is not homogeneous — code-critic shares it and only reviews.
 const FILE_MUTATING_NAMES: &[&str] = &["qa", "web-qa", "api-qa"];
 
+/// Harness built-in agents that read but never write, and so ship in no bundle.
+///
+/// Why: `Explore` and `Plan` are Claude Code's own dispatch targets, not
+/// trusty-mpm artifacts, so [`agent_write_risk`]'s bundle scan cannot find them
+/// and answered [`AgentWriteRisk::Unknown`] — which
+/// [`requires_own_worktree_in_main_checkout`] treats as a writer and grants a
+/// worktree to. A granted worktree is cut from a COMMIT, so a reader dispatched
+/// into one reads a tree WITHOUT the session's uncommitted work and answers
+/// confidently about the wrong tree. For a writer that cost is a worktree; for a
+/// reader it is a wrong answer, which is why the Unknown-is-a-writer rule
+/// (ADR-0048 decision 3) must not reach them.
+///
+/// The list is exactly the built-ins whose published tool set excludes every
+/// write tool (`Edit`, `Write`, `NotebookEdit`). `general-purpose` is
+/// deliberately NOT here: it carries the full tool set, and in this project it
+/// is also the identity a failed named-agent dispatch degrades into (#4451), so
+/// a `general-purpose` delegation is routinely an engineer's work under another
+/// name. It stays `Unknown`, and stays isolated.
+/// What: matched case-sensitively, ahead of the bundle scan, so a bundled agent
+/// could never be shadowed by one of these names without also colliding on it.
+/// Test: `read_only_harness_builtins_are_not_isolated`.
+const READ_ONLY_HARNESS_AGENTS: &[&str] = &["Explore", "Plan"];
+
 /// The `extends:` base whose descendants are engineer-tier regardless of role.
 ///
 /// Why: a bundled agent could declare a new role spelling and still inherit the
@@ -210,10 +233,16 @@ pub enum AgentWriteRisk {
 /// this runs once per `Agent` dispatch, which is rare compared to ordinary tool
 /// calls. A process-lifetime cache would be global state for no measurable win.
 /// Test: `write_risk_separates_unknown_from_read_only`,
-/// `engineer_tier_agents_mutate_files`, `non_engineer_agents_do_not`.
+/// `engineer_tier_agents_mutate_files`, `non_engineer_agents_do_not`,
+/// `read_only_harness_builtins_are_not_isolated`.
 pub fn agent_write_risk(agent: &str) -> AgentWriteRisk {
     if agent.is_empty() {
         return AgentWriteRisk::Unknown;
+    }
+    // Checked before the bundle: these ship in no bundle at all, so the scan
+    // below can only ever answer `Unknown` for them. See the constant.
+    if READ_ONLY_HARNESS_AGENTS.contains(&agent) {
+        return AgentWriteRisk::ReadsOnly;
     }
     crate::core::bundle::ALL
         .iter()
@@ -459,6 +488,35 @@ mod tests {
                 Some(mode)
             ));
         }
+    }
+
+    #[test]
+    fn read_only_harness_builtins_are_not_isolated() {
+        // #5769: `Explore` and `Plan` are Claude Code's own read-only dispatch
+        // targets and ship in no bundle, so they classified `Unknown` and were
+        // granted a worktree — which is cut from a COMMIT and therefore hides
+        // the session's uncommitted work from the very agent asked to read it.
+        for agent in READ_ONLY_HARNESS_AGENTS {
+            assert_eq!(
+                agent_write_risk(agent),
+                AgentWriteRisk::ReadsOnly,
+                "{agent}"
+            );
+            assert!(
+                !requires_own_worktree_in_main_checkout(agent, None),
+                "{agent} only reads and must read the session's own tree"
+            );
+        }
+        // `general-purpose` carries the full tool set and is also the identity a
+        // failed named-agent dispatch degrades into, so it stays a writer.
+        assert_eq!(agent_write_risk("general-purpose"), AgentWriteRisk::Unknown);
+        assert!(requires_own_worktree_in_main_checkout(
+            "general-purpose",
+            None
+        ));
+        // The read-only classification must not leak into #4480's question:
+        // these were already allowed to share a tree, and still are.
+        assert!(!shares_the_callers_tree("Explore", None));
     }
 
     #[test]

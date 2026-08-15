@@ -208,6 +208,64 @@ fn usable_agent_id(response: &Value) -> Option<&str> {
 /// `dedups_declaration_and_observation`, `duplicate_pre_tool_use_is_idempotent`,
 /// `pre_tool_use_records_declared_isolation`.
 fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
+    let _guard = state.dispatch_record_guard();
+    on_dispatch_locked(state, session, payload);
+}
+
+/// Correct an existing delegation's `isolation`, or create the record (#5769).
+///
+/// Why: `tm hook --pm-guard` rewrites an unisolated dispatch made from a main
+/// checkout into an isolated one (ADR-0048 decision 1), but [`on_dispatch`]
+/// observes the ORIGINAL payload, so the record read `isolation: None` — naming
+/// an agent that had just been moved into its own worktree as a live writer in
+/// the shared checkout. Decision 10 then denies `git pull` there on that record,
+/// for the six hours of `RUNNING_STALE_AFTER_SECS`, which blocks the release
+/// flow's fast-forward of the main checkout.
+///
+/// It is an UPSERT and not a second call to [`observe`] for two reasons read
+/// from this file. [`on_dispatch`] returns early when a delegation with the same
+/// `tool_use_id` already exists, so an `observe`-based grant would correct
+/// nothing whenever the tracker's hook won the race — and the two hooks fire on
+/// the same event, so which one wins is not decidable here. And the route the
+/// guard would otherwise post to re-derives eligibility and rejects an isolated
+/// dispatch by design. So isolation must be written over whatever landed first,
+/// which makes the two arrival orders converge instead of one of them deciding.
+/// What: with the dispatch-record lock held, sets `isolation` on the delegation
+/// carrying `payload.tool_use_id`, or creates the record from this payload when
+/// none exists — in which case the tracker's own later hook is a no-op on
+/// `tool_use_id` and the granted isolation survives.
+///
+/// A payload with no `tool_use_id` records NOTHING and returns `false`. Without
+/// that key the record could not be found again, so creating one would leave a
+/// second, unisolated record beside the tracker's — the phantom duplicated
+/// rather than removed.
+/// Test: `a_grant_and_the_tracker_converge_in_either_order`,
+/// `a_grant_without_a_tool_use_id_records_nothing`.
+pub fn record_granted_isolation(state: &DaemonState, session: SessionId, payload: &Value) -> bool {
+    let Some(tool_use_id) = field(payload, "tool_use_id") else {
+        return false;
+    };
+    let Some(isolation) = dispatch_isolation(payload.get("input")).map(str::to_string) else {
+        return false;
+    };
+    let _guard = state.dispatch_record_guard();
+    if let Some(id) =
+        state.find_delegation(session, |d| d.tool_use_id.as_deref() == Some(tool_use_id))
+    {
+        state.mutate_delegation(id, |d| d.isolation = Some(isolation.clone()));
+        return true;
+    }
+    on_dispatch_locked(state, session, payload);
+    true
+}
+
+/// [`on_dispatch`] with the dispatch-record lock already held.
+///
+/// Why: [`record_granted_isolation`] holds that lock across its own
+/// find-then-insert and then falls through to this body, so the locking cannot
+/// live here — it would be a second, non-reentrant acquisition of a
+/// `parking_lot::Mutex`, which deadlocks rather than failing.
+fn on_dispatch_locked(state: &DaemonState, session: SessionId, payload: &Value) {
     let input = payload.get("input");
     let agent = input
         .and_then(|i| i.get("subagent_type"))
