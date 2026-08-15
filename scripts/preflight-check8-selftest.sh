@@ -175,7 +175,12 @@ text_of() { printf '%s' "$1" | cut -d'|' -f2-; }
 # tbl <target> <status> <conclusion> <url> [<target> <status> ...] — one row per
 # group of four. printf reuses its format for leftover arguments, which is what
 # lets a multi-run fixture stay one readable call.
-tbl() { printf '%s\t%s\t%s\t%s\n' "$@"; }
+#
+# PIPE-separated, matching the shipped table. Tab would be wrong here for the
+# same reason it was wrong there: it is IFS whitespace, so `read` would collapse
+# the empty <conclusion> of case 5's in-progress row and shift the url into it —
+# the exact defect measured on run 31878535281.
+tbl() { printf '%s|%s|%s|%s\n' "$@"; }
 
 echo "gate_decide — attribution:"
 
@@ -208,6 +213,12 @@ assert_absent "4 red attributed: not 'never ran'" "NO 'Pre-publish gate' run gat
 raw="$(run_decide "$(tbl "$HEAD_SHA" in_progress "" https://gh/run/5)")"
 assert_eq "5 in-progress: stops" "1" "$(status_of "$raw")"
 assert_contains "5 in-progress: says wait" "still-running gate is not a" "$(text_of "$raw")"
+# An in-progress run is the ONLY row with an empty <conclusion>, which makes it
+# the row that catches a delimiter regression: under a tab delimiter `read`
+# collapses the empty field and the url shifts into $concl, printing
+# "in_progress/https://…" with no url of its own (run 31878535281).
+# (run_decide collapses runs of spaces, so this is the single-space form.)
+assert_contains "5 in-progress: empty conclusion not collapsed" "in_progress/<none> https://gh/run/5" "$(text_of "$raw")"
 
 # --- 6. runs exist, none attributed to HEAD ----------------------------------
 raw="$(run_decide "$(tbl "$OTHER_SHA" completed success https://gh/a "$LATER_SHA" completed failure https://gh/b)")"

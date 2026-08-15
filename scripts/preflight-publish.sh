@@ -1066,9 +1066,18 @@ gate_run_target() {
 # including the verbatim run-31874835425 attribution this function exists
 # because of.
 #
-# Input is one tab-separated line per candidate run:
-#     <target>\t<status>\t<conclusion>\t<html_url>
+# Input is one PIPE-separated line per candidate run:
+#     <target>|<status>|<conclusion>|<html_url>
 # where <target> is gate_run_target's output for that run.
+#
+# PIPE, NOT TAB, and this is load-free but not arbitrary: tab is IFS whitespace,
+# so `read` collapses a RUN of tabs into one delimiter and an empty field
+# silently vanishes. A queued or in-progress run has an empty `conclusion`, so
+# with a tab delimiter its html_url shifted left into $concl and $url came back
+# empty — measured on run 31878535281, which printed `in_progress/<the url>`.
+# A non-whitespace delimiter preserves empty fields. No field can contain `|`:
+# targets are hex or a keyword, statuses and conclusions are a fixed vocabulary,
+# and a GitHub run URL has no pipe in it.
 #
 # THE INVARIANT: a [PASS] means a run said, in its own output, that it gated
 # THIS commit — and no count of runs that merely mention it can substitute.
@@ -1082,7 +1091,7 @@ gate_decide() {
   # processed: read returns nonzero at EOF even when it filled the variables,
   # and silently dropping the last run would drop the newest one — the run the
   # operator just dispatched.
-  while IFS=$'\t' read -r target status concl url || [ -n "$target" ]; do
+  while IFS='|' read -r target status concl url || [ -n "$target" ]; do
     [ -n "$target" ] || continue
     case "$target" in
       NOGATE) continue ;;
@@ -1157,7 +1166,7 @@ check8_prepublish_gate() {
   # `|| rc=$?` rather than a bare call: a network failure must reach the
   # unverified path below, not abort the script under `set -e`.
   runs="$(gh api "repos/${GATE_REPO}/actions/workflows/pre-publish.yml/runs?per_page=100" \
-    --jq '.workflow_runs[] | [(.id|tostring), .created_at, .status, (.conclusion // ""), .html_url] | @tsv' 2>/dev/null)" || rc=$?
+    --jq '.workflow_runs[] | [(.id|tostring), .created_at, .status, (.conclusion // ""), .html_url] | join("|")' 2>/dev/null)" || rc=$?
 
   if [ "$rc" -ne 0 ]; then
     gate_unverified "the GitHub Actions API could not be reached (gh exited ${rc})"
@@ -1174,13 +1183,13 @@ d = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
 print((d - datetime.timedelta(days=int(sys.argv[2]))).strftime("%Y-%m-%dT%H:%M:%SZ"))
 ' "$head_date" "$GATE_SCAN_DAYS" 2>/dev/null || echo "")"
 
-  while IFS=$'\t' read -r run_id created status concl url; do
+  while IFS='|' read -r run_id created status concl url; do
     [ -n "$run_id" ] || continue
     if [ -n "$cutoff" ] && [[ "$created" < "$cutoff" ]]; then continue; fi
     if [ "$examined" -ge "$GATE_SCAN_CAP" ]; then capped=1; break; fi
     examined=$((examined + 1))
     target="$(gate_run_target "$run_id")"
-    table="${table}${target}"$'\t'"${status}"$'\t'"${concl}"$'\t'"${url}"$'\n'
+    table="${table}${target}|${status}|${concl}|${url}"$'\n'
     # Newest-first from the API, so the run just dispatched is normally the
     # first one opened. Stop there rather than paying two API calls per run for
     # a verdict that cannot change.
