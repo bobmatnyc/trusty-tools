@@ -10,6 +10,27 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# NOT PUBLISHED, and deliberately so. This crate has never been uploaded to
+# crates.io and it is still Slice 1 scaffold, so claiming the permanent
+# `trusty-tui` name for a seam whose shape is still moving buys nothing and
+# cannot be undone — a crates.io name is never released back.
+#
+# THE COST, STATED PLAINLY. `cargo publish` requires a `version` on every
+# non-dev dependency and refuses a crate that depends on an unpublishable one.
+# `trusty-code` depends on this crate from PRODUCTION code (`src/cli/tui.rs`
+# and the whole `src/tui_client/` adapter), not from tests, so this line is
+# what keeps `trusty-code` unpublishable. That is a disclosure, not a
+# regression: `trusty-code` 0.3.0 already cannot publish, because `trusty-tui`
+# 0.1.0 does not exist on crates.io for its `version = "0.1.0"` requirement to
+# resolve against. `trusty-code` 0.1.0 and 0.2.0 are live on crates.io and
+# stay live; neither declared this dependency.
+#
+# Publishing `trusty-code` again therefore needs a decision this line does not
+# make: publish `trusty-tui` after all, vendor the seam into `trusty-code`, or
+# leave `trusty-code` at 0.2.0 on the registry. Moving the dependency to
+# `[dev-dependencies]` is NOT among the options — dev-dependencies need no
+# version to publish, but the usage here is production.
+publish = false
 # Slice 1 (#3412, epic #3411, DOC-50 §3.1/§5 Slice 1): scaffold only — the
 # `TuiEngine` trait and `ReplEvent` enum that let one TUI drive both tagent
 # and tcode. Deliberately dependency-minimal: no ratatui/crossterm yet (that
