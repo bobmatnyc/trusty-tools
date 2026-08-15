@@ -226,6 +226,11 @@ jobs:
           # cargo-semver-checks builds into target/semver-checks/, which
           # rust-cache prunes as "unrecognised" by default.
           cache-directories: target/semver-checks
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota, and this
+          # repo was over it — see the note on the test-shard cache in ci.yml.
+          # This one also saved from worktree branches pushed for release tags.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Runs BEFORE the real gate, matching line-cap.yml's selftest-then-gate
       # ordering: a gate that cannot fail makes the real run's green meaningless.
