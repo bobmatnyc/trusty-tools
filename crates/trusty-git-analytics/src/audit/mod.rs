@@ -32,9 +32,6 @@ mod sweep;
 #[cfg(test)]
 mod tests;
 
-/// #5670: the `--include-ignored` arm — the same guard against the real
-/// `trusty-analyze` binary rather than a stub. Unix-only: it drives the binary
-/// through a `#!/bin/sh` wrapper.
 #[cfg(all(test, unix))]
 mod real_binary_tests;
 

@@ -8,7 +8,8 @@
 //! binary crate) to implement or mock the runner without a full dependency.
 //! Extracting to `trusty-agents-common` breaks that coupling: any crate that
 //! only needs to implement or test against `AgentRunner` can depend on this
-//! tiny crate.
+//! tiny crate. Moved to `trusty-agents-common` in Wave 2 (issue #867, refs
+//! #830/#832).
 //! What: Defines `HistoryMessage` (portable IPC wire type), `RunContext`
 //! (per-invocation directives), `AgentOutput` (agent result envelope), and
 //! the `AgentRunner` async trait.
@@ -20,7 +21,7 @@
 //! has tests that construct `AgentOutput`, `RunContext`, and `HistoryMessage`.
 //! The `test_run_with_history_forwards_ctx` test in
 //! `trusty-agents::tools::traits` exercises the default `run_with_history`
-//! implementation.
+//! implementation, and is the bug #122 regression guard.
 
 use std::path::PathBuf;
 

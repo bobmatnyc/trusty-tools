@@ -36,7 +36,8 @@
 //! JSON-backed create/list/get/query/update registry — see `ledger`);
 //! [`LedgerError`] (the typed failure surface — see `error`);
 //! [`LedgerRecovery`]/[`JsonFileRecovery`]/[`TrustyMemoryRecovery`] (the
-//! restart-recovery seam — see `recovery`).
+//! restart-recovery seam — see `recovery`; `JsonFileRecovery` is the default and
+//! `TrustyMemoryRecovery` is a stub blocked on issue #3228).
 //! Test: `cargo test -p trusty-agents-common workstreams::` exercises every
 //! submodule in place.
 //!

@@ -15,17 +15,6 @@
 //! research verbs, question words, action-verb tasks, and edge cases.
 //! See `tests` module below — fixes #199, #203, #4319.
 
-/// Deterministic Tm-vs-Tcode router for the `dispatch_task` bridge tool
-/// (epic #3052, PR B, lane 3).
-///
-/// Why: a separate, focused module rather than folding into
-/// `classify_intent` above — that classifier answers "how much machinery
-/// does this input need" (conversational / research / implementation);
-/// `route` answers an orthogonal question once the answer is already
-/// "hand this off": WHICH black-boxed backend (orchestration vs direct
-/// coding) should receive it.
-/// What: see `route::route_task` / `route::BridgeRoute`.
-/// Test: `route::route_tests`.
 pub mod route;
 
 /// Classification of user input for PM fast-pathing.

@@ -1,4 +1,3 @@
-/// #4390 / #4391: durable boot-integrity markers on `indexes.toml`.
 pub mod boot_markers;
 pub mod call_chain;
 #[cfg(feature = "candle")]
@@ -10,13 +9,11 @@ pub mod config;
 pub mod constants;
 pub mod context_inference;
 pub mod daemon;
-/// Issue #718: HOME-based data-dir fallback for supervised-process contexts.
 pub(crate) mod data_dir;
 pub mod embed_pool;
 pub mod embedder_supervisor;
 pub mod fs_discovery;
 pub mod grep;
-/// Issue #4356: fail-closed file-count / total-byte ceiling for the reindex walk.
 pub mod index_budget;
 pub mod indexed_files;
 pub mod lazy_loader;
@@ -36,15 +33,12 @@ pub mod server;
 pub mod shutdown_budget;
 pub mod shutdown_flush;
 pub mod stall_tracker;
-/// #4250: retry for indexes parked by a warm-boot restore timeout.
 pub mod timeout_recovery;
 pub mod ui;
 pub mod walker;
 pub mod warm_boot;
 pub mod watch_loop;
-/// Dropped-event (`Flag::Rescan`) tree reconciliation for the file watcher.
 pub mod watch_rescan;
-/// #4731: condition-based waiting shared by every watcher test in this module.
 #[cfg(test)]
 pub(crate) mod watch_test_support;
 pub mod watcher;

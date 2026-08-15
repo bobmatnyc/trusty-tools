@@ -1,12 +1,16 @@
 //! Portable tool-output compression surface, shared across harnesses.
 //!
 //! Why: `trusty-agents`'s own LLM tool loop and `trusty-mpm`'s `tm compress`
-//! subcommand (Option 0 spike, issue #1956) both need
+//! subcommand (the `tm hook` `PreToolUse` Bash rewrite, Option 0 spike, issue
+//! #1956) both need
 //! `compress_tool_output_async` but must not pull in the full `trusty-agents`
 //! binary crate to get it. Hoisted here in issue #1959, mirroring the
 //! `OutputStyle`-style hoists already established for this crate (Wave 1/2,
 //! issues #862/#867).
-//! What: Re-exports the `tool_output` dispatch/filter module. `trusty-agents`
+//! What: Re-exports the `tool_output` dispatch/filter module — the
+//! `compress_tool_output` dispatch, the async RTK-then-native
+//! `compress_tool_output_async`, and the path-reporting
+//! `compress_tool_output_async_with_path` used for stats logging. `trusty-agents`
 //! re-exports the same symbols via `trusty_agents::compress` for source-level
 //! compatibility with existing call sites.
 //! Test: `cargo test -p trusty-agents-common` runs `tool_output::tests` in

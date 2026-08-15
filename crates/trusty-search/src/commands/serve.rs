@@ -210,12 +210,10 @@ async fn serve_http(server: crate::mcp::McpServer, addr: String, daemon_url: &st
     Ok(())
 }
 
-/// Index-pin precedence tests — see `serve_index_env_tests.rs`.
 #[cfg(test)]
 #[path = "serve_index_env_tests.rs"]
 mod index_env_tests;
 
-/// Working-directory scoping tests (#5264) — see `serve_scope_tests.rs`.
 #[cfg(test)]
 #[path = "serve_scope_tests.rs"]
 mod scope_tests;

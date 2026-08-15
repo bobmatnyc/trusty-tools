@@ -1,0 +1,4 @@
+Documentation
+
+- **BASE-AGENT states the post-merge cleanup rule agents were skipping.** `gh pr merge --delete-branch` only removes the remote branch, so the local worktree and branch were being left behind after every merge. The Git Workflow section now says: remove the worktree first, then use `gh pr view <branch> --json state` — never git's own ancestry check, which under-reports every squash merge and gets worse from a stale local checkout — as the sole merged-ness test before `git branch -D` ([#5768](https://github.com/bobmatnyc/trusty-tools/pull/5768))
+- **BASE-AGENT also now says fetch before you branch and fetch again after you merge.** Branch off `origin/main` explicitly, never local `main`, which can be stale enough to lose commits or leave a fresh branch `BEHIND` the moment its PR opens ([#5768](https://github.com/bobmatnyc/trusty-tools/pull/5768))

@@ -6,6 +6,11 @@
 //! `tm`/`tcode`. Something still has to pick a real backend deterministically
 //! (same input -> same route, every time, no I/O, no LLM call) so the tool's
 //! behavior is testable and auditable independent of the model that calls it.
+//! This is a separate module rather than part of `intent::classify_intent`
+//! because the two answer orthogonal questions: the classifier decides how much
+//! machinery an input needs (conversational / research / implementation), while
+//! `route` decides — once the answer is already "hand this off" — WHICH
+//! black-boxed backend receives it.
 //! What: `route_task` classifies a free-text task string into `BridgeRoute`
 //! using ordered heuristics over two signal tables (Tcode: coding verbs,
 //! repo-file tokens, error/stack-trace markers; Tm: orchestration/session/

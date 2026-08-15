@@ -1,4 +1,5 @@
-//! Unified harness event envelope, bus, and filter (Wave 3 Phase 0; ADR-0005).
+//! Unified harness event envelope, bus, and filter (Wave 3 Phase 0; epic #830,
+//! refs #833; ADR-0005).
 //!
 //! Why: The three harnesses (`trusty-agents`, `trusty-mpm`, `trusty-code`) each
 //!      grew their own ad-hoc event streaming. Wave 3 unifies them on one
