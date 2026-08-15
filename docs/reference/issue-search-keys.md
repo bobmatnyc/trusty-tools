@@ -21,3 +21,23 @@ Search **open and recently closed** issues on all four.
 A repeat failure in the same crate is almost always another occurrence of an
 existing canonical issue: append the run URL, SHA, command, and failure
 signature to that issue rather than filing a second one.
+
+## A fifth place to search: the 1.3.8 backlog reset pool
+
+On 2026-08-14 a backlog reset closed 277 issues on age rather than on
+verification. Each carries `stateReason: NOT_PLANNED` and a comment stating
+plainly that closure was not a claim the issue was fixed.
+
+```bash
+gh issue list -R bobmatnyc/trusty-tools --state closed \
+  --search '"1.3.8 backlog reset" in:comments' --limit 400
+```
+
+One has already been confirmed still-live and reopened
+([#5267](https://github.com/bobmatnyc/trusty-tools/issues/5267)) — the
+behavior it described was verifiably absent from main. The pool holds real,
+unfixed problems, so a hit there is prior art worth reading, not a dead end.
+
+When a problem looks new, check this pool alongside the four keys above. A
+match means someone described it before: reopen that issue rather than filing
+a fresh one.

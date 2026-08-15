@@ -20,6 +20,7 @@
 //! - [`ai_markers`] — the agentic-marker set behind `agentic_mode` detection
 //! - [`ai_marker_config`] — operator-supplied markers, read from a file (#5414)
 //! - [`errors`] — module-level error type ([`CollectError`])
+//! - [`fault`] — severity-tagged non-fatal faults ([`CollectionFault`], #5655)
 
 pub mod ai_attribution;
 pub mod ai_marker_config;
@@ -30,6 +31,7 @@ pub mod collector;
 pub mod correlate;
 pub mod env_expand;
 pub mod errors;
+pub mod fault;
 pub mod git;
 pub mod github;
 mod github_pipeline;
@@ -46,6 +48,7 @@ pub mod weeks;
 pub use collector::{CollectionPipeline, CollectionStats};
 pub use correlate::{correlate_commits, CorrelationOutcome};
 pub use errors::{CollectError, Result};
+pub use fault::{CollectionFault, FaultSeverity};
 pub use pm_adapter::{
     build_adapters, AzureDevOpsAdapter, GitHubAdapter, JiraAdapter, LinearAdapter, PmAdapter,
     PmError, PmSource, PmTicket,
