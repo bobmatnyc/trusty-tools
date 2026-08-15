@@ -133,11 +133,15 @@ async fn shared_tree_dispatch_route_reports_live_unisolated_writers() {
         Some("toolu_F"),
         DelegationStatus::Running,
     );
-    // Another session's children are not this session's problem.
+    // Another session's child in THIS directory now counts (ADR-0048). This
+    // line used to assert the opposite — "not this session's problem" — and
+    // that assumption is what made the guard blind to the reported incident:
+    // the writers sharing one checkout each belonged to a different session.
+    // Dedicated coverage is `shared_tree_writers_span_sessions_in_one_checkout`.
     insert(
         &state,
         SessionId(uuid::Uuid::new_v4()),
-        "rust-engineer",
+        "python-engineer",
         "/repo",
         None,
         Some("toolu_G"),
@@ -151,10 +155,13 @@ async fn shared_tree_dispatch_route_reports_live_unisolated_writers() {
     )
     .await;
 
-    assert_eq!(body.total, 1, "only the live unisolated engineer counts");
-    assert_eq!(body.agents.len(), 1);
-    assert_eq!(body.agents[0].agent, "rust-engineer");
-    assert_eq!(body.agents[0].count, 1);
+    assert_eq!(
+        body.total, 2,
+        "the live unisolated engineers in this directory, whichever session dispatched them"
+    );
+    assert_eq!(body.agents.len(), 2, "{:?}", body.agents);
+    assert_eq!(body.agents[0].agent, "python-engineer");
+    assert_eq!(body.agents[1].agent, "rust-engineer");
     assert!(!body.claimed, "a denied dispatch must not claim the tree");
 }
 
@@ -392,6 +399,97 @@ async fn shared_tree_dispatch_route_is_empty_without_a_cwd() {
     assert_eq!(body.total, 0);
     assert!(!body.claimed);
     assert_eq!(state.delegations_for(session).len(), 1);
+}
+
+#[tokio::test]
+async fn shared_tree_writers_span_sessions_in_one_checkout() {
+    // THE REGRESSION (ADR-0048). The reported incident, reduced: three sessions
+    // standing in one `mcp-services` checkout, each dispatching a writer into
+    // it. Every guard saw an empty answer and admitted its writer, because the
+    // answer was filtered to the ASKING session's own delegations before any
+    // other test ran — so the writers were invisible to each other by
+    // construction, not by timing. Downstream that produced branches switching
+    // under each other and a commit landing on a workstream it did not belong
+    // to.
+    //
+    // Session B asks about the directory session A's writer is already in.
+    // With the session filter this answered 0 and claimed the tree a second
+    // time; the hazard is a shared git HEAD, which belongs to the DIRECTORY and
+    // knows nothing about session ids.
+    let (state, _dir, session_a) = hermetic();
+    let session_b = SessionId(uuid::Uuid::new_v4());
+    let session_c = SessionId(uuid::Uuid::new_v4());
+
+    insert(
+        &state,
+        session_a,
+        "rust-engineer",
+        "/repo/mcp-services",
+        None,
+        Some("toolu_A"),
+        DelegationStatus::Running,
+    );
+
+    let body = call(
+        &state,
+        session_b,
+        dispatch(
+            "/repo/mcp-services",
+            "python-engineer",
+            None,
+            Some("toolu_B"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        body.total, 1,
+        "session B must see session A's writer in the same checkout"
+    );
+    assert_eq!(body.agents[0].agent, "rust-engineer");
+    assert!(
+        !body.claimed,
+        "a denied dispatch must not also occupy the directory"
+    );
+
+    // A third session gets the same answer, naming every writer it would be
+    // joining rather than only the ones its own session dispatched.
+    insert(
+        &state,
+        session_b,
+        "documentation",
+        "/repo/mcp-services",
+        None,
+        Some("toolu_B2"),
+        DelegationStatus::Running,
+    );
+    let body = call(
+        &state,
+        session_c,
+        dispatch("/repo/mcp-services", "qa", None, Some("toolu_C")),
+    )
+    .await;
+    assert_eq!(body.total, 2, "every live writer in the directory counts");
+
+    // The widening must not reach across DIRECTORIES — that would deny every
+    // dispatch on the machine as soon as one agent was running anywhere. A
+    // worktree is a different directory and stays free, which is what makes the
+    // remedy the deny offers actually work.
+    let body = call(
+        &state,
+        session_c,
+        dispatch(
+            "/repo/mcp-services/.claude/worktrees/w1",
+            "rust-engineer",
+            None,
+            Some("toolu_D"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        body.total, 0,
+        "a different directory is a different git HEAD and must stay admitted"
+    );
+    assert!(body.claimed, "the first writer in its own tree claims it");
 }
 
 #[tokio::test]

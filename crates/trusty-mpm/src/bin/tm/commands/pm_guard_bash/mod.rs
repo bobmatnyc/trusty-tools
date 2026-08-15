@@ -33,7 +33,9 @@ mod persistence;
 mod sed_awk;
 mod shell_lex;
 
-pub(crate) use main_checkout::evaluate_main_checkout_destructive_command;
+pub(crate) use main_checkout::{
+    evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
+};
 pub(crate) use persistence::command_is_persistence_only;
 
 use std::path::{Path, PathBuf};

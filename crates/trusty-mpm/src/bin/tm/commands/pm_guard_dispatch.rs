@@ -116,7 +116,8 @@ fn deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
     let running = names.join(", ");
     format!(
         "Concurrent shared-worktree dispatch denied (#4480): {running} is already running in \
-         {} without a worktree of its own, and this {agent} dispatch would put a second \
+         {} without a worktree of its own — possibly dispatched by a different session standing \
+         in the same directory (ADR-0048) — and this {agent} dispatch would put a second \
          file-mutating agent on the same git HEAD. Git does not catch this — a `git checkout -b` \
          refuses only when a tracked file differs between both branches AND has an uncommitted \
          change, so untracked files and edits the two branches agree on transfer onto the wrong \

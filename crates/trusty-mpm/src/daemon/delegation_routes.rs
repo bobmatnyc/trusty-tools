@@ -174,15 +174,14 @@ pub async fn shared_tree_dispatch_route(
         && dispatch_agent(input)
             .is_some_and(|agent| shares_the_callers_tree(agent, dispatch_isolation(input)));
 
-    let (names, claimed) =
-        state.claim_shared_tree_dispatch(session, &cwd, exclude, eligible, |s| {
-            crate::daemon::services::delegation_tracker::observe(
-                s,
-                session,
-                HookEvent::PreToolUse,
-                payload,
-            );
-        });
+    let (names, claimed) = state.claim_shared_tree_dispatch(&cwd, exclude, eligible, |s| {
+        crate::daemon::services::delegation_tracker::observe(
+            s,
+            session,
+            HookEvent::PreToolUse,
+            payload,
+        );
+    });
 
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for name in &names {

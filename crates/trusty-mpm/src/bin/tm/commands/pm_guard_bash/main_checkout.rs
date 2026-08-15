@@ -89,8 +89,65 @@ pub(crate) fn evaluate_main_checkout_destructive_command(
     command: &str,
     cwd: &Path,
 ) -> Option<String> {
-    let (verb, target) = destructive_target_dir(command, cwd, &PathEnv::from_process())?;
+    let (verb, target) = git_verb_target_dir(
+        command,
+        cwd,
+        &PathEnv::from_process(),
+        is_whole_tree_destructive,
+    )?;
     is_main_checkout(&target).then(|| deny_reason(&verb, &target))
+}
+
+/// Deny a `git commit` aimed at a main checkout (ADR-0048).
+///
+/// Why: ADR-0044 makes the main checkout read-only apart from documents and
+/// configuration, and a commit is the step that makes a write permanent on a
+/// branch other sessions are standing on. The reported incident is exactly
+/// this: commit `f1da7bce` landed on `fix/1646-drive-query-v2-migration`, a
+/// branch belonging to a different workstream, because three sessions shared
+/// one checkout and one of them committed on whichever branch HEAD happened to
+/// point at. Blocking the source write alone would not have stopped it — the
+/// files were already there.
+/// What: `Some(reason)` when a `git commit` segment's effective directory
+/// [`is_main_checkout`]; `None` otherwise. Every other git verb, and a commit
+/// anywhere else, falls through to ALLOW. `commit` is matched on the verb
+/// alone, with no flag conditions: there is no non-writing form of it.
+///
+/// Scope, stated because the near neighbours are tempting: branch-MOVING verbs
+/// (`git checkout <branch>`, `git switch <branch>`, `merge`, `rebase`) are NOT
+/// covered here even though switching a branch under another session is part
+/// of the same incident. They are left to ADR-0048's follow-up rather than
+/// folded in, because their safe and unsafe forms differ by argument rather
+/// than by verb and a loose rule here costs a false deny on ordinary work —
+/// the failure #5356 was filed for.
+/// Test: `commit_target_dir_*`, `evaluate_main_checkout_commit_*`.
+pub(crate) fn evaluate_main_checkout_commit_command(command: &str, cwd: &Path) -> Option<String> {
+    let (_, target) = git_verb_target_dir(command, cwd, &PathEnv::from_process(), |verb, _| {
+        verb == "commit"
+    })?;
+    is_main_checkout(&target).then(|| commit_deny_reason(&target))
+}
+
+/// Build the deny message for a blocked commit.
+///
+/// Why: as [`deny_reason`] — a bare refusal is retried differently and worse.
+/// This one has to be clear that the work is not lost and does not need
+/// redoing, only moved, because the reflex on a blocked commit is to reach for
+/// `git stash` or a second `-m` attempt.
+/// Test: `commit_deny_reason_names_the_path_and_the_remedy`.
+fn commit_deny_reason(target: &Path) -> String {
+    format!(
+        "Commit denied in a main checkout (ADR-0044): {} is a project's main checkout, which is \
+         read-only apart from documents and configuration, and other sessions are standing on \
+         this same git HEAD. A commit here lands on whichever branch HEAD currently points at — \
+         the reported failure is a commit landing on another workstream's branch and the branch \
+         it belonged to left empty, with no error at any step. Commit from a worktree instead: \
+         ask the PM to re-dispatch you with `isolation: \"worktree\"`, or move the work with \
+         `git worktree add .claude/worktrees/<name>` and commit there. Nothing is lost — the \
+         changes are still in the tree. Read-only git (`status`, `log`, `diff`) and everything \
+         under `.claude/worktrees/**` are never blocked by this rule.",
+        target.display()
+    )
 }
 
 /// Build the deny message.
@@ -115,21 +172,28 @@ fn deny_reason(verb: &str, target: &Path) -> String {
     )
 }
 
-/// The directory a whole-tree-destructive git command in `command` would act
-/// on, with the verb that made it destructive.
+/// The directory the first git segment matching `matches` would act on, with
+/// that segment's verb.
 ///
 /// Why: split from the filesystem classification so the whole text-and-path
 /// half — which is where a false positive would come from — is a pure function
-/// with no filesystem or environment of its own.
+/// with no filesystem or environment of its own. The classifier is a parameter
+/// rather than hardcoded so the destructive-verb rule and the commit rule share
+/// one walker: `cd` tracking, `git -C` resolution, and segment splitting are
+/// the parts a second copy would drift on, and they are identical for both.
 /// What: walks the composition segments (reusing [`split_shell_segments`], so
 /// `true && git reset --hard` is classified on its second segment), tracks the
-/// effective working directory across `cd` segments and a leading `git -C`
-/// exactly as the sibling worktree guard does, and returns the first segment
-/// whose git subcommand [`is_whole_tree_destructive`]. `None` when no segment
-/// qualifies — including a segment `shlex` cannot split, which yields no argv
-/// to classify.
-/// Test: `destructive_target_dir_*`.
-fn destructive_target_dir(command: &str, cwd: &Path, env: &PathEnv) -> Option<(String, PathBuf)> {
+/// effective working directory across `cd` segments and a leading `git -C`,
+/// and returns the first segment whose `(verb, argv-tail)` satisfies `matches`.
+/// `None` when no segment qualifies — including a segment `shlex` cannot split,
+/// which yields no argv to classify.
+/// Test: `destructive_target_dir_*`, `commit_target_dir_*`.
+fn git_verb_target_dir(
+    command: &str,
+    cwd: &Path,
+    env: &PathEnv,
+    matches: impl Fn(&str, &[String]) -> bool,
+) -> Option<(String, PathBuf)> {
     let mut effective_cwd = cwd.to_path_buf();
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
@@ -159,7 +223,7 @@ fn destructive_target_dir(command: &str, cwd: &Path, env: &PathEnv) -> Option<(S
         let Some(idx) = argv.iter().position(|t| *t == subcommand) else {
             continue;
         };
-        if !is_whole_tree_destructive(&subcommand, &argv[idx + 1..]) {
+        if !matches(&subcommand, &argv[idx + 1..]) {
             continue;
         }
         let base = match git_dash_c_override(&argv, idx) {
@@ -242,9 +306,29 @@ fn pathspec_separator_with_paths(tail: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     fn tail(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The destructive-verb specialisation of [`git_verb_target_dir`], so the
+    /// pre-existing cases below keep asserting on the shape they were written
+    /// against rather than restating the classifier at every call.
+    fn destructive_target_dir(
+        command: &str,
+        cwd: &Path,
+        env: &PathEnv,
+    ) -> Option<(String, PathBuf)> {
+        git_verb_target_dir(command, cwd, env, is_whole_tree_destructive)
+    }
+
+    /// A directory that answers `is_main_checkout`: a `.git` DIRECTORY, which
+    /// is how git marks a main checkout and never a linked worktree.
+    fn main_checkout_dir() -> TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join(".git")).expect("mkdir .git");
+        dir
     }
 
     #[test]
@@ -410,6 +494,99 @@ mod tests {
                 "`{command}` must not resolve a destructive target"
             );
         }
+    }
+
+    #[test]
+    fn commit_target_dir_finds_the_commit_and_follows_cd_and_dash_c() {
+        let env = PathEnv::from_process();
+        let is_commit = |verb: &str, _: &[String]| verb == "commit";
+
+        let (verb, dir) =
+            git_verb_target_dir("git commit -m 'wip'", Path::new("/repo"), &env, is_commit)
+                .expect("a commit must resolve a target");
+        assert_eq!(verb, "commit");
+        assert_eq!(dir, PathBuf::from("/repo"));
+
+        // The composition shape `git add -A && git commit -m …` is the ordinary
+        // one, so the commit must be found in a later segment.
+        let (_, chained) = git_verb_target_dir(
+            "git add -A && git commit -m 'wip'",
+            Path::new("/repo"),
+            &env,
+            is_commit,
+        )
+        .expect("the second segment must be classified");
+        assert_eq!(chained, PathBuf::from("/repo"));
+
+        // Both directory overrides the destructive rule already closes.
+        let (_, via_cd) = git_verb_target_dir(
+            "cd /elsewhere/main && git commit -m x",
+            Path::new("/repo"),
+            &env,
+            is_commit,
+        )
+        .expect("cd must move the target");
+        assert_eq!(via_cd, PathBuf::from("/elsewhere/main"));
+
+        let (_, via_dash_c) = git_verb_target_dir(
+            "git -C /elsewhere/main commit -m x",
+            Path::new("/repo"),
+            &env,
+            is_commit,
+        )
+        .expect("-C must move the target");
+        assert_eq!(via_dash_c, PathBuf::from("/elsewhere/main"));
+    }
+
+    #[test]
+    fn commit_target_dir_is_none_for_everything_else() {
+        let env = PathEnv::from_process();
+        let is_commit = |verb: &str, _: &[String]| verb == "commit";
+        for command in [
+            "git status",
+            "git log --oneline -5",
+            "git add -A",
+            "git push origin HEAD",
+            "cargo test -p trusty-mpm",
+            "",
+        ] {
+            assert!(
+                git_verb_target_dir(command, Path::new("/repo"), &env, is_commit).is_none(),
+                "`{command}` is not a commit"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_main_checkout_commit_denies_in_a_checkout_and_allows_in_a_worktree() {
+        let checkout = main_checkout_dir();
+        let reason = evaluate_main_checkout_commit_command("git commit -m 'wip'", checkout.path())
+            .expect("a commit in a main checkout must be denied");
+        assert!(reason.contains("ADR-0044"), "{reason}");
+
+        // A linked worktree carries a `.git` FILE. Committing there is the
+        // whole remedy the deny offers, so it must work.
+        let worktree = tempfile::tempdir().expect("tempdir");
+        std::fs::write(worktree.path().join(".git"), "gitdir: /elsewhere").expect("write .git");
+        assert_eq!(
+            evaluate_main_checkout_commit_command("git commit -m 'wip'", worktree.path()),
+            None
+        );
+
+        // Not a repository at all: nothing to protect.
+        let plain = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            evaluate_main_checkout_commit_command("git commit -m 'wip'", plain.path()),
+            None
+        );
+    }
+
+    #[test]
+    fn commit_deny_reason_names_the_path_and_the_remedy() {
+        let reason = commit_deny_reason(Path::new("/repo/main"));
+        assert!(reason.contains("/repo/main"), "{reason}");
+        assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+        assert!(reason.contains("Nothing is lost"), "{reason}");
     }
 
     #[test]

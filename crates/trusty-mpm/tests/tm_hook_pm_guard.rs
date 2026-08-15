@@ -1331,6 +1331,244 @@ fn pm_guard_allows_destructive_git_outside_any_checkout() {
     }
 }
 
+/// A `PreToolUse` payload for any tool, with `tool_input` supplied verbatim.
+///
+/// Why: the main-checkout write boundary and the worktree grant are driven by
+/// `Write`/`Edit` and `Agent` calls, neither of which fits the Bash-shaped
+/// helper above.
+fn tool_payload_at(
+    tool: &str,
+    tool_input: &str,
+    cwd: &std::path::Path,
+    extra_fields: &str,
+) -> String {
+    format!(
+        r#"{{"hook_event_name":"PreToolUse",{extra_fields}"cwd":"{}","tool_name":"{tool}","tool_input":{tool_input}}}"#,
+        cwd.display()
+    )
+}
+
+#[test]
+fn pm_guard_denies_a_source_write_in_a_main_checkout() {
+    // ADR-0044 decision 1, the half that was never built: an ordinary `Write`
+    // to a source file in the shared checkout passed every guard in the
+    // process, and that is the write the reported incident was made of.
+    let (_dir, repo) = main_checkout_fixture();
+    let target = repo.join("crates/trusty-mpm/src/lib.rs");
+    let input = format!(
+        r#"{{"file_path":"{}","content":"fn main() {{}}"}}"#,
+        target.display()
+    );
+    let stdout = run_pm_guard(&tool_payload_at("Write", &input, &repo, ""), &[]);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("ADR-0044"),
+        "the deny must cite the decision it enforces: {stdout}"
+    );
+    assert!(
+        stdout.contains("isolation"),
+        "the deny must say what to do instead: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_dispatched_agents_source_write_in_a_main_checkout() {
+    // ADR-0044 binds "the PM and every agent it dispatches", so this rule must
+    // pierce both automatic subagent markers — Guard 4's `agent_id` payload
+    // field and Guard 1's `CLAUDE_MPM_SUB_AGENT` env var. Both early-return
+    // ALLOW precisely for the population the rule exists to bind, so a version
+    // placed after either would be a no-op for all of it.
+    let (_dir, repo) = main_checkout_fixture();
+    let target = repo.join("crates/trusty-mpm/src/lib.rs");
+    let input = format!(r#"{{"file_path":"{}","content":"x"}}"#, target.display());
+
+    let dispatched = run_pm_guard(
+        &tool_payload_at("Write", &input, &repo, r#""agent_id":"agt_1","#),
+        &[],
+    );
+    assert_denied(&dispatched);
+
+    let nested = run_pm_guard(
+        &tool_payload_at("Write", &input, &repo, ""),
+        &[("CLAUDE_MPM_SUB_AGENT", "1")],
+    );
+    assert_denied(&nested);
+}
+
+#[test]
+fn pm_guard_allows_documents_and_configuration_in_a_main_checkout() {
+    // The other half of ADR-0044, and the half a "read-only checkout" framing
+    // loses: writing projects and configuration maintenance are what a
+    // main-checkout session is FOR, and framework deployment writes `.claude/`
+    // and `TASK.md` on every launch.
+    let (_dir, repo) = main_checkout_fixture();
+    for name in [
+        "README.md",
+        "TASK.md",
+        "Cargo.toml",
+        ".claude/settings.json",
+    ] {
+        let target = repo.join(name);
+        let input = format!(r#"{{"file_path":"{}","content":"x"}}"#, target.display());
+        let stdout = run_pm_guard(&tool_payload_at("Write", &input, &repo, ""), &[]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "{name} is a document or configuration and must stay writable"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_commit_in_a_main_checkout() {
+    // The commit is where a write becomes permanent on a branch another
+    // session is standing on — the step that produced `f1da7bce` landing on a
+    // branch belonging to a different workstream.
+    let (_dir, repo) = main_checkout_fixture();
+    let stdout = run_pm_guard(&bash_payload_at("git commit -m 'wip'", &repo, ""), &[]);
+    assert_denied(&stdout);
+    assert!(stdout.contains("ADR-0044"), "{stdout}");
+
+    // The composition the PM actually types, and a dispatched agent's commit.
+    let chained = run_pm_guard(
+        &bash_payload_at("git add -A && git commit -m 'wip'", &repo, ""),
+        &[],
+    );
+    assert_denied(&chained);
+    let dispatched = run_pm_guard(
+        &bash_payload_at("git commit -m 'wip'", &repo, r#""agent_id":"agt_1","#),
+        &[],
+    );
+    assert_denied(&dispatched);
+
+    // Read-only git is never this rule's business.
+    for command in ["git status --short", "git log --oneline -5", "git add -A"] {
+        let stdout = run_pm_guard(&bash_payload_at(command, &repo, ""), &[]);
+        assert_eq!(stdout.trim(), "", "`{command}` must stay allowed");
+    }
+}
+
+#[test]
+fn pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout() {
+    // ADR-0048 Part A: the dispatch is REWRITTEN, not refused — the PM does not
+    // have to re-issue anything, and the rewrite applies whether or not the
+    // model reads a message. The whole original input must survive, because
+    // `updatedInput` replaces the arguments rather than merging into them.
+    let (_dir, repo) = main_checkout_fixture();
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"do the thing","description":"go"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let out = &value["hookSpecificOutput"];
+    assert_eq!(out["hookEventName"], "PreToolUse");
+    assert_eq!(out["updatedInput"]["isolation"], "worktree");
+    assert_eq!(out["updatedInput"]["prompt"], "do the thing");
+    assert_eq!(out["updatedInput"]["subagent_type"], "rust-engineer");
+    assert!(
+        out.get("permissionDecision").is_none(),
+        "a grant changes the arguments and must not touch the permission flow: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_grants_a_worktree_to_an_unknown_agent_in_a_main_checkout() {
+    // The deliberate divergence from #4480's fail-open: a custom or renamed
+    // agent is indeterminate, and in a main checkout indeterminate resolves
+    // toward isolation. This is the agent that kept writing to the shared tree.
+    let (_dir, repo) = main_checkout_fixture();
+    for input in [
+        r#"{"subagent_type":"some-project-custom-agent","prompt":"x"}"#,
+        r#"{"prompt":"an untyped dispatch"}"#,
+    ] {
+        let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+        let value: serde_json::Value =
+            serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+        assert_eq!(
+            value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
+            "{input} must be isolated rather than trusted"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_leaves_read_only_and_isolated_dispatches_alone() {
+    // A worktree per read-only dispatch would re-open #3455's wasted-disk
+    // complaint, and re-granting an already-isolated dispatch would let the
+    // guard silently downgrade `remote` to `worktree`.
+    let (_dir, repo) = main_checkout_fixture();
+    for input in [
+        r#"{"subagent_type":"research","prompt":"x"}"#,
+        r#"{"subagent_type":"code-critic","prompt":"x"}"#,
+        r#"{"subagent_type":"rust-engineer","isolation":"worktree","prompt":"x"}"#,
+        r#"{"subagent_type":"rust-engineer","isolation":"remote","prompt":"x"}"#,
+    ] {
+        let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+        assert_eq!(stdout.trim(), "", "{input} must pass through untouched");
+    }
+}
+
+#[test]
+fn pm_guard_does_not_grant_a_worktree_outside_a_main_checkout() {
+    // Delegated work in a worktree is where work is supposed to happen. If this
+    // fired there it would try to nest a worktree inside a worktree on every
+    // dispatch — and it is the branch that keeps the rule from applying to the
+    // whole machine.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("wt");
+    std::fs::create_dir_all(&worktree).expect("mkdir");
+    std::fs::write(worktree.join(".git"), "gitdir: /elsewhere").expect("write .git");
+
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"x"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &worktree, ""), &[]);
+    assert_eq!(stdout.trim(), "", "a worktree dispatch must be untouched");
+}
+
+#[test]
+fn pm_guard_denies_a_task_dispatch_it_cannot_isolate() {
+    // `Task` carries no `isolation` parameter, so a rewrite would produce a
+    // failed tool call rather than an isolated agent. This is the one case the
+    // grant refuses, and the message has to name the tool that can do it.
+    let (_dir, repo) = main_checkout_fixture();
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"x"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Task", input, &repo, ""), &[]);
+    assert_denied(&stdout);
+    assert!(stdout.contains("Agent"), "{stdout}");
+    assert!(stdout.contains("isolation"), "{stdout}");
+}
+
+#[test]
+fn pm_guard_operator_escape_hatches_still_lift_the_write_boundary() {
+    // The same contract every other rule in this file keeps: an operator who
+    // lifts enforcement gets exactly that. Stated as a test because the write
+    // boundary pierces the two AUTOMATIC subagent markers, and the distinction
+    // between those and the two human escape hatches is the whole reason the
+    // piercing is permitted at all.
+    let (_dir, repo) = main_checkout_fixture();
+    let target = repo.join("crates/trusty-mpm/src/lib.rs");
+    let write = tool_payload_at(
+        "Write",
+        &format!(r#"{{"file_path":"{}","content":"x"}}"#, target.display()),
+        &repo,
+        "",
+    );
+    let commit = bash_payload_at("git commit -m 'wip'", &repo, "");
+    for env in [
+        ("TRUSTY_MPM_DISABLE_HOOKS", "1"),
+        ("TRUSTY_MPM_PM_UNRESTRICTED", "1"),
+    ] {
+        for payload in [&write, &commit] {
+            let stdout = run_pm_guard(payload, &[env]);
+            assert_eq!(
+                stdout.trim(),
+                "",
+                "{} must lift this guard along with every other",
+                env.0
+            );
+        }
+    }
+}
+
 #[test]
 fn pm_guard_denies_main_checkout_destructive_git_with_the_daemon_unreachable() {
     // The fail-open check this rule most had to get right. Every other

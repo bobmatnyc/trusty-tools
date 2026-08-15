@@ -118,11 +118,21 @@ fn provisioning_message(label: Option<&str>, detail: Option<&str>) -> String {
 
 /// POST a new managed session to the daemon (async) and attach once ready.
 ///
-/// Why: "launch new" must use the daemon's protected managed-clone spawn path
-/// (never write framework files into the live checkout, #1724) AND must not
-/// hold one HTTP request open across a multi-minute clone (#2605). This POSTs
+/// Why: "launch new" must go through the daemon's managed spawn path rather
+/// than deploying framework files itself (#1724) AND must not hold one HTTP
+/// request open across a multi-minute clone (#2605). This POSTs
 /// `background: true`, then polls `provision-status`, rendering live phase +
 /// clone-percent progress, before attaching.
+///
+/// What that path does with a LOCAL `repo_url` changed under this comment and
+/// the old wording — "never write framework files into the live checkout" — is
+/// no longer true of it. ADR-0037 made a local working-tree root run on that
+/// checkout by default, and `spawn_managed_on_main` deploys `.claude/`, the
+/// bundled skills, and `TASK.md` into it. That is permitted configuration
+/// under ADR-0044, which restricts the same checkout to documents and
+/// configuration and nothing else. #1724's actual guarantee — that the
+/// daemon-unreachable FALLBACK never deploys into a checkout it was not told
+/// it could — lives in `provision_for_fallback` and is unchanged.
 /// What: (1) shows a `trusty_progress` spinner (auto-hidden in non-TTY/plain
 /// output); (2) POSTs `{ repo_url, ref: "HEAD", task: "", force_new: true,
 /// background: true }`, plus `name_hint` when the caller supplied one (#4965 —
