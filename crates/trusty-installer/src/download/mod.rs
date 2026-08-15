@@ -36,9 +36,10 @@ pub mod release;
 use std::path::PathBuf;
 
 use anyhow::Context;
-
-/// Default install directory for prebuilt binaries (mirrors `install.sh`).
-pub const DEFAULT_INSTALL_DIR: &str = "~/.local/bin";
+// #5777: the `DEFAULT_INSTALL_DIR = "~/.local/bin"` const that lived here was
+// deleted with the Phase 3 destination flip — no code read it, and the real
+// default is `default_install_dir()` below (the shared canonical cargo bin
+// dir, which honours `CARGO_HOME` where a literal string cannot).
 
 /// Outcome of a [`try_install_prebuilt`] call.
 ///
@@ -197,7 +198,7 @@ pub fn http_client() -> reqwest::Client {
 /// Test: Exercised by the `#[ignore]`-tagged live integration test.
 async fn install_from_urls(
     client: &reqwest::Client,
-    _crate_name: &str,
+    crate_name: &str,
     _version: &str,
     archive_name: &str,
     tarball_url: &str,
@@ -213,15 +214,21 @@ async fn install_from_urls(
         .await
         .context("downloading and verifying prebuilt tarball")?;
 
-    // Extract all binaries from the archive.
+    // Extract all regular files from the archive (into the temp dir only).
     let extract_dir = tmp_path.join("extracted");
     std::fs::create_dir_all(&extract_dir).context("creating extraction directory")?;
-    let binary_names = fetch::extract_binaries(&tarball, &extract_dir)
+    let extracted = fetch::extract_binaries(&tarball, &extract_dir)
         .context("extracting binaries from tarball")?;
+
+    // #5777: place ONLY the crate's expected binaries. Release tarballs also
+    // ship `LICENSE`/`README.md` (mode 0755), which used to be installed into
+    // the bin dir as if they were binaries.
+    let binary_names = expected_binaries_among(crate_name, &extracted);
 
     if binary_names.is_empty() {
         return Err(anyhow::anyhow!(
-            "tarball contained no regular files; expected at least one binary"
+            "tarball contained none of {crate_name}'s expected binaries \
+             (found: {extracted:?})"
         ));
     }
 
@@ -232,18 +239,44 @@ async fn install_from_urls(
     Ok(placed)
 }
 
-/// Resolve the default install directory (`~/.local/bin`), or `None` if the home
-/// directory cannot be determined.
+/// Narrow an extracted archive's file list to `crate_name`'s expected binaries.
 ///
-/// Why: Both `install` and `upgrade` need the default install path; this provides
-/// a single resolution rule consistent with `install.sh`.
+/// Why (#5777): `fetch::extract_binaries` returns every regular file in the
+/// tarball, and release tarballs ship `LICENSE`/`README.md` at mode 0755 — an
+/// execute-bit filter cannot tell them from binaries, which is how they ended
+/// up in bin dirs on real installs. An expected-name allowlist can.
+/// What: keeps, in extraction order, the names that appear in the shared
+/// [`trusty_common::bin_resolve::installed_binaries`] set for `crate_name`.
+/// Test: `tests::expected_binaries_among_drops_documentation_files`,
+/// `tests::expected_binaries_among_keeps_multi_binary_sets`.
+fn expected_binaries_among(crate_name: &str, extracted: &[String]) -> Vec<String> {
+    let expected = trusty_common::bin_resolve::installed_binaries(crate_name);
+    extracted
+        .iter()
+        .filter(|name| expected.iter().any(|e| e == *name))
+        .cloned()
+        .collect()
+}
+
+/// Resolve the default install directory — the canonical cargo bin dir
+/// (`$CARGO_HOME/bin`, falling back to `~/.cargo/bin`), or `None` if neither
+/// `CARGO_HOME` nor the home directory can be determined.
 ///
-/// What: Expands `~` via `dirs::home_dir()`.
+/// Why (#5777, Phase 3 of #4964): prebuilt downloads used to land in
+/// `~/.local/bin` while `cargo install` wrote `$CARGO_HOME/bin`, so PATH
+/// order decided which copy ran — the stale-daemon mechanism behind #2386.
+/// Every write path this project controls now converges on the one directory
+/// a hand-typed `cargo install` also writes to.
 ///
-/// Test: `tests::default_install_dir_resolves` asserts the returned path ends
-/// with `.local/bin`.
+/// What: delegates to the shared
+/// [`trusty_common::bin_resolve::canonical_bin_dir`] — pure path arithmetic,
+/// never spawns `cargo`, so a machine with no Rust toolchain still resolves
+/// it. `install.sh` applies the same `${CARGO_HOME:-$HOME/.cargo}/bin` rule.
+///
+/// Test: `tests::default_install_dir_resolves` asserts the returned path is
+/// the canonical cargo bin dir.
 pub fn default_install_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".local").join("bin"))
+    trusty_common::bin_resolve::canonical_bin_dir()
 }
 
 #[cfg(test)]
@@ -265,20 +298,69 @@ mod tests {
         assert!(!platform::is_tier1_target("wasm32-unknown-unknown"));
     }
 
-    /// Why: The default install dir must end in `.local/bin` so `install.sh` and
-    /// the Rust installer agree on the default location.
-    /// What: Asserts `default_install_dir()` ends with `.local/bin` when a home
-    /// dir is available.
+    /// Why (#5777, Phase 3 of #4964): the default install dir IS the canonical
+    /// cargo bin dir — a `~/.local/bin` default is the two-directory split this
+    /// change closes, so this test FAILS against the pre-flip resolver.
+    /// What: asserts `default_install_dir()` equals the shared
+    /// `canonical_bin_dir()` and never ends in `.local/bin`.
     /// Test: This is the test.
     #[test]
     fn default_install_dir_resolves() {
+        assert_eq!(
+            default_install_dir(),
+            trusty_common::bin_resolve::canonical_bin_dir(),
+            "default install dir must be the shared canonical cargo bin dir (#5777)"
+        );
         if let Some(p) = default_install_dir() {
             assert!(
-                p.ends_with(std::path::Path::new(".local").join("bin")),
-                "unexpected path: {}",
+                !p.ends_with(std::path::Path::new(".local").join("bin")),
+                "~/.local/bin is no longer a write destination (#5777): {}",
                 p.display()
             );
         }
+    }
+
+    /// Why (#5777): mode-0755 `LICENSE`/`README.md` in release tarballs were
+    /// installed into bin dirs as if they were binaries — an exec-bit filter
+    /// cannot exclude them, only an expected-name allowlist can. This test
+    /// FAILS against the pre-#5777 place-everything behaviour (which this
+    /// helper now gates).
+    /// What: documentation files are dropped; the crate's binaries survive.
+    #[test]
+    fn expected_binaries_among_drops_documentation_files() {
+        let extracted = vec![
+            "trusty-search".to_owned(),
+            "trusty-embedderd".to_owned(),
+            "LICENSE".to_owned(),
+            "README.md".to_owned(),
+        ];
+        assert_eq!(
+            expected_binaries_among("trusty-search", &extracted),
+            vec!["trusty-search".to_owned(), "trusty-embedderd".to_owned()],
+            "only the crate's expected binaries may be placed (#5777)"
+        );
+    }
+
+    /// Why: the allowlist must not regress alias/multi-binary crates — the
+    /// exact failure mode the shared `installed_binaries` table exists to
+    /// prevent.
+    /// What: `trusty-installer`'s tarball keeps both `trusty-installer` and
+    /// the `tctl` alias; an unknown crate falls back to its own name.
+    #[test]
+    fn expected_binaries_among_keeps_multi_binary_sets() {
+        let extracted = vec![
+            "trusty-installer".to_owned(),
+            "tctl".to_owned(),
+            "LICENSE".to_owned(),
+        ];
+        assert_eq!(
+            expected_binaries_among("trusty-installer", &extracted),
+            vec!["trusty-installer".to_owned(), "tctl".to_owned()]
+        );
+        assert_eq!(
+            expected_binaries_among("tga", &["tga".to_owned(), "README.md".to_owned()]),
+            vec!["tga".to_owned()]
+        );
     }
 
     /// Why: An `Installed` outcome must expose the version string and non-empty

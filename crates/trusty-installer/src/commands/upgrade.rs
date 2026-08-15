@@ -487,10 +487,10 @@ async fn upgrade_one(
 ) -> anyhow::Result<UpgradeDetail> {
     use crate::download::{self, Outcome};
 
-    // #4964: fall back to the SHARED `canonical_bin_dir()` rather than an
-    // inline `CARGO_HOME` read (one of five copies of the same rule).
+    // #5777: `default_install_dir()` IS the shared canonical cargo bin dir
+    // now, so the old `.or_else(canonical_bin_dir)` second leg (which this
+    // selector made unreachable) is gone rather than dead.
     let install_dir = download::default_install_dir()
-        .or_else(trusty_common::bin_resolve::canonical_bin_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
 
     let outcome = download::try_install_prebuilt(&c.crate_name, &install_dir).await;
