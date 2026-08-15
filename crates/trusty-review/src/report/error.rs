@@ -76,7 +76,13 @@ pub enum ManifestError {
 /// and generic I/O; the CLI maps these to `anyhow` at the boundary.
 /// Test: `reporter_tests.rs` (I/O), `template.rs` tests (`TemplateNotFound`),
 /// `metrics.rs` tests (`Metrics`).
+///
+/// `#[non_exhaustive]` (#5762): every new failure mode this pipeline learns to
+/// name adds a variant, and three arrived between 0.16.0 and 0.17.0 alone. A
+/// downstream `match` must carry a `_` arm, which makes those additions a minor
+/// bump instead of a major one.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ReportError {
     /// A manifest-level failure (parse or validation).
     #[error(transparent)]
