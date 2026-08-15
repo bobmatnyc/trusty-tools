@@ -704,41 +704,9 @@ impl CollectionPipeline {
 
         // Drain results as they complete. Persistence runs on the main task
         // (where `&mut Database` is safe to use) and uses the matching
-        // provider's `store_pull_requests`.
-        while let Some(joined) = set.join_next().await {
-            let (provider_name, fetch_result) = match joined {
-                Ok(t) => t,
-                Err(e) => {
-                    stats.fail_stage(format!("PR fetch task panicked: {e}"));
-                    continue;
-                }
-            };
-            match fetch_result {
-                Ok(prs) => {
-                    // Find the matching provider for storage.
-                    let Some(provider) = providers.iter().find(|p| p.name() == provider_name)
-                    else {
-                        stats.fail_stage(format!(
-                            "internal: no provider registered for '{provider_name}' \
-                             when storing PRs"
-                        ));
-                        continue;
-                    };
-                    match provider.store_pull_requests(db, &prs) {
-                        Ok(n) => {
-                            info!(provider = %provider_name, prs = n, "stored pull requests");
-                            stats.prs_fetched += n;
-                        }
-                        Err(e) => {
-                            stats.fail_stage(format!("{provider_name} PR store failed: {e}"));
-                        }
-                    }
-                }
-                Err(e) => {
-                    stats.fail_stage(format!("{provider_name} PR fetch failed: {e}"));
-                }
-            }
-        }
+        // provider's `store_pull_requests`. The drain lives in
+        // `pr_pipeline` so every fault-severity decision sits in one place.
+        super::pr_pipeline::drain_and_store_pull_requests(set, &providers, db, stats).await;
 
         // Phase 3 (issue #742): GitHub reviewer ingestion pass (serial, after
         // PRs are stored so FK lookups succeed).

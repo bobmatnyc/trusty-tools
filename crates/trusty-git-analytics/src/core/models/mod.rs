@@ -219,6 +219,51 @@ pub struct PullRequest {
     /// Test: `store_pull_requests_stale_write_guard_*` in
     /// `collect::github::client_tests` and `collect::bitbucket::tests`.
     pub fetched_at: String,
+
+    /// Raw source-branch name this PR was opened from, when the provider
+    /// supplies one.
+    ///
+    /// Why: #5734 — this is the ONLY place a commit's authoring branch
+    /// survives. A commit object carries no branch, and `git branch --contains`
+    /// answers a different question: under a squash-merge workflow it returns
+    /// `main` for every merged commit and the authoring branch for none. Joined
+    /// through [`Self::commit_shas`], this field is the per-commit branch
+    /// reference that #5734 asks for.
+    ///
+    /// What: `None` and `Some("")` mean different things, and the distinction
+    /// is what keeps a missing branch from being silently harvested as nothing.
+    /// `None` is "this provider makes no claim" — Bitbucket and Azure DevOps
+    /// PRs fetched before #5734 wired their source branch through. `Some("")`
+    /// is "the provider answered and the ref was empty", an anomaly the
+    /// collector records as a [`crate::collect::CollectionFault`] with
+    /// `skip_item` severity rather than passing over.
+    ///
+    /// GitHub reports a bare name (`feature/PROJ-123-thing`); Azure DevOps
+    /// reports a full ref (`refs/heads/...`).
+    /// [`crate::collect::ticket::branch_ticket_key`] normalizes both.
+    ///
+    /// Test: `collect::correlate::tests::branch_name_supplies_a_key_the_subject_lacks`.
+    #[serde(default)]
+    pub head_ref: Option<String>,
+
+    /// Issue reference extracted from this PR's body at fetch time.
+    ///
+    /// Why: #5734 — a PR body routinely declares `Closes #N` for work the
+    /// commit subject never names; this recovers a key for 51 merged commits in
+    /// this repository. The EXTRACTED key is stored rather than the body
+    /// because the body is 9.4 MB across 2433 PRs here and an unrestricted scan
+    /// of it yields 2501 false JIRA-shaped keys — see
+    /// [`crate::collect::ticket::pr_body_ticket_key`] for the measurement and
+    /// `0024_pull_requests_head_ref_and_body_ticket.sql` for the trade.
+    ///
+    /// What: `Some("#N")` when the body declared an issue with an action
+    /// keyword, `None` otherwise. Because the key is derived at fetch time,
+    /// sharpening the extraction rule needs a re-collect to take effect on
+    /// existing rows — that is the cost of not keeping the prose.
+    ///
+    /// Test: `collect::correlate::tests::pr_body_supplies_a_key_the_subject_lacks`.
+    #[serde(default)]
+    pub body_ticket_id: Option<String>,
 }
 
 /// Cascade tier that produced a classification.

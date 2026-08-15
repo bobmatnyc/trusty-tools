@@ -1,0 +1,34 @@
+-- Migration v24: carry a PR's source branch and its body-declared issue ref.
+--
+-- Issue #5734 (split from #5199). `collect/ticket.rs` reads a ticket key from
+-- the commit subject only. Branch names and PR bodies carry keys constantly and
+-- none of it reached `work_items` / `commit_work_items`.
+--
+-- Why these columns live on `pull_requests` and not on `commits`:
+-- a commit object carries no branch. `git branch --contains` answers "which
+-- refs reach this commit", which under a squash-merge workflow is `main` for
+-- every merged commit and the authoring branch for none — this repository has
+-- 2633 commits against 13 live remote branches. The branch a commit was
+-- authored on survives in exactly one place, the pull request's head ref, and
+-- `pull_requests.commit_shas` already joins a PR to the commits it produced.
+-- So the per-commit branch reference is reachable, and it is stored where it is
+-- actually a fact rather than as a mostly-NULL column on `commits`.
+--
+-- `head_ref` is the raw source-branch name (`feature/PROJ-123-thing`, or an
+-- ADO-style `refs/heads/...`). Empty string means the provider supplied none;
+-- see `PullRequest::head_ref` for the not-claimed vs. claimed-and-empty split.
+--
+-- `body_ticket_id` stores the key EXTRACTED from the PR body, not the body
+-- itself. The body is not persisted: this repository's 2433 PR bodies total
+-- 9.4 MB, and an unrestricted JIRA-shaped scan over them yields 2501 matches
+-- across 423 distinct keys dominated by `DOC-39`, `DOC-48` and `ADR-0024` —
+-- five times the false-key volume #5199 removed from commit bodies, against 51
+-- genuine `Closes #N` references. Storing 9.4 MB of prose to recover 51 keys is
+-- the wrong trade, so the high-precision extraction runs at fetch time and only
+-- its result is kept. See `collect::ticket::pr_body_ticket_key`.
+--
+-- Additive only — no existing column is modified and no data is removed.
+-- Existing rows default to '' / NULL, which both read as "this provider made no
+-- claim", so an old database keeps working untouched until its next collect.
+ALTER TABLE pull_requests ADD COLUMN head_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE pull_requests ADD COLUMN body_ticket_id TEXT;
