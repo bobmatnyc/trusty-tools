@@ -150,26 +150,15 @@ confidence-threshold = 0.8
 # never required.
 [bans]
 multiple-versions = "warn"
-# WILDCARDS ARE "warn" AND THAT IS A COMPROMISE, NOT A JUDGEMENT.
-#
-# Set to "deny" — which is what a publish gate wants, since crates.io rejects a
-# path dependency carrying no version — this check FAILS TODAY on a real defect:
-#
-#   error[wildcard]: found 1 wildcard dependency for crate 'trusty-agents'.
-#     crates/trusty-agents/Cargo.toml:34  trusty-code = { workspace = true }
-#
-# The root `[workspace.dependencies]` entry is `trusty-code = { path =
-# "crates/trusty-code" }` with NO `version` key, unlike every other internal
-# dependency trusty-agents declares (trusty-memory "0.23", trusty-search "0.47",
-# trusty-gworkspace "0.2.2", …). `cargo publish -p trusty-agents` would be
-# rejected outright: crates.io requires a version on every dependency. trusty-code
-# IS published, so the fix is one field on that root entry.
-#
-# It is left at "warn" here for one reason only: the root Cargo.toml is being
-# rewritten by a concurrent workstream, and a one-line edit landing in two PRs at
-# once is a conflict nobody needs. RAISE THIS TO "deny" once that lands and the
-# version field is added. The finding is recorded in this PR's body.
-wildcards = "warn"
+# WILDCARDS IS "deny": crates.io rejects a publish whose dependency carries no
+# version, so a path dependency missing `version` is a real publish-breaking
+# defect, not a style nit. This caught exactly that case once — the root
+# `[workspace.dependencies]` entry `trusty-code = { path = "crates/trusty-code" }`
+# had no `version` key, unlike every other internal dependency trusty-agents
+# declares (trusty-memory "0.23", trusty-search "0.47", trusty-gworkspace
+# "0.2.2", …), and `cargo publish -p trusty-agents` failed outright. Fixed by
+# adding `version = "0.3.0"` to that entry.
+wildcards = "deny"
 # Dev-dependency wildcards are exempt because they never reach a published
 # artifact and crates.io does not reject them.
 allow-wildcard-paths = true
