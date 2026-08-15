@@ -1,4 +1,0 @@
-Fixed
-
-- Startup palace hydration now opens each palace with the registry's configured `OpenIntent` instead of the zero-arg `PalaceHandle::open` default. `AppState::load_palaces_from_disk` is the path a restarting daemon takes for every palace it already has on disk — the common case — and it was hardcoded to `ReadOnlyClient`, so `main.rs`'s `with_writer_intent()` reached only palaces created after startup. The daemon consequently refused every palace whose store needed the #702 incompatible-format recovery, despite being the writer that owns those files (#4911).
-- A palace that startup hydration cannot open is now recorded on the registry rather than only logged. It was absent from the handle cache and absent from `palace_list`, so a refused open read to an operator exactly like deletion even though the bytes were intact (#4911).

@@ -1,5 +1,0 @@
-Documentation
-
-- **Module docs render once instead of twice.** 14 modules carried both an outer `///` on their `mod x;` declaration and their own inner `//!`; rustdoc concatenates the two, so each module page showed two summary lines and two Why/What/Test triples. The outer is gone and the inner `//!` is now the single module doc, per the `//!` convention in `documentation-style` and DOC-38 §3.1 ([#5754](https://github.com/bobmatnyc/trusty-tools/pull/5754))
-  - six modules had the outer merged forward rather than deleted, because it held a fact the inner did not: `dream_scheduler` (the `make_shutdown_watch` / `spawn_shutdown_bridge` exports), `idle_evict` (wired in `spawn_startup_tasks`), `events` and `http_server` (issue #1195, and the crate-root re-export that keeps `trusty_memory::DaemonEvent` paths working), `foreground` (launchd needs loud failure on port collision, not silent port-walking), and `wordnet_pos` (the `NOUN`/`VERB`/`ADJ`/`ADV` bitmask constants)
-  - `palace_id_derive`'s outer doc was stale — it still described the pure derivation core that moved to `trusty-common` in #1605 — so deleting it removed wrong information rather than a duplicate
