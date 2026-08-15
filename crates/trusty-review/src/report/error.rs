@@ -125,6 +125,35 @@ pub enum ReportError {
         source: serde_json::Error,
     },
 
+    /// A metrics JSON parsed, but declares a schema major this build does not
+    /// read (#5747).
+    ///
+    /// Why: the producer of the artifact and this reader are separate binaries,
+    /// and every field of [`super::metrics::AnalyzeMetrics`] carries
+    /// `#[serde(default)]`. A renamed key in a later schema therefore parses to
+    /// zero and renders `0 lines of code` or an empty complexity distribution as
+    /// a stated fact in a client-facing due-diligence report. Refusing a major
+    /// this build cannot read routes that the same way an unparseable artifact
+    /// goes: a hard, named failure.
+    /// What: distinct from [`ReportError::Metrics`] because the remedy differs —
+    /// that one is a malformed file, this one is a version mismatch the operator
+    /// resolves by aligning the producer with this build. An artifact carrying
+    /// no `schema_version` at all never reaches this variant; see
+    /// [`super::metrics::load_metrics`] for why absent means v0 here and is a
+    /// refusal for the ticketing artifact.
+    #[error(
+        "metrics artifact at {path} declares schema_version {found:?}, which this build cannot \
+         read; it reads schema major {supported}"
+    )]
+    MetricsSchema {
+        /// The metrics artifact whose schema tag was refused.
+        path: PathBuf,
+        /// The `schema_version` the artifact declared; never empty.
+        found: String,
+        /// The schema major this build reads.
+        supported: u32,
+    },
+
     /// A declared ticketing artifact exists but could not be parsed (#5405).
     ///
     /// Why: the manifest declared the file, so an unreadable one is a producer
