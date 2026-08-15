@@ -122,6 +122,39 @@ mod tests {
         assert_eq!(rows, vec![("alice".to_string(), 3), ("bob".to_string(), 1)]);
     }
 
+    /// Why: #5384 / trusty-common 0.33.0 changed this from `u64` to
+    /// `Result<u64>` precisely so `Ok(0)` could mean "empty" and nothing else —
+    /// before it, a failed read also produced `0` and `kg_query` reported
+    /// `graph_state: "graph_empty"`, the false claim #4775 exists to prevent.
+    /// The contract test asserts the MEANING of `Ok(0)`, which is what a caller
+    /// relies on; the type differ sees the signature move but not this.
+    /// What: a freshly opened store reports `Ok(0)`, and the zero survives a
+    /// full assert-then-retract round trip — so `Ok(0)` is reachable only from
+    /// a completed read of an empty graph.
+    /// Test: itself.
+    #[test]
+    fn contract_count_active_triples_zero_means_empty_not_failed() {
+        let (_d, kg) = open_kg();
+
+        // Postcondition: Ok(0) on a store that opened cleanly and holds nothing.
+        // `open_with_intent` creates every table on open, so this is a real
+        // read of an empty graph and never a missing-table shortcut.
+        assert_eq!(kg.count_active_triples().unwrap(), 0);
+
+        kg.assert(&t("alice", "is_alias_for", "Acme")).unwrap();
+        assert_eq!(kg.count_active_triples().unwrap(), 1);
+
+        // Postcondition: retraction returns it to Ok(0) — the same value, still
+        // meaning "empty", reached by a different route.
+        kg.retract("alice", "is_alias_for").unwrap();
+        assert_eq!(kg.count_active_triples().unwrap(), 0);
+
+        // Invariant: counts ACTIVE triples only. The retracted triple's history
+        // row survives, and must not be counted.
+        kg.assert(&t("bob", "is_alias_for", "Gamma")).unwrap();
+        assert_eq!(kg.count_active_triples().unwrap(), 1);
+    }
+
     #[test]
     fn count_active_triples_returns_live_only() {
         let (_d, kg) = open_kg();
