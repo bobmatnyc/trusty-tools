@@ -287,7 +287,19 @@ evidence the codebase has been screened for exploitable vulnerabilities.*
      source report presents (size distributions, green-impact deficiencies,
      documentation scores, etc.) — one dataset per canonical chart. -->
 
-## 8. Gaps & Caveats
+## 8. Ticketing & Delivery Traceability
+
+<!-- Engagement-wide commit ↔ board-item correlation, measured by the
+     collection sweep that produced this report's data. Counts and the boards
+     they came from — deliberately no linkage-quality score, grade, or band:
+     nothing here is calibrated against a peer population, and an uncalibrated
+     ratio in this document would be read as one. When the producing run
+     supplied no correlation data this section collapses and is named under
+     Gaps & Caveats, never silently omitted. -->
+
+{{ticketing_coverage}}
+
+## 9. Gaps & Caveats
 
 - {{gap_1}}
 - {{gap_2}}

@@ -650,7 +650,9 @@ fn evidence_with_adjacent_hash_comment_lines_renders_byte_identical() {
     );
     // The corrupted fragments must never leak into the Gaps & Caveats list.
     let gaps_start = md
-        .find("## 8. Gaps & Caveats")
+        // #5405 renumbered this to §9; §8 is now Ticketing & Delivery
+        // Traceability.
+        .find("## 9. Gaps & Caveats")
         .expect("gaps section present");
     let gaps_section = &md[gaps_start..];
     assert!(
@@ -1888,5 +1890,123 @@ fn reporter_captions_a_truncated_top_risks_table() {
     assert!(
         !plain.contains("Top 5 of"),
         "an untruncated table must not claim truncation:\n{plain}"
+    );
+}
+
+/// Build a model whose manifest declares a ticketing artifact (#5405).
+fn fixture_model_with_ticketing(dir: &Path, artifact: &str) -> ReportModel {
+    std::fs::write(dir.join("ticketing.json"), artifact).expect("write ticketing");
+
+    let toml = r#"
+        [report]
+        title = "Acme Due Diligence"
+        analyst = "bobmatnyc"
+        ticketing = "ticketing.json"
+
+        [[repositories]]
+        name = "Acme Web"
+        path = "/nonexistent/acme-web"
+    "#;
+    let manifest_path = dir.join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
+    ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build model")
+}
+
+/// #5405's first closure condition, asserted on the RENDERED artifact rather
+/// than on the model: the report reads `work_items` (by way of the correlation
+/// figures tga wrote) and states them on the page.
+///
+/// The end-to-end shape matters here. Every intermediate layer could hold the
+/// figures correctly and the section could still never reach the page — the
+/// polish pass drops marker rows and collapses emptied sections, so a scalar
+/// this test only checked on the model would prove nothing about the document
+/// an acquirer reads.
+#[test]
+fn reporter_states_ticketing_coverage() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model_with_ticketing(
+        tmp.path(),
+        r#"{"schema_version":"v0","commits":412,"commits_linked":260,
+            "work_items":180,"work_items_linked":155,"sources":["jira","linear"]}"#,
+    );
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(
+        md.contains("## 8. Ticketing & Delivery Traceability"),
+        "the section must render:\n{md}"
+    );
+    assert!(
+        md.contains("260 of 412 commit(s)") && md.contains("jira, linear"),
+        "the counts and the boards they came from must reach the page:\n{md}"
+    );
+    // Not collapsed, and not swept into the gaps list.
+    assert!(
+        !md.contains("## 8. Ticketing & Delivery Traceability\n\n_No data available"),
+        "a populated section must not collapse:\n{md}"
+    );
+    assert!(!md.contains("{{ticketing_coverage}}"));
+}
+
+/// The anti-fail-open half, also on the rendered artifact: a run that
+/// correlated nothing STATES that. A zero is a finding about the codebase —
+/// commits do not cite tracked work — and must never render as the same blank
+/// a missing artifact produces.
+#[test]
+fn reporter_states_a_zero_coverage_run_rather_than_omitting_it() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model_with_ticketing(
+        tmp.path(),
+        r#"{"schema_version":"v0","commits":300,"commits_linked":0,
+            "work_items":12,"work_items_linked":0,"sources":[]}"#,
+    );
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(
+        md.contains("No commit referenced a tracked board item"),
+        "a zero run must state itself, not collapse:\n{md}"
+    );
+    assert!(md.contains("300 commit(s)"), "{md}");
+}
+
+/// The other side of that contract: when the producing run supplied NO
+/// artifact, the section must be named as unassessed rather than silently
+/// absent — DOC-67 §9's rule, and the defect #5405 is one level up from.
+#[test]
+fn a_missing_ticketing_artifact_is_named_not_silently_dropped() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    // The heading survives, carrying the collapse note — the reader sees that
+    // the dimension exists and was not assessed.
+    assert!(
+        md.contains("## 8. Ticketing & Delivery Traceability"),
+        "the heading must survive so the omission is visible:\n{md}"
+    );
+    let section = md
+        .split("## 8. Ticketing & Delivery Traceability")
+        .nth(1)
+        .expect("section body");
+    assert!(
+        section.contains("_No data available — see Gaps & Caveats._"),
+        "an unpopulated section must say so:\n{section}"
+    );
+    // And it is listed among the gaps, not merely blank on the page.
+    let gaps = md
+        .split("## 9. Gaps & Caveats")
+        .nth(1)
+        .expect("gaps section");
+    assert!(
+        gaps.contains("Ticketing & Delivery Traceability"),
+        "the unassessed dimension must be named in Gaps & Caveats:\n{gaps}"
     );
 }

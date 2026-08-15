@@ -238,6 +238,19 @@ fn build_scope(model: &ReportModel) -> Scope {
     // tool defines this scale, so it is measured, never "not stated".
     set_scoring_model(&mut root);
 
+    // #5405: the board-correlation figures. Set only when the producing run
+    // supplied them; left unset otherwise, so the section collapses and polish
+    // names it under Gaps & Caveats rather than the page reading as if the
+    // codebase simply had no tracker. A zero-coverage run still SETS the
+    // scalar — "no commit referenced a tracked board item" is a finding, and
+    // must not be mistaken for an absent artifact.
+    if let Some(t) = &model.ticketing {
+        root.set(
+            "ticketing_coverage",
+            tag(t.coverage_line(), Provenance::Measured),
+        );
+    }
+
     let apps: Vec<String> = model.repositories.iter().map(|r| r.name.clone()).collect();
     if !apps.is_empty() {
         root.set(

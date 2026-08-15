@@ -125,6 +125,21 @@ pub enum ReportError {
         source: serde_json::Error,
     },
 
+    /// A declared ticketing artifact exists but could not be parsed (#5405).
+    ///
+    /// Why: the manifest declared the file, so an unreadable one is a producer
+    /// bug — tga writes the key only after writing the file. Degrading to a
+    /// report with no board coverage would hide that bug behind a section that
+    /// merely looks unpopulated, which is the failure mode #5405 is about.
+    #[error("failed to parse ticketing JSON at {path}: {source}")]
+    Ticketing {
+        /// The ticketing artifact path that failed to parse.
+        path: PathBuf,
+        /// The underlying serde_json error.
+        #[source]
+        source: serde_json::Error,
+    },
+
     /// A filesystem I/O error while reading templates/metrics or writing output.
     #[error("I/O error in report pipeline at {path}: {source}")]
     Io {

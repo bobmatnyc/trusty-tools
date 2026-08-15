@@ -188,3 +188,34 @@ fn parse_declared_gaps() {
     .expect("parses");
     assert!(none.report.gaps.is_empty(), "absent key defaults to empty");
 }
+
+/// #5405: the ticketing artifact rides on `[report]` — the figures are
+/// engagement-wide, and a repository entry's `metrics` key must stay free so the
+/// live `--analyze` fetch is never blocked by a declared file.
+#[test]
+fn parse_ticketing_path() {
+    let m = parse_manifest(
+        "[report]\ntitle = \"T\"\nticketing = \"ticketing.json\"\n\n\
+         [[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        Path::new("m.toml"),
+    )
+    .expect("parses");
+    assert_eq!(
+        m.report.ticketing,
+        Some(std::path::PathBuf::from("ticketing.json"))
+    );
+    assert!(
+        m.repositories[0].metrics.is_none(),
+        "ticketing must not have been routed through the metrics field"
+    );
+
+    let none = parse_manifest(
+        "[report]\ntitle = \"T\"\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        Path::new("m.toml"),
+    )
+    .expect("parses");
+    assert!(
+        none.report.ticketing.is_none(),
+        "absent key defaults to None, which renders the section as unassessed"
+    );
+}
