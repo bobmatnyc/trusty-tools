@@ -192,10 +192,54 @@ echo "  building rustdoc JSON (nightly, $(printf '%s' "$FEATURES" | tr ',' '\n' 
 if ! SKIP_UI_BUILD=1 RUSTDOCFLAGS="-Z unstable-options --output-format json" \
   cargo +nightly rustdoc -p "$CRATE" --lib --no-default-features \
   --features "$FEATURES" > "${SCRATCH}/rustdoc.log" 2>&1; then
+  # `tail -20` CANNOT show why this build failed, and reporting it as though it
+  # could is what made this gate unactionable. rustdoc prints diagnostics in
+  # source order and its warnings vastly outnumber its errors: when #5744's
+  # `#![deny(rustdoc::broken_intra_doc_links)]` first failed this build, the two
+  # `error:` blocks sat at lines 391 and 405 of an 1117-line log and the tail
+  # showed twenty lines of unrelated `unclosed HTML tag` warnings. A developer
+  # reading that has no way to reach the cause. Print the error BLOCKS instead,
+  # and when there are none say so, because "no diagnostic" means the failure is
+  # a build script or the toolchain, which is a different thing to go fix.
+  # The block ends at a TRULY empty line, not at `/^[[:space:]]*$/`: rustdoc
+  # renders the offending source line inside its `= note:` block and indents the
+  # blank line above it, so a whitespace-tolerant terminator cuts the block
+  # before `no item named ... in scope` — the one line that says what to fix.
+  ERRORS="${SCRATCH}/rustdoc.errors"
+  awk '/^error/ { blk = 1 } blk { print } /^$/ { blk = 0 }' \
+    "${SCRATCH}/rustdoc.log" > "$ERRORS" || true
+  SAVED_LOG="${REPO_ROOT}/target/contracts-rustdoc-failure.log"
+  mkdir -p "$(dirname "$SAVED_LOG")" 2>/dev/null || true
+  cp "${SCRATCH}/rustdoc.log" "$SAVED_LOG" 2>/dev/null || SAVED_LOG=""
   {
     echo "NO VERDICT: the rustdoc JSON build failed, so no contract was read."
-    echo "            This is NOT a pass. Last 20 lines:"
-    tail -20 "${SCRATCH}/rustdoc.log" | sed 's/^/       /'
+    echo "            This is NOT a pass."
+    echo ""
+    if [ -s "$ERRORS" ]; then
+      echo "            rustdoc reported $(grep -c '^error' "$ERRORS") error(s):"
+      echo ""
+      head -80 "$ERRORS" | sed 's/^/       /'
+    else
+      echo "            rustdoc emitted no 'error:' diagnostic, so this is a BUILD"
+      echo "            failure rather than a documentation failure — a dependency's"
+      echo "            build script or the toolchain itself."
+      if grep -qiE 'dbus|pkg-config|pkg_config' "${SCRATCH}/rustdoc.log"; then
+        echo ""
+        echo "            The log names pkg-config/dbus. This crate's full feature set"
+        echo "            pulls in libdbus-sys, whose build.rs panics when the dbus"
+        echo "            headers are absent — the failure that took down this gate's"
+        echo "            first CI run (31858449749). Install them:"
+        echo "              Debian/Ubuntu:  sudo apt-get install -y libdbus-1-dev"
+        echo "              macOS:          brew install dbus pkg-config"
+      fi
+      echo ""
+      echo "            Last 20 lines:"
+      tail -20 "${SCRATCH}/rustdoc.log" | sed 's/^/       /'
+    fi
+    if [ -n "$SAVED_LOG" ]; then
+      echo ""
+      echo "            Full build log: ${SAVED_LOG}"
+    fi
   } >&2
   exit "$EXIT_NO_VERDICT"
 fi
