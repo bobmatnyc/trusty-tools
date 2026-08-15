@@ -190,11 +190,18 @@ impl VerifyTailReport {
     /// `down`/`not_installed`` (an OPTIONAL member's health never fails this
     /// — demo-critical fix). A `stale` or `unknown` member does NOT fail
     /// verification — mirrors `stack::health::HealthReport`'s degrade policy
-    /// exactly (an under-the-version-floor daemon is still up; an
-    /// unprobeable process-managed member is not a verified gap).
+    /// exactly (an under-the-version-floor daemon is still up; a member with no
+    /// probeable transport is not a verified gap).
+    ///
+    /// #4925: trusty-mpm is no longer an example of the `unknown` tolerance. It
+    /// is probed over HTTP now, so a stopped mpm arrives here as `down` and — it
+    /// being `required: true` — FAILS verification. That is the accepted policy
+    /// consequence, not an oversight: the tolerance is for members whose health
+    /// genuinely cannot be determined, and mpm's can.
     /// Test: `tests::verified_requires_ensure_and_health`,
     /// `tests::verified_tolerates_stale_and_unknown`,
-    /// `tests::verified_ignores_optional_down_member`.
+    /// `tests::verified_ignores_optional_down_member`,
+    /// `tests::required_mpm_reporting_down_fails_verification`.
     fn build(ensure_ok: bool, members: Vec<VerifyRow>) -> Self {
         let health_ok = members
             .iter()
@@ -213,8 +220,17 @@ impl VerifyTailReport {
 ///
 /// Why: only a `down` LAUNCHD daemon is the #2498 failure signature
 /// (`launchctl bootstrap` succeeded, `RunAtLoad` never fired); a `not_installed`
-/// member, an `unknown` process-managed member (trusty-mpm), or a non-launchd
-/// member must never trigger a kickstart attempt.
+/// member, or any non-launchd member, must never trigger a kickstart attempt.
+///
+/// #4925: the `manage == Launchd` half of this predicate is now LOAD-BEARING FOR
+/// A LIVE CODE PATH rather than a hypothetical. `probe_member_health` used to
+/// return `Unprobeable` for trusty-mpm, so no `OwnVerb` member could ever reach
+/// `is_confirmed_down()` and the strategy check was belt-and-braces. mpm is now
+/// probed over HTTP, so a genuinely-stopped mpm DOES produce `Refused`, and this
+/// check is the only thing standing between that and
+/// `launchctl kickstart -k gui/<uid>/com.trusty.mpm` — a label that does not
+/// exist (mpm is process-managed via its own `start`/`stop` verbs; the
+/// `com.trusty.mpm.supervisor` job is a different job). Do not relax it.
 ///
 /// #4246: this predicate was never wrong — `probe_member_health` MANUFACTURED
 /// the `down` it fired on, by shelling out to a `health --json` verb no daemon
