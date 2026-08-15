@@ -515,6 +515,19 @@ jobs:
           bash scripts/check_contracts.sh --crate trusty-common
         id: contract-drift
 
+      # NEXT AUTHOR, READ THIS BEFORE WIRING THE REAL COMPARISON. When a
+      # published trusty-common finally carries contracts.json, the entry point
+      # to use is NOT `python3 scripts/diff_contracts.py` — it is
+      #
+      #     bash scripts/check_contracts.sh --diff <baseline> <current>
+      #
+      # which #5729 built for exactly this, and which owns the exit-code
+      # contract (0 clean / 1 drift / 2 usage / 3 no verdict) that this job
+      # should be reading. Calling the Python differ directly would re-implement
+      # that mapping here and let the two drift apart. This step still shells out
+      # to diff_contracts.py only as a RUNNABILITY PROBE; both arms end in the
+      # no-baseline SKIP today, so the choice has no effect yet and was left
+      # alone rather than changed speculatively.
       - name: "Gate 6 — cross-version contract diff"
         run: |
           set -euo pipefail
