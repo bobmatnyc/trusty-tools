@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::expand_path;
+use super::{expand_path_with, home_dir};
 
 /// Resolve the effective database path from the `database:` config field.
 ///
@@ -24,8 +24,26 @@ use super::expand_path;
 ///
 /// Test: see the unit tests in this module (`database_path_*`).
 pub fn resolve(database: Option<&Path>, config_dir: Option<&Path>) -> Option<PathBuf> {
+    // #5313: read $HOME here so `resolve_with_home` stays testable without it.
+    resolve_with_home(database, config_dir, home_dir().as_deref())
+}
+
+/// [`resolve`], with the home directory used for `~` expansion supplied
+/// explicitly.
+///
+/// Why (#5313): `resolve` expands `~` through `$HOME`, so the tilde case could
+/// only be tested by setting `HOME` process-wide — `unsafe` under the 2024
+/// edition, and a race against every other test thread, including the sibling
+/// `alias_file_path_expansion` which mutated the same variable.
+/// What: identical to [`resolve`] except that `home` replaces the `$HOME` read.
+/// Test: `database_path_tilde_expands_and_is_absolute`.
+pub(crate) fn resolve_with_home(
+    database: Option<&Path>,
+    config_dir: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
     let raw = database?;
-    let expanded = expand_path(raw);
+    let expanded = expand_path_with(raw, home);
     if expanded.is_absolute() {
         return Some(expanded);
     }
@@ -80,23 +98,35 @@ mod tests {
 
     /// Why: a `~/…` path must expand to the home directory and then not be
     /// further modified by `config_dir` (it is absolute after expansion).
-    /// What: call `resolve` with a tilde path and assert the HOME-expanded result.
-    /// Test: overrides `HOME` env var to a known value.
+    /// What: call `resolve_with_home` with a tilde path and a known home
+    /// directory, and assert the expanded result ignores `config_dir`.
+    /// Test: this test. #5313: it used to set `HOME` process-wide, which is
+    /// `unsafe` under the 2024 edition and raced every concurrent test thread;
+    /// the home directory is now an argument, so nothing global is touched.
     #[test]
     fn database_path_tilde_expands_and_is_absolute() {
-        // Temporarily set HOME to a known directory for predictable expansion.
-        let original = std::env::var_os("HOME");
-        std::env::set_var("HOME", "/home/testuser");
-        let result = resolve(
+        let result = resolve_with_home(
             Some(Path::new("~/data/tga.db")),
             Some(Path::new("/etc/tga")),
+            Some(Path::new("/home/testuser")),
         );
-        // Restore HOME.
-        match original {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
         assert_eq!(result, Some(PathBuf::from("/home/testuser/data/tga.db")));
+    }
+
+    /// Why: with no home directory known, a `~` path stays relative and must
+    /// then anchor to `config_dir` like any other relative path — the branch
+    /// that previously ran only on a machine with `HOME` unset.
+    /// What: call `resolve_with_home` with `home = None` and assert the tilde
+    /// path is joined to the config directory unexpanded.
+    /// Test: this test.
+    #[test]
+    fn database_path_tilde_without_home_anchors_to_config_dir() {
+        let result = resolve_with_home(
+            Some(Path::new("~/data/tga.db")),
+            Some(Path::new("/etc/tga")),
+            None,
+        );
+        assert_eq!(result, Some(PathBuf::from("/etc/tga/~/data/tga.db")));
     }
 
     /// Why: a relative `database:` value (e.g. `data/tga.db`) must be anchored

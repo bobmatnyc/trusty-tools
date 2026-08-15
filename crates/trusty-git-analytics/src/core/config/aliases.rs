@@ -30,7 +30,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::config::expand_path;
+use crate::core::config::{expand_path_with, home_dir};
 use crate::core::errors::{Result, TgaError};
 
 /// A single developer identity record in an external aliases file.
@@ -86,7 +86,27 @@ impl AliasFile {
     /// - [`TgaError::ConfigError`] if the parsed file is structurally
     ///   valid YAML but missing required fields.
     pub fn load(path: &Path) -> Result<Self> {
-        let resolved = expand_path(path);
+        // #5313: read $HOME here so `load_with_home` stays testable without it.
+        Self::load_with_home(path, home_dir().as_deref())
+    }
+
+    /// [`AliasFile::load`], with the home directory used for `~` expansion
+    /// supplied explicitly.
+    ///
+    /// Why (#5313): proving that `load` expands a leading `~` before reading
+    /// the file used to require pointing `HOME` at a temp directory — `unsafe`
+    /// under the 2024 edition, and a race against every other test thread,
+    /// including the sibling `database_path_tilde_expands_and_is_absolute`
+    /// which mutated the same variable.
+    /// What: identical to [`AliasFile::load`] except that `home` replaces the
+    /// `$HOME` read.
+    /// Test: `alias_file_path_expansion`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`AliasFile::load`].
+    pub(crate) fn load_with_home(path: &Path, home: Option<&Path>) -> Result<Self> {
+        let resolved = expand_path_with(path, home);
         tracing::debug!(path = %resolved.display(), "loading external aliases file");
         let text = std::fs::read_to_string(&resolved).map_err(|e| {
             TgaError::ConfigError(format!(
@@ -219,10 +239,16 @@ developers:
         assert_eq!(parsed.developers[0].reasoning, "");
     }
 
+    /// Why: `load` must expand a leading `~` before reading, so an aliases
+    /// file configured as `~/aliases.yaml` is found.
+    /// What: write the sample file into a unique temp directory, pass that
+    /// directory as the home, and load `~/aliases.yaml`.
+    /// Test: this test. #5313: it used to point the process-wide `HOME` at the
+    /// temp directory, which is `unsafe` under the 2024 edition and raced
+    /// `database_path_tilde_expands_and_is_absolute`, the other `HOME` mutator
+    /// in this test binary. The home directory is now an argument.
     #[test]
     fn alias_file_path_expansion() {
-        // Create a unique temp directory under std::env::temp_dir() and
-        // point HOME at it so `~/aliases.yaml` resolves into the temp dir.
         let unique = format!(
             "tga-alias-test-{}-{}",
             std::process::id(),
@@ -233,30 +259,12 @@ developers:
         );
         let tmp = std::env::temp_dir().join(unique);
         std::fs::create_dir_all(&tmp).expect("create tmp");
+        std::fs::write(tmp.join("aliases.yaml"), sample_yaml()).expect("write");
 
-        let original_home = std::env::var_os("HOME");
-        // SAFETY: env mutation. Restored at end of test. Tests can run
-        // concurrently across files, but the unique temp dir makes
-        // collisions impossible for the file payload; HOME mutation is
-        // the only concurrency risk and is accepted for this small test.
-        unsafe {
-            std::env::set_var("HOME", &tmp);
-        }
-
-        let file_path = tmp.join("aliases.yaml");
-        std::fs::write(&file_path, sample_yaml()).expect("write");
-
-        let tilde_path = Path::new("~/aliases.yaml");
-        let parsed = AliasFile::load(tilde_path).expect("load via tilde");
+        let parsed = AliasFile::load_with_home(Path::new("~/aliases.yaml"), Some(&tmp))
+            .expect("load via tilde");
         assert_eq!(parsed.developers.len(), 2);
 
-        // Restore HOME.
-        unsafe {
-            match original_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
