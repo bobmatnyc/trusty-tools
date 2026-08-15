@@ -33,6 +33,8 @@ pub mod reporter_fill;
 pub mod reporter_findings;
 pub mod reporter_graph_datasets;
 pub mod scan;
+// #5747: the schema-tag parse both artifact loaders decide compatibility from.
+pub(crate) mod schema;
 pub mod section_instructions;
 pub mod synthesize;
 pub mod synthesize_digest;
