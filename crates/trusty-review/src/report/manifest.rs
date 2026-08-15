@@ -106,6 +106,21 @@ pub struct ReportSection {
     /// Test: `manifest_tests.rs::parse_declared_gaps`.
     #[serde(default)]
     pub gaps: Vec<String>,
+    /// Optional path to the run's ticketing artifact (#5405).
+    ///
+    /// Why: `tga audit` correlates commits against the board items it synced,
+    /// and until now the report read none of that — a repository with a fully
+    /// configured tracker rendered exactly like one with none. The figures are
+    /// engagement-wide, so they belong here rather than on a repository entry;
+    /// routing them through `RepositoryEntry.metrics` would additionally block
+    /// the live `--analyze` fetch for whichever repository carried them.
+    /// What: a path to the JSON `tga` wrote beside this manifest, resolved
+    /// against the manifest directory when relative. Absent — a hand-written
+    /// manifest, or a run whose correlation stage failed — renders the section
+    /// as unpopulated and names it under Gaps & Caveats, never as a clean pass.
+    /// Test: `manifest_tests.rs::parse_ticketing_path`.
+    #[serde(default)]
+    pub ticketing: Option<PathBuf>,
     /// Optional base URL of the trusty-analyze daemon for the `--analyze` live
     /// deterministic-metrics fetch (epic #2445).
     ///
