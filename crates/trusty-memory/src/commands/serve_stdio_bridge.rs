@@ -8,10 +8,11 @@
 //! the stdio process never opens redb.
 //!
 //! What: `run_stdio_bridge` (1) ensures the daemon is running via the shared
-//! `trusty_common::mcp::ensure_daemon_up` helper (auto-starting it detached
-//! if absent, polling the `http_addr` file for the real dynamic port);
-//! (2) forwards each non-notification request to `POST /rpc` on the daemon
-//! and returns the daemon response verbatim to the MCP client.
+//! `trusty_common::mcp::ensure_daemon_up_single_flight` helper — starting it
+//! under an exclusive lock if absent (#5267), polling the `http_addr` file for
+//! the real dynamic port; (2) forwards each non-notification request to
+//! `POST /rpc` on the daemon and returns the daemon response verbatim to the
+//! MCP client.
 //!
 //! Caller-identity injection (DOC-53 §4.3, critical fix): the daemon this
 //! bridge proxies to is ONE shared process serving every concurrently-
@@ -35,9 +36,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use std::time::Duration;
-use trusty_common::mcp::{self, DaemonBridgeConfig};
-
-use crate::commands::daemon_guard::daemon_base_url;
+use trusty_common::mcp;
 
 /// Per-request forwarding timeout (60 s -- headroom for cold-start embedding).
 ///
@@ -91,54 +90,30 @@ pub(crate) async fn forward_rpc(
         .context("deserialise JSON-RPC response from daemon")
 }
 
-/// Build the `DaemonBridgeConfig` for the trusty-memory stdio bridge.
-///
-/// Why (issue #1152): the stdio bridge is a pure proxy — it must NEVER spawn
-/// an unmanaged daemon.  The previous config used `spawn_args = ["serve",
-/// "--foreground", "--http", "127.0.0.1:0"]`, which auto-started a background
-/// process on a random OS-assigned port whenever the health probe to the
-/// launchd daemon at :7070 failed transiently.  That spawned daemon opened the
-/// production palace redb files and squatted the exclusive write lock, starving
-/// the real daemon and causing all writes to fail with "DatabaseAlreadyOpen".
-/// Setting `no_spawn: true` converts the spawn-on-miss path into a clear `Err`
-/// so the user is told to run `trusty-memory start` rather than silently
-/// spawning a write-lock squatter.
-/// What: returns a `DaemonBridgeConfig` with `no_spawn: true` and empty
-/// `spawn_args` (unused when `no_spawn` is set) that is ready for
-/// `ensure_daemon_up`.
-/// Test: `ensure_daemon_up` unit tests in `trusty_common::mcp::daemon_bridge`;
-/// `no_spawn_returns_err_without_spawning` specifically covers this path.
-fn build_bridge_config() -> DaemonBridgeConfig {
-    DaemonBridgeConfig {
-        service_name: "trusty-memory".to_string(),
-        // spawn_args is unused because no_spawn = true: the bridge never
-        // spawns a daemon.  Left empty rather than deleted so DaemonBridgeConfig
-        // consumers that iterate spawn_args don't need a None-check.
-        spawn_args: vec![],
-        health_path: "/health".to_string(),
-        base_url_fn: Box::new(daemon_base_url),
-        startup_timeout: None, // use the shared 30s default
-        poll_interval: None,   // use the shared 500ms default
-        // Issue #1152: NEVER spawn an unmanaged daemon from the stdio bridge.
-        // If the launchd daemon at :7070 is not reachable, fail loudly.
-        no_spawn: true,
-        // trusty-memory's real operator guidance matches the shared helper's
-        // generic `{service} setup` / `io.trusty.{service}.plist` wording, so
-        // no override is needed here (issue #2491).
-        no_spawn_hint: None,
-    }
-}
-
 /// Ensure the trusty-memory daemon is running and return its live base URL.
 ///
-/// Why: thin wrapper around the shared `ensure_daemon_up` helper that supplies
-/// the trusty-memory-specific `DaemonBridgeConfig`. Kept as a named function so
-/// `run_stdio_bridge` reads cleanly and the config details are isolated.
-/// What: delegates entirely to `trusty_common::mcp::ensure_daemon_up`.
-/// Test: e2e coverage in `tests/serve_stdio_e2e.rs`.
+/// Why (#5267, superseding the `no_spawn: true` posture of #1152): a bridge whose
+/// daemon is merely not running should start it, not hard-error. #1152 was an
+/// *auto-spawn* outage — every bridge independently spawning `serve --foreground
+/// --http 127.0.0.1:0`, N bridges producing N daemons racing for redb's write
+/// lock. What this does instead is start-if-not-running: the daemon's existence
+/// is ensured ONCE, under an exclusive lock, so seven bridges converge on one
+/// daemon. #1152's own approved text sanctioned this branch ("auto-start the
+/// CANONICAL daemon via the single-instance-guarded start … so duplicates are
+/// structurally impossible"); the lock is the exclusion it assumed.
+/// What: delegates to the shared
+/// [`trusty_common::mcp::ensure_daemon_up_single_flight`] with the one
+/// [`crate::commands::start::daemon_start_config`] that `trusty-memory start`
+/// also uses — same spawn args, same lock file, so the two paths cannot race
+/// each other. Fails closed if the daemon does not become ready.
+/// Test: `crates/trusty-common/tests/single_flight_exclusion.rs`
+/// (`n_concurrent_bridges_start_exactly_one_daemon`); e2e in
+/// `tests/serve_stdio_e2e.rs`.
 pub(crate) async fn ensure_daemon_up_for_stdio() -> Result<String> {
-    let config = build_bridge_config();
-    trusty_common::mcp::ensure_daemon_up(&config).await
+    let lock_path = crate::commands::start::start_lock_path()
+        .ok_or_else(|| anyhow!("could not resolve the trusty-memory data directory"))?;
+    let config = crate::commands::start::daemon_start_config();
+    trusty_common::mcp::ensure_daemon_up_single_flight(&config, &lock_path).await
 }
 
 /// Returns true if the request is a JSON-RPC notification.
@@ -163,8 +138,9 @@ fn is_notification(req: &mcp::Request) -> bool {
 /// under the daemon-bridge architecture (issue #1078). The prior direct-store
 /// path opened redb in the stdio process and hit the write-lock exclusion
 /// problem; this path never touches the store at all.
-/// What: (1) ensures the daemon is running via the shared `ensure_daemon_up`
-/// helper (auto-start with 30 s budget); (2) builds a shared reqwest client;
+/// What: (1) ensures the daemon is running via the shared single-flight helper
+/// (start-if-absent under an exclusive lock, 30 s readiness budget, #5267);
+/// (2) builds a shared reqwest client;
 /// (3) enters `run_stdio_loop` -- for each JSON-RPC request, detects and
 /// suppresses notifications (per MCP spec section 4.1), then forwards
 /// non-notification requests to `POST /rpc` on the daemon and returns the

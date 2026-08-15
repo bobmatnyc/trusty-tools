@@ -27,9 +27,11 @@ pub mod daemon_bridge;
 pub mod memory_rpc;
 pub mod openrpc;
 pub mod service;
+pub mod single_flight;
 
 pub use daemon_bridge::{DaemonBridgeConfig, ensure_daemon_up};
 pub use service::ServiceDescriptor;
+pub use single_flight::{StartLock, ensure_daemon_up_single_flight};
 
 /// JSON-RPC 2.0 error codes.
 ///

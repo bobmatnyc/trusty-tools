@@ -155,6 +155,10 @@ open = "5"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# libc: the #5267 TTY-gated notice can only be exercised by giving the child a
+# REAL terminal on stdin, which needs openpty(3). A pipe proves the silent half
+# of the contract; only a pty proves the human-facing half.
+libc = { workspace = true }
 # #5005: encode a real 384-dim vector when seeding a synthetic id collision
 # into a palace's index redb, so HnswStore's dimension check accepts the file.
 postcard = { workspace = true }
