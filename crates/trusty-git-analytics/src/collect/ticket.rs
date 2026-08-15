@@ -10,6 +10,13 @@
 //!   `resolves #7` (case-insensitive, also matches `fix`/`close`/`resolve`).
 //! - **Azure DevOps work-item refs**: `AB#123`.
 //!
+//! **Note on JIRA-shaped tokens (issue #5199):** [`extract_ticket_id`] reads a
+//! JIRA/Linear key from the **subject line only**, and rejects documentation
+//! prefixes (`ADR`, `DOC`, `RFC`, `SPEC`). [`is_ticketed`] still scans the whole
+//! message with the unrestricted pattern — the two now disagree deliberately,
+//! because `ticketed` is an operator-facing quality metric last tuned by #445
+//! and narrowing it is a separate decision.
+//!
 //! **Note on bare `#N` refs (issue #445):** A bare `#N` preceded by
 //! whitespace (the `gh_bare` pattern) is explicitly *excluded* from
 //! [`is_ticketed`]. It fires on almost any multi-line commit body and was
@@ -58,13 +65,29 @@ fn patterns() -> &'static TicketPatterns {
     })
 }
 
+/// Prefixes that name a *document*, never a work item (#5199).
+///
+/// Why: `ADR-0029` and `PROJ-1234` are the same shape, so shape alone cannot
+/// separate them. These four prefixes are cross-industry documentation
+/// conventions, and a repo that writes them in a commit subject is citing a
+/// document, not a ticket.
+/// What: compared against the segment before the first `-` of an otherwise
+/// well-formed key.
+/// Test: `tests::adr_reference_is_not_a_ticket_key`.
+const DOC_REF_PREFIXES: &[&str] = &["ADR", "DOC", "RFC", "SPEC"];
+
 /// Compiled extraction patterns used by [`extract_ticket_id`], ordered from
 /// most-specific to least-specific so the highest-fidelity match wins.
 struct ExtractPatterns {
     /// Azure DevOps work-item reference: `AB#123`.
     azdo: Regex,
-    /// JIRA / Linear style: `PROJ-123`, `ENG-456`, `DRE-405`.
-    jira: Regex,
+    /// Leading noise stripped from a subject line before anchoring the
+    /// JIRA/Linear key: an optional conventional-commit `type(scope)!:`
+    /// prefix, then an optional `[` or `(`.
+    subject_prefix: Regex,
+    /// JIRA / Linear style anchored to the start of the stripped subject:
+    /// `PROJ-123`, `ENG-456`, `DRE-405`.
+    jira_anchored: Regex,
     /// GitHub bare issue reference: `#123`.
     gh_bare: Regex,
 }
@@ -77,10 +100,57 @@ fn extract_patterns() -> &'static ExtractPatterns {
         // [`extract_patterns_compile`] — any regression is caught at test time.
         ExtractPatterns {
             azdo: Regex::new(r"\bAB#\d+\b").expect("azdo extract pattern compiles"),
-            jira: Regex::new(r"\b[A-Z][A-Z0-9]*-\d+\b").expect("jira extract pattern compiles"),
+            subject_prefix: Regex::new(
+                r"^(?:[a-z][a-z0-9]*(?:\([^)\n]*\))?!?:[ \t]*)?[\[(]?[ \t]*",
+            )
+            .expect("subject_prefix pattern compiles"),
+            // #5199: anchored to `^`, so a key that is the tail of a longer
+            // hyphenated identifier (`SPEC-INSTALLER-01` → `INSTALLER-01`)
+            // can never match.
+            jira_anchored: Regex::new(r"^([A-Z][A-Z0-9]*-\d+)(?:$|[\s:,.;)\]])")
+                .expect("jira_anchored pattern compiles"),
             gh_bare: Regex::new(r"(?:^|\s)(#\d+)\b").expect("gh_bare extract pattern compiles"),
         }
     })
+}
+
+/// Is `key` a documentation reference rather than a work-tracking key?
+///
+/// Why: see [`DOC_REF_PREFIXES`].
+/// What: splits at the first `-` and matches the prefix against that list.
+/// Test: `tests::adr_reference_is_not_a_ticket_key`.
+fn is_doc_reference(key: &str) -> bool {
+    key.split_once('-')
+        .is_some_and(|(prefix, _)| DOC_REF_PREFIXES.contains(&prefix))
+}
+
+/// The JIRA/Linear key a commit *subject* declares, if any.
+///
+/// Why: a JIRA-shaped token is only evidence of a ticket when the author put
+/// it where a ticket key goes. Accepting one from anywhere in the message
+/// makes every `UTF-8`, `SHA-256`, `RUSTSEC-2026`, `GCC-11` and `ADR-0034` in
+/// a commit body a ticket key — measured at 466 false keys across 178 distinct
+/// prefixes on this repo's own 2633 commits, against zero genuine ones (#5199).
+/// What: strips an optional conventional-commit prefix and an optional opening
+/// bracket, then requires the key to be the very first token of what remains
+/// and not a [`DOC_REF_PREFIXES`] citation.
+/// Test: `tests::extract_ticket_id_subject_forms`,
+/// `tests::adr_reference_is_not_a_ticket_key`,
+/// `tests::body_prose_identifier_is_not_a_ticket_key`.
+fn subject_ticket_key(subject: &str) -> Option<String> {
+    let p = extract_patterns();
+    let stripped = p.subject_prefix.replace(subject, "");
+    let key = p
+        .jira_anchored
+        .captures(stripped.as_ref())?
+        .get(1)?
+        .as_str()
+        .to_string();
+    if is_doc_reference(&key) {
+        None
+    } else {
+        Some(key)
+    }
 }
 
 /// Return `true` if `message` contains any recognized ticket reference.
@@ -115,7 +185,7 @@ pub fn is_ticketed(message: &str) -> bool {
     p.jira.is_match(message) || p.gh_action.is_match(message) || p.azdo.is_match(message)
 }
 
-/// Extract the first recognizable ticket identifier from a commit message.
+/// Extract the ticket identifier a commit message declares.
 ///
 /// Why: `commits.ticket_id` must be populated at insert time so that JIRA
 /// classification and ticket-rate metrics work without requiring a separate
@@ -123,10 +193,28 @@ pub fn is_ticketed(message: &str) -> bool {
 /// uncategorized commits had clearly extractable JIRA IDs (e.g. `BB-2746`,
 /// `SRE-3104`, `DRE-405`) but NULL `ticket_id` because this extraction
 /// only happened during backfill, not during `tga collect`.
-/// What: tests the message against ADO (`AB#N`), JIRA/Linear (`PROJ-N`),
-/// and GitHub bare (`#N`) patterns in that priority order; returns the
-/// first match as `Some(String)`, or `None` when no ticket ref is found.
-/// Test: `tests::extract_ticket_id_*` below; also exercised by
+/// [`crate::collect::correlate_commits`] then joins that key against
+/// `work_items`, so a wrong key here is not a missed link — it is a reported
+/// coverage gap against a ticket that exists on no board (#5199).
+///
+/// What: three tiers, most-specific first.
+///
+/// 1. Azure DevOps `AB#N`, anywhere in the message.
+/// 2. A JIRA/Linear key **the subject line declares** — see
+///    [`subject_ticket_key`] for what qualifies. A JIRA-shaped token anywhere
+///    else in the message is prose, not a ticket key.
+/// 3. GitHub bare `#N`, anywhere in the message.
+///
+/// Returns the first tier that matches, else `None`.
+///
+/// This takes no configuration and consults none: there is no
+/// project-key allow-list to be present or absent, so there is no branch that
+/// can silently return nothing because a repo was never configured. A repo
+/// whose ticket keys are unanchored prose loses them — that is the deliberate
+/// trade, measured in the [`subject_ticket_key`] doc.
+///
+/// Test: `tests::extract_ticket_id_*` and
+/// `tests::adr_reference_is_not_a_ticket_key` below; also exercised by
 /// `collect::git::extractor` tests that verify `ticket_id` is populated
 /// at INSERT time during `tga collect`.
 ///
@@ -140,6 +228,14 @@ pub fn is_ticketed(message: &str) -> bool {
 /// assert_eq!(extract_ticket_id("DRE-405 fix demand calculation"), Some("DRE-405".to_string()));
 /// assert_eq!(extract_ticket_id("fixes #99"), Some("#99".to_string()));
 /// assert_eq!(extract_ticket_id("misc cleanup"), None);
+///
+/// // #5199: a documentation citation is not a ticket key, and a subject-line
+/// // issue reference is no longer overridden by one in the body.
+/// assert_eq!(extract_ticket_id("docs: amend ADR-0034"), None);
+/// assert_eq!(
+///     extract_ticket_id("fix: crash on start\n\nSee ADR-0034.\nCloses #5089"),
+///     Some("#5089".to_string())
+/// );
 /// ```
 pub fn extract_ticket_id(message: &str) -> Option<String> {
     let p = extract_patterns();
@@ -149,9 +245,11 @@ pub fn extract_ticket_id(message: &str) -> Option<String> {
         return Some(m.as_str().to_string());
     }
 
-    // JIRA / Linear: PROJ-123.
-    if let Some(m) = p.jira.find(message) {
-        return Some(m.as_str().to_string());
+    // #5199: JIRA/Linear keys are read from the subject line only. Scanning
+    // the whole message made every hyphenated uppercase token in the body a
+    // ticket key.
+    if let Some(key) = subject_ticket_key(message.lines().next().unwrap_or("")) {
+        return Some(key);
     }
 
     // GitHub bare: #123 — the capture group strips the leading whitespace
@@ -248,10 +346,97 @@ mod tests {
         );
     }
 
+    /// Why: this test used to assert that `Relates to SRE-999` in a commit
+    /// BODY yields `SRE-999`. That assertion encoded the #5199 defect — it is
+    /// the exact shape that turned `UTF-8`, `SHA-256`, `RUSTSEC-2026` and
+    /// `ADR-0034` into ticket keys. It is inverted here deliberately, not
+    /// weakened: a body-line JIRA-shaped token is no longer a ticket key.
+    /// What: the body key is ignored; a body `#N` is still the last resort.
+    /// Test: this test itself.
     #[test]
     fn extract_ticket_id_multiline_body() {
         let msg = "Refactor module structure\n\nRelates to SRE-999.\n";
-        assert_eq!(extract_ticket_id(msg), Some("SRE-999".to_string()));
+        assert_eq!(extract_ticket_id(msg), None);
+
+        // A subject that declares the key still resolves from a multi-line
+        // message — only the position changed, not the support for bodies.
+        let anchored = "SRE-999 refactor module structure\n\nDetails here.\n";
+        assert_eq!(extract_ticket_id(anchored), Some("SRE-999".to_string()));
+    }
+
+    /// Why: #5199 — `ADR-0029` and `PROJ-1234` are the same shape, so the
+    /// unrestricted JIRA pattern read this repo's own architecture-decision
+    /// citations as ticket keys and `correlate_commits` reported them as
+    /// coverage gaps against tickets that exist on no board.
+    /// What: an ADR citation yields no ticket key, and the commit falls
+    /// through to the GitHub issue its subject or body actually names.
+    /// Test: this test itself.
+    #[test]
+    fn adr_reference_is_not_a_ticket_key() {
+        // Subject-leading ADR citation: not a ticket, and nothing else to fall
+        // back to.
+        assert_eq!(extract_ticket_id("docs(adr): ADR-0030 point 7"), None);
+        // The #5199 reproduction: subject cites real issues, body cites an ADR.
+        // Before the fix this returned Some("ADR-0034").
+        let msg = "fix(relay): verify the HMAC once\n\nPer ADR-0034 the relay spools durably.\nCloses #5089\nCloses #5175\n";
+        assert_eq!(extract_ticket_id(msg), Some("#5089".to_string()));
+        // The other three documentation prefixes.
+        assert_eq!(extract_ticket_id("docs: DOC-67 §2 rewrite"), None);
+        assert_eq!(extract_ticket_id("RFC-2119 keyword sweep"), None);
+        assert_eq!(extract_ticket_id("SPEC-14 tightened"), None);
+    }
+
+    /// Why: #5199 — the long tail of false keys was not documentation
+    /// prefixes at all but ordinary technical identifiers in commit bodies. A
+    /// deny-list can never enumerate them; anchoring to the subject removes
+    /// them by construction.
+    /// What: none of these body-prose identifiers becomes a ticket key.
+    /// Test: this test itself.
+    #[test]
+    fn body_prose_identifier_is_not_a_ticket_key() {
+        for body in [
+            "fix: stem handling\n\nA filename containing a multi-byte UTF-8 character breaks.\n",
+            "chore: pin the digest\n\nVerifies the artifact against the published SHA-256.\n",
+            "chore: bump anydoc\n\nAvoids reintroducing RUSTSEC-2026-0187.\n",
+            "build: probe the toolchain\n\nMirrors the AL2023/GCC-11 desync.\n",
+            "docs: rate table\n\nGPT-5 and Gemini rates differ.\n",
+            "fix: parse timestamps\n\nISO-8601 offsets were dropped.\n",
+        ] {
+            assert_eq!(extract_ticket_id(body), None, "message: {body:?}");
+        }
+    }
+
+    /// Why: #5199 narrowed where a JIRA/Linear key is read from, so the real
+    /// subject shapes #316 relied on must be proven still to resolve.
+    /// What: bare, colon-separated, conventional-commit-prefixed and
+    /// bracketed subject forms all yield the key.
+    /// Test: this test itself.
+    #[test]
+    fn extract_ticket_id_subject_forms() {
+        for (msg, want) in [
+            ("BB-2746: refactor auth service", "BB-2746"),
+            ("DRE-405 fix demand calculation", "DRE-405"),
+            ("fix(auth): PROJ-12 tighten token check", "PROJ-12"),
+            ("[ENG-77] add endpoint", "ENG-77"),
+            ("feat!: API-9 breaking rename", "API-9"),
+            ("SRE-3104", "SRE-3104"),
+        ] {
+            assert_eq!(extract_ticket_id(msg), Some(want.to_string()), "{msg:?}");
+        }
+    }
+
+    /// Why: #5199 — a key that is the tail of a longer hyphenated identifier
+    /// (`SPEC-INSTALLER-01`) used to surface as `INSTALLER-01`, which the
+    /// `SPEC` deny-list alone would not have caught.
+    /// What: anchoring at `^` makes the tail unreachable.
+    /// Test: this test itself.
+    #[test]
+    fn hyphenated_tail_segment_is_not_a_ticket_key() {
+        assert_eq!(extract_ticket_id("SPEC-INSTALLER-01 detect target"), None);
+        assert_eq!(
+            extract_ticket_id("docs: SPEC-MPM-CUTOVER-03 decision"),
+            None
+        );
     }
 
     #[test]

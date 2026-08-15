@@ -248,8 +248,12 @@ mod tests {
             Some("PROJ-9"),
         );
         insert_commit(db.connection(), "ccc", "chore: nothing here", None);
-        // ticket_id column empty, but the message still carries the key.
-        insert_commit(db.connection(), "ddd", "fixes PROJ-1 again", None);
+        // ticket_id column empty, but the subject still declares the key.
+        // #5199: the key must lead the subject — a mid-prose `fixes PROJ-1`
+        // no longer counts, so this fixture states it the way a real commit
+        // would. The behaviour under test (column empty → read the message)
+        // is unchanged.
+        insert_commit(db.connection(), "ddd", "PROJ-1 fixed again", None);
         upsert_work_item(db.connection(), &work_item("PROJ-1", "jira")).expect("upsert");
 
         let out = correlate_commits(db.connection_mut(), &ProgressBus::disabled()).expect("run");
@@ -391,11 +395,41 @@ mod tests {
     #[test]
     fn ticket_key_prefers_column_then_message() {
         assert_eq!(
-            ticket_key(Some("PROJ-1"), "unrelated PROJ-2"),
+            ticket_key(Some("PROJ-1"), "PROJ-2 unrelated"),
             Some("PROJ-1".into())
         );
-        assert_eq!(ticket_key(Some("  "), "sees PROJ-2"), Some("PROJ-2".into()));
-        assert_eq!(ticket_key(None, "sees PROJ-2"), Some("PROJ-2".into()));
+        // #5199: the message fallback reads a subject-leading key. The
+        // fixtures say `PROJ-2 seen` rather than `sees PROJ-2` for that
+        // reason; which of the two sources wins is what this test covers.
+        assert_eq!(ticket_key(Some("  "), "PROJ-2 seen"), Some("PROJ-2".into()));
+        assert_eq!(ticket_key(None, "PROJ-2 seen"), Some("PROJ-2".into()));
         assert_eq!(ticket_key(None, "chore: nothing"), None);
+    }
+
+    /// Why: #5199 — this pass is where the corrupted key became an operator-
+    /// facing number. A commit citing an ADR in its body was stored with
+    /// `ticket_id = 'ADR-0034'` and counted in `no_work_item`, reporting a
+    /// coverage gap against a ticket that exists on no board.
+    /// What: the ADR-citing commit resolves to the GitHub issue its body
+    /// names, links to the real work item, and never lands in `no_work_item`.
+    /// Test: this test itself.
+    #[test]
+    fn adr_citation_does_not_become_a_phantom_coverage_gap() {
+        let mut db = Database::open_in_memory().expect("open");
+        insert_commit(
+            db.connection(),
+            "352fe5d6",
+            "fix(relay): verify the HMAC once\n\nPer ADR-0034 the relay spools durably.\nCloses #5089\n",
+            None,
+        );
+        upsert_work_item(db.connection(), &work_item("#5089", "github")).expect("upsert");
+
+        let out = correlate_commits(db.connection_mut(), &ProgressBus::disabled()).expect("run");
+        assert_eq!(
+            out.linked, 1,
+            "resolves the issue the commit actually cites"
+        );
+        assert_eq!(out.no_work_item, 0, "ADR-0034 is not a phantom gap");
+        assert_eq!(out.no_ticket, 0);
     }
 }
