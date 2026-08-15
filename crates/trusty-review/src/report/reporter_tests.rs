@@ -1894,7 +1894,10 @@ fn reporter_captions_a_truncated_top_risks_table() {
 }
 
 /// Build a model whose manifest declares a ticketing artifact (#5405).
-fn fixture_model_with_ticketing(dir: &Path, artifact: &str) -> ReportModel {
+///
+/// `template` is the name recorded on the model; the caller loads the same
+/// template's text separately, so both bundled templates run this fixture.
+fn fixture_model_with_ticketing(dir: &Path, template: &str, artifact: &str) -> ReportModel {
     std::fs::write(dir.join("ticketing.json"), artifact).expect("write ticketing");
 
     let toml = r#"
@@ -1909,43 +1912,44 @@ fn fixture_model_with_ticketing(dir: &Path, artifact: &str) -> ReportModel {
     "#;
     let manifest_path = dir.join("manifest.toml");
     let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
-    ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build model")
+    ReportModel::build(&manifest, &manifest_path, template, None).expect("build model")
 }
 
-/// #5405's first closure condition, asserted on the RENDERED artifact rather
-/// than on the model: the report reads `work_items` (by way of the correlation
-/// figures tga wrote) and states them on the page.
+/// The figures-present case, asserted on the RENDERED artifact rather than on
+/// the model: the report reads `work_items` (by way of the correlation figures
+/// tga wrote) and states them on the page.
 ///
 /// The end-to-end shape matters here. Every intermediate layer could hold the
 /// figures correctly and the section could still never reach the page — the
 /// polish pass drops marker rows and collapses emptied sections, so a scalar
-/// this test only checked on the model would prove nothing about the document
-/// an acquirer reads.
-#[test]
-fn reporter_states_ticketing_coverage() {
+/// checked only on the model would prove nothing about the document an acquirer
+/// reads. Both bundled templates place the section at §8, so one body serves
+/// both.
+fn assert_template_states_ticketing_coverage(template_name: &str) {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let model = fixture_model_with_ticketing(
         tmp.path(),
+        template_name,
         r#"{"schema_version":"v0","commits":412,"commits_linked":260,
             "work_items":180,"work_items_linked":155,"sources":["jira","linear"]}"#,
     );
     let template = TemplateLoader::bundled_only()
-        .load("report-technical-dd")
+        .load(template_name)
         .expect("bundled template");
     let md = Reporter::new(tmp.path()).render(&model, &template);
 
     assert!(
         md.contains("## 8. Ticketing & Delivery Traceability"),
-        "the section must render:\n{md}"
+        "{template_name}: the section must render:\n{md}"
     );
     assert!(
         md.contains("260 of 412 commit(s)") && md.contains("jira, linear"),
-        "the counts and the boards they came from must reach the page:\n{md}"
+        "{template_name}: the counts and the boards they came from must reach the page:\n{md}"
     );
     // Not collapsed, and not swept into the gaps list.
     assert!(
         !md.contains("## 8. Ticketing & Delivery Traceability\n\n_No data available"),
-        "a populated section must not collapse:\n{md}"
+        "{template_name}: a populated section must not collapse:\n{md}"
     );
     assert!(!md.contains("{{ticketing_coverage}}"));
 }
@@ -1954,35 +1958,41 @@ fn reporter_states_ticketing_coverage() {
 /// correlated nothing STATES that. A zero is a finding about the codebase —
 /// commits do not cite tracked work — and must never render as the same blank
 /// a missing artifact produces.
-#[test]
-fn reporter_states_a_zero_coverage_run_rather_than_omitting_it() {
+fn assert_template_states_a_zero_coverage_run(template_name: &str) {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let model = fixture_model_with_ticketing(
         tmp.path(),
+        template_name,
         r#"{"schema_version":"v0","commits":300,"commits_linked":0,
             "work_items":12,"work_items_linked":0,"sources":[]}"#,
     );
     let template = TemplateLoader::bundled_only()
-        .load("report-technical-dd")
+        .load(template_name)
         .expect("bundled template");
     let md = Reporter::new(tmp.path()).render(&model, &template);
 
     assert!(
         md.contains("No commit referenced a tracked board item"),
-        "a zero run must state itself, not collapse:\n{md}"
+        "{template_name}: a zero run must state itself, not collapse:\n{md}"
     );
-    assert!(md.contains("300 commit(s)"), "{md}");
+    assert!(md.contains("300 commit(s)"), "{template_name}:\n{md}");
 }
 
 /// The other side of that contract: when the producing run supplied NO
 /// artifact, the section must be named as unassessed rather than silently
 /// absent — DOC-67 §9's rule, and the defect #5405 is one level up from.
-#[test]
-fn a_missing_ticketing_artifact_is_named_not_silently_dropped() {
+///
+/// This is the case a template can fail invisibly. A template with no section
+/// at all renders no placeholder, so the polish pass has nothing to collapse
+/// and nothing to name: the omission escapes the very mechanism built to
+/// surface it. Assert the heading, the collapse line, and the gap entry
+/// together — any one of the three alone passes on a template that dropped the
+/// dimension entirely.
+fn assert_template_names_a_missing_ticketing_artifact(template_name: &str) {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let model = fixture_model(tmp.path());
     let template = TemplateLoader::bundled_only()
-        .load("report-technical-dd")
+        .load(template_name)
         .expect("bundled template");
     let md = Reporter::new(tmp.path()).render(&model, &template);
 
@@ -1990,7 +2000,7 @@ fn a_missing_ticketing_artifact_is_named_not_silently_dropped() {
     // the dimension exists and was not assessed.
     assert!(
         md.contains("## 8. Ticketing & Delivery Traceability"),
-        "the heading must survive so the omission is visible:\n{md}"
+        "{template_name}: the heading must survive so the omission is visible:\n{md}"
     );
     let section = md
         .split("## 8. Ticketing & Delivery Traceability")
@@ -1998,7 +2008,7 @@ fn a_missing_ticketing_artifact_is_named_not_silently_dropped() {
         .expect("section body");
     assert!(
         section.contains("_No data available — see Gaps & Caveats._"),
-        "an unpopulated section must say so:\n{section}"
+        "{template_name}: an unpopulated section must say so:\n{section}"
     );
     // And it is listed among the gaps, not merely blank on the page.
     let gaps = md
@@ -2007,6 +2017,45 @@ fn a_missing_ticketing_artifact_is_named_not_silently_dropped() {
         .expect("gaps section");
     assert!(
         gaps.contains("Ticketing & Delivery Traceability"),
-        "the unassessed dimension must be named in Gaps & Caveats:\n{gaps}"
+        "{template_name}: the unassessed dimension must be named in Gaps & Caveats:\n{gaps}"
     );
+}
+
+#[test]
+fn reporter_states_ticketing_coverage() {
+    assert_template_states_ticketing_coverage("report-technical-dd");
+}
+
+#[test]
+fn reporter_states_a_zero_coverage_run_rather_than_omitting_it() {
+    assert_template_states_a_zero_coverage_run("report-technical-dd");
+}
+
+#[test]
+fn a_missing_ticketing_artifact_is_named_not_silently_dropped() {
+    assert_template_names_a_missing_ticketing_artifact("report-technical-dd");
+}
+
+/// The CAST template's copy of the figures-present case.
+///
+/// A CAST engagement resolves the same manifest and the same model: nothing on
+/// the load path is template-aware, so the figures reach `build_scope`
+/// identically. Only the template decides whether they reach the page.
+#[test]
+fn cast_reporter_states_ticketing_coverage() {
+    assert_template_states_ticketing_coverage("report-technical-dd-cast");
+}
+
+/// The CAST template's copy of the correlated-nothing case.
+#[test]
+fn cast_reporter_states_a_zero_coverage_run_rather_than_omitting_it() {
+    assert_template_states_a_zero_coverage_run("report-technical-dd-cast");
+}
+
+/// The CAST template's copy of the missing-artifact case — the one that was
+/// failing invisibly. The template had no §8 at all, so a CAST report showed
+/// neither the coverage figures nor a gap line explaining their absence.
+#[test]
+fn a_missing_ticketing_artifact_is_named_in_the_cast_template_too() {
+    assert_template_names_a_missing_ticketing_artifact("report-technical-dd-cast");
 }
