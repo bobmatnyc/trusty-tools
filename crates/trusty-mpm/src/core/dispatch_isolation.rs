@@ -63,6 +63,9 @@
 //!
 //! [`isolation_separates_working_tree`]: crate::core::dispatch_isolation::isolation_separates_working_tree
 //! [`agent_mutates_files`]: crate::core::dispatch_isolation::agent_mutates_files
+//! [`shares_the_callers_tree`]: crate::core::dispatch_isolation::shares_the_callers_tree
+//! [`agent_write_risk`]: crate::core::dispatch_isolation::agent_write_risk
+//! [`requires_own_worktree_in_main_checkout`]: crate::core::dispatch_isolation::requires_own_worktree_in_main_checkout
 
 use serde_json::Value;
 use trusty_agents_common::agents::metadata::agent_metadata_from_str;

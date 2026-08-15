@@ -16,7 +16,7 @@
 //! What: [`evaluate_main_checkout_destructive_command`] denies a `Bash` call
 //! when BOTH halves hold — the command names a whole-tree-destructive git verb
 //! ([`is_whole_tree_destructive`]) AND the directory that verb would act on
-//! ([`destructive_target_dir`]) is a main checkout
+//! ([`git_verb_target_dir`]) is a main checkout
 //! ([`trusty_mpm::core::project_aliases::is_main_checkout`]). Anything under
 //! `.claude/worktrees/**` or `.worktrees/**` is a worktree, never a main
 //! checkout, so delegated work stays fully writable — that is where it is
@@ -60,7 +60,8 @@
 //! (`TRUSTY_MPM_DISABLE_HOOKS`, `TRUSTY_MPM_PM_UNRESTRICTED`) lift this rule
 //! along with every other, which remains tracked as #3981.
 //!
-//! Test: `is_whole_tree_destructive_*`, `destructive_target_dir_*` below;
+//! Test: `is_whole_tree_destructive_*`, `destructive_target_dir_*`,
+//! `commit_target_dir_*` below;
 //! `is_main_checkout_*` in `trusty_mpm::core::project_aliases`;
 //! `pm_guard_denies_the_incident_commands_in_a_main_checkout` and siblings in
 //! `tests/tm_hook_pm_guard.rs` run the stdin→decision→stdout path through the
@@ -81,7 +82,7 @@ use crate::commands::pm_guard_bash::shell_lex;
 /// ([`PathEnv::from_process`]) happens in exactly one place and the policy
 /// underneath stays testable without it.
 /// What: `Some(reason)` — naming the verb, the directory, and the remedy —
-/// when [`destructive_target_dir`] finds a destructive verb whose target
+/// when [`git_verb_target_dir`] finds a destructive verb whose target
 /// directory [`is_main_checkout`]; `None` (ALLOW) otherwise.
 /// Test: the two halves are covered separately (see the module doc); the
 /// composition runs end to end in `tests/tm_hook_pm_guard.rs`.
