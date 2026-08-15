@@ -54,6 +54,39 @@ To regenerate: build a crate from `probe-base.rs` at 0.1.0 and from
 Everything the differ does read is verbatim, including the 45 synthetic and
 blanket impls, which is what proves it skips them.
 
+## The format-61 pair
+
+`probe-v61-base.json` / `probe-v61-cur.json`, sources beside them as
+`probe-v61-base.rs` / `probe-v61-cur.rs`. Same nine breaks as the pair above plus
+a tenth — `S::async_ret`, `Vec<u64>` -> `Result<Vec<u64>, String>` — at
+rustdoc-JSON `format_version` 61.
+
+**Why a second pair exists.** The differ shipped with
+`SUPPORTED_FORMAT_VERSIONS = (57,)` while every rustdoc on the machine emitted
+61, so `--crate <anything>` exited 3 and it compared nothing on any real crate.
+Its self-test stayed green the whole time, because the format-57 fixtures above
+were the only documents it ever read. A differ pinned to a schema version needs a
+fixture at the version the toolchain actually emits, or "the tests pass" and "the
+tool works" come apart with nothing to say so.
+
+**Why the async row.** rustdoc records an `async fn` UN-DESUGARED: `sig.output`
+holds the inner type, not the `impl Future` the source implies. So an async
+return is an ordinary type position and needs no special handling — verified, not
+assumed. Pinning it means a future schema that starts recording the desugared
+future instead fails here, rather than silently comparing every async return
+equal.
+
+**To regenerate**, or to add a pair at the next format version:
+
+```
+cargo +nightly rustdoc -- -Zunstable-options --output-format json
+```
+
+over a crate named `lintprobe` built from each `.rs`, then apply the same two
+reductions described above. `scripts/check_semver_types_selftest.sh` case 15
+asserts every version in `SUPPORTED_FORMAT_VERSIONS` has a pair behind it, so
+adding a version to that tuple without a fixture fails the self-test.
+
 ## Derived fixtures
 
 `mutate.py` derives the fail-closed inputs from `probe-base.json` at test time —

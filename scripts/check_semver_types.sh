@@ -198,7 +198,20 @@ import sys
 # added and confirming the node shapes below still hold. An unlisted version is
 # a NO VERDICT, which is the safe direction: a schema this differ half-
 # understands would compare rendering differences and call them API changes.
-SUPPORTED_FORMAT_VERSIONS = (57,)
+#
+# 61 was added because the list said (57,) while every rustdoc on the machine
+# emitted 61, so `--crate <anything>` exited 3 and this differ compared nothing
+# on any real crate. It read only its own committed format-57 fixtures, so its
+# self-test stayed green throughout and nothing said the tool was inert. The
+# format-61 fixture pair exists so that cannot recur silently — see
+# scripts/test-data/semver-types/README.md.
+#
+# THE STALENESS IS STRUCTURAL, not fixed by this entry. A frozen fixture proves
+# the differ still reads the version it was captured at; it can never notice
+# that the toolchain has moved past it. Only running the differ on rustdoc JSON
+# the CURRENT toolchain produced can do that, and nothing does — see
+# docs/reference/semver-gate.md, "The staleness this cannot detect".
+SUPPORTED_FORMAT_VERSIONS = (57, 61)
 
 NO_VERDICT = 3
 

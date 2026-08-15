@@ -117,7 +117,54 @@ Two things it does not cover, both deliberate:
   renders identically on both sides. No static differ can see it, this one
   included.
 
-Self-test: `scripts/check_semver_types_selftest.sh`.
+`async fn` needs no special handling and gets none. rustdoc records it
+UN-DESUGARED — `sig.output` holds the inner type, not the `impl Future` the
+source implies — so an async `Vec<T>` -> `Result<Vec<T>>` is an ordinary return
+position and reports like any other. Pinned by the `S::async_ret` row of the
+format-61 fixture pair.
+
+Self-test: `scripts/check_semver_types_selftest.sh`, 15 cases.
+
+### The staleness this cannot detect
+
+The differ reads one schema at a time: `SUPPORTED_FORMAT_VERSIONS` in
+`scripts/check_semver_types.sh` lists the rustdoc-JSON `format_version` values it
+understands, and anything else is a `NO VERDICT`. That guard is correct and it is
+also the failure mode.
+
+It shipped listing only 57 while every rustdoc on the machine emitted 61, so
+`--crate <anything>` exited 3 and it compared nothing on any real crate. Nothing
+reported this, because the only thing that runs the differ is its own self-test
+and that reads committed format-57 fixtures. The tool was inert and its tests
+were green.
+
+Two things now stand against a repeat, and neither is sufficient:
+
+- A **format-61 fixture pair** covers the version the toolchain currently emits,
+  and self-test case 15 fails if a version is added to
+  `SUPPORTED_FORMAT_VERSIONS` without a pair behind it.
+- Both are still **frozen fixtures**. They prove the differ reads the versions it
+  was captured at. They cannot notice the toolchain moving past them — at
+  `format_version` 62 the differ goes inert again and the self-test stays green.
+
+Detecting that needs the differ run against rustdoc JSON the CURRENT toolchain
+produced, and **nothing does that**. The document is already there for free:
+`check_semver.sh` caches it under `target/semver-checks/`, so a step that runs
+`check_semver_types.sh --crate <c>` after the gate would fail loudly on a schema
+bump — and would also be the first thing anywhere to make a type change block a
+release. Neither `.github/workflows/semver-checks.yml` nor `preflight-publish.sh`
+CHECK 5 does it today; CHECK 5 still only names the script in its `[PASS]` line.
+
+Until then: a type break is caught only if somebody runs the differ by hand, and
+it is silently caught by nothing at all if the toolchain has moved past every
+listed format version. Check with:
+
+```
+$ bash scripts/check_semver_types.sh --crate <crate>
+```
+
+An exit of 3 mentioning `format_version` means the list is stale, not that the
+crate is clean.
 
 ## What runs
 

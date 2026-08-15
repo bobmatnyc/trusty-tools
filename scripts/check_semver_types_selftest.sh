@@ -270,6 +270,89 @@ else
   pass_case "two cached baselines for one version are refused, not guessed at (exit 3)"
 fi
 
+# ===========================================================================
+# 14. The format-61 pair is read, and the same substitutions are caught there.
+#     Cases 1-13 all run on format-57 fixtures. That is what let the differ ship
+#     supporting only 57 while every rustdoc on the machine emitted 61: it was
+#     inert on every real crate and its self-test never noticed, because the
+#     self-test is the one caller that never feeds it a current document.
+#
+#     `async_ret` is the eighth row and the reason the pair carries an async fn.
+#     rustdoc records an `async fn` UN-DESUGARED — `sig.output` holds the inner
+#     type, not the `impl Future` the source implies — so an async return is an
+#     ordinary type position. That is worth pinning: if a future schema starts
+#     recording the desugared future instead, both sides would render as the
+#     same opaque node and every async return would silently compare equal.
+# ===========================================================================
+BASE61="${FIXTURES}/probe-v61-base.json"
+CUR61="${FIXTURES}/probe-v61-cur.json"
+
+for f in "$BASE61" "$CUR61"; do
+  if [[ ! -f "$f" ]]; then
+    echo "SELF-TEST FAIL: fixture ${f} is missing; see ${FIXTURES}/README.md." >&2
+    exit 1
+  fi
+done
+
+run_differ --baseline-json "$BASE61" --current-json "$CUR61"
+SUBSTITUTIONS_AT_61="fn lintprobe::S::method_ret -> : u64 -> Result<u64, String>
+fn lintprobe::S::method_param(#1 x): u64 -> String
+fn lintprobe::S::async_ret -> : Vec<u64> -> Result<Vec<u64>, String>
+fn lintprobe::free_ret -> : u64 -> Result<u64, String>
+fn lintprobe::free_param(#0 x): u64 -> String
+field lintprobe::F.f: u64 -> i64
+const lintprobe::C: u64 -> i64
+fn lintprobe::T::tm -> : u64 -> Result<u64, String>"
+
+missing61=""
+while IFS= read -r want; do
+  [[ -z "$want" ]] && continue
+  [[ "$OUT" == *"CHANGED ${want}"* ]] || missing61="${missing61}${want}"$'\n'
+done <<<"$SUBSTITUTIONS_AT_61"
+
+if [[ "$RC" -eq 3 ]]; then
+  fail_case "format-61: the differ does not understand the format its own toolchain emits" "$OUT"
+elif [[ "$RC" -ne 1 ]]; then
+  fail_case "format-61: expected exit 1 over 8 type substitutions, got ${RC}" "$OUT"
+elif [[ -n "$missing61" ]]; then
+  fail_case "format-61: these substitutions were NOT reported" "$missing61" "--- output ---" "$OUT"
+elif [[ "$OUT" != *"8 changed"* ]]; then
+  fail_case "format-61: exit 1 and all 8 named, but the summary did not count 8" "$OUT"
+else
+  pass_case "format-61 input is understood, async return included (exit 1)"
+fi
+
+# ===========================================================================
+# 15. Every version in SUPPORTED_FORMAT_VERSIONS has a fixture pair behind it.
+#     The list is a claim about what the differ can read, and cases 1-14 only
+#     substantiate the versions they happen to carry fixtures for. Without this,
+#     adding a version to that tuple to make a red run green is a one-line edit
+#     that nothing contradicts — which is the shape of the defect this file's
+#     format-61 case exists to document.
+# ===========================================================================
+declared="$(sed -n 's/^SUPPORTED_FORMAT_VERSIONS = (\(.*\))$/\1/p' "$DIFFER" | tr -d ' ,' | fold -w2 | sort -u | tr '\n' ' ')"
+covered="$(python3 - "$BASE" "$BASE61" <<'PY'
+import json, sys
+print(" ".join(sorted({str(json.load(open(p))["format_version"]) for p in sys.argv[1:]})))
+PY
+)"
+
+uncovered=""
+for v in $declared; do
+  [[ -z "$v" ]] && continue
+  [[ " $covered " == *" $v "* ]] || uncovered="${uncovered}${v} "
+done
+
+if [[ -z "$declared" ]]; then
+  fail_case "coverage: could not read SUPPORTED_FORMAT_VERSIONS out of ${DIFFER}"
+elif [[ -n "$uncovered" ]]; then
+  fail_case "coverage: format version(s) claimed as supported with no fixture proving it" \
+    "declared: ${declared}" "covered by fixtures: ${covered}" "uncovered: ${uncovered}" \
+    "Add a fixture pair at that version; see ${FIXTURES}/README.md."
+else
+  pass_case "every declared format version has a fixture pair behind it (${covered})"
+fi
+
 echo
 if [[ "$FAILED" -ne 0 ]]; then
   echo "check_semver_types_selftest: ${PASSED} passed, ${FAILED} FAILED." >&2
