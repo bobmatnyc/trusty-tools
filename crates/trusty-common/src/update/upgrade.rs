@@ -120,6 +120,53 @@ fn cargo_install_cmd(crate_name: &str) -> tokio::process::Command {
     cmd
 }
 
+/// Run `cargo install <crate_name> --locked` under the cargo ownership guard.
+///
+/// Why (#5777): `cargo install` exits 101 on any destination binary Cargo's
+/// `.crates2.json` does not record — exactly what a prebuilt-download install
+/// leaves in `$CARGO_HOME/bin`. Every one of the nine cargo reach points in
+/// the workspace funnels through this function (via [`perform_upgrade`] /
+/// [`perform_upgrade_captured`]), so guarding here covers them all by
+/// construction — including the in-daemon `upgrade` commands and MCP tools
+/// that never consult the downloader.
+///
+/// What: resolves the canonical bin dir and the crate's FULL binary set
+/// ([`crate::bin_resolve::installed_binaries`] — alias and multi-binary
+/// crates like `tctl`/`tm`/`trusty-embedderd`/`tagent` collide on names the
+/// crate name alone would miss), moves each existing destination file aside,
+/// runs cargo, then settles: commit on success (restoring any file cargo's
+/// already-installed skip did not rewrite), restore on failure. A restore
+/// failure is folded into the returned error rather than masking cargo's own
+/// failure.
+///
+/// # Errors
+/// Returns cargo's failure (with any restore failure appended), or the
+/// guard's own move/settle error. In every error case the pre-existing
+/// binaries are either back in place or still on disk under the hidden aside
+/// name the error message names.
+///
+/// Test: guard semantics in `cargo_guard::tests`; the wiring is shared by
+/// [`perform_upgrade`] / [`perform_upgrade_captured`] and exercised by the
+/// ignore-tagged `perform_upgrade_fails_cleanly_on_nonexistent_crate`.
+async fn run_cargo_install(crate_name: &str, mode: UpgradeOutput) -> anyhow::Result<()> {
+    let label = format!("`cargo install {crate_name} --locked`");
+    // #5777: clear cargo-untracked binaries out of the destination first.
+    let guard = match crate::bin_resolve::canonical_bin_dir() {
+        Some(dir) => super::cargo_guard::OwnershipGuard::move_aside(
+            &dir,
+            &crate::bin_resolve::installed_binaries(crate_name),
+        )?,
+        None => super::cargo_guard::OwnershipGuard::inert(),
+    };
+    match run_with_mode(cargo_install_cmd(crate_name), mode, &label).await {
+        Ok(()) => guard.commit(),
+        Err(e) => match guard.restore() {
+            Ok(()) => Err(e),
+            Err(restore_err) => Err(e.context(format!("additionally, {restore_err}"))),
+        },
+    }
+}
+
 /// Run `cargo install <crate_name> --locked` to upgrade the named crate.
 ///
 /// Why: Centralises the upgrade invocation so both trusty-memory and
@@ -143,13 +190,8 @@ fn cargo_install_cmd(crate_name: &str) -> tokio::process::Command {
 /// no real cargo-install in CI); manual validation via `trusty-memory upgrade --yes`.
 pub async fn perform_upgrade(crate_name: &str) -> anyhow::Result<()> {
     tracing::info!(crate_name, "running: cargo install {} --locked", crate_name);
-    let label = format!("`cargo install {crate_name} --locked`");
-    let result = run_with_mode(
-        cargo_install_cmd(crate_name),
-        UpgradeOutput::Inherit,
-        &label,
-    )
-    .await;
+    // #5777: routed through the cargo ownership guard — see run_cargo_install.
+    let result = run_cargo_install(crate_name, UpgradeOutput::Inherit).await;
     if result.is_ok() {
         tracing::info!(crate_name, "cargo install succeeded");
     }
@@ -184,13 +226,8 @@ pub async fn perform_upgrade_captured(crate_name: &str) -> anyhow::Result<()> {
         "running (captured): cargo install {} --locked",
         crate_name
     );
-    let label = format!("`cargo install {crate_name} --locked`");
-    let result = run_with_mode(
-        cargo_install_cmd(crate_name),
-        UpgradeOutput::Capture,
-        &label,
-    )
-    .await;
+    // #5777: routed through the cargo ownership guard — see run_cargo_install.
+    let result = run_cargo_install(crate_name, UpgradeOutput::Capture).await;
     if result.is_ok() {
         tracing::info!(crate_name, "cargo install succeeded");
     }
