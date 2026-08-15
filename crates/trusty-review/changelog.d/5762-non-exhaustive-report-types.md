@@ -1,0 +1,4 @@
+Changed
+
+- **0.17.0, not 0.16.1 — the public API of the `report` module broke and the patch bump did not say so.** `ReportSection` and `ReportModel` each gained a required `ticketing` field, and `ReportError` gained `MetricsSchema`, `Ticketing` and `TicketingSchema`. Cargo's 0.x rule puts the breaking position at MINOR for a `0.y.z` crate, so this ships as 0.17.0. The `trusty-review-v0.16.1` tag was cut for that delta and is abandoned.
+- `ReportError`, `ReportSection` and `ReportModel` now carry `#[non_exhaustive]`. A downstream `match` on `ReportError` needs a `_` arm and the two structs are built through `ReportModel::build` or manifest deserialization rather than a struct literal, so the next variant or field is a minor bump instead of a major one. No in-workspace caller was affected — neither trusty-analyze nor trusty-mpm reaches the `report` module.

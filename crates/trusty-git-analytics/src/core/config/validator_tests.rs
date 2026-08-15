@@ -75,6 +75,7 @@ fn github_fetching_prs(token: Option<&str>) -> GithubConfig {
         fetch_pr_reviews: true,
         review_fetch_concurrency: 1,
         ticket_regex: None,
+        fetch_on_reference: false,
     }
 }
 
@@ -125,6 +126,7 @@ fn github_token_in_config_satisfies() {
         fetch_pr_reviews: true,
         review_fetch_concurrency: 1,
         ticket_regex: None,
+        fetch_on_reference: false,
     });
     let errors = ConfigValidator::new(&cfg).validate();
     assert!(

@@ -267,6 +267,7 @@ mod tests {
             fetch_pr_reviews: true,
             review_fetch_concurrency: concurrency,
             ticket_regex: None,
+            fetch_on_reference: false,
         }
     }
 

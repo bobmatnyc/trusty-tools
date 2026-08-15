@@ -1005,7 +1005,13 @@ fn default_failure_window_hours() -> u32 {
 /// resolver, and org-discovery paths throughout `tga collect`.
 /// Test: `github_config_serde_*` tests in this module; org/reviewer fields
 /// tested in `collect::github::org_discovery` and `reviewer_store` tests.
+///
+/// `#[non_exhaustive]` since #5219, which added `fetch_on_reference`. A config
+/// section grows a knob whenever a provider learns an option, and every
+/// addition is otherwise a SemVer-major break for a published crate — build one
+/// with `..Default::default()`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct GithubConfig {
     /// Personal access token (often sourced from `GITHUB_TOKEN`).
     #[serde(default)]
@@ -1074,6 +1080,22 @@ pub struct GithubConfig {
     /// to return an error.
     #[serde(default)]
     pub ticket_regex: Option<String>,
+
+    /// Whether to fetch the GitHub issues referenced by commit messages and
+    /// write them into `work_items`.
+    ///
+    /// Defaults to `true` (#5219), as all four providers do — Linear and
+    /// Azure DevOps already did. Uniformity is the point of routing every
+    /// provider through one abstraction, and #5219 was reopened precisely
+    /// because `github.ticket_regex` validated cleanly while affecting no
+    /// output; a writer that ships off by default reproduces that.
+    ///
+    /// Known cost, accepted rather than overlooked: an upgrade starts issuing
+    /// one issue lookup per detected `#N` on the first `tga collect`, against
+    /// the token's hourly budget, for every user who had configured GitHub for
+    /// pull requests alone. Set this to `false` to opt out.
+    #[serde(default = "default_true")]
+    pub fetch_on_reference: bool,
 }
 
 fn default_fetch_pr_reviews() -> bool {
@@ -1142,7 +1164,11 @@ pub struct BitbucketConfig {
 }
 
 /// JIRA Cloud / Server integration settings.
+///
+/// `#[non_exhaustive]` since #5219, which added `fetch_on_reference` — same
+/// reasoning as [`GithubConfig`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct JiraConfig {
     /// Base URL of the JIRA instance.
     #[serde(default)]
@@ -1218,6 +1244,20 @@ pub struct JiraConfig {
     /// to return an error.
     #[serde(default)]
     pub ticket_regex: Option<String>,
+
+    /// Whether to fetch the JIRA issues referenced by commit messages and
+    /// write them into `work_items`.
+    ///
+    /// Defaults to `true` (#5219), as all four providers do — see
+    /// [`GithubConfig::fetch_on_reference`] for the reasoning and the accepted
+    /// cost. This flag governs only the reference-driven pull inside
+    /// `tga collect`; `tga jira sync` is a separate, explicitly invoked path
+    /// that populates the transition and comment tables and is unaffected.
+    ///
+    /// Known cost: an upgrade starts issuing one issue lookup per detected key
+    /// on the first `tga collect`. Set this to `false` to opt out.
+    #[serde(default = "default_true")]
+    pub fetch_on_reference: bool,
 }
 
 /// The current user's home directory, as `$HOME`.

@@ -129,7 +129,7 @@ trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.11", defau
 # Cargo edge on it: #5466 removed trusty-review's, and the tga -> trusty-review
 # direction is a PATH lookup, not a manifest edge (#5236, DOC-67 §6). The entry
 # stays so a future in-tree consumer resolves from source rather than crates.io.
-tga = { path = "crates/trusty-git-analytics", version = "3.0.0" }
+tga = { path = "crates/trusty-git-analytics", version = "3.1.0" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.
@@ -144,7 +144,7 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 #      this line existed. Both consumers name what they need: trusty-analyze's
 #      `review` feature pulls `trusty-review/mcp`; trusty-mpm's dev-dependency
 #      only touches `integrations`, which is unconditional.
-trusty-review = { path = "crates/trusty-review", version = "0.16", default-features = false }
+trusty-review = { path = "crates/trusty-review", version = "0.17", default-features = false }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
