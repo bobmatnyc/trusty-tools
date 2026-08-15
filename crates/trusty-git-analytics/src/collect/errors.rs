@@ -157,7 +157,10 @@ pub enum CollectError {
         status: u16,
         /// Issue identifier the call was for, e.g. `ENG-123`.
         identifier: String,
-        /// Linear's response body, truncated when long.
+        /// Linear's response body, scrubbed of the client's API key and then
+        /// truncated. Scrubbing precedes truncation so a key straddling the
+        /// cut cannot survive as an unmatchable prefix — see
+        /// `collect::linear::client::redacted_body_excerpt`.
         message: String,
     },
 

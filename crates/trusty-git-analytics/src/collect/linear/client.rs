@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use reqwest::Client;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use trusty_common::credentials::scrub_secrets;
 
 use crate::collect::errors::{CollectError, Result};
 use crate::core::config::LinearConfig;
@@ -155,7 +156,7 @@ impl LinearClient {
             return Err(CollectError::LinearApi {
                 status: status.as_u16(),
                 identifier: identifier.to_string(),
-                message: truncate_body(&body),
+                message: redacted_body_excerpt(&body, &self.api_key),
             });
         }
 
@@ -325,11 +326,34 @@ pub fn store_linear_issues(db: &Database, issues: &[LinearIssue]) -> crate::core
     Ok(count)
 }
 
-/// Clip a response body to [`MAX_ERROR_BODY_CHARS`] on a character boundary.
+/// A credential-free excerpt of a non-success response body, capped at
+/// [`MAX_ERROR_BODY_CHARS`] characters.
 ///
-/// Test: `truncate_body_clips_long_input`, `truncate_body_keeps_short_input`.
-fn truncate_body(body: &str) -> String {
-    let trimmed = body.trim();
+/// Why: the body is text this process did not author, and it now reaches an
+/// operator's terminal via `stats.errors` where it previously vanished into a
+/// `tracing::warn!`. A provider that echoes the submitted key back ("your key
+/// `lin_api_…` is invalid") would put a live credential there.
+/// What: scrubs `api_key` out of the raw body through
+/// [`trusty_common::credentials::scrub_secrets`] FIRST, then trims and
+/// truncates — the #5239 ordering. Truncating first would cut a credential
+/// that straddles the boundary into a prefix the scrubber can no longer match,
+/// leaving a partial secret behind. Scrubbing and truncation are one function
+/// with the key as a required argument, so no call site can get the order
+/// wrong. The cap applies to the scrubbed text, so `[REDACTED]` being longer
+/// than what it replaces cannot push the excerpt over budget.
+/// Test: `redacted_body_excerpt_scrubs_before_truncating`,
+/// `redacted_body_excerpt_clips_long_input`,
+/// `redacted_body_excerpt_keeps_short_input`,
+/// `an_api_key_echoed_in_the_error_body_never_reaches_the_message`.
+///
+/// This removes the one credential this client holds. Per `scrub_secrets`'s own
+/// contract the result is lower-risk, not proven secret-free: a key under
+/// `MIN_SCRUBBABLE_SECRET_CHARS` (8) is skipped, and a credential the process
+/// does not hold — one Linear quotes from its own side — passes through.
+fn redacted_body_excerpt(body: &str, api_key: &str) -> String {
+    // #5239: scrub the full body, THEN cut.
+    let clean = scrub_secrets(body, &[api_key]);
+    let trimmed = clean.trim();
     match trimmed.char_indices().nth(MAX_ERROR_BODY_CHARS) {
         Some((idx, _)) => format!("{}…", &trimmed[..idx]),
         None => trimmed.to_string(),
@@ -482,22 +506,49 @@ mod tests {
         assert!(db.schema_version().expect("version") >= 2);
     }
 
+    /// A credential-shaped key, long enough to clear `scrub_secrets`'
+    /// eight-character floor. Fake — matches Linear's `lin_api_` prefix only so
+    /// the fixture reads like the real thing.
+    const FAKE_API_KEY: &str = "lin_api_averyrealisticlookingkey0123456789";
+
     #[test]
-    fn truncate_body_keeps_short_input() {
-        assert_eq!(truncate_body("  {\"errors\":[]}  "), "{\"errors\":[]}");
+    fn redacted_body_excerpt_keeps_short_input() {
+        assert_eq!(
+            redacted_body_excerpt("  {\"errors\":[]}  ", FAKE_API_KEY),
+            "{\"errors\":[]}"
+        );
     }
 
     #[test]
-    fn truncate_body_clips_long_input() {
-        let out = truncate_body(&"x".repeat(MAX_ERROR_BODY_CHARS + 50));
+    fn redacted_body_excerpt_clips_long_input() {
+        let out = redacted_body_excerpt(&"x".repeat(MAX_ERROR_BODY_CHARS + 50), FAKE_API_KEY);
         assert_eq!(out.chars().count(), MAX_ERROR_BODY_CHARS + 1);
         assert!(out.ends_with('…'));
     }
 
-    /// Build a client pointed at `endpoint` with a syntactically valid key.
+    /// The #5239 ordering, pinned: the key straddles the truncation boundary.
+    /// Scrub-then-truncate removes it whole. Truncate-then-scrub would cut it
+    /// into a prefix no scrubber can match and leave that fragment in the
+    /// operator's terminal.
+    #[test]
+    fn redacted_body_excerpt_scrubs_before_truncating() {
+        let pad = "x".repeat(MAX_ERROR_BODY_CHARS - 30);
+        let body = format!("{pad}{FAKE_API_KEY} trailing detail");
+
+        let out = redacted_body_excerpt(&body, FAKE_API_KEY);
+
+        assert!(!out.contains(FAKE_API_KEY), "whole key survived: {out}");
+        assert!(
+            !out.contains(&FAKE_API_KEY[..30]),
+            "a prefix of the key survived the cut — truncation ran first: {out}"
+        );
+        assert!(out.contains("[REDACTED]"), "key was not scrubbed: {out}");
+    }
+
+    /// Build a client pointed at `endpoint`, holding [`FAKE_API_KEY`].
     fn mock_client(endpoint: &str) -> LinearClient {
         let cfg = LinearConfig {
-            api_key: Some("lin_api_test".into()),
+            api_key: Some(FAKE_API_KEY.into()),
             ..Default::default()
         };
         LinearClient::with_endpoint(&cfg, endpoint).expect("client builds")
@@ -544,6 +595,44 @@ mod tests {
             }
             other => panic!("expected LinearApi, got {other:?}"),
         }
+    }
+
+    /// A provider that quotes the rejected key back must not put it in the
+    /// operator's terminal. `stats.errors` is printed to stderr by
+    /// `commands::collect`, so this body reaches a human — it did not before
+    /// #5665, which is what makes the scrub load-bearing now.
+    #[tokio::test]
+    async fn an_api_key_echoed_in_the_error_body_never_reaches_the_message() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let echoing_body = format!(
+            r#"{{"errors":[{{"message":"API key {FAKE_API_KEY} is not valid for this workspace"}}]}}"#
+        );
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_raw(echoing_body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let err = mock_client(&server.uri())
+            .fetch_issue("ENG-1")
+            .await
+            .expect_err("a 401 must surface");
+        let rendered = err.to_string();
+
+        assert!(
+            !rendered.contains(FAKE_API_KEY),
+            "the key reached the error message: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED]"),
+            "the key was not scrubbed: {rendered}"
+        );
+        assert!(
+            rendered.contains("is not valid for this workspace"),
+            "redaction must not cost the reader Linear's diagnosis: {rendered}"
+        );
     }
 
     /// The same arm for a server-side failure — a 500 is no more an absent
