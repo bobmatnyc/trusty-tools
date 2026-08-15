@@ -123,9 +123,7 @@ pub(super) async fn fetch_and_store_github_reviewers(
         let mut stmt = match conn.prepare(query) {
             Ok(s) => s,
             Err(e) => {
-                stats
-                    .errors
-                    .push(format!("GitHub reviewer query prepare failed: {e}"));
+                stats.fail_stage(format!("GitHub reviewer query prepare failed: {e}"));
                 return;
             }
         };
@@ -139,9 +137,7 @@ pub(super) async fn fetch_and_store_github_reviewers(
         match rows {
             Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
             Err(e) => {
-                stats
-                    .errors
-                    .push(format!("GitHub reviewer query failed: {e}"));
+                stats.fail_stage(format!("GitHub reviewer query failed: {e}"));
                 return;
             }
         }
@@ -156,9 +152,7 @@ pub(super) async fn fetch_and_store_github_reviewers(
     let gh_client = match GitHubClient::new_for_reviews(gh_cfg) {
         Ok(c) => c,
         Err(e) => {
-            stats
-                .errors
-                .push(format!("GitHub reviewer client init failed: {e}"));
+            stats.fail_stage(format!("GitHub reviewer client init failed: {e}"));
             return;
         }
     };
@@ -201,7 +195,9 @@ pub(super) async fn fetch_and_store_github_reviewers(
                     match upsert_github_pr_reviewer(conn, pr_db_id, review) {
                         Ok(()) => stats.reviewers_fetched += 1,
                         Err(e) => {
-                            stats.errors.push(format!(
+                            // #5655: one PR's reviewer row, not the pass — the
+                            // remaining PRs still upsert.
+                            stats.skip_item(format!(
                                 "reviewer upsert failed for {repository}#{pr_number}: {e}"
                             ));
                         }

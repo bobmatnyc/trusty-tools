@@ -61,6 +61,10 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
         }
     }
 
+    // #5655: messages of the stages whose data never landed, reported after
+    // stage 3 so the reports are still written.
+    let mut collect_stage_failures: Vec<String> = Vec::new();
+
     if !args.skip_collect {
         tracing::info!("stage 1: collect");
         // Since tga 2.6.0 fetch failures are fatal by default; --allow-stale
@@ -119,9 +123,17 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
         );
         if !collect_stats.errors.is_empty() {
             for e in &collect_stats.errors {
-                eprintln!("  warning: {e}");
+                eprintln!("  {}: {}", e.severity.label(), e.message);
             }
         }
+        // #5655: same swallow as `tga collect` had — record the failed stages
+        // here and report them after stage 3, so the reports the user asked for
+        // are still written from whatever did land.
+        collect_stage_failures = collect_stats
+            .stage_failures()
+            .iter()
+            .map(|f| f.message.clone())
+            .collect();
     } else {
         tracing::info!("stage 1: collect (skipped)");
     }
@@ -151,6 +163,20 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
 
     if args.dry_run {
         println!("Dry run complete. No changes persisted to the on-disk database.");
+    }
+
+    // #5655: reported last so classify and report still run — the exit code
+    // says the collected data was incomplete, the reports say what it held.
+    if !collect_stage_failures.is_empty() {
+        let mut msg = format!(
+            "{} collection stage(s) failed and their data was NOT persisted; \
+             the reports above were generated from a partial collection:\n",
+            collect_stage_failures.len()
+        );
+        for f in &collect_stage_failures {
+            msg.push_str(&format!("  - {f}\n"));
+        }
+        anyhow::bail!("{}", msg.trim_end());
     }
 
     Ok(())

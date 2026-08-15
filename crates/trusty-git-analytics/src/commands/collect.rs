@@ -68,6 +68,15 @@ pub async fn run_with_progress(
 ///
 /// Propagates date-range resolution and pipeline errors, and — unless
 /// `--allow-stale` or `--no-fetch` was passed — a fetch failure on any repo.
+///
+/// Since #5655 it also errors when any stage recorded a
+/// [`tga::collect::FaultSeverity::StageFailed`] fault: a provider whose write
+/// or fetch path failed leaves the database incomplete, and returning `Ok`
+/// there is what let an unattended run report success over missing data. The
+/// run itself still completes every stage first — the error reports what
+/// happened, it does not abort anything — and a per-record skip never
+/// contributes. `--allow-stale` does not suppress it; that flag governs git
+/// remote freshness, not whether a write landed.
 pub async fn run_reporting_fetch(
     config: Config,
     db: &mut Database,
@@ -185,11 +194,13 @@ pub async fn run_reporting_fetch(
     }
     if !stats.errors.is_empty() {
         eprintln!(
-            "Encountered {} warnings during collection:",
+            "Encountered {} issue(s) during collection:",
             stats.errors.len()
         );
         for e in &stats.errors {
-            eprintln!("  warning: {e}");
+            // #5655: the severity label is the operator-visible half of the
+            // same split the exit code reads.
+            eprintln!("  {}: {}", e.severity.label(), e.message);
         }
     }
 
@@ -225,7 +236,46 @@ pub async fn run_reporting_fetch(
         }
     }
 
+    // #5655: a stage whose write or fetch path failed must not exit 0.
+    if let Some(msg) = stage_failure_report(&stats) {
+        anyhow::bail!("{msg}");
+    }
+
     Ok(stats.fetch_outcomes)
+}
+
+/// Build the abort message for the stages that never persisted their data.
+///
+/// Why: #5655 — every provider pushed its failures into `stats.errors`, the
+/// command printed them as warnings, and the process exited 0. A script, a CI
+/// job, or `tga audit` running unattended read that as success while the
+/// database was missing whatever the failed stage should have written.
+/// What: returns `None` when no fault is
+/// [`tga::collect::FaultSeverity::StageFailed`] — including when the run
+/// recorded only skipped records, which is the per-item resilience that lets a
+/// long sweep survive one malformed ticket. Otherwise returns the operator
+/// message naming each failed stage, which the caller turns into a non-zero
+/// exit. It never inspects a per-record skip.
+/// Test: `tests::a_failed_stage_makes_collect_exit_non_zero`,
+/// `tests::skipped_records_alone_keep_collect_at_exit_zero`,
+/// `tests::a_dropped_work_items_write_is_a_stage_failure`.
+fn stage_failure_report(stats: &tga::collect::CollectionStats) -> Option<String> {
+    let failures = stats.stage_failures();
+    if failures.is_empty() {
+        return None;
+    }
+    let mut msg = format!(
+        "{} collection stage(s) failed and their data was NOT persisted:\n",
+        failures.len()
+    );
+    for f in &failures {
+        msg.push_str(&format!("  - {}\n", f.message));
+    }
+    msg.push_str(
+        "\nThe run finished the remaining stages, so the database holds a partial \
+         collection. Re-run `tga collect` once the cause above is fixed.",
+    );
+    Some(msg.trim_end().to_string())
 }
 
 /// Print the end-of-collect fetch summary to stderr.
@@ -299,6 +349,7 @@ fn print_fetch_summary(outcomes: &[tga::collect::collector::PerRepoFetch], verbo
 #[cfg(test)]
 mod tests {
     use tga::collect::collector::{FetchOutcome, PerRepoFetch};
+    use tga::collect::CollectionFault;
 
     use super::*;
 
@@ -335,6 +386,88 @@ mod tests {
         // Should not panic.
         print_fetch_summary(&outcomes, false);
         print_fetch_summary(&outcomes, true);
+    }
+
+    /// The #5655 regression: a stage whose data never landed used to print as a
+    /// warning and return `Ok`, so `tga collect` exited 0 over an incomplete
+    /// database. A repository that cannot be opened is the cheapest real stage
+    /// failure to drive end-to-end — no network, no credentials — and it takes
+    /// the same `stats.errors` path the Linear `work_items` write failure does.
+    #[tokio::test]
+    async fn a_failed_stage_makes_collect_exit_non_zero() {
+        use tga::core::config::RepositoryConfig;
+        let cfg = Config {
+            repositories: vec![RepositoryConfig {
+                path: "/definitely/does/not/exist/5655".into(),
+                name: Some("ghost".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut db = tga::core::db::Database::open_in_memory().expect("db");
+        let err = run_reporting_fetch(
+            cfg,
+            &mut db,
+            CollectArgs::default(),
+            &ProgressBus::disabled(),
+        )
+        .await
+        .expect_err("a stage that never persisted its data must not exit 0");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NOT persisted"),
+            "the error says the data is missing: {msg}"
+        );
+        assert!(
+            msg.contains("failed to open repo"),
+            "the error names the failing stage: {msg}"
+        );
+    }
+
+    /// #5655's third closure condition: one bad record must not fail a long
+    /// sweep. Only `StageFailed` reaches the exit code.
+    #[test]
+    fn skipped_records_alone_keep_collect_at_exit_zero() {
+        let stats = tga::collect::CollectionStats {
+            errors: vec![
+                CollectionFault::item_skipped("reviewer upsert failed for a/b#1: malformed"),
+                CollectionFault::item_skipped("collection failed for repo W3 2026: bad week"),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            stage_failure_report(&stats).is_none(),
+            "skipped records are reported, never fatal"
+        );
+    }
+
+    /// The exact fault #5655 was filed about: `persist_work_items` returns
+    /// `Err`, `linear_pipeline` records it, and the command must exit non-zero
+    /// rather than printing it beside the per-record skips.
+    #[test]
+    fn a_dropped_work_items_write_is_a_stage_failure() {
+        let stats = tga::collect::CollectionStats {
+            errors: vec![
+                CollectionFault::item_skipped("reviewer upsert failed for a/b#1: malformed"),
+                CollectionFault::stage_failed(
+                    "Linear: store work_items failed: attempt to write a readonly database",
+                ),
+            ],
+            ..Default::default()
+        };
+        let msg = stage_failure_report(&stats).expect("a failed write must be reported");
+        assert!(
+            msg.contains("store work_items failed"),
+            "the failed write is named: {msg}"
+        );
+        assert!(
+            !msg.contains("reviewer upsert"),
+            "a skipped record must not be reported as a failed stage: {msg}"
+        );
+        assert!(
+            msg.starts_with("1 collection stage(s) failed"),
+            "the count covers only the failed stages: {msg}"
+        );
     }
 
     /// Why: empty outcomes must produce no output (avoid spurious "Fetch
