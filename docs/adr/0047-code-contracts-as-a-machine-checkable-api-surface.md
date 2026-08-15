@@ -1,14 +1,17 @@
-# ADR-0047: Code Contracts are a machine-checkable part of the public API
+# 0047. Code Contracts are a machine-checkable part of the public API
 
 - **Status:** Accepted
 - **Date:** 2026-08-15
+- **Scope:** crate `trusty-common` (mechanism is workspace-wide; adoption starts here)
+- **Reversibility Cost:** Low — the contracts are doc comments and one generated
+  artifact. Deleting the artifact and the three scripts leaves the source
+  compiling and every test passing; the doc blocks degrade to prose.
+- **Decision Drivers:** cargo-semver-checks cannot compare behaviour, no static
+  differ ever can, trusty-common's break history (6 of its last 8 releases),
+  19 crates.io reverse dependencies, common-entry-point rule
+- **Supersedes / Superseded by:** —
 - **Deciders:** trusty-tools maintainers
 - **Issue:** #5724
-- **Supersedes:** none
-- **Related:** [ADR-0029](0029-msrv-1-94-and-edition-policy.md) (release gates),
-  PR #5723 (the type differ this builds on),
-  [DOC-38](../specs/spec-linked-documentation.md) (SLD — evaluated as a vehicle
-  and rejected; see "SLD is not the right home")
 
 ## Context
 
@@ -178,3 +181,24 @@ reports as a change and needs a human to dismiss it.
 
 **Neutral.** The artifact grows with adoption. At 15 entries it is reviewable in
 a diff; at several hundred it would need per-item review tooling.
+
+## Related Decisions
+
+Vetted against prior ADRs and `docs/adr/INDEX.md` on 2026-08-15:
+
+- **ADR-0029 (MSRV 1.94 and edition policy):** Consistent — this adds a gate
+  beside the existing release-time semver checks and changes neither the MSRV
+  nor the per-crate edition policy. It does introduce a nightly-toolchain
+  requirement for the gate itself, which is a tooling dependency, not an MSRV
+  change: the crate still builds on stable 1.94.
+- **ADR-0034 (shared primitives promoted into trusty-common):** Extends — the
+  same one-implementation-per-capability reasoning applied to a script, which is
+  why the rustdoc walk moved into `scripts/lib/rustdoc_walk.py` instead of being
+  reimplemented for the second consumer.
+- **DOC-38 / SLD (`docs/specs/spec-linked-documentation.md`):** Consistent, and
+  deliberately not extended. SLD links source to a governing spec id and
+  validates anchors; it carries no representation of what a function promises
+  and no cross-version comparison. The reasoning is in "SLD is not the right
+  home" above.
+
+No prior decision is superseded or contradicted.

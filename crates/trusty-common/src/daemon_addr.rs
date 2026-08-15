@@ -159,7 +159,9 @@ pub async fn check_already_running(addr_file: &Path, health_path: &str) -> Optio
 /// Test: `resolve_daemon_base_url_adds_scheme`,
 /// `resolve_daemon_base_url_preserves_existing_scheme`,
 /// `resolve_daemon_base_url_none_when_undiscoverable`,
-/// `contract_resolve_daemon_base_url_never_guesses`.
+/// `contract_read_daemon_addr_separates_absent_from_failed` (which carries this
+/// function's contract too — see the comment mid-body for why the two share one
+/// env-guarded block).
 ///
 /// # Code Contract
 /// Preconditions:
