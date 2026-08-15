@@ -1,0 +1,20 @@
+TYPES trusty-common 0.34.0
+  baseline: /repo/target/semver-checks/cache/trusty_common-0_33_0-aarch64_apple_darwin-347ed244453a3272.json
+  current:  /repo/target/semver-checks/local-trusty_common-0_34_0-aarch64_apple_darwin-14a22f5588f32ee6/target/doc/trusty_common.json
+NO VERDICT: baseline rustdoc JSON /repo/target/semver-checks/cache/trusty_common-0_33_0-aarch64_apple_darwin-347ed244453a3272.json has format_version 61; this differ understands [57]. Add the version to SUPPORTED_FORMAT_VERSIONS only after checking the node shapes it changed.
+
+NO TYPE VERDICT WAS COMPUTED for trusty-common 0.34.0. This is NOT a pass: nothing is known
+either way about whether a type moved.
+
+The differ exited 3 without printing its 'compared:' marker.
+The usual causes, all of them deliberate refusals:
+
+  * rustdoc JSON's format_version is not one this differ understands. The
+    toolchain moved; read the rustdoc-types changelog for the new version and
+    extend SUPPORTED_FORMAT_VERSIONS.
+  * a type, generic-argument or bound node whose shape is unrecognised. The
+    message above names it. Rendering it as a placeholder would make two
+    different unknowns compare equal, so it refuses instead.
+  * one of the two files is missing, truncated, or not a rustdoc document.
+
+Fix the differ, then re-run. "It could not compare" is not "the types match".

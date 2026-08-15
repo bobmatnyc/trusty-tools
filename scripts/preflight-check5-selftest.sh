@@ -66,6 +66,23 @@
 #                             so trusty-mpm does not need one on every publish.
 #                             An override that is always set is not an override.
 #
+#   Type-differ cases, driving semver_types_decide(). CHECK 5 now also runs
+#   scripts/check_semver_types.sh, which compares the types cargo-semver-checks
+#   does not read. It is ADVISORY: none of these may change the publish decision.
+#     13. differ clean        ran, compared >= 1 position, found nothing.
+#                             [PASS] semver-types:, and the line states the count.
+#     14. differ found        real tga Vec<T> -> Result<Vec<T>>. [WARN], lists the
+#                             items, and STILL PERMITS — an advisory check that
+#                             blocks is a different decision than the one taken.
+#     15. differ no verdict   the arm this split exists for. A differ that could
+#                             not run must be legible as "did not examine", never
+#                             borrow [PASS], and never fail the publish. #5620 in
+#                             an advisory costume: a check nobody is blocked by is
+#                             the cheapest place for a silent skip to hide.
+#     16. differ no marker    exit 0 with no `compared:` count. Positive evidence
+#                             is required for the clean arm, so a malfunctioning
+#                             differ lands in NO VERDICT rather than in [PASS].
+#
 # HOW IT DRIVES THE REAL DECISION: the two functions are lifted out of
 #   preflight-publish.sh BY PATTERN (the same awk-extraction
 #   check_semver_selftest.sh uses for release_type), so this exercises the
@@ -130,6 +147,23 @@ exit "${SELFTEST_GATE_RC:-0}"
 STUB
 chmod +x "${SCRATCH}/scripts/check_semver.sh"
 
+# check5_semver also runs the type differ now. Same replay shape, separate
+# fixture and status, so a case can hold the gate fixed and vary the differ.
+# Defaulting to a clean differ run keeps the cases above about semver_decide.
+cat > "${SCRATCH}/scripts/check_semver_types.sh" <<'STUB'
+#!/usr/bin/env bash
+# Stub type differ for preflight-check5-selftest.sh: replays captured
+# check_semver_types.sh output at a chosen exit status.
+if [[ -n "${SELFTEST_TYPES_FIXTURE:-}" ]]; then
+  cat "$SELFTEST_TYPES_FIXTURE"
+else
+  echo "compared: 100 public item(s); 0 changed, 0 removed, 0 added"
+  echo "semver type differ: 100 public item position(s) compared, 0 type change(s) — OK."
+fi
+exit "${SELFTEST_TYPES_RC:-0}"
+STUB
+chmod +x "${SCRATCH}/scripts/check_semver_types.sh"
+
 # ---------------------------------------------------------------------------
 # run_decision <fixture> <gate-rc> — run the shipped CHECK 5 end to end and
 # print `<return-status>` on the first line, then everything it wrote.
@@ -157,6 +191,8 @@ run_decision() {
     # The shipped definitions, lifted by pattern so a drifted copy cannot be
     # what passes. A missing function is a loud failure, not a silent skip.
     eval "$(awk '/^semver_decide\(\) \{/,/^\}/' "$UNDER_TEST")"
+    eval "$(awk '/^semver_types_decide\(\) \{/,/^\}/' "$UNDER_TEST")"
+    eval "$(awk '/^semver_types_advisory\(\) \{/,/^\}/' "$UNDER_TEST")"
     eval "$(awk '/^check5_semver\(\) \{/,/^\}/' "$UNDER_TEST")"
     if ! declare -f check5_semver > /dev/null; then
       echo "127"
@@ -204,28 +240,28 @@ assert_case() {
 # whatever else those arms print, they must not be readable as a verified pass.
 # ===========================================================================
 assert_case "checked clean" \
-  checked-clean.out 0 0 "[PASS]" "1 crate(s) compared" "NOT VERIFIED"
+  checked-clean.out 0 0 "[PASS] semver:" "1 crate(s) compared" "NOT VERIFIED"
 
 assert_case "inventory clean (advisory arm ran)" \
-  inventory-clean.out 0 0 "[PASS]" "1 crate(s) compared" "NOT VERIFIED"
+  inventory-clean.out 0 0 "[PASS] semver:" "1 crate(s) compared" "NOT VERIFIED"
 
 assert_case "inventory blind (the trusty-review 0.16.0 defect)" \
-  inventory-blind.out 0 1 "[FAIL]" "0 crate(s) were compared" "[PASS]"
+  inventory-blind.out 0 1 "[FAIL]" "0 crate(s) were compared" "[PASS] semver:"
 
 assert_case "recorded skip (excluded crate)" \
-  recorded-skip.out 0 0 "[SKIP]" "NOT VERIFIED" "[PASS]"
+  recorded-skip.out 0 0 "[SKIP]" "NOT VERIFIED" "[PASS] semver:"
 
 assert_case "no verdict (gate exit 3)" \
-  no-verdict.out 3 1 "[FAIL]" "0 crate(s) were compared" "[PASS]"
+  no-verdict.out 3 1 "[FAIL]" "0 crate(s) were compared" "[PASS] semver:"
 
 assert_case "computed break (gate exit 1)" \
-  break.out 1 1 "[FAIL]" "without a breaking" "[PASS]"
+  break.out 1 1 "[FAIL]" "without a breaking" "[PASS] semver:"
 
 assert_case "summary line unparsable" \
-  no-summary.out 0 1 "[FAIL]" "no summary line this script could read" "[PASS]"
+  no-summary.out 0 1 "[FAIL]" "no summary line this script could read" "[PASS] semver:"
 
 assert_case "gate malfunction (undocumented exit)" \
-  checked-clean.out 42 1 "[FAIL]" "not one of its documented statuses" "[PASS]"
+  checked-clean.out 42 1 "[FAIL]" "not one of its documented statuses" "[PASS] semver:"
 
 # ===========================================================================
 # 9-12. The override.
@@ -240,7 +276,7 @@ if [[ "$status" != "0" ]]; then
   fail_case "override/reason: an explicit reason must permit the publish (got ${status})" "$body"
 elif [[ "$body" != *"[WARN]"* ]]; then
   fail_case "override/reason: expected a [WARN] line" "$body"
-elif [[ "$body" == *"[PASS]"* ]]; then
+elif [[ "$body" == *"[PASS] semver:"* ]]; then
   fail_case "override/reason: an overridden publish printed PASS — it verified nothing" "$body"
 elif [[ "$body" != *"$REASON"* ]]; then
   fail_case "override/reason: the reason was not echoed verbatim, so the run records THAT a publish was allowed but not WHY" "$body"
@@ -284,6 +320,87 @@ elif [[ "$body" == *"PREFLIGHT_SEMVER_UNVERIFIED"* ]]; then
   fail_case "skip/unforced: the skip arm asked for an override, which would make the variable permanent for every excluded crate" "$body"
 else
   pass_case "a recorded skip permits without an override"
+fi
+
+# ===========================================================================
+# 13-16. The type differ's advisory line. It runs from CHECK 5 and cannot fail
+#        the publish, which is exactly why its three outcomes have to stay
+#        legible: a check that never blocks is one whose silence costs nothing,
+#        so "did not run" must not be able to wear "found nothing"'s label.
+# ===========================================================================
+# run_types <types-fixture> <types-rc> — hold the gate at a clean pass and vary
+# only the differ, so what these cases read is the differ's own arm.
+run_types() {
+  local types_fixture="$1" types_rc="$2"
+  (
+    SELFTEST_TYPES_FIXTURE="${FIXTURES}/${types_fixture}"
+    SELFTEST_TYPES_RC="$types_rc"
+    export SELFTEST_TYPES_FIXTURE SELFTEST_TYPES_RC
+    run_decision checked-clean.out 0
+  )
+}
+
+# --- 13. Ran, compared a real number of positions, found nothing.
+raw="$(run_types types-clean.out 0)"
+status="$(printf '%s\n' "$raw" | sed -n 1p)"
+body="$(printf '%s\n' "$raw" | sed '1d')"
+if [[ "$status" != "0" ]]; then
+  fail_case "types/clean: the advisory must not change the decision (got ${status})" "$body"
+elif [[ "$body" != *"[PASS] semver-types:"* ]]; then
+  fail_case "types/clean: expected a [PASS] semver-types line" "$body"
+elif [[ "$body" != *"7628 public item position(s) compared"* ]]; then
+  fail_case "types/clean: the compared count was not reported" "$body"
+else
+  pass_case "differ ran clean -> [PASS] naming the compared count"
+fi
+
+# --- 14. Ran and found type changes. WARNs, lists them, still permits.
+raw="$(run_types types-changed.out 1)"
+status="$(printf '%s\n' "$raw" | sed -n 1p)"
+body="$(printf '%s\n' "$raw" | sed '1d')"
+if [[ "$status" != "0" ]]; then
+  fail_case "types/changed: a type change must NOT block the publish (got ${status})" "$body"
+elif [[ "$body" != *"[WARN] semver-types: 2 TYPE CHANGE(S)"* ]]; then
+  fail_case "types/changed: expected a [WARN] naming the change count" "$body"
+elif [[ "$body" != *"fetch_referenced_issues"* ]]; then
+  fail_case "types/changed: the changed items were not listed" "$body"
+elif [[ "$body" == *"[PASS] semver-types:"* ]]; then
+  fail_case "types/changed: found changes and still printed a semver-types [PASS]" "$body"
+else
+  pass_case "differ found changes -> [WARN] listing them, publish still permitted"
+fi
+
+# --- 15. Could not answer. The outcome this whole split exists for: it must be
+#         distinguishable from case 13 at a glance and must never say [PASS].
+raw="$(run_types types-no-verdict.out 3)"
+status="$(printf '%s\n' "$raw" | sed -n 1p)"
+body="$(printf '%s\n' "$raw" | sed '1d')"
+if [[ "$status" != "0" ]]; then
+  fail_case "types/no-verdict: a differ that could not run must not fail the publish (got ${status})" "$body"
+elif [[ "$body" == *"[PASS] semver-types:"* ]]; then
+  fail_case "types/no-verdict: a differ that compared NOTHING printed [PASS] — this is #5620's shape" "$body"
+elif [[ "$body" != *"[WARN] semver-types: NO VERDICT"* ]]; then
+  fail_case "types/no-verdict: expected a [WARN] semver-types NO VERDICT line" "$body"
+elif [[ "$body" != *"did not run to a conclusion"* ]]; then
+  fail_case "types/no-verdict: did not say the differ failed to RUN, so it reads like a clean result" "$body"
+else
+  pass_case "differ could not answer -> [WARN] NO VERDICT, never [PASS], never blocking"
+fi
+
+# --- 16. Exit 0 with no 'compared:' marker. A malfunctioning differ that says
+#         nothing must land in NO VERDICT, not in the clean arm — the marker is
+#         positive evidence and its absence is not agreement.
+raw="$(run_types no-summary.out 0)"
+status="$(printf '%s\n' "$raw" | sed -n 1p)"
+body="$(printf '%s\n' "$raw" | sed '1d')"
+if [[ "$status" != "0" ]]; then
+  fail_case "types/no-marker: must not block (got ${status})" "$body"
+elif [[ "$body" == *"[PASS] semver-types:"* ]]; then
+  fail_case "types/no-marker: exit 0 with no compared: marker printed [PASS] on no evidence" "$body"
+elif [[ "$body" != *"[WARN] semver-types: NO VERDICT"* ]]; then
+  fail_case "types/no-marker: expected NO VERDICT when the differ printed no count" "$body"
+else
+  pass_case "differ exit 0 with no compared: marker -> NO VERDICT, not a pass"
 fi
 
 echo

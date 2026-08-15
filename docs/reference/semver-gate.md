@@ -104,9 +104,18 @@ $ bash scripts/check_semver_types.sh --crate trusty-common
 CHANGED fn trusty_common::…::KgStoreRedb::count_active_triples -> : u64 -> Result<u64>
 ```
 
-It is **not wired into CHECK 5**, so it blocks nothing on its own. What CHECK 5
-does carry is the disclosure: its `[PASS]` line states that no type was compared
-and names this script. Run it before a release whose diff touched a signature.
+**`preflight-publish.sh` CHECK 5 runs it** on every publish, immediately after
+`cargo-semver-checks` populates the cache it reads, on its own `semver-types:`
+output line. It is **advisory and cannot block the publish** — a type change
+prints `[WARN]` and the publish proceeds.
+
+That is a deliberate posture, not an oversight. The differ compares *rendered*
+types, so a lifetime rename or a re-export path shift is a real signature
+difference no caller has to care about. Giving that a veto over `cargo publish`
+would buy a release-blocking gate its first false positive, and a release gate
+people learn to override is worth less than no gate. What changed is that it
+**executes** every release instead of being a command named in a `[PASS]` line
+for someone to remember to run.
 
 Two things it does not cover, both deliberate:
 
@@ -138,28 +147,30 @@ reported this, because the only thing that runs the differ is its own self-test
 and that reads committed format-57 fixtures. The tool was inert and its tests
 were green.
 
-Two things now stand against a repeat, and neither is sufficient:
+Three things now stand against a repeat, and none of them is a mechanical stop:
 
 - A **format-61 fixture pair** covers the version the toolchain currently emits,
   and self-test case 15 fails if a version is added to
   `SUPPORTED_FORMAT_VERSIONS` without a pair behind it.
-- Both are still **frozen fixtures**. They prove the differ reads the versions it
-  was captured at. They cannot notice the toolchain moving past them — at
+- Both fixtures are still **frozen**. They prove the differ reads the versions
+  they were captured at. They cannot notice the toolchain moving past them — at
   `format_version` 62 the differ goes inert again and the self-test stays green.
+- **CHECK 5 runs the differ on every publish**, against rustdoc JSON the current
+  toolchain just produced. That is the one place the staleness becomes visible:
+  a schema bump turns the `semver-types:` line into `[WARN] … NO VERDICT` naming
+  the format version it did not understand.
 
-Detecting that needs the differ run against rustdoc JSON the CURRENT toolchain
-produced, and **nothing does that**. The document is already there for free:
-`check_semver.sh` caches it under `target/semver-checks/`, so a step that runs
-`check_semver_types.sh --crate <c>` after the gate would fail loudly on a schema
-bump — and would also be the first thing anywhere to make a type change block a
-release. Neither `.github/workflows/semver-checks.yml` nor `preflight-publish.sh`
-CHECK 5 does it today; CHECK 5 still only names the script in its `[PASS]` line.
+The gap that remains is that this is a **`[WARN]` a human has to read**, not a
+stop. A release published over it proceeds exactly as before, and nothing else
+runs the differ — `.github/workflows/semver-checks.yml` runs its self-tests, not
+the differ against a crate. So the practical guarantee is: at every publish the
+type comparison either happens or says out loud that it did not, and acting on
+either is the operator's job.
 
-Until then: a type break is caught only if somebody runs the differ by hand, and
-it is silently caught by nothing at all if the toolchain has moved past every
-listed format version. Check with:
+Check by hand at any time with:
 
 ```
+$ bash scripts/check_semver.sh --crate <crate>        # warms the cache
 $ bash scripts/check_semver_types.sh --crate <crate>
 ```
 
