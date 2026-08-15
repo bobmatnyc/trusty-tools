@@ -1,0 +1,13 @@
+{
+  "artifact_version": 1,
+  "crate": "demo",
+  "items": [
+    {
+      "kind": "function",
+      "path": "demo::g",
+      "preconditions": ["y is positive"],
+      "postconditions": [],
+      "invariants": []
+    }
+  ]
+}

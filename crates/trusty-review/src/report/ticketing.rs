@@ -106,24 +106,6 @@ impl TicketingSummary {
     }
 }
 
-/// The major component of a schema tag, if it has one.
-///
-/// Why: the tag is a document the producer wrote, not a number, so the loader
-/// reads only what it needs to decide compatibility — a `v0.3` written by a
-/// later tga must resolve to the same major as `v0`.
-/// What: strips a leading `v`, takes everything up to the first separator, and
-/// parses it. `None` for an empty, absent, or non-numeric tag.
-/// Test: `super::ticketing_tests::{an_artifact_with_a_newer_minor_of_a_known_major_still_parses,
-/// an_artifact_with_no_schema_version_is_a_named_error}`.
-fn schema_major(tag: &str) -> Option<u32> {
-    tag.strip_prefix('v')
-        .unwrap_or(tag)
-        .split(['.', '-', '+'])
-        .next()?
-        .parse()
-        .ok()
-}
-
 /// Load and parse a ticketing artifact from disk.
 ///
 /// Why: mirrors [`super::metrics::load_metrics`] — a declared file that cannot
@@ -134,9 +116,10 @@ fn schema_major(tag: &str) -> Option<u32> {
 /// not an edge case, so the check is on the load path rather than left to the
 /// caller.
 /// What: reads `path`, parses it against [`TicketingSummary`], then refuses any
-/// [`schema_major`] other than [`SUPPORTED_SCHEMA_MAJOR`]. A newer MINOR of a
-/// known major loads — that is the added-field case `#[serde(default)]` exists
-/// for.
+/// [`super::schema::major`] other than [`SUPPORTED_SCHEMA_MAJOR`] — including
+/// an absent tag, since every tga that writes this artifact writes one. A newer
+/// MINOR of a known major loads: that is the added-field case
+/// `#[serde(default)]` exists for.
 /// Test: `super::ticketing_tests::{parses_the_artifact_tga_writes,
 /// a_malformed_artifact_is_a_named_error,
 /// an_artifact_from_an_unknown_schema_major_is_a_named_error}`.
@@ -157,7 +140,8 @@ pub fn load_ticketing(path: &Path) -> std::result::Result<TicketingSummary, Repo
             source,
         })?;
 
-    if schema_major(&summary.schema_version) != Some(SUPPORTED_SCHEMA_MAJOR) {
+    // #5747: the parse now lives in `report::schema`, shared with `load_metrics`.
+    if super::schema::major(&summary.schema_version) != Some(SUPPORTED_SCHEMA_MAJOR) {
         return Err(ReportError::TicketingSchema {
             path: path.to_path_buf(),
             found: summary.schema_version,

@@ -196,8 +196,9 @@ pub mod launchd_activate;
 /// while launchd had `com.trusty.search` loaded, activating nothing.
 /// What: [`launchd_labels::SERVICES`] plus the `com.trusty.<stem>` convention
 /// as executable code, and the legacy aliases an upgrade must evict.
-/// Deliberately NOT macOS-gated, unlike [`launchd`], so the drift tests run on
-/// Linux CI too.
+/// Deliberately NOT macOS-gated, unlike `launchd`, so the drift tests run on
+/// Linux CI too. (`launchd` is named here, not linked: it does not exist on
+/// Linux, so a link to it breaks on the very platform this sentence is about.)
 /// Test: `cargo test -p trusty-common --features unconditional-only launchd_labels`.
 pub mod launchd_labels;
 
