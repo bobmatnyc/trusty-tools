@@ -16,17 +16,24 @@
 //! `output_with_timeout` subprocess wrapper it needed were deleted with the
 //! transport they served.
 //!
+//! #4925: probeability is a property of the daemon's HTTP transport, not of its
+//! lifecycle-management strategy, so [`probe_member_health`] no longer keys the
+//! probe off [`ManageStrategy`]. Both axes coincided while the probe was a
+//! `<binary> health --json` subprocess; #4246 moved it to HTTP `/health` and they
+//! diverged. `OwnVerb` (trusty-mpm) now takes the same transport as `Launchd`.
+//!
 //! What:
-//! - [`probe_member_health`] / [`health_string`]: the strategy-aware daemon
-//!   health probe. Process-managed members (trusty-mpm) are reported
-//!   `Unprobeable` rather than falsely `down`.
+//! - [`probe_member_health`] / [`health_string`]: the daemon health probe. EVERY
+//!   daemon member is probed over HTTP, launchd-supervised or process-managed;
+//!   only a non-daemon ([`ManageStrategy::None`]) is `Unprobeable`.
 //! - [`spawn_member_json`]: spawn `<binary> <verb> --json` and return parsed JSON.
 //! - [`validate_version_envelope`]: the DOC-1 conformance check used by
 //!   `doctor --self-check` (asserts `contract_version` + `verbs[]`).
 //!
 //! Test: `tests` covers `health_string`, `validate_version_envelope`, the
-//! strategy gating in `probe_member_health`, and (against a stub server) the
-//! launchd arm end-to-end — a path no test executed before #4246.
+//! non-daemon gating in `probe_member_health`, and (against a stub server) BOTH
+//! probed arms end-to-end — `Launchd` (a path no test executed before #4246) and
+//! `OwnVerb` (#4925).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -78,9 +85,9 @@ fn resolve_binary_path(binary: &str) -> Option<PathBuf> {
 /// Why: `status` and `stack` render a one-word health per member; a flat set of
 /// constants keeps the vocabulary consistent and greppable instead of scattering
 /// string literals.
-/// What: the canonical health strings. `UNKNOWN` is the verdict for a
-/// process-managed member whose health cannot be probed via the standard
-/// `health --json` contract verb.
+/// What: the canonical health strings. `UNKNOWN` is the verdict for a member
+/// with no HTTP transport to probe — post-#4925 that is a NON-DAEMON only, so no
+/// member of the shipped stable set produces it (callers filter on `m.daemon`).
 /// Test: used by `health_string`; asserted in `tests::health_string_mapping`.
 pub mod health_str {
     /// Running and at an acceptable version.
@@ -111,7 +118,7 @@ pub fn health_string(h: MemberHealth) -> &'static str {
     }
 }
 
-/// Probe a member's health, honouring its lifecycle [`ManageStrategy`].
+/// Probe a member's health over HTTP, iff it has an HTTP transport to probe.
 ///
 /// Why (#4246): this is THE health probe every `tctl` rollup and the install
 /// verify tail agree on. It used to spawn `<binary> health --json`, a contract no
@@ -122,20 +129,53 @@ pub fn health_string(h: MemberHealth) -> &'static str {
 /// only safe basis for a destructive repair is a transport-level observation
 /// ([`ProbeOutcome::is_confirmed_down`]) — a distinction a `String` cannot carry.
 ///
+/// Why (#4925): PROBEABILITY IS A PROPERTY OF THE TRANSPORT, NOT OF THE
+/// LIFECYCLE. [`ManageStrategy`] answers "how do I start and stop this member?"
+/// — `launchctl bootstrap` versus `trusty-mpm start`. While the probe was a
+/// `<binary> health --json` subprocess the two axes plausibly coincided, so this
+/// dispatch keyed one off the other; #4246 moved the probe to HTTP `/health` and
+/// they separated. Keying off `manage` after that split reported `unknown` for
+/// trusty-mpm — a daemon with an `http_addr`, a fixed-port fallback
+/// (`probe_http::fixed_port_for`) and a 200 on the first try. The host already
+/// demonstrates the separation from the other side: launchd members with NO plist
+/// probe `healthy` every day, so launchd supervision was never a precondition
+/// either. So the dispatch now asks the transport question — does this member
+/// serve HTTP at all? — and only a non-daemon answers no.
+///
+/// `ManageStrategy` is untouched and still governs everything it was for:
+/// `lifecycle::apply_to_member`'s start/stop/restart dispatch and
+/// [`super::verify_tail::needs_kickstart`], which independently requires
+/// `manage == Launchd`. That second one is why this is a one-arm change rather
+/// than a cross-cutting one — a confirmed-down mpm reaches `Refused` here yet
+/// still cannot be handed to `launchctl kickstart -k` against the nonexistent
+/// `com.trusty.mpm` label, which is also why mpm stays `OwnVerb` in
+/// `stable_set::manage_strategy_for` rather than being reclassified.
+///
+/// ACCEPTED CONSEQUENCE (#4925): mpm is `required: true` (`stable_set`), and
+/// `down` — unlike `unknown` — fails `VerifyTailReport::build` and `status`'s
+/// exit code. A user who has simply not started mpm therefore gets `tctl status`
+/// → `degraded`/exit 2 and `tctl install` → NOT VERIFIED. That is intended: it
+/// makes mpm consistent with its declared `required` flag instead of exempt from
+/// it, exactly as a stopped trusty-search already behaves. Do NOT re-add a
+/// tolerance here; demoting `required` would be a separate, argued decision.
+///
 /// # Postconditions
 /// - A binary resolvable on neither `PATH` nor the default install directory is
 ///   [`ProbeOutcome::NotInstalled`] (#3876) — the probe never runs.
-/// - A `Launchd` member is probed over HTTP via [`super::probe_http`].
-/// - An `OwnVerb`/`None` member is [`ProbeOutcome::Unprobeable`], rendering
-///   `unknown`, and can therefore never be kickstarted.
+/// - A DAEMON member — `Launchd` or `OwnVerb` — is probed over HTTP via
+///   [`super::probe_http`].
+/// - A `None` (non-daemon) member is [`ProbeOutcome::Unprobeable`], rendering
+///   `unknown`. It never reaches here in production (callers filter on
+///   `m.daemon`) but keeps the safe default.
 ///
-/// What: resolves the binary, then dispatches on `manage`. The `app` name handed
-/// to the transport is the BINARY name — the `http_addr` discovery file is keyed
-/// by app name, and `crate_name == binary == app name` holds for every stable-set
-/// daemon (see `stable_set`; the one member where it does not, trusty-mpm which
-/// ships both `tm` and `trusty-mpm`, takes the `OwnVerb` arm and is never
-/// probed).
-/// Test: `tests::own_verb_member_is_unknown`,
+/// What: resolves the binary, then dispatches on whether `manage` describes a
+/// daemon. The `app` name handed to the transport is the BINARY name — the
+/// `http_addr` discovery file is keyed by app name, and
+/// `crate_name == binary == app name` holds for every stable-set daemon INCLUDING
+/// trusty-mpm, whose entry is `("trusty-mpm", "trusty-mpm", …)`; the second binary
+/// it ships (`tm`) is not a stable-set member and is never the lookup key.
+/// Test: `tests::own_verb_member_is_probed_over_http`,
+/// `tests::own_verb_member_refused_when_nothing_listens`,
 /// `tests::probe_member_health_serves_from_http_addr`,
 /// `tests::probe_member_health_refused_when_nothing_listens`.
 pub fn probe_member_health(binary: &str, manage: ManageStrategy) -> ProbeOutcome {
@@ -143,17 +183,18 @@ pub fn probe_member_health(binary: &str, manage: ManageStrategy) -> ProbeOutcome
         return ProbeOutcome::NotInstalled;
     }
     match manage {
-        ManageStrategy::Launchd => probe_member_http_blocking(binary, binary),
-        // #4246: trusty-mpm (`OwnVerb`) is DELIBERATELY left unprobed and
-        // reported `unknown`, even though it does answer `/health` on 7880.
-        // It is `required: true` (`stable_set`), and `unknown` is the only
-        // verdict `VerifyTailReport::build` and `status`'s exit code tolerate —
-        // so probing it would flip `tctl status` to exit 2 and `tctl install` to
-        // NOT VERIFIED for every user who simply has not started mpm. Enabling
-        // it is a separate, user-visible policy change, tracked separately.
-        // `None` (non-daemon) never reaches here in production (callers filter on
-        // `m.daemon`) but shares the safe default.
-        ManageStrategy::OwnVerb | ManageStrategy::None => ProbeOutcome::Unprobeable,
+        // #4925: BOTH daemon strategies take the HTTP transport. `OwnVerb` is
+        // process-managed, not transport-less — trusty-mpm answers `/health` on
+        // 7880 — and the `unknown` this arm used to return was a carve-out from
+        // #4246, not a fact about the daemon. `needs_kickstart` still gates the
+        // destructive repair on `Launchd` alone, so widening this arm cannot arm
+        // `kickstart -k` against mpm's nonexistent launchd label.
+        ManageStrategy::Launchd | ManageStrategy::OwnVerb => {
+            probe_member_http_blocking(binary, binary)
+        }
+        // A non-daemon has no `/health` to ask. `Unprobeable` is the honest
+        // answer, not a policy choice.
+        ManageStrategy::None => ProbeOutcome::Unprobeable,
     }
 }
 
@@ -271,20 +312,80 @@ mod tests {
         }
     }
 
-    /// Why (#4246): trusty-mpm is `required: true`, and `unknown` is the only
-    /// verdict `VerifyTailReport::build` and `status`'s exit code tolerate — so
-    /// the `OwnVerb` arm staying `Unprobeable` is what keeps `tctl status` from
-    /// exiting 2, and `tctl install` from printing NOT VERIFIED, for every user
-    /// who has simply not started mpm. Deliberately unchanged by this fix; pin
-    /// it so a well-meaning follow-up cannot flip it silently.
-    /// What: an INSTALLED binary probed with `OwnVerb` is `Unprobeable` and
-    /// renders `unknown`, never a launchd verdict.
+    /// Why (#4925): THE reversal. This test used to be
+    /// `own_verb_member_is_unknown`, pinning `OwnVerb` → `Unprobeable` →
+    /// `unknown` so "a well-meaning follow-up cannot flip it silently". That pin
+    /// was the #4246 carve-out, and #4925 is the argued decision that removes it:
+    /// probeability tracks the HTTP transport, not the lifecycle strategy, and
+    /// trusty-mpm serves `/health`. The assertion is inverted rather than deleted
+    /// so the reversal is recorded in the same place the carve-out was.
+    /// What: plants an `http_addr` for a stub answering `{"status":"ok"}` and
+    /// asserts an `OwnVerb` member probes it — `Serving`/`healthy`, NOT
+    /// `Unprobeable`/`unknown`.
     /// Test: This is the test.
     #[test]
-    fn own_verb_member_is_unknown() {
+    fn own_verb_member_is_probed_over_http() {
+        use crate::commands::test_support as ts;
+        let _guard = ts::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let addr = ts::stub_seq_blocking(vec![("HTTP/1.1 200 OK", r#"{"status":"ok"}"#)]);
+        let dir = ts::stub_data_dir(ts::PROBEABLE_BINARY, &addr);
+        let outcome = probe_member_health(ts::PROBEABLE_BINARY, ManageStrategy::OwnVerb);
+        ts::clear_data_dir_override(&dir);
+
+        assert_eq!(
+            outcome,
+            ProbeOutcome::Serving {
+                status: "ok".to_owned(),
+                version: None,
+            },
+            "an OwnVerb daemon must take the HTTP transport, not the unknown carve-out"
+        );
+        assert_eq!(outcome.health_string(), health_str::HEALTHY);
+    }
+
+    /// Why (#4925): the mirror of `own_verb_member_is_probed_over_http`, and the
+    /// half that carries the accepted user-visible consequence — a stopped mpm
+    /// now reads `down`, which (unlike `unknown`) fails
+    /// `VerifyTailReport::build`'s required-member gate and degrades `status`'s
+    /// exit code. Asserting it here is what makes that consequence deliberate
+    /// rather than emergent.
+    /// What: plants an `http_addr` at an address guaranteed to refuse and asserts
+    /// an `OwnVerb` member reaches `Refused` → `is_confirmed_down` → `down`.
+    /// Test: This is the test.
+    #[test]
+    fn own_verb_member_refused_when_nothing_listens() {
+        use crate::commands::test_support as ts;
+        let _guard = ts::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = ts::stub_data_dir(ts::PROBEABLE_BINARY, &ts::dead_addr());
+        let outcome = probe_member_health(ts::PROBEABLE_BINARY, ManageStrategy::OwnVerb);
+        ts::clear_data_dir_override(&dir);
+
+        assert_eq!(outcome, ProbeOutcome::Refused);
+        assert!(outcome.is_confirmed_down());
+        assert_eq!(outcome.health_string(), health_str::DOWN);
+        // The kickstart gate is a SEPARATE axis and must not have moved with the
+        // probe: a confirmed-down `OwnVerb` member is still ineligible for
+        // `launchctl kickstart -k` (there is no `com.trusty.mpm` label to
+        // kickstart). Asserted end-to-end from a REAL probe outcome here;
+        // `verify_tail_tests::needs_kickstart_only_for_confirmed_down_launchd`
+        // covers the predicate's full truth table.
+        assert!(!crate::commands::verify_tail::needs_kickstart(
+            &outcome,
+            ManageStrategy::OwnVerb
+        ));
+    }
+
+    /// Why (#4925): a NON-daemon has no `/health` to ask, so `Unprobeable` must
+    /// survive the reversal for `ManageStrategy::None`. Without this the widened
+    /// arm could quietly grow to cover every strategy and start probing `tga`.
+    /// What: an INSTALLED binary probed with `None` is `Unprobeable`, renders
+    /// `unknown`, and is not confirmed-down.
+    /// Test: This is the test.
+    #[test]
+    fn non_daemon_member_is_unprobeable() {
         let outcome = probe_member_health(
             crate::commands::test_support::PROBEABLE_BINARY,
-            ManageStrategy::OwnVerb,
+            ManageStrategy::None,
         );
         assert_eq!(outcome, ProbeOutcome::Unprobeable);
         assert_eq!(outcome.health_string(), health_str::UNKNOWN);

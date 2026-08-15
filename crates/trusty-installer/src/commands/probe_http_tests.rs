@@ -656,8 +656,10 @@ fn health_string_maps_every_variant() {
 }
 
 /// Why: `tctl up`'s `ensure_member` branches on `MemberHealth`, not on a string.
-/// `Unprobeable` must map to `Down` (not to a health verdict) so trusty-mpm keeps
-/// falling through to its idempotent `start`, exactly as before #4246.
+/// `Unprobeable` must map to `Down` (not to a health verdict) so a member whose
+/// health could not be established falls through to its idempotent `start`.
+/// (#4925: trusty-mpm is no longer that member — it is probed over HTTP and
+/// reaches a real verdict; only a non-daemon is `Unprobeable` now.)
 /// What: asserts the `MemberHealth` for each variant.
 /// Test: This is the test.
 #[test]
@@ -669,7 +671,7 @@ fn member_health_maps_every_variant() {
     assert_eq!(
         ProbeOutcome::Unprobeable.member_health(),
         MemberHealth::Down,
-        "mpm must keep falling through to `start`, as it did pre-#4246"
+        "an unestablished health must fall through to the idempotent `start`"
     );
     for down in [
         ProbeOutcome::NoAddress,
