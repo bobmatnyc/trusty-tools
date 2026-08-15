@@ -1,10 +1,12 @@
 [package]
 name        = "trusty-review"
-# #4421: patch bump — 0.16.0 already published on crates.io and this PR
-# touches src/**. `SystemGhResolver::gh_auth_token` swaps its hand-rolled
-# `gh auth token` spawn for trusty-common's `GhCommand` entry point; the
-# trait method signature and struct are unchanged, so no public API moved.
-version     = "0.16.1"
+# #5762: MINOR bump — for a 0.y.z crate the breaking position is MINOR, and the
+# public API of the `report` module broke since 0.16.0: `ReportSection` and
+# `ReportModel` each gained a required field (`ticketing`), and `ReportError`
+# gained three variants (`MetricsSchema`, `Ticketing`, `TicketingSchema`).
+# 0.16.1 was tagged for that delta and is wrong; the three types now carry
+# `#[non_exhaustive]` so the same additions are non-breaking from here on.
+version     = "0.17.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

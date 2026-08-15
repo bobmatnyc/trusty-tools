@@ -42,7 +42,13 @@ pub struct Manifest {
 /// What: `title` is required; `template` and `analyst` are optional.  When
 /// `template` is absent the CLI falls back to the default template name.
 /// Test: `manifest_tests.rs::parse_local_path_entry`.
+///
+/// `#[non_exhaustive]` (#5762): the section grows a field whenever the manifest
+/// learns a new key — `ticketing` arrived in 0.17.0 — and a struct literal
+/// outside this crate would break on each one. Construct it by deserializing a
+/// manifest, which is the only supported source.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[non_exhaustive]
 pub struct ReportSection {
     /// Human-readable report title (used as the target codename and slug seed).
     pub title: String,

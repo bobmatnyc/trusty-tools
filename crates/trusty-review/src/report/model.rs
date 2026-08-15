@@ -43,7 +43,13 @@ pub fn vendor_methodology() -> String {
 /// What: report-level fields (title, chosen template, analyst, dates, manifest
 /// provenance) plus one [`RepositoryReport`] per repository.
 /// Test: `reporter_tests.rs::build_model_from_manifest`.
+///
+/// `#[non_exhaustive]` (#5762): each new report section adds a field here —
+/// `ticketing` arrived in 0.17.0 — so a struct literal outside this crate would
+/// break on every section the report gains. Build it with
+/// [`ReportModel::build`].
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct ReportModel {
     /// Report title (used as the target codename and output slug seed).
     pub title: String,
