@@ -167,14 +167,6 @@ pub(super) fn interpret_tier_s_facts(
     )
 }
 
-/// Unit tests live in a sibling file so this module stays under the 500-SLOC
-/// production cap (the test file is classified as a test target).
-///
-/// Why: `doctor/mod.rs` is already at 472 SLOC against a 500 cap, so the suite
-/// could not go there either; a sibling `*_tests.rs` is this repo's established
-/// answer (see `memory_core/filter.rs`).
-/// What: pulls in `tier_s_tests.rs` as the `tests` module under `cfg(test)`.
-/// Test: the referenced file is itself the test suite.
 #[cfg(test)]
 #[path = "tier_s_tests.rs"]
 mod tests;

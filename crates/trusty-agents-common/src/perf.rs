@@ -5,6 +5,7 @@
 //! session record, and future external analysis tools. Placing the plain-data
 //! types here (without stateful collection or async I/O) lets every layer
 //! reference them without depending on the full `trusty-agents` binary crate.
+//! Moved to `trusty-agents-common` in Wave 2 (issue #867, refs #830/#832).
 //! What: Defines the four portable value types:
 //! - `TokenUsage` — per-LLM-call token counter (prompt/completion/cache)
 //! - `PhaseRecord` — per-phase duration + token snapshot
