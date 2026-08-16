@@ -1,0 +1,5 @@
+Added
+- The auditor client has a desktop shell: `trusty-audit-ui`, a Tauri 2 window at `crates/trusty-audit/ui`. Phase 1 shows one view — the working-directory root, the engagement's manifest state, per-tool install status, and the next step — and adds no capability ([#5477](https://github.com/bobmatnyc/trusty-tools/issues/5477))
+- The shell calls `Session::execute` in-process through a Tauri IPC command. There is no HTTP endpoint and no `taudit` subprocess, so a capability still has exactly one implementation and one CLI arm, per DOC-68 §11 ([#5477](https://github.com/bobmatnyc/trusty-tools/issues/5477))
+- The window distinguishes a tool it installed and verified from one that is merely present, the same three states the CLI prints as `ok` / `UNVERIFIED` / `MISSING`. Wording is the front end's; the states come from `Session::execute` ([#5477](https://github.com/bobmatnyc/trusty-tools/issues/5477))
+- A failed guided call shows its reason and a retry, rather than an empty panel that would read as an engagement with nothing to report ([#5477](https://github.com/bobmatnyc/trusty-tools/issues/5477))

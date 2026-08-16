@@ -1,0 +1,48 @@
+/* Why: this window is read by an outsider on their own machine, once. No
+   design system, no fonts to download — system stack, one accent, and enough
+   contrast to read a path. Phase 1 (epic #5477) is deliberately plain.
+   What: light and dark palettes as custom properties, plus the handful of
+   element rules App.svelte's markup needs. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbfa;
+  --panel: #ffffff;
+  --border: #dfdedb;
+  --text: #23211e;
+  --muted: #6b6862;
+  --accent: #b7410e;
+  --ok: #2f6f3e;
+  --warn: #8a5a00;
+  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1917;
+    --panel: #232120;
+    --border: #3a3735;
+    --text: #eceae6;
+    --muted: #a29d95;
+    --accent: #e2703a;
+    --ok: #7fc08d;
+    --warn: #d9a441;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+#app {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 3rem;
+}

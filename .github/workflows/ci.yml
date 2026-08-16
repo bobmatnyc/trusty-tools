@@ -18,6 +18,7 @@
 #              scope
 #   msrv     – cargo check --workspace (toolchain 1.94, SKIP_UI_BUILD=1)
 #   agents-ui – cargo clippy -p trusty-agents-ui (stable, WebKit2GTK-enabled runner)
+#   audit-ui – cargo clippy + test -p trusty-audit-ui (same runner shape, #5477)
 #   embedder-cuda-check – cargo check -p trusty-common --features embedder-cuda
 #                         (issue #3508: compile-check the deadlock-safety
 #                         invariant test that is otherwise never compiled)
@@ -28,15 +29,16 @@
 #                         goes red (post-merge breakage was detected but never
 #                         alerted)
 #
-# trusty-mpm-gui, trusty-code-gui, and trusty-agents-ui are excluded from the
-# headless workspace jobs (clippy/test/msrv): all three are Tauri desktop apps
+# trusty-mpm-gui, trusty-code-gui, trusty-agents-ui and trusty-audit-ui are
+# excluded from the headless workspace jobs (clippy/test/msrv): all four are Tauri desktop apps
 # (publish = false) that require WebKit2GTK on Linux (~100 MB apt chain) which
 # the headless runners do not install. Exclude them via
-# --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui
+# --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui
 # on every workspace-wide cargo invocation.
 #
-# UNLIKE the two other GUIs, trusty-agents-ui gets a DEDICATED `agents-ui` job
-# (#3053) that installs the WebKit2GTK toolchain and runs
+# UNLIKE trusty-mpm-gui and trusty-code-gui, trusty-agents-ui gets a DEDICATED
+# `agents-ui` job (#3053) — and trusty-audit-ui an `audit-ui` job (#5477) built
+# on the same shape — that installs the WebKit2GTK toolchain and runs
 # `cargo clippy -p trusty-agents-ui --all-targets -- -D warnings`, so the crate
 # is genuinely build- and lint-verified in CI rather than merely excluded. That
 # job stubs a minimal `crates/trusty-agents/ui/dist/index.html` (gitignored)
@@ -376,7 +378,7 @@ jobs:
 
       - name: cargo clippy --workspace --all-targets -- -D warnings
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
+        run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui -- -D warnings
 
       # `codex-config` is enabled by no crate in the workspace, so the
       # `--workspace` run above never pulls `codex_config` in via feature
@@ -941,7 +943,7 @@ jobs:
       # fingerprint and forced a ~91s recompile — measured in #4402.)
       - name: cargo test --workspace --no-run (build phase)
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-run
+        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --no-run
 
       # The `.rcgu.o` sweep that used to sit here (#3668) was deleted as dead
       # code. It found nothing left to delete: `CARGO_PROFILE_TEST_DEBUG=
@@ -997,7 +999,7 @@ jobs:
       - name: cargo nextest run
         if: needs.changes.outputs.docs_only != 'true'
         run: |
-          cargo nextest run --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-fail-fast \
+          cargo nextest run --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --no-fail-fast \
             --partition hash:${{ matrix.shard }}/${{ strategy.job-total }} \
             -E 'not test(=update::tests::cache_fresh_returns_some_when_newer)'
 
@@ -1108,7 +1110,7 @@ jobs:
 
       - name: cargo test --doc
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --doc
+        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --doc
 
   # --------------------------------------------------------------------------
   # test: the aggregate gate over the sharded suite above.
@@ -1229,7 +1231,7 @@ jobs:
 
       - name: cargo check --workspace
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo check --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui
+        run: cargo check --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui
 
   # --------------------------------------------------------------------------
   # agents-ui: build- and lint-verify the trusty-agents Tauri desktop app
@@ -1309,6 +1311,87 @@ jobs:
       - name: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings
+
+  # --------------------------------------------------------------------------
+  # audit-ui: build- and lint-verify the auditor client's Tauri desktop shell
+  # (crates/trusty-audit/ui/src-tauri, package `trusty-audit-ui`). Issue #5477.
+  #
+  # Same shape and same reasons as `agents-ui` directly above: the crate is
+  # excluded from the headless workspace jobs because Tauri links WebKit2GTK on
+  # Linux, so this job installs that toolchain and genuinely compiles and lints
+  # it. `tauri::generate_context!()` embeds `frontendDist` ("../dist") at
+  # compile time and hard-errors when it is absent; `dist/` is a gitignored
+  # build artefact, so a placeholder index.html is stubbed before clippy. That
+  # compile- and lint-verifies the Rust side without pulling node/pnpm into CI.
+  #
+  # Unlike agents-ui this job also RUNS the crate's tests: they are pure
+  # mapping tests over `Session::execute`'s output with no window involved, so
+  # they cost seconds and are what keeps the Rust↔TypeScript wire shape from
+  # drifting.
+  # --------------------------------------------------------------------------
+  audit-ui:
+    name: trusty-audit-ui clippy
+    needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING. `!cancelled()`
+    # overrides the implicit success() so a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install stable toolchain with clippy
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install Tauri system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: audit-ui
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Stub the frontendDist so tauri::generate_context!() can embed it.
+      # SKIP_UI_BUILD=1 below stops build.rs looking for pnpm.
+      - name: Stub frontend dist for generate_context!
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          mkdir -p crates/trusty-audit/ui/dist
+          printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-audit</title></head><body></body></html>\n' \
+            > crates/trusty-audit/ui/dist/index.html
+
+      - name: cargo clippy -p trusty-audit-ui --all-targets -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SKIP_UI_BUILD: "1"
+        run: cargo clippy -p trusty-audit-ui --all-targets -- -D warnings
+
+      - name: cargo test -p trusty-audit-ui
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SKIP_UI_BUILD: "1"
+        run: cargo test -p trusty-audit-ui
 
   # --------------------------------------------------------------------------
   # embedder-cuda-check: compile-check the `embedder-cuda` feature (issue
@@ -1496,6 +1579,14 @@ jobs:
           - name: trusty-analyze
             dir: crates/trusty-analyze/ui
             command: pnpm run build
+          # #5477 phase 1. No test suite yet — the shell has one view and its
+          # only logic (the Rust↔TypeScript wire shape) is asserted on the Rust
+          # side by `guided_serialises_to_the_shape_the_window_reads`. `build`
+          # proves the bundle Tauri embeds still compiles; `check` is
+          # svelte-check over the same sources.
+          - name: trusty-audit
+            dir: crates/trusty-audit/ui
+            command: pnpm run build && pnpm run check
     steps:
       - uses: actions/checkout@v5
 
@@ -1759,6 +1850,7 @@ jobs:
         test,
         msrv,
         agents-ui,
+        audit-ui,
         embedder-cuda-check,
         ui-checks,
         search-daemon-smoke,
@@ -1779,6 +1871,7 @@ jobs:
             test=${{ needs.test.result }}
             msrv=${{ needs.msrv.result }}
             agents-ui=${{ needs['agents-ui'].result }}
+            audit-ui=${{ needs['audit-ui'].result }}
             embedder-cuda-check=${{ needs.changes.outputs.embedder_cuda_relevant != 'false' && needs['embedder-cuda-check'].result || 'success' }}
             ui-checks=${{ needs['ui-checks'].result }}
             search-daemon-smoke=${{ needs['search-daemon-smoke'].result }}
