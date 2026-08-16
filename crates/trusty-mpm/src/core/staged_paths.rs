@@ -18,6 +18,27 @@
 //! branch (a repository with no commits yet) is handled by git itself and
 //! reports the whole index.
 //!
+//! **Two `diff` behaviours are pinned off, and both were live exploits before
+//! they were (#5788 review).** `git_command`'s shared
+//! `GIT_PINNED_GLOBAL_ARGS` was authored for `status` and pins
+//! `status.relativePaths`; `diff` has its own config surface and neither key
+//! below is in that list.
+//!
+//! * `diff.relative=false`. With `diff.relative=true` in any config file,
+//!   `git diff --cached --name-only` under `-C <subdir>` prints only the paths
+//!   BENEATH that subdirectory — a strict subset of what the commit lands.
+//!   Demonstrated: `docs/x.md` and `crates/a/src/lib.rs` both staged, read from
+//!   `<repo>/docs`, reported `["x.md"]`, and the gate above read that as
+//!   documents-only while the commit carried the `.rs`.
+//! * `--no-renames`. Rename detection is on by default and `--name-only`
+//!   prints only the DESTINATION, so a staged
+//!   `git mv crates/a/src/lib.rs docs/lib.md` reported as `["docs/lib.md"]` —
+//!   documents-only, for a commit that deletes a source file.
+//!
+//! Both are pinned here rather than in `GIT_PINNED_GLOBAL_ARGS` because that
+//! constant's callers all run `status`, and a `diff` key added to it would be
+//! inert for every one of them while reading as though it protected them.
+//!
 //! The `Option` is the load-bearing part of the contract: `None` means the
 //! staged set is UNKNOWN, never that it is empty. Its caller denies on `None`,
 //! so collapsing the two would turn every unreadable repository into a
@@ -26,7 +47,9 @@
 //!
 //! Test: `staged_paths_lists_the_staged_set`,
 //! `staged_paths_reports_none_outside_a_repository`,
-//! `staged_paths_reports_an_empty_set_as_empty`.
+//! `staged_paths_reports_an_empty_set_as_empty`,
+//! `staged_paths_stays_repository_relative_under_diff_relative`,
+//! `staged_paths_reports_both_sides_of_a_rename`.
 
 use std::path::Path;
 
@@ -42,9 +65,22 @@ use crate::session_manager::worktree_safety::git_command;
 /// non-UTF-8.
 /// Test: as the module doc.
 pub fn staged_paths(dir: &Path) -> Option<Vec<String>> {
-    let out = git_command(dir, &["diff", "--cached", "--name-only", "-z"])
-        .output()
-        .ok()?;
+    // `-c` is a global option and git accepts it after `-C <dir>`, ahead of the
+    // subcommand. See the module doc for what each of these two closes.
+    let out = git_command(
+        dir,
+        &[
+            "-c",
+            "diff.relative=false",
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "-z",
+        ],
+    )
+    .output()
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -81,13 +117,23 @@ mod tests {
             std::fs::create_dir_all(parent).expect("mkdir");
         }
         std::fs::write(&path, "x").expect("write");
+        git(dir, &["add", "--", name]);
+    }
+
+    /// Run a git command in `dir` and assert it succeeded.
+    fn git(dir: &Path, args: &[&str]) {
         assert!(
             std::process::Command::new("git")
-                .args(["add", "--", name])
+                .args(args)
                 .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
                 .status()
-                .expect("git add")
-                .success()
+                .expect("git")
+                .success(),
+            "git {args:?}"
         );
     }
 
@@ -116,6 +162,51 @@ mod tests {
     fn staged_paths_reports_none_outside_a_repository() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert_eq!(staged_paths(dir.path()), None);
+    }
+
+    #[test]
+    fn staged_paths_stays_repository_relative_under_diff_relative() {
+        // #5788 review, CRITICAL 2. With `diff.relative=true` set in the repo's
+        // own config, an unpinned `git diff --cached --name-only` under
+        // `-C <subdir>` reports ONLY the paths beneath that subdirectory, so a
+        // staged `.rs` outside it disappears and the commit gate reads the set
+        // as documents-only. The pin makes the answer independent of where the
+        // command was run from.
+        let Some(dir) = repo() else {
+            return;
+        };
+        git(dir.path(), &["config", "diff.relative", "true"]);
+        stage(dir.path(), "docs/x.md");
+        stage(dir.path(), "crates/a/src/lib.rs");
+
+        let mut from_subdir = staged_paths(&dir.path().join("docs")).expect("git ran");
+        from_subdir.sort();
+        assert_eq!(from_subdir, vec!["crates/a/src/lib.rs", "docs/x.md"]);
+        let mut from_root = staged_paths(dir.path()).expect("git ran");
+        from_root.sort();
+        assert_eq!(
+            from_root, from_subdir,
+            "the answer must not depend on which directory it was asked from"
+        );
+    }
+
+    #[test]
+    fn staged_paths_reports_both_sides_of_a_rename() {
+        // #5788 review, HIGH 3. Rename detection is on by default and
+        // `--name-only` prints only the DESTINATION, so a staged
+        // `git mv <src>.rs <docs>.md` reported as documents-only for a commit
+        // that deletes a source file. `--no-renames` restores both sides.
+        let Some(dir) = repo() else {
+            return;
+        };
+        stage(dir.path(), "crates/a/src/lib.rs");
+        git(dir.path(), &["commit", "-qm", "init"]);
+        std::fs::create_dir_all(dir.path().join("docs")).expect("mkdir docs");
+        git(dir.path(), &["mv", "crates/a/src/lib.rs", "docs/lib.md"]);
+
+        let mut staged = staged_paths(dir.path()).expect("git ran");
+        staged.sort();
+        assert_eq!(staged, vec!["crates/a/src/lib.rs", "docs/lib.md"]);
     }
 
     #[test]

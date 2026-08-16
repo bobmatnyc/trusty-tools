@@ -168,7 +168,10 @@ pub(crate) enum CommitVerdict {
     /// Refuse, with the reason already built.
     Deny(String),
     /// Documents and configuration only. Permit unless another live writer
-    /// holds this HEAD; `dirs` are the query keys, target first then root.
+    /// holds this HEAD; `dirs` are the query keys, checkout root first then the
+    /// command's own directory — the same order and the same reason as the
+    /// HEAD-move rule (#5769: `tm hook` stamps a record from its own process
+    /// directory, and the root is the spelling a record most often carries).
     DocsOnly { root: PathBuf, dirs: [PathBuf; 2] },
 }
 
@@ -192,16 +195,23 @@ pub(crate) enum CommitVerdict {
 ///
 /// What: `None` (ALLOW, this rule's business does not arise) unless a
 /// `git commit` segment's effective directory belongs to a main checkout. When
-/// it does, [`classify_staged_commit`] decides between
-/// [`CommitVerdict::Deny`] and [`CommitVerdict::DocsOnly`]. The staged set is
-/// read only once both lexical halves match, so ordinary Bash traffic never
-/// pays for the subprocess.
+/// it does, the command must first be a LONE commit
+/// ([`command_is_a_lone_commit`]) — one index read describes one commit and
+/// only when nothing between the read and the commit can restage — and
+/// [`classify_staged_commit`] then decides between [`CommitVerdict::Deny`] and
+/// [`CommitVerdict::DocsOnly`]. The staged set is read only once both lexical
+/// halves match, so ordinary Bash traffic never pays for the subprocess.
 ///
-/// **The direction this can move a verdict is one-way.** Before ADR-0049 every
-/// reachable case here returned a deny. Every arm that is not a positively
-/// evidenced docs-only commit still returns one, so this classifier can turn a
-/// deny into an allow and can never turn an allow into a deny. That is what
-/// keeps it off ordinary work without a #5356-shaped false-deny risk.
+/// **The direction this can move a verdict is one-way, and the property is
+/// stated per COMMAND rather than per arm (#5788 review).** Before ADR-0049
+/// every `git commit` reaching this function was denied. After it, a command is
+/// allowed only when it is a lone commit whose staged set is positively
+/// evidenced as documents and configuration; every other command still denies.
+/// The first cut stated this per-arm — true of [`classify_staged_commit`] in
+/// isolation, false of the composed rule, and the gap between the two was the
+/// `git commit -m docs && git commit -a -m src` exploit. Read this way it holds
+/// for the whole entry point, which is what keeps it off ordinary work without
+/// a #5356-shaped false-deny risk.
 ///
 /// Scope, stated because the near neighbours are tempting: `git checkout
 /// <branch>` and `git switch <branch>` are NOT covered here even though
@@ -213,8 +223,10 @@ pub(crate) enum CommitVerdict {
 /// argument analysis: none of the three has a form that leaves HEAD alone.
 /// `git add` is not covered by any of them and deliberately so: it writes the
 /// index and moves no ref, so it creates none of the shared-HEAD hazard these
-/// rules exist for (ADR-0049 decision 4).
-/// Test: `commit_target_dir_*`, `evaluate_main_checkout_commit_*`.
+/// rules exist for (ADR-0049 decision 4). It is still refused when CHAINED to a
+/// commit, which is a statement about the index read above, not about `git add`.
+/// Test: `commit_target_dir_*`, `evaluate_main_checkout_commit_*`,
+/// `command_is_a_lone_commit_*`.
 pub(crate) fn evaluate_main_checkout_commit_command(
     command: &str,
     cwd: &Path,
@@ -228,12 +240,62 @@ pub(crate) fn evaluate_main_checkout_commit_command(
     // subdirectory that shares the checkout's HEAD, and the writer query has to
     // be keyed on a directory a delegation record can actually carry.
     let root = main_checkout_root(&target)?;
+    // #5788 review, CRITICAL 1: one index read authorises at most one commit,
+    // and only when nothing between the read and that commit can change the
+    // index. Asked before the staged set is even read, because a composition
+    // this cannot vouch for is refused whatever is staged.
+    if !command_is_a_lone_commit(command) {
+        return Some(CommitVerdict::Deny(composed_commit_deny_reason(&root)));
+    }
     Some(classify_staged_commit(
         &tail,
         staged_paths(&target),
         &target,
         root,
     ))
+}
+
+/// Whether `command` is a single `git commit` and nothing that could restage.
+///
+/// Why (#5788 review, CRITICAL 1): the staged set is read once, at hook time,
+/// and describes the index at that instant. A composition breaks that in two
+/// ways, both demonstrated live against the first cut of this rule.
+/// `git commit -m docs && git add -A && git commit -a -m src` was ALLOWED — the
+/// walker returned on the FIRST commit segment, so the docs-only staged set
+/// licensed a source commit two segments later. And `git add -A &&
+/// git commit -m docs` has one commit segment but restages before it runs, so
+/// the read describes an index the commit never sees. Both were denied before
+/// ADR-0049 and must stay denied.
+///
+/// The sibling destructive rule scans every segment and so has neither problem;
+/// this one cannot fix it the same way, because scanning further segments still
+/// would not tell it what the index holds by the time they run. The only
+/// defensible answer is to refuse the composition.
+///
+/// What: `true` when every non-empty segment is either a `cd` — which moves no
+/// files and touches no index — or THE one `git commit`. Any second commit, any
+/// other command, and any segment `shlex` cannot split all return `false`,
+/// which the caller turns into the pre-ADR-0049 deny. The remedy is one extra
+/// tool call, and [`composed_commit_deny_reason`] names it.
+/// Test: `command_is_a_lone_commit_accepts_a_commit_and_cd`,
+/// `command_is_a_lone_commit_rejects_a_second_commit`,
+/// `command_is_a_lone_commit_rejects_anything_that_can_restage`.
+fn command_is_a_lone_commit(command: &str) -> bool {
+    let mut commits = 0;
+    for segment in split_shell_segments(command) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if first_command_token(trimmed) == Some("cd") {
+            continue;
+        }
+        if shell_lex::git_subcommand(trimmed).as_deref() != Some("commit") {
+            return false;
+        }
+        commits += 1;
+    }
+    commits == 1
 }
 
 /// The verdict for a commit already known to be aimed at a main checkout.
@@ -280,7 +342,7 @@ fn classify_staged_commit(
         .collect();
     if source.is_empty() {
         CommitVerdict::DocsOnly {
-            dirs: [target.to_path_buf(), root.clone()],
+            dirs: [root.clone(), target.to_path_buf()],
             root,
         }
     } else {
@@ -533,6 +595,31 @@ fn commit_deny_reason(target: &Path) -> String {
          `git worktree add .claude/worktrees/<name>` and commit there. Nothing is lost — the \
          changes are still in the tree. Read-only git (`status`, `log`, `diff`), `git add`, and \
          everything under `.claude/worktrees/**` are never blocked by this rule.",
+        target.display()
+    )
+}
+
+/// Build the deny message for a commit this rule cannot read the index for,
+/// because the command composes it with something else.
+///
+/// Why (#5788 review, CRITICAL 1): the reader has staged documents and is being
+/// refused anyway, so the text has to name the composition as the cause — not
+/// the content — or the retry is to unstage something that was never the
+/// problem. The remedy is one extra tool call and the message says exactly
+/// which one.
+/// Test: `composed_commit_deny_reason_names_the_composition_and_the_remedy`.
+fn composed_commit_deny_reason(target: &Path) -> String {
+    format!(
+        "Composed commit denied in a main checkout (ADR-0049): {} is a project's main checkout, \
+         where a documents-only commit is permitted — but only when the guard can see what the \
+         commit will contain. It reads the index once, before this command runs, and that reading \
+         describes exactly one commit with nothing in between: a second `git commit`, a \
+         `git add`, or any other command in the same call can change the index after the reading \
+         and before the commit, so the reading would be describing a commit that never happens. \
+         Split the call: stage in one Bash call (`git add -- <paths>`), then run \
+         `git commit -m …` as its own call with nothing chained to it. `cd` is the one exception \
+         and may be chained, since it touches no index. Nothing is lost — the changes are still \
+         in the tree, and `git add` is never blocked by this rule.",
         target.display()
     )
 }
@@ -1109,14 +1196,16 @@ mod tests {
             let verdict = classify(&["-m", "docs: x"], Some(staged));
             assert!(is_docs_only(&verdict), "{staged:?} is documents-only");
         }
-        // The DocsOnly arm hands back both query keys, target first.
+        // The DocsOnly arm hands back both query keys, checkout ROOT first —
+        // the order the HEAD-move rule uses, and the spelling a delegation
+        // record most often carries (#5769).
         let CommitVerdict::DocsOnly { root, dirs } = classify(&[], Some(&["README.md"])) else {
             panic!("expected DocsOnly");
         };
         assert_eq!(root, PathBuf::from("/repo"));
         assert_eq!(
             dirs,
-            [PathBuf::from("/repo/crates"), PathBuf::from("/repo")]
+            [PathBuf::from("/repo"), PathBuf::from("/repo/crates")]
         );
     }
 
@@ -1255,6 +1344,71 @@ mod tests {
                 tail.join(" ")
             );
         }
+    }
+
+    #[test]
+    fn command_is_a_lone_commit_accepts_a_commit_and_cd() {
+        // `cd` moves no files and touches no index, so it cannot invalidate the
+        // reading. Everything a documents commit legitimately needs is here.
+        for command in [
+            "git commit -m 'docs: x'",
+            "cd /repo && git commit -m 'docs: x'",
+            "cd /repo && cd docs && git commit -m x",
+            "git -C /repo commit -m x",
+        ] {
+            assert!(
+                command_is_a_lone_commit(command),
+                "`{command}` is a lone commit"
+            );
+        }
+    }
+
+    #[test]
+    fn command_is_a_lone_commit_rejects_a_second_commit() {
+        // #5788 review, CRITICAL 1 — the demonstrated exploit. The walker
+        // returns on the first commit segment, so without this the docs-only
+        // reading licensed the later source commit.
+        for command in [
+            "git commit -m docs && git add -A && git commit -a -m src",
+            "git commit -m docs ; git commit --amend --no-edit",
+            "git commit -m a || git commit -m b",
+        ] {
+            assert!(
+                !command_is_a_lone_commit(command),
+                "`{command}` carries more than one commit"
+            );
+        }
+    }
+
+    #[test]
+    fn command_is_a_lone_commit_rejects_anything_that_can_restage() {
+        // One commit segment is not enough — anything running before it can
+        // change the index after the reading. `git add -A && git commit` is the
+        // shape that matters, and it was denied before ADR-0049 too.
+        for command in [
+            "git add -A && git commit -m docs",
+            "echo x > src/lib.rs && git commit -m docs",
+            "git status && git commit -m docs",
+            "git commit -m docs && cargo test",
+            // No commit at all: this rule has nothing to license.
+            "git status",
+        ] {
+            assert!(
+                !command_is_a_lone_commit(command),
+                "`{command}` is not a lone commit"
+            );
+        }
+    }
+
+    #[test]
+    fn composed_commit_deny_reason_names_the_composition_and_the_remedy() {
+        let reason = composed_commit_deny_reason(Path::new("/repo"));
+        assert!(reason.contains("/repo"), "{reason}");
+        assert!(reason.contains("ADR-0049"), "{reason}");
+        // The cause is the composition, not the content — say so, or the retry
+        // is to unstage the document that was fine.
+        assert!(reason.contains("Split the call"), "{reason}");
+        assert!(reason.contains("git add -- <paths>"), "{reason}");
     }
 
     #[test]

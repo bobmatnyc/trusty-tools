@@ -99,16 +99,52 @@ a proposed one — not stale prose that a doc sync could quietly fix.
    property "should be enforced for it" describes a checkout this workspace does
    not have. DOC-66 §0.5 is updated to state the source-restricted boundary and
    to cite ADR-0044/0048/0049 for it.
+8. **One index read authorises one commit, and only in a command that cannot
+   restage.** The read describes the index at hook time. A `Bash` call that
+   chains anything but `cd` breaks that description in two ways, both
+   demonstrated live against the first cut of this rule and both permitted by
+   it: `git commit -m docs && git add -A && git commit -a -m src` was ALLOWED,
+   because the classifier stopped at the first commit segment and the later ones
+   were never examined; and `git add -A && git commit -m docs` carries one
+   commit but restages between the read and the commit, so the read describes an
+   index the commit never sees. Scanning further segments does not fix either —
+   it still would not say what the index holds by the time they run. So a
+   documents-only allow requires EVERY segment to be a `cd` or THE one
+   `git commit`. `cd` is the one exception because it moves no files and touches
+   no index. Anything else is refused with the remedy named: stage in one call,
+   commit in the next.
+9. **The read is pinned against two `diff` config surfaces**, both also
+   demonstrated live. `diff.relative=true` in any config file makes
+   `git diff --cached --name-only` under `-C <subdir>` report only the paths
+   beneath that subdirectory, so a staged `.rs` outside it vanished and the set
+   read as documents-only; the invocation now pins `diff.relative=false`.
+   Rename detection is on by default and `--name-only` prints only the
+   DESTINATION, so a staged `git mv <src>.rs <docs>.md` read as documents-only
+   for a commit that deletes a source file; the invocation now passes
+   `--no-renames`, which restores both sides. `git_command`'s shared
+   `GIT_PINNED_GLOBAL_ARGS` pins `status.relativePaths` and was authored for
+   `status`; `diff` has its own config surface and neither key is in that list.
 
 ## Consequences
 
-- **This change is one-way, and that is what keeps it off ordinary work.**
-  Every reachable arm of the commit rule returned a deny before it; every arm
-  that is not a positively evidenced documents-only commit returns one after.
-  The classifier can turn a deny into an allow and cannot turn an allow into a
-  deny, so it carries none of the false-deny risk #5356 was filed for. The
-  allowlist in decision 5 is what buys that property: an unrecognised flag
-  yields the pre-ADR-0049 behaviour rather than a new judgement.
+- **This change is one-way, and the property is stated per COMMAND, not per
+  arm.** Every `git commit` aimed at a main checkout was denied before this ADR.
+  After it, a command is allowed only when it is a lone commit (decision 8)
+  whose staged set is positively evidenced as documents and configuration
+  (decisions 1, 2, 5, 9); every other command still denies. So the rule can turn
+  a deny into an allow and cannot turn an allow into a deny, and it carries none
+  of the false-deny risk #5356 was filed for. The allowlist in decision 5 is
+  part of what buys that: an unrecognised flag yields the pre-ADR-0049
+  behaviour rather than a new judgement.
+
+  **The first cut stated this per-arm and the wording was itself the defect.**
+  "Every arm that is not a positively evidenced documents-only commit returns a
+  deny" is true of the staged-set classifier read in isolation and false of the
+  rule that composes it, because the composition consulted the classifier once
+  and applied its answer to a whole `Bash` call. Decision 8 exists in the gap
+  between those two readings. A safety property claimed about a component is not
+  a property of the system that calls it; state it at the boundary the guard
+  actually decides on.
 - **The gate now runs a git subprocess, on a path that previously ran none.**
   `pm_guard_bash::main_checkout` documented itself as filesystem-lexical with no
   subprocess, and the staged set cannot be read any other way. It is read only
@@ -132,6 +168,17 @@ a proposed one — not stale prose that a doc sync could quietly fix.
   again — and the cost of a false allow here is one docs commit on a shared
   branch, against a false deny that would block the release-note and ADR work
   main-checkout sessions exist to do.
+- **Decision 8 costs the natural `git add … && git commit …` shape one extra
+  tool call.** That is the price of the index read meaning anything, and it is
+  paid in friction rather than in blocked work: the composed form was denied
+  before this ADR too, so nothing that used to succeed now fails. The deny names
+  the split rather than the content, because a reader who has staged documents
+  and is refused anyway will otherwise unstage the file that was fine.
+- **`git mv` is gated by nothing except decision 9's `--no-renames`.** It is not
+  an edit tool, so the write boundary never sees it, and it is not in
+  `is_whole_tree_destructive`. Making the staged rename visible to the commit
+  gate is what stops a source file leaving the shared branch under a `.md` name;
+  the `git mv` itself stays permitted, like `git add`.
 - **A source commit's message is longer and more specific than the one it
   replaces**, because it now names files. A staged set of a hundred source paths
   produces a hundred names. That is the correct failure for the reader, who has
@@ -142,6 +189,12 @@ a proposed one — not stale prose that a doc sync could quietly fix.
   outside resolves the running directory. It is the same stated gap, not a new
   one, and closing it is still a change to `git_verb_target_dir` that all three
   rules would inherit.
+- **Two lexer residuals are inherited from `split_shell_segments`, unchanged in
+  either direction by this ADR.** `(git commit -m x)` and
+  `bash -c "git commit -m x"` are not classified as commits at all, so neither
+  this rule nor ADR-0048's saw them before or sees them now. Recorded here
+  because a reader auditing decision 8's segment walk will find it and should
+  know it predates the walk rather than following from it.
 - **ADR-0030 is not superseded.** Only §0.5's read-only-ness claim, as DOC-66
   encodes it, is scoped. ADR-0030's session-to-workstream relationship, its
   single-home model, and everything else DOC-66 states are untouched and remain

@@ -1757,7 +1757,13 @@ fn pm_guard_denies_a_documents_only_commit_beside_a_live_writer() {
         return;
     };
     stage(&repo, "docs/x.md");
-    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    // The CAPTURING mock (#5769 added it for exactly this), so the directory
+    // KEY the query is made on is asserted rather than assumed. A query keyed
+    // on a path no delegation record carries matches nothing and allows, with
+    // the guard silently off — which is the defect #5769 was filed for.
+    let (url, captured) = spawn_capturing_writers_mock(
+        r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#,
+    );
     let stdout = run_pm_guard_at(
         &commit_payload("git commit -m 'docs: x'", &repo, ""),
         &url,
@@ -1765,6 +1771,12 @@ fn pm_guard_denies_a_documents_only_commit_beside_a_live_writer() {
     );
 
     assert_denied(&stdout);
+    let posted = captured.posted().expect("the guard must query the daemon");
+    assert_eq!(
+        posted["cwd"],
+        repo.display().to_string(),
+        "the query must be keyed by the checkout root the recorder stamps"
+    );
     let parsed: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
     let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
@@ -1780,6 +1792,33 @@ fn pm_guard_denies_a_documents_only_commit_beside_a_live_writer() {
         "the content was never the problem and the text must say so: {reason}"
     );
     assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+}
+
+#[test]
+fn pm_guard_keys_a_subdirectory_commit_query_by_the_checkout_root() {
+    // #5788 review, MEDIUM 4. `cd <subdir> && git commit` resolves the
+    // subdirectory, but `tm hook` stamps a delegation record from its own
+    // process directory — the two name one HEAD and need not be the same
+    // string. The root is asked FIRST, which is the same order and the same
+    // reason as the HEAD-move rule (#5769).
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/x.md");
+    let sub = repo.join("docs");
+    let (url, captured) = spawn_capturing_writers_mock(
+        r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#,
+    );
+    let command = format!("cd {} && git commit -m 'docs: x'", sub.display());
+    let stdout = run_pm_guard_at(&commit_payload(&command, &repo, ""), &url, &repo);
+
+    assert_denied(&stdout);
+    let posted = captured.posted().expect("the guard must query the daemon");
+    assert_eq!(
+        posted["cwd"],
+        repo.display().to_string(),
+        "a subdirectory commit must key the query by the checkout root"
+    );
 }
 
 #[test]
@@ -1801,6 +1840,118 @@ fn pm_guard_allows_a_documents_only_commit_when_nobody_else_is_writing() {
         stdout.trim(),
         "",
         "a documents commit with no other writer must be allowed, got: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_docs_commit_composed_with_another_command() {
+    // #5788 review, CRITICAL 1, demonstrated live against the first cut. The
+    // walker returned on the FIRST commit segment, so a docs-only staged set
+    // licensed every later segment in the same Bash call:
+    //
+    //   git commit -m docs && git add -A && git commit -a -m src   → ALLOWED
+    //   git commit -m docs ; git commit --amend --no-edit          → ALLOWED
+    //
+    // Both were denied before ADR-0049, and the second rewrites the shared
+    // branch's tip. One index read describes at most one commit, and only when
+    // nothing between the read and that commit can restage.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/x.md");
+    std::fs::create_dir_all(repo.join("crates/a/src")).expect("mkdir src");
+    std::fs::write(repo.join("crates/a/src/lib.rs"), "y").expect("write source");
+    for command in [
+        "git commit -m docs && git add -A && git commit -a -m src",
+        "git commit -m docs ; git commit --amend --no-edit",
+        // One commit segment, but `git add` restages after the reading — the
+        // same hole, one segment earlier.
+        "git add -A && git commit -m docs",
+        "git commit -m docs && cargo test",
+    ] {
+        let stdout = run_pm_guard(&commit_payload(command, &repo, ""), &[]);
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("Split the call"),
+            "`{command}` must name the composition as the cause: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_source_commit_read_from_a_subdirectory() {
+    // #5788 review, CRITICAL 2, demonstrated live. `diff.relative=true` in any
+    // config file makes `git diff --cached --name-only` under `-C <subdir>`
+    // report only the paths beneath it, so a staged `.rs` outside the
+    // subdirectory vanished and the gate read the set as documents-only.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    assert!(
+        Command::new("git")
+            .args(["config", "diff.relative", "true"])
+            .current_dir(&repo)
+            .status()
+            .expect("git config")
+            .success()
+    );
+    stage(&repo, "docs/x.md");
+    stage(&repo, "crates/a/src/lib.rs");
+    let sub = repo.join("docs");
+
+    let stdout = run_pm_guard(
+        &commit_payload(
+            &format!("cd {} && git commit -m docs", sub.display()),
+            &repo,
+            "",
+        ),
+        &[],
+    );
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("crates/a/src/lib.rs"),
+        "the source file outside the subdirectory must still be seen: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_commit_that_renames_source_into_a_document() {
+    // #5788 review, HIGH 3, demonstrated live. Rename detection is on by
+    // default and `--name-only` prints only the DESTINATION, so a staged
+    // `git mv crates/a/src/lib.rs docs/lib.md` reported as documents-only for a
+    // commit that deletes a source file from the shared branch. `git mv` is
+    // gated by nothing else — it is not an edit tool and not a destructive verb.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "crates/a/src/lib.rs");
+    assert!(
+        Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
+            .status()
+            .expect("git commit")
+            .success()
+    );
+    std::fs::create_dir_all(repo.join("docs")).expect("mkdir docs");
+    assert!(
+        Command::new("git")
+            .args(["mv", "crates/a/src/lib.rs", "docs/lib.md"])
+            .current_dir(&repo)
+            .status()
+            .expect("git mv")
+            .success()
+    );
+
+    let stdout = run_pm_guard(&commit_payload("git commit -m docs", &repo, ""), &[]);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("crates/a/src/lib.rs"),
+        "the deleted source side of the rename must be named: {stdout}"
     );
 }
 

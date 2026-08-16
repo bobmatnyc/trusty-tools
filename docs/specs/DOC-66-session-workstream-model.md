@@ -78,7 +78,7 @@ git recovers anything committed. It recovers **nothing** uncommitted or untracke
 
 **A narrower boundary does apply, and it is mechanically enforced.** [ADR-0044](../adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md), [ADR-0048](../adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md) and [ADR-0049](../adr/0049-docs-commits-are-permitted-in-a-main-checkout.md) make any main checkout — the tm checkout included — **source-restricted**, for the PM and every agent it dispatches:
 
-- **Documents and configuration are writable**, and since ADR-0049 they are also **committable** from the checkout they were written in, provided the staged set holds nothing else and no other live writer shares the HEAD.
+- **Documents and configuration are writable**, and since ADR-0049 they are also **committable** from the checkout they were written in, provided the staged set holds nothing else, no other live writer shares the HEAD, and the `git commit` is not chained to anything but a `cd` (one index reading describes one commit).
 - **Source files are not writable there, and a commit whose staged set contains one is refused.** `tm hook --pm-guard` enforces both. Source work belongs in a worktree.
 - **`git pull`, `merge` and `rebase` are refused while another live writer shares the directory** (ADR-0048 decision 10). `git fetch` and `git add` are never restricted — neither moves HEAD.
 
