@@ -1110,27 +1110,29 @@ fn subagent_tool_call_registers_its_worktree() {
     );
     assert_eq!(only(&state, sid).worktree_path, None, "nothing yet");
 
-    // #4311: a REAL directory, because registration now writes the ownership
-    // sentinel into it first and declines when that write fails. The path this
-    // used to fabricate could never have been written to.
-    let wt = tempfile::tempdir().expect("tempdir");
+    // #4311: a REAL directory at the harness shape, because registration now
+    // writes the ownership sentinel into it and refuses any path that is not a
+    // `.claude/worktrees/<name>` leaf. The path this used to fabricate could
+    // never have been written to.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let wt = harness_store_dir(&tmp, "agent-a403");
     observe(
         &state,
         sid,
         HookEvent::PreToolUse,
-        &subagent_call("a403", &wt.path().to_string_lossy()),
+        &subagent_call("a403", &wt.to_string_lossy()),
     );
 
     assert_eq!(
         only(&state, sid).worktree_path.as_deref(),
-        Some(wt.path()),
+        Some(wt.as_path()),
         "the subagent's own cwd is the tree it was granted"
     );
     // ...and the grant is durable, not only in the DashMap the next daemon
     // restart drops.
     assert!(
         matches!(
-            crate::session_manager::worktree_ownership::read_sentinel_owner(wt.path()),
+            crate::session_manager::worktree_ownership::read_sentinel_owner(&wt),
             SentinelOwner::Agent(owner, _) if owner.agent_id == "a403"
         ),
         "the tree must carry an ownership sentinel naming this agent"
@@ -1167,14 +1169,15 @@ fn a_failed_sentinel_write_registers_no_worktree() {
         &post_async("Agent", "toolu_1", "a405"),
     );
 
-    let wt = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir(wt.path().join(".trusty-mpm-worktree")).expect("occupy the sentinel path");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let wt = harness_store_dir(&tmp, "agent-a405");
+    std::fs::create_dir(wt.join(".trusty-mpm-worktree")).expect("occupy the sentinel path");
 
     observe(
         &state,
         sid,
         HookEvent::PreToolUse,
-        &subagent_call("a405", &wt.path().to_string_lossy()),
+        &subagent_call("a405", &wt.to_string_lossy()),
     );
 
     assert_eq!(
@@ -1182,6 +1185,170 @@ fn a_failed_sentinel_write_registers_no_worktree() {
         None,
         "an unattributable tree must stay unregistered — owner-unknown is never \
          auto-deleted, and that is the safe side of this failure"
+    );
+}
+
+/// Build a real `<tmp>/.claude/worktrees/<name>` directory.
+fn harness_store_dir(tmp: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
+    let wt = tmp.path().join(".claude").join("worktrees").join(name);
+    std::fs::create_dir_all(&wt).expect("create harness worktree dir");
+    wt
+}
+
+/// Drive a dispatch to the point where `agent_id` is known.
+fn dispatched(state: &Arc<DaemonState>, sid: SessionId, agent_id: &str, tool_use_id: &str) {
+    observe(
+        state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "rust-engineer", "build it", tool_use_id),
+    );
+    observe(
+        state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", tool_use_id, agent_id),
+    );
+}
+
+/// #4311 REGRESSION: a `cwd` outside `.claude/worktrees/<name>` gets no sentinel.
+///
+/// Why: `cwd` is `std::env::current_dir()` of the `tm hook` process — wherever
+/// the agent last `cd`-ed, not a path trusty-mpm chose. An agent that steps into
+/// its main checkout, `/private/tmp`, or a peer's tree reports that instead, and
+/// the pre-review body wrote a sentinel into whatever it was handed. That both
+/// stamps trusty-mpm's ownership on a directory it does not own and retargets
+/// the reap at a directory the agent merely visited.
+#[test]
+fn a_cwd_outside_the_harness_store_gets_no_sentinel() {
+    let (state, sid) = state_with_session();
+    dispatched(&state, sid, "a601", "toolu_1");
+    // A real, writable directory — so the refusal is the shape gate, not a
+    // write failure standing in for it.
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &subagent_call("a601", &elsewhere.path().to_string_lossy()),
+    );
+
+    assert_eq!(
+        only(&state, sid).worktree_path,
+        None,
+        "a path outside the harness store must not be registered"
+    );
+    assert_eq!(
+        crate::session_manager::worktree_ownership::read_sentinel_owner(elsewhere.path()),
+        SentinelOwner::Unknown,
+        "and no sentinel may be left behind in a directory trusty-mpm does not own"
+    );
+}
+
+/// #4311 REGRESSION: another agent's sentinel is never truncated.
+///
+/// Why: `fs::write` truncates. An agent reporting a peer's worktree as its cwd
+/// would have overwritten that peer's ownership record, after which the peer's
+/// tree reaps on the WRONG agent's exit and the peer's own exit reaps nothing.
+#[test]
+fn a_cwd_owned_by_another_agent_is_never_overwritten() {
+    let (state, sid) = state_with_session();
+    dispatched(&state, sid, "a602", "toolu_1");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let peer_tree = harness_store_dir(&tmp, "agent-peer");
+    crate::session_manager::worktree_ownership::write_agent_sentinel(
+        &peer_tree,
+        crate::session_manager::worktree_ownership::AgentWorktreeOwner {
+            agent_id: "a-the-peer".to_string(),
+            delegation_id: crate::core::agent::DelegationId(uuid::Uuid::new_v4()),
+            parent_session_id: sid,
+        },
+    )
+    .expect("write the peer's sentinel");
+
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &subagent_call("a602", &peer_tree.to_string_lossy()),
+    );
+
+    assert_eq!(only(&state, sid).worktree_path, None, "must not register");
+    assert!(
+        matches!(
+            crate::session_manager::worktree_ownership::read_sentinel_owner(&peer_tree),
+            SentinelOwner::Agent(owner, _) if owner.agent_id == "a-the-peer"
+        ),
+        "the peer's sentinel must survive untouched"
+    );
+}
+
+/// A managed session's own sentinel is equally protected.
+///
+/// Why: `SentinelOwner::Known` is the shape a tm-provisioned session worktree
+/// carries. Overwriting one would hand a session's workspace to an agent reap.
+#[test]
+fn a_cwd_owned_by_a_managed_session_is_never_overwritten() {
+    let (state, sid) = state_with_session();
+    dispatched(&state, sid, "a603", "toolu_1");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let session_tree = harness_store_dir(&tmp, "agent-looks-like-one");
+    let owner = crate::session_manager::record::ManagedSessionId::new();
+    std::fs::write(
+        session_tree.join(".trusty-mpm-worktree"),
+        crate::session_manager::worktree_ownership::sentinel_payload_bytes(owner),
+    )
+    .expect("write a session sentinel");
+
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &subagent_call("a603", &session_tree.to_string_lossy()),
+    );
+
+    assert_eq!(only(&state, sid).worktree_path, None, "must not register");
+    assert!(
+        matches!(
+            crate::session_manager::worktree_ownership::read_sentinel_owner(&session_tree),
+            SentinelOwner::Known(got, _) if got == owner
+        ),
+        "the session's sentinel must survive untouched"
+    );
+}
+
+/// Re-registering the SAME agent's own tree is not an overwrite and proceeds.
+///
+/// Why: registration re-fires on every subagent tool call by design, so the
+/// occupied-path refusal must not turn the retry path into a permanent block.
+#[test]
+fn an_agent_may_rewrite_its_own_sentinel() {
+    let (state, sid) = state_with_session();
+    dispatched(&state, sid, "a604", "toolu_1");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let own_tree = harness_store_dir(&tmp, "agent-a604");
+    crate::session_manager::worktree_ownership::write_agent_sentinel(
+        &own_tree,
+        crate::session_manager::worktree_ownership::AgentWorktreeOwner {
+            agent_id: "a604".to_string(),
+            delegation_id: crate::core::agent::DelegationId(uuid::Uuid::new_v4()),
+            parent_session_id: sid,
+        },
+    )
+    .expect("write its own earlier sentinel");
+
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &subagent_call("a604", &own_tree.to_string_lossy()),
+    );
+
+    assert_eq!(
+        only(&state, sid).worktree_path.as_deref(),
+        Some(own_tree.as_path()),
+        "an agent must be able to re-register its own tree"
     );
 }
 
@@ -1197,24 +1364,13 @@ fn a_failed_sentinel_write_registers_no_worktree() {
 #[test]
 fn concurrent_subagents_register_their_own_trees() {
     let (state, sid) = state_with_session();
+    let tmp = tempfile::tempdir().expect("tempdir");
     let trees: Vec<_> = ["a501", "a502", "a503"]
         .iter()
         .enumerate()
         .map(|(i, agent)| {
-            let tool_use_id = format!("toolu_{i}");
-            observe(
-                &state,
-                sid,
-                HookEvent::PreToolUse,
-                &pre("Agent", "rust-engineer", &format!("task {i}"), &tool_use_id),
-            );
-            observe(
-                &state,
-                sid,
-                HookEvent::PostToolUse,
-                &post_async("Agent", &tool_use_id, agent),
-            );
-            (*agent, tempfile::tempdir().expect("tempdir"))
+            dispatched(&state, sid, agent, &format!("toolu_{i}"));
+            (*agent, harness_store_dir(&tmp, &format!("agent-{agent}")))
         })
         .collect();
 
@@ -1226,7 +1382,7 @@ fn concurrent_subagents_register_their_own_trees() {
                     state,
                     sid,
                     HookEvent::PreToolUse,
-                    &subagent_call(agent, &wt.path().to_string_lossy()),
+                    &subagent_call(agent, &wt.to_string_lossy()),
                 );
             });
         }
@@ -1239,10 +1395,10 @@ fn concurrent_subagents_register_their_own_trees() {
             .find(|d| d.agent_id.as_deref() == Some(*agent))
             .and_then(|d| d.worktree_path)
             .unwrap_or_else(|| panic!("{agent} registered no worktree"));
-        assert_eq!(recorded, wt.path(), "{agent} must hold its OWN tree");
+        assert_eq!(&recorded, wt, "{agent} must hold its OWN tree");
         assert!(
             matches!(
-                crate::session_manager::worktree_ownership::read_sentinel_owner(wt.path()),
+                crate::session_manager::worktree_ownership::read_sentinel_owner(wt),
                 SentinelOwner::Agent(owner, _) if owner.agent_id == *agent
             ),
             "{agent}'s tree must carry {agent}'s sentinel, not a sibling's"

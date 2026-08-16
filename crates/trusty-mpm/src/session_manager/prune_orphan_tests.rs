@@ -358,6 +358,15 @@ async fn prune_orphaned_worktrees_skips_an_agent_owned_worktree() {
         "this sweep has no liveness check and must never reclaim an agent's tree; got {:?}",
         outcome.removed
     );
+    // Attributing it must not cost an operator the VIEW of it. Pre-#4311 these
+    // landed in `owner_unknown` — unreclaimable but visible in `--dry-run`, the
+    // prune route, the MCP tool and `tm doctor`. A directory that vanishes from
+    // every report is worse than one reported as unreclaimable.
+    assert!(
+        outcome.agent_owned.contains(&wt),
+        "an agent-owned worktree must stay visible in the sweep report; got {:?}",
+        outcome.agent_owned
+    );
     assert!(wt.exists(), "the worktree must survive the sweep");
 }
 

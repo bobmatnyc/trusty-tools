@@ -24,15 +24,25 @@
 //! not ABSENT. On a machine with no `lsof` this refuses every reap and says so,
 //! which is the correct trade for a `git worktree remove --force`.
 //!
-//! # Stated gap: cwd only, not open descriptors
+//! # Stated gap: this misses the agent process itself
 //!
-//! `lsof -d cwd` costs one invocation and about a second regardless of how big
-//! the tree is. The recursive form (`lsof +D <path>`) also catches a process
-//! whose cwd is elsewhere but which holds a descriptor inside the tree, at a
-//! cost that scales with the tree — an agent worktree here carries a 1.5 GiB
-//! `target/`. The cwd form catches the observed incident exactly; a process
-//! holding only a descriptor is not covered and is left as a known gap rather
-//! than paid for on every reap.
+//! State the limit at its real width, not its flattering one. This catches a
+//! process that `cd`-ed into the tree. It does NOT reliably catch the agent the
+//! worktree was granted to: measured on this machine, every running `claude`
+//! process has its cwd at a project root and none inside `.claude/worktrees/`.
+//! Coverage of a live agent is therefore incidental — it exists only where that
+//! agent happened to `cd`. What this gate reliably catches is the class of
+//! long-running command started BY an agent from inside its tree, which is the
+//! 2026-08-15 `trusty-memory serve --foreground` shape.
+//!
+//! The agent process itself is covered by the registry instead:
+//! `agent_worktree_reap::paths_in_use` reads every non-terminal delegation in
+//! every session. The two are complementary, and neither alone is sufficient.
+//!
+//! `lsof +D <path>` would additionally catch a process holding a descriptor
+//! inside the tree with its cwd elsewhere, at a cost that scales with the tree —
+//! an agent worktree here carries a 1.5 GiB `target/`. Not paid for on every
+//! reap, and not the fix for the gap above.
 //! Test: the `#[cfg(test)]` suite in `worktree_liveness_tests.rs`.
 
 use std::path::Path;
@@ -110,15 +120,31 @@ fn run_cwd_probe(bin: &str) -> Result<String, String> {
 /// including the shapes that must NOT be read as "free".
 /// What: `lsof`'s field output repeats `p<pid>`, `c<command>`, then `n<path>`;
 /// the `p`/`c` values carry forward until the next process set. Returns
-/// `Some(reason)` for the first match, for an empty listing (nothing was
-/// observed, so nothing was ruled out), and for a listing that yielded no `n`
-/// field at all (the probe answered in a shape this cannot read).
+/// `Some(reason)` for the first match, and for any listing that fails the
+/// SELF-VISIBILITY proof below.
+///
+/// # Why "the listing was non-empty" is not proof it saw anything
+///
+/// Without root, `lsof` reports only the caller's own processes and exits 0
+/// regardless — measured on this machine, `lsof -w -d cwd -F pcn` returned 429
+/// of 667 processes and ZERO of the 229 owned by other users. A flag that only
+/// asks "did ANY `n` line appear" is satisfied by that partial listing, so
+/// blindness to the very process that matters reads as a clean negative, which
+/// is a PERMIT on a `git worktree remove --force`. That is #4470's
+/// empty-`lsof`-is-not-`Free` defect in a second subsystem.
+///
+/// So the proof is positive and specific: the listing must contain THIS
+/// process's own pid with a working directory. If the probe cannot see the
+/// process that ran it, its silence about every other process carries no
+/// information at all.
 /// Test: `liveness_reports_a_process_standing_in_the_directory`,
 /// `liveness_ignores_a_sibling_directory`,
 /// `liveness_treats_an_unparsable_probe_as_in_use`,
-/// `liveness_treats_an_empty_probe_as_in_use`.
+/// `liveness_treats_an_empty_probe_as_in_use`,
+/// `liveness_treats_a_listing_that_cannot_see_this_process_as_in_use`.
 fn scan_probe(output: &str, root: &Path) -> Option<String> {
-    let (mut pid, mut command, mut saw_a_path) = ("?", "?", false);
+    let self_pid = std::process::id().to_string();
+    let (mut pid, mut command, mut saw_self) = ("?", "?", false);
     for line in output.lines() {
         let Some((tag, value)) = line.split_at_checked(1) else {
             continue;
@@ -127,7 +153,9 @@ fn scan_probe(output: &str, root: &Path) -> Option<String> {
             "p" => pid = value,
             "c" => command = value,
             "n" => {
-                saw_a_path = true;
+                if pid == self_pid {
+                    saw_self = true;
+                }
                 if Path::new(value).starts_with(root) {
                     return Some(format!(
                         "pid {pid} ({command}) is standing in {value} — a live process nothing \
@@ -138,10 +166,10 @@ fn scan_probe(output: &str, root: &Path) -> Option<String> {
             _ => {}
         }
     }
-    if !saw_a_path {
+    if !saw_self {
         return Some(format!(
-            "the live-process probe returned no working directories at all, so nothing rules \
-             out a process inside {} — treating it as in use (ADR-0045)",
+            "the live-process probe never reported this process (pid {self_pid}) — it cannot \
+             see the process that ran it, so its silence about {} proves nothing (ADR-0045)",
             root.display()
         ));
     }

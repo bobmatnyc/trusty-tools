@@ -62,7 +62,9 @@ use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::worktree_liveness::process_holding;
-use crate::session_manager::worktree_ownership::find_agent_worktree;
+use crate::session_manager::worktree_ownership::{
+    SentinelOwner, find_agent_worktree, read_sentinel_owner,
+};
 use crate::session_manager::worktree_safety::{DirtyWorktreePolicy, dirt_blocks_removal};
 
 /// What happened to one registered agent worktree.
@@ -159,8 +161,10 @@ pub(crate) fn is_harness_agent_worktree(path: &Path) -> bool {
 /// `reap_refuses_an_unpushed_commit`, `reap_refuses_a_path_a_live_session_holds`,
 /// `reap_refuses_a_worktree_outside_the_harness_base`,
 /// `reap_reports_already_gone_when_the_harness_reclaimed_it`,
-/// `reap_refuses_a_worktree_a_live_process_is_standing_in`.
-pub(crate) fn reap_worktree(path: &Path, in_use: &[PathBuf]) -> ReapOutcome {
+/// `reap_refuses_a_worktree_a_live_process_is_standing_in`,
+/// `reap_refuses_a_path_whose_sentinel_names_another_agent`,
+/// `reap_refuses_a_path_with_no_sentinel`.
+pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> ReapOutcome {
     if !path.exists() {
         return ReapOutcome::AlreadyGone;
     }
@@ -170,6 +174,25 @@ pub(crate) fn reap_worktree(path: &Path, in_use: &[PathBuf]) -> ReapOutcome {
              ADR-0036 assigns to harness agent worktrees",
             path.display()
         ));
+    }
+    // #4311: confirm ownership against the DIRECTORY, immediately before
+    // deleting it. Every other input to this decision — `d.worktree_path` from
+    // the registry, or the path `rebuild_from_disk` matched — was resolved
+    // somewhere else and could name a directory this agent never owned. The
+    // sentinel sitting IN the target is the only claim that cannot have been
+    // redirected on the way here, so it is re-read rather than trusted from the
+    // caller. This gate holds independently of the write-site gates in
+    // `delegation_tracker::register_agent_worktree`; either one alone would
+    // leave the removal reachable through the other path.
+    match read_sentinel_owner(path) {
+        SentinelOwner::Agent(owner, _) if owner.agent_id == agent_id => {}
+        other => {
+            return ReapOutcome::Refused(format!(
+                "{} does not carry a sentinel naming agent {agent_id} (found {other:?}) — \
+                 refusing to remove a directory whose ownership it cannot confirm on disk",
+                path.display()
+            ));
+        }
     }
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if in_use
@@ -235,13 +258,16 @@ pub(crate) fn reap_worktree(path: &Path, in_use: &[PathBuf]) -> ReapOutcome {
 /// What: every managed session's `workspace_path` — deliberately UNFILTERED by
 /// record state, for the reason `prune.rs` gives (a record's state is
 /// bookkeeping, not a liveness signal) — plus the registered worktree of every
-/// delegation in this session that is not terminal, excluding `self_id`'s own.
-/// Test: `reap_refuses_a_path_a_live_session_holds`.
-async fn paths_in_use(
-    state: &Arc<DaemonState>,
-    session: SessionId,
-    self_agent_id: &str,
-) -> Vec<PathBuf> {
+/// non-terminal delegation in EVERY session, excluding `self_agent_id`'s own.
+///
+/// The delegation half was scoped to the stopping agent's own session until
+/// #4311's review. That scoping was wrong for the same reason the record-state
+/// filter above is: a sibling agent dispatched from a different session is
+/// exactly as live, and its worktree is exactly as un-deletable. Sessions are
+/// not an isolation boundary for "is something running in this directory".
+/// Test: `reap_refuses_a_path_a_live_session_holds`,
+/// `reap_spares_a_worktree_another_sessions_agent_still_holds`.
+async fn paths_in_use(state: &Arc<DaemonState>, self_agent_id: &str) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = state
         .session_manager()
         .await
@@ -250,7 +276,7 @@ async fn paths_in_use(
         .into_iter()
         .filter_map(|r| r.workspace_path)
         .collect();
-    for d in state.delegations_for(session) {
+    for d in state.all_delegations() {
         if d.status.is_terminal() || d.agent_id.as_deref() == Some(self_agent_id) {
             continue;
         }
@@ -346,11 +372,14 @@ pub fn spawn_on_stop(
 
     let state = Arc::clone(state);
     tokio::spawn(async move {
-        let in_use = paths_in_use(&state, session, &agent_id).await;
+        let in_use = paths_in_use(&state, &agent_id).await;
         let removal_path = path.clone();
-        let outcome = tokio::task::spawn_blocking(move || reap_worktree(&removal_path, &in_use))
-            .await
-            .unwrap_or_else(|e| ReapOutcome::Refused(format!("reap task panicked: {e}")));
+        let reap_agent_id = agent_id.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            reap_worktree(&removal_path, &reap_agent_id, &in_use)
+        })
+        .await
+        .unwrap_or_else(|e| ReapOutcome::Refused(format!("reap task panicked: {e}")));
         match &outcome {
             ReapOutcome::Removed | ReapOutcome::AlreadyGone => {
                 // `None` when the path came from disk rather than the registry

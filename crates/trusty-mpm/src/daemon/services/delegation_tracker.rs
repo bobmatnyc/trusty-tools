@@ -104,7 +104,11 @@ use crate::core::dispatch_isolation::{dispatch_isolation, isolation_separates_wo
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
-use crate::session_manager::worktree_ownership::{AgentWorktreeOwner, write_agent_sentinel};
+use crate::session_manager::worktree_ownership::{
+    AgentWorktreeOwner, SentinelOwner, read_sentinel_owner, write_agent_sentinel,
+};
+
+use super::agent_worktree_reap::is_harness_agent_worktree;
 
 /// How long after an `agent_delegate` call an observed dispatch may be treated
 /// as the *same* delegation.
@@ -247,10 +251,30 @@ fn usable_agent_id(response: &Value) -> Option<&str> {
 /// in both directions. It is never fatal to the hook: [`observe`] is
 /// observational and must never affect the tool verdict, so the failure is
 /// logged at `error!` and the hook returns normally.
+///
+/// # `cwd` is agent-controlled, so two gates stand in front of the write
+///
+/// The `cwd` here is `std::env::current_dir()` of the `tm hook` process
+/// (`core::standalone::misc`), which is wherever the agent last `cd`-ed. It is
+/// not a path trusty-mpm chose, and an agent that visits its own main checkout,
+/// `/private/tmp`, or a peer's worktree reports that instead. Writing there
+/// would truncate whatever sentinel already sat at that path and retarget the
+/// reap at a directory the agent merely walked through.
+///
+/// So [`is_harness_agent_worktree`] must accept the path — the identical
+/// predicate [`super::agent_worktree_reap::reap_worktree`] uses as its own gate,
+/// reused rather than restated so the write and the delete cannot disagree
+/// about what a worktree is — AND the path's existing sentinel must be either
+/// absent/unparsable ([`SentinelOwner::Unknown`], nothing to overwrite) or
+/// already this same agent's. Anything else refuses and logs, exactly like the
+/// write-failure arm below.
 /// Test: `subagent_tool_call_registers_its_worktree`,
 /// `subagent_sharing_the_dispatchers_tree_registers_nothing`,
 /// `an_unknown_agent_id_registers_nothing`,
-/// `a_failed_sentinel_write_registers_no_worktree`.
+/// `a_failed_sentinel_write_registers_no_worktree`,
+/// `a_cwd_outside_the_harness_store_gets_no_sentinel`,
+/// `a_cwd_owned_by_another_agent_is_never_overwritten`,
+/// `a_cwd_owned_by_a_managed_session_is_never_overwritten`.
 fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Value) {
     let Some(agent_id) = field(payload, "agent_id") else {
         return;
@@ -265,6 +289,28 @@ fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Va
     }) else {
         return;
     };
+    if !is_harness_agent_worktree(&cwd) {
+        tracing::debug!(
+            agent_id,
+            cwd = %cwd.display(),
+            "delegation: the agent reported a working directory outside \
+             `.claude/worktrees/<name>` — recording no ownership there (#4311)"
+        );
+        return;
+    }
+    match read_sentinel_owner(&cwd) {
+        SentinelOwner::Unknown => {}
+        SentinelOwner::Agent(existing, _) if existing.agent_id == agent_id => {}
+        occupied => {
+            tracing::warn!(
+                agent_id,
+                cwd = %cwd.display(),
+                "delegation: {occupied:?} already owns this worktree — refusing to \
+                 overwrite another owner's sentinel and registering nothing (#4311)"
+            );
+            return;
+        }
+    }
     let owner = AgentWorktreeOwner {
         agent_id: agent_id.to_string(),
         delegation_id: id,

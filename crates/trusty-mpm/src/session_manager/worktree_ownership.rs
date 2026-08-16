@@ -272,24 +272,47 @@ pub(crate) fn write_agent_sentinel(
 /// `X` have?" — without it a restart returns every agent worktree to
 /// owner-unknown and the reap never fires again for it.
 /// What: reads each immediate child of `store` (`…/.claude/worktrees/`), parses
-/// its sentinel, and returns the first whose recorded `agent_id` equals
-/// `agent_id`. An exact key, never a heuristic — the same discipline
-/// `delegation_tracker::on_subagent_stop` applies, and for the same reason: a
-/// "most recent" guess would name the wrong directory under concurrency, and
-/// here that directory gets deleted.
+/// its sentinel, and returns the directory whose recorded `agent_id` equals
+/// `agent_id` — but ONLY when exactly one does. An exact key, never a
+/// heuristic: the same discipline `delegation_tracker::on_subagent_stop`
+/// applies, and for the same reason, except that here the named directory gets
+/// deleted.
+///
+/// # Two matches is undeterminable, not a permit
+///
+/// Nothing deletes a stale sentinel, and registration re-fires on every
+/// `PreToolUse`, so one `agent_id` CAN come to name several directories — an
+/// agent that moved between trees leaves the first one stamped. Returning the
+/// first `read_dir` hit would make the deletion target depend on filesystem
+/// enumeration order, which is not an ownership answer. Ambiguity resolves to
+/// `None` per ADR-0045, and the reap ends there, keeping both directories.
 /// Test: `agent_sentinel_survives_a_lost_registry`,
-/// `agent_sentinel_lookup_ignores_a_different_agent`.
+/// `agent_sentinel_lookup_ignores_a_different_agent`,
+/// `agent_sentinel_lookup_refuses_an_ambiguous_match`.
 pub(crate) fn find_agent_worktree(store: &Path, agent_id: &str) -> Option<std::path::PathBuf> {
     let entries = std::fs::read_dir(store).ok()?;
+    let mut matches: Vec<std::path::PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if let SentinelOwner::Agent(owner, _) = read_sentinel_owner(&path)
             && owner.agent_id == agent_id
         {
-            return Some(path);
+            matches.push(path);
         }
     }
-    None
+    match matches.len() {
+        1 => matches.pop(),
+        0 => None,
+        n => {
+            tracing::warn!(
+                agent_id,
+                store = %store.display(),
+                "worktree ownership: {n} directories carry a sentinel naming this agent — \
+                 which one it owns is undeterminable, so none is reclaimed (#4311, ADR-0045)"
+            );
+            None
+        }
+    }
 }
 
 /// Grace window (#3649 review fix): how young an ABSENT-owner sentinel must
@@ -643,6 +666,30 @@ mod tests {
 
         assert_eq!(find_agent_worktree(store.path(), "a404"), None);
         assert_eq!(find_agent_worktree(store.path(), ""), None);
+    }
+
+    /// #4311 REGRESSION: one `agent_id` in TWO directories resolves to neither.
+    ///
+    /// Why: nothing deletes a stale sentinel and registration re-fires on every
+    /// `PreToolUse`, so an agent that moved between trees leaves both stamped.
+    /// Returning the first `read_dir` hit would make the deletion target depend
+    /// on filesystem enumeration order — the reap would remove whichever
+    /// directory the OS happened to list first. Ambiguity is undeterminable
+    /// (ADR-0045), not a licence to pick one.
+    #[test]
+    fn agent_sentinel_lookup_refuses_an_ambiguous_match() {
+        let store = tempfile::tempdir().expect("tempdir");
+        for name in ["agent-first", "agent-second"] {
+            let wt = store.path().join(name);
+            std::fs::create_dir(&wt).expect("create worktree dir");
+            write_agent_sentinel(&wt, an_agent("a-moved-around")).expect("write sentinel");
+        }
+
+        assert_eq!(
+            find_agent_worktree(store.path(), "a-moved-around"),
+            None,
+            "two directories claiming one agent must reclaim neither"
+        );
     }
 
     /// Two agents registering concurrently keep separate directories.

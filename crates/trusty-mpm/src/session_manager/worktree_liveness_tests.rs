@@ -15,6 +15,12 @@ fn set(pid: &str, command: &str, cwd: &str) -> String {
     format!("p{pid}\nc{command}\nn{cwd}\n")
 }
 
+/// The self-visibility proof every non-refusing listing must carry: this
+/// process's own pid with a working directory.
+fn self_set() -> String {
+    set(&std::process::id().to_string(), "test", "/")
+}
+
 /// A process whose cwd is the candidate itself is named, with pid and command.
 #[test]
 fn liveness_reports_a_process_standing_in_the_directory() {
@@ -59,7 +65,8 @@ fn liveness_reports_a_process_nested_below_the_directory() {
 fn liveness_ignores_a_sibling_directory() {
     let root = PathBuf::from("/r/.claude/worktrees/agent-x");
     let listing = format!(
-        "{}{}",
+        "{}{}{}",
+        self_set(),
         set("100", "zsh", "/r/.claude/worktrees/agent-y"),
         set("101", "zsh", "/r/.claude/worktrees/agent-x2")
     );
@@ -68,6 +75,30 @@ fn liveness_ignores_a_sibling_directory() {
         scan_probe(&listing, &root),
         None,
         "neither sibling is inside the candidate"
+    );
+}
+
+/// #4311 REGRESSION: a listing that cannot see THIS process is not a negative.
+///
+/// Why: without root, `lsof` reports only the caller's own processes and exits
+/// 0 either way — measured on this machine, `lsof -w -d cwd -F pcn` returned
+/// 429 of 667 processes and ZERO of the 229 owned by other users. The
+/// pre-review check was a single "did any `n` line appear" flag, which that
+/// partial listing satisfies, so blindness to the process that matters read as
+/// a clean negative — a PERMIT on `git worktree remove --force`. This listing
+/// is non-empty and names a real cwd, so it passes the old flag; it must still
+/// refuse, because the probe never reported the process that ran it.
+#[test]
+fn liveness_treats_a_listing_that_cannot_see_this_process_as_in_use() {
+    let root = PathBuf::from("/r/.claude/worktrees/agent-x");
+    let listing = set("100", "zsh", "/Users/bob");
+
+    let reason =
+        scan_probe(&listing, &root).expect("a listing blind to this process rules nothing out");
+
+    assert!(
+        reason.contains(&std::process::id().to_string()),
+        "the refusal must name the pid it could not find: {reason}"
     );
 }
 
