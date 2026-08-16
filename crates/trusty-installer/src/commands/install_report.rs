@@ -114,7 +114,7 @@ pub struct InstallReport {
     /// The gating set is the REQUIRED members when the selection has any —
     /// an OPTIONAL member's failure never flips this (graceful-degrade,
     /// demo-critical fix) — and EVERY selected member when it has none
-    /// (#5799; see [`InstallReport::build`]).
+    /// (#5806; see [`InstallReport::build`]).
     pub all_ok: bool,
     /// The post-install verify-tail result (#2560): `ensure` + health (with
     /// the #2498 kickstart retry). `None` when `--no-verify` skipped it.
@@ -136,28 +136,35 @@ impl InstallReport {
     /// AND shadow_ok == true` (graceful-degrade, demo-critical fix: an
     /// OPTIONAL member is excluded from this check entirely — its failure is
     /// visible in `members` but never fails the run).
-    /// #5799 — the graceful-degrade filter used to fail OPEN on an
+    /// #5806 — the graceful-degrade filter used to fail OPEN on an
     /// all-OPTIONAL selection. `filter(required).all(…)` over an empty
     /// iterator is vacuously `true`, so `tctl install tga` reported
     /// `all_ok: true` and exit 0 when tga's install had genuinely failed —
     /// nothing installed, success reported. Adding trusty-installer (also
     /// OPTIONAL) would have made `tctl install trusty-installer` a fourth way
-    /// in. The gating set is now REQUIRED members when any were selected, and
-    /// EVERY selected member otherwise: "degrade gracefully" only means
-    /// anything relative to a required core, and a selection with no required
-    /// core is one where the operator asked for exactly these members.
+    /// in. The rule now lives once, in
+    /// [`crate::commands::stable_set::required_gate`], because the verify
+    /// tail wrote the same expression and kept failing open after this one was
+    /// fixed.
+    ///
+    /// An EMPTY member list is `all_ok: false`. `run` returns early on an empty
+    /// selection so nothing reaches here today, but "installed nothing" is not
+    /// evidence of a successful install, and the vacuous `.all()` that made it
+    /// `true` is the same shape being fixed one line up.
     ///
     /// Test: `tests::report_all_ok`, `tests::report_all_ok_reflects_service_failure`,
     /// `tests::report_all_ok_reflects_shadow_failure`,
     /// `tests::report_all_ok_ignores_optional_failure`,
     /// `tests::all_optional_selection_does_not_fail_open`,
-    /// `tests::lone_optional_installer_failure_exits_nonzero`.
+    /// `tests::lone_optional_installer_failure_exits_nonzero`,
+    /// `tests::empty_report_is_not_all_ok`.
     pub(super) fn build(members: Vec<InstallOutcome>) -> Self {
-        let any_required = members.iter().any(|m| m.required);
-        let all_ok = members
-            .iter()
-            .filter(|m| m.required || !any_required)
-            .all(|m| m.ok && m.service_ok && m.shadow_ok);
+        let all_ok = !members.is_empty()
+            && crate::commands::stable_set::required_gate(
+                &members,
+                |m| m.required,
+                |m| m.ok && m.service_ok && m.shadow_ok,
+            );
         Self {
             command: "install",
             members,
@@ -216,7 +223,7 @@ pub struct DryRunMember {
     /// Binary name that would land on PATH (the one probed for health).
     pub binary: String,
     /// EVERY binary this member would place, from the shared
-    /// `trusty_common::bin_resolve` table (#5799).
+    /// `trusty_common::bin_resolve` table (#5805).
     ///
     /// Why: `binary` names one file, but trusty-installer places
     /// `trusty-installer` AND `tctl`, trusty-mpm places `tm` AND `trusty-mpm`,
@@ -247,7 +254,7 @@ pub struct DryRunReport {
     pub members: Vec<DryRunMember>,
     /// Whether the post-install service bootstrap step is enabled.
     pub service_bootstrap_enabled: bool,
-    /// The directory every binary above would be written to (#5799).
+    /// The directory every binary above would be written to (#5805).
     ///
     /// Why: the preview claimed to show the blast radius but never named the
     /// destination, so an operator could not tell whether an install would
@@ -300,7 +307,7 @@ pub(super) fn plans_mpm_supervisor_bootstrap(m: &StableMember, service_enabled: 
 /// the preview can never drift from what `install_all` actually does, and
 /// listing every binary the member places via [`StableMember::binaries`].
 /// `install_dir` is passed in rather than resolved here so the shaping stays
-/// pure and the caller uses the SAME resolution `install_one` does (#5799).
+/// pure and the caller uses the SAME resolution `install_one` does (#5805).
 /// Test: `tests::dry_run_report_shape`,
 /// `tests::dry_run_names_the_canonical_install_dir`,
 /// `tests::dry_run_lists_both_installer_binaries`.
@@ -332,7 +339,7 @@ pub(super) fn build_dry_run_report(
 /// Why: A dry run never fails on its own account — it only reports what WOULD
 /// happen; a resolution error (unknown member) is caught earlier in `run`.
 /// What: resolves the install destination exactly as `install_one` does
-/// ([`crate::download::install_dir_or_fallback`], #5799), then `--json` emits
+/// ([`crate::download::install_dir_or_fallback`], #5805), then `--json` emits
 /// [`DryRunReport`] via `render_json`; otherwise prints a human blast-radius
 /// summary matching the wording the confirmation prompt used, naming the
 /// destination directory and, per member, every binary it would place there.
@@ -364,7 +371,7 @@ pub(super) fn print_dry_run(selected: &[StableMember], service_enabled: bool, js
         } else {
             "no service bootstrap"
         };
-        // #5799: every binary, not just the health-probe one — trusty-installer
+        // #5805: every binary, not just the health-probe one — trusty-installer
         // places `trusty-installer` AND `tctl`.
         eprintln!(
             "tctl install:   {} -> {} ({svc})",
@@ -376,46 +383,104 @@ pub(super) fn print_dry_run(selected: &[StableMember], service_enabled: bool, js
     0
 }
 
+/// The human summary footer's content, before it reaches stdout.
+///
+/// Why (#5806): the footer used to be computed inline inside a function that
+/// only printed, so nothing could assert it agreed with the exit code — and it
+/// did not. Splitting the shaping out is what makes the agreement testable.
+/// What: `headline` is the one-line count; `errors` are failures the exit code
+/// gates on; `skipped` are non-gating optional gaps.
+/// Test: `tests::summary_lines_match_the_gating_set`,
+/// `tests::all_optional_failure_summary_does_not_read_as_success`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SummaryLines {
+    /// `installed N/M …` — counted over the gating set.
+    pub headline: String,
+    /// Error-level lines: a gating member that failed to install, or installed
+    /// and then failed its service bootstrap.
+    pub errors: Vec<String>,
+    /// Info-level lines: an OPTIONAL member's failure that does not gate.
+    pub skipped: Vec<String>,
+}
+
+/// Shape the human summary from the SAME gating set [`InstallReport::build`]
+/// derives `all_ok` from.
+///
+/// Why (#5806): the machine verdict was fixed and the human one was not. For an
+/// all-optional selection that failed, this printed `installed 0/0 required
+/// component(s)`, an info-level "skipped", and a green `VERIFIED` — while
+/// `build` exited 2. Two channels describing one run must not disagree, so both
+/// now read [`crate::commands::stable_set::required_gate`]'s rule: REQUIRED
+/// members when the selection has any, every selected member when it has none.
+///
+/// What: counts and reports failures over the gating set; only members OUTSIDE
+/// it degrade to an informational "skipped". The headline says "required" only
+/// when the gating set genuinely is the required subset — with no required
+/// member, `0/0 required` was itself misleading.
+///
+/// # Postconditions
+/// - `errors` is empty iff every gating member installed and bootstrapped, which
+///   is exactly [`InstallReport::all_ok`] before the verify tail folds in.
+/// - A member never appears in both `errors` and `skipped`.
+///
+/// Test: `tests::summary_lines_match_the_gating_set`,
+/// `tests::all_optional_failure_summary_does_not_read_as_success`.
+pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
+    let any_required = report.members.iter().any(|m| m.required);
+    let gating: Vec<&InstallOutcome> = report
+        .members
+        .iter()
+        .filter(|m| m.required || !any_required)
+        .collect();
+    let gating_ok = gating.iter().filter(|m| m.ok).count();
+    let noun = if any_required { "required" } else { "selected" };
+
+    let mut errors: Vec<String> = gating
+        .iter()
+        .filter(|m| !m.ok)
+        .map(|m| format!("{}: {}", m.member, m.detail))
+        .collect();
+    // #2566 review: a binary can install cleanly (`ok: true`) while its service
+    // bootstrap genuinely failed — surface that on the human path too, not just
+    // fold it silently into the exit code. Gating members only: `all_ok`
+    // likewise ignores a non-gating member's service failure.
+    errors.extend(
+        gating
+            .iter()
+            .filter(|m| m.ok && !m.service_ok)
+            .map(|m| format!("{}: {}", m.member, m.service_detail)),
+    );
+
+    SummaryLines {
+        headline: format!("installed {gating_ok}/{} {noun} component(s)", gating.len()),
+        errors,
+        skipped: report
+            .members
+            .iter()
+            .filter(|m| !m.required && any_required && !m.ok)
+            .map(|m| format!("{}: skipped (no prebuilt for this platform)", m.member))
+            .collect(),
+    }
+}
+
 /// Print the human-readable install summary footer.
 ///
 /// Why: After the component table, a one-line verdict tells the operator whether
 /// everything landed. Graceful-degrade (demo-critical fix): the headline count
-/// covers REQUIRED members only, so an optional component with no prebuilt for
+/// covers the gating set only, so an optional component with no prebuilt for
 /// this platform never reads as a scary partial failure (e.g. the old
 /// `installed 4/7`); optional gaps are listed separately as skipped.
-/// What: Prints `installed N/M required component(s)`, lists REQUIRED failures
-/// as errors, and OPTIONAL failures as an informational "skipped" note.
-/// Test: Side-effect-only; the data it reads is tested via `InstallReport`.
+/// What: renders [`summary_lines`] — the headline at info level, gating
+/// failures at ERROR level, non-gating gaps at info level.
+/// Test: Side-effect-only; the content is tested via [`summary_lines`].
 pub(super) fn print_human_summary(report: &InstallReport) {
     let narr = narrator(false);
-    let required: Vec<&InstallOutcome> = report.members.iter().filter(|m| m.required).collect();
-    let required_ok = required.iter().filter(|m| m.ok).count();
-    let _ = narr.info(&format!(
-        "installed {}/{} required component(s)",
-        required_ok,
-        required.len()
-    ));
-    for m in required.iter().filter(|m| !m.ok) {
-        let _ = narr.error(&format!("{}: {}", m.member, m.detail));
+    let lines = summary_lines(report);
+    let _ = narr.info(&lines.headline);
+    for line in &lines.errors {
+        let _ = narr.error(line);
     }
-    // #2566 review: a binary can install cleanly (`ok: true`) while its
-    // service bootstrap genuinely failed — surface that on the human path too,
-    // not just fold it silently into the exit code. Only meaningful for
-    // required members: all_ok already ignores optional service failures.
-    for m in required.iter().filter(|m| m.ok && !m.service_ok) {
-        let _ = narr.error(&format!("{}: {}", m.member, m.service_detail));
-    }
-    let optional_failed: Vec<&InstallOutcome> = report
-        .members
-        .iter()
-        .filter(|m| !m.required && !m.ok)
-        .collect();
-    if !optional_failed.is_empty() {
-        for m in &optional_failed {
-            let _ = narr.info(&format!(
-                "{}: skipped (no prebuilt for this platform)",
-                m.member
-            ));
-        }
+    for line in &lines.skipped {
+        let _ = narr.info(line);
     }
 }

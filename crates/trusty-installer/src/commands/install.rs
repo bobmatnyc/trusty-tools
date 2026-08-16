@@ -404,7 +404,7 @@ async fn install_all(
     // with an unresolvable home), so the `/usr/local/bin` fallback is
     // reachable only with BOTH unset — invariant pinned by
     // `download::tests::install_dir_is_some_whenever_cargo_home_is_set`.
-    // #5799: via the shared `install_dir_or_fallback`, so this, `install_one`,
+    // #5805: via the shared `install_dir_or_fallback`, so this, `install_one`,
     // and the `--dry-run` preview cannot name three different directories.
     let install_dir = crate::download::install_dir_or_fallback();
 
@@ -569,25 +569,34 @@ async fn install_all(
                 // the install succeeded on disk, but the operator's shell
                 // would not see it, which is exactly the #3554 "looks
                 // installed, actually isn't live" failure class.
-                let (shadow_ok, shadow_detail) = match shadow_check::detect(
-                    &m.binary,
+                //
+                // #5805: EVERY binary the member places, not just the
+                // health-probe name. `tctl` is the name operators type and the
+                // one `--dry-run` advertises; probing only `trusty-installer`
+                // left a stale `tctl` winning every shell invocation while the
+                // install reported clear.
+                let reports = shadow_check::detect_all(
+                    &m.binaries(),
                     &installed.path,
                     Some(&installed.version),
                     &path_env,
                 )
-                .await
-                {
-                    Some(report) => {
-                        let msg = report.message();
-                        let full = format!("{}: {msg}", m.crate_name);
-                        if live {
-                            checklist.note(&format!("error: {full}"));
-                        } else {
-                            let _ = narr.error(&full);
-                        }
-                        (false, msg)
+                .await;
+                let (shadow_ok, shadow_detail) = if reports.is_empty() {
+                    (true, String::new())
+                } else {
+                    let msg = reports
+                        .iter()
+                        .map(|r| r.message())
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let full = format!("{}: {msg}", m.crate_name);
+                    if live {
+                        checklist.note(&format!("error: {full}"));
+                    } else {
+                        let _ = narr.error(&full);
                     }
-                    None => (true, String::new()),
+                    (false, msg)
                 };
                 checklist.set(&m.crate_name, ComponentState::Installed);
                 outcomes.push(InstallOutcome {
@@ -755,7 +764,7 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 /// hand-typed `cargo install` write to.
 ///
 /// That atomic-rename property is also what makes trusty-installer safe as a
-/// member of its own stable set (#5799): installing it replaces a binary that
+/// member of its own stable set (#5805): installing it replaces a binary that
 /// may be the running process, and `rename(2)` leaves the running image's open
 /// inode intact. Neither write path ever `cp`s over an on-PATH binary, which is
 /// the macOS cdhash hazard CLAUDE.md warns about.

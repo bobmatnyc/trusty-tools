@@ -11,7 +11,7 @@
 //! What: Defines [`StableMember`] (crate name + binary name + whether it is a
 //! supervised daemon) and [`stable_set`] — the ordered member list:
 //! trusty-search, trusty-memory, trusty-analyze, trusty-review, tga,
-//! trusty-console, trusty-mpm, and trusty-installer itself (#5799). Library
+//! trusty-console, trusty-mpm, and trusty-installer itself (#5805). Library
 //! crates (trusty-common, trusty-embedderd, …) are pulled in automatically as
 //! cargo dependencies of these binaries, so they are intentionally *not*
 //! listed here.
@@ -124,7 +124,7 @@ impl StableMember {
 
     /// Every binary `cargo install <crate_name>` puts in the bin dir.
     ///
-    /// Why (#5799): [`StableMember::binary`] holds ONE name, but three members
+    /// Why (#5805): [`StableMember::binary`] holds ONE name, but three members
     /// ship more than one — trusty-installer (`trusty-installer` + `tctl`),
     /// trusty-mpm (`tm` + `trusty-mpm`), trusty-search (`trusty-search` +
     /// `trusty-embedderd`). Resolving `tctl install tctl` against the single
@@ -143,10 +143,49 @@ impl StableMember {
         trusty_common::bin_resolve::installed_binaries(&self.crate_name)
     }
 
+    /// Whether this member IS the running control plane — `tctl` itself.
+    ///
+    /// Why (#5805): membership put the installer in the same list every
+    /// per-member fan-out iterates, and one of those fan-outs spawns the
+    /// member's binary. `tctl config` spawned `trusty-installer config --json`,
+    /// which enumerated the set and spawned it again, with
+    /// [`super::probe::spawn_member_json`] blocking on each child. Any surface
+    /// that runs a member's binary must ask this question first.
+    ///
+    /// What: `true` when the member's crate is this crate, or when it claims
+    /// any binary this crate installs — so the `tctl` alias is caught even if
+    /// a future row spells the crate differently. Both sides read
+    /// [`trusty_common::bin_resolve::installed_binaries`], the shared table
+    /// [`StableMember::binaries`] already delegates to.
+    ///
+    /// Test: `tests::exactly_one_member_is_the_control_plane`.
+    pub fn is_control_plane(&self) -> bool {
+        let me = env!("CARGO_PKG_NAME");
+        self.crate_name == me || {
+            let own = trusty_common::bin_resolve::installed_binaries(me);
+            self.binaries().iter().any(|b| own.contains(b))
+        }
+    }
+
+    /// Whether `tctl` may spawn this member's binary to forward a contract verb
+    /// (`<binary> config --json`, `<binary> version --json`).
+    ///
+    /// Why (#5805): forwarding to itself is unbounded recursion, not a config
+    /// read — see [`StableMember::is_control_plane`]. `tctl`'s own answer to
+    /// `config` is the aggregate it is building, so there is nothing to fetch.
+    ///
+    /// What: the negation of [`StableMember::is_control_plane`].
+    ///
+    /// Test: `tests::the_control_plane_forwards_no_contract_verb`,
+    /// `super::config::tests::fan_out_never_targets_our_own_binaries`.
+    pub fn forwards_contract_verbs(&self) -> bool {
+        !self.is_control_plane()
+    }
+
     /// Whether `name` refers to this member — its crate name or any of its
     /// installed binaries.
     ///
-    /// Why (#5799): the one predicate [`select_members`] and
+    /// Why (#5805): the one predicate [`select_members`] and
     /// [`select_members_transitive`] share, so the two resolvers cannot drift
     /// on which spellings are accepted.
     ///
@@ -157,6 +196,40 @@ impl StableMember {
     fn matches_name(&self, name: &str) -> bool {
         name == self.crate_name || name == self.binary || self.binaries().iter().any(|b| b == name)
     }
+}
+
+/// Fold a per-row verdict over the REQUIRED subset, falling back to every row
+/// when the selection contains none.
+///
+/// Why (#5806): `filter(|r| required(r)).all(ok)` over zero required rows is
+/// vacuously `true`, so a selection of only OPTIONAL members reported success
+/// no matter what happened. The rule was written twice — once in
+/// [`super::install_report::InstallReport::build`] for `all_ok`, once in
+/// [`super::verify_tail::VerifyTailReport::build`] for `verified` — and the
+/// first was fixed while the second kept failing open. It lives here now, so a
+/// third consumer inherits the fix rather than the bug.
+///
+/// "Degrade gracefully" only means anything relative to a required core. A
+/// selection with no required core is one where the operator asked for exactly
+/// these rows, so every one of them gates.
+///
+/// # Postconditions
+/// - With any required row, only required rows gate.
+/// - With no required row, every row gates.
+/// - An empty `rows` returns `true`. The two callers disagree about what no
+///   rows MEANS — for `install` it is "nothing was installed", for the verify
+///   tail it is "this selection contains no daemon to probe" — so emptiness is
+///   each caller's to judge, not this fold's.
+///
+/// Test: `tests::required_gate_truth_table`,
+/// `tests::required_gate_over_no_rows_is_the_callers_problem`.
+pub(super) fn required_gate<T>(
+    rows: &[T],
+    required: impl Fn(&T) -> bool,
+    ok: impl Fn(&T) -> bool,
+) -> bool {
+    let any_required = rows.iter().any(&required);
+    rows.iter().filter(|r| required(r) || !any_required).all(ok)
 }
 
 /// Derive a member's lifecycle [`ManageStrategy`] from its binary name and
@@ -197,7 +270,7 @@ pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
 /// itself, LAST. Library crates resolve as cargo dependencies and are not
 /// listed.
 ///
-/// #5799 — why the installer is a member, and why it is last: the tool whose
+/// #5805 — why the installer is a member, and why it is last: the tool whose
 /// job is placing trusty-* binaries could not place its own, so
 /// `tctl install trusty-installer` answered `unknown member(s)`. It is a
 /// non-daemon (`daemon: false`), so every daemon-shaped surface skips it by
@@ -241,7 +314,7 @@ pub fn stable_set() -> Vec<StableMember> {
         StableMember::new("tga", "tga", false, false),
         StableMember::new("trusty-console", "trusty-console", true, false),
         StableMember::new("trusty-mpm", "trusty-mpm", true, true),
-        // #5799: the control plane installs itself. Last, non-daemon, OPTIONAL
+        // #5805: the control plane installs itself. Last, non-daemon, OPTIONAL
         // — see this function's doc for all three reasons.
         StableMember::new("trusty-installer", "trusty-installer", false, false),
     ]
@@ -420,7 +493,7 @@ mod tests {
         );
     }
 
-    /// Why (#5799): the whole point — `tctl install trusty-installer` used to
+    /// Why (#5805): the whole point — `tctl install trusty-installer` used to
     /// answer `unknown member(s): trusty-installer`, so the tool that places
     /// trusty-* binaries could not place its own. Pin membership AND the three
     /// properties that keep it from turning every daemon-shaped surface into
@@ -436,7 +509,7 @@ mod tests {
         let installer = set
             .iter()
             .find(|m| m.crate_name == "trusty-installer")
-            .expect("trusty-installer must be a stable-set member (#5799)");
+            .expect("trusty-installer must be a stable-set member (#5805)");
         assert!(!installer.daemon, "the installer is not a daemon");
         assert_eq!(installer.manage, ManageStrategy::None);
         assert_eq!(
@@ -446,7 +519,98 @@ mod tests {
         );
     }
 
-    /// Why (#5799): `daemon_members` is the set `tctl stack doctor`,
+    /// Why (#5805): every fan-out that SPAWNS a member's binary must be able to
+    /// ask "is this me?" and get exactly one yes. Two would silently drop a
+    /// real member from `tctl config`; zero is the recursion itself.
+    /// What: asserts exactly one member of the shipped set is the control
+    /// plane, that it is trusty-installer, and that the `tctl` alias answers
+    /// the same way even though the crate name does not spell it.
+    /// Test: This is the test.
+    #[test]
+    fn exactly_one_member_is_the_control_plane() {
+        let set = stable_set();
+        let selves: Vec<&str> = set
+            .iter()
+            .filter(|m| m.is_control_plane())
+            .map(|m| m.crate_name.as_str())
+            .collect();
+        assert_eq!(selves, vec!["trusty-installer"]);
+
+        let alias = StableMember::new("trusty-installer", "tctl", false, false);
+        assert!(
+            alias.is_control_plane(),
+            "the `tctl` alias must resolve to self through the shared table too"
+        );
+    }
+
+    /// Why (#5805): the predicate `config::partition_forwardable` reads. A
+    /// member that forwards nothing must be the control plane and nothing else,
+    /// or a daemon stops reporting its config with no error anywhere.
+    /// What: asserts `forwards_contract_verbs` is the exact negation of
+    /// `is_control_plane` for every shipped member.
+    /// Test: This is the test.
+    #[test]
+    fn the_control_plane_forwards_no_contract_verb() {
+        for m in stable_set() {
+            assert_eq!(
+                m.forwards_contract_verbs(),
+                !m.is_control_plane(),
+                "{} disagrees with itself about forwarding",
+                m.crate_name
+            );
+        }
+    }
+
+    /// Why (#5806): the gating rule two reports derive their verdict from.
+    /// `filter(required).all(…)` over zero required rows is vacuously true, and
+    /// that shape shipped twice — fixed in `InstallReport::build`, left in
+    /// `VerifyTailReport::build`. Pin the truth table where the rule now lives.
+    /// What: asserts a failing OPTIONAL row gates when nothing is REQUIRED, and
+    /// stops gating as soon as a REQUIRED row joins the selection.
+    /// Test: This is the test.
+    #[test]
+    fn required_gate_truth_table() {
+        // (required, ok)
+        let rows = |v: &[(bool, bool)]| v.to_vec();
+        let req = |r: &(bool, bool)| r.0;
+        let ok = |r: &(bool, bool)| r.1;
+
+        // No required row: every row gates, so a failed optional fails the run.
+        assert!(!required_gate(&rows(&[(false, false)]), req, ok));
+        assert!(required_gate(&rows(&[(false, true)]), req, ok));
+        assert!(!required_gate(
+            &rows(&[(false, true), (false, false)]),
+            req,
+            ok
+        ));
+
+        // Any required row: only required rows gate — graceful degrade.
+        assert!(required_gate(
+            &rows(&[(true, true), (false, false)]),
+            req,
+            ok
+        ));
+        assert!(!required_gate(
+            &rows(&[(true, false), (false, true)]),
+            req,
+            ok
+        ));
+    }
+
+    /// Why (#5806): the two callers disagree about what "no rows" means, so the
+    /// fold must not decide for them — `install` treats it as "nothing was
+    /// installed" (failure), the verify tail as "no daemon in this selection"
+    /// (defer to `ensure_ok`). Pin that the fold itself stays neutral, so a
+    /// future caller reads the postcondition rather than inheriting a guess.
+    /// What: asserts the fold returns `true` over zero rows.
+    /// Test: This is the test.
+    #[test]
+    fn required_gate_over_no_rows_is_the_callers_problem() {
+        let empty: Vec<(bool, bool)> = Vec::new();
+        assert!(required_gate(&empty, |r| r.0, |r| r.1));
+    }
+
+    /// Why (#5805): `daemon_members` is the set `tctl stack doctor`,
     /// `tctl stack health`, and vmtest-harness enumerate. Adding a member to
     /// `stable_set` must not silently enrol the installer as a daemon those
     /// surfaces then probe for an HTTP `/health` it does not serve.
@@ -459,10 +623,10 @@ mod tests {
             !names.contains(&"trusty-installer".to_owned()),
             "the installer must never reach a daemon-shaped surface: {names:?}"
         );
-        assert_eq!(names.len(), 6, "daemon set unchanged by #5799: {names:?}");
+        assert_eq!(names.len(), 6, "daemon set unchanged by #5805: {names:?}");
     }
 
-    /// Why (#5799): the crate ships TWO binaries, and `tctl` is the one
+    /// Why (#5805): the crate ships TWO binaries, and `tctl` is the one
     /// operators actually type — `tctl install tctl` answered
     /// `unknown member(s): tctl`. The alias set comes from the shared
     /// `trusty_common::bin_resolve` table, so this also covers trusty-mpm's
@@ -491,7 +655,7 @@ mod tests {
         assert!(bins("trusty-search").contains(&"trusty-embedderd".to_owned()));
     }
 
-    /// Why (#5799): [`StableMember::matches_name`] resolves a caller's name
+    /// Why (#5805): [`StableMember::matches_name`] resolves a caller's name
     /// against every binary a member ships. If two members claimed the same
     /// binary name, resolution would silently pick whichever sorted first in
     /// [`stable_set`] and the operator would install the wrong crate. Nothing
@@ -516,7 +680,7 @@ mod tests {
         }
     }
 
-    /// Why (#5799): the resolver used to match only `crate_name` and the
+    /// Why (#5805): the resolver used to match only `crate_name` and the
     /// single `binary` field, so the alias binaries a member genuinely
     /// installs were rejected as unknown.
     /// What: asserts `tctl`, `tm`, and `trusty-embedderd` each resolve to
@@ -543,7 +707,7 @@ mod tests {
         }
     }
 
-    /// Why (#5799): the acceptance case. `tctl install trusty-installer`
+    /// Why (#5805): the acceptance case. `tctl install trusty-installer`
     /// resolved to nothing; it must now resolve to exactly the installer, with
     /// no transitive expansion (it has no runtime dependencies on other
     /// members, so it must not silently drag the stack in).
@@ -714,7 +878,7 @@ mod tests {
             "trusty-analyze",
             "trusty-console",
             "tga",
-            // #5799: a bulk install runs FROM a working installer, so failing
+            // #5805: a bulk install runs FROM a working installer, so failing
             // to refresh that copy leaves the stack usable. Naming it
             // explicitly still exits nonzero — see
             // `install_report::InstallReport::build`.

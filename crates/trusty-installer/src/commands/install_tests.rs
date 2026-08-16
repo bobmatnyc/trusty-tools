@@ -114,7 +114,7 @@ fn report_all_ok_true_for_optional_only_success() {
     assert_eq!(report.exit_code(), 0);
 }
 
-/// Why (#5799): the error arm the test above never covered, and a fail-open.
+/// Why (#5806): the error arm the test above never covered, and a fail-open.
 /// `filter(required).all(…)` over an empty iterator is vacuously `true`, so an
 /// all-OPTIONAL selection whose install genuinely FAILED reported
 /// `all_ok: true` and exit 0 — nothing installed, success reported, no signal
@@ -143,7 +143,7 @@ fn all_optional_selection_does_not_fail_open() {
     assert!(!InstallReport::build(vec![shadowed]).all_ok);
 }
 
-/// Why (#5799): the acceptance case for the fail-open fix. `tctl install
+/// Why (#5806): the acceptance case for the fail-open fix. `tctl install
 /// trusty-installer` names exactly one member, and that member is OPTIONAL, so
 /// a failed self-install hit the vacuous-truth path above and exited 0 — the
 /// worst possible place for it, since "reported success, did nothing" on the
@@ -173,6 +173,73 @@ fn lone_optional_installer_failure_exits_nonzero() {
          must not fail the whole stack"
     );
     assert_eq!(bulk.exit_code(), 0);
+}
+
+/// Why (#5806): `build(vec![])` was vacuously `all_ok: true` — `.all()` over an
+/// empty iterator, the same shape the required-filter fix removes one line up.
+/// `run` returns early on an empty selection so nothing reaches it today, but
+/// "installed nothing" is not evidence of a successful install, and leaving the
+/// shape inside the function being fixed for it is how it comes back.
+/// What: asserts an empty report is not `all_ok` and exits 2.
+/// Test: This is the test.
+#[test]
+fn empty_report_is_not_all_ok() {
+    let empty = InstallReport::build(Vec::new());
+    assert!(
+        !empty.all_ok,
+        "a report over zero members must not claim every member installed"
+    );
+    assert_eq!(empty.exit_code(), 2);
+}
+
+/// Why (#5806): the machine verdict was fixed and the human one was not. For an
+/// all-optional selection that failed, the footer printed `installed 0/0
+/// required component(s)`, an INFO-level "skipped", and then a green VERIFIED —
+/// while `build` exited 2. One run, two channels, opposite stories.
+/// What: asserts a lone failed OPTIONAL member produces a `0/1 selected`
+/// headline, an ERROR line naming the failure, and NO informational "skipped"
+/// line — and that the summary agrees with `all_ok` in every case.
+/// Test: This is the test.
+#[test]
+fn all_optional_failure_summary_does_not_read_as_success() {
+    let report = InstallReport::build(vec![optional_outcome("tga", false, "network error")]);
+    let lines = install_report::summary_lines(&report);
+
+    assert_eq!(lines.headline, "installed 0/1 selected component(s)");
+    assert_eq!(lines.errors, vec!["tga: network error".to_owned()]);
+    assert!(
+        lines.skipped.is_empty(),
+        "a failure the exit code gates on must not be downgraded to `skipped`: {:?}",
+        lines.skipped
+    );
+    assert!(!report.all_ok);
+    assert_eq!(
+        lines.errors.is_empty(),
+        report.all_ok,
+        "the human summary and `all_ok` must not disagree"
+    );
+}
+
+/// Why (#5806): the graceful-degrade wording this fix must NOT break. With a
+/// REQUIRED member present, an OPTIONAL member's failure still reads as an
+/// informational skip rather than a scary error, and the headline still counts
+/// the required subset.
+/// What: asserts a healthy REQUIRED member beside a failed OPTIONAL one yields
+/// `1/1 required`, no errors, and one `skipped` line.
+/// Test: This is the test.
+#[test]
+fn summary_lines_match_the_gating_set() {
+    let report = InstallReport::build(vec![
+        outcome("trusty-search", true, "installed"),
+        optional_outcome("tga", false, "no prebuilt for this platform"),
+    ]);
+    let lines = install_report::summary_lines(&report);
+
+    assert_eq!(lines.headline, "installed 1/1 required component(s)");
+    assert!(lines.errors.is_empty(), "{:?}", lines.errors);
+    assert_eq!(lines.skipped.len(), 1);
+    assert!(lines.skipped[0].starts_with("tga: skipped"));
+    assert!(report.all_ok);
 }
 
 /// Why: #2566 review — a binary can install cleanly (`ok: true`) while its
@@ -589,7 +656,7 @@ fn dry_run_full_set_when_no_members_named() {
     );
 }
 
-/// Why (#5799): THE acceptance case. `tctl install trusty-installer
+/// Why (#5805): THE acceptance case. `tctl install trusty-installer
 /// --dry-run` returned `{"error": "unknown member(s): trusty-installer"}` and
 /// exit 3; it must now resolve, preview, and exit 0. `run` is called with
 /// `--json` so the interactive picker and the TTY-dependent confirmation gate
@@ -609,7 +676,7 @@ fn run_dry_run_accepts_the_installer_itself() {
     }
 }
 
-/// Why (#5799): the second half of the acceptance case — the preview must name
+/// Why (#5805): the second half of the acceptance case — the preview must name
 /// the destination #5777 canonicalised. Before this change the report had no
 /// `install_dir` field at all, so an operator could not tell from a dry run
 /// whether the install would land in `$CARGO_HOME/bin` or somewhere a stale
@@ -632,7 +699,7 @@ fn dry_run_names_the_canonical_install_dir() {
     );
 }
 
-/// Why (#5799): the crate ships TWO binaries and the preview listed one. An
+/// Why (#5805): the crate ships TWO binaries and the preview listed one. An
 /// operator reading `trusty-installer -> trusty-installer` would not learn
 /// that `tctl` — the name they actually type — is also about to be replaced.
 /// What: asserts the installer's preview row lists both binaries, and that no
@@ -658,7 +725,7 @@ fn dry_run_lists_both_installer_binaries() {
     }
 }
 
-/// Why (#5799): membership pulls a member into the daemon-shaped subcommands,
+/// Why (#5805): membership pulls a member into the daemon-shaped subcommands,
 /// and `tctl start trusty-installer` must not try to bootstrap a launchd job
 /// for a CLI. `plans_service_bootstrap` is the shared predicate the preview
 /// and the real install loop both read, so pinning it here pins both.

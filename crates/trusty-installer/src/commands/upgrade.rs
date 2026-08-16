@@ -196,16 +196,14 @@ pub fn run(
         return 3;
     }
     if exclude_self {
-        // Exclude both the primary name and the transitional alias binary name
-        // so --exclude-self works regardless of which binary the user invoked.
-        // Also exclude "tctl" by binary name as belt-and-suspenders: trusty-installer
-        // is not in stable_set(), so this guard would only fire if the alias were
-        // ever added to the set — but we want to be explicit about the intent.
-        selected.retain(|m| {
-            m.crate_name != "trusty-installer"
-                && m.binary != "trusty-installer"
-                && m.binary != "tctl"
-        });
+        // #5805: this is the live self-exclusion path. trusty-installer IS in
+        // `stable_set()` now, so a bare `tctl upgrade` replaces the running
+        // binary by default and `--exclude-self` is the operator's opt-out —
+        // where before membership it matched nothing and the flag was dead.
+        // `is_control_plane` reads the shared `bin_resolve` table, so the
+        // `tctl` alias is excluded by the same predicate rather than a second
+        // hand-written name list.
+        selected.retain(|m| !m.is_control_plane());
     }
 
     // Build ONE runtime for the whole command: candidate gathering and applying
@@ -350,17 +348,25 @@ impl UpgradeDetail {
         }
     }
 
-    /// Fold a `shadow_check::detect` result into the detail: `None` (clear)
-    /// stays a plain success; `Some(report)` flips `shadow_ok` to `false`
-    /// and carries the actionable message.
-    fn from_shadow(detail: String, shadow: Option<shadow_check::ShadowReport>) -> Self {
-        match shadow {
-            Some(report) => Self {
-                detail,
-                shadow_ok: false,
-                shadow_detail: report.message(),
-            },
-            None => Self::ok(detail),
+    /// Fold a `shadow_check::detect_all` result into the detail: an empty list
+    /// (clear) stays a plain success; any report flips `shadow_ok` to `false`
+    /// and carries every actionable message.
+    ///
+    /// #5805: takes a LIST because the check now covers every binary the
+    /// member places, not just its health-probe name — `tctl` and `tm` can be
+    /// shadowed while the primary name is clear.
+    fn from_shadows(detail: String, shadows: Vec<shadow_check::ShadowReport>) -> Self {
+        if shadows.is_empty() {
+            return Self::ok(detail);
+        }
+        Self {
+            detail,
+            shadow_ok: false,
+            shadow_detail: shadows
+                .iter()
+                .map(|r| r.message())
+                .collect::<Vec<_>>()
+                .join(" | "),
         }
     }
 }
@@ -515,11 +521,16 @@ async fn upgrade_one(
                     "upgraded to {version}; {restarted}"
                 )))
             } else {
-                let shadow =
-                    shadow_check::detect(&c.binary, &bin_path, Some(&version), path_env).await;
-                Ok(UpgradeDetail::from_shadow(
+                let shadows = shadow_check::detect_all(
+                    &trusty_common::bin_resolve::installed_binaries(&c.crate_name),
+                    &bin_path,
+                    Some(&version),
+                    path_env,
+                )
+                .await;
+                Ok(UpgradeDetail::from_shadows(
                     format!("upgraded to {version}"),
-                    shadow,
+                    shadows,
                 ))
             }
         }
@@ -553,16 +564,16 @@ async fn upgrade_one(
                 )))
             } else {
                 let reported_version = super::update_engine::extract_version_from_line(&reported);
-                let shadow = shadow_check::detect(
-                    &c.binary,
+                let shadows = shadow_check::detect_all(
+                    &trusty_common::bin_resolve::installed_binaries(&c.crate_name),
                     &bin_path,
                     reported_version.as_deref(),
                     path_env,
                 )
                 .await;
-                Ok(UpgradeDetail::from_shadow(
+                Ok(UpgradeDetail::from_shadows(
                     format!("upgraded to {}", c.latest),
-                    shadow,
+                    shadows,
                 ))
             }
         }
