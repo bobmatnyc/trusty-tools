@@ -33,8 +33,11 @@ async fn main() -> Result<()> {
     let env_value = std::env::var(WORKDIR_ENV).ok();
     let work = WorkDir::resolve(cli.work_dir.clone(), env_value.as_deref(), &cwd);
 
+    // #5797: the policy lives on `Session`, so the Tauri shell sets it the same
+    // way rather than reimplementing when to install.
     let mut session = Session::new(work)
-        .with_config_path(EngagementConfig::resolve_path(cli.config.clone(), &cwd));
+        .with_config_path(EngagementConfig::resolve_path(cli.config.clone(), &cwd))
+        .with_auto_install(!cli.no_install);
     if let Some(path) = &cli.manifest {
         session = session.with_manifest_path(path);
     }

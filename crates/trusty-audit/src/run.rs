@@ -1173,6 +1173,26 @@ trusty-review = "0.15.1"
         assert_eq!(missing.len(), RequiredTool::ALL.len());
     }
 
+    /// Auto-install decides whether to download from [`tools::unsatisfied`],
+    /// and this preflight decides whether to run. If the two disagree,
+    /// auto-install either downloads on every sweep or skips a download this
+    /// preflight then refuses over — so they are asserted to agree (#5797).
+    #[test]
+    fn nothing_unsatisfied_is_exactly_what_the_preflight_accepts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let pins = config().tools;
+
+        // Unsatisfied and refused.
+        assert!(!tools::unsatisfied(&work, &pins).expect("reads").is_empty());
+        assert!(pinned_binaries(&work, &pins).is_err());
+
+        // Satisfied and accepted.
+        install_stubs(&work, "#!/bin/sh\nexit 0\n");
+        assert!(tools::unsatisfied(&work, &pins).expect("reads").is_empty());
+        assert!(pinned_binaries(&work, &pins).is_ok());
+    }
+
     /// A binary this client did not install and verify is not a usable binary.
     #[test]
     fn an_unverified_binary_does_not_count_as_installed() {
