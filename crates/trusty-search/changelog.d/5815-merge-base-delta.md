@@ -1,0 +1,7 @@
+Fixed
+
+- **Merge-base resolution compared two commits, so it never saw uncommitted work.** `core::git::resolve_branch_files` ran `git diff --name-only <base>..HEAD`; on a four-change fixture it reported 1 of the 4 real differences, missing the uncommitted edit, the untracked file, and the deletion. A live worktree is mostly uncommitted work, so [ADR-0050](https://github.com/bobmatnyc/trusty-tools/blob/main/docs/adr/0050-colocated-path-tied-identity-with-delta-indexed-worktree-facets.md)'s delta-indexed worktree facets cannot be built on that answer. First increment of that ADR; it adds no indexing behaviour of its own
+  - `core::git::resolve_merge_base_delta` is the new entry point. It diffs the merge-base against the **working tree**, adds untracked files via `ls-files --others --exclude-standard`, and returns `changed` and `deleted` separately — a deletion means "drop the base facet's chunks", which the old single list could not express
+  - a failed untracked-file step returns `None` rather than a partial delta. A partial delta reads as a complete answer while silently omitting files that exist in the tree, and the caller cannot tell the two apart
+  - both git calls use `-z`, so paths containing spaces or non-ASCII bytes arrive verbatim instead of in git's quoted form
+  - `resolve_branch_files` delegates and keeps its signature, so the [#122](https://github.com/bobmatnyc/trusty-tools/issues/122) branch boost now covers a file being edited before it is committed. Deletions stay out of it — a deleted file has no chunks to boost

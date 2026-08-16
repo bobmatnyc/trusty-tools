@@ -92,6 +92,8 @@ fn resolve_merge_base_delta_with(
 ) -> Option<MergeBaseDelta> {
     let base_sha = merge_base_sha(root_path, base_ref, git_bin)?;
 
+    // #5815: diff the base against the WORKING TREE — `<base>..HEAD` compares
+    // two commits and misses the uncommitted work a worktree mostly consists of.
     let diff = run_git(
         root_path,
         git_bin,
@@ -99,7 +101,7 @@ fn resolve_merge_base_delta_with(
     )?;
     let (mut changed, deleted) = parse_name_status_z(&diff);
 
-    // ADR-0050: an untracked file is real worktree content the delta owes the
+    // #5815: an untracked file is real worktree content the delta owes the
     // index. Failing this step yields a delta that LOOKS complete, so refuse.
     let untracked = run_git(
         root_path,
@@ -198,6 +200,8 @@ fn parse_name_status_z(body: &str) -> (Vec<String>, Vec<String>) {
 /// Test: `resolve_branch_files_reports_uncommitted_work`,
 /// `test_resolve_branch_files_returns_none_when_not_a_repo`.
 pub fn resolve_branch_files(root_path: &Path, branch: &str) -> Option<Vec<String>> {
+    // #5815: delegate so the boost and ADR-0050's delta indexing agree on what
+    // "differs from the merge-base" means.
     resolve_merge_base_delta(root_path, branch).map(|d| d.changed)
 }
 
