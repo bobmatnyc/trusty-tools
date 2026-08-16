@@ -163,15 +163,25 @@ pub fn run(json: bool) -> i32 {
 
 /// Resolve the directory into which to place the updated binary.
 ///
-/// Why: The installer should update itself in the same directory where it was
-/// launched, matching user expectations and avoiding $PATH confusion.
+/// Why (#5777, Phase 3 of #4964): self-update used to target the directory
+/// `current_exe()` lives in, which perpetuated whatever split destination an
+/// old installer had chosen — a `~/.local/bin` copy kept refreshing itself
+/// there while `cargo install` wrote elsewhere. Targeting the canonical
+/// cargo bin dir converges every write path on one directory; the shadow
+/// warning in `cargo_updated_message` covers a legacy copy earlier on PATH.
 ///
-/// What: Uses `std::env::current_exe()` and takes the parent directory; falls
-/// back to `download::default_install_dir()` or `/usr/local/bin` if the parent
-/// cannot be resolved.
+/// What: the canonical cargo bin dir (`download::default_install_dir()`,
+/// which delegates to the shared `canonical_bin_dir()`); falls back to the
+/// running binary's parent directory, then `/usr/local/bin`, when no home /
+/// `CARGO_HOME` is resolvable.
 ///
-/// Test: `tests::resolve_install_dir_returns_path`.
+/// Test: `tests::resolve_install_dir_returns_path`,
+/// `tests::resolve_install_dir_is_canonical_not_current_exe_parent`.
 fn resolve_install_dir() -> PathBuf {
+    // #5777: canonical destination first — never the running copy's own dir.
+    if let Some(canonical) = download::default_install_dir() {
+        return canonical;
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             if parent != Path::new("") {
@@ -179,7 +189,7 @@ fn resolve_install_dir() -> PathBuf {
             }
         }
     }
-    download::default_install_dir().unwrap_or_else(|| PathBuf::from("/usr/local/bin"))
+    PathBuf::from("/usr/local/bin")
 }
 
 /// Format the error message for a permission-denied install directory.
@@ -376,6 +386,29 @@ mod tests {
     fn resolve_install_dir_returns_path() {
         let p = resolve_install_dir();
         assert!(!p.as_os_str().is_empty());
+    }
+
+    /// Why (#5777, Phase 3 of #4964): self-update must place into the ONE
+    /// canonical destination, not wherever the running copy happens to live —
+    /// the `current_exe().parent()` rule is what kept a stray `~/.local/bin`
+    /// copy refreshing itself forever. This test FAILS against the pre-#5777
+    /// resolver whenever the test binary does not live in the cargo bin dir
+    /// (it lives under `target/`, so it never does).
+    /// What: with a resolvable canonical dir, `resolve_install_dir` returns
+    /// it. Pinning equality with the canonical dir IS the whole contract; a
+    /// separate not-`current_exe().parent()` assertion is either implied by
+    /// it or wrong — a CI host may legitimately run tooling FROM the cargo
+    /// bin dir, where the two coincide — so none is made (#5778 review).
+    #[test]
+    fn resolve_install_dir_is_canonical_not_current_exe_parent() {
+        let Some(canonical) = crate::download::default_install_dir() else {
+            return; // no home/CARGO_HOME in this environment — fallback path
+        };
+        assert_eq!(
+            resolve_install_dir(),
+            canonical,
+            "self-update must target the canonical cargo bin dir (#5777)"
+        );
     }
 
     /// Why: A writable directory must yield `WriteProbe::Writable` so the up-front

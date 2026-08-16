@@ -10,15 +10,12 @@
 //! the daemon comes back on the NEW binary only when the plist's
 //! `ProgramArguments[0]` already points at the directory this upgrade wrote to.
 //! `bootout`/`bootstrap` re-exec whatever path the plist names, and nothing on
-//! this path rewrites it. Today the prebuilt branch writes `~/.local/bin` while
-//! the `cargo install` fallback writes `$CARGO_HOME/bin`, so on a host whose
-//! plist was baked from the other directory the bounce costs a downtime window
-//! and brings the SAME OLD BINARY back — while the report still says
-//! "upgraded to X; restarted". That is a false success report, and it is why
-//! Phase 4's plist regeneration is a prerequisite for the guarantee rather than
-//! a cleanup after it. Phase 3 (single destination) removes the divergence that
-//! makes it reachable; until both land, read "restarted" as exactly that and no
-//! more.
+//! this path rewrites it. Since #5777 (Phase 3) both branches write the ONE
+//! canonical `$CARGO_HOME/bin`, so new plists cannot be baked from a second
+//! directory — but a plist baked from `~/.local/bin` before the flip still
+//! respawns that legacy copy, and only Phase 4's plist regeneration /
+//! migration retires it. Until then, read "restarted" as exactly that and no
+//! more on pre-flip hosts.
 //!
 //! What: Gathers candidates (`update_engine`), runs the pure confirm-then-apply
 //! gate (`decide_apply`), and — only on `Apply` — upgrades each member: prebuilt
@@ -487,10 +484,10 @@ async fn upgrade_one(
 ) -> anyhow::Result<UpgradeDetail> {
     use crate::download::{self, Outcome};
 
-    // #4964: fall back to the SHARED `canonical_bin_dir()` rather than an
-    // inline `CARGO_HOME` read (one of five copies of the same rule).
+    // #5777: `default_install_dir()` IS the shared canonical cargo bin dir
+    // now, so the old `.or_else(canonical_bin_dir)` second leg (which this
+    // selector made unreachable) is gone rather than dead.
     let install_dir = download::default_install_dir()
-        .or_else(trusty_common::bin_resolve::canonical_bin_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
 
     let outcome = download::try_install_prebuilt(&c.crate_name, &install_dir).await;

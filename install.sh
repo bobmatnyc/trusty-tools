@@ -20,7 +20,7 @@
 #
 # Environment variables:
 #   TRUSTY_VERSION         Pin trusty-installer version (e.g. "0.2.0")
-#   TRUSTY_INSTALL_DIR     Install dir (default: ~/.local/bin)
+#   TRUSTY_INSTALL_DIR     Install dir (default: ${CARGO_HOME:-$HOME/.cargo}/bin)
 #   TRUSTY_YES             Set to 1 to skip all prompts (same as -y)
 #   TRUSTY_NO_MODIFY_PATH  Set to 1 to skip PATH modification
 #   TRUSTY_FORCE           Set to 1 to re-download even if already installed
@@ -48,8 +48,11 @@ REPO_URL="https://github.com/${REPO}"
 API_RELEASES_URL="https://api.github.com/repos/${REPO}/releases"
 RELEASE_DL_BASE="${REPO_URL}/releases/download"
 TAG_PREFIX="${CRATE}-v"
-# Default install dir. Alternative: ~/.cargo/bin if you have Rust installed.
-DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
+# Default install dir — the canonical cargo bin dir, matching every other
+# write path (#5777 / #4964: two destinations meant PATH order decided which
+# copy ran). Honours CARGO_HOME like cargo itself; no Rust toolchain needed —
+# this is pure path arithmetic, and the downloader writes the binary here.
+DEFAULT_INSTALL_DIR="${CARGO_HOME:-${HOME}/.cargo}/bin"
 FDA_DOCS_URL="${REPO_URL}/blob/main/CLAUDE.md"
 
 # Linux arm64 (aarch64) release target triple.
