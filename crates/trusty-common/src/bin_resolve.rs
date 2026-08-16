@@ -381,6 +381,55 @@ pub fn canonical_bin_dir_from(home: Option<&Path>, cargo_home: Option<&str>) -> 
     }
 }
 
+/// Crates whose `cargo install` output is NOT just `<crate_name>` — the
+/// canonical crate → bin-targets table for the trusty-* workspace.
+///
+/// Why (#5777): the cargo ownership guard must move aside EVERY binary
+/// `cargo install <crate>` will write, and the tarball allowlist must accept
+/// exactly those names — a guard keyed on the crate name alone breaks for
+/// alias and multi-binary crates (`tctl`, `tm`, `trusty-embedderd`, `tagent`).
+/// This is the one shared table per CLAUDE.md's common-entry-point rule;
+/// trusty-installer's `SIGNABLE_BINARIES` (signing sets/identifiers) and
+/// `stable_set` (install-set membership) answer different questions and are
+/// deliberately not folded in.
+///
+/// What: `(crate_name, bin targets)` pairs mirroring each crate's `[[bin]]`
+/// tables (and, for trusty-search, the bundled `trusty-embedderd` binary its
+/// release tarball ships). Crates absent from this table install exactly one
+/// binary named after the crate — [`installed_binaries`] supplies that default.
+///
+/// Test: `installed_binaries_covers_multi_binary_crates`,
+/// `installed_binaries_defaults_to_crate_name`.
+const CRATE_BINARIES: &[(&str, &[&str])] = &[
+    ("trusty-installer", &["trusty-installer", "tctl"]),
+    ("trusty-mpm", &["tm", "trusty-mpm"]),
+    (
+        "trusty-memory",
+        &["trusty-memory", "trusty-memory-mcp-bridge"],
+    ),
+    ("trusty-search", &["trusty-search", "trusty-embedderd"]),
+    ("trusty-agents", &["tagent"]),
+    ("trusty-audit", &["trusty-audit", "taudit"]),
+    ("trusty-code", &["tcode"]),
+];
+
+/// The binary names `cargo install <crate_name>` writes into the bin dir.
+///
+/// Why (#5777): see [`CRATE_BINARIES`]. Both the cargo ownership guard
+/// (`update::cargo_guard`) and trusty-installer's tarball allowlist need the
+/// full per-crate binary set, so the rule lives once, here.
+/// What: the table row for `crate_name`, or `[crate_name]` when the crate is
+/// not listed (single binary named after the crate — tga, trusty-console, …).
+/// Test: `installed_binaries_covers_multi_binary_crates`,
+/// `installed_binaries_defaults_to_crate_name`.
+pub fn installed_binaries(crate_name: &str) -> Vec<String> {
+    CRATE_BINARIES
+        .iter()
+        .find(|(c, _)| *c == crate_name)
+        .map(|(_, bins)| bins.iter().map(|b| (*b).to_owned()).collect())
+        .unwrap_or_else(|| vec![crate_name.to_owned()])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,5 +801,52 @@ mod tests {
     fn canonical_bin_dir_from_is_none_without_either_input() {
         assert_eq!(canonical_bin_dir_from(None, None), None);
         assert_eq!(canonical_bin_dir_from(None, Some("")), None);
+    }
+
+    /// Why (#5777): the alias/multi-binary crates are exactly the ones the
+    /// cargo ownership guard existed to not break — a table row silently
+    /// dropping one of them reintroduces the exit-101 collision on that
+    /// alias. An earlier version of this test hard-coded a verbatim mirror of
+    /// the table, which a future row edit would sail past; two independent
+    /// review rounds flagged that (#5778 review).
+    /// What: iterates [`CRATE_BINARIES`] itself, so every row — present and
+    /// future — is exercised through [`installed_binaries`]; then pins the
+    /// four ticket-named alias binaries the table must never lose, the one
+    /// drift a lookup-only iteration cannot catch (a deleted row).
+    #[test]
+    fn installed_binaries_covers_multi_binary_crates() {
+        for (krate, expected) in CRATE_BINARIES {
+            assert_eq!(
+                installed_binaries(krate),
+                expected.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+                "binary set for {krate} must come from its CRATE_BINARIES row"
+            );
+        }
+        // #5777 hard requirements: these aliases are what a crate-name-only
+        // guard breaks on; deleting a table row must fail here, loudly.
+        for (krate, alias) in [
+            ("trusty-installer", "tctl"),
+            ("trusty-mpm", "tm"),
+            ("trusty-search", "trusty-embedderd"),
+            ("trusty-agents", "tagent"),
+        ] {
+            assert!(
+                installed_binaries(krate).iter().any(|b| b == alias),
+                "{krate} must install `{alias}` (#5777 hard requirement)"
+            );
+        }
+    }
+
+    /// Why: a crate absent from the table installs one binary named after
+    /// itself; the fallback must supply that rather than an empty set (an
+    /// empty set would make the guard and the allowlist silently vacuous).
+    /// What: unlisted crates map to `[crate_name]`.
+    #[test]
+    fn installed_binaries_defaults_to_crate_name() {
+        assert_eq!(installed_binaries("tga"), vec!["tga".to_owned()]);
+        assert_eq!(
+            installed_binaries("trusty-console"),
+            vec!["trusty-console".to_owned()]
+        );
     }
 }

@@ -157,7 +157,7 @@ trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
 # trusty-installer: consumed as a LIBRARY by trusty-audit for the pinned,
 # fail-closed prebuilt download entry point (#5491, #5495). trusty-audit is
 # `publish = false`, so this entry exists for in-tree resolution.
-trusty-installer = { path = "crates/trusty-installer", version = "0.8" }
+trusty-installer = { path = "crates/trusty-installer", version = "0.9" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────
 anyhow = "1"

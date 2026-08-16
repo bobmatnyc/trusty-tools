@@ -397,13 +397,13 @@ async fn install_all(
     let checklist = LiveChecklist::new(&narr.output(), &names);
 
     // Resolve the install directory once for post-install hooks (Phase 7 & 8).
-    // #4964: the fallback is the SHARED `canonical_bin_dir()`. It used to be an
-    // inline `~/.cargo/bin` join that never read `CARGO_HOME`, so it named a
-    // directory `cargo install` does not write to whenever `CARGO_HOME` was set
-    // — while the sibling fallback in `install_one` (same job, six hundred
-    // lines away) did read it.
+    // #5777: `default_install_dir()` IS the shared canonical cargo bin dir,
+    // so the former `.or_else(canonical_bin_dir)` leg is gone rather than
+    // dead. It is `Some` whenever `CARGO_HOME` is set and non-empty (even
+    // with an unresolvable home), so the `/usr/local/bin` fallback is
+    // reachable only with BOTH unset — invariant pinned by
+    // `download::tests::install_dir_is_some_whenever_cargo_home_is_set`.
     let install_dir = crate::download::default_install_dir()
-        .or_else(trusty_common::bin_resolve::canonical_bin_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
 
     // #3554: the real $PATH, resolved once, used by every member's
@@ -752,8 +752,8 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 /// `install.sh` uses it, nothing more.
 ///
 /// What: Resolves the install directory (`crate::download::default_install_dir`,
-/// today `~/.local/bin`; falls back to cargo path via `perform_upgrade_captured`
-/// when prebuilt fails). Calls `crate::download::try_install_prebuilt`; on
+/// since #5777 the canonical `$CARGO_HOME/bin`; falls back to cargo path via
+/// `perform_upgrade_captured` when prebuilt fails). Calls `crate::download::try_install_prebuilt`; on
 /// `Outcome::Fallback` — which fires on ANY prebuilt-download failure (network
 /// blip, 404, rate-limit, SHA mismatch), not just an unsupported platform, so
 /// this path is reachable even on a Tier-1 machine — emits a narration line
@@ -783,12 +783,10 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
     use crate::download::{self, Outcome};
 
-    // Resolve the install directory — currently `~/.local/bin` (the default
-    // `install.sh` uses), falling back to the cargo bin dir when the home
-    // directory cannot be determined (#4964: the shared `canonical_bin_dir()`,
-    // so this fallback and `install_all`'s read `CARGO_HOME` the same way).
+    // Resolve the install directory — the canonical cargo bin dir (#5777:
+    // `default_install_dir()` delegates to the shared `canonical_bin_dir()`,
+    // so prebuilt and cargo-fallback branches write ONE directory).
     let install_dir = download::default_install_dir()
-        .or_else(trusty_common::bin_resolve::canonical_bin_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
 
     // #3846 code-critic MEDIUM fix: capture "did a binary already exist" at

@@ -586,24 +586,22 @@ fn candidate_bin_dirs_ignores_empty_cargo_home() {
     );
 }
 
+/// Why (#5777, Phase 3 of #4964): every write path now targets the canonical
+/// cargo bin dir, so the install-dir candidate list must be exactly ONE entry.
+/// A second entry (`~/.local/bin`, the pre-flip prebuilt default) is what let
+/// a stale legacy copy satisfy the health gate for a binary the daemon never
+/// runs. This test FAILS against the pre-#5777 two-entry list.
+/// What: with a resolvable home, the list is `[<home>/.cargo/bin]` and
+/// nothing else.
 #[test]
-fn candidate_bin_dirs_includes_local_bin() {
+fn candidate_bin_dirs_returns_single_canonical_entry() {
     let home = std::path::Path::new("/home/tester");
     let dirs = super::upgrade::candidate_bin_dirs(Some(home), None);
-    assert!(
-        dirs.contains(&home.join(".local").join("bin")),
-        "~/.local/bin (the prebuilt installer's default) must be a candidate: {dirs:?}"
+    assert_eq!(
+        dirs,
+        vec![home.join(".cargo").join("bin")],
+        "the canonical cargo bin dir must be the ONLY install-dir candidate (#5777)"
     );
-    // ~/.local/bin must be checked after ~/.cargo/bin, not before.
-    let local_idx = dirs
-        .iter()
-        .position(|d| d == &home.join(".local").join("bin"))
-        .expect("local bin present");
-    let cargo_idx = dirs
-        .iter()
-        .position(|d| d == &home.join(".cargo").join("bin"))
-        .expect("cargo bin present");
-    assert!(cargo_idx < local_idx, "cargo bin must be checked first");
 }
 
 #[test]
@@ -704,13 +702,19 @@ async fn verify_installed_binary_finds_binary_in_cargo_bin() {
     assert!(result.is_ok(), "expected Ok, got {result:?}");
 }
 
+/// Why (#5777, Phase 3 of #4964): `~/.local/bin` is a LEGACY directory no
+/// write path targets any more, so a copy that exists only there (and is not
+/// on `PATH`) must NOT satisfy the health gate — passing it green-lit an
+/// upgrade whose daemon keeps running a different binary. This test FAILS
+/// against the pre-#5777 candidate list, which consulted `~/.local/bin`.
+/// What: plants a binary only under `~/.local/bin` of an isolated HOME (with
+/// `PATH` cleared of it) and asserts `verify_installed_binary` reports it
+/// missing.
 #[cfg(unix)]
 #[tokio::test]
 #[serial(update_verify_installed_binary_env)]
-async fn verify_installed_binary_finds_binary_in_local_bin() {
+async fn verify_installed_binary_ignores_stale_local_bin_copy() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    // Deliberately do NOT create ~/.cargo/bin — only ~/.local/bin has the
-    // binary, mirroring a prebuilt-installer-only install (issue #1771/#1992).
     let local_bin = tmp.path().join(".local").join("bin");
     std::fs::create_dir_all(&local_bin).expect("mkdir .local/bin");
     write_fake_binary(&local_bin.join("fake_trusty_bin_local"));
@@ -720,8 +724,9 @@ async fn verify_installed_binary_finds_binary_in_local_bin() {
     restore_home_env(snapshot);
 
     assert!(
-        result.is_ok(),
-        "expected Ok when binary only exists in ~/.local/bin, got {result:?}"
+        result.is_err(),
+        "a ~/.local/bin-only copy must no longer satisfy the health gate \
+         (#5777); got {result:?}"
     );
 }
 
