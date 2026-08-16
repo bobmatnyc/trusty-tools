@@ -175,24 +175,25 @@ pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> 
             path.display()
         ));
     }
-    // #4311: confirm ownership against the DIRECTORY, immediately before
-    // deleting it. Every other input to this decision — `d.worktree_path` from
-    // the registry, or the path `rebuild_from_disk` matched — was resolved
-    // somewhere else and could name a directory this agent never owned. The
-    // sentinel sitting IN the target is the only claim that cannot have been
-    // redirected on the way here, so it is re-read rather than trusted from the
-    // caller. This gate holds independently of the write-site gates in
+    // #4311: confirm ownership against the DIRECTORY. Every other input to this
+    // decision — `d.worktree_path` from the registry, or the path
+    // `rebuild_from_disk` matched — was resolved somewhere else and could name
+    // a directory this agent never owned. The sentinel sitting IN the target is
+    // the only claim that cannot have been redirected on the way here, so it is
+    // read rather than trusted from the caller. This gate holds independently
+    // of the write-site claims in
     // `delegation_tracker::register_agent_worktree`; either one alone would
     // leave the removal reachable through the other path.
-    match read_sentinel_owner(path) {
-        SentinelOwner::Agent(owner, _) if owner.agent_id == agent_id => {}
-        other => {
-            return ReapOutcome::Refused(format!(
-                "{} does not carry a sentinel naming agent {agent_id} (found {other:?}) — \
-                 refusing to remove a directory whose ownership it cannot confirm on disk",
-                path.display()
-            ));
-        }
+    //
+    // Checked HERE so an unattributed path is refused before the expensive
+    // gates below, and again immediately before the removal — #4118's
+    // precedent, established when a per-candidate dirty verdict computed at
+    // scan time went stale across a minutes-long sweep. The gates between the
+    // two reads take real time (git subprocesses for the dirt check, ~1s of
+    // `lsof` for the liveness probe), so the authoritative read is the one
+    // adjacent to the deletion.
+    if let Some(refusal) = ownership_unconfirmed(path, agent_id) {
+        return ReapOutcome::Refused(refusal);
     }
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if in_use
@@ -227,6 +228,14 @@ pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> 
     if let Some(holder) = process_holding(path) {
         return ReapOutcome::Refused(format!("{} is still occupied — {holder}", path.display()));
     }
+    // #4118 pattern: the authoritative ownership read is the one adjacent to
+    // the removal. The only in-window transition is another agent claiming this
+    // sentinel, which the write-site claims refuse while one is present — so
+    // this is a cheap re-read that makes the guarantee structural rather than
+    // dependent on that argument holding.
+    if let Some(refusal) = ownership_unconfirmed(path, agent_id) {
+        return ReapOutcome::Refused(refusal);
+    }
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(&registry_root)
@@ -247,6 +256,26 @@ pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> 
             String::from_utf8_lossy(&o.stderr).trim()
         )),
         Err(e) => ReapOutcome::Refused(format!("could not run git: {e}")),
+    }
+}
+
+/// Why `path`'s on-disk sentinel does not confirm `agent_id` owns it, or `None`
+/// when it does (#4311).
+///
+/// Why a function and not two inline matches: [`reap_worktree`] runs this twice
+/// — once to fail fast before the expensive gates, once immediately before the
+/// removal — and two copies of a refusal this load-bearing would eventually
+/// disagree.
+/// Test: `reap_refuses_a_path_whose_sentinel_names_another_agent`,
+/// `reap_refuses_a_path_with_no_sentinel`.
+fn ownership_unconfirmed(path: &Path, agent_id: &str) -> Option<String> {
+    match read_sentinel_owner(path) {
+        SentinelOwner::Agent(owner, _) if owner.agent_id == agent_id => None,
+        other => Some(format!(
+            "{} does not carry a sentinel naming agent {agent_id} (found {other:?}) — \
+             refusing to remove a directory whose ownership it cannot confirm on disk",
+            path.display()
+        )),
     }
 }
 

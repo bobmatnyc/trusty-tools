@@ -275,6 +275,116 @@ fn usable_agent_id(response: &Value) -> Option<&str> {
 /// `a_cwd_outside_the_harness_store_gets_no_sentinel`,
 /// `a_cwd_owned_by_another_agent_is_never_overwritten`,
 /// `a_cwd_owned_by_a_managed_session_is_never_overwritten`.
+/// Why this agent may NOT claim `cwd` as its worktree, or `None` if it may.
+///
+/// Why: the `cwd` a subagent reports is `std::env::current_dir()` of its own
+/// `tm hook` process, so it follows wherever the agent `cd`-ed. It is a value
+/// the agent controls, and a claim on it grants the reaper authority to delete
+/// that directory. Four independent claims must all hold, and each answers a
+/// question the others cannot.
+/// What: `Some(reason)` refuses and is logged; `None` proceeds to the write.
+///
+/// 1. **Shape** — [`is_harness_agent_worktree`], the identical predicate
+///    [`super::agent_worktree_reap::reap_worktree`] gates on, imported rather
+///    than restated so the write and the delete cannot disagree about what a
+///    worktree is. Rejects a main checkout, a scratchpad, a nested path.
+/// 2. **Project** — the store this path sits in must be the store of the
+///    DISPATCHING session's own checkout. Claim 1 has already established the
+///    path is `<X>/.claude/worktrees/<name>`, so `<X>` is the checkout owning
+///    that store; the dispatcher's `cwd` must be `<X>` or sit under it. Under
+///    [ADR-0037](../../../../../docs/adr/0037-pm-placement-precedence-main-checkout-by-default.md)
+///    a PM is normally in the main checkout, which IS `<X>`, and under
+///    [ADR-0036](../../../../../docs/adr/0036-all-worktrees-are-siblings-under-claude-worktrees.md)
+///    a PM working from a worktree is a flat sibling beneath the same `<X>` —
+///    both normal placements pass. This is deliberately LEXICAL rather than a
+///    `harness_root_for` call: that resolves through `git rev-parse`, and this
+///    runs inside the synchronous `PreToolUse` budget. The lexical form refuses
+///    a superset (a PM in a different checkout of the same project), which is
+///    the fail-closed direction.
+/// 3. **Sentinel** — the path's existing sentinel must be absent/unparsable or
+///    already this same agent's. `fs::write` truncates, so without this an
+///    agent reporting a peer's tree erases that peer's ownership record, after
+///    which the peer's tree reaps on the wrong agent's exit and the peer's own
+///    exit reaps nothing.
+/// 4. **Registration** — no OTHER non-terminal delegation may already record
+///    this path. Claim 3 cannot see a peer worktree that carries no sentinel,
+///    which is every directory in the store until they acquire one; this claim
+///    covers exactly that case from the daemon's own live state, and is the
+///    write-side mirror of the reap's in-use gate.
+///
+/// Residual, stated: a sentinel-LESS peer whose delegation was also lost to a
+/// daemon restart is invisible to claims 3 and 4 both. Such a directory is
+/// unattributed and unregistered, so nothing else can reclaim it either; the
+/// exposure closes as worktrees acquire sentinels.
+///
+/// A convention that WOULD close it — the harness names each tree
+/// `agent-<agent_id>`, which holds for all 16 such directories on this machine
+/// — is deliberately not used. Nothing in this codebase or in any contract with
+/// Claude Code establishes that name, so a harness rename would silently stop
+/// every registration rather than failing visibly.
+/// Test: `a_cwd_outside_the_harness_store_gets_no_sentinel`,
+/// `a_cwd_in_another_projects_store_is_refused`,
+/// `a_cwd_owned_by_another_agent_is_never_overwritten`,
+/// `a_cwd_owned_by_a_managed_session_is_never_overwritten`,
+/// `a_cwd_another_live_delegation_holds_is_refused`,
+/// `an_agent_may_rewrite_its_own_sentinel`.
+fn claim_refused(
+    state: &DaemonState,
+    session: SessionId,
+    agent_id: &str,
+    cwd: &std::path::Path,
+) -> Option<String> {
+    if !is_harness_agent_worktree(cwd) {
+        return Some("it is not a `.claude/worktrees/<name>` leaf".to_string());
+    }
+    // `<X>/.claude/worktrees/<name>` — three parents up is `<X>`, the checkout
+    // that owns the store. Claim 1 guarantees the first two exist.
+    let store_owner = cwd
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)?;
+    let dispatcher_cwd = state
+        .delegations_for(session)
+        .into_iter()
+        .find(|d| d.agent_id.as_deref() == Some(agent_id))
+        .and_then(|d| d.cwd);
+    match dispatcher_cwd {
+        Some(dispatch_from) if dispatch_from.starts_with(store_owner) => {}
+        Some(dispatch_from) => {
+            return Some(format!(
+                "its store belongs to {}, but the dispatching session works from {} — an \
+                 agent may not claim a worktree in another project's store",
+                store_owner.display(),
+                dispatch_from.display()
+            ));
+        }
+        // No recorded dispatcher cwd is no proof of a shared project.
+        None => {
+            return Some(
+                "the dispatching delegation records no working directory, so nothing \
+                 establishes this store belongs to its project"
+                    .to_string(),
+            );
+        }
+    }
+    match read_sentinel_owner(cwd) {
+        SentinelOwner::Unknown => {}
+        SentinelOwner::Agent(existing, _) if existing.agent_id == agent_id => {}
+        occupied => return Some(format!("{occupied:?} already owns it")),
+    }
+    if let Some(holder) = state.all_delegations().into_iter().find(|d| {
+        !d.status.is_terminal()
+            && d.agent_id.as_deref() != Some(agent_id)
+            && d.worktree_path.as_deref() == Some(cwd)
+    }) {
+        return Some(format!(
+            "agent {} is still running and already registers it",
+            holder.agent_id.as_deref().unwrap_or("<unknown>")
+        ));
+    }
+    None
+}
+
 fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Value) {
     let Some(agent_id) = field(payload, "agent_id") else {
         return;
@@ -289,27 +399,13 @@ fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Va
     }) else {
         return;
     };
-    if !is_harness_agent_worktree(&cwd) {
-        tracing::debug!(
+    if let Some(refusal) = claim_refused(state, session, agent_id, &cwd) {
+        tracing::warn!(
             agent_id,
             cwd = %cwd.display(),
-            "delegation: the agent reported a working directory outside \
-             `.claude/worktrees/<name>` — recording no ownership there (#4311)"
+            "delegation: not claiming this worktree — {refusal} (#4311)"
         );
         return;
-    }
-    match read_sentinel_owner(&cwd) {
-        SentinelOwner::Unknown => {}
-        SentinelOwner::Agent(existing, _) if existing.agent_id == agent_id => {}
-        occupied => {
-            tracing::warn!(
-                agent_id,
-                cwd = %cwd.display(),
-                "delegation: {occupied:?} already owns this worktree — refusing to \
-                 overwrite another owner's sentinel and registering nothing (#4311)"
-            );
-            return;
-        }
     }
     let owner = AgentWorktreeOwner {
         agent_id: agent_id.to_string(),
