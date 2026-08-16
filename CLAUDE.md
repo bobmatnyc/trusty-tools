@@ -426,18 +426,32 @@ squash-merge → worktree cleanup. `tm-workflow` owns the full sequence and
 `tm-ticketing` owns whether the optional issue exists; this file adds only the
 Rust-specific gates (see the Rust Test Ladder above).
 
-🟡 **`cargo install` from a worktree, not the main checkout.** The preferred
-pattern for installing a freshly-built binary onto your PATH is:
+🟡 **`cargo install` a clean checkout, never `cp`.** The preferred pattern for
+installing a freshly-built binary onto your PATH is:
 
 ```bash
 cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked
 ```
 
-Cargo writes atomically to a temp file and renames into `~/.cargo/bin/`,
-which keeps the macOS kernel's cdhash cache consistent (see the
-release-workflow note above). A plain `cp` over an on-PATH binary leaves a stale
-cdhash cache and the next exec is SIGKILL'd. The main checkout never needs to be
-involved.
+Cargo writes atomically to a temp file and renames into `~/.cargo/bin/`, which
+keeps the macOS kernel's cdhash cache consistent (see the release-workflow
+note above). A plain `cp` over an on-PATH binary leaves a stale cdhash cache
+and the next exec is SIGKILL'd — that hazard is about `cargo install` versus
+`cp`, and holds identically no matter which checkout you run it from.
+
+What the checkout DOES decide is provenance: `cargo install --path` bakes in
+whatever is on disk, including uncommitted edits. Install from a checkout with
+an empty `git status --porcelain` at a known commit. A freshly-provisioned
+worktree off `origin/main` satisfies that by construction, which is why it
+stays the default. The main checkout is not automatically disqualified, but
+the write boundary
+([ADR-0044](docs/adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
+[ADR-0048](docs/adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md),
+[ADR-0049](docs/adr/0049-docs-commits-are-permitted-in-a-main-checkout.md))
+only restricts SOURCE writes there — it classifies by file extension, and
+documents and configuration (`.md` included) stay writable, and since
+ADR-0049 committable, directly in the main checkout. Check `git status
+--porcelain` before installing from either location; don't assume it.
 
 > **Extended discipline rationale, the install-from-worktree commands, and the
 > stash-first fallback:** see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
