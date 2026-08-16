@@ -106,11 +106,15 @@ pub struct InstallReport {
     pub command: &'static str,
     /// Per-member install outcomes in install order.
     pub members: Vec<InstallOutcome>,
-    /// Whether every REQUIRED member installed AND every attempted service
-    /// bootstrap on a REQUIRED member succeeded (see [`InstallOutcome`]'s
+    /// Whether every GATING member installed AND every attempted service
+    /// bootstrap on a gating member succeeded (see [`InstallOutcome`]'s
     /// field docs for what counts as a service failure) AND, when the verify
-    /// tail ran, it reported verified. An OPTIONAL member's failure never
-    /// flips this (graceful-degrade, demo-critical fix).
+    /// tail ran, it reported verified.
+    ///
+    /// The gating set is the REQUIRED members when the selection has any —
+    /// an OPTIONAL member's failure never flips this (graceful-degrade,
+    /// demo-critical fix) — and EVERY selected member when it has none
+    /// (#5799; see [`InstallReport::build`]).
     pub all_ok: bool,
     /// The post-install verify-tail result (#2560): `ensure` + health (with
     /// the #2498 kickstart retry). `None` when `--no-verify` skipped it.
@@ -132,13 +136,27 @@ impl InstallReport {
     /// AND shadow_ok == true` (graceful-degrade, demo-critical fix: an
     /// OPTIONAL member is excluded from this check entirely — its failure is
     /// visible in `members` but never fails the run).
+    /// #5799 — the graceful-degrade filter used to fail OPEN on an
+    /// all-OPTIONAL selection. `filter(required).all(…)` over an empty
+    /// iterator is vacuously `true`, so `tctl install tga` reported
+    /// `all_ok: true` and exit 0 when tga's install had genuinely failed —
+    /// nothing installed, success reported. Adding trusty-installer (also
+    /// OPTIONAL) would have made `tctl install trusty-installer` a fourth way
+    /// in. The gating set is now REQUIRED members when any were selected, and
+    /// EVERY selected member otherwise: "degrade gracefully" only means
+    /// anything relative to a required core, and a selection with no required
+    /// core is one where the operator asked for exactly these members.
+    ///
     /// Test: `tests::report_all_ok`, `tests::report_all_ok_reflects_service_failure`,
     /// `tests::report_all_ok_reflects_shadow_failure`,
-    /// `tests::report_all_ok_ignores_optional_failure`.
+    /// `tests::report_all_ok_ignores_optional_failure`,
+    /// `tests::all_optional_selection_does_not_fail_open`,
+    /// `tests::lone_optional_installer_failure_exits_nonzero`.
     pub(super) fn build(members: Vec<InstallOutcome>) -> Self {
+        let any_required = members.iter().any(|m| m.required);
         let all_ok = members
             .iter()
-            .filter(|m| m.required)
+            .filter(|m| m.required || !any_required)
             .all(|m| m.ok && m.service_ok && m.shadow_ok);
         Self {
             command: "install",
@@ -195,8 +213,17 @@ impl InstallReport {
 pub struct DryRunMember {
     /// Crate name that would be installed.
     pub member: String,
-    /// Binary name that would land on PATH.
+    /// Binary name that would land on PATH (the one probed for health).
     pub binary: String,
+    /// EVERY binary this member would place, from the shared
+    /// `trusty_common::bin_resolve` table (#5799).
+    ///
+    /// Why: `binary` names one file, but trusty-installer places
+    /// `trusty-installer` AND `tctl`, trusty-mpm places `tm` AND `trusty-mpm`,
+    /// and trusty-search places `trusty-search` AND `trusty-embedderd`. A
+    /// preview that lists one of two is a preview that under-reports the blast
+    /// radius on the exact members where it matters most.
+    pub binaries: Vec<String>,
     /// Whether a post-install launchd service bootstrap would be attempted.
     pub service_bootstrap: bool,
 }
@@ -220,6 +247,16 @@ pub struct DryRunReport {
     pub members: Vec<DryRunMember>,
     /// Whether the post-install service bootstrap step is enabled.
     pub service_bootstrap_enabled: bool,
+    /// The directory every binary above would be written to (#5799).
+    ///
+    /// Why: the preview claimed to show the blast radius but never named the
+    /// destination, so an operator could not tell whether an install would
+    /// land in the canonical `$CARGO_HOME/bin` (#5777) or somewhere a stale
+    /// copy earlier on PATH would keep shadowing. It comes from
+    /// [`crate::download::install_dir_or_fallback`] — the same call
+    /// `install_one` makes — so the preview cannot name a directory the
+    /// install would not use.
+    pub install_dir: String,
 }
 
 /// Whether an install (real or previewed) would attempt a launchd service
@@ -260,17 +297,24 @@ pub(super) fn plans_mpm_supervisor_bootstrap(m: &StableMember, service_enabled: 
 /// Why: Extracted so the report's shaping is unit-testable without stdout.
 /// What: Maps each [`StableMember`] to a [`DryRunMember`], computing
 /// `service_bootstrap` via the shared [`plans_service_bootstrap`] predicate so
-/// the preview can never drift from what `install_all` actually does.
-/// Test: `tests::dry_run_report_shape`.
+/// the preview can never drift from what `install_all` actually does, and
+/// listing every binary the member places via [`StableMember::binaries`].
+/// `install_dir` is passed in rather than resolved here so the shaping stays
+/// pure and the caller uses the SAME resolution `install_one` does (#5799).
+/// Test: `tests::dry_run_report_shape`,
+/// `tests::dry_run_names_the_canonical_install_dir`,
+/// `tests::dry_run_lists_both_installer_binaries`.
 pub(super) fn build_dry_run_report(
     selected: &[StableMember],
     service_enabled: bool,
+    install_dir: &std::path::Path,
 ) -> DryRunReport {
     let members = selected
         .iter()
         .map(|m| DryRunMember {
             member: m.crate_name.clone(),
             binary: m.binary.clone(),
+            binaries: m.binaries(),
             service_bootstrap: plans_service_bootstrap(m, service_enabled),
         })
         .collect();
@@ -279,6 +323,7 @@ pub(super) fn build_dry_run_report(
         dry_run: true,
         members,
         service_bootstrap_enabled: service_enabled,
+        install_dir: install_dir.display().to_string(),
     }
 }
 
@@ -286,15 +331,19 @@ pub(super) fn build_dry_run_report(
 ///
 /// Why: A dry run never fails on its own account — it only reports what WOULD
 /// happen; a resolution error (unknown member) is caught earlier in `run`.
-/// What: `--json` emits [`DryRunReport`] via `render_json`; otherwise prints a
-/// human blast-radius summary matching the wording the confirmation prompt
-/// used, one line per member noting whether it would bootstrap a service.
+/// What: resolves the install destination exactly as `install_one` does
+/// ([`crate::download::install_dir_or_fallback`], #5799), then `--json` emits
+/// [`DryRunReport`] via `render_json`; otherwise prints a human blast-radius
+/// summary matching the wording the confirmation prompt used, naming the
+/// destination directory and, per member, every binary it would place there.
 /// Returns `0` unless the `--json` write itself fails, in which case `1`
 /// (mirrors the real install path's failed-JSON-write handling below).
 /// Test: Side-effect-only (stdout); the data it prints is covered by
-/// `tests::dry_run_report_shape`.
+/// `tests::dry_run_report_shape`,
+/// `tests::dry_run_names_the_canonical_install_dir`.
 pub(super) fn print_dry_run(selected: &[StableMember], service_enabled: bool, json: bool) -> i32 {
-    let report = build_dry_run_report(selected, service_enabled);
+    let install_dir = crate::download::install_dir_or_fallback();
+    let report = build_dry_run_report(selected, service_enabled, &install_dir);
     if json {
         if render_json(&report).is_err() {
             eprintln!("tctl install: failed to write JSON output");
@@ -308,13 +357,20 @@ pub(super) fn print_dry_run(selected: &[StableMember], service_enabled: bool, js
         report.members.len(),
         names.join(", ")
     );
+    eprintln!("tctl install: destination: {}", report.install_dir);
     for m in &report.members {
         let svc = if m.service_bootstrap {
             "would bootstrap launchd service"
         } else {
             "no service bootstrap"
         };
-        eprintln!("tctl install:   {} -> {} ({svc})", m.member, m.binary);
+        // #5799: every binary, not just the health-probe one — trusty-installer
+        // places `trusty-installer` AND `tctl`.
+        eprintln!(
+            "tctl install:   {} -> {} ({svc})",
+            m.member,
+            m.binaries.join(", ")
+        );
     }
     eprintln!("tctl install: dry run complete — no changes made.");
     0

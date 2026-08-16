@@ -10,10 +10,16 @@
 //!
 //! What: Defines [`StableMember`] (crate name + binary name + whether it is a
 //! supervised daemon) and [`stable_set`] — the ordered member list:
-//! trusty-search, trusty-memory, trusty-analyze, trusty-review, tga, and
-//! trusty-console. Library crates (trusty-common, trusty-embedderd,
-//! trusty-embedderd, …) are pulled in automatically as cargo dependencies of
-//! these binaries, so they are intentionally *not* listed here.
+//! trusty-search, trusty-memory, trusty-analyze, trusty-review, tga,
+//! trusty-console, trusty-mpm, and trusty-installer itself (#5799). Library
+//! crates (trusty-common, trusty-embedderd, …) are pulled in automatically as
+//! cargo dependencies of these binaries, so they are intentionally *not*
+//! listed here.
+//!
+//! A member may ship more than one binary; [`StableMember::binary`] names the
+//! one probed for health, and [`StableMember::binaries`] enumerates the full
+//! set from the shared `trusty_common::bin_resolve` table so every alias
+//! (`tctl`, `tm`, `trusty-embedderd`) resolves to its crate.
 //!
 //! Test: `tests` pins the ordered set, asserts every member's crate/binary
 //! names, and asserts the daemon flags.
@@ -115,6 +121,42 @@ impl StableMember {
             required,
         }
     }
+
+    /// Every binary `cargo install <crate_name>` puts in the bin dir.
+    ///
+    /// Why (#5799): [`StableMember::binary`] holds ONE name, but three members
+    /// ship more than one — trusty-installer (`trusty-installer` + `tctl`),
+    /// trusty-mpm (`tm` + `trusty-mpm`), trusty-search (`trusty-search` +
+    /// `trusty-embedderd`). Resolving `tctl install tctl` against the single
+    /// field reported `unknown member(s): tctl` for a binary the installer
+    /// itself writes. The rule already exists once, in
+    /// [`trusty_common::bin_resolve::installed_binaries`] — the same table the
+    /// tarball allowlist and the cargo ownership guard read — so this delegates
+    /// rather than adding a second copy (CLAUDE.md, common entry point).
+    ///
+    /// What: the shared table's row for `crate_name`, which falls back to
+    /// `[crate_name]` for the single-binary members.
+    ///
+    /// Test: `tests::binaries_covers_every_alias_binary`,
+    /// `tests::binaries_are_unique_across_the_stable_set`.
+    pub fn binaries(&self) -> Vec<String> {
+        trusty_common::bin_resolve::installed_binaries(&self.crate_name)
+    }
+
+    /// Whether `name` refers to this member — its crate name or any of its
+    /// installed binaries.
+    ///
+    /// Why (#5799): the one predicate [`select_members`] and
+    /// [`select_members_transitive`] share, so the two resolvers cannot drift
+    /// on which spellings are accepted.
+    ///
+    /// What: matches `crate_name`, [`StableMember::binary`], or any name in
+    /// [`StableMember::binaries`].
+    ///
+    /// Test: `tests::select_resolves_alias_binary_names`.
+    fn matches_name(&self, name: &str) -> bool {
+        name == self.crate_name || name == self.binary || self.binaries().iter().any(|b| b == name)
+    }
 }
 
 /// Derive a member's lifecycle [`ManageStrategy`] from its binary name and
@@ -150,17 +192,37 @@ pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
 ///
 /// What: Returns the member list in install/topological order — trusty-search,
 /// trusty-memory, trusty-analyze, trusty-review, tga (binary `tga`,
-/// non-daemon), trusty-console (daemon), and trusty-mpm (the orchestrator,
-/// brought up last, process-managed via its own `start`/`stop` verbs). Library
-/// crates resolve as cargo dependencies and are not listed.
+/// non-daemon), trusty-console (daemon), trusty-mpm (the orchestrator,
+/// process-managed via its own `start`/`stop` verbs), and trusty-installer
+/// itself, LAST. Library crates resolve as cargo dependencies and are not
+/// listed.
+///
+/// #5799 — why the installer is a member, and why it is last: the tool whose
+/// job is placing trusty-* binaries could not place its own, so
+/// `tctl install trusty-installer` answered `unknown member(s)`. It is a
+/// non-daemon (`daemon: false`), so every daemon-shaped surface skips it by
+/// the filter it already applies to `tga`: `daemon_members`, the verify tail,
+/// `plans_service_bootstrap`, and `order_for` in `lifecycle`. It sorts LAST
+/// because installing it REPLACES the running binary — doing that after the
+/// rest of the stack has landed means a failure there costs nothing already
+/// installed. The replacement itself is safe: both write paths rename
+/// atomically over the destination (`download::fetch::place_binaries`, or
+/// `cargo install`), so the running process keeps its open inode and the
+/// macOS cdhash cache never sees a partially-overwritten file — the hazard
+/// CLAUDE.md warns about is `cp`, which neither path uses.
 ///
 /// REQUIRED vs OPTIONAL (graceful-degrade policy, demo-critical fix): REQUIRED
 /// = trusty-mpm + its runtime deps trusty-search + trusty-memory +
 /// trusty-review — a from-scratch install on a Tier-1 platform must always be
-/// able to bring these up. OPTIONAL = trusty-analyze, trusty-console, tga —
-/// members that may lack a prebuilt for a given platform on a host with no
-/// Rust toolchain to fall back to; their absence must not fail the run or
-/// print a scary FAILED/exit-2 verdict.
+/// able to bring these up. OPTIONAL = trusty-analyze, trusty-console, tga,
+/// trusty-installer — members that may lack a prebuilt for a given platform on
+/// a host with no Rust toolchain to fall back to; their absence must not fail
+/// the run or print a scary FAILED/exit-2 verdict. trusty-installer is
+/// OPTIONAL for a second reason: a bulk `tctl install` runs FROM a working
+/// installer, so failing to refresh that copy leaves the stack usable. Naming
+/// it explicitly is the different case, and [`super::install_report`]'s
+/// `all_ok` derivation handles it — a selection with no REQUIRED member gates
+/// on every member instead of vacuously passing.
 ///
 /// NOTE for future editors: a separate lane may add `trusty-agents` to this
 /// set as REQUIRED — insert it with `required: true` in topological position;
@@ -179,6 +241,9 @@ pub fn stable_set() -> Vec<StableMember> {
         StableMember::new("tga", "tga", false, false),
         StableMember::new("trusty-console", "trusty-console", true, false),
         StableMember::new("trusty-mpm", "trusty-mpm", true, true),
+        // #5799: the control plane installs itself. Last, non-daemon, OPTIONAL
+        // — see this function's doc for all three reasons.
+        StableMember::new("trusty-installer", "trusty-installer", false, false),
     ]
 }
 
@@ -220,12 +285,12 @@ pub fn select_members(names: &[String]) -> (Vec<StableMember>, Vec<String>) {
     }
     let selected: Vec<StableMember> = all
         .iter()
-        .filter(|m| names.iter().any(|n| n == &m.crate_name || n == &m.binary))
+        .filter(|m| names.iter().any(|n| m.matches_name(n)))
         .cloned()
         .collect();
     let unknown: Vec<String> = names
         .iter()
-        .filter(|n| !all.iter().any(|m| *n == &m.crate_name || *n == &m.binary))
+        .filter(|n| !all.iter().any(|m| m.matches_name(n)))
         .cloned()
         .collect();
     (selected, unknown)
@@ -296,7 +361,7 @@ pub fn select_members_transitive(names: &[String]) -> TransitiveSelection {
 
     let mut explicit: Vec<String> = Vec::new();
     for n in names {
-        if let Some(m) = all.iter().find(|m| n == &m.crate_name || n == &m.binary) {
+        if let Some(m) = all.iter().find(|m| m.matches_name(n)) {
             if !explicit.contains(&m.crate_name) {
                 explicit.push(m.crate_name.clone());
             }
@@ -304,7 +369,7 @@ pub fn select_members_transitive(names: &[String]) -> TransitiveSelection {
     }
     let unknown: Vec<String> = names
         .iter()
-        .filter(|n| !all.iter().any(|m| *n == &m.crate_name || *n == &m.binary))
+        .filter(|n| !all.iter().any(|m| m.matches_name(n)))
         .cloned()
         .collect();
 
@@ -350,7 +415,151 @@ mod tests {
                 "tga",
                 "trusty-console",
                 "trusty-mpm",
+                "trusty-installer",
             ]
+        );
+    }
+
+    /// Why (#5799): the whole point — `tctl install trusty-installer` used to
+    /// answer `unknown member(s): trusty-installer`, so the tool that places
+    /// trusty-* binaries could not place its own. Pin membership AND the three
+    /// properties that keep it from turning every daemon-shaped surface into
+    /// nonsense: it is not a daemon, it has no lifecycle strategy, and it sorts
+    /// last so a bulk install replaces the running binary only after
+    /// everything else has landed.
+    /// What: asserts the member resolves, is `daemon: false` /
+    /// `ManageStrategy::None`, and is the final entry in install order.
+    /// Test: This is the test.
+    #[test]
+    fn installer_is_a_non_daemon_member_installed_last() {
+        let set = stable_set();
+        let installer = set
+            .iter()
+            .find(|m| m.crate_name == "trusty-installer")
+            .expect("trusty-installer must be a stable-set member (#5799)");
+        assert!(!installer.daemon, "the installer is not a daemon");
+        assert_eq!(installer.manage, ManageStrategy::None);
+        assert_eq!(
+            set.last().map(|m| m.crate_name.as_str()),
+            Some("trusty-installer"),
+            "self-replacement must come after the rest of the stack has landed"
+        );
+    }
+
+    /// Why (#5799): `daemon_members` is the set `tctl stack doctor`,
+    /// `tctl stack health`, and vmtest-harness enumerate. Adding a member to
+    /// `stable_set` must not silently enrol the installer as a daemon those
+    /// surfaces then probe for an HTTP `/health` it does not serve.
+    /// What: asserts the daemon set still holds exactly the six daemons.
+    /// Test: This is the test.
+    #[test]
+    fn installer_is_absent_from_the_daemon_set() {
+        let names: Vec<String> = daemon_members().into_iter().map(|m| m.crate_name).collect();
+        assert!(
+            !names.contains(&"trusty-installer".to_owned()),
+            "the installer must never reach a daemon-shaped surface: {names:?}"
+        );
+        assert_eq!(names.len(), 6, "daemon set unchanged by #5799: {names:?}");
+    }
+
+    /// Why (#5799): the crate ships TWO binaries, and `tctl` is the one
+    /// operators actually type — `tctl install tctl` answered
+    /// `unknown member(s): tctl`. The alias set comes from the shared
+    /// `trusty_common::bin_resolve` table, so this also covers trusty-mpm's
+    /// `tm` and trusty-search's `trusty-embedderd`.
+    /// What: asserts every member's `binaries()` contains its own `binary`,
+    /// then pins the three multi-binary rows by name.
+    /// Test: This is the test.
+    #[test]
+    fn binaries_covers_every_alias_binary() {
+        for m in stable_set() {
+            assert!(
+                m.binaries().contains(&m.binary),
+                "{} must list its own probe binary",
+                m.crate_name
+            );
+        }
+        let set = stable_set();
+        let bins = |c: &str| {
+            set.iter()
+                .find(|m| m.crate_name == c)
+                .expect("present")
+                .binaries()
+        };
+        assert!(bins("trusty-installer").contains(&"tctl".to_owned()));
+        assert!(bins("trusty-mpm").contains(&"tm".to_owned()));
+        assert!(bins("trusty-search").contains(&"trusty-embedderd".to_owned()));
+    }
+
+    /// Why (#5799): [`StableMember::matches_name`] resolves a caller's name
+    /// against every binary a member ships. If two members claimed the same
+    /// binary name, resolution would silently pick whichever sorted first in
+    /// [`stable_set`] and the operator would install the wrong crate. Nothing
+    /// in the shared table enforces uniqueness, so pin it here where the
+    /// ambiguity would bite.
+    /// What: collects every name each member answers to and asserts no
+    /// duplicates across the whole set.
+    /// Test: This is the test.
+    #[test]
+    fn binaries_are_unique_across_the_stable_set() {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for m in stable_set() {
+            for b in m.binaries() {
+                if let Some((owner, _)) = seen.iter().find(|(_, name)| *name == b) {
+                    panic!(
+                        "binary {b:?} is claimed by both {owner} and {}",
+                        m.crate_name
+                    );
+                }
+                seen.push((m.crate_name.clone(), b));
+            }
+        }
+    }
+
+    /// Why (#5799): the resolver used to match only `crate_name` and the
+    /// single `binary` field, so the alias binaries a member genuinely
+    /// installs were rejected as unknown.
+    /// What: asserts `tctl`, `tm`, and `trusty-embedderd` each resolve to
+    /// their owning crate through both resolvers, with no unknowns.
+    /// Test: This is the test.
+    #[test]
+    fn select_resolves_alias_binary_names() {
+        for (typed, expected) in [
+            ("tctl", "trusty-installer"),
+            ("tm", "trusty-mpm"),
+            ("trusty-embedderd", "trusty-search"),
+        ] {
+            let (sel, unknown) = select_members(&[typed.to_owned()]);
+            assert!(unknown.is_empty(), "{typed} must resolve: {unknown:?}");
+            assert_eq!(sel.len(), 1, "{typed} must resolve to exactly one member");
+            assert_eq!(sel[0].crate_name, expected);
+
+            let t = select_members_transitive(&[typed.to_owned()]);
+            assert!(t.unknown.is_empty(), "{typed} must resolve transitively");
+            assert!(
+                t.members.iter().any(|m| m.crate_name == expected),
+                "{typed} must expand to include {expected}"
+            );
+        }
+    }
+
+    /// Why (#5799): the acceptance case. `tctl install trusty-installer`
+    /// resolved to nothing; it must now resolve to exactly the installer, with
+    /// no transitive expansion (it has no runtime dependencies on other
+    /// members, so it must not silently drag the stack in).
+    /// What: asserts the resolved set is exactly `[trusty-installer]` and
+    /// `added` is empty.
+    /// Test: This is the test.
+    #[test]
+    fn select_transitive_installer_pulls_in_nothing() {
+        let sel = select_members_transitive(&["trusty-installer".to_owned()]);
+        let names: Vec<String> = sel.members.iter().map(|m| m.crate_name.clone()).collect();
+        assert_eq!(names, vec!["trusty-installer"]);
+        assert!(sel.unknown.is_empty());
+        assert!(
+            sel.added.is_empty(),
+            "the installer requires no other member at runtime: {:?}",
+            sel.added
         );
     }
 
@@ -501,7 +710,16 @@ mod tests {
         ] {
             assert!(required(c), "{c} must be REQUIRED");
         }
-        for c in ["trusty-analyze", "trusty-console", "tga"] {
+        for c in [
+            "trusty-analyze",
+            "trusty-console",
+            "tga",
+            // #5799: a bulk install runs FROM a working installer, so failing
+            // to refresh that copy leaves the stack usable. Naming it
+            // explicitly still exits nonzero — see
+            // `install_report::InstallReport::build`.
+            "trusty-installer",
+        ] {
             assert!(!required(c), "{c} must be OPTIONAL");
         }
     }

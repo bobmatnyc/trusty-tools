@@ -9,7 +9,8 @@
 //! What: Resolves the requested members against [`super::stable_set`], installs
 //! each in order via the prebuilt-first strategy: on a Tier-1 platform a prebuilt
 //! tarball is downloaded, SHA-256 verified, and atomically placed into the install
-//! directory (`~/.local/bin` by default). On non-Tier-1 platforms (or when the
+//! directory (since #5777 the canonical `$CARGO_HOME/bin`, falling back to
+//! `~/.cargo/bin`). On non-Tier-1 platforms (or when the
 //! prebuilt download fails) the code falls back to
 //! `trusty_common::update::perform_upgrade_captured` (= `cargo install <crate>
 //! --locked`, stdio captured rather than inherited — #3830), verifying cargo is
@@ -403,8 +404,9 @@ async fn install_all(
     // with an unresolvable home), so the `/usr/local/bin` fallback is
     // reachable only with BOTH unset — invariant pinned by
     // `download::tests::install_dir_is_some_whenever_cargo_home_is_set`.
-    let install_dir = crate::download::default_install_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
+    // #5799: via the shared `install_dir_or_fallback`, so this, `install_one`,
+    // and the `--dry-run` preview cannot name three different directories.
+    let install_dir = crate::download::install_dir_or_fallback();
 
     // #3554: the real $PATH, resolved once, used by every member's
     // shadow-detection check below.
@@ -748,8 +750,15 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 /// the atomic `rename` in `crate::download::fetch` — writing a temp file beside
 /// the destination and renaming over it, so the kernel never sees a
 /// partially-overwritten inode. That property holds in ANY directory; the
-/// destination has nothing to do with it. `~/.local/bin` is the default because
-/// `install.sh` uses it, nothing more.
+/// destination has nothing to do with it. Since #5777 the default is the
+/// canonical `$CARGO_HOME/bin`, the same directory `install.sh` and a
+/// hand-typed `cargo install` write to.
+///
+/// That atomic-rename property is also what makes trusty-installer safe as a
+/// member of its own stable set (#5799): installing it replaces a binary that
+/// may be the running process, and `rename(2)` leaves the running image's open
+/// inode intact. Neither write path ever `cp`s over an on-PATH binary, which is
+/// the macOS cdhash hazard CLAUDE.md warns about.
 ///
 /// What: Resolves the install directory (`crate::download::default_install_dir`,
 /// since #5777 the canonical `$CARGO_HOME/bin`; falls back to cargo path via
@@ -786,8 +795,7 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
     // Resolve the install directory — the canonical cargo bin dir (#5777:
     // `default_install_dir()` delegates to the shared `canonical_bin_dir()`,
     // so prebuilt and cargo-fallback branches write ONE directory).
-    let install_dir = download::default_install_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
+    let install_dir = download::install_dir_or_fallback();
 
     // #3846 code-critic MEDIUM fix: capture "did a binary already exist" at
     // BOTH candidate destinations before EITHER write path below can run —
@@ -881,8 +889,9 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
 /// Best-effort on-disk size of a just-installed binary (for the component row).
 ///
 /// Why (#4964): this took a bare binary NAME and joined it onto the cargo bin
-/// dir, while `install_one` writes to `install_dir` (`~/.local/bin` on the
-/// prebuilt branch). The two disagreed, so the size column reported a stale
+/// dir, while `install_one` wrote to `install_dir` (`~/.local/bin` on the
+/// prebuilt branch, before #5777 converged the two). The two disagreed, so the
+/// size column reported a stale
 /// copy's bytes — or 0 when no cargo copy existed at all — for the binary that
 /// had just been placed somewhere else. Taking the CONCRETE path
 /// `install_one` reports makes the divergence structurally impossible rather

@@ -114,6 +114,67 @@ fn report_all_ok_true_for_optional_only_success() {
     assert_eq!(report.exit_code(), 0);
 }
 
+/// Why (#5799): the error arm the test above never covered, and a fail-open.
+/// `filter(required).all(…)` over an empty iterator is vacuously `true`, so an
+/// all-OPTIONAL selection whose install genuinely FAILED reported
+/// `all_ok: true` and exit 0 — nothing installed, success reported, no signal
+/// until much later. This has been reachable via `tctl install tga`,
+/// `trusty-analyze`, and `trusty-console` all along; adding trusty-installer
+/// as an OPTIONAL member would have opened a fourth door.
+/// What: one optional, FAILED outcome must yield `all_ok: false` / exit 2, and
+/// so must each of the two other failure dimensions (service, shadow) on the
+/// same all-optional selection.
+/// Test: This is the test.
+#[test]
+fn all_optional_selection_does_not_fail_open() {
+    let failed = InstallReport::build(vec![optional_outcome("tga", false, "network error")]);
+    assert!(
+        !failed.all_ok,
+        "an all-optional selection that FAILED must not report success"
+    );
+    assert_eq!(failed.exit_code(), 2);
+
+    let mut service_failed = optional_outcome("tga", true, "installed");
+    service_failed.service_ok = false;
+    assert!(!InstallReport::build(vec![service_failed]).all_ok);
+
+    let mut shadowed = optional_outcome("tga", true, "installed");
+    shadowed.shadow_ok = false;
+    assert!(!InstallReport::build(vec![shadowed]).all_ok);
+}
+
+/// Why (#5799): the acceptance case for the fail-open fix. `tctl install
+/// trusty-installer` names exactly one member, and that member is OPTIONAL, so
+/// a failed self-install hit the vacuous-truth path above and exited 0 — the
+/// worst possible place for it, since "reported success, did nothing" on the
+/// installer means the operator keeps running the stale binary believing it
+/// was replaced.
+/// What: a lone failed trusty-installer outcome exits 2; the same outcome
+/// alongside a healthy REQUIRED member still degrades gracefully to exit 0,
+/// which is the graceful-degrade property this fix must not break.
+/// Test: This is the test.
+#[test]
+fn lone_optional_installer_failure_exits_nonzero() {
+    let alone = InstallReport::build(vec![optional_outcome(
+        "trusty-installer",
+        false,
+        "permission denied writing to bin dir",
+    )]);
+    assert!(!alone.all_ok);
+    assert_eq!(alone.exit_code(), 2);
+
+    let bulk = InstallReport::build(vec![
+        outcome("trusty-search", true, "installed"),
+        optional_outcome("trusty-installer", false, "no prebuilt for this platform"),
+    ]);
+    assert!(
+        bulk.all_ok,
+        "a bulk install runs from a working installer; failing to refresh it \
+         must not fail the whole stack"
+    );
+    assert_eq!(bulk.exit_code(), 0);
+}
+
 /// Why: #2566 review — a binary can install cleanly (`ok: true`) while its
 /// SERVICE bootstrap genuinely fails; the report must not claim
 /// `all_ok: true` in that case (the exact failure class #2557 existed
@@ -472,7 +533,8 @@ fn dry_run_report_shape() {
         stable_member_for_test("trusty-search", "trusty-search", ManageStrategy::Launchd),
         stable_member_for_test("tga", "tga", ManageStrategy::None),
     ];
-    let report = build_dry_run_report(&members, true);
+    let dir = std::path::Path::new("/tmp/tctl-test-bin");
+    let report = build_dry_run_report(&members, true, dir);
     assert_eq!(report.command, "install");
     assert!(report.dry_run);
     assert!(report.service_bootstrap_enabled);
@@ -486,7 +548,7 @@ fn dry_run_report_shape() {
         "non-daemon member must not plan a service bootstrap"
     );
 
-    let disabled = build_dry_run_report(&members, false);
+    let disabled = build_dry_run_report(&members, false, dir);
     assert!(
         !disabled.members[0].service_bootstrap,
         "disabled service bootstrap must suppress every member"
@@ -514,12 +576,103 @@ fn dry_run_full_set_when_no_members_named() {
         "empty members must resolve to the full stable set"
     );
 
-    let report = build_dry_run_report(&resolved.members, true);
+    let report = build_dry_run_report(
+        &resolved.members,
+        true,
+        std::path::Path::new("/tmp/tctl-test-bin"),
+    );
     let names: Vec<&str> = report.members.iter().map(|m| m.member.as_str()).collect();
     let expected: Vec<&str> = all.iter().map(|m| m.crate_name.as_str()).collect();
     assert_eq!(
         names, expected,
         "dry-run preview must list every stable-set member, in order, when none are named"
+    );
+}
+
+/// Why (#5799): THE acceptance case. `tctl install trusty-installer
+/// --dry-run` returned `{"error": "unknown member(s): trusty-installer"}` and
+/// exit 3; it must now resolve, preview, and exit 0. `run` is called with
+/// `--json` so the interactive picker and the TTY-dependent confirmation gate
+/// are both bypassed — `--dry-run` returns before any install side effect, so
+/// this test writes nothing to disk.
+/// What: asserts exit 0 for both spellings the crate answers to,
+/// `trusty-installer` and the `tctl` alias binary.
+/// Test: This is the test.
+#[test]
+fn run_dry_run_accepts_the_installer_itself() {
+    for name in ["trusty-installer", "tctl"] {
+        let code = run(&[name.to_owned()], false, true, false, true, false, true);
+        assert_eq!(
+            code, 0,
+            "`tctl install {name} --dry-run` must succeed, not report an unknown member"
+        );
+    }
+}
+
+/// Why (#5799): the second half of the acceptance case — the preview must name
+/// the destination #5777 canonicalised. Before this change the report had no
+/// `install_dir` field at all, so an operator could not tell from a dry run
+/// whether the install would land in `$CARGO_HOME/bin` or somewhere a stale
+/// copy earlier on PATH would keep shadowing.
+/// What: asserts the reported directory is exactly what
+/// `download::install_dir_or_fallback()` resolves — the same call
+/// `install_one` makes, so the preview cannot name a directory the install
+/// would not use — and that it ends in `/bin`.
+/// Test: This is the test.
+#[test]
+fn dry_run_names_the_canonical_install_dir() {
+    let members = select_members_transitive(&["trusty-installer".to_owned()]).members;
+    let expected = crate::download::install_dir_or_fallback();
+    let report = build_dry_run_report(&members, true, &expected);
+    assert_eq!(report.install_dir, expected.display().to_string());
+    assert!(
+        report.install_dir.ends_with("/bin"),
+        "the canonical destination is a bin dir: {}",
+        report.install_dir
+    );
+}
+
+/// Why (#5799): the crate ships TWO binaries and the preview listed one. An
+/// operator reading `trusty-installer -> trusty-installer` would not learn
+/// that `tctl` — the name they actually type — is also about to be replaced.
+/// What: asserts the installer's preview row lists both binaries, and that no
+/// member's row is empty (the shared table falls back to `[crate_name]`).
+/// Test: This is the test.
+#[test]
+fn dry_run_lists_both_installer_binaries() {
+    let all = select_members_transitive(&[]).members;
+    let report = build_dry_run_report(&all, true, std::path::Path::new("/tmp/tctl-test-bin"));
+    let installer = report
+        .members
+        .iter()
+        .find(|m| m.member == "trusty-installer")
+        .expect("the installer previews as a member");
+    assert!(installer.binaries.contains(&"trusty-installer".to_owned()));
+    assert!(
+        installer.binaries.contains(&"tctl".to_owned()),
+        "the preview must name the `tctl` alias it also replaces: {:?}",
+        installer.binaries
+    );
+    for m in &report.members {
+        assert!(!m.binaries.is_empty(), "{} previewed no binary", m.member);
+    }
+}
+
+/// Why (#5799): membership pulls a member into the daemon-shaped subcommands,
+/// and `tctl start trusty-installer` must not try to bootstrap a launchd job
+/// for a CLI. `plans_service_bootstrap` is the shared predicate the preview
+/// and the real install loop both read, so pinning it here pins both.
+/// What: asserts the installer plans no service bootstrap even with service
+/// bootstrapping fully enabled.
+/// Test: This is the test.
+#[test]
+fn installer_never_plans_a_service_bootstrap() {
+    let members = select_members_transitive(&["trusty-installer".to_owned()]).members;
+    let report = build_dry_run_report(&members, true, std::path::Path::new("/tmp/tctl-test-bin"));
+    assert!(report.service_bootstrap_enabled);
+    assert!(
+        !report.members[0].service_bootstrap,
+        "a non-daemon must never plan a launchd service bootstrap"
     );
 }
 

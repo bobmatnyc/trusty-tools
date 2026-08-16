@@ -356,6 +356,23 @@ pub fn default_install_dir() -> Option<PathBuf> {
     trusty_common::bin_resolve::canonical_bin_dir()
 }
 
+/// The install destination, with the last-resort fallback applied.
+///
+/// Why (#5799): three call sites wrote
+/// `default_install_dir().unwrap_or_else(|| "/usr/local/bin".into())` by hand —
+/// `install_all`, `install_one`, and now the `--dry-run` preview. A preview
+/// that names a different directory than the install writes to is worse than
+/// no preview, and three copies of one expression is how that drift starts.
+///
+/// What: [`default_install_dir`], falling back to `/usr/local/bin` only when
+/// neither `CARGO_HOME` nor the home directory resolves — an invariant pinned
+/// by `tests::install_dir_is_some_whenever_cargo_home_is_set`.
+///
+/// Test: `tests::install_dir_or_fallback_matches_default_when_resolvable`.
+pub fn install_dir_or_fallback() -> PathBuf {
+    default_install_dir().unwrap_or_else(|| PathBuf::from("/usr/local/bin"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +411,25 @@ mod tests {
                 "~/.local/bin is no longer a write destination (#5777): {}",
                 p.display()
             );
+        }
+    }
+
+    /// Why (#5799): `install_all`, `install_one`, and the `--dry-run` preview
+    /// all need the destination, and three hand-written copies of
+    /// `default_install_dir().unwrap_or_else(…)` is how a preview starts
+    /// naming a directory the install does not write to.
+    /// What: asserts the helper equals [`default_install_dir`] whenever that
+    /// resolves, and only substitutes `/usr/local/bin` when it does not.
+    /// Test: This is the test.
+    #[test]
+    fn install_dir_or_fallback_matches_default_when_resolvable() {
+        match default_install_dir() {
+            Some(p) => assert_eq!(install_dir_or_fallback(), p),
+            None => assert_eq!(
+                install_dir_or_fallback(),
+                PathBuf::from("/usr/local/bin"),
+                "the fallback is reachable only with no CARGO_HOME and no home"
+            ),
         }
     }
 
