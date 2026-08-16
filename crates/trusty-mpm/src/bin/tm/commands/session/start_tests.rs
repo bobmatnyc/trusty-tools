@@ -440,8 +440,12 @@ fn session_start_accepts_a_git_directory() {
 /// entire subject). `repo_url` is a non-directory string, so
 /// `needs_first_run_clone` short-circuits without touching the filesystem.
 /// Test: `launch_new_session_and_attach_sends_the_name_hint`,
-/// `launch_new_session_and_attach_omits_name_hint_when_unnamed`.
-async fn capture_guided_launch_body(name_hint: Option<&str>) -> serde_json::Value {
+/// `launch_new_session_and_attach_omits_name_hint_when_unnamed`,
+/// `launch_new_session_and_attach_requests_a_worktree_when_asked`.
+async fn capture_guided_launch_body(
+    name_hint: Option<&str>,
+    isolation: crate::commands::picker_launch_new::LaunchIsolation,
+) -> serde_json::Value {
     let (captured, url) = spawn_capturing_managed_spawn_server_answering(
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
     )
@@ -452,6 +456,7 @@ async fn capture_guided_launch_body(name_hint: Option<&str>) -> serde_json::Valu
         &url,
         "https://example.invalid/owner/repo.git",
         name_hint,
+        isolation,
     )
     .await;
     assert!(
@@ -475,7 +480,11 @@ async fn capture_guided_launch_body(name_hint: Option<&str>) -> serde_json::Valu
 /// What: captures the real POST body for `Some("auth")`.
 #[tokio::test]
 async fn launch_new_session_and_attach_sends_the_name_hint() {
-    let body = capture_guided_launch_body(Some("auth")).await;
+    let body = capture_guided_launch_body(
+        Some("auth"),
+        crate::commands::picker_launch_new::LaunchIsolation::SessionCheckout,
+    )
+    .await;
     assert_eq!(
         body.get("name_hint"),
         Some(&serde_json::Value::String("auth".to_string())),
@@ -493,7 +502,11 @@ async fn launch_new_session_and_attach_sends_the_name_hint() {
 /// then that the rest of the body is unchanged.
 #[tokio::test]
 async fn launch_new_session_and_attach_omits_name_hint_when_unnamed() {
-    let body = capture_guided_launch_body(None).await;
+    let body = capture_guided_launch_body(
+        None,
+        crate::commands::picker_launch_new::LaunchIsolation::SessionCheckout,
+    )
+    .await;
     assert!(
         body.get("name_hint").is_none(),
         "the unnamed launch must omit name_hint entirely, not send null: {body}"
@@ -507,6 +520,35 @@ async fn launch_new_session_and_attach_omits_name_hint_when_unnamed() {
             "force_new": true,
             "background": true,
         }),
-        "the unnamed request's wire shape must be unchanged by #4965"
+        "the unnamed request's wire shape must be unchanged by #4965 or #5773"
+    );
+}
+
+/// #5773: `n <name> --worktree` must put the isolation request on the wire
+/// under the key the daemon reads (`worktree`), as a JSON `true`.
+///
+/// Why: the picker's launch-new path built a body with no `worktree` key at
+/// all, so `SpawnRequest`'s `#[serde(default)]` decoded `false` and
+/// `spawn_managed_routed` took the main-checkout branch for every picker
+/// launch — the operator had no way to reach the worktree branch that
+/// `tm launch --worktree` reaches. Sending it under a different spelling would
+/// be silently ignored the same way.
+///
+/// FAILS BEFORE THIS CHANGE: the body carried no `worktree` key at all.
+/// What: captures the real POST body for an isolation-requesting launch. The
+/// default path's absence of the key is pinned by
+/// `launch_new_session_and_attach_omits_name_hint_when_unnamed`'s equality
+/// assertion above.
+#[tokio::test]
+async fn launch_new_session_and_attach_requests_a_worktree_when_asked() {
+    let body = capture_guided_launch_body(
+        Some("auth"),
+        crate::commands::picker_launch_new::LaunchIsolation::OwnWorktree,
+    )
+    .await;
+    assert_eq!(
+        body.get("worktree"),
+        Some(&serde_json::Value::Bool(true)),
+        "an isolation request must send worktree: true: {body}"
     );
 }

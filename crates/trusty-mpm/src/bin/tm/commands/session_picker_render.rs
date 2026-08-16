@@ -234,9 +234,14 @@ pub(crate) fn command_legend(launch_slot: Option<u32>) -> Vec<String> {
         None => vec![row("[Enter]".to_string(), "launch new session")],
         Some(slot) => vec![row(format!("[{slot}]"), "launch new session")],
     };
+    // #5773: the isolation request rides on this row rather than a row of its
+    // own. A key of `[n <name> --worktree]` is wider than MENU_KEY_WIDTH and
+    // would ragged the whole column, and the flag is a modifier of this action
+    // rather than a second action.
     lines.push(row(
         "[n <name>]".to_string(),
-        "launch new session as tm-<name>-NN (e.g. n auth-refactor)",
+        "launch new session as tm-<name>-NN (e.g. n auth-refactor; \
+         add --worktree to run it in its own worktree)",
     ));
     if launch_slot.is_some() {
         lines.push(row("[d<N>]".to_string(), "delete session N (e.g. d1)"));
