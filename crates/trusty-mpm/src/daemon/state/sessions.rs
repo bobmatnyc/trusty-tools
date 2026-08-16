@@ -532,6 +532,18 @@ impl DaemonState {
             .collect()
     }
 
+    /// Every tracked delegation, across every session (#4311).
+    ///
+    /// Why: `agent_worktree_reap::paths_in_use` asks "is any agent still
+    /// working in this directory", and a session boundary is not an answer to
+    /// that — an agent dispatched from another session is exactly as live, and
+    /// its worktree exactly as un-deletable. Filtering by session there let a
+    /// reap approve a path a sibling still held.
+    /// Test: `reap_spares_a_worktree_another_sessions_agent_still_holds`.
+    pub fn all_delegations(&self) -> Vec<Delegation> {
+        self.delegations.iter().map(|e| e.value().clone()).collect()
+    }
+
     /// Agents of every live delegation writing into `cwd` without a working
     /// tree of their own (#4480, widened across sessions by ADR-0048).
     ///

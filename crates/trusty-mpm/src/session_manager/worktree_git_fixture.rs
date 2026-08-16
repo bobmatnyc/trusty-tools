@@ -284,8 +284,9 @@ impl GitWorktreeFixture {
             - super::worktree_ownership::OWNERLESS_GRACE
             - chrono::Duration::minutes(1);
         let payload = serde_json::to_vec(&super::worktree_ownership::WorktreeSentinel {
-            owner_session_id: ManagedSessionId::new(),
+            owner_session_id: Some(ManagedSessionId::new()),
             created_at: aged,
+            agent: None,
         })
         .expect("fixture: serialize sentinel");
         std::fs::write(

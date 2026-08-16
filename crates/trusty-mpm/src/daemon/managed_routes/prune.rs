@@ -107,7 +107,7 @@ fn default_dry_run() -> bool {
 /// that belongs to an active session.
 /// What: collects active workspace paths and the managed workspace root, then
 /// delegates to [`SessionManager::prune_orphaned_worktrees`](crate::session_manager::SessionManager::prune_orphaned_worktrees). Returns
-/// `{ dry_run, paths: ["..."], owner_unknown_paths: ["..."], skipped_dirty: [...] }`
+/// `{ dry_run, paths, owner_unknown_paths, agent_owned_paths, skipped_dirty }`
 /// (#3649 added the second field: worktrees conservatively skipped because
 /// their ownership sentinel had no resolvable owner — never auto-deleted,
 /// surfaced here for operator review; #4091 adds the third: worktrees skipped
@@ -183,6 +183,16 @@ pub async fn prune_worktrees_route(
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
+            // #4311: attributed to a dispatched agent — owned, and reclaimed by
+            // that agent's exit rather than this sweep. Reported because these
+            // arrived in `owner_unknown_paths` before they carried a
+            // sentinel, and losing them from the response would trade a
+            // "cannot reclaim" line for silence.
+            let agent_owned_paths: Vec<String> = outcome
+                .agent_owned
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
             // #2919: the merged-PR pass runs only on the explicit opt-in, and
             // only ever in Report mode under `dry_run`. It re-reads the
             // in-use set itself via `in_use_workspace_paths` above, which was
@@ -250,6 +260,7 @@ pub async fn prune_worktrees_route(
                 "dry_run": req.dry_run,
                 "paths": paths,
                 "owner_unknown_paths": owner_unknown_paths,
+                "agent_owned_paths": agent_owned_paths,
                 "skipped_dirty": outcome.skipped_dirty,
                 "merged_prs": merged,
             }))

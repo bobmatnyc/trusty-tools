@@ -770,6 +770,18 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                                 outcome.owner_unknown.len()
                             );
                         }
+                        // #4311: attributed, so NOT the owner-unknown backlog
+                        // above — these have an owner and a reaper, and the
+                        // count is logged separately so an operator can tell
+                        // "nothing may touch this" from "the agent's exit
+                        // will".
+                        if !outcome.agent_owned.is_empty() {
+                            info!(
+                                "orphan-GC left {} agent-owned worktree dir(s) to their agents' \
+                                 exits (#4311)",
+                                outcome.agent_owned.len()
+                            );
+                        }
                         // #4091: a worktree holding uncommitted or unpushed
                         // work is NEVER auto-deleted. Warn (not info) with the
                         // per-path reason — this is unsaved work sitting in a

@@ -149,3 +149,8 @@ docs/certificates/*.mobileprovision
 # claude-mpm (unrelated Python project) leftovers — synced skills/agents, never a deliverable here
 .agents/
 .codex/
+
+# The per-worktree ownership sentinel (#3649, #4311). It is written INTO a
+# worktree by the daemon, so it appears in that tree as an untracked file and
+# trips the clean-tree guards in scripts/check-publish-ready.sh.
+.trusty-mpm-worktree
