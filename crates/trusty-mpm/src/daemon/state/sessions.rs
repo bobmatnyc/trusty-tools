@@ -503,6 +503,26 @@ impl DaemonState {
         self.delegations.insert(delegation.id.0, delegation);
     }
 
+    /// Hold the dispatch-record lock for the duration of one find-then-insert
+    /// (#5769).
+    ///
+    /// Why: see the `dispatch_record` field's own doc. Two writers describe one
+    /// dispatch — the tracker's `matcher: "*"` hook and the guard's grant POST —
+    /// and both resolve by `tool_use_id` before inserting, which a `DashMap`
+    /// cannot make atomic. Exposed as a guard rather than as a closure-taking
+    /// method because both takers already own their record logic and only need
+    /// it serialised.
+    /// What: blocks until the lock is free. `pub(crate)`, not `pub`: this is an
+    /// internal invariant between two modules of this crate, not an API a
+    /// consumer may hold.
+    ///
+    /// It is ALWAYS taken inside [`Self::claim_shared_tree_dispatch`]'s lock,
+    /// never around it. Take them in the other order and the two deadlock.
+    /// Test: `a_grant_and_the_tracker_converge_in_either_order`.
+    pub(crate) fn dispatch_record_guard(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.dispatch_record.lock()
+    }
+
     /// All delegations belonging to one session.
     pub fn delegations_for(&self, session: SessionId) -> Vec<Delegation> {
         self.delegations
@@ -512,16 +532,27 @@ impl DaemonState {
             .collect()
     }
 
-    /// Agents of this session's live delegations that are writing into `cwd`
-    /// without a working tree of their own (#4480).
+    /// Agents of every live delegation writing into `cwd` without a working
+    /// tree of their own (#4480, widened across sessions by ADR-0048).
     ///
     /// Why: this is the exact population a new file-mutating dispatch would be
     /// joining. Answering it here — over the tracker's own records, which are
     /// the only place a delegation's liveness is resolved from real
     /// `SubagentStop` signals — is what keeps the guard from having to
     /// re-derive liveness from a timer and guess.
-    /// What: this session's delegations that are [`DelegationStatus::is_live`],
-    /// whose `cwd` equals `cwd`, whose agent
+    ///
+    /// **It deliberately does not filter by session.** It used to, and that
+    /// made it blind to the only shape that has actually caused harm: three
+    /// sessions standing in ONE checkout, each seeing an empty answer because
+    /// the other two writers belonged to a different session id. The hazard is
+    /// a shared git HEAD, and a HEAD is a property of the DIRECTORY — two
+    /// agents in one directory collide whether or not the same PM dispatched
+    /// them, and two agents in different directories never collide however
+    /// closely related their sessions are. The session was never the right
+    /// key; the daemon holds every session's delegations and this is the one
+    /// place that fact is usable.
+    /// What: every delegation that is [`DelegationStatus::is_live`], whose
+    /// `cwd` equals `cwd`, whose agent
     /// [`shares_the_callers_tree`](crate::core::dispatch_isolation::shares_the_callers_tree),
     /// and whose `tool_use_id` is not `exclude_tool_use_id`; returned as agent
     /// names for the deny message.
@@ -542,7 +573,6 @@ impl DaemonState {
     /// filter here through the route that is this method's only caller.
     pub fn live_shared_tree_writers(
         &self,
-        session: SessionId,
         cwd: &std::path::Path,
         exclude_tool_use_id: Option<&str>,
     ) -> Vec<String> {
@@ -550,8 +580,7 @@ impl DaemonState {
             .iter()
             .filter(|e| {
                 let d = e.value();
-                d.session == session
-                    && d.status.is_live()
+                d.status.is_live()
                     && d.cwd.as_deref() == Some(cwd)
                     && !(exclude_tool_use_id.is_some()
                         && d.tool_use_id.as_deref() == exclude_tool_use_id)
@@ -589,21 +618,31 @@ impl DaemonState {
     /// the same lifecycle, the same liveness, and the same staleness sweep. No
     /// second kind of state and no new expiry are introduced.
     ///
-    /// `record` must not take this lock again (it is not reentrant), must not
-    /// block, and must not await.
+    /// `record` must not take THIS lock again — it is not reentrant — and must
+    /// not await. It MAY take [`Self::dispatch_record_guard`], and both of the
+    /// closures passed today do: that is the documented lock order, and taking
+    /// the two in the other order is what would deadlock. It must not block on
+    /// anything else.
+    ///
+    /// It takes no session (ADR-0048). [`Self::live_shared_tree_writers`] spans
+    /// every session, so a guard in one session now sees a writer another
+    /// session put in the same directory, and the caller's own `record` closure
+    /// carries whichever session the claim is written under. One mutex still
+    /// serialises every caller, because the directory it protects is a property
+    /// of this state rather than of a session.
     /// Test: `shared_tree_dispatch_route_denies_the_second_claim`,
+    /// `shared_tree_writers_span_sessions_in_one_checkout`,
     /// `shared_tree_dispatch_route_reserves_the_tree_on_an_empty_answer`,
     /// `shared_tree_dispatch_route_does_not_reserve_when_it_denies`.
     pub fn claim_shared_tree_dispatch<F: FnOnce(&Self)>(
         &self,
-        session: SessionId,
         cwd: &std::path::Path,
         exclude_tool_use_id: Option<&str>,
         eligible: bool,
         record: F,
     ) -> (Vec<String>, bool) {
         let _claim = self.shared_tree_claim.lock();
-        let live = self.live_shared_tree_writers(session, cwd, exclude_tool_use_id);
+        let live = self.live_shared_tree_writers(cwd, exclude_tool_use_id);
         let claimed = eligible && live.is_empty();
         if claimed {
             record(self);

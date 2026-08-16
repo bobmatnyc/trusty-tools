@@ -60,7 +60,7 @@ use serde_json::Value;
 
 use crate::core::agent::is_subagent_dispatch_tool;
 use crate::core::dispatch_isolation::{
-    dispatch_agent, dispatch_isolation, shares_the_callers_tree,
+    dispatch_agent, dispatch_isolation, isolation_separates_working_tree, shares_the_callers_tree,
 };
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
@@ -93,9 +93,21 @@ pub struct SharedTreeDispatchRequest {
 /// What: `agents` holds one entry per live unisolated writer, deduplicated with
 /// a count so two concurrent `rust-engineer`s render as one row rather than a
 /// repeated name. `total` is the number of delegations, not of distinct names.
-/// `claimed` reports whether this call took the directory; it is diagnostic —
-/// the guard decides on `agents` alone, so an older guard that ignores the field
-/// behaves identically.
+/// `claimed` reports whether this call WROTE anything, and what that write was
+/// depends on which route answered. On
+/// [`shared_tree_dispatch_route`] it means the directory was reserved for an
+/// unisolated dispatch. On [`granted_worktree_route`] it means the granted
+/// isolation was recorded — an isolated dispatch reserves nothing, so there is
+/// no directory to take. The two share the field because both answer the same
+/// question the caller asks of it: did the daemon act, or only look? A single
+/// name for "the daemon wrote" keeps an older guard that ignores the field
+/// behaving identically on both.
+///
+/// Since #5769 that field is no longer purely diagnostic on the granted route:
+/// the guard reads it to tell "the checkout is free" from "the daemon declined
+/// to record", which are otherwise the same empty answer. A daemon too old to
+/// send it reads as not-written, which is the conservative direction — see
+/// `pm_guard_dispatch::warn_on_unrecorded_grant`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SharedTreeWritersResponse {
     /// Distinct agent names, each with how many of its delegations are live.
@@ -124,10 +136,71 @@ pub struct SharedTreeWriter {
 /// What: one POST on a literal-suffixed path under `/sessions/{id}`.
 /// Test: `shared_tree_dispatch_route_reports_live_unisolated_writers`.
 pub fn router() -> Router<Arc<DaemonState>> {
-    Router::new().route(
-        "/api/v1/sessions/{id}/delegations/shared-tree-dispatch",
-        post(shared_tree_dispatch_route),
-    )
+    Router::new()
+        .route(
+            "/api/v1/sessions/{id}/delegations/shared-tree-dispatch",
+            post(shared_tree_dispatch_route),
+        )
+        .route(
+            "/api/v1/sessions/{id}/delegations/granted-worktree",
+            post(granted_worktree_route),
+        )
+}
+
+/// `POST /api/v1/sessions/{id}/delegations/granted-worktree` (#5769).
+///
+/// Why: [`shared_tree_dispatch_route`] cannot record a granted dispatch, and
+/// that is deliberate rather than an oversight — it re-derives eligibility with
+/// [`shares_the_callers_tree`], which an `isolation: "worktree"` input makes
+/// false, so its record closure never runs (pinned by
+/// `shared_tree_dispatch_route_does_not_reserve_a_read_only_agent`). But a
+/// dispatch the guard just rewrote from unisolated to isolated is exactly the
+/// one whose record needs correcting: the tracker's `matcher: "*"` hook observes
+/// the ORIGINAL payload and writes `isolation: None`, so every granted writer
+/// stays named as a shared-checkout writer and ADR-0048 decision 10 denies
+/// `git pull` there on a phantom. This route is the second half the grant needs.
+///
+/// What: the same scan-and-claim as its sibling, with two differences. The
+/// record is [`crate::daemon::services::delegation_tracker::record_granted_isolation`]
+/// — an upsert that OVERWRITES `isolation` on an existing record, so the guard
+/// and the tracker converge whichever arrives first. And eligibility asks
+/// whether the dispatch declares an isolating mode, the exact inverse of the
+/// sibling's question, because that is what a grant looks like on the wire.
+///
+/// It re-derives that from the payload rather than trusting the caller, for the
+/// same reason the sibling does: whether a dispatch may hold a directory is this
+/// daemon's policy call. A payload with no `cwd`, no `tool_use_id`, a
+/// non-dispatch `tool`, or no isolating `isolation` answers the query and
+/// records nothing.
+/// Test: `a_grant_and_the_tracker_converge_in_either_order` covers both the
+/// correct-an-existing-record and the record-arrives-first halves;
+/// `a_grant_and_the_tracker_race_without_losing_the_isolation`,
+/// `granted_worktree_route_records_nothing_without_isolation_or_a_tool_use_id`,
+/// `record_granted_isolation_refuses_a_non_separating_mode`,
+/// `granted_worktree_route_reports_a_live_writer_without_claiming`.
+pub async fn granted_worktree_route(
+    State(state): State<Arc<DaemonState>>,
+    Path(id): Path<String>,
+    Json(req): Json<SharedTreeDispatchRequest>,
+) -> Result<Json<SharedTreeWritersResponse>, DaemonError> {
+    let session = uuid::Uuid::parse_str(&id)
+        .map(SessionId)
+        .map_err(|_| DaemonError::InvalidRequest(format!("malformed session id: {id}")))?;
+
+    let payload = &req.payload;
+    let Some(cwd) = str_field(payload, "cwd").map(PathBuf::from) else {
+        return Ok(Json(SharedTreeWritersResponse::default()));
+    };
+    let exclude = str_field(payload, "tool_use_id");
+    let input = payload.get("input");
+    let eligible = exclude.is_some()
+        && str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
+        && isolation_separates_working_tree(dispatch_isolation(input));
+
+    let (names, claimed) = state.claim_shared_tree_dispatch(&cwd, exclude, eligible, |s| {
+        crate::daemon::services::delegation_tracker::record_granted_isolation(s, session, payload);
+    });
+    Ok(Json(writers_response(&names, claimed)))
 }
 
 /// `POST /api/v1/sessions/{id}/delegations/shared-tree-dispatch` (#4480, #5324).
@@ -174,28 +247,39 @@ pub async fn shared_tree_dispatch_route(
         && dispatch_agent(input)
             .is_some_and(|agent| shares_the_callers_tree(agent, dispatch_isolation(input)));
 
-    let (names, claimed) =
-        state.claim_shared_tree_dispatch(session, &cwd, exclude, eligible, |s| {
-            crate::daemon::services::delegation_tracker::observe(
-                s,
-                session,
-                HookEvent::PreToolUse,
-                payload,
-            );
-        });
+    let (names, claimed) = state.claim_shared_tree_dispatch(&cwd, exclude, eligible, |s| {
+        crate::daemon::services::delegation_tracker::observe(
+            s,
+            session,
+            HookEvent::PreToolUse,
+            payload,
+        );
+    });
 
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for name in &names {
-        *counts.entry(name.clone()).or_default() += 1;
+    Ok(Json(writers_response(&names, claimed)))
+}
+
+/// Fold a list of live writer names into the wire response.
+///
+/// Why: both routes answer the same question in the same shape, and the
+/// deduplication ("two `rust-engineer`s render as one row with a count") is the
+/// part a second copy would drift on.
+fn writers_response(names: &[String], claimed: bool) -> SharedTreeWritersResponse {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for name in names {
+        *counts.entry(name.as_str()).or_default() += 1;
     }
-    Ok(Json(SharedTreeWritersResponse {
+    SharedTreeWritersResponse {
         agents: counts
             .into_iter()
-            .map(|(agent, count)| SharedTreeWriter { agent, count })
+            .map(|(agent, count)| SharedTreeWriter {
+                agent: agent.to_string(),
+                count,
+            })
             .collect(),
         total: names.len(),
         claimed,
-    }))
+    }
 }
 
 /// Read a non-empty string field from the forwarded hook payload.

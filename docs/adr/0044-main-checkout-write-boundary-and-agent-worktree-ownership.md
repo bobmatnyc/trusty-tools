@@ -1,6 +1,6 @@
 # 0044. Main-checkout sessions restrict writes; the harness owns agent worktrees
 
-- **Status:** Accepted
+- **Status:** Amended by [0048](0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md)
 - **Date:** 2026-08-10
 - **Scope:** crate `trusty-mpm` session launch and delegated-agent enforcement;
   Claude Code worktree isolation under `.claude/worktrees/`
@@ -9,6 +9,10 @@
 - **Decision Drivers:** owner ruling that main checkouts are read-only except
   for documents and configuration; verified absence of a trusty-mpm agent
   worktree creation path; ADR-0036's harness-owned worktree topology
+- **Current amendment:** [ADR-0048](0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md) builds the mechanism decision 2
+  requires, grants a dispatched writer the harness worktree decision 4 keeps
+  trusty-mpm out of creating, and extends decision 5's row 4 so isolation may
+  be requested on a dispatch's behalf. Decisions 1-4 and 6 stand as accepted.
 - **Supersedes / Superseded by:** Amends ADR-0037's write boundary and corrects
   row 4 of its placement table. ADR-0037's PM placement rules remain in force.
 

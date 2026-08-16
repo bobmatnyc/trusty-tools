@@ -394,6 +394,24 @@ pub struct DaemonState {
     /// Test: `shared_tree_dispatch_route_denies_the_second_claim`,
     /// `pm_guard_denies_the_second_of_two_simultaneous_dispatches`.
     pub(super) shared_tree_claim: parking_lot::Mutex<()>,
+    /// Serializes creation and isolation-correction of one dispatch's
+    /// delegation record (#5769).
+    ///
+    /// Why: two independent writers describe the same dispatch. The daemon's
+    /// own `matcher: "*"` `PreToolUse` hook records it from the ORIGINAL
+    /// payload, and `tm hook --pm-guard` posts the isolation it granted that
+    /// same dispatch. Both resolve the record by `tool_use_id` and then insert
+    /// if they find none, and a `DashMap` makes neither half of that pair atomic
+    /// with the other — so the two could both miss and both insert, leaving one
+    /// dispatch with two records and the unisolated one deciding later denies.
+    /// What: held across the find-then-insert in
+    /// [`crate::daemon::services::delegation_tracker::observe`]'s dispatch arm
+    /// and across the whole upsert in
+    /// [`crate::daemon::services::delegation_tracker::record_granted_isolation`].
+    /// It is ALWAYS taken inside [`Self::shared_tree_claim`], never outside it,
+    /// so the two can never deadlock. In-memory work only: no I/O, no await.
+    /// Test: `a_grant_and_the_tracker_converge_in_either_order`.
+    pub(super) dispatch_record: parking_lot::Mutex<()>,
 }
 
 impl Default for DaemonState {
@@ -491,6 +509,7 @@ impl DaemonState {
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
             shared_tree_claim: parking_lot::Mutex::new(()),
+            dispatch_record: parking_lot::Mutex::new(()),
         }
     }
 
@@ -565,6 +584,7 @@ impl DaemonState {
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
             shared_tree_claim: parking_lot::Mutex::new(()),
+            dispatch_record: parking_lot::Mutex::new(()),
         }
     }
 
