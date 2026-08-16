@@ -256,6 +256,35 @@ impl EngagementConfig {
         Self::from_toml(&text, path)
     }
 
+    /// Read the config, or `None` when the handoff package left none here.
+    ///
+    /// Why: the guided flow reports state on a working directory that may have
+    /// no config yet, and must keep doing so (#5797). It needs the pins to
+    /// auto-install, so it asks for them — but an absent config is a state to
+    /// report, not a failure, and the flow falls back to naming the install step
+    /// rather than performing it.
+    /// What: `NotFound` becomes `Ok(None)`; every other read failure and every
+    /// parse failure still propagates, because a config that is present and
+    /// wrong is not the same as one that is not there. Shaped after
+    /// [`crate::manifest::AuditManifest::load_if_present`].
+    /// Test: `super::config_tests::an_absent_config_is_not_an_error`,
+    /// `super::config_tests::a_malformed_config_is_still_an_error`.
+    ///
+    /// # Errors
+    ///
+    /// [`AuditError::Read`] for a read failure other than absence, and
+    /// [`AuditError::Parse`] when the file does not match the schema.
+    pub fn load_if_present(path: &Path) -> Result<Option<Self>, AuditError> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self::from_toml(&text, path).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(AuditError::Read {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
     /// Conventional location of the config: beside the running binary's package.
     pub fn default_path(package_dir: &Path) -> PathBuf {
         package_dir.join(Self::FILE_NAME)

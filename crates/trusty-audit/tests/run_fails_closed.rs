@@ -10,6 +10,13 @@
 //! What: a throwaway work directory with stub binaries standing in for the
 //! pinned triple, driven through the real `taudit run`. No network, so nothing
 //! here is `#[ignore]`d.
+//!
+//! Keeping that true needs `--no-install` since #5797: `run` installs the pins
+//! it is missing, and the tests here that deliberately omit a binary would
+//! otherwise reach the release host. The flag is the opt-out, so passing it is
+//! also the thing that keeps these assertions about the SWEEP's preflight
+//! rather than about the installer. [`Engagement::run_installing`] is the one
+//! helper that leaves auto-install on.
 //! Test: this is the test.
 
 #![cfg(unix)]
@@ -104,11 +111,33 @@ impl Engagement {
     fn run(&self) -> (String, String, Option<i32>) {
         let mut command = Command::new(TAUDIT);
         command
+            .args(["run", "--no-install", "--work-dir"])
+            .arg(&self.work)
+            .arg("--config")
+            .arg(&self.config);
+        report(&mut command)
+    }
+
+    /// The same run with auto-install left on — the default (#5797).
+    fn run_installing(&self) -> (String, String, Option<i32>) {
+        let mut command = Command::new(TAUDIT);
+        command
             .args(["run", "--work-dir"])
             .arg(&self.work)
             .arg("--config")
             .arg(&self.config);
         report(&mut command)
+    }
+
+    /// Replace `tools/` with a symlink, which `tools::install` refuses at its
+    /// own guard BEFORE it builds an HTTP client. That is what lets a test
+    /// prove auto-install was ATTEMPTED without reaching the network.
+    fn sabotage_tools_dir(&self) {
+        let tools = self.work.join("tools");
+        let elsewhere = self.tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
+        std::fs::remove_dir_all(&tools).expect("remove tools");
+        std::os::unix::fs::symlink(&elsewhere, &tools).expect("symlink");
     }
 
     /// The same run with the flags spelled RELATIVE, from a shell sitting in
@@ -152,6 +181,9 @@ fn is_empty(dir: &Path) -> bool {
 }
 
 /// Without the pinned triple there is no run and no fallback to `PATH`.
+///
+/// Asserted with `--no-install`, which is what the opt-out is FOR: the sweep's
+/// preflight is unchanged by #5797, and this is the test that says so.
 #[test]
 fn a_run_without_the_pinned_tools_refuses() {
     let e = Engagement::new();
@@ -163,6 +195,59 @@ fn a_run_without_the_pinned_tools_refuses() {
     assert!(stderr.contains("trusty-audit install"), "{stderr}");
     assert!(e.progress().is_empty(), "no run may be recorded");
     assert!(is_empty(&e.work.join("out")));
+}
+
+/// The default is to install what is missing rather than refuse over it
+/// (#5797), and a failed install still starts no sweep.
+///
+/// The symlinked `tools/` is what keeps this offline: reaching that guard is
+/// only possible by having decided to install, and the guard runs before any
+/// HTTP client exists. Compare with the test above, which passes `--no-install`
+/// against the same missing set and gets the preflight's refusal instead.
+#[test]
+fn a_run_installs_the_pinned_tools_it_is_missing() {
+    let e = Engagement::new();
+    e.checkout("acme-api");
+    e.select(&[("acme-api", "repos/acme-api")]);
+    e.sabotage_tools_dir();
+
+    let (_, stderr, code) = e.run_installing();
+    assert_ne!(code, Some(0), "{stderr}");
+    assert!(
+        stderr.contains("nothing was installed"),
+        "the sweep must have tried to install: {stderr}"
+    );
+    assert!(
+        !stderr.contains("trusty-audit install"),
+        "it must not still be telling the operator to install by hand: {stderr}"
+    );
+    assert!(e.progress().is_empty(), "no run may be recorded");
+    assert!(is_empty(&e.work.join("out")));
+}
+
+/// An already-satisfied set reaches no installer, so a run costs no download —
+/// the idempotence #5797 turns on.
+///
+/// Proved offline, and without depending on whether the pinned versions happen
+/// to exist on the release host: `tools/` is left a symlink, which any install
+/// attempt refuses over, and the stub set is written THROUGH it and recorded at
+/// the config's pins. A sweep that reaches the children is therefore one that
+/// never asked to install.
+#[test]
+fn a_satisfied_set_is_not_reinstalled_on_the_next_run() {
+    let e = Engagement::new();
+    e.checkout("acme-api");
+    e.select(&[("acme-api", "repos/acme-api")]);
+    e.sabotage_tools_dir();
+    e.install_stubs(&Engagement::manifest_writer(None));
+
+    let (_, stderr, code) = e.run_installing();
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        !stderr.contains("nothing was installed"),
+        "a satisfied set must not reach the installer: {stderr}"
+    );
+    assert!(!e.progress().is_empty(), "the sweep ran");
 }
 
 /// Nothing selected is a refusal, never a zero-repository success.
