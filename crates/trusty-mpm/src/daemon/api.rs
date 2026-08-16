@@ -905,6 +905,7 @@ pub async fn discover_sessions(State(state): State<Arc<DaemonState>>) -> Json<Di
     Json(DiscoverResponse {
         discovered: result.adopted,
         sessions: result.sessions,
+        skipped: result.skipped,
     })
 }
 

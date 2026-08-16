@@ -224,10 +224,18 @@ decides), the PM wanting a second opinion, or confirming green CI.
 
 ## Worktree Isolation on a Dispatch
 
-Pass `isolation: "worktree"` on Agent tool calls when spawning 2+ parallel
-agents that modify files. Not needed for sequential agents, read-only research,
-or separate file trees. Use `run_in_background: true` for fire-and-forget
-parallel work.
+**From a main checkout, this is automatic, not a PM choice (ADR-0048).** `tm
+hook --pm-guard` grants `isolation: "worktree"` to any dispatched agent that
+may write, single or parallel, the moment the session is standing in a main
+checkout — the write boundary above denies that agent a source edit there
+anyway. Nothing needs declaring for this case.
+
+**From inside a worktree, pass it yourself for concurrency.** Pass
+`isolation: "worktree"` on Agent tool calls when spawning 2+ parallel agents
+that modify files on the SAME checkout — the case the guard cannot see,
+because there is no main-checkout grant to fall back on. Not needed for
+sequential agents, read-only research, or separate file trees. Use
+`run_in_background: true` for fire-and-forget parallel work.
 
 🔴 **`isolation: "worktree"` is the only sanctioned mechanism, and the PM never
 authors a `git worktree add` into a dispatch prompt (#5649).**

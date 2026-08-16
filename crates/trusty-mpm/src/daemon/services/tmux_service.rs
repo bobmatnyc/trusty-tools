@@ -27,6 +27,30 @@ use crate::daemon::tmux::{AdoptedSession, SessionSnapshot, TmuxDriver};
 /// What: capture / list / adopt / snapshot, each wrapping a [`TmuxDriver`] call
 /// with the daemon's failure policy.
 /// Test: the module's `#[cfg(test)]` suite.
+/// Map a [`TmuxDriver::discover`] failure onto the right [`DaemonError`] (#5784).
+///
+/// Why: a scratch-environment refusal is not a missing session. Collapsing it
+/// into `SessionNotFound` answered "that session does not exist" — HTTP 404 —
+/// to an operator whose real problem is a reassigned `$HOME`, and buried the
+/// variable that lifts the gate. This crate's own gate doc says a silent skip
+/// is its own trap; this was that trap.
+/// What: asks the gate directly rather than sniffing `discover`'s error text,
+/// so a refusal becomes `TmuxUnavailable` carrying the full reason (including
+/// `TRUSTY_MPM_ALLOW_HOST_STATE`). Every other failure — tmux genuinely
+/// absent — keeps the historical `SessionNotFound` mapping for `name`.
+/// Test: `scratch_home_daemon_does_not_spawn_tmux` in
+/// `tests/scratch_home_tmux_gate.rs` calls `TmuxService::adopt` under a
+/// scratch `$HOME` and asserts the error names the gate, not a missing
+/// session.
+fn discover_or_session_error(name: &str) -> Result<TmuxDriver, DaemonError> {
+    if let Some(reason) = crate::core::host_state_gate::host_state_access().skip_reason() {
+        return Err(DaemonError::TmuxUnavailable(reason));
+    }
+    TmuxDriver::discover().map_err(|_| DaemonError::SessionNotFound {
+        id: name.to_string(),
+    })
+}
+
 pub struct TmuxService;
 
 impl TmuxService {
@@ -145,9 +169,7 @@ impl TmuxService {
     /// view "that session is not available here" is the same `404` either way.
     /// Test: `adopt_missing_session_is_not_found`.
     pub fn adopt(name: &str) -> Result<AdoptedSession, DaemonError> {
-        let driver = TmuxDriver::discover().map_err(|_| DaemonError::SessionNotFound {
-            id: name.to_string(),
-        })?;
+        let driver = discover_or_session_error(name)?;
         driver.adopt_session(name).map_err(|e| {
             tracing::warn!("tmux adopt {name} failed: {e}");
             DaemonError::SessionNotFound {
@@ -228,9 +250,7 @@ impl TmuxService {
     /// [`DaemonError::SessionNotFound`] (a uniform `404` for "not available").
     /// Test: `snapshot_missing_session_is_not_found`.
     pub fn snapshot(name: &str, lines: u32) -> Result<SessionSnapshot, DaemonError> {
-        let driver = TmuxDriver::discover().map_err(|_| DaemonError::SessionNotFound {
-            id: name.to_string(),
-        })?;
+        let driver = discover_or_session_error(name)?;
         driver.monitor_session(name, lines).map_err(|e| {
             tracing::warn!("tmux snapshot for {name} failed: {e}");
             DaemonError::SessionNotFound {
