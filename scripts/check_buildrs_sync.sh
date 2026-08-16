@@ -8,11 +8,12 @@
 #   "daemon"  — trusty-memory, trusty-analyze, trusty-console, trusty-search
 #               (issue #987). Embeds an OPTIONAL web UI; degrades to a
 #               placeholder when the JS toolchain is missing.
-#   "tauri-ui" — trusty-code-gui, trusty-mpm-gui, trusty-agents-ui (issue
-#               #4699). Embeds the whole desktop window; ABORTS the crate build
-#               on any UI-build failure, because a placeholder there would ship
-#               a blank app. trusty-agents-ui is edition 2021, so this block
-#               must stay free of let-chains.
+#   "tauri-ui" — trusty-code-gui, trusty-mpm-gui, trusty-agents-ui,
+#               trusty-audit-ui (issues #4699, #5477). Embeds the whole desktop
+#               window; ABORTS the crate build on any UI-build failure, because
+#               a placeholder there would ship a blank app. trusty-agents-ui and
+#               trusty-audit-ui are edition 2021, so this block must stay free
+#               of let-chains.
 #
 # The two families are deliberately not merged: their failure semantics differ.
 #
@@ -38,6 +39,7 @@ TAURI_UI_FILES=(
     "crates/trusty-code-gui/build.rs"
     "crates/trusty-mpm-gui/build.rs"
     "crates/trusty-agents/ui/src-tauri/build.rs"
+    "crates/trusty-audit/ui/src-tauri/build.rs"
 )
 
 TMP_DIR=$(mktemp -d)
