@@ -398,7 +398,11 @@ async fn install_all(
 
     // Resolve the install directory once for post-install hooks (Phase 7 & 8).
     // #5777: `default_install_dir()` IS the shared canonical cargo bin dir,
-    // so the former `.or_else(canonical_bin_dir)` leg is gone rather than dead.
+    // so the former `.or_else(canonical_bin_dir)` leg is gone rather than
+    // dead. It is `Some` whenever `CARGO_HOME` is set and non-empty (even
+    // with an unresolvable home), so the `/usr/local/bin` fallback is
+    // reachable only with BOTH unset — invariant pinned by
+    // `download::tests::install_dir_is_some_whenever_cargo_home_is_set`.
     let install_dir = crate::download::default_install_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
 

@@ -252,7 +252,8 @@ async fn install_from_urls(
 /// `tracing::warn!` before being skipped — table drift used to produce a
 /// half-install with no trace at all (#5778 review).
 /// Test: `tests::expected_binaries_among_drops_documentation_files`,
-/// `tests::expected_binaries_among_keeps_multi_binary_sets`.
+/// `tests::expected_binaries_among_keeps_multi_binary_sets`,
+/// `tests::drop_warn_fires_only_for_unexpected_executables`.
 fn expected_binaries_among(
     crate_name: &str,
     extract_dir: &std::path::Path,
@@ -263,20 +264,37 @@ fn expected_binaries_among(
     for name in extracted {
         if expected.iter().any(|e| e == name) {
             kept.push(name.clone());
-        } else if !is_documentation_file(name) && has_exec_bit(&extract_dir.join(name)) {
-            // #5778: a silently-dropped executable is a half-install in the
-            // making — the fix is a CRATE_BINARIES row, and nobody can add
-            // one for a file they never heard about.
-            tracing::warn!(
-                crate_name,
-                file = %name,
-                "tarball shipped an executable not in the shared \
-                 installed_binaries table; NOT installing it — if this is a \
-                 real binary, add it to trusty-common's CRATE_BINARIES (#5778)"
-            );
+        } else {
+            warn_dropped_executable(crate_name, name, &extract_dir.join(name));
         }
     }
     kept
+}
+
+/// Warn about a dropped tarball entry that looks like a real binary.
+///
+/// Why (#5778): a silently-dropped executable is a half-install in the
+/// making — the fix is a CRATE_BINARIES row, and nobody can add one for a
+/// file they never heard about. Split from [`expected_binaries_among`], with
+/// the fired/not-fired decision returned, so tests can assert it against
+/// real on-disk files — the prior fixtures created no files, so
+/// `has_exec_bit` always saw a metadata `Err` and the warn arm was dead in
+/// every test run (#5778 verifier round).
+/// What: fires (and returns `true`) only for a non-documentation name whose
+/// extracted copy carries the execute bit; returns `false` otherwise.
+/// Test: `tests::drop_warn_fires_only_for_unexpected_executables`.
+fn warn_dropped_executable(crate_name: &str, name: &str, path: &std::path::Path) -> bool {
+    if is_documentation_file(name) || !has_exec_bit(path) {
+        return false;
+    }
+    tracing::warn!(
+        crate_name,
+        file = %name,
+        "tarball shipped an executable not in the shared \
+         installed_binaries table; NOT installing it — if this is a \
+         real binary, add it to trusty-common's CRATE_BINARIES (#5778)"
+    );
+    true
 }
 
 /// Whether `name` is an obvious documentation file release tarballs ship.
@@ -300,8 +318,9 @@ fn is_documentation_file(name: &str) -> bool {
 /// binaries; a plain data file the table ignores is not a half-install risk.
 /// What: on Unix, any `0o111` bit in the file's mode; a missing or unreadable
 /// file is `false` (nothing to install, nothing to warn about).
-/// Test: exercised via the `tests::expected_binaries_among_drops_documentation_files`
-/// and `tests::expected_binaries_among_keeps_multi_binary_sets` fixtures.
+/// Test: `tests::drop_warn_fires_only_for_unexpected_executables` (real
+/// on-disk fixtures with and without the execute bit); also exercised via
+/// the `tests::expected_binaries_among_*` fixtures.
 fn has_exec_bit(path: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
@@ -330,7 +349,9 @@ fn has_exec_bit(path: &std::path::Path) -> bool {
 /// it. `install.sh` applies the same `${CARGO_HOME:-$HOME/.cargo}/bin` rule.
 ///
 /// Test: `tests::default_install_dir_resolves` asserts the returned path is
-/// the canonical cargo bin dir.
+/// the canonical cargo bin dir;
+/// `tests::install_dir_is_some_whenever_cargo_home_is_set` pins that this is
+/// `Some` whenever `CARGO_HOME` is set, even with an unresolvable home.
 pub fn default_install_dir() -> Option<PathBuf> {
     trusty_common::bin_resolve::canonical_bin_dir()
 }
@@ -384,7 +405,9 @@ mod tests {
     /// What: extends the crate's OWN expected set — taken live from the
     /// shared `installed_binaries` table, so a future table edit cannot
     /// silently change what this test asserts (#5778 review) — with the two
-    /// doc files, and asserts exactly the doc files are dropped.
+    /// doc files, all created on disk at mode 0755 so `has_exec_bit` reads
+    /// real metadata (#5778 verifier round — the prior fixture created no
+    /// files), and asserts exactly the doc files are dropped.
     #[test]
     fn expected_binaries_among_drops_documentation_files() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -392,6 +415,9 @@ mod tests {
         let mut extracted = bins.clone();
         extracted.push("LICENSE".to_owned());
         extracted.push("README.md".to_owned());
+        for name in &extracted {
+            write_mode(dir.path(), name, 0o755);
+        }
         assert_eq!(
             expected_binaries_among("trusty-search", dir.path(), &extracted),
             bins,
@@ -403,7 +429,8 @@ mod tests {
     /// exact failure mode the shared `installed_binaries` table exists to
     /// prevent.
     /// What: `trusty-installer`'s tarball keeps both `trusty-installer` and
-    /// the `tctl` alias; an unknown crate falls back to its own name.
+    /// the `tctl` alias; an unknown crate falls back to its own name. All
+    /// fixture files exist on disk at mode 0755 (#5778 verifier round).
     #[test]
     fn expected_binaries_among_keeps_multi_binary_sets() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -412,6 +439,13 @@ mod tests {
             "tctl".to_owned(),
             "LICENSE".to_owned(),
         ];
+        for name in extracted
+            .iter()
+            .map(String::as_str)
+            .chain(["tga", "README.md"])
+        {
+            write_mode(dir.path(), name, 0o755);
+        }
         assert_eq!(
             expected_binaries_among("trusty-installer", dir.path(), &extracted),
             vec!["trusty-installer".to_owned(), "tctl".to_owned()]
@@ -424,6 +458,89 @@ mod tests {
             ),
             vec!["tga".to_owned()]
         );
+    }
+
+    /// Write `dir/<name>` with `mode` so `has_exec_bit` sees real metadata.
+    fn write_mode(dir: &std::path::Path, name: &str, mode: u32) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, name).expect("write fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        path
+    }
+
+    /// Why (#5778 verifier round): the drop-warn tests used to pass a
+    /// directory with no files in it, so `has_exec_bit` always returned
+    /// `false` and the warn arm never ran — they would have passed with the
+    /// exec-bit check replaced by `|| false`. This test creates real files
+    /// and asserts the warn decision fires exactly for an exec-bit
+    /// executable outside the expected set.
+    /// What: a mode-0755 `rogue-tool` fires the warn; a mode-0755 `LICENSE`
+    /// (doc file) and a mode-0644 data file do not; and the full allowlist
+    /// drops the rogue from the kept set while warning about it.
+    #[cfg(unix)]
+    #[test]
+    fn drop_warn_fires_only_for_unexpected_executables() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rogue = write_mode(dir.path(), "rogue-tool", 0o755);
+        let license = write_mode(dir.path(), "LICENSE", 0o755);
+        let data = write_mode(dir.path(), "notes.txt", 0o644);
+
+        assert!(
+            warn_dropped_executable("trusty-search", "rogue-tool", &rogue),
+            "an exec-bit executable outside the expected set must be warned about (#5778)"
+        );
+        assert!(
+            !warn_dropped_executable("trusty-search", "LICENSE", &license),
+            "mode-0755 doc files are the expected, boring drops"
+        );
+        assert!(
+            !warn_dropped_executable("trusty-search", "notes.txt", &data),
+            "a plain data file is not a half-install risk"
+        );
+
+        // Through the full allowlist: the rogue is dropped, never kept.
+        write_mode(dir.path(), "trusty-search", 0o755);
+        assert_eq!(
+            expected_binaries_among(
+                "trusty-search",
+                dir.path(),
+                &["trusty-search".to_owned(), "rogue-tool".to_owned()]
+            ),
+            vec!["trusty-search".to_owned()]
+        );
+    }
+
+    /// Why (#5777, twice-raised trusty-review finding on `install.rs`):
+    /// dropping the `.or_else(canonical_bin_dir)` leg at the install-dir
+    /// selector cannot make a `CARGO_HOME` machine fall through to
+    /// `/usr/local/bin`, because `default_install_dir()` is `Some` whenever
+    /// `CARGO_HOME` is set and non-empty — regardless of home resolvability.
+    /// This pins that invariant so the finding stays refuted.
+    /// What: drives the pure resolver behind `default_install_dir()` with
+    /// `CARGO_HOME` set and NO resolvable home and asserts `Some`
+    /// (`default_install_dir_resolves` above pins the delegation); when the
+    /// live environment has `CARGO_HOME` set, also asserts the real
+    /// `default_install_dir()` agrees. No env mutation — the resolver is
+    /// parameterised precisely so tests stay safe under the parallel harness.
+    #[test]
+    fn install_dir_is_some_whenever_cargo_home_is_set() {
+        assert_eq!(
+            trusty_common::bin_resolve::canonical_bin_dir_from(None, Some("/opt/cargo")),
+            Some(PathBuf::from("/opt/cargo").join("bin")),
+            "CARGO_HOME set with an unresolvable home must still resolve (#5777)"
+        );
+        if std::env::var("CARGO_HOME").is_ok_and(|v| !v.is_empty()) {
+            assert!(
+                default_install_dir().is_some(),
+                "default_install_dir() must be Some while CARGO_HOME is set (#5777)"
+            );
+        }
     }
 
     /// Why (#5778): the allowlist drop-warn must stay silent for the doc

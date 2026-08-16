@@ -297,14 +297,17 @@ fn sweep_stale_asides(bin_dir: &Path, name: &str, dest: &Path) {
                      earlier aside was already restored to the destination \
                      this sweep and the two copies may differ (#5778)"
                 ),
+                // #5778 review: this branch DELETES litter — it must never
+                // log with the restore branch's "recovered" wording, or an
+                // operator cannot tell a restore from a deletion.
                 Ok(()) => tracing::warn!(
                     aside = %aside.display(),
                     dest = %dest.display(),
-                    "recovered stale pre-cargo aside from a dead process (#5777)"
+                    "deleted stale pre-cargo aside litter from a dead process (#5777)"
                 ),
                 Err(e) => tracing::warn!(
                     aside = %aside.display(),
-                    "could not recover stale pre-cargo aside: {e}"
+                    "could not delete stale pre-cargo aside litter: {e}"
                 ),
             }
         } else {
@@ -319,7 +322,7 @@ fn sweep_stale_asides(bin_dir: &Path, name: &str, dest: &Path) {
                 }
                 Err(e) => tracing::warn!(
                     aside = %aside.display(),
-                    "could not recover stale pre-cargo aside: {e}"
+                    "could not restore stale pre-cargo aside: {e}"
                 ),
             }
         }
@@ -336,8 +339,15 @@ fn sweep_stale_asides(bin_dir: &Path, name: &str, dest: &Path) {
 /// child, live pid from the test process itself).
 #[cfg(unix)]
 fn pid_is_alive(pid: u32) -> bool {
+    // #5778: `pid as pid_t` would wrap a pid above `i32::MAX` negative, and
+    // `kill(-n, 0)` probes a process GROUP, not a process — a live guard's
+    // aside could then be swept. Unreachable on today's platforms (Linux
+    // caps pids at 4194304, macOS at 99998), but map the overflow to -1
+    // anyway: `kill(-1, 0)` returns EPERM, which reads as alive, so the
+    // sweep stays fail-closed.
+    let pid = libc::pid_t::try_from(pid).unwrap_or(-1);
     // Safety: kill(2) with signal 0 only probes; it cannot affect the target.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    let rc = unsafe { libc::kill(pid, 0) };
     if rc == 0 {
         return true;
     }
@@ -495,6 +505,53 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "no aside litter after the race: {leftovers:?}"
+        );
+    }
+
+    /// Why (#5778 review; independently flagged by the code-critic round):
+    /// `concurrent_guards_never_lose_the_binary` settles every guard via
+    /// `restore`, so the `commit` path was never exercised under contention —
+    /// yet a committing guard racing a restoring guard is exactly what a
+    /// daemon MCP `upgrade` racing a manual CLI upgrade produces.
+    /// What: half the threads simulate a SUCCESSFUL cargo run (write fresh
+    /// content at the destination, then `commit`); the other half simulate a
+    /// FAILED run (`restore`). Whatever interleaving wins, the surviving
+    /// binary must hold one of the two valid contents and no aside litter
+    /// may remain.
+    #[test]
+    fn concurrent_commit_and_restore_keep_a_valid_binary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin = tmp.path().join("trusty-search");
+        write(&bin, "v1");
+
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let dir = tmp.path().to_path_buf();
+                s.spawn(move || {
+                    for _ in 0..25 {
+                        let guard = OwnershipGuard::move_aside(&dir, &names(&["trusty-search"]))
+                            .expect("move_aside must not error");
+                        if i % 2 == 0 {
+                            // Simulated successful cargo run: cargo writes
+                            // the fresh binary, then the guard commits.
+                            write(&dir.join("trusty-search"), "v2");
+                            guard.commit().expect("commit must not error");
+                        } else {
+                            guard.restore().expect("restore must not error");
+                        }
+                    }
+                });
+            }
+        });
+
+        let survivor = std::fs::read_to_string(&bin).expect("binary must survive the race");
+        assert!(
+            survivor == "v1" || survivor == "v2",
+            "surviving binary must be one of the two valid copies, got {survivor:?}"
+        );
+        assert!(
+            hidden_entries(tmp.path()).is_empty(),
+            "no aside litter after the commit/restore race"
         );
     }
 
