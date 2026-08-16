@@ -154,29 +154,60 @@ fn harness_shape_is_the_strict_leaf_form() {
     )));
 }
 
-/// `spawn_on_stop` is a no-op for anything that is not an agent exit.
-///
-/// Why: it runs on the hook pipeline's hot path, in front of every event in
-/// every managed session.
-#[tokio::test]
-async fn spawn_on_stop_ignores_a_non_stop_event() {
+/// A hermetic daemon state plus one session id.
+fn hermetic() -> (
+    std::sync::Arc<crate::daemon::state::DaemonState>,
+    tempfile::TempDir,
+    crate::core::session::SessionId,
+) {
     let dir = tempfile::tempdir().expect("temp dir");
     let paths = crate::core::paths::FrameworkPaths::under(dir.path());
     let state = std::sync::Arc::new(crate::daemon::state::DaemonState::with_paths(&paths));
-    let session = crate::core::session::SessionId(uuid::Uuid::new_v4());
-    // No panic, no task, nothing to observe — the assertion is that this
-    // returns rather than reaching the delegation lookup at all.
+    (
+        state,
+        dir,
+        crate::core::session::SessionId(uuid::Uuid::new_v4()),
+    )
+}
+
+/// `spawn_on_stop` is a no-op for anything that is not an agent exit.
+///
+/// Why: it runs on the hook pipeline's hot path, in front of every event in
+/// every managed session, so an event that is not a stop must return before it
+/// reaches the delegation lookup at all.
+#[tokio::test]
+async fn spawn_on_stop_ignores_a_non_stop_event() {
+    let (state, _dir, session) = hermetic();
     super::spawn_on_stop(
         &state,
         session,
         HookEvent::PreToolUse,
         &serde_json::json!({ "agent_id": "a1", "cwd": "/nowhere" }),
     );
+    assert!(state.delegations_for(session).is_empty());
+}
+
+/// A stop with no `agent_id` reaps nothing.
+///
+/// Why: `agent_id` is the only exact correlation key a stop carries, and
+/// `delegation_tracker`'s own note forbids a "most recent" guess — under
+/// concurrency it closes the wrong agent. Reaping on such a guess would delete
+/// the wrong directory, so the absence of the key must end the path.
+#[tokio::test]
+async fn spawn_on_stop_ignores_a_payload_without_an_agent_id() {
+    let (state, _dir, session) = hermetic();
     super::spawn_on_stop(
         &state,
         session,
         HookEvent::SubagentStop,
         &serde_json::json!({ "cwd": "/nowhere" }),
+    );
+    // An empty-string id is equally indeterminate, not a match.
+    super::spawn_on_stop(
+        &state,
+        session,
+        HookEvent::SubagentStop,
+        &serde_json::json!({ "agent_id": "", "cwd": "/nowhere" }),
     );
     assert!(state.delegations_for(session).is_empty());
 }
