@@ -43,7 +43,8 @@ use crate::commands::guided_resume::{
 // composition directly.
 use trusty_mpm::daemon::orphan_gc::AlwaysIdleProbe;
 // The picker decision enum + parser moved to the shared `session_picker` module.
-use crate::commands::session_picker::{PickerDecision, parse_picker_choice};
+use crate::commands::picker_launch_new::LaunchIsolation;
+use crate::commands::session_picker::{LaunchNewRequest, PickerDecision, parse_picker_choice};
 
 // ── parse_picker_choice ───────────────────────────────────────────────────────
 
@@ -52,11 +53,11 @@ fn guided_picker_bare_enter_no_sessions_launches_new() {
     // Why: bare Enter with no sessions must launch a new session, not hang.
     assert_eq!(
         parse_picker_choice("", &[], false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
     assert_eq!(
         parse_picker_choice("  \t", &[], false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
 }
 
@@ -183,7 +184,7 @@ fn guided_picker_launch_new_uses_highest_slot_with_gaps() {
     ];
     assert_eq!(
         parse_picker_choice("6", &sessions, false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
     // The old `len()+1` value (3) must NOT be treated as launch-new here.
     assert_eq!(
@@ -284,11 +285,11 @@ fn guided_picker_numeric_launch_new() {
     // Why: "[highest slot + 1]" must always launch a new session.
     assert_eq!(
         parse_picker_choice("1", &[], false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
     assert_eq!(
         parse_picker_choice("4", &picker_fixture(3, &[]), false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
 }
 
@@ -324,7 +325,7 @@ fn guided_picker_stale_daemon_slots_render_distinct_incrementing_choices() {
     // fixed `1` (the pre-fix `sessions.last().slot + 1 == 0 + 1` bug).
     assert_eq!(
         parse_picker_choice("4", &sessions, false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
 }
 
@@ -449,23 +450,23 @@ fn guided_picker_n_launches_new_unnamed() {
     // never an empty `name_hint` the daemon would have to fall back on.
     assert_eq!(
         parse_picker_choice("n", &picker_fixture(3, &[]), false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
     assert_eq!(
         parse_picker_choice("N", &picker_fixture(3, &[]), false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
     assert_eq!(
         parse_picker_choice("n\n", &[], false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
     assert_eq!(
         parse_picker_choice("  n  ", &picker_fixture(1, &[]), true),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
     assert_eq!(
         parse_picker_choice("n   ", &picker_fixture(3, &[]), false),
-        PickerDecision::LaunchNew(None),
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed()),
         "a whitespace-only remainder must launch unnamed, not with an empty name"
     );
 }
@@ -477,16 +478,60 @@ fn guided_picker_n_with_argument_carries_name_hint() {
     // `guided_picker_n_sanitizes_the_name_cli_side`).
     assert_eq!(
         parse_picker_choice("n auth-refactor", &picker_fixture(3, &[]), false),
-        PickerDecision::LaunchNew(Some("auth-refactor".to_string()))
+        PickerDecision::LaunchNew(LaunchNewRequest::named("auth-refactor"))
     );
     assert_eq!(
         parse_picker_choice("N auth-refactor\n", &[], false),
-        PickerDecision::LaunchNew(Some("auth-refactor".to_string()))
+        PickerDecision::LaunchNew(LaunchNewRequest::named("auth-refactor"))
     );
     assert_eq!(
         parse_picker_choice("n   auth-refactor   ", &picker_fixture(3, &[]), false),
-        PickerDecision::LaunchNew(Some("auth-refactor".to_string())),
+        PickerDecision::LaunchNew(LaunchNewRequest::named("auth-refactor")),
         "extra separator whitespace must not become part of the name"
+    );
+}
+
+/// #5773: the picker can ask for isolation, and the request survives the name
+/// parse.
+///
+/// Why: bare `tm` is the default human launch surface, and it had no way to
+/// express what `tm launch --worktree` expresses — the wire body it built
+/// carried no `worktree` key, so ADR-0037's `#[serde(default)]` decoded
+/// `false` and every picker launch landed in the main checkout. An operator
+/// who genuinely wants an isolated session (a long refactor, a risky rebase)
+/// had to remember a different command.
+///
+/// FAILS BEFORE THIS CHANGE: `PickerDecision::LaunchNew` carried a name and
+/// nothing else, so there was no isolation to assert.
+#[test]
+fn guided_picker_n_requests_a_worktree() {
+    let sessions = picker_fixture(3, &[]);
+    let isolated = |name: Option<&str>| {
+        PickerDecision::LaunchNew(
+            name.map_or_else(LaunchNewRequest::unnamed, LaunchNewRequest::named)
+                .with_isolation(LaunchIsolation::OwnWorktree),
+        )
+    };
+    // Trailing (the `tm launch --worktree` habit) and leading (the shell
+    // habit) both work, and neither leaves the flag in the name.
+    assert_eq!(
+        parse_picker_choice("n auth-refactor --worktree", &sessions, false),
+        isolated(Some("auth-refactor"))
+    );
+    assert_eq!(
+        parse_picker_choice("n --worktree auth-refactor", &sessions, false),
+        isolated(Some("auth-refactor"))
+    );
+    // The flag alone is an unnamed isolated launch.
+    assert_eq!(
+        parse_picker_choice("n --worktree", &sessions, false),
+        isolated(None)
+    );
+    // And nothing about the default path moves: no flag, no request.
+    assert_eq!(
+        parse_picker_choice("n auth-refactor", &sessions, false),
+        PickerDecision::LaunchNew(LaunchNewRequest::named("auth-refactor")),
+        "an unflagged launch must still carry no isolation request"
     );
 }
 
@@ -514,14 +559,14 @@ fn guided_picker_n_grammar_is_bounded() {
     for input in ["n", "N", "n ", "  n  ", "n\t\n"] {
         assert_eq!(
             parse_picker_choice(input, &sessions, false),
-            PickerDecision::LaunchNew(None),
+            PickerDecision::LaunchNew(LaunchNewRequest::unnamed()),
             "{input:?} is the bare launch-new alias"
         );
     }
     // And a separated name is still accepted.
     assert_eq!(
         parse_picker_choice("n auth-refactor", &sessions, false),
-        PickerDecision::LaunchNew(Some("auth-refactor".to_string()))
+        PickerDecision::LaunchNew(LaunchNewRequest::named("auth-refactor"))
     );
 }
 
@@ -542,17 +587,17 @@ fn guided_picker_n_sanitizes_the_name_cli_side() {
     let sessions = picker_fixture(3, &[]);
     assert_eq!(
         parse_picker_choice("n My Auth Fix!", &sessions, false),
-        PickerDecision::LaunchNew(Some("my-auth-fix".to_string())),
+        PickerDecision::LaunchNew(LaunchNewRequest::named("my-auth-fix")),
         "a multi-word name must arrive kebab-cased"
     );
     assert_eq!(
         parse_picker_choice("n feature/auth", &sessions, false),
-        PickerDecision::LaunchNew(Some("feature-auth".to_string())),
+        PickerDecision::LaunchNew(LaunchNewRequest::named("feature-auth")),
         "the path-like segment must SURVIVE — the daemon's file_name() would drop it"
     );
     assert_eq!(
         parse_picker_choice("n hotfix/auth", &sessions, false),
-        PickerDecision::LaunchNew(Some("hotfix-auth".to_string())),
+        PickerDecision::LaunchNew(LaunchNewRequest::named("hotfix-auth")),
         "and must stay distinct from feature/auth"
     );
     // Unusable names refuse rather than spawning under a fallback leaf.
@@ -598,7 +643,7 @@ fn guided_picker_n_does_not_shadow_other_commands() {
     );
     assert_eq!(
         parse_picker_choice("4", &sessions, false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
     // Bare Enter still resolves against position 0, never the new `n` branch.
     assert_eq!(
@@ -608,7 +653,7 @@ fn guided_picker_n_does_not_shadow_other_commands() {
     // And the reverse direction: `n` is not shadowed by any of them.
     assert_eq!(
         parse_picker_choice("n", &sessions, false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
 }
 
