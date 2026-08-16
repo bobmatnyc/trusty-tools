@@ -90,6 +90,17 @@ Questions, and Related Decisions. The invariant the comment is trying to cite
 is ADR-0012 §1, restated by this ADR. A separate PR is fixing the miscited
 comments; this ADR gives that fix something correct to point at.
 
+**The invariant does not stop at "a worktree and its main checkout."**
+ADR-0012 §1's derivation is `git_origin + committed_pin`, not physical path,
+so it is checkout-location-independent by construction. A repo can have all
+three of: the user's own clone (what this ADR calls the "main checkout"
+above), the tm-managed checkout at `<repos_root>/<owner>/<repo>/` — a
+separate clone that ADR-0030 explicitly distinguishes from the user's own
+clone, not a git worktree of it — and any number of agent worktrees nested
+beneath either. All three resolve to one palace as long as `git_origin` and
+the committed pin agree between them, because none of the three changes what
+the derivation reads.
+
 ## Decision
 
 We will:
@@ -109,6 +120,22 @@ We will:
    `owner: None, project: None`. A reader that wants them re-derives from the
    git remote (the same source `owner_repo_from_git_remote` already uses) or
    treats them as unknown. Never guess by splitting the string.
+
+   `owner: None, project: None` carries two distinct meanings, and a reader
+   must not conflate them. **Unknown** is the case above — a git-derived
+   palace that predates these fields, or was created before enough remote
+   information existed to populate them; `owner_repo_from_git_remote` can
+   still populate it later, so re-deriving from the git remote is meaningful.
+   **Inapplicable** is a different case: a palace is not necessarily a
+   software project. `trusty-agents` creates one palace per ASSISTANT (owner
+   ruling, 2026-08-16 conversation), and an assistant-scoped palace has no
+   git remote, no owner, and no repo — nothing to derive. For an inapplicable
+   palace, `None` is permanent by design, not a gap; no future migration
+   should attempt to derive `owner`/`project` for it. Code reading these
+   fields must not treat `None` as an instruction to go compute a value — it
+   must first tell unknown from inapplicable (in practice: whether the
+   palace's id came from `owner_repo_from_git_remote` at all) before deciding
+   whether re-deriving even makes sense.
 4. **Mark the `Palace` record `#[non_exhaustive]` and keep the two new
    fields `Option`.** `trusty-common` is published to crates.io; a required
    new public field on a 0.y.z crate is a MINOR-position SemVer break under
@@ -119,7 +146,12 @@ We will:
    would have caught #4088's shape of break; it runs at release time via
    `cargo-semver-checks` against the crate's latest crates.io release and does
    not run on PRs — so passing CI on this ADR's implementation PR is not
-   evidence the release-time gate has been satisfied.
+   evidence the release-time gate has been satisfied. The two-reasons-for-
+   absence split in item 3 above sharpens why `Option` is correct here, not
+   just convenient: an assistant-scoped palace has no value to put in
+   `owner`/`project` at all, so a required field would have no legitimate
+   content to hold for a whole class of palace, independently of the #4088
+   SemVer argument.
 5. **Leave the storage token unchanged.** No existing palace directory moves,
    and no migration code runs as part of this decision.
    `update_palace_name` (`crates/trusty-memory/src/service/core.rs:348-379`)
@@ -173,6 +205,12 @@ deliberately overrides what git-path derivation would otherwise produce
   rather than merely inconvenient, and it will make the same class of mistake
   possible again for any future separator or format change that does not
   independently check the sanitizer's behavior first.
+- **A palace is not necessarily a software project.** `owner: None,
+  project: None` on an assistant-scoped palace (one `trusty-agents` palace
+  per assistant) is not an artifact of the fields being unpopulated yet — the
+  palace has no git remote to derive them from. A consumer or future
+  migration that reads `None` and assumes "needs deriving" is wrong for this
+  class of palace; see Decision item 3.
 
 ## What could not be verified
 
