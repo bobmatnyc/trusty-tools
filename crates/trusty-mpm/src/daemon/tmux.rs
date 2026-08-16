@@ -207,11 +207,20 @@ impl TmuxDriver {
     /// tmux server is keyed to the uid, not to `$HOME` — so a scratch daemon
     /// that resolved a driver here would list, adopt, and later kill the
     /// operator's live panes. This is the crate's ONLY constructor for
-    /// `TmuxDriver` (the `tmux_path` field is private), so every daemon path
-    /// that reaches tmux — startup auto-discovery, the reap loop, orphan-GC,
-    /// the idle reaper, the session services, and the session manager's
-    /// `RealTmuxDriver` — is gated by this one check. The gate fails CLOSED:
-    /// an environment it cannot classify is refused, and
+    /// `TmuxDriver` (the `tmux_path` field is private), so every path that
+    /// HOLDS a driver is covered: startup auto-discovery, the reap loop,
+    /// orphan-GC, the idle reaper, the session services, and the session
+    /// manager's `RealTmuxDriver`.
+    ///
+    /// It does NOT cover the paths that never construct one — `tm launch` and
+    /// `tm connect` create and kill sessions through
+    /// [`crate::core::tmux::create_managed_session`] and
+    /// [`crate::core::tmux::run_tmux`] directly. Those are gated at the spawn
+    /// itself by `core::tmux`'s `host_state_guard`, which is why the check
+    /// lives in two places rather than one; this one exists so a gated daemon
+    /// fails fast with a diagnosable message instead of N refused subprocesses.
+    ///
+    /// The gate fails CLOSED: an environment it cannot classify is refused, and
     /// `TRUSTY_MPM_ALLOW_HOST_STATE=1` is the explicit way back in.
     /// Test: `driver_reports_availability` (skips assertion when tmux
     /// missing); `scratch_home_daemon_does_not_spawn_tmux`

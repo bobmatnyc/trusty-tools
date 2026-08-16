@@ -149,17 +149,33 @@ pub async fn serve_http(
     }
 
     // Run inproject-hygiene for all managed base clones (#1709):
-    // fetch, safety-gated hard-reset (#2177) to default branch, prune stale
-    // worktrees. This is intentionally synchronous (git subprocess calls) so
+    // fetch, safety-gated `git merge --ff-only` (#2177) to the default branch,
+    // prune stale worktrees. It never runs `git reset --hard` — this comment
+    // claimed it did until #5784, and `inproject_hygiene.rs`'s own header is
+    // the authority. This is intentionally synchronous (git subprocess calls) so
     // we offload it to a blocking thread. Failures are logged as warnings;
     // they do not block the daemon from starting.
     // Default ON (the #2177 guard makes it safe); set
     // TRUSTY_MPM_INPROJECT_HYGIENE=0 to disable the whole sweep (#2190).
     if inproject_hygiene_enabled() {
         let repos_root = managed_routes::inproject::repos_root();
-        tokio::task::spawn_blocking(move || {
-            managed_routes::inproject_hygiene::run_hygiene_for_all_bases(&repos_root);
-        });
+        // #5784: `repos_root()` is only $HOME-scoped when nothing overrode it.
+        // Precedence is TRUSTY_MPM_REPOS_ROOT > TRUSTY_MPM_WORKSPACE_ROOT /
+        // config > $HOME-derived, and a scratch daemon launched from the
+        // operator's shell inherits those exports — so a reassigned $HOME can
+        // still point this sweep, which fetches and fast-forwards real clones,
+        // at the operator's real repos root. Skip when the two disagree.
+        match crate::core::host_state_gate::host_state_access().skip_reason() {
+            Some(reason) => tracing::warn!(
+                repos_root = %repos_root.display(),
+                "inproject-hygiene skipped — {reason}"
+            ),
+            None => {
+                tokio::task::spawn_blocking(move || {
+                    managed_routes::inproject_hygiene::run_hygiene_for_all_bases(&repos_root);
+                });
+            }
+        }
     } else {
         info!("inproject-hygiene disabled via TRUSTY_MPM_INPROJECT_HYGIENE");
     }
@@ -423,7 +439,14 @@ async fn reap_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cancellati
                         sweep.staled, sweep.evicted
                     );
                 }
-                if let Ok(driver) = tmux::TmuxDriver::discover() {
+                // #5784: a gated environment used to fall through this
+                // `if let` silently, every tick, forever. Name it once per
+                // sweep so the operator sees the reason and the hatch.
+                if let Some(reason) =
+                    crate::core::host_state_gate::host_state_access().skip_reason()
+                {
+                    tracing::warn!("reap_loop: skipped — {reason}");
+                } else if let Ok(driver) = tmux::TmuxDriver::discover() {
                     let result = state.reap_dead_sessions(&driver);
                     if result.reaped > 0 {
                         info!("reaped {} dead session(s)", result.reaped);
@@ -625,6 +648,13 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                         Ok(_) => {}
                         Err(e) => tracing::warn!("record retention sweep failed: {e}"),
                     }
+                }
+                // #5784: same silent-`continue` trap as `reap_loop` above.
+                if let Some(reason) =
+                    crate::core::host_state_gate::host_state_access().skip_reason()
+                {
+                    tracing::warn!("orphan-GC: skipped — {reason}");
+                    continue;
                 }
                 let Ok(driver) = tmux::TmuxDriver::discover() else {
                     continue;

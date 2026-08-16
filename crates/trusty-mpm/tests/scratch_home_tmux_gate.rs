@@ -21,8 +21,9 @@
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::host_state_gate::ALLOW_HOST_STATE_ENV;
+use trusty_mpm::core::tmux::{TmuxCommand, create_managed_session, run_tmux};
 use trusty_mpm::daemon::DaemonState;
-use trusty_mpm::daemon::discovery::{DiscoveryResult, discover_claude_sessions};
+use trusty_mpm::daemon::discovery::{DiscoveryResult, discover_all, discover_claude_sessions};
 
 /// RAII override of one environment variable, restored on drop.
 ///
@@ -124,6 +125,61 @@ fn scratch_home_daemon_does_not_spawn_tmux() {
         std::fs::read_to_string(&invocations).unwrap_or_default()
     );
 
+    // `discover_all` adds the `ps`/`lsof` native scan, which touches no tmux
+    // and so is NOT covered by `TmuxDriver::discover`'s gate. Deleting the
+    // arm in `discover_all` leaves every other assertion in this file passing.
+    let all = tokio_block_on(discover_all(&state));
+    assert_eq!(all.adopted, 0, "the native scan must adopt nothing either");
+    assert!(
+        all.skipped
+            .is_some_and(|r| r.contains(ALLOW_HOST_STATE_ENV)),
+        "a refused scan must be distinguishable from one that found nothing"
+    );
+
+    // `tm launch` / `tm connect` create and kill sessions through `core::tmux`
+    // without ever constructing a `TmuxDriver`, so the spawn choke point needs
+    // its own proof.
+    let created = create_managed_session(Some(&fake_tmux.to_string_lossy()), "tm-scratch", None);
+    let err = created.expect_err("session creation must be refused under a scratch $HOME");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    let killed = run_tmux(&TmuxCommand::KillSession {
+        name: "tm-scratch".to_string(),
+    });
+    assert_eq!(
+        killed
+            .expect_err("a kill must be refused too — it mutates the real server")
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert!(
+        !invocations.exists(),
+        "no tmux spawn may have happened yet; it ran: {}",
+        std::fs::read_to_string(&invocations).unwrap_or_default()
+    );
+
+    // Indeterminate: `$HOME` absent entirely. The gate cannot classify the
+    // environment, and fails toward leaving shared state alone.
+    {
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: single-test binary.
+        unsafe { std::env::remove_var("HOME") };
+        let unclassifiable = discover_claude_sessions(&state);
+        // SAFETY: as above.
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        assert_eq!(
+            unclassifiable,
+            DiscoveryResult::default(),
+            "an unclassifiable environment must adopt nothing"
+        );
+        assert!(
+            !invocations.exists(),
+            "an unclassifiable environment must not run tmux"
+        );
+    }
+
     let _opt_in = EnvOverride::set(ALLOW_HOST_STATE_ENV, "1");
     let _ = discover_claude_sessions(&state);
     let ran = std::fs::read_to_string(&invocations)
@@ -132,4 +188,15 @@ fn scratch_home_daemon_does_not_spawn_tmux() {
         ran.contains("list-panes"),
         "the opt-in scan must issue the pane listing; log was: {ran}"
     );
+}
+
+/// Drive one future to completion without pulling `#[tokio::test]` into a
+/// test whose whole point is controlling process-global environment on one
+/// thread.
+fn tokio_block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime")
+        .block_on(fut)
 }

@@ -155,7 +155,41 @@ pub fn run_tmux_with_bin(
     tmux_bin: &str,
     cmd: &TmuxCommand,
 ) -> std::io::Result<std::process::Output> {
+    host_state_guard()?;
     crate::core::spawn_disclaim::disclaimed_output(tmux_bin, &tmux_argv(cmd))
+}
+
+/// Refuse a tmux spawn when this process is not running in the operator's
+/// real environment (#5784).
+///
+/// Why: a tmux server is keyed to the OS user, not to `$HOME`, so a daemon or
+/// CLI under a throwaway `$HOME` still reaches the operator's live sessions.
+/// [`crate::daemon::tmux::TmuxDriver::discover`] gates every path that holds a
+/// driver, but `tm launch`/`tm connect` CREATE and KILL sessions through
+/// [`create_managed_session`] and [`run_tmux`] without ever constructing one —
+/// so the check also belongs at the spawn itself, which this module already
+/// owns as the crate's single tmux-spawning point.
+/// What: `Ok(())` when [`crate::core::host_state_gate::host_state_access`]
+/// allows; otherwise an `io::Error` of kind `PermissionDenied` carrying the
+/// reason, so a caller that only prints the error still tells its operator
+/// which variable lifts the gate. Logged at `debug!` rather than `warn!`
+/// because one operation issues many spawns — the loud line belongs at the
+/// entry point ([`create_managed_session`], `TmuxDriver::discover`,
+/// `discovery::discover_all`, the daemon's startup banner).
+/// Test: `run_tmux_with_bin_refuses_under_a_scratch_home`,
+/// `create_managed_session_refuses_under_a_scratch_home` in
+/// `tests/scratch_home_tmux_gate.rs`.
+fn host_state_guard() -> std::io::Result<()> {
+    match crate::core::host_state_gate::host_state_access().skip_reason() {
+        None => Ok(()),
+        Some(reason) => {
+            tracing::debug!("#5784: tmux spawn refused — {reason}");
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("tmux spawn refused: {reason}"),
+            ))
+        }
+    }
 }
 
 /// [`run_tmux_with_bin`], resolving the tmux binary via
@@ -239,6 +273,7 @@ pub fn run_tmux_argv_with_bin(
     tmux_bin: &str,
     args: &[String],
 ) -> std::io::Result<std::process::Output> {
+    host_state_guard()?;
     crate::core::spawn_disclaim::disclaimed_output(tmux_bin, args)
 }
 
@@ -377,6 +412,19 @@ pub fn create_managed_session(
     name: &str,
     workdir: Option<&str>,
 ) -> std::io::Result<ManagedSessionOutcome> {
+    // #5784: refuse once, loudly, at the entry point. `host_state_guard` also
+    // guards every spawn below, but this is the operation an operator asked
+    // for by name, so it is the one that earns a `warn!` — and refusing here
+    // skips the retried apply-and-verify cycle that would otherwise emit a
+    // dozen refusals for one `tm launch`.
+    if let Some(reason) = crate::core::host_state_gate::host_state_access().skip_reason() {
+        warn!("#5784: refusing to create tmux session '{name}' — {reason}");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("tmux session creation refused: {reason}"),
+        ));
+    }
+
     let owned_bin;
     let bin = match tmux_bin {
         Some(b) => b,

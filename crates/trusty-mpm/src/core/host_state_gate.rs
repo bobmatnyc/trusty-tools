@@ -190,6 +190,11 @@ fn trim_trailing_separators(path: &Path) -> PathBuf {
 /// Test: covered through [`classify`]; the end-to-end effect is proven by
 /// `scratch_home_daemon_does_not_spawn_tmux`.
 pub fn host_state_access() -> HostStateAccess {
+    #[cfg(not(unix))]
+    {
+        return host_state_access_non_unix();
+    }
+    #[cfg(unix)]
     classify(
         effective_home().as_deref(),
         passwd_home().as_deref(),
@@ -228,10 +233,15 @@ fn passwd_home() -> Option<PathBuf> {
     }
 }
 
-/// Non-unix hosts have no password database and no tmux; nothing to isolate.
+/// Non-unix hosts have no password database and no tmux, so there is nothing
+/// for this gate to isolate — it always allows.
+///
+/// Returning `effective_home()` here would have blocked instead: Windows
+/// normally leaves `$HOME` unset, so `classify` would hit its `(None, _)` arm
+/// and refuse every tmux path on a platform that has no tmux to refuse.
 #[cfg(not(unix))]
-fn passwd_home() -> Option<PathBuf> {
-    effective_home()
+fn host_state_access_non_unix() -> HostStateAccess {
+    HostStateAccess::RealEnvironment
 }
 
 /// True when [`ALLOW_HOST_STATE_ENV`] holds a truthy token.
