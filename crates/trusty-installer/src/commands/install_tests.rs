@@ -242,6 +242,105 @@ fn summary_lines_match_the_gating_set() {
     assert!(report.all_ok);
 }
 
+/// Why (#5806): `summary_lines_match_the_gating_set` pins ONE selection shape,
+/// so the agreement between the footer and `all_ok` held there by construction
+/// rather than by rule. The defect this change closes was the two channels
+/// deriving the gating partition separately — pin the agreement across every
+/// shape the partition can take, so re-deriving it anywhere fails a test rather
+/// than shipping.
+/// What: over eight selections — all-required, all-optional and mixed, each
+/// healthy and each failing, plus the service-failure dimension — asserts
+/// `summary_lines(&r).errors.is_empty() == r.all_ok`, and that the table
+/// exercises both verdicts rather than passing vacuously.
+///
+/// The empty selection is excluded deliberately: `build(vec![])` is `all_ok:
+/// false` with no member able to fail, which `empty_report_is_not_all_ok`
+/// covers and `summary_lines`'s postcondition documents as the one exception.
+/// Test: This is the test.
+#[test]
+fn summary_errors_agree_with_all_ok_across_selection_shapes() {
+    let service_failed = |member: &str, required: bool| {
+        let mut o = if required {
+            outcome(member, true, "installed")
+        } else {
+            optional_outcome(member, true, "installed")
+        };
+        o.service_ok = false;
+        o.service_detail = "launchd bootstrap failed".to_owned();
+        o
+    };
+
+    let cases: Vec<(&str, Vec<InstallOutcome>)> = vec![
+        (
+            "all required, healthy",
+            vec![outcome("a", true, "installed"), outcome("b", true, "ok")],
+        ),
+        (
+            "all required, one binary failure",
+            vec![outcome("a", true, "installed"), outcome("b", false, "boom")],
+        ),
+        (
+            "all required, one service failure",
+            vec![outcome("a", true, "installed"), service_failed("b", true)],
+        ),
+        (
+            "all optional, healthy",
+            vec![
+                optional_outcome("a", true, "installed"),
+                optional_outcome("b", true, "installed"),
+            ],
+        ),
+        (
+            "all optional, one binary failure",
+            vec![
+                optional_outcome("a", true, "installed"),
+                optional_outcome("b", false, "boom"),
+            ],
+        ),
+        (
+            "all optional, lone service failure",
+            vec![service_failed("a", false)],
+        ),
+        (
+            "mixed, optional failure degrades gracefully",
+            vec![
+                outcome("a", true, "installed"),
+                optional_outcome("b", false, "no prebuilt for this platform"),
+            ],
+        ),
+        (
+            "mixed, required failure gates",
+            vec![
+                outcome("a", false, "boom"),
+                optional_outcome("b", true, "installed"),
+            ],
+        ),
+    ];
+
+    let (mut verdicts_ok, mut verdicts_failed) = (0, 0);
+    for (shape, members) in cases {
+        let report = InstallReport::build(members);
+        let lines = install_report::summary_lines(&report);
+        assert_eq!(
+            lines.errors.is_empty(),
+            report.all_ok,
+            "{shape}: the human footer and `all_ok` disagree — errors {:?}, all_ok {}",
+            lines.errors,
+            report.all_ok
+        );
+        if report.all_ok {
+            verdicts_ok += 1;
+        } else {
+            verdicts_failed += 1;
+        }
+    }
+    assert!(
+        verdicts_ok > 0 && verdicts_failed > 0,
+        "the table must exercise both verdicts, not pass vacuously: \
+         {verdicts_ok} ok / {verdicts_failed} failed"
+    );
+}
+
 /// Why: #2566 review — a binary can install cleanly (`ok: true`) while its
 /// SERVICE bootstrap genuinely fails; the report must not claim
 /// `all_ok: true` in that case (the exact failure class #2557 existed

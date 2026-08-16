@@ -410,8 +410,11 @@ pub(super) struct SummaryLines {
 /// all-optional selection that failed, this printed `installed 0/0 required
 /// component(s)`, an info-level "skipped", and a green `VERIFIED` — while
 /// `build` exited 2. Two channels describing one run must not disagree, so both
-/// now read [`crate::commands::stable_set::required_gate`]'s rule: REQUIRED
-/// members when the selection has any, every selected member when it has none.
+/// now read the SAME partition —
+/// [`crate::commands::stable_set::gating_split`]: REQUIRED members when the
+/// selection has any, every selected member when it has none. `build` folds
+/// [`crate::commands::stable_set::required_gate`] over that split; this
+/// function reports over it.
 ///
 /// What: counts and reports failures over the gating set; only members OUTSIDE
 /// it degrade to an informational "skipped". The headline says "required" only
@@ -419,21 +422,32 @@ pub(super) struct SummaryLines {
 /// member, `0/0 required` was itself misleading.
 ///
 /// # Postconditions
-/// - `errors` is empty iff every gating member installed and bootstrapped, which
-///   is exactly [`InstallReport::all_ok`] before the verify tail folds in.
+/// - Over a non-empty selection, `errors` is empty iff every gating member
+///   installed and bootstrapped — the same verdict [`InstallReport::all_ok`]
+///   reaches before the verify tail folds in. `build(vec![])` is the one
+///   deliberate exception: no member can fail, so `errors` is empty while
+///   `all_ok` is `false` ("installed nothing" is not a success).
+/// - PATH shadowing is the one `all_ok` input this footer does not restate. A
+///   shadow is reported at ERROR level the moment it is detected
+///   (`install_one`, #3554), so it reaches the operator on the human path
+///   without the footer repeating it.
 /// - A member never appears in both `errors` and `skipped`.
 ///
 /// Test: `tests::summary_lines_match_the_gating_set`,
-/// `tests::all_optional_failure_summary_does_not_read_as_success`.
+/// `tests::all_optional_failure_summary_does_not_read_as_success`,
+/// `tests::summary_errors_agree_with_all_ok_across_selection_shapes`.
 pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
-    let any_required = report.members.iter().any(|m| m.required);
-    let gating: Vec<&InstallOutcome> = report
-        .members
-        .iter()
-        .filter(|m| m.required || !any_required)
-        .collect();
+    // #5806: read the partition, never re-derive it — `build` above folds
+    // `required_gate` over the same split, and the two channels drifting apart
+    // is the defect this whole change exists to close.
+    let split = crate::commands::stable_set::gating_split(&report.members, |m| m.required);
+    let gating = &split.gating;
     let gating_ok = gating.iter().filter(|m| m.ok).count();
-    let noun = if any_required { "required" } else { "selected" };
+    let noun = if split.any_required {
+        "required"
+    } else {
+        "selected"
+    };
 
     let mut errors: Vec<String> = gating
         .iter()
@@ -454,10 +468,10 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
     SummaryLines {
         headline: format!("installed {gating_ok}/{} {noun} component(s)", gating.len()),
         errors,
-        skipped: report
-            .members
+        skipped: split
+            .non_gating
             .iter()
-            .filter(|m| !m.required && any_required && !m.ok)
+            .filter(|m| !m.ok)
             .map(|m| format!("{}: skipped (no prebuilt for this platform)", m.member))
             .collect(),
     }

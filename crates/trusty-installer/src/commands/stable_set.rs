@@ -228,8 +228,44 @@ pub(super) fn required_gate<T>(
     required: impl Fn(&T) -> bool,
     ok: impl Fn(&T) -> bool,
 ) -> bool {
+    gating_split(rows, required).gating.into_iter().all(ok)
+}
+
+/// Which rows [`required_gate`] folds over, and which it excludes.
+///
+/// Why (#5806): the human summary needs that partition as a SET, not as a
+/// verdict, and re-derived `required(r) || !any_required` inline to get one.
+/// Expressing the rule twice is how the machine verdict and the human summary
+/// came to disagree — the exact drift `required_gate` was extracted to stop.
+///
+/// What: `gating` decides the verdict; `non_gating` holds the rows excluded
+/// from it, and is empty unless the selection has a required core;
+/// `any_required` says which of the two rules applied, because a caller words
+/// "required component(s)" and "selected component(s)" differently.
+///
+/// Test: `tests::gating_split_is_the_partition_required_gate_folds_over`.
+pub(super) struct GatingSplit<'a, T> {
+    /// Rows whose outcome decides the run's verdict.
+    pub gating: Vec<&'a T>,
+    /// Rows excluded from the verdict — an OPTIONAL row beside a required core.
+    pub non_gating: Vec<&'a T>,
+    /// Whether the selection contains a required row at all.
+    pub any_required: bool,
+}
+
+/// Split `rows` into the gating set and the rest.
+///
+/// Why / What / Test: see [`GatingSplit`]. This is the single expression of the
+/// gating rule; [`required_gate`] and the `tctl install` human summary both
+/// read it rather than writing their own.
+pub(super) fn gating_split<T>(rows: &[T], required: impl Fn(&T) -> bool) -> GatingSplit<'_, T> {
     let any_required = rows.iter().any(&required);
-    rows.iter().filter(|r| required(r) || !any_required).all(ok)
+    let (gating, non_gating) = rows.iter().partition(|r| required(r) || !any_required);
+    GatingSplit {
+        gating,
+        non_gating,
+        any_required,
+    }
 }
 
 /// Derive a member's lifecycle [`ManageStrategy`] from its binary name and
@@ -608,6 +644,42 @@ mod tests {
     fn required_gate_over_no_rows_is_the_callers_problem() {
         let empty: Vec<(bool, bool)> = Vec::new();
         assert!(required_gate(&empty, |r| r.0, |r| r.1));
+    }
+
+    /// Why (#5806): `required_gate` returns a verdict, but the human summary
+    /// needs the same partition as a set. It re-derived the rule inline, which
+    /// is two expressions of one rule and the road back to the machine and
+    /// human channels disagreeing. Pin that the split is that rule, so
+    /// `required_gate` folding over it is provably the same selection.
+    /// What: asserts the split is a partition (gating + non_gating covers every
+    /// row, disjointly), that no-required puts every row in `gating`, and that
+    /// one required row moves every optional row out of it.
+    /// Test: This is the test.
+    #[test]
+    fn gating_split_is_the_partition_required_gate_folds_over() {
+        let req = |r: &(bool, bool)| r.0;
+
+        let optional_only = vec![(false, true), (false, false)];
+        let split = gating_split(&optional_only, req);
+        assert!(!split.any_required);
+        assert_eq!(split.gating.len(), 2, "no required core: every row gates");
+        assert!(split.non_gating.is_empty());
+
+        let mixed = vec![(true, true), (false, false), (false, true)];
+        let split = gating_split(&mixed, req);
+        assert!(split.any_required);
+        assert_eq!(split.gating, vec![&(true, true)]);
+        assert_eq!(split.non_gating, vec![&(false, false), &(false, true)]);
+        assert_eq!(
+            split.gating.len() + split.non_gating.len(),
+            mixed.len(),
+            "the split must lose no row"
+        );
+
+        let empty: Vec<(bool, bool)> = Vec::new();
+        let split = gating_split(&empty, req);
+        assert!(!split.any_required);
+        assert!(split.gating.is_empty() && split.non_gating.is_empty());
     }
 
     /// Why (#5805): `daemon_members` is the set `tctl stack doctor`,
