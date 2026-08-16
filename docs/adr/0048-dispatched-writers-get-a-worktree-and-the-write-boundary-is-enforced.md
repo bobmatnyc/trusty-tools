@@ -1,6 +1,6 @@
 # 0048. Dispatched writers are granted a worktree, and the main-checkout write boundary is enforced
 
-- **Status:** Accepted
+- **Status:** Amended by [0049](0049-docs-commits-are-permitted-in-a-main-checkout.md)
 - **Date:** 2026-08-15
 - **Scope:** crate `trusty-mpm` — `tm hook --pm-guard` (`pm_guard_worktree_grant`,
   `pm_guard_write_boundary`, `pm_guard_bash::main_checkout`), the agent
@@ -15,6 +15,11 @@
   checkout with commit `f1da7bce` landing on `fix/1646-drive-query-v2-migration`
   and `fix/1644-…` left empty at `cff5bbcd`; ADR-0044 row 4's finding that no
   trusty-mpm path gives a dispatched agent anywhere else to write
+- **Current amendment:** [ADR-0049](0049-docs-commits-are-permitted-in-a-main-checkout.md)
+  makes decision 4's `git commit` deny conditional on the staged set — a
+  documents-and-configuration staged set may commit, subject to decision 10's
+  live-writer check — and scopes ADR-0030's DOC-66 §0.5 position. Decisions
+  1-3 and 5-10 stand as accepted.
 - **Supersedes / Superseded by:** Amends [ADR-0044](0044-main-checkout-write-boundary-and-agent-worktree-ownership.md).
   ADR-0044's write boundary and its assignment of worktree ownership to the
   harness both remain in force.

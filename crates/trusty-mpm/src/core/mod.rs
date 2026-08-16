@@ -157,6 +157,7 @@ pub mod skill_unmanaged;
 pub mod sm;
 pub mod spawn_disclaim;
 pub mod stack_profile;
+pub mod staged_paths;
 pub mod stale_skills;
 pub mod standalone;
 pub mod stray_mcp;
