@@ -138,6 +138,11 @@ pub fn observe(state: &DaemonState, session: SessionId, event: HookEvent, payloa
         // Hot path: the overwhelming majority of PreToolUse events are ordinary
         // tools. Bail on the tool-name compare before touching any state.
         HookEvent::PreToolUse => {
+            // #4311: a SUBAGENT's own tool call is the only event that names the
+            // tree the harness gave it. Costs one `payload.get("agent_id")` on
+            // the hot path — the same class as the tool-name compare below — and
+            // writes only when the answer changed.
+            register_agent_worktree(state, session, payload);
             if dispatch_tool(payload).is_some() {
                 on_dispatch(state, session, payload);
             }
@@ -192,6 +197,58 @@ fn field<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
 /// `empty_string_agent_id_does_not_launch_a_phantom_delegation`.
 fn usable_agent_id(response: &Value) -> Option<&str> {
     field(response, "agentId")
+}
+
+/// Record the working tree a subagent is actually running in (#4311).
+///
+/// Why: trusty-mpm creates no agent worktrees (ADR-0044 decision 4), so it
+/// cannot know the path at dispatch time — the harness chooses it. Without the
+/// path the tree has no owner, and an owner-unknown worktree is one ADR-0020
+/// correctly forbids anything from removing. That is the whole reason 56
+/// unowned trees accumulated under `.claude/worktrees` by the 2026-07-29 count.
+///
+/// The agent reports its own path, and it is the only party that can. Claude
+/// Code stamps `agent_id` into every hook payload a SUBAGENT emits (the same
+/// marker `pm_guard_fanout` reads to tell a subagent from the PM) and `tm hook`
+/// already forwards it, alongside the `cwd` that hook process is standing in.
+/// For an isolated agent that cwd IS the harness worktree. Nothing is created,
+/// nothing is relocated, and no new hook is installed — this reads an event the
+/// daemon already receives and discards.
+/// What: matches `payload.agent_id` against the `agent_id` `on_launched`
+/// learned, and writes `payload.cwd` to that delegation's `worktree_path`.
+/// Writes nothing when the cwd equals the DISPATCHER's `cwd` — that subagent
+/// inherited the caller's tree, so there is no child tree to own — and nothing
+/// when the value is already recorded, which is what keeps this off the hot
+/// path after the first tool call.
+///
+/// It is retried on every subagent tool call rather than run once, because the
+/// first one can lose a race: `agent_id` is taught only by the dispatch's
+/// `PostToolUse`, that hook is installed `async: true`, and until it lands there
+/// is no record to match against. A registration that misses simply happens on
+/// the next call.
+/// Test: `subagent_tool_call_registers_its_worktree`,
+/// `subagent_sharing_the_dispatchers_tree_registers_nothing`,
+/// `an_unknown_agent_id_registers_nothing`.
+fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Value) {
+    let Some(agent_id) = field(payload, "agent_id") else {
+        return;
+    };
+    let Some(cwd) = field(payload, "cwd").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let Some(id) = state.find_delegation(session, |d| {
+        d.agent_id.as_deref() == Some(agent_id)
+            && d.worktree_path.as_deref() != Some(cwd.as_path())
+            && d.cwd.as_deref() != Some(cwd.as_path())
+    }) else {
+        return;
+    };
+    tracing::info!(
+        agent_id,
+        worktree = %cwd.display(),
+        "delegation: registered the agent worktree its dispatch was granted (#4311)"
+    );
+    state.mutate_delegation(id, |d| d.worktree_path = Some(cwd.clone()));
 }
 
 /// `PreToolUse` on a dispatch tool: a subagent is starting now.
