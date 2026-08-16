@@ -13,7 +13,7 @@
 
 use trusty_mpm::client::ManagedSessionSummary;
 
-use super::{PickerDecision, next_launch_slot, parse_picker_choice};
+use super::{LaunchNewRequest, PickerDecision, next_launch_slot, parse_picker_choice};
 use crate::commands::session_picker_render::{
     StateColor, colorize, command_legend, format_session_row, picker_use_color,
     restart_confirm_hint, state_color, table_use_color,
@@ -119,7 +119,7 @@ fn parse_picker_choice_launch_new_uses_max_slot_after_reorder() {
     );
     assert_eq!(
         parse_picker_choice("32", &sessions, false),
-        PickerDecision::LaunchNew(None)
+        PickerDecision::LaunchNew(LaunchNewRequest::unnamed())
     );
 }
 
@@ -510,6 +510,23 @@ fn command_legend_n_row_names_the_resulting_session_shape() {
         n_row.contains("tm-<name>-NN"),
         "the n row must spell out the name it produces: {n_row}"
     );
+}
+
+/// #5773: the `n` row must advertise `--worktree`. An operator who cannot see
+/// the flag on the menu will not discover it, and the picker is the surface
+/// where the choice between sharing the checkout and isolating is made.
+#[test]
+fn command_legend_n_row_offers_the_worktree_flag() {
+    for lines in [command_legend(None), command_legend(Some(4))] {
+        let n_row = lines
+            .iter()
+            .find(|l| l.starts_with("[n <name>]"))
+            .expect("the n row must be present");
+        assert!(
+            n_row.contains("--worktree"),
+            "the n row must offer the isolation flag: {n_row}"
+        );
+    }
 }
 
 /// #4965 (LOW): BOTH menus are padded to the same column. The empty variant
