@@ -20,8 +20,9 @@
 //!
 //! Failures on any branch are isolated — each fetch is bounded by
 //! `HTTP_TIMEOUT` and individual errors are skipped without failing the
-//! hook. If everything is empty, the existing placeholder is emitted so
-//! the empty-palace fallback behaviour is preserved.
+//! hook. When every section is empty the command prints **nothing** (#5817):
+//! this runs on every prompt of every session, so an injection that has no
+//! content to carry must cost no tokens to say so.
 //!
 //! Note on MPM sub-agents: unlike `trusty-mpm hook`, this command is
 //! **intentionally NOT** gated on the `CLAUDE_MPM_SUB_AGENT` environment
@@ -56,7 +57,8 @@ use crate::{hook_prompt_excerpt, HookType, InjectionKind};
 
 use fetch::{fetch_global_prompt_context, fetch_palace_kg_triples, fetch_palace_recall};
 use filter::{
-    filter_drawers_by_deny_tags, filter_drawers_by_relevance_floor, select_relevant_triples,
+    filter_drawers_by_deny_tags, filter_drawers_by_project_scope,
+    filter_drawers_by_relevance_floor, select_relevant_triples,
 };
 use format::{compose_injection, count_facts};
 use query::{configured_query_budget, shape_recall_query, warn_if_reshaped};
@@ -458,6 +460,9 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
     //    to the process cwd. Both lookups are wrapped in `ok()` so failure
     //    just yields `None` (we'll skip palace-specific sections).
     let palace_slug = resolve_palace_slug(trigger_payload);
+    // #5817: resolved once per firing, not per drawer — the walk touches the
+    // filesystem and the answer is the same for every candidate.
+    let session_root = resolve_session_project_root(trigger_payload);
 
     // 4. Fan out the fetches. Each is best-effort; failures are skipped.
     //
@@ -490,11 +495,15 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
             // back to global hot facts via the existing branch below.
             let deny_tags = configured_deny_tags();
             let drawers = filter_drawers_by_deny_tags(drawers, &deny_tags);
+            // #5817: a second provenance gate — drop drawers written while
+            // working on a different repository. Runs before the floor for the
+            // same reason the deny filter does.
+            let drawers = filter_drawers_by_project_scope(drawers, session_root.as_deref());
             // #5037: the deny filter judges provenance; this one judges
-            // relevance. It runs second so a drawer excluded for its tags is
-            // never also counted as "withheld below the floor" — the notice
-            // would then promise `memory_recall` results the deny list also
-            // suppresses.
+            // relevance. It runs last so a drawer excluded for where it came
+            // from is never also counted as "withheld below the floor" — the
+            // notice would then promise `memory_recall` results the provenance
+            // gates also suppress.
             let floor = filter_drawers_by_relevance_floor(drawers, configured_relevance_floor());
             // #4972: the KG selector matches literal words, not vectors — it has
             // no token window, so it keeps the whole prompt. Shaping is a fix
@@ -505,21 +514,18 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
         None => (global_fut.await, Vec::new(), 0, Vec::new()),
     };
 
-    // 5. Compose the injection. If every section is empty, emit the legacy
-    //    placeholder so downstream consumers see byte-identical behaviour
-    //    on a brand-new install.
-    let composed = compose_injection(
+    // 5. Compose the injection. An empty composition stays empty — #5817
+    //    replaced the `EMPTY_PLACEHOLDER` fallback, which spent 27 bytes per
+    //    firing announcing that there was nothing to inject. The constant
+    //    survives because `fetch_global_prompt_context` still recognises it as
+    //    the daemon's own empty-body response.
+    let body = compose_injection(
         global_facts.as_deref(),
         &drawers,
         withheld,
         &kg_triples,
         palace_slug.as_deref(),
     );
-    let body = if composed.is_empty() {
-        EMPTY_PLACEHOLDER.to_string()
-    } else {
-        composed
-    };
 
     // Best-effort log entry — `count_facts` approximates the number of
     // bulleted facts in the rendered Markdown block. Errors are swallowed
@@ -732,6 +738,53 @@ fn resolve_palace_slug(stdin_payload: &str) -> Option<String> {
     crate::messaging::cwd_palace_slug().ok()
 }
 
+/// Resolve the project tree this firing belongs to, normalised for comparison
+/// against a drawer's recorded `creator:cwd`.
+///
+/// Why (#5817): [`filter_drawers_by_project_scope`] needs one stable answer to
+/// "which project is this session working on?". The stdin `cwd` is the source of
+/// truth for the same reason [`resolve_palace_slug`] uses it — the hook process'
+/// own cwd is whatever Claude Code launched it with, not where the user is.
+/// What: walks up from the stdin `cwd` (falling back to the process cwd) via
+/// [`crate::project_root::find_project_root`], then normalises the result the
+/// same way drawer paths are normalised, so an agent worktree under
+/// `.claude/worktrees/` resolves to the main checkout rather than to itself.
+/// Returns `None` when no project marker is found, which disables the filter
+/// rather than making it guess.
+/// Test: `session_project_root_normalises_a_worktree_to_its_checkout`.
+fn resolve_session_project_root(stdin_payload: &str) -> Option<String> {
+    let start = payload_cwd(stdin_payload)
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())?;
+    let root = crate::project_root::find_project_root(&start)?;
+    let normalised = filter::normalise_project_path(&root.to_string_lossy());
+    if normalised.is_empty() {
+        None
+    } else {
+        Some(normalised)
+    }
+}
+
+/// Extract the `cwd` field from the stdin JSON payload.
+///
+/// Why: [`palace_slug_from_stdin_cwd`] and [`resolve_session_project_root`] both
+/// need it, and two spellings of "read cwd out of the payload" would drift.
+/// What: `Some(cwd)` when the payload parses as JSON carrying a non-empty
+/// string `cwd`; `None` otherwise.
+/// Test: `resolve_palace_for_log_prefers_stdin_cwd` exercises the same read.
+fn payload_cwd(stdin_payload: &str) -> Option<String> {
+    if stdin_payload.trim().is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(stdin_payload).ok()?;
+    let cwd = value.get("cwd")?.as_str()?;
+    if cwd.is_empty() {
+        None
+    } else {
+        Some(cwd.to_string())
+    }
+}
+
 /// Resolve the palace identifier for the log entry.
 ///
 /// Why (issue #125): see [`resolve_palace_slug`]; the log helper keeps
@@ -751,15 +804,8 @@ fn resolve_palace_for_log(stdin_payload: &str) -> String {
 /// path. Returns `None` on every failure mode so the caller can fall back.
 /// Test: `resolve_palace_for_log_prefers_stdin_cwd`.
 fn palace_slug_from_stdin_cwd(stdin_payload: &str) -> Option<String> {
-    if stdin_payload.trim().is_empty() {
-        return None;
-    }
-    let value: Value = serde_json::from_str(stdin_payload).ok()?;
-    let cwd = value.get("cwd")?.as_str()?;
-    if cwd.is_empty() {
-        return None;
-    }
-    crate::messaging::cwd_palace_slug_at(std::path::Path::new(cwd)).ok()
+    let cwd = payload_cwd(stdin_payload)?;
+    crate::messaging::cwd_palace_slug_at(std::path::Path::new(&cwd)).ok()
 }
 
 /// Append one log entry to the enriched-prompt log, swallowing failures.

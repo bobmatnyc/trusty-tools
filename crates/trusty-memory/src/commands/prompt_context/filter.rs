@@ -5,10 +5,18 @@
 //! testing and future tuning straightforward without touching the network or
 //! orchestration layers.
 //! What: exports `RecalledDrawer`, `RawTriple`, `filter_drawers_by_deny_tags`,
-//! `filter_drawers_by_relevance_floor`, `select_relevant_triples`, and
-//! `triple_overlaps`.
+//! `filter_drawers_by_project_scope`, `filter_drawers_by_relevance_floor`,
+//! `select_relevant_triples`, and `triple_overlaps`.
+//!
+//! Three drawer filters run in a fixed order, and the order is the contract:
+//! provenance (deny tags), then project scope, then relevance. Both provenance
+//! gates must run before the relevance floor so a drawer excluded for *where it
+//! came from* is never also counted as "withheld below the floor" — that count
+//! is rendered to the model as a promise that `memory_recall` would show more,
+//! and a provenance-excluded drawer is not something the reader wants back.
 //! Test: `filter_drawers_by_deny_tags_handles_edge_cases`,
-//! `relevance_floor_drops_all_noise_drawers`, and
+//! `relevance_floor_drops_all_noise_drawers`,
+//! `project_scope_drops_foreign_cwd_drawer`, and
 //! `select_relevant_triples_filters_by_prompt_overlap` in `mod.rs`.
 
 use serde_json::Value;
@@ -165,20 +173,34 @@ pub(super) fn filter_drawers_by_relevance_floor(
     apply_relevance_floor(drawers, floor, |d| d.score)
 }
 
-/// Filter a triple list down to those whose subject or object appears in
-/// the prompt (case-insensitive, word-ish substring match), capped at
-/// `top_k`.
+/// Filter a triple list down to knowledge-bearing triples whose subject or
+/// object appears in the prompt (case-insensitive, word-ish substring match),
+/// capped at `top_k`.
 ///
-/// Why: dumping every active triple would shred the byte budget on a
-/// palace with hundreds of triples. Limiting to subjects/objects the user
-/// actually mentioned keeps signal high and noise low. We accept both
-/// directions (`subject ∈ prompt` and `object ∈ prompt`) so a query like
-/// "what is tga?" matches `tga is_alias_for trusty-git-analytics`.
-/// What: lowercase-tokenises the prompt into a `HashSet<String>` of words
-/// (≥ 3 chars), then keeps any triple whose normalised subject or object
-/// (split by `:` or whitespace) overlaps the set. Returns at most `top_k`
-/// entries.
-/// Test: `select_relevant_triples_filters_by_prompt_overlap`.
+/// Why: word overlap alone judges *aboutness*, never *whether the triple says
+/// anything*. Without a predicate gate the selector happily returns storage
+/// plumbing: `tag:creator:client=trusty-memory-mcp --tags--> drawer:5814…`,
+/// `topic:12fbc5c8… --mentioned-in--> drawer:3887…`, `room:General --contains-->
+/// drawer:…`. Those are how the store indexes itself, not knowledge, and a bare
+/// commit SHA is not a topic. Measured against the live `trusty-tools` palace on
+/// 2026-08-17, **54 of 54** stored triples carry a structural or extraction
+/// predicate and **zero** carry a hot one, so an unguarded KG section on that
+/// palace is 100% noise by count. ADR-0028 C10 measured the same shape estate-
+/// wide at 93.5% and D7 settled it: the injected KG section admits hot
+/// predicates only, structural predicates excluded entirely.
+/// What: applies [`crate::prompt_facts::is_hot_predicate`] as an allow-list
+/// *before* the overlap test, then keeps any triple whose normalised subject or
+/// object (split by `:` or whitespace) overlaps the prompt's word set (≥ 3
+/// chars). Returns at most `top_k` entries. Nothing here filters by subject
+/// shape: `tag:*`, `topic:*`, and `room:*` subjects disappear because their
+/// predicates are structural, which is the one rule rather than three.
+/// Test: `select_relevant_triples_filters_by_prompt_overlap`,
+/// `select_relevant_triples_drops_structural_predicates`,
+/// `select_relevant_triples_drops_creator_provenance_triples`.
+///
+/// # Spec References
+/// - [ADR-0028 D7](docs/adr/0028-memory-recall-tiers-standing-current-episodic.md)
+// #5817: the allow-list is the whole fix for the provenance/SHA noise.
 pub(super) fn select_relevant_triples(
     triples: &[RawTriple],
     prompt: &str,
@@ -196,6 +218,9 @@ pub(super) fn select_relevant_triples(
     }
     let mut out: Vec<RawTriple> = Vec::with_capacity(top_k);
     for t in triples {
+        if !crate::prompt_facts::is_hot_predicate(&t.predicate) {
+            continue;
+        }
         if triple_overlaps(t, &words) {
             out.push(t.clone());
             if out.len() >= top_k {
@@ -204,6 +229,95 @@ pub(super) fn select_relevant_triples(
         }
     }
     out
+}
+
+/// Drop recalled drawers that were written while working on a different
+/// project.
+///
+/// Why: a drawer tagged `creator:cwd=/Users/bob/Duetto/cto` — a note about
+/// another repository entirely — was recalled into `trusty-tools` sessions turn
+/// after turn. The drawer really does live in the `trusty-tools` palace, so
+/// palace resolution cannot exclude it; the write put it in the wrong place and
+/// only its own provenance tag records where it came from. Reading that tag is
+/// the one signal available at recall time.
+/// What: keeps every drawer that carries no `creator:cwd=` tag, and every
+/// drawer whose recorded cwd sits inside `session_root`. `session_root` and each
+/// recorded cwd are compared after [`normalise_project_path`], so a worktree
+/// under `.claude/worktrees/` and a crate subdirectory both resolve to the same
+/// root as the main checkout. Fails OPEN in every ambiguous case — absent tag,
+/// absent `session_root`, unparseable path — because dropping a drawer the
+/// filter cannot judge would lose real knowledge to a heuristic.
+/// Test: `project_scope_drops_foreign_cwd_drawer`,
+/// `project_scope_keeps_untagged_and_in_tree_drawers`,
+/// `project_scope_keeps_worktree_and_subdirectory_writers`.
+// #5817: cross-project leakage, read-side mitigation only — the write that put
+// the drawer in this palace is the actual defect.
+pub(super) fn filter_drawers_by_project_scope(
+    drawers: Vec<RecalledDrawer>,
+    session_root: Option<&str>,
+) -> Vec<RecalledDrawer> {
+    let Some(root) = session_root else {
+        return drawers;
+    };
+    drawers
+        .into_iter()
+        .filter(|d| match drawer_creator_root(d) {
+            Some(drawer_root) => path_contains(root, &drawer_root),
+            None => true,
+        })
+        .collect()
+}
+
+/// Extract a drawer's normalised `creator:cwd` project path, if it records one.
+///
+/// Why: split out so the tag-shape handling is asserted directly rather than
+/// only through the filter.
+/// What: finds the first tag starting with [`crate::attribution::CREATOR_CWD_PREFIX`]
+/// (case-insensitively — the tag is lowercased on some write paths) and returns
+/// its value through [`normalise_project_path`]. `None` when absent or empty.
+/// Test: `project_scope_drops_foreign_cwd_drawer`.
+fn drawer_creator_root(d: &RecalledDrawer) -> Option<String> {
+    const PREFIX: &str = crate::attribution::CREATOR_CWD_PREFIX;
+    let raw = d.tags.iter().find_map(|t| {
+        let (head, rest) = t.split_at_checked(PREFIX.len())?;
+        head.eq_ignore_ascii_case(PREFIX).then_some(rest)
+    })?;
+    let normalised = normalise_project_path(raw);
+    if normalised.is_empty() {
+        None
+    } else {
+        Some(normalised)
+    }
+}
+
+/// Reduce a filesystem path to the project tree it belongs to.
+///
+/// Why: the same project is written from three shapes of path — the main
+/// checkout, a crate subdirectory under it, and an agent worktree under
+/// `.claude/worktrees/<name>` (ADR-0036). Comparing raw strings would call a
+/// worktree writer "another project", which is the false positive that would
+/// make this filter lose real content.
+/// What: lowercases, trims a trailing `/`, and truncates at the
+/// `/.claude/worktrees/` segment when present. macOS is case-insensitive and
+/// some write paths lowercase the tag, so the comparison is lowercase on both
+/// sides.
+/// Test: `project_scope_keeps_worktree_and_subdirectory_writers`.
+pub(super) fn normalise_project_path(path: &str) -> String {
+    let lower = path.trim().trim_end_matches('/').to_lowercase();
+    match lower.find("/.claude/worktrees/") {
+        Some(i) => lower[..i].to_string(),
+        None => lower,
+    }
+}
+
+/// Return `true` when `candidate` is `root` or sits inside it.
+///
+/// Why: a plain `starts_with` on strings would treat `/a/foo-other` as inside
+/// `/a/foo`. The separator check is what makes the containment test a path
+/// test rather than a prefix test.
+/// Test: `project_scope_keeps_worktree_and_subdirectory_writers`.
+fn path_contains(root: &str, candidate: &str) -> bool {
+    candidate == root || candidate.starts_with(&format!("{root}/"))
 }
 
 /// Return `true` when any normalised token of a triple's subject or object

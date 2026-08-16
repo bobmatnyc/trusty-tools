@@ -61,6 +61,27 @@ pub(super) const MAX_RENDERED_TAGS: usize = 4;
 /// Test: `injection_caps_rendered_tag_bytes`.
 pub(super) const MAX_RENDERED_TAG_CHARS: usize = DRAWER_PREVIEW_CHARS;
 
+/// Byte budget for the rendered "Relevant KG facts" section.
+///
+/// Why (ADR-0028 D7): the KG section is the last of the four injection
+/// sections and the only one with no length control of its own — `top_k`
+/// bounded the triple *count* but a triple's rendered width is unbounded, so a
+/// palace with long subject or object strings could spend the whole remaining
+/// budget on the section ADR-0028 C10 measured as 93.5% plumbing estate-wide.
+/// D7 allocates it 256 bytes. That is a real allocation, not a token gesture: a
+/// hot triple is short by construction (`tga is_alias_for
+/// trusty-git-analytics` renders to 44 bytes), so 256 bytes carries roughly
+/// five of them.
+/// What: `256`. Triples render until the next line would cross it, then the
+/// section stops. There is no `+N more` marker — the surplus is by definition
+/// lower-ranked than what fit, and announcing it would spend bytes the cap
+/// exists to protect.
+/// Test: `compose_injection_caps_kg_section_bytes`.
+///
+/// # Spec References
+/// - [ADR-0028 D7](docs/adr/0028-memory-recall-tiers-standing-current-episodic.md)
+pub(super) const KG_SECTION_BYTE_CAP: usize = 256;
+
 /// Compose the final injection block.
 ///
 /// Why: a single coherent Markdown block is easier for the model to read
@@ -69,12 +90,18 @@ pub(super) const MAX_RENDERED_TAG_CHARS: usize = DRAWER_PREVIEW_CHARS;
 /// What: appends sections in priority order (workspace facts → drawers →
 /// KG triples), each separated by a blank line. Truncates at
 /// [`INJECTION_BYTE_CAP`] bytes with a `…` marker. `withheld` is how many
-/// drawers the relevance floor dropped (#5037); when it is non-zero the drawer
-/// section carries the [`withheld_notice`] line, including when every drawer was
-/// dropped and there is otherwise no section at all.
+/// drawers the relevance floor dropped (#5037); it is announced by
+/// [`withheld_notice`] only as a suffix to a drawer section that has something
+/// in it.
+///
+/// Returns an empty string when every section is empty, and the caller prints
+/// nothing rather than a placeholder. Silence is the correct output for a
+/// prompt with no relevant memory: it costs zero tokens, and a sentence saying
+/// so costs real ones on every turn of every session (#5817).
 /// Test: `compose_injection_truncates_at_cap`,
 /// `compose_injection_announces_withheld_drawers`,
-/// `compose_injection_announces_total_silence`,
+/// `compose_injection_is_silent_when_everything_was_withheld`,
+/// `compose_injection_empty_inputs_yields_empty`,
 /// `prompt_context_recalls_palace_drawers`.
 pub(super) fn compose_injection(
     global_facts: Option<&str>,
@@ -87,7 +114,9 @@ pub(super) fn compose_injection(
     if let Some(facts) = global_facts {
         push_section(&mut out, facts.trim_end());
     }
-    if !drawers.is_empty() || withheld > 0 {
+    // #5817: `withheld > 0` used to open this section on its own, so a prompt
+    // that matched nothing still rendered a paragraph announcing the fact.
+    if !drawers.is_empty() {
         let mut section = String::new();
         if let Some(slug) = palace_slug {
             section.push_str(&format!("## Relevant memories from palace `{slug}`\n"));
@@ -104,21 +133,29 @@ pub(super) fn compose_injection(
             section.push('\n');
         }
         if withheld > 0 {
-            section.push_str(&withheld_notice(withheld, drawers.is_empty()));
+            section.push_str(&withheld_notice(withheld));
             section.push('\n');
         }
         push_section(&mut out, section.trim_end());
     }
     if !triples.is_empty() {
-        let mut section = String::new();
-        section.push_str("## Relevant KG facts\n");
+        let mut section = String::from("## Relevant KG facts\n");
+        let mut rendered = 0usize;
         for t in triples {
-            section.push_str(&format!(
-                "- {} **{}** {}\n",
-                t.subject, t.predicate, t.object
-            ));
+            let line = format!("- {} **{}** {}\n", t.subject, t.predicate, t.object);
+            // #5817 (ADR-0028 D7): the KG section gets its own byte budget, so
+            // a palace with many hot triples cannot crowd out drawer recall.
+            if section.len() + line.len() > KG_SECTION_BYTE_CAP {
+                break;
+            }
+            section.push_str(&line);
+            rendered += 1;
         }
-        push_section(&mut out, section.trim_end());
+        // A heading with no bullets under it is pure cost. Emit the section
+        // only when at least one triple fit.
+        if rendered > 0 {
+            push_section(&mut out, section.trim_end());
+        }
     }
     if out.len() > INJECTION_BYTE_CAP {
         // Reserve 3 bytes for the `…` marker (UTF-8). Walk back to a char
@@ -135,34 +172,28 @@ pub(super) fn compose_injection(
     out
 }
 
-/// Render the "results were withheld" line for the drawer section.
+/// Render the "further results were withheld" line for a non-empty drawer
+/// section.
 ///
-/// Why (issue #5037, requirement 4): the relevance floor is allowed to return
-/// zero drawers where five noisy ones used to appear — that is the correct
-/// outcome for a prompt with no good match. It is only correct if the reader can
-/// tell it apart from "this palace holds nothing", because those two call for
-/// opposite next actions: one means search harder, the other means store
-/// something first. Without this line the floor would have swapped a visible
-/// wrong answer for an invisible one.
-/// What: one italic Markdown line naming the count, worded differently for a
-/// partial drop and a total one, and pointing at `memory_recall` as the way to
-/// see past the floor.
+/// Why (issue #5037, requirement 4, narrowed by #5817): when the injection
+/// already shows the reader some memories, saying how many more exist below the
+/// floor is cheap and tells them `memory_recall` would return more. #5037 also
+/// emitted a longer variant when the floor kept *nothing*, on the reasoning that
+/// "no good match" and "empty palace" call for opposite next actions. That
+/// variant is removed: it rendered on every prompt that matched nothing, which
+/// is most prompts, and it spent roughly 200 bytes per turn to report having
+/// nothing to say. Silence carries the same information at zero cost — the
+/// reader who wants to know either way calls `memory_recall`.
+/// What: one italic Markdown line naming the count and pointing at
+/// `memory_recall`. Only ever appended after at least one rendered drawer.
 /// Test: `compose_injection_announces_withheld_drawers`,
-/// `compose_injection_announces_total_silence`.
-pub(super) fn withheld_notice(withheld: usize, nothing_kept: bool) -> String {
+/// `compose_injection_is_silent_when_everything_was_withheld`.
+pub(super) fn withheld_notice(withheld: usize) -> String {
     let plural = if withheld == 1 { "memory" } else { "memories" };
-    if nothing_kept {
-        format!(
-            "_(No stored {plural} cleared the relevance floor for this prompt — \
-             {withheld} withheld as too weak a match. Nothing is missing from the \
-             palace; call `memory_recall` to search it directly.)_"
-        )
-    } else {
-        format!(
-            "_({withheld} further {plural} withheld below the relevance floor — \
-             call `memory_recall` for the full ranked set.)_"
-        )
-    }
+    format!(
+        "_({withheld} further {plural} withheld below the relevance floor — \
+         call `memory_recall` for the full ranked set.)_"
+    )
 }
 
 /// Render a drawer's tag suffix, filtered and capped.
