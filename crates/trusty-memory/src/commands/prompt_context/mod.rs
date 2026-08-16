@@ -722,14 +722,19 @@ fn configured_deny_tags() -> Vec<String> {
 /// hook process was launched with. The stdin `cwd` is the source of truth.
 /// What: parse stdin as JSON, take `cwd`, derive slug via
 /// [`crate::messaging::cwd_palace_slug_at`]. Falls back to the process
-/// cwd's slug. Returns `None` only when neither resolves cleanly.
+/// cwd's slug. Returns `None` only when neither resolves cleanly. The derived
+/// slug then goes through [`crate::palace_id_derive::follow_palace_alias`], so
+/// every consumer of this value — the injection header, the recall and KG
+/// requests, the prompt log, the activity event — names the palace the daemon
+/// will actually open rather than the pre-redirect slug.
 /// Test: `resolve_palace_for_log_prefers_stdin_cwd` (the log helper uses
-/// the same chain).
+/// the same chain), `prompt_context_header_names_the_alias_target`.
 fn resolve_palace_slug(stdin_payload: &str) -> Option<String> {
-    if let Some(slug) = palace_slug_from_stdin_cwd(stdin_payload) {
-        return Some(slug);
-    }
-    crate::messaging::cwd_palace_slug().ok()
+    let derived = palace_slug_from_stdin_cwd(stdin_payload)
+        .or_else(|| crate::messaging::cwd_palace_slug().ok())?;
+    // #5810: the header printed the derived slug while the drawers under it came
+    // from the alias target, naming a palace `palace_list` never returns.
+    Some(crate::palace_id_derive::follow_palace_alias(derived))
 }
 
 /// Resolve the palace identifier for the log entry.
