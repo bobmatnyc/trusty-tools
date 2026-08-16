@@ -1,6 +1,6 @@
 [package]
 name = "trusty-mpm"
-version = "1.5.0"
+version = "1.4.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -307,7 +307,9 @@ futures-util = { workspace = true, optional = true }
 
 # ── Platform-specific always-on deps ─────────────────────────────────────────
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["signal"] }
+# `user` (#5784): `getpwuid` for the current uid, the signal that tells a
+# scratch `$HOME` from the operator's real one — see `core::host_state_gate`.
+nix = { version = "0.29", features = ["signal", "user"] }
 
 # ── Dev dependencies ───────────────────────────────────────────────────────────
 [dev-dependencies]

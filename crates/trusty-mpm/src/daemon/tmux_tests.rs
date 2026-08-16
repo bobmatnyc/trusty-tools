@@ -255,6 +255,7 @@ fn rejects_malformed_session_row() {
     assert!(SessionInfo::parse("name:not-a-number:0").is_err());
 }
 
+#[serial_test::serial]
 #[test]
 fn driver_reports_availability() {
     // Works whether or not tmux is installed: discover() either resolves a
@@ -284,6 +285,7 @@ fn write_fake_tmux(dir: &std::path::Path, name: &str, body: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
+#[serial_test::serial]
 #[test]
 fn ensure_server_up_issues_start_server_on_a_fresh_socket() {
     // Simulates a machine where tmux has never run: the fake binary logs
@@ -310,6 +312,7 @@ fn ensure_server_up_issues_start_server_on_a_fresh_socket() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn ensure_server_up_fails_loudly_when_the_server_never_comes_up() {
     // The fake tmux ALWAYS fails with the exact "no such file" style stderr

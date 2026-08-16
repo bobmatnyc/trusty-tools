@@ -258,6 +258,18 @@ impl HookService {
         // the verdict below.
         crate::daemon::services::delegation_tracker::observe(&self.state, session, event, &payload);
 
+        // 1d (#4311): reap the worktree of an agent that just exited. Runs
+        // AFTER `observe`, which is what terminalizes the record this reads, and
+        // no-ops for every event other than `SubagentStop`. Like 1b it spawns a
+        // detached task off this synchronous method — the reap runs git — and
+        // like 1b it cannot change the verdict below.
+        crate::daemon::services::agent_worktree_reap::spawn_on_stop(
+            &self.state,
+            session,
+            event,
+            &payload,
+        );
+
         // 2. PostToolUse: compress tool output before it enters the ring buffer.
         if event == HookEvent::PostToolUse {
             let tool_name = payload

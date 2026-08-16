@@ -1074,3 +1074,97 @@ fn missing_subagent_type_still_tracks_as_live() {
     assert_eq!(d.agent, "unknown");
     assert_eq!(d.status, DelegationStatus::Running);
 }
+
+/// One subagent tool call, in the shape `tm hook` forwards it from INSIDE the
+/// subagent: the payload carries the subagent's `agent_id` and its own `cwd`.
+fn subagent_call(agent_id: &str, cwd: &str) -> Value {
+    serde_json::json!({
+        "tool": "Bash",
+        "cwd": cwd,
+        "agent_id": agent_id,
+        "input": { "command": "ls" }
+    })
+}
+
+/// #4311 REGRESSION: the agent's own tool call registers the tree it works in.
+///
+/// Why: this is the only event that names the harness-created worktree, and
+/// without it the tree has no owner and nothing may reap it — the state that
+/// left 56 unowned trees under `.claude/worktrees` on 2026-07-29. It fails
+/// against a tracker that ignores subagent-origin events.
+#[test]
+fn subagent_tool_call_registers_its_worktree() {
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "rust-engineer", "build it", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "a403"),
+    );
+    assert_eq!(only(&state, sid).worktree_path, None, "nothing yet");
+
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &subagent_call("a403", "/tmp/p/.claude/worktrees/agent-a403"),
+    );
+
+    assert_eq!(
+        only(&state, sid).worktree_path,
+        Some(std::path::PathBuf::from(
+            "/tmp/p/.claude/worktrees/agent-a403"
+        )),
+        "the subagent's own cwd is the tree it was granted"
+    );
+}
+
+/// A subagent that inherited the dispatcher's tree owns no child tree.
+///
+/// Why: registering the dispatcher's own checkout would name a directory this
+/// binary must never remove — the session's main checkout, in the ordinary case.
+#[test]
+fn subagent_sharing_the_dispatchers_tree_registers_nothing() {
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "documentation", "write it", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "a404"),
+    );
+
+    // `pre` dispatches from `/tmp/p`; an unisolated subagent runs there too.
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &subagent_call("a404", "/tmp/p"),
+    );
+
+    assert_eq!(only(&state, sid).worktree_path, None);
+}
+
+/// An `agent_id` matching no delegation registers nothing at all.
+#[test]
+fn an_unknown_agent_id_registers_nothing() {
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &subagent_call("ghost", "/tmp/p/.claude/worktrees/ghost"),
+    );
+    assert!(state.delegations_for(sid).is_empty());
+}
