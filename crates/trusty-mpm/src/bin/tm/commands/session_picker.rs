@@ -34,7 +34,7 @@ use trusty_mpm::client::{ManagedListResponse, ManagedSessionSummary};
 
 use super::managed::filter_live_sessions;
 pub(crate) use super::picker_launch_new::{
-    LaunchNewRequest, shared_checkout_note, split_isolation_flag,
+    LaunchNewRequest, launch_new_argument, shared_checkout_note, split_isolation_flag,
 };
 
 /// Decision returned by [`parse_picker_choice`].
@@ -768,34 +768,6 @@ pub(crate) fn decide_for_index(
     } else {
         PickerDecision::Resume(idx)
     }
-}
-
-/// Recognise the `n` launch-new command and return its raw argument (#4965).
-///
-/// Why the token is matched EXACTLY rather than stripped like `d<N>`/`r<N>`:
-/// those prefixes are safe only because their remainder must still parse as a
-/// live slot number, so `d2` is unambiguous while `delete` falls through to
-/// `Unrecognised`. `n` has no such gate — an unbounded `strip_prefix(['n','N'])`
-/// makes EVERY n-initial word a spawn with no confirmation, and the menu line
-/// itself reads "launch new session", so an operator typing `new` gets a real
-/// cloned, spawned, attached session named `tm-ew-NN`. `n` is also already the
-/// "no" answer in this tool's own `[y/N]` delete confirm. So: the token before
-/// the first whitespace must be exactly `n`/`N`, and a name requires a
-/// separator — the no-space `nauth` form is deliberately NOT accepted.
-///
-/// What: `None` when `choice` is not the `n` command at all (`new`, `no`,
-/// `nn`, `n1`, `nauth`). `Some("")` for a bare `n`/`N`, or one whose remainder
-/// is only whitespace. `Some(name)` — trimmed, possibly multi-word, NOT yet
-/// sanitized — for `n <name>`. `choice` must already be trimmed.
-/// Test: `guided_picker_n_grammar_is_bounded`,
-/// `guided_picker_n_launches_new_unnamed`,
-/// `guided_picker_n_with_argument_carries_name_hint`.
-fn launch_new_argument(choice: &str) -> Option<&str> {
-    let (token, rest) = match choice.split_once(char::is_whitespace) {
-        Some((token, rest)) => (token, rest.trim()),
-        None => (choice, ""),
-    };
-    token.eq_ignore_ascii_case("n").then_some(rest)
 }
 
 /// Parse one line of picker input into a [`PickerDecision`].
