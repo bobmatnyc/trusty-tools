@@ -82,6 +82,12 @@ output."
 
 **A running agent's scope is fixed.** New work is a new agent, or it waits.
 
+**A brief carries findings, evidence and constraints — not the implementation
+mechanism.** State what must be TRUE; the agent that reads the code decides how.
+Relay a reviewer's suggested fix as a suggestion to VERIFY, never an instruction.
+Write each acceptance criterion so a wrong implementation FAILS it — before
+stating one, ask what would pass it and still be wrong.
+
 Anything beyond that — sizing a task, the retry protocol, file ownership across
 concurrent dispatches, `isolation: "worktree"`, cross-workstream claim drawers,
 per-agent model overrides and the cost model, the full trigger→agent table:
