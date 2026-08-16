@@ -95,6 +95,16 @@ pub struct DiscoveryResult {
     pub adopted: usize,
     /// Friendly tmux names of the newly-registered sessions.
     pub sessions: Vec<String>,
+    /// Why the scan did not run at all, when it did not (#5784).
+    ///
+    /// Why: a REFUSED scan and a scan that ran and found nothing were
+    /// byte-identical — both `{adopted: 0, sessions: []}` — so
+    /// `POST /sessions/discover` answered "nothing to adopt" to a caller whose
+    /// real answer is "this daemon is not allowed to look".
+    /// What: `None` means the scan ran. `Some` carries the gate's own reason,
+    /// naming the mismatch and the variable that lifts it.
+    /// Test: `scratch_home_daemon_does_not_spawn_tmux`.
+    pub skipped: Option<String>,
 }
 
 /// Scan existing tmux sessions and register any running Claude Code.
@@ -474,9 +484,25 @@ pub async fn discover_native_processes(state: &DaemonState) -> DiscoveryResult {
 /// it runs; a single entry point keeps both scans in lockstep.
 /// What: runs [`discover_claude_sessions`] then [`discover_native_processes`]
 /// and merges their [`DiscoveryResult`]s.
-/// Test: covered indirectly — each scan has its own unit coverage, and the
-/// merge is exercised by `discover_all_merges_results`.
+///
+/// Scratch-environment gate (#5784): both scans read state that `$HOME` does
+/// not isolate — the tmux server and the host process table — and adopting
+/// what they find makes the operator's real sessions this daemon's to resume,
+/// reap, and kill on shutdown, with the adopted record carrying the real
+/// project's working directory. `discover_claude_sessions` is already covered
+/// by [`super::tmux::TmuxDriver::discover`]'s own gate; the `ps`/`lsof` scan
+/// touches no tmux, so the check is repeated here to cover it.
+/// Test: `scratch_home_daemon_does_not_spawn_tmux`; the merge is exercised by
+/// `discover_all_merges_results`.
 pub async fn discover_all(state: &DaemonState) -> DiscoveryResult {
+    let access = crate::core::host_state_gate::host_state_access();
+    if let Some(reason) = access.skip_reason() {
+        tracing::warn!("#5784: session auto-discovery skipped — {reason}");
+        return DiscoveryResult {
+            skipped: Some(reason),
+            ..Default::default()
+        };
+    }
     let mut result = discover_claude_sessions(state);
     let native = discover_native_processes(state).await;
     result.adopted += native.adopted;

@@ -99,7 +99,12 @@
 //! close it, both placed with the destructive rule and ahead of the same two
 //! exemptions, because ADR-0044 binds the PM AND every agent it dispatches:
 //! [`crate::commands::pm_guard_bash::evaluate_main_checkout_commit_command`]
-//! denies `git commit` in a main checkout, and
+//! classifies `git commit` in a main checkout — since ADR-0049 on what is
+//! STAGED rather than on the verb, so a documents-and-configuration staged set
+//! is permitted (then subject to the HEAD-move rule's live-writer query below,
+//! because a commit moves the shared HEAD too) while any staged source file,
+//! an unreadable or empty index, and every form that commits content the index
+//! does not hold all keep the deny — and
 //! [`crate::commands::pm_guard_write_boundary::evaluate_main_checkout_write`]
 //! denies an edit tool whose target is a SOURCE file there. Documents,
 //! configuration, and everything in a worktree stay writable — that is
@@ -168,13 +173,14 @@
 //! exercises the stdin→decision→stdout path (and the env bypasses / sub-agent
 //! exemption / fail-open) end to end through the real binary.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
 use crate::commands::pm_guard_bash::{
-    SHELL_EDIT_REASON, evaluate_bash_command, evaluate_main_checkout_commit_command,
-    evaluate_main_checkout_destructive_command, evaluate_worktree_add_command,
-    extract_shell_edit_target, head_move_deny_reason, main_checkout_head_move,
+    CommitVerdict, SHELL_EDIT_REASON, docs_commit_deny_reason, evaluate_bash_command,
+    evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
+    evaluate_worktree_add_command, extract_shell_edit_target, head_move_deny_reason,
+    main_checkout_head_move,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_cost;
@@ -376,16 +382,39 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             println!("{}", build_pretooluse_deny_response(&reason));
             return Ok(());
         }
-        // ABSOLUTE guard (ADR-0044 decision 1, enforced by ADR-0048) — the
-        // same placement and the same reason as the two above. A commit is
-        // where a write becomes permanent on a branch other sessions are
-        // standing on, and the reported incident is a commit landing on
-        // another workstream's branch. See `pm_guard_bash::main_checkout` for
-        // why branch-MOVING verbs are deliberately not folded in here.
-        if let Some(reason) = evaluate_main_checkout_commit_command(command, &hook_cwd) {
-            audit_denied_tool(url, session_id, tool_name, &reason).await;
-            println!("{}", build_pretooluse_deny_response(&reason));
-            return Ok(());
+        // ABSOLUTE guard (ADR-0044 decision 1, enforced by ADR-0048, amended by
+        // ADR-0049) — the same placement and the same reason as the two above.
+        // A commit is where a write becomes permanent on a branch other
+        // sessions are standing on, and the reported incident is a commit
+        // landing on another workstream's branch. See
+        // `pm_guard_bash::main_checkout` for why branch-MOVING verbs are
+        // deliberately not folded in here.
+        //
+        // ADR-0049 makes this two-armed rather than one. A staged set of
+        // documents and configuration is permitted, and then takes decision
+        // 10's concurrency test — a docs commit moves the shared HEAD exactly
+        // as far as a source commit does, so the same directory-keyed writer
+        // query decides it. Everything else still denies outright.
+        match evaluate_main_checkout_commit_command(command, &hook_cwd) {
+            Some(CommitVerdict::Deny(reason)) => {
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pretooluse_deny_response(&reason));
+                return Ok(());
+            }
+            Some(CommitVerdict::DocsOnly { root, dirs }) => {
+                let keys: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+                let live = pm_guard_dispatch::live_shared_tree_writers_in(
+                    url, session_id, &keys, &payload,
+                )
+                .await;
+                if !live.is_empty() {
+                    let reason = docs_commit_deny_reason(&root, &live);
+                    audit_denied_tool(url, session_id, tool_name, &reason).await;
+                    println!("{}", build_pretooluse_deny_response(&reason));
+                    return Ok(());
+                }
+            }
+            None => {}
         }
         // ABSOLUTE guard (ADR-0048 decision 10) — the same placement and the
         // same reason as the three above. `git pull`, `merge` and `rebase` move

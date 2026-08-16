@@ -40,7 +40,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `hooks` — Project-settings hook hygiene: detect and remove tm hook contamination (issue #2940)
   - `clean` — Remove tm-owned hook entries from project-level `.claude/settings.json` / `settings.local.json` files
 - `install` — Install the bundled framework artifacts to `~/.trusty-mpm/framework/`
-- `internal-spawn-disclaimed` — [INTERNAL] Spawn a program with macOS TCC responsibility disclaimed (issue #2997) — not for direct use
+- `internal-spawn-disclaimed` — \[INTERNAL\] Spawn a program with macOS TCC responsibility disclaimed (issue #2997) — not for direct use
 - `issue` — YAML-configurable issue state-management (labels/transitions/assignee)
   - `current` — Report an issue's current state, derived from its labels
   - `repair` — Resolve a mid-transition issue carrying multiple state labels
@@ -121,7 +121,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `list` — List all SESSCTL sessions
   - `run` — Spawn a SESSCTL session for a project via the daemon HTTP API
   - `stop` — Stop a session (graceful by default, --force for immediate)
-- `session` — [DEPRECATED] Alias of `sessions` (#2116) — use `tm sessions <verb>`
+- `session` — \[DEPRECATED\] Alias of `sessions` (#2116) — use `tm sessions <verb>`
   - `activity` — Show recent activity for a managed session
   - `answer` — Answer a managed session's pending decision
   - `attach` — Print the tmux attach command for a managed session
@@ -136,8 +136,8 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `instructions` — Print the composed launch instructions a session would receive
   - `list` — List sessions for the current project
   - `ls` — List managed sessions (session-manager MVP)
-  - `managed-resume` — [DEPRECATED] Resume a stopped managed session — use `resume` instead
-  - `managed-stop` — [DEPRECATED] Stop a managed session's runtime — use `stop` instead
+  - `managed-resume` — \[DEPRECATED\] Resume a stopped managed session — use `resume` instead
+  - `managed-stop` — \[DEPRECATED\] Stop a managed session's runtime — use `stop` instead
   - `new` — Spawn a new managed session from a repo + ref (session-manager MVP)
   - `output` — Capture the current output of a session's tmux pane
   - `pause` — Pause a running session, saving state for later resume
@@ -148,7 +148,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `rename` — Rename a managed session — from the list OR from within a session
   - `resume` — Resume a stopped/paused session (managed or project session)
   - `run` — Send a command to a session's tmux pane
-  - `runtime-stop` — [DEPRECATED] Stop a managed session's runtime — use `stop` instead
+  - `runtime-stop` — \[DEPRECATED\] Stop a managed session's runtime — use `stop` instead
   - `send` — Inject text into a managed session's pane
   - `start` — Start a new Claude Code session in the current/specified project
   - `stop` — Stop a session by id or friendly name (managed or project session)
@@ -169,8 +169,8 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `instructions` — Print the composed launch instructions a session would receive
   - `list` — List sessions for the current project
   - `ls` — List managed sessions (session-manager MVP)
-  - `managed-resume` — [DEPRECATED] Resume a stopped managed session — use `resume` instead
-  - `managed-stop` — [DEPRECATED] Stop a managed session's runtime — use `stop` instead
+  - `managed-resume` — \[DEPRECATED\] Resume a stopped managed session — use `resume` instead
+  - `managed-stop` — \[DEPRECATED\] Stop a managed session's runtime — use `stop` instead
   - `new` — Spawn a new managed session from a repo + ref (session-manager MVP)
   - `output` — Capture the current output of a session's tmux pane
   - `pause` — Pause a running session, saving state for later resume
@@ -181,7 +181,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `rename` — Rename a managed session — from the list OR from within a session
   - `resume` — Resume a stopped/paused session (managed or project session)
   - `run` — Send a command to a session's tmux pane
-  - `runtime-stop` — [DEPRECATED] Stop a managed session's runtime — use `stop` instead
+  - `runtime-stop` — \[DEPRECATED\] Stop a managed session's runtime — use `stop` instead
   - `send` — Inject text into a managed session's pane
   - `start` — Start a new Claude Code session in the current/specified project
   - `stop` — Stop a session by id or friendly name (managed or project session)

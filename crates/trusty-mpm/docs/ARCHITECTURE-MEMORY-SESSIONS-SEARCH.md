@@ -2,9 +2,11 @@
 
 This document describes three foundational design patterns shipped on trusty-mpm's
 `main` branch that govern how the framework manages memory access, session isolation,
-and code search. All three are active in every managed session; understanding their
-trade-offs and failure modes is essential for building reliable tools and debugging
-production behaviour.
+and code search. Memory resolution (§1) and code search indexing (§3) are active in
+every managed session; the worktree model (§2) is active whenever a worktree exists —
+see the note at the top of §2 for when that is. Understanding their trade-offs and
+failure modes is essential for building reliable tools and debugging production
+behaviour.
 
 ## 1. Memory over MCP/JSON-RPC, never a guessed port
 
@@ -47,6 +49,19 @@ shared helper in `trusty-common/src/mcp/memory_rpc.rs` (issue #2030):
 ---
 
 ## 2. Session↔Worktree 1:1 Model + Semantic Naming
+
+> **Superseded default, current scope:** this section predates
+> [ADR-0037](../../../docs/adr/0037-pm-placement-precedence-main-checkout-by-default.md).
+> A managed session no longer gets a worktree by default — it runs on the
+> project's main checkout, which stays writable for documents and
+> configuration only ([ADR-0044](../../../docs/adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
+> [ADR-0048](../../../docs/adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md)),
+> mechanically enforced, not by convention. What follows still applies whenever
+> a worktree DOES exist: an operator launches with `--worktree`, or a
+> dispatched agent that writes is automatically granted one. A session
+> worktree keeps the `.worktrees/<name>` path this section describes — a
+> different, unaffected family from the harness's own `.claude/worktrees/`
+> agent worktrees ([ADR-0036](../../../docs/adr/0036-all-worktrees-are-siblings-under-claude-worktrees.md)).
 
 **The problem:** Prior to issue #2032, each managed session was backed by a git
 worktree with a UUID-based name (e.g., `.worktrees/fb2c8a12-4e9e-11ec.../`). The

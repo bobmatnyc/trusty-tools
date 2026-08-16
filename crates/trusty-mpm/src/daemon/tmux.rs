@@ -199,8 +199,38 @@ impl TmuxDriver {
     /// consults the live `PATH` first and then falls back to the well-known
     /// daemon dirs (Homebrew + user bins). Errors with a clear message if no
     /// `tmux` is found anywhere.
-    /// Test: `driver_reports_availability` (skips assertion when tmux missing).
+    ///
+    /// Scratch-environment gate (#5784): before resolving anything, this asks
+    /// [`crate::core::host_state_gate::host_state_access`] whether the process
+    /// is running in the operator's real environment. It is not when `$HOME`
+    /// has been reassigned away from this uid's password-database home, and a
+    /// tmux server is keyed to the uid, not to `$HOME` — so a scratch daemon
+    /// that resolved a driver here would list, adopt, and later kill the
+    /// operator's live panes. This is the crate's ONLY constructor for
+    /// `TmuxDriver` (the `tmux_path` field is private), so every path that
+    /// HOLDS a driver is covered: startup auto-discovery, the reap loop,
+    /// orphan-GC, the idle reaper, the session services, and the session
+    /// manager's `RealTmuxDriver`.
+    ///
+    /// It does NOT cover the paths that never construct one — `tm launch` and
+    /// `tm connect` create and kill sessions through
+    /// [`crate::core::tmux::create_managed_session`] and
+    /// [`crate::core::tmux::run_tmux`] directly. Those are gated at the spawn
+    /// itself by `core::tmux`'s `host_state_guard`, which is why the check
+    /// lives in two places rather than one; this one exists so a gated daemon
+    /// fails fast with a diagnosable message instead of N refused subprocesses.
+    ///
+    /// The gate fails CLOSED: an environment it cannot classify is refused, and
+    /// `TRUSTY_MPM_ALLOW_HOST_STATE=1` is the explicit way back in.
+    /// Test: `driver_reports_availability` (skips assertion when tmux
+    /// missing); `scratch_home_daemon_does_not_spawn_tmux`
+    /// proves no tmux process is spawned once this refuses.
     pub fn discover() -> Result<Self> {
+        let access = crate::core::host_state_gate::host_state_access();
+        if let Some(reason) = access.skip_reason() {
+            tracing::warn!("#5784: tmux access refused — {reason}");
+            return Err(Error::Protocol(format!("tmux access refused: {reason}")));
+        }
         let path = trusty_common::bin_resolve::resolve_binary("tmux").ok_or_else(|| {
             Error::Protocol(
                 "tmux not found on PATH or in well-known dirs (e.g. /opt/homebrew/bin); \

@@ -35,8 +35,8 @@ mod sed_awk;
 mod shell_lex;
 
 pub(crate) use main_checkout::{
-    evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
-    head_move_deny_reason, main_checkout_head_move,
+    CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,
+    evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
 };
 pub(crate) use persistence::command_is_persistence_only;
 
