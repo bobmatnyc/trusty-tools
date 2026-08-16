@@ -810,6 +810,20 @@ impl SessionManager {
                     );
                     owner_unknown.push(candidate);
                 }
+                // #4311: attributed to a dispatched agent, whose liveness this
+                // sweep cannot answer — there is no session record to look up,
+                // so `resolve_ownerless_with_grace` would report every agent
+                // worktree reclaimable once past the grace window. Skipped like
+                // the live-owner arm below: owned, and reclaimed by
+                // `daemon::services::agent_worktree_reap` on the agent's exit.
+                SentinelOwner::Agent(agent, _) => {
+                    info!(
+                        path = %candidate.display(),
+                        agent_id = %agent.agent_id,
+                        "prune-worktrees: owned by a dispatched agent — reclaimed when that \
+                         agent exits, never by this sweep (#4311)"
+                    );
+                }
                 SentinelOwner::Known(owner, created_at) => {
                     if !self.resolve_ownerless_with_grace(owner, created_at).await {
                         info!(

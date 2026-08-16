@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use super::{ReapOutcome, is_harness_agent_worktree, reap_worktree};
 use crate::core::hook::HookEvent;
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
+use crate::session_manager::worktree_ownership::write_agent_sentinel;
 
 /// Build a worktree at the harness shape: `<repo>/.claude/worktrees/<name>`.
 fn harness_worktree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
@@ -210,4 +211,136 @@ async fn spawn_on_stop_ignores_a_payload_without_an_agent_id() {
         &serde_json::json!({ "agent_id": "", "cwd": "/nowhere" }),
     );
     assert!(state.delegations_for(session).is_empty());
+}
+
+// ── the liveness gate (#4311) ───────────────────────────────────────────────
+
+/// #4311 REGRESSION: a process standing in the tree stops the removal, even
+/// though every registry says the tree is free.
+///
+/// Why: gates 3 and 5 read registries — what trusty-mpm recorded, and what git
+/// recorded. On 2026-08-15 a `trusty-memory serve --foreground` started by hand
+/// inside an agent worktree ran for a day in neither. This test passes `&[]` for
+/// `in_use` and builds a clean, fully-pushed tree, so every earlier gate
+/// approves; only an OS-level check can refuse. It fails against the pre-#4311
+/// chain, which removed the directory out from under the process.
+#[test]
+fn reap_refuses_a_worktree_a_live_process_is_standing_in() {
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree(&fx, "agent-occupied");
+    std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+
+    // A real child process whose cwd is the worktree, held open for the probe.
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .current_dir(&wt)
+        .spawn()
+        .expect("spawn a process inside the worktree");
+    let outcome = reap_worktree(&wt, &[]);
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let reason = outcome
+        .refusal()
+        .expect("a worktree a live process stands in must be refused");
+    assert!(reason.contains("still occupied"), "{reason}");
+    assert!(wt.exists(), "the directory must survive");
+}
+
+// ── ownership rebuilt from disk (#4311, ADR-0023 point 4) ───────────────────
+
+/// #4311 REGRESSION: a stop reaps a tree the in-memory registry never knew.
+///
+/// Why: `DaemonState::delegations` is a `DashMap` built empty at every boot
+/// with no load path, so a daemon restart drops every registration — and a
+/// `SubagentStop` arrives once, so the reap was lost permanently for any agent
+/// alive across the restart. This test registers NOTHING in the daemon state
+/// (which is exactly what a post-restart daemon holds) and asserts the reap
+/// still fires from the on-disk sentinel alone. It fails against the pre-#4311
+/// body, whose only lookup was the DashMap.
+#[tokio::test]
+async fn stop_reaps_a_worktree_the_registry_lost_to_a_restart() {
+    let (state, _dir, session) = hermetic();
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree(&fx, "agent-restarted");
+    std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+    write_agent_sentinel(
+        &wt,
+        crate::session_manager::worktree_ownership::AgentWorktreeOwner {
+            agent_id: "a601".to_string(),
+            delegation_id: crate::core::agent::DelegationId(uuid::Uuid::new_v4()),
+            parent_session_id: session,
+        },
+    )
+    .expect("write agent sentinel");
+    assert!(
+        state.delegations_for(session).is_empty(),
+        "this fixture must hold no registration — that is what a restarted daemon looks like"
+    );
+
+    super::spawn_on_stop(
+        &state,
+        session,
+        HookEvent::SubagentStop,
+        &serde_json::json!({ "agent_id": "a601", "cwd": fx.repo.to_string_lossy() }),
+    );
+    await_gone(&wt).await;
+
+    assert!(
+        !wt.exists(),
+        "the sentinel is the whole ownership record here; the reap must act on it"
+    );
+}
+
+/// A sentinel naming a DIFFERENT agent is not this agent's tree.
+///
+/// Why: the disk lookup is the one place a "close enough" match would delete
+/// a directory belonging to an agent that is still running. It must be as
+/// exact as `on_subagent_stop`'s own `agent_id` resolution.
+#[tokio::test]
+async fn stop_ignores_a_sentinel_naming_a_different_agent() {
+    let (state, _dir, session) = hermetic();
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree(&fx, "agent-other");
+    std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+    write_agent_sentinel(
+        &wt,
+        crate::session_manager::worktree_ownership::AgentWorktreeOwner {
+            agent_id: "a701".to_string(),
+            delegation_id: crate::core::agent::DelegationId(uuid::Uuid::new_v4()),
+            parent_session_id: session,
+        },
+    )
+    .expect("write agent sentinel");
+
+    super::spawn_on_stop(
+        &state,
+        session,
+        HookEvent::SubagentStop,
+        &serde_json::json!({ "agent_id": "a702", "cwd": fx.repo.to_string_lossy() }),
+    );
+    // Give a wrong implementation the same window the correct one gets.
+    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+
+    assert!(
+        wt.exists(),
+        "another agent's worktree must never be reaped by this stop"
+    );
+}
+
+/// Poll until `path` is gone, or fail with what is still there.
+///
+/// Why: `spawn_on_stop` detaches the removal onto a task, so the assertion has
+/// to wait on the condition rather than on a fixed sleep.
+async fn await_gone(path: &std::path::Path) {
+    for _ in 0..100 {
+        if !path.exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("{} was never removed", path.display());
 }

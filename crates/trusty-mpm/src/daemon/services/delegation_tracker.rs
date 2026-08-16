@@ -104,6 +104,7 @@ use crate::core::dispatch_isolation::{dispatch_isolation, isolation_separates_wo
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
+use crate::session_manager::worktree_ownership::{AgentWorktreeOwner, write_agent_sentinel};
 
 /// How long after an `agent_delegate` call an observed dispatch may be treated
 /// as the *same* delegation.
@@ -226,9 +227,30 @@ fn usable_agent_id(response: &Value) -> Option<&str> {
 /// `PostToolUse`, that hook is installed `async: true`, and until it lands there
 /// is no record to match against. A registration that misses simply happens on
 /// the next call.
+///
+/// # The sentinel is written FIRST, and a failed write registers nothing
+///
+/// The in-memory record is what grants
+/// [`super::agent_worktree_reap`] authority to run `git worktree remove
+/// --force` on that path. The sentinel is the only evidence of that authority
+/// that survives a daemon restart (`daemon::state::core` initialises the
+/// delegation map empty and never loads one), so registering after a failed
+/// write would grant deletion authority whose durable record does not exist —
+/// the fail-OPEN branch, and the exact shape of the bug this whole change
+/// closes: a worktree that silently becomes unattributable.
+///
+/// So the order is write-then-register, and a write failure declines the
+/// registration. That is affordable precisely because this function is
+/// retried on every subagent tool call: a transient failure self-heals on the
+/// next one at no extra cost. Declining leaves the tree owner-UNKNOWN, which
+/// is the pre-#4311 state and is never auto-deleted by anything — fail-closed
+/// in both directions. It is never fatal to the hook: [`observe`] is
+/// observational and must never affect the tool verdict, so the failure is
+/// logged at `error!` and the hook returns normally.
 /// Test: `subagent_tool_call_registers_its_worktree`,
 /// `subagent_sharing_the_dispatchers_tree_registers_nothing`,
-/// `an_unknown_agent_id_registers_nothing`.
+/// `an_unknown_agent_id_registers_nothing`,
+/// `a_failed_sentinel_write_registers_no_worktree`.
 fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Value) {
     let Some(agent_id) = field(payload, "agent_id") else {
         return;
@@ -243,6 +265,21 @@ fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Va
     }) else {
         return;
     };
+    let owner = AgentWorktreeOwner {
+        agent_id: agent_id.to_string(),
+        delegation_id: id,
+        parent_session_id: session,
+    };
+    if let Err(e) = write_agent_sentinel(&cwd, owner) {
+        tracing::error!(
+            agent_id,
+            worktree = %cwd.display(),
+            "delegation: could not write the agent worktree's ownership sentinel ({e}); \
+             leaving the tree unregistered and owner-unknown rather than granting a reap \
+             authority nothing on disk records — retried on this agent's next tool call (#4311)"
+        );
+        return;
+    }
     tracing::info!(
         agent_id,
         worktree = %cwd.display(),

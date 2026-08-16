@@ -308,6 +308,59 @@ async fn prune_orphaned_worktrees_skips_owner_unknown() {
     );
 }
 
+/// #4311 REGRESSION: an AGENT-owned worktree is neither deleted nor reported
+/// owner-unknown.
+///
+/// Why, on both halves. Not reported owner-unknown: that report is the
+/// refusal this change exists to clear — on 2026-08-16 all 18 directories
+/// under `.claude/worktrees` logged it every 60 seconds, and the tree carrying
+/// an ownership sentinel is what makes it stop. Not deleted: the sweep resolves
+/// a `Known` owner through `resolve_ownerless_with_grace`, a SESSION-STORE
+/// lookup. An agent has no session record, so past the 10-minute grace that
+/// lookup answers "no owner" — and this sweep's chain holds no liveness check
+/// at all, so a live agent's tree would be removed under it on the daemon's
+/// 60-second cadence. An implementation that resolved the agent sentinel to
+/// `Known` instead of `Agent` fails on `removed`.
+#[tokio::test]
+async fn prune_orphaned_worktrees_skips_an_agent_owned_worktree() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(
+        store_dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree_at(&fx.repo.join(".claude").join("worktrees"), "agent-owned");
+    crate::session_manager::worktree_ownership::write_agent_sentinel(
+        &wt,
+        crate::session_manager::worktree_ownership::AgentWorktreeOwner {
+            agent_id: "a801".to_string(),
+            delegation_id: crate::core::agent::DelegationId(uuid::Uuid::new_v4()),
+            parent_session_id: crate::core::session::SessionId::new(),
+        },
+    )
+    .expect("write agent sentinel");
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        !outcome.owner_unknown.contains(&wt),
+        "an attributed worktree must stop being reported owner-unknown; got {:?}",
+        outcome.owner_unknown
+    );
+    assert!(
+        outcome.removed.is_empty(),
+        "this sweep has no liveness check and must never reclaim an agent's tree; got {:?}",
+        outcome.removed
+    );
+    assert!(wt.exists(), "the worktree must survive the sweep");
+}
+
 /// Write a sentinel with an explicit `created_at`, bypassing
 /// `sentinel_payload_bytes`'s "now" default — needed to simulate a sentinel
 /// old enough to fall outside [`crate::session_manager::worktree_ownership::OWNERLESS_GRACE`]
@@ -318,8 +371,9 @@ fn aged_sentinel_bytes(
 ) -> Vec<u8> {
     serde_json::to_vec(
         &crate::session_manager::worktree_ownership::WorktreeSentinel {
-            owner_session_id: owner,
+            owner_session_id: Some(owner),
             created_at,
+            agent: None,
         },
     )
     .expect("serialize aged sentinel")
