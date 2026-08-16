@@ -3,7 +3,7 @@
 Google Workspace MCP server for the Trusty suite — a Rust port of the
 Python [`gworkspace-mcp`](https://pypi.org/project/gworkspace-mcp/) project.
 
-Exposes 46 [Model Context Protocol](https://modelcontextprotocol.io/) tools
+Exposes 62 [Model Context Protocol](https://modelcontextprotocol.io/) tools
 across Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, and Accounts.
 Authentication is fully native: the `trusty-gworkspace-mcp` binary runs the
 OAuth consent flow itself and reads/writes `~/.gworkspace-mcp/tokens.json` —
@@ -97,20 +97,42 @@ it is never changed.
 
 ### 3. Wire into Claude Code (or any MCP client)
 
+Inside a trusty-mpm-managed environment, register it with `tm mcp add` — that
+writes the tm-owned config dir every managed session reads, which a plain
+`claude mcp add` cannot target:
+
+```sh
+tm mcp add trusty-gworkspace -- trusty-gworkspace-mcp
+tm mcp list                      # confirm what is registered
+```
+
+Outside tm, declare it by hand:
+
 ```jsonc
 // ~/.claude.json
 {
   "mcpServers": {
-    "gworkspace": {
+    "trusty-gworkspace": {
       "command": "trusty-gworkspace-mcp"
     }
   }
 }
 ```
 
+**The name you choose is the tool prefix.** Registered as `trusty-gworkspace`,
+the tools arrive as `mcp__trusty-gworkspace__search_gmail_messages` and so on.
+The crate name, the binary name, and this server's own `serverInfo.name`
+(`gworkspace-mcp`, for wire compatibility with the Python predecessor) do not
+decide it — the map key does. Pick one name and keep it, because agent
+instructions that name a prefix go stale when it changes.
+
 The model can now call `search_gmail_messages`, `manage_events`,
 `create_document`, `manage_slides`, etc. Pass `account = "<profile-name>"` to
 any tool to target a non-default profile.
+
+Registering the server does not authenticate it. Until steps 1 and 2 above are
+complete, every tool call fails with a 401 — that is missing credentials, not a
+broken install.
 
 ## Re-authenticating from within a session
 
@@ -225,31 +247,39 @@ per profile (two-tier lookup) — useful for per-project accounts.
 
 ## Tool Surface
 
-46 tools, grouped by service:
+62 tools, grouped by service:
 
-- **Accounts:** `list_accounts`, `set_default_account`, `remove_account`,
+- **Accounts (4):** `list_accounts`, `set_default_account`, `remove_account`,
   `add_account`
-- **Calendar:** `manage_calendars`, `manage_events`, `query_free_busy`
-- **Gmail:** `search_gmail_messages`, `get_gmail_message_content`,
+- **Calendar (3):** `manage_calendars`, `manage_events`, `query_free_busy`
+- **Gmail (10):** `search_gmail_messages`, `get_gmail_message_content`,
   `download_gmail_attachment`, `list_message_attachments`, `compose_email`,
   `modify_gmail_messages`, `format_email_content`, `manage_gmail_labels`,
   `manage_gmail_filters`, `manage_gmail_settings`
-- **Drive:** `list_drive_contents`, `search_drive_files`,
+- **Drive (6):** `list_drive_contents`, `search_drive_files`,
   `get_drive_file_content`, `list_shared_drives`, `manage_drive_file`,
   `manage_file_permissions`
-- **Docs:** `create_document`, `append_to_document`, `get_document`,
+- **Docs (27):** `create_document`, `append_to_document`, `get_document`,
   `get_document_structure`, `replace_text_in_document`,
   `insert_text_in_document`, `delete_range_in_document`,
   `manage_document_comments`, `format_document_range`, `set_document_style`,
   `insert_table_in_document`, `find_tables_in_document`,
-  `manage_table_structure`
-- **Sheets:** `get_spreadsheet`, `manage_spreadsheet`, `modify_sheet_values`,
-  `format_sheet`
-- **Slides:** `get_slides`, `manage_slides`, `add_slide_content`
-- **Tasks:** `manage_task_lists`, `manage_tasks`
+  `manage_table_structure`, `manage_document_tabs`, `create_document_tab`,
+  `move_paragraph_in_document`, `format_paragraph_in_document`,
+  `create_list_in_document`, `insert_image_in_document`, `format_table_cells`,
+  `set_table_column_widths`, `apply_table_style`, `format_document_tables`,
+  `manage_document_header_footer`, `create_document_from_template`,
+  `get_document_named_styles`, `update_document_named_styles`
+- **Sheets (5):** `get_spreadsheet`, `manage_spreadsheet`,
+  `modify_sheet_values`, `format_sheet`, `create_chart`
+- **Slides (3):** `get_slides`, `manage_slides`, `add_slide_content`
+- **Tasks (4):** `manage_task_lists`, `manage_tasks`, `list_tasks`,
+  `complete_task`
 
-The authoritative list with JSON Schemas is in
-[`src/tools.rs`](src/tools.rs).
+The authoritative list with JSON Schemas is assembled by
+[`src/tools/mod.rs`](src/tools/mod.rs) from one module per service. To read the
+live surface instead of this list, pipe an `initialize` then a `tools/list`
+JSON-RPC message into `trusty-gworkspace-mcp` on stdin.
 
 ## Architecture
 
