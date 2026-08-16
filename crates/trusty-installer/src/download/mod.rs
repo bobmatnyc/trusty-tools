@@ -268,7 +268,42 @@ fn expected_binaries_among(
             warn_dropped_executable(crate_name, name, &extract_dir.join(name));
         }
     }
+    warn_unshipped_binaries(crate_name, &expected, &kept);
     kept
+}
+
+/// Warn about a binary the shared table promises but the tarball did not ship.
+///
+/// Why (#5805): the mirror of [`warn_dropped_executable`], and the half that
+/// had no check at all. `--dry-run` now advertises every name from the shared
+/// table — `trusty-installer` AND `tctl` — so an operator is told two files
+/// will be replaced. If the tarball ships only one, `place_binaries` places one
+/// and nothing anywhere says so: the preview over-promised and the install
+/// under-delivered, silently.
+///
+/// Not an error: a release that legitimately drops an alias on some platform
+/// would then fail the whole install rather than place what it has, and the
+/// binary the operator asked for is the one that IS there. The mismatch is a
+/// release-tooling defect, so it is reported where a release-tooling defect can
+/// be seen, at the same level as its mirror.
+///
+/// Test: `tests::unshipped_expected_binary_is_reported`.
+fn warn_unshipped_binaries(crate_name: &str, expected: &[String], kept: &[String]) -> Vec<String> {
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|e| !kept.iter().any(|k| k == *e))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        tracing::warn!(
+            crate_name,
+            missing = ?missing,
+            "the shared installed_binaries table lists binaries this tarball did \
+             not ship; they will NOT be placed even though the install preview \
+             named them (#5805)"
+        );
+    }
+    missing
 }
 
 /// Warn about a dropped tarball entry that looks like a real binary.
@@ -356,6 +391,23 @@ pub fn default_install_dir() -> Option<PathBuf> {
     trusty_common::bin_resolve::canonical_bin_dir()
 }
 
+/// The install destination, with the last-resort fallback applied.
+///
+/// Why (#5805): three call sites wrote
+/// `default_install_dir().unwrap_or_else(|| "/usr/local/bin".into())` by hand —
+/// `install_all`, `install_one`, and now the `--dry-run` preview. A preview
+/// that names a different directory than the install writes to is worse than
+/// no preview, and three copies of one expression is how that drift starts.
+///
+/// What: [`default_install_dir`], falling back to `/usr/local/bin` only when
+/// neither `CARGO_HOME` nor the home directory resolves — an invariant pinned
+/// by `tests::install_dir_is_some_whenever_cargo_home_is_set`.
+///
+/// Test: `tests::install_dir_or_fallback_matches_default_when_resolvable`.
+pub fn install_dir_or_fallback() -> PathBuf {
+    default_install_dir().unwrap_or_else(|| PathBuf::from("/usr/local/bin"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +446,25 @@ mod tests {
                 "~/.local/bin is no longer a write destination (#5777): {}",
                 p.display()
             );
+        }
+    }
+
+    /// Why (#5805): `install_all`, `install_one`, and the `--dry-run` preview
+    /// all need the destination, and three hand-written copies of
+    /// `default_install_dir().unwrap_or_else(…)` is how a preview starts
+    /// naming a directory the install does not write to.
+    /// What: asserts the helper equals [`default_install_dir`] whenever that
+    /// resolves, and only substitutes `/usr/local/bin` when it does not.
+    /// Test: This is the test.
+    #[test]
+    fn install_dir_or_fallback_matches_default_when_resolvable() {
+        match default_install_dir() {
+            Some(p) => assert_eq!(install_dir_or_fallback(), p),
+            None => assert_eq!(
+                install_dir_or_fallback(),
+                PathBuf::from("/usr/local/bin"),
+                "the fallback is reachable only with no CARGO_HOME and no home"
+            ),
         }
     }
 
@@ -458,6 +529,31 @@ mod tests {
             ),
             vec!["tga".to_owned()]
         );
+    }
+
+    /// Why (#5805): `--dry-run` advertises every name from the shared table, so
+    /// a tarball shipping only some of them means the preview over-promised and
+    /// the install under-delivered with nothing said. `place_binaries` cannot
+    /// see it — its input is already the intersection — so the check belongs
+    /// here, where both lists exist.
+    /// What: a tarball with `trusty-installer` but no `tctl` keeps the one it
+    /// shipped and reports `tctl` as unshipped; a complete tarball reports
+    /// nothing.
+    /// Test: This is the test.
+    #[test]
+    fn unshipped_expected_binary_is_reported() {
+        let expected = trusty_common::bin_resolve::installed_binaries("trusty-installer");
+        assert!(
+            expected.contains(&"tctl".to_owned()),
+            "the fixture depends on the table listing both binaries: {expected:?}"
+        );
+
+        let kept = vec!["trusty-installer".to_owned()];
+        assert_eq!(
+            warn_unshipped_binaries("trusty-installer", &expected, &kept),
+            vec!["tctl".to_owned()]
+        );
+        assert!(warn_unshipped_binaries("trusty-installer", &expected, &expected).is_empty());
     }
 
     /// Write `dir/<name>` with `mode` so `has_exec_bit` sees real metadata.
