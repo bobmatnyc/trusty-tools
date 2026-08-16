@@ -568,18 +568,22 @@ cargo test -p <crate>
 cargo check --workspace
 
 # 5. If UI changes (trusty-search, trusty-memory, trusty-analyze, trusty-console),
-#    check for stale artifacts AND stale bundle content (issue #3568)
+#    check for stale artifacts AND stale bundle content (issue #3606)
 git status  # Look for node_modules/ or pnpm-workspace.yaml
 git clean -fdX  # If present
 #    Freshness (not just presence) matters: verify the COMMITTED ui-dist/ /
 #    ui/dist/ bundle actually reflects current ui/src — cargo publish cannot
-#    catch this for you (see step 7 note). Rebuild and diff:
+#    catch this for you (see step 7 note). Check the source digest directly
+#    (no rebuild needed):
+#      bash scripts/check-ui-bundle-freshness.sh <crate>
+#    If it reports BUNDLE-STALE, rebuild and re-stamp before continuing:
 #      cd crates/<crate>/ui && pnpm install --frozen-lockfile && pnpm run build
 #      # trusty-search only: also copy ui/dist/* into ../ui-dist/ (or `make release-prep`)
-#    If the rebuild differs from what's committed, commit the regenerated
-#    bundle before continuing. `.github/workflows/release.yml`'s
-#    ui-freshness-check job does this same check automatically once you tag
-#    (step 9) — but catching it here, before tagging, is cheaper.
+#      bash scripts/stamp-ui-bundle.sh <crate>
+#    then commit the regenerated bundle. `.github/workflows/ui-bundle-freshness.yml`
+#    runs this same check on every push to `main`, and `preflight-publish.sh`
+#    CHECK 7 runs it again immediately before step 7's dry-run — but catching
+#    it here, before tagging, is cheaper.
 
 # 6. Commit version bump
 git add -A
@@ -593,7 +597,7 @@ git commit -m "chore: bump <crate> to v<version>"
 # package --list`), so cargo has nothing to rebuild from during packaging
 # either way. This dry-run therefore verifies the RUST package publishes
 # cleanly — it provides NO signal on UI bundle freshness (that's step 5 /
-# ui-freshness-check, a structurally separate concern).
+# check-ui-bundle-freshness.sh, a structurally separate concern).
 SKIP_UI_BUILD=1 cargo publish --dry-run -p <crate>
 
 # 8. If dry-run fails:
