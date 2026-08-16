@@ -1,6 +1,6 @@
 # ADR Index — All Decisions
 
-**Last updated:** 2026-08-16 | **Format version:** 1.1
+**Last updated:** 2026-08-17 | **Format version:** 1.1
 
 This index is the complete, concise vetting surface for workspace ADRs. The ADR
 files remain authoritative for full context, decision text, and consequences.
@@ -18,7 +18,7 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0005](0005-harness-event-bus.md) | Shared harness event bus | Amended by 0019 | A common event envelope and process-global telemetry bus serve all harnesses; ADR-0019 adds durable messaging to that bus. | Workspace |
 | [0006](0006-trusty-controller-naming.md) | `trusty-controller` naming | Superseded by 0013 | The control plane was named `trusty-controller` with binary `tctl`. | Workspace |
 | [0007](0007-tool-contract-versioning-and-verb-model.md) | Tool contract versioning | Accepted | Tool contracts use monotonic integer versions and Base/Extended/Custom verb layers. | Workspace |
-| [0008](0008-project-identity-convention.md) | Project identity convention | Amended by 0012 | Projects use the full-path slug of the nearest Git root; ADR-0012 changes worktree identity only. | Workspace |
+| [0008](0008-project-identity-convention.md) | Project identity convention | Amended by 0012, 0052 | Projects use the full-path slug of the nearest Git root; ADR-0012 changes worktree identity, ADR-0052 nullifies point 4 outright. | Workspace |
 | [0009](0009-external-extractor-kg-ingest-contract.md) | External extractor KG ingest | Accepted | External extractors contribute durable overlay subgraphs to trusty-search. | Workspace |
 | [0010](0010-kg-edge-kind-extensibility.md) | Extensible KG edge kinds | Accepted | The KG has first-class data-flow edges plus a custom escape hatch. | Workspace |
 | [0011](0011-tctl-owns-service-lifecycle.md) | Lifecycle and HTTP ownership | Amended by 0032 | The installer/control plane owns service lifecycle and trusty-console owns the sole HTTP surface. | Workspace |
@@ -60,7 +60,8 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0047](0047-code-contracts-as-a-machine-checkable-api-surface.md) | Code Contracts are a machine-checkable API surface | Accepted | Public API contracts are stated in doc comments in a parseable grammar, extracted to a checked-in artifact, diffed across versions, and enforced by tests — the behavioural break class no static differ can see. | `trusty-common` |
 | [0048](0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md) | Dispatched writers get a worktree; the write boundary is enforced | Amended by 0049 | A dispatched writer in a main checkout is granted harness isolation, source writes and commits there are denied for the PM and every agent, and the shared-writer query is keyed by directory rather than session. | `trusty-mpm` |
 | [0049](0049-docs-commits-are-permitted-in-a-main-checkout.md) | Documents-only commits are permitted in a main checkout | Accepted | The main-checkout commit gate decides on what is STAGED rather than on the verb: documents and configuration may commit there when no other live writer shares the HEAD, any staged source file denies, and DOC-66 §0.5's checkout is scoped to source-restricted rather than read-only. | `trusty-mpm` |
-| [0050](0050-colocated-path-tied-identity-with-delta-indexed-worktree-facets.md) | Colocated, path-tied identity with delta-indexed worktree facets | Accepted | Index data stays colocated and path-tied, one index per project copy covers its worktrees, BM25/KG split into separate indexes, worktrees are indexed as deltas against the merge-base, and embeddings stay main-only. | `trusty-search` |
+| [0050](0050-colocated-path-tied-identity-with-delta-indexed-worktree-facets.md) | Colocated, path-tied identity with delta-indexed worktree facets | Amended by 0052 | Index data stays colocated and path-tied, one index per project copy covers its worktrees, BM25/KG split into separate indexes, worktrees are indexed as deltas against the merge-base, and embeddings stay main-only. | `trusty-search` |
+| [0052](0052-one-index-per-checkout-worktrees-as-tagged-chunk-rows.md) | One index per checkout; worktrees are tagged chunk rows | Accepted | A durable checkout gets one search index covering all its worktrees; a worktree contributes only its modified files' chunks, tagged with the worktree they came from, deleted when the worktree is deleted, and returned by search results as provenance alongside the file path. | `trusty-search` |
 
 ## Notes
 

@@ -1,6 +1,6 @@
 # 0050. Colocated, path-tied index identity with delta-indexed worktree facets
 
-- **Status:** Accepted
+- **Status:** Amended by [0052](0052-one-index-per-checkout-worktrees-as-tagged-chunk-rows.md)
 - **Date:** 2026-08-16
 - **Scope:** crate `trusty-search` (index storage location, identity, worktree
   facet handling, embedding scope). References `trusty-memory` for contrast
