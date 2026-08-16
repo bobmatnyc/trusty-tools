@@ -83,6 +83,7 @@ pub mod git_identity;
 pub mod harness_root;
 pub mod home_trust_seed;
 pub mod hook;
+pub mod host_state_gate;
 pub mod idle_nudge;
 pub mod idle_parking;
 pub mod instruction_overrides;
