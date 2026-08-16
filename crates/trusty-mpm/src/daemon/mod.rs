@@ -90,10 +90,16 @@ pub async fn serve_http(
     state: Arc<DaemonState>,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
-    if tmux::TmuxDriver::is_available() {
-        info!("tmux control model available");
-    } else {
-        info!("tmux not found — sessions will need the PTY or SDK control model");
+    // #5784: report a gated environment as gated. Without this branch the
+    // refusal reads as "tmux not found", which sends an operator hunting for a
+    // missing binary instead of showing them the reassigned `$HOME` and the
+    // variable that lifts the gate.
+    match crate::core::host_state_gate::host_state_access().skip_reason() {
+        Some(reason) => tracing::warn!(
+            "tmux and host-process discovery are DISABLED for this daemon — {reason}"
+        ),
+        None if tmux::TmuxDriver::is_available() => info!("tmux control model available"),
+        None => info!("tmux not found — sessions will need the PTY or SDK control model"),
     }
 
     // Discover the trusty sidecar addresses and record them in shared state.

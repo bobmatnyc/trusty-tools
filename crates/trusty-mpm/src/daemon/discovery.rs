@@ -474,9 +474,22 @@ pub async fn discover_native_processes(state: &DaemonState) -> DiscoveryResult {
 /// it runs; a single entry point keeps both scans in lockstep.
 /// What: runs [`discover_claude_sessions`] then [`discover_native_processes`]
 /// and merges their [`DiscoveryResult`]s.
-/// Test: covered indirectly — each scan has its own unit coverage, and the
-/// merge is exercised by `discover_all_merges_results`.
+///
+/// Scratch-environment gate (#5784): both scans read state that `$HOME` does
+/// not isolate — the tmux server and the host process table — and adopting
+/// what they find makes the operator's real sessions this daemon's to resume,
+/// reap, and kill on shutdown, with the adopted record carrying the real
+/// project's working directory. `discover_claude_sessions` is already covered
+/// by [`super::tmux::TmuxDriver::discover`]'s own gate; the `ps`/`lsof` scan
+/// touches no tmux, so the check is repeated here to cover it.
+/// Test: `scratch_home_daemon_does_not_spawn_tmux`; the merge is exercised by
+/// `discover_all_merges_results`.
 pub async fn discover_all(state: &DaemonState) -> DiscoveryResult {
+    let access = crate::core::host_state_gate::host_state_access();
+    if let Some(reason) = access.skip_reason() {
+        tracing::warn!("#5784: session auto-discovery skipped — {reason}");
+        return DiscoveryResult::default();
+    }
     let mut result = discover_claude_sessions(state);
     let native = discover_native_processes(state).await;
     result.adopted += native.adopted;
