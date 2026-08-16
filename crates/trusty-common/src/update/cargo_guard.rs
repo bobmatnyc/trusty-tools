@@ -72,9 +72,9 @@ impl OwnershipGuard {
     /// Test: `move_aside_then_commit_removes_asides`,
     /// `sweep_restores_stale_aside_when_destination_missing`,
     /// `sweep_deletes_stale_aside_when_destination_exists`,
-    /// `sweep_leaves_live_process_asides_alone`;
-    /// `move_aside_failure_restores_already_moved` is covered indirectly by
-    /// `restore_puts_every_binary_back` (same restore path).
+    /// `sweep_leaves_live_process_asides_alone`; the rename-failure rollback
+    /// is covered indirectly by `restore_puts_every_binary_back` (same
+    /// restore path).
     pub(crate) fn move_aside(bin_dir: &Path, binaries: &[String]) -> anyhow::Result<Self> {
         let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
         for name in binaries {
@@ -247,12 +247,19 @@ fn restore_pairs(moved: &[(PathBuf, PathBuf)]) -> anyhow::Result<()> {
 /// (sorted for determinism). Entries whose pid is this process or still
 /// alive belong to a concurrent guard and are left alone. For a dead pid:
 /// when `dest` is missing the aside is renamed back (it is the only copy);
-/// otherwise the aside is deleted. Entirely best-effort — every failure is
-/// logged via `tracing` and never propagated, because an unswept aside must
-/// not block the upgrade that is about to run.
+/// otherwise the aside is deleted. When MORE than one stale aside exists
+/// with `dest` missing, the first (sorted) aside wins the restore and every
+/// later one is deleted WITH an explicit warning naming it — the copies may
+/// differ and the discard must never be silent (#5778 review). Deleting
+/// rather than `break`-ing is deliberate: a `break` merely defers the same
+/// deletion to the next sweep's dest-exists branch, where the log line no
+/// longer knows the file was the sibling of a restore. Entirely best-effort
+/// — every failure is logged via `tracing` and never propagated, because an
+/// unswept aside must not block the upgrade that is about to run.
 ///
 /// Test: `sweep_restores_stale_aside_when_destination_missing`,
 /// `sweep_deletes_stale_aside_when_destination_exists`,
+/// `sweep_restores_first_stale_aside_and_discards_the_rest`,
 /// `sweep_leaves_live_process_asides_alone`.
 fn sweep_stale_asides(bin_dir: &Path, name: &str, dest: &Path) {
     let prefix = format!(".{name}.pre-cargo.");
@@ -276,22 +283,45 @@ fn sweep_stale_asides(bin_dir: &Path, name: &str, dest: &Path) {
         })
         .collect();
     stale.sort();
+    // #5778: whether an earlier iteration of THIS sweep already restored an
+    // aside to `dest` — a later delete is then discarding a possibly
+    // different copy, and must say so rather than log as routine litter.
+    let mut restored_this_sweep = false;
     for aside in stale {
-        let result = if dest.exists() {
-            std::fs::remove_file(&aside)
+        if dest.exists() {
+            match std::fs::remove_file(&aside) {
+                Ok(()) if restored_this_sweep => tracing::warn!(
+                    aside = %aside.display(),
+                    dest = %dest.display(),
+                    "discarded an ADDITIONAL stale pre-cargo aside — an \
+                     earlier aside was already restored to the destination \
+                     this sweep and the two copies may differ (#5778)"
+                ),
+                Ok(()) => tracing::warn!(
+                    aside = %aside.display(),
+                    dest = %dest.display(),
+                    "recovered stale pre-cargo aside from a dead process (#5777)"
+                ),
+                Err(e) => tracing::warn!(
+                    aside = %aside.display(),
+                    "could not recover stale pre-cargo aside: {e}"
+                ),
+            }
         } else {
-            std::fs::rename(&aside, dest)
-        };
-        match result {
-            Ok(()) => tracing::warn!(
-                aside = %aside.display(),
-                dest = %dest.display(),
-                "recovered stale pre-cargo aside from a dead process (#5777)"
-            ),
-            Err(e) => tracing::warn!(
-                aside = %aside.display(),
-                "could not recover stale pre-cargo aside: {e}"
-            ),
+            match std::fs::rename(&aside, dest) {
+                Ok(()) => {
+                    restored_this_sweep = true;
+                    tracing::warn!(
+                        aside = %aside.display(),
+                        dest = %dest.display(),
+                        "recovered stale pre-cargo aside from a dead process (#5777)"
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    aside = %aside.display(),
+                    "could not recover stale pre-cargo aside: {e}"
+                ),
+            }
         }
     }
 }
@@ -479,6 +509,11 @@ mod tests {
     }
 
     /// Spawn and reap a short-lived child, returning its (now dead) pid.
+    ///
+    /// #5778 review: unix-only — `true` does not exist on Windows, and the
+    /// non-unix `pid_is_alive` stub reports every pid alive anyway, so the
+    /// sweep the callers exercise can never fire there.
+    #[cfg(unix)]
     fn dead_pid() -> u32 {
         let mut child = std::process::Command::new("true")
             .spawn()
@@ -542,6 +577,7 @@ mod tests {
     /// What: plants a stale aside under a reaped child's pid with no
     /// destination file, runs `move_aside` + `restore`, and asserts the
     /// binary is back at the destination with the stale copy's contents.
+    #[cfg(unix)]
     #[test]
     fn sweep_restores_stale_aside_when_destination_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -567,6 +603,7 @@ mod tests {
     /// What: plants a stale aside next to a live destination, runs
     /// `move_aside` + `restore`, and asserts the destination is unchanged and
     /// the litter is gone.
+    #[cfg(unix)]
     #[test]
     fn sweep_deletes_stale_aside_when_destination_exists() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -587,10 +624,51 @@ mod tests {
         assert!(hidden_entries(tmp.path()).is_empty(), "litter deleted");
     }
 
+    /// Why (#5778 review): with the destination missing and TWO stale asides
+    /// stranded for the same binary, the first (sorted) aside is restored
+    /// and every later one is discarded — deliberately, with an explicit
+    /// warning, never silently. Before this fix the second aside hit the
+    /// delete branch purely because the first restore made `dest` exist.
+    /// What: plants two dead-pid asides with distinct contents and no
+    /// destination, sweeps via `move_aside` + `restore`, and asserts the
+    /// destination holds the sorted-first aside's bytes with zero hidden
+    /// litter left behind.
+    #[cfg(unix)]
+    #[test]
+    fn sweep_restores_first_stale_aside_and_discards_the_rest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pid = dead_pid();
+        write(
+            &tmp.path().join(format!(".tctl.pre-cargo.{pid}.3")),
+            "first-copy",
+        );
+        write(
+            &tmp.path().join(format!(".tctl.pre-cargo.{pid}.7")),
+            "second-copy",
+        );
+
+        let guard = OwnershipGuard::move_aside(tmp.path(), &names(&["tctl"])).expect("move");
+        guard.restore().expect("restore");
+
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("tctl")).expect("read"),
+            "first-copy",
+            "the sorted-first stale aside must win the restore"
+        );
+        assert!(
+            hidden_entries(tmp.path()).is_empty(),
+            "additional stale asides are discarded (with a warning), not kept"
+        );
+    }
+
     /// Why: an aside owned by a LIVE process belongs to a concurrent guard —
     /// stealing it would race that guard's own settle.
     /// What: plants an aside under this test process's (live) pid and asserts
-    /// the sweep leaves it untouched.
+    /// the sweep leaves it untouched, byte for byte. A wrong sweep would have
+    /// renamed the aside to `tm` (and this guard would then carry it through
+    /// commit), so `tm` materialising is the failure signal for the final
+    /// assertion — it is not a vacuous never-existed check (#5778 review).
+    #[cfg(unix)]
     #[test]
     fn sweep_leaves_live_process_asides_alone() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -602,7 +680,14 @@ mod tests {
         let guard = OwnershipGuard::move_aside(tmp.path(), &names(&["tm"])).expect("move");
         guard.commit().expect("commit (nothing moved)");
 
-        assert!(live.exists(), "a live process's aside must never be swept");
-        assert!(!tmp.path().join("tm").exists(), "nothing restored");
+        assert_eq!(
+            std::fs::read_to_string(&live).expect("read live aside"),
+            "owned-by-a-live-guard",
+            "a live process's aside must never be swept or rewritten"
+        );
+        assert!(
+            !tmp.path().join("tm").exists(),
+            "a wrong sweep would have restored the live aside to `tm`"
+        );
     }
 }

@@ -395,7 +395,10 @@ mod tests {
     /// resolver whenever the test binary does not live in the cargo bin dir
     /// (it lives under `target/`, so it never does).
     /// What: with a resolvable canonical dir, `resolve_install_dir` returns
-    /// it — never the test executable's own parent directory.
+    /// it. Pinning equality with the canonical dir IS the whole contract; a
+    /// separate not-`current_exe().parent()` assertion is either implied by
+    /// it or wrong — a CI host may legitimately run tooling FROM the cargo
+    /// bin dir, where the two coincide — so none is made (#5778 review).
     #[test]
     fn resolve_install_dir_is_canonical_not_current_exe_parent() {
         let Some(canonical) = crate::download::default_install_dir() else {
@@ -406,16 +409,6 @@ mod tests {
             canonical,
             "self-update must target the canonical cargo bin dir (#5777)"
         );
-        let exe_parent = std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(std::path::Path::to_path_buf));
-        if let Some(parent) = exe_parent {
-            assert_ne!(
-                resolve_install_dir(),
-                parent,
-                "a target/ test binary's own directory must never be the destination"
-            );
-        }
     }
 
     /// Why: A writable directory must yield `WriteProbe::Writable` so the up-front

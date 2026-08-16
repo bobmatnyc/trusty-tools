@@ -223,7 +223,7 @@ async fn install_from_urls(
     // #5777: place ONLY the crate's expected binaries. Release tarballs also
     // ship `LICENSE`/`README.md` (mode 0755), which used to be installed into
     // the bin dir as if they were binaries.
-    let binary_names = expected_binaries_among(crate_name, &extracted);
+    let binary_names = expected_binaries_among(crate_name, &extract_dir, &extracted);
 
     if binary_names.is_empty() {
         return Err(anyhow::anyhow!(
@@ -247,15 +247,71 @@ async fn install_from_urls(
 /// up in bin dirs on real installs. An expected-name allowlist can.
 /// What: keeps, in extraction order, the names that appear in the shared
 /// [`trusty_common::bin_resolve::installed_binaries`] set for `crate_name`.
+/// A dropped file that carries the execute bit (checked against its copy in
+/// `extract_dir`) and is not an obvious documentation file is named in a
+/// `tracing::warn!` before being skipped — table drift used to produce a
+/// half-install with no trace at all (#5778 review).
 /// Test: `tests::expected_binaries_among_drops_documentation_files`,
 /// `tests::expected_binaries_among_keeps_multi_binary_sets`.
-fn expected_binaries_among(crate_name: &str, extracted: &[String]) -> Vec<String> {
+fn expected_binaries_among(
+    crate_name: &str,
+    extract_dir: &std::path::Path,
+    extracted: &[String],
+) -> Vec<String> {
     let expected = trusty_common::bin_resolve::installed_binaries(crate_name);
-    extracted
+    let mut kept: Vec<String> = Vec::new();
+    for name in extracted {
+        if expected.iter().any(|e| e == name) {
+            kept.push(name.clone());
+        } else if !is_documentation_file(name) && has_exec_bit(&extract_dir.join(name)) {
+            // #5778: a silently-dropped executable is a half-install in the
+            // making — the fix is a CRATE_BINARIES row, and nobody can add
+            // one for a file they never heard about.
+            tracing::warn!(
+                crate_name,
+                file = %name,
+                "tarball shipped an executable not in the shared \
+                 installed_binaries table; NOT installing it — if this is a \
+                 real binary, add it to trusty-common's CRATE_BINARIES (#5778)"
+            );
+        }
+    }
+    kept
+}
+
+/// Whether `name` is an obvious documentation file release tarballs ship.
+///
+/// Why (#5778): the allowlist drop-warn above must stay silent for the
+/// `LICENSE`/`README.md`/`CHANGELOG.md` files every release tarball carries
+/// at mode 0755 — those are the expected, boring drops.
+/// What: case-insensitive prefix match on LICENSE / README / CHANGELOG.
+/// Test: `tests::documentation_files_are_recognised`.
+fn is_documentation_file(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["LICENSE", "README", "CHANGELOG"]
         .iter()
-        .filter(|name| expected.iter().any(|e| e == *name))
-        .cloned()
-        .collect()
+        .any(|prefix| upper.starts_with(prefix))
+}
+
+/// Whether the file at `path` looks runnable — execute bit on Unix, plain
+/// existence elsewhere (no portable execute concept).
+///
+/// Why (#5778): the drop-warn should fire only for files that LOOK like
+/// binaries; a plain data file the table ignores is not a half-install risk.
+/// What: on Unix, any `0o111` bit in the file's mode; a missing or unreadable
+/// file is `false` (nothing to install, nothing to warn about).
+/// Test: exercised via the `tests::expected_binaries_among_drops_documentation_files`
+/// and `tests::expected_binaries_among_keeps_multi_binary_sets` fixtures.
+fn has_exec_bit(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 /// Resolve the default install directory — the canonical cargo bin dir
@@ -325,19 +381,21 @@ mod tests {
     /// cannot exclude them, only an expected-name allowlist can. This test
     /// FAILS against the pre-#5777 place-everything behaviour (which this
     /// helper now gates).
-    /// What: documentation files are dropped; the crate's binaries survive.
+    /// What: extends the crate's OWN expected set — taken live from the
+    /// shared `installed_binaries` table, so a future table edit cannot
+    /// silently change what this test asserts (#5778 review) — with the two
+    /// doc files, and asserts exactly the doc files are dropped.
     #[test]
     fn expected_binaries_among_drops_documentation_files() {
-        let extracted = vec![
-            "trusty-search".to_owned(),
-            "trusty-embedderd".to_owned(),
-            "LICENSE".to_owned(),
-            "README.md".to_owned(),
-        ];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bins = trusty_common::bin_resolve::installed_binaries("trusty-search");
+        let mut extracted = bins.clone();
+        extracted.push("LICENSE".to_owned());
+        extracted.push("README.md".to_owned());
         assert_eq!(
-            expected_binaries_among("trusty-search", &extracted),
-            vec!["trusty-search".to_owned(), "trusty-embedderd".to_owned()],
-            "only the crate's expected binaries may be placed (#5777)"
+            expected_binaries_among("trusty-search", dir.path(), &extracted),
+            bins,
+            "LICENSE/README must be dropped; the crate's own binary set survives (#5777)"
         );
     }
 
@@ -348,19 +406,44 @@ mod tests {
     /// the `tctl` alias; an unknown crate falls back to its own name.
     #[test]
     fn expected_binaries_among_keeps_multi_binary_sets() {
+        let dir = tempfile::tempdir().expect("tempdir");
         let extracted = vec![
             "trusty-installer".to_owned(),
             "tctl".to_owned(),
             "LICENSE".to_owned(),
         ];
         assert_eq!(
-            expected_binaries_among("trusty-installer", &extracted),
+            expected_binaries_among("trusty-installer", dir.path(), &extracted),
             vec!["trusty-installer".to_owned(), "tctl".to_owned()]
         );
         assert_eq!(
-            expected_binaries_among("tga", &["tga".to_owned(), "README.md".to_owned()]),
+            expected_binaries_among(
+                "tga",
+                dir.path(),
+                &["tga".to_owned(), "README.md".to_owned()]
+            ),
             vec!["tga".to_owned()]
         );
+    }
+
+    /// Why (#5778): the allowlist drop-warn must stay silent for the doc
+    /// files every tarball ships and remain armed for anything binary-shaped.
+    /// What: LICENSE/README/CHANGELOG variants are recognised in any case and
+    /// with suffixes; binary-like names are not.
+    #[test]
+    fn documentation_files_are_recognised() {
+        for doc in [
+            "LICENSE",
+            "LICENSE-MIT",
+            "README.md",
+            "readme.txt",
+            "CHANGELOG.md",
+        ] {
+            assert!(is_documentation_file(doc), "{doc} is a doc file");
+        }
+        for bin in ["trusty-search", "tctl", "libonnxruntime.so"] {
+            assert!(!is_documentation_file(bin), "{bin} is not a doc file");
+        }
     }
 
     /// Why: An `Installed` outcome must expose the version string and non-empty

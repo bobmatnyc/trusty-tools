@@ -20,7 +20,7 @@
 #
 # Environment variables:
 #   TRUSTY_VERSION         Pin trusty-installer version (e.g. "0.2.0")
-#   TRUSTY_INSTALL_DIR     Install dir (default: ${CARGO_HOME:-~/.cargo}/bin)
+#   TRUSTY_INSTALL_DIR     Install dir (default: ${CARGO_HOME:-$HOME/.cargo}/bin)
 #   TRUSTY_YES             Set to 1 to skip all prompts (same as -y)
 #   TRUSTY_NO_MODIFY_PATH  Set to 1 to skip PATH modification
 #   TRUSTY_FORCE           Set to 1 to re-download even if already installed

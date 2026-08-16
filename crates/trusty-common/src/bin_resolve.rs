@@ -805,28 +805,34 @@ mod tests {
 
     /// Why (#5777): the alias/multi-binary crates are exactly the ones the
     /// cargo ownership guard existed to not break — a table row silently
-    /// dropping one of them reintroduces the exit-101 collision on that alias.
-    /// What: pins the four crates the ticket names as hard requirements, plus
-    /// the two other multi-binary rows, against their `[[bin]]` ground truth.
+    /// dropping one of them reintroduces the exit-101 collision on that
+    /// alias. An earlier version of this test hard-coded a verbatim mirror of
+    /// the table, which a future row edit would sail past; two independent
+    /// review rounds flagged that (#5778 review).
+    /// What: iterates [`CRATE_BINARIES`] itself, so every row — present and
+    /// future — is exercised through [`installed_binaries`]; then pins the
+    /// four ticket-named alias binaries the table must never lose, the one
+    /// drift a lookup-only iteration cannot catch (a deleted row).
     #[test]
     fn installed_binaries_covers_multi_binary_crates() {
-        let cases: &[(&str, &[&str])] = &[
-            ("trusty-installer", &["trusty-installer", "tctl"]),
-            ("trusty-mpm", &["tm", "trusty-mpm"]),
-            (
-                "trusty-memory",
-                &["trusty-memory", "trusty-memory-mcp-bridge"],
-            ),
-            ("trusty-search", &["trusty-search", "trusty-embedderd"]),
-            ("trusty-agents", &["tagent"]),
-            ("trusty-audit", &["trusty-audit", "taudit"]),
-            ("trusty-code", &["tcode"]),
-        ];
-        for (krate, expected) in cases {
+        for (krate, expected) in CRATE_BINARIES {
             assert_eq!(
                 installed_binaries(krate),
                 expected.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
-                "binary set for {krate} must match its Cargo.toml [[bin]] targets"
+                "binary set for {krate} must come from its CRATE_BINARIES row"
+            );
+        }
+        // #5777 hard requirements: these aliases are what a crate-name-only
+        // guard breaks on; deleting a table row must fail here, loudly.
+        for (krate, alias) in [
+            ("trusty-installer", "tctl"),
+            ("trusty-mpm", "tm"),
+            ("trusty-search", "trusty-embedderd"),
+            ("trusty-agents", "tagent"),
+        ] {
+            assert!(
+                installed_binaries(krate).iter().any(|b| b == alias),
+                "{krate} must install `{alias}` (#5777 hard requirement)"
             );
         }
     }
