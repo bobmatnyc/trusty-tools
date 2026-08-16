@@ -1,6 +1,6 @@
 # 0012. Per-instance GUID and marker-file canonical identity for trusty-search indexes
 
-- **Status:** Accepted
+- **Status:** Amended by [0051](0051-palace-id-stays-hyphen-joined-owner-and-project-fields-added.md), specifically §1's implicit separator choice.
 - **Date:** 2026-06-25
 - **Accepted:** 2026-06-25
 - **Scope:** trusty-search (index discovery, registration, move-relink,
