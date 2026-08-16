@@ -1,0 +1,2 @@
+Changed
+- `tm hook --pm-guard` now decides a `git commit` in a main checkout on what is STAGED rather than on the verb (ADR-0049). A staged set of documents and configuration commits there, provided the daemon reports no other live writer sharing that HEAD; any staged source file denies, and the refusal names the offending paths. A commit whose staged set does not describe it — nothing staged, an unreadable index, or `-a`/`--amend`/`--include`/`--only`/a pathspec — keeps the previous unconditional deny. `git add` is unaffected: it moves no ref. #5782, #5781

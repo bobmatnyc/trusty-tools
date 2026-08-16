@@ -98,8 +98,24 @@
 //!   direction this carve-out can afford; the reverse cost a whole `git merge`
 //!   its deny.
 //!
+//! **The commit rule reads the index, and is the one branch here that spawns a
+//! subprocess (ADR-0049).** Everything above is filesystem-lexical, and the
+//! commit rule was too until the owner ruled that documents may be committed in
+//! a main checkout. Which files a commit will land is a question only git can
+//! answer, so [`evaluate_main_checkout_commit_command`] runs
+//! [`trusty_mpm::core::staged_paths::staged_paths`] — but only after both
+//! lexical halves already match, so ordinary Bash traffic never pays for it,
+//! the same discipline the HEAD-move rule uses before its daemon call. A
+//! documents-only staged set then takes the same live-writer query, because a
+//! commit moves the shared HEAD exactly as far as a pull does. Every other
+//! arm — a staged source file, an unreadable index, an empty index, and every
+//! flag form that commits content the index does not hold — keeps the
+//! unconditional deny ADR-0048 decision 4 shipped, so this rule can only turn a
+//! deny into an allow and never the reverse.
+//!
 //! Test: `is_whole_tree_destructive_*`, `destructive_target_dir_*`,
-//! `commit_target_dir_*`, `main_checkout_head_move_*`,
+//! `commit_target_dir_*`, `classify_staged_commit_*`,
+//! `commit_flags_leave_the_index_authoritative_*`, `main_checkout_head_move_*`,
 //! `starts_a_head_move_*` below;
 //! `is_main_checkout_*` in `trusty_mpm::core::project_aliases`;
 //! `pm_guard_denies_the_incident_commands_in_a_main_checkout` and siblings in
@@ -109,9 +125,11 @@
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::project_aliases::{is_main_checkout, main_checkout_root};
+use trusty_mpm::core::staged_paths::staged_paths;
 
 use super::{PathEnv, git_dash_c_override, resolve_target_path, split_shell_segments};
 use crate::commands::hook_rewrite::first_command_token;
+use crate::commands::pm_guard::is_source_code_path;
 use crate::commands::pm_guard_bash::shell_lex;
 
 /// Deny a whole-tree-destructive git command aimed at a main checkout.
@@ -138,7 +156,24 @@ pub(crate) fn evaluate_main_checkout_destructive_command(
     is_main_checkout(&target).then(|| deny_reason(&verb, &target))
 }
 
-/// Deny a `git commit` aimed at a main checkout (ADR-0048).
+/// What a `git commit` aimed at a main checkout is allowed to do (ADR-0049).
+///
+/// Why: the rule stopped being decidable from the verb alone when the owner
+/// ruled that documents may be committed there, so the caller needs two
+/// answers, not one. A source commit is refused outright; a docs-only commit is
+/// permitted unless the daemon reports another live writer sharing the HEAD,
+/// which only the caller can ask.
+/// Test: `evaluate_main_checkout_commit_*`.
+pub(crate) enum CommitVerdict {
+    /// Refuse, with the reason already built.
+    Deny(String),
+    /// Documents and configuration only. Permit unless another live writer
+    /// holds this HEAD; `dirs` are the query keys, target first then root.
+    DocsOnly { root: PathBuf, dirs: [PathBuf; 2] },
+}
+
+/// Classify a `git commit` aimed at a main checkout (ADR-0048, amended by
+/// ADR-0049).
 ///
 /// Why: ADR-0044 makes the main checkout read-only apart from documents and
 /// configuration, and a commit is the step that makes a write permanent on a
@@ -148,10 +183,25 @@ pub(crate) fn evaluate_main_checkout_destructive_command(
 /// one checkout and one of them committed on whichever branch HEAD happened to
 /// point at. Blocking the source write alone would not have stopped it — the
 /// files were already there.
-/// What: `Some(reason)` when a `git commit` segment's effective directory
-/// [`is_main_checkout`]; `None` otherwise. Every other git verb, and a commit
-/// anywhere else, falls through to ALLOW. `commit` is matched on the verb
-/// alone, with no flag conditions: there is no non-writing form of it.
+///
+/// ADR-0049 then found the other half of that rule stranded work: documents are
+/// WRITABLE in a main checkout and a commit was denied unconditionally, so a
+/// doc could be written where it could never be landed. The gate now reads what
+/// is STAGED rather than the verb — the verb is `git commit` either way, and
+/// only the content tells a safe commit from an unsafe one.
+///
+/// What: `None` (ALLOW, this rule's business does not arise) unless a
+/// `git commit` segment's effective directory belongs to a main checkout. When
+/// it does, [`classify_staged_commit`] decides between
+/// [`CommitVerdict::Deny`] and [`CommitVerdict::DocsOnly`]. The staged set is
+/// read only once both lexical halves match, so ordinary Bash traffic never
+/// pays for the subprocess.
+///
+/// **The direction this can move a verdict is one-way.** Before ADR-0049 every
+/// reachable case here returned a deny. Every arm that is not a positively
+/// evidenced docs-only commit still returns one, so this classifier can turn a
+/// deny into an allow and can never turn an allow into a deny. That is what
+/// keeps it off ordinary work without a #5356-shaped false-deny risk.
 ///
 /// Scope, stated because the near neighbours are tempting: `git checkout
 /// <branch>` and `git switch <branch>` are NOT covered here even though
@@ -161,12 +211,162 @@ pub(crate) fn evaluate_main_checkout_destructive_command(
 /// filed for. `pull`, `merge` and `rebase` left that family in ADR-0048
 /// decision 10 and are handled by [`main_checkout_head_move`], which needs no
 /// argument analysis: none of the three has a form that leaves HEAD alone.
+/// `git add` is not covered by any of them and deliberately so: it writes the
+/// index and moves no ref, so it creates none of the shared-HEAD hazard these
+/// rules exist for (ADR-0049 decision 4).
 /// Test: `commit_target_dir_*`, `evaluate_main_checkout_commit_*`.
-pub(crate) fn evaluate_main_checkout_commit_command(command: &str, cwd: &Path) -> Option<String> {
-    let (_, target) = git_verb_target_dir(command, cwd, &PathEnv::from_process(), |verb, _| {
-        verb == "commit"
-    })?;
-    is_main_checkout(&target).then(|| commit_deny_reason(&target))
+pub(crate) fn evaluate_main_checkout_commit_command(
+    command: &str,
+    cwd: &Path,
+) -> Option<CommitVerdict> {
+    let (_, target, tail) =
+        git_verb_target_dir_with_tail(command, cwd, &PathEnv::from_process(), |verb, _| {
+            verb == "commit"
+        })?;
+    // `main_checkout_root` rather than `is_main_checkout` for the reason #5769
+    // gave the HEAD-move rule: `cd crates/foo && git commit` resolves a
+    // subdirectory that shares the checkout's HEAD, and the writer query has to
+    // be keyed on a directory a delegation record can actually carry.
+    let root = main_checkout_root(&target)?;
+    Some(classify_staged_commit(
+        &tail,
+        staged_paths(&target),
+        &target,
+        root,
+    ))
+}
+
+/// The verdict for a commit already known to be aimed at a main checkout.
+///
+/// Why: split from [`evaluate_main_checkout_commit_command`] so the whole
+/// policy is a pure function of the argv tail and the staged set. Every arm
+/// below is a failure arm except one, and a test that had to build a real
+/// repository to reach each of them would exercise git rather than the policy.
+/// What: [`CommitVerdict::DocsOnly`] only when BOTH halves are positively
+/// evidenced — the flags leave the index authoritative
+/// ([`commit_flags_leave_the_index_authoritative`]) AND the staged set is
+/// non-empty and contains no source file. Everything else is a
+/// [`CommitVerdict::Deny`], which is the pre-ADR-0049 behaviour:
+///
+/// * a staged set containing source, mixed or not, names the offending files;
+/// * `None` — git could not be asked — is UNKNOWN, not empty;
+/// * an empty staged set is not evidence of a docs commit, and `git commit`
+///   with nothing staged is either an error or one of the forms below;
+/// * a flag that commits content the index does not hold (`-a`, `--amend`,
+///   `--include`, `--only`, a bare pathspec) makes the staged set a lie about
+///   what will land, so the staged set cannot license it.
+///
+/// Test: `classify_staged_commit_permits_documents_and_configuration`,
+/// `classify_staged_commit_denies_source_and_names_it`,
+/// `classify_staged_commit_denies_a_mixed_set_and_names_only_the_source`,
+/// `classify_staged_commit_denies_an_unreadable_or_empty_index`,
+/// `classify_staged_commit_denies_the_forms_the_index_does_not_describe`.
+fn classify_staged_commit(
+    tail: &[String],
+    staged: Option<Vec<String>>,
+    target: &Path,
+    root: PathBuf,
+) -> CommitVerdict {
+    if !commit_flags_leave_the_index_authoritative(tail) {
+        return CommitVerdict::Deny(commit_deny_reason(&root));
+    }
+    let Some(staged) = staged.filter(|s| !s.is_empty()) else {
+        return CommitVerdict::Deny(commit_deny_reason(&root));
+    };
+    let source: Vec<&str> = staged
+        .iter()
+        .map(String::as_str)
+        .filter(|p| is_source_code_path(p))
+        .collect();
+    if source.is_empty() {
+        CommitVerdict::DocsOnly {
+            dirs: [target.to_path_buf(), root.clone()],
+            root,
+        }
+    } else {
+        CommitVerdict::Deny(staged_source_deny_reason(&root, &source))
+    }
+}
+
+/// `git commit` flags under which the index IS what the commit will contain.
+///
+/// Why: the docs-only carve-out rests entirely on the staged set describing the
+/// commit, and four flag families break that. `-a`/`--all` stages every tracked
+/// modification at commit time; `-i`/`--include` adds paths to the index first;
+/// `-o`/`--only` commits the named paths from the working tree instead of the
+/// index; `--amend` reuses the previous commit's tree, whose contents this
+/// process never looked at. A bare pathspec implies `--only`. Under any of
+/// them the staged set answers a different question than the one being asked.
+/// What: an ALLOWLIST, walked left to right, so an unrecognised token — a
+/// pathspec, a short cluster, a flag added by a future git — is `false`. That
+/// direction is safe by construction here: `false` returns the pre-ADR-0049
+/// deny, which is what the caller did for every commit before this rule
+/// existed. A denylist would have the opposite bias and would license a commit
+/// on a flag nobody had heard of.
+///
+/// `-S`/`--gpg-sign` sit in the no-value list because git accepts their
+/// optional key id only glued (`-S<keyid>`, `--gpg-sign=<keyid>`), never as a
+/// following token.
+/// Test: `commit_flags_leave_the_index_authoritative_accepts_message_forms`,
+/// `commit_flags_leave_the_index_authoritative_rejects_content_flags`,
+/// `commit_flags_leave_the_index_authoritative_rejects_a_pathspec`.
+fn commit_flags_leave_the_index_authoritative(tail: &[String]) -> bool {
+    const NO_VALUE: &[&str] = &[
+        "-s",
+        "--signoff",
+        "--no-signoff",
+        "-n",
+        "--no-verify",
+        "--verify",
+        "-q",
+        "--quiet",
+        "-v",
+        "--verbose",
+        "-e",
+        "--edit",
+        "--no-edit",
+        "--allow-empty",
+        "--allow-empty-message",
+        "--status",
+        "--no-status",
+        "--no-post-rewrite",
+        "-S",
+        "--gpg-sign",
+        "--no-gpg-sign",
+    ];
+    const WITH_VALUE: &[&str] = &[
+        "-m",
+        "--message",
+        "-F",
+        "--file",
+        "--author",
+        "--date",
+        "--cleanup",
+        "--trailer",
+    ];
+
+    let mut expecting_value = false;
+    for token in tail {
+        if expecting_value {
+            expecting_value = false;
+            continue;
+        }
+        // `--flag=value` and `-S<keyid>` carry their value glued on.
+        let name = match token.split_once('=') {
+            Some((head, _)) if head.starts_with("--") => head,
+            _ if token.starts_with("-S") => "-S",
+            _ => token.as_str(),
+        };
+        if NO_VALUE.contains(&name) {
+            continue;
+        }
+        if WITH_VALUE.contains(&name) {
+            expecting_value = name == token.as_str();
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 /// The verb and directory of a HEAD-moving git command aimed at a main
@@ -305,12 +505,16 @@ pub(crate) fn head_move_deny_reason(verb: &str, target: &Path, live: &[String]) 
     )
 }
 
-/// Build the deny message for a blocked commit.
+/// Build the deny message for a blocked commit whose content this rule could
+/// not read as documents.
 ///
 /// Why: as [`deny_reason`] — a bare refusal is retried differently and worse.
 /// This one has to be clear that the work is not lost and does not need
 /// redoing, only moved, because the reflex on a blocked commit is to reach for
-/// `git stash` or a second `-m` attempt.
+/// `git stash` or a second `-m` attempt. Since ADR-0049 it also has to name the
+/// docs-only carve-out, because the reader who lands here after editing one
+/// `.md` file has usually hit the `-a`/`--amend`/nothing-staged arm and the fix
+/// is one `git add`, not a worktree.
 /// Test: `commit_deny_reason_names_the_path_and_the_remedy`.
 fn commit_deny_reason(target: &Path) -> String {
     format!(
@@ -318,12 +522,82 @@ fn commit_deny_reason(target: &Path) -> String {
          read-only apart from documents and configuration, and other sessions are standing on \
          this same git HEAD. A commit here lands on whichever branch HEAD currently points at — \
          the reported failure is a commit landing on another workstream's branch and the branch \
-         it belonged to left empty, with no error at any step. Commit from a worktree instead: \
-         ask the PM to re-dispatch you with `isolation: \"worktree\"`, or move the work with \
+         it belonged to left empty, with no error at any step. A DOCUMENTS-ONLY commit is \
+         permitted here (ADR-0049), but only when the staged set says so: stage the documents \
+         explicitly (`git add -- <paths>`) and commit with a plain `git commit -m …`. This call \
+         was refused because the staged set does not describe what it would commit — nothing is \
+         staged, the index could not be read, or the command carries `-a`, `--amend`, \
+         `--include`, `--only`, or a pathspec, each of which commits content the index does not \
+         hold. For source changes, commit from a worktree instead: ask the PM to re-dispatch you \
+         with `isolation: \"worktree\"`, or move the work with \
          `git worktree add .claude/worktrees/<name>` and commit there. Nothing is lost — the \
-         changes are still in the tree. Read-only git (`status`, `log`, `diff`) and everything \
-         under `.claude/worktrees/**` are never blocked by this rule.",
+         changes are still in the tree. Read-only git (`status`, `log`, `diff`), `git add`, and \
+         everything under `.claude/worktrees/**` are never blocked by this rule.",
         target.display()
+    )
+}
+
+/// Build the deny message for a commit whose staged set contains source.
+///
+/// Why: ADR-0049 decision 2 — a mixed staged set fails safe, and a refusal that
+/// does not say WHICH file made it unsafe leaves the reader unstaging by
+/// guesswork. Naming them turns the remedy into a mechanical
+/// `git restore --staged` of a listed path.
+/// What: names the checkout, every staged source path, and the two ways
+/// forward — unstage the source and commit the documents here, or move the
+/// whole change to a worktree.
+/// Test: `staged_source_deny_reason_names_every_source_file`.
+fn staged_source_deny_reason(target: &Path, source: &[&str]) -> String {
+    let mut names: Vec<&str> = source.to_vec();
+    names.sort_unstable();
+    names.dedup();
+    format!(
+        "Source commit denied in a main checkout (ADR-0044, amended by ADR-0049): {} is a \
+         project's main checkout, which is read-only apart from documents and configuration, and \
+         other sessions are standing on this same git HEAD. Documents may be committed here; \
+         these staged paths are source and may not be: {}. A mixed staged set is refused as a \
+         whole rather than split, because a commit is one object and half of it cannot be sent \
+         elsewhere. Two ways forward. To land the documents from here, unstage the source \
+         (`git restore --staged -- <paths above>`) and commit again. To land the source, do it \
+         in a worktree: ask the PM to re-dispatch you with `isolation: \"worktree\"`, or \
+         `git worktree add .claude/worktrees/<name>` and commit there. Nothing is lost — the \
+         changes are still in the tree, and `git add` is never blocked by this rule.",
+        target.display(),
+        names.join(", ")
+    )
+}
+
+/// Build the deny message for a documents-only commit refused because another
+/// live writer shares the HEAD.
+///
+/// Why: ADR-0049 decision 3 gives a docs commit the same concurrency test
+/// ADR-0048 decision 10 gives `pull`/`merge`/`rebase`, because the hazard is
+/// the same one — a commit MOVES HEAD, and the branch it moves is whichever one
+/// the other session's uncommitted work is sitting on. The reader has to be
+/// told that the content was fine and the timing was not, or the obvious retry
+/// is to unstage the document that was never the problem.
+/// What: names the checkout, the writers the daemon reports, and the remedy.
+/// It attributes the claim to the daemon's records for the reason
+/// [`head_move_deny_reason`] gives: a record can outlive its agent.
+/// Test: `docs_commit_deny_reason_names_the_writer_and_attributes_the_claim`.
+pub(crate) fn docs_commit_deny_reason(target: &Path, live: &[String]) -> String {
+    let mut names: Vec<&str> = live.iter().map(String::as_str).collect();
+    names.sort_unstable();
+    names.dedup();
+    format!(
+        "Documents-only commit denied in a SHARED main checkout (ADR-0049): the staged set is \
+         documents and configuration, which may be committed in {} — but a commit moves HEAD, \
+         and the daemon's delegation records name {} as running there with no worktree of its \
+         own, possibly dispatched by a different session standing in the same directory. Moving \
+         HEAD under a live writer changes the branch its uncommitted work sits on, and git \
+         reports no error when it happens. The content is not the problem here and unstaging it \
+         will not help. Wait for that agent to finish and commit then, or commit from a worktree: \
+         ask the PM to re-dispatch you with `isolation: \"worktree\"`, or \
+         `git worktree add .claude/worktrees/<name>`. If you believe that record is stale — the \
+         agent finished without its stop signal reaching the daemon — report it to the PM rather \
+         than retrying this command. Nothing is lost; the staged changes are still in the tree.",
+        target.display(),
+        names.join(", ")
     )
 }
 
@@ -371,6 +645,24 @@ fn git_verb_target_dir(
     env: &PathEnv,
     matches: impl Fn(&str, &[String]) -> bool,
 ) -> Option<(String, PathBuf)> {
+    git_verb_target_dir_with_tail(command, cwd, env, matches).map(|(verb, dir, _)| (verb, dir))
+}
+
+/// [`git_verb_target_dir`], also handing back the matched segment's argv tail.
+///
+/// Why: the commit rule decides on the flags as well as the directory
+/// (ADR-0049 — `--amend` and `-a` commit content the index does not describe),
+/// and the tail was already computed here to run `matches`. Returning it beats
+/// a second lexer in the commit rule, which is the copy that would drift on
+/// `cd` tracking and `git -C` resolution.
+/// Test: as [`git_verb_target_dir`], plus
+/// `commit_target_dir_hands_back_the_argv_tail`.
+fn git_verb_target_dir_with_tail(
+    command: &str,
+    cwd: &Path,
+    env: &PathEnv,
+    matches: impl Fn(&str, &[String]) -> bool,
+) -> Option<(String, PathBuf, Vec<String>)> {
     let mut effective_cwd = cwd.to_path_buf();
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
@@ -400,14 +692,15 @@ fn git_verb_target_dir(
         let Some(idx) = argv.iter().position(|t| *t == subcommand) else {
             continue;
         };
-        if !matches(&subcommand, &argv[idx + 1..]) {
+        let tail = &argv[idx + 1..];
+        if !matches(&subcommand, tail) {
             continue;
         }
         let base = match git_dash_c_override(&argv, idx) {
             Some(dash_c) => resolve_target_path(dash_c, &effective_cwd, env),
             None => effective_cwd.clone(),
         };
-        return Some((subcommand, base));
+        return Some((subcommand, base, tail.to_vec()));
     }
     None
 }
@@ -736,25 +1029,31 @@ mod tests {
 
     #[test]
     fn evaluate_main_checkout_commit_denies_in_a_checkout_and_allows_in_a_worktree() {
+        // `main_checkout_dir` fabricates `.git` as a directory, so `git diff
+        // --cached` cannot run there and the staged set is UNKNOWN — the
+        // deny arm of ADR-0049 decision 5, which is also the pre-ADR-0049
+        // behaviour for every commit.
         let checkout = main_checkout_dir();
-        let reason = evaluate_main_checkout_commit_command("git commit -m 'wip'", checkout.path())
-            .expect("a commit in a main checkout must be denied");
+        let CommitVerdict::Deny(reason) =
+            evaluate_main_checkout_commit_command("git commit -m 'wip'", checkout.path())
+                .expect("a commit in a main checkout must be classified")
+        else {
+            panic!("an unreadable staged set must deny");
+        };
         assert!(reason.contains("ADR-0044"), "{reason}");
 
         // A linked worktree carries a `.git` FILE. Committing there is the
         // whole remedy the deny offers, so it must work.
         let worktree = tempfile::tempdir().expect("tempdir");
         std::fs::write(worktree.path().join(".git"), "gitdir: /elsewhere").expect("write .git");
-        assert_eq!(
-            evaluate_main_checkout_commit_command("git commit -m 'wip'", worktree.path()),
-            None
+        assert!(
+            evaluate_main_checkout_commit_command("git commit -m 'wip'", worktree.path()).is_none()
         );
 
         // Not a repository at all: nothing to protect.
         let plain = tempfile::tempdir().expect("tempdir");
-        assert_eq!(
-            evaluate_main_checkout_commit_command("git commit -m 'wip'", plain.path()),
-            None
+        assert!(
+            evaluate_main_checkout_commit_command("git commit -m 'wip'", plain.path()).is_none()
         );
     }
 
@@ -764,6 +1063,242 @@ mod tests {
         assert!(reason.contains("/repo/main"), "{reason}");
         assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
         assert!(reason.contains("Nothing is lost"), "{reason}");
+        // ADR-0049: the reader who lands here after editing one `.md` needs to
+        // know the carve-out exists and what it wants.
+        assert!(reason.contains("ADR-0049"), "{reason}");
+        assert!(reason.contains("git add"), "{reason}");
+    }
+
+    // ── ADR-0049: the commit gate reads the staged set ──────────────────────
+
+    /// `classify_staged_commit` with the shapes the caller supplies, so each
+    /// case reads as the argv tail plus the staged set and nothing else.
+    fn classify(tail: &[&str], staged: Option<&[&str]>) -> CommitVerdict {
+        let tail: Vec<String> = tail.iter().map(|s| (*s).to_string()).collect();
+        let staged = staged.map(|s| s.iter().map(|p| (*p).to_string()).collect());
+        classify_staged_commit(
+            &tail,
+            staged,
+            Path::new("/repo/crates"),
+            PathBuf::from("/repo"),
+        )
+    }
+
+    fn is_docs_only(verdict: &CommitVerdict) -> bool {
+        matches!(verdict, CommitVerdict::DocsOnly { .. })
+    }
+
+    fn deny_text(verdict: &CommitVerdict) -> &str {
+        match verdict {
+            CommitVerdict::Deny(reason) => reason,
+            CommitVerdict::DocsOnly { .. } => panic!("expected a deny"),
+        }
+    }
+
+    #[test]
+    fn classify_staged_commit_permits_documents_and_configuration() {
+        // ADR-0049 decision 1 and 2: the same non-source classification the
+        // write boundary uses, so a file that may be WRITTEN here may be
+        // COMMITTED here.
+        for staged in [
+            &["docs/adr/0049-x.md"][..],
+            &["CLAUDE.md", "Cargo.toml"][..],
+            &[".claude/settings.json", "TASK.md", "Makefile"][..],
+            &["crates/trusty-mpm/changelog.d/5782-x.md"][..],
+        ] {
+            let verdict = classify(&["-m", "docs: x"], Some(staged));
+            assert!(is_docs_only(&verdict), "{staged:?} is documents-only");
+        }
+        // The DocsOnly arm hands back both query keys, target first.
+        let CommitVerdict::DocsOnly { root, dirs } = classify(&[], Some(&["README.md"])) else {
+            panic!("expected DocsOnly");
+        };
+        assert_eq!(root, PathBuf::from("/repo"));
+        assert_eq!(
+            dirs,
+            [PathBuf::from("/repo/crates"), PathBuf::from("/repo")]
+        );
+    }
+
+    #[test]
+    fn classify_staged_commit_denies_source_and_names_it() {
+        let verdict = classify(&["-m", "feat: x"], Some(&["crates/a/src/lib.rs"]));
+        let reason = deny_text(&verdict);
+        assert!(reason.contains("crates/a/src/lib.rs"), "{reason}");
+        assert!(reason.contains("ADR-0049"), "{reason}");
+        assert!(reason.contains("git restore --staged"), "{reason}");
+    }
+
+    #[test]
+    fn classify_staged_commit_denies_a_mixed_set_and_names_only_the_source() {
+        // ADR-0049 decision 6: fail safe on a mixed set, and name what made it
+        // unsafe. Naming the documents too would send the reader unstaging the
+        // files that were fine.
+        let verdict = classify(
+            &["-m", "wip"],
+            Some(&["docs/x.md", "src/a.rs", "Cargo.toml", "src/b.py"]),
+        );
+        let reason = deny_text(&verdict);
+        assert!(
+            reason.contains("src/a.rs") && reason.contains("src/b.py"),
+            "{reason}"
+        );
+        assert!(!reason.contains("docs/x.md"), "{reason}");
+        assert!(!reason.contains("Cargo.toml"), "{reason}");
+    }
+
+    #[test]
+    fn classify_staged_commit_denies_an_unreadable_or_empty_index() {
+        // ADR-0045's distinction, on a gate: `None` is UNKNOWN and
+        // `Some(vec![])` is empty, and neither is evidence of a docs commit.
+        for staged in [None, Some(&[][..])] {
+            let verdict = classify(&["-m", "wip"], staged);
+            assert!(deny_text(&verdict).contains("ADR-0044"), "{staged:?}");
+        }
+    }
+
+    #[test]
+    fn classify_staged_commit_denies_the_forms_the_index_does_not_describe() {
+        // ADR-0049 decision 5. Each of these commits content the staged set
+        // does not hold, so a staged set of pure documents cannot license it.
+        for tail in [
+            &["-a", "-m", "wip"][..],
+            &["-am", "wip"][..],
+            &["--all"][..],
+            &["--amend", "--no-edit"][..],
+            &["-i", "--", "src/lib.rs"][..],
+            &["--include", "src/lib.rs"][..],
+            &["-o", "docs/x.md"][..],
+            &["--only", "docs/x.md"][..],
+            // A bare pathspec implies `--only`.
+            &["docs/x.md"][..],
+            &["-m", "wip", "--", "docs/x.md"][..],
+        ] {
+            let verdict = classify(tail, Some(&["docs/x.md"]));
+            assert!(
+                !is_docs_only(&verdict),
+                "`git commit {}` must not be licensed by the index",
+                tail.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn commit_flags_leave_the_index_authoritative_accepts_message_forms() {
+        // The forms an agent actually types. A false `false` here costs the
+        // carve-out; it never costs a new deny, because `false` is the
+        // pre-ADR-0049 behaviour.
+        for tail in [
+            &[][..],
+            &["-m", "docs: x"][..],
+            &["--message", "docs: x"][..],
+            &["--message=docs: x"][..],
+            &["-m", "docs: x", "-s"][..],
+            &["-m", "x", "--no-verify"][..],
+            &["-q", "-m", "x"][..],
+            &["--author", "A <a@b>", "-m", "x"][..],
+            &["--date=2026-08-16", "-m", "x"][..],
+            &["-S", "-m", "x"][..],
+            &["-Sdeadbeef", "-m", "x"][..],
+            &["--gpg-sign=deadbeef", "-m", "x"][..],
+            &["-F", "/tmp/msg", "--cleanup=strip"][..],
+            &["--trailer", "Closes: #1", "-m", "x"][..],
+            &["--allow-empty", "-m", "x"][..],
+            // A message that happens to contain a content flag is a VALUE,
+            // consumed by the `-m` before it.
+            &["-m", "--amend"][..],
+        ] {
+            let tail: Vec<String> = tail.iter().map(|s| (*s).to_string()).collect();
+            assert!(
+                commit_flags_leave_the_index_authoritative(&tail),
+                "`git commit {}` leaves the index authoritative",
+                tail.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn commit_flags_leave_the_index_authoritative_rejects_content_flags() {
+        for tail in [
+            &["-a"][..],
+            &["--all"][..],
+            &["--amend"][..],
+            &["-i"][..],
+            &["--include"][..],
+            &["-o"][..],
+            &["--only"][..],
+            // Unrecognised: a short cluster, and a flag this list has never
+            // heard of. The allowlist denies both rather than guessing.
+            &["-sn"][..],
+            &["--some-future-flag"][..],
+        ] {
+            let tail: Vec<String> = tail.iter().map(|s| (*s).to_string()).collect();
+            assert!(
+                !commit_flags_leave_the_index_authoritative(&tail),
+                "`git commit {}` must not be licensed by the index",
+                tail.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn commit_flags_leave_the_index_authoritative_rejects_a_pathspec() {
+        for tail in [
+            &["docs/x.md"][..],
+            &["-m", "x", "docs/x.md"][..],
+            &["--"][..],
+        ] {
+            let tail: Vec<String> = tail.iter().map(|s| (*s).to_string()).collect();
+            assert!(
+                !commit_flags_leave_the_index_authoritative(&tail),
+                "a pathspec is `--only` by implication: {}",
+                tail.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn commit_target_dir_hands_back_the_argv_tail() {
+        let env = PathEnv::from_process();
+        let (verb, dir, tail) = git_verb_target_dir_with_tail(
+            "cd /repo && git -C sub commit --amend -m wip",
+            Path::new("/start"),
+            &env,
+            |verb, _| verb == "commit",
+        )
+        .expect("a commit must resolve");
+        assert_eq!(verb, "commit");
+        assert_eq!(dir, PathBuf::from("/repo/sub"));
+        assert_eq!(tail, vec!["--amend", "-m", "wip"]);
+    }
+
+    #[test]
+    fn staged_source_deny_reason_names_every_source_file() {
+        let reason = staged_source_deny_reason(Path::new("/repo"), &["src/b.rs", "src/a.rs"]);
+        assert!(
+            reason.contains("src/a.rs") && reason.contains("src/b.rs"),
+            "{reason}"
+        );
+        // Sorted, so two runs over the same set read identically.
+        assert!(
+            reason.find("src/a.rs") < reason.find("src/b.rs"),
+            "{reason}"
+        );
+        assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+    }
+
+    #[test]
+    fn docs_commit_deny_reason_names_the_writer_and_attributes_the_claim() {
+        let reason = docs_commit_deny_reason(Path::new("/repo"), &["rust-engineer".to_string()]);
+        assert!(reason.contains("/repo"), "{reason}");
+        assert!(reason.contains("rust-engineer"), "{reason}");
+        assert!(reason.contains("ADR-0049"), "{reason}");
+        // The claim is the daemon's, not this process's — a record can outlive
+        // its agent. Same wording discipline as `head_move_deny_reason`.
+        assert!(reason.contains("delegation records"), "{reason}");
+        // Unstaging is the wrong retry here and the text has to say so.
+        assert!(reason.contains("unstaging it will not help"), "{reason}");
+        assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
     }
 
     #[test]

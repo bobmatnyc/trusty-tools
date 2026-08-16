@@ -72,11 +72,19 @@ A user may point Obsidian, Cursor, an IDE, or any other tool at the tm checkout 
 
 git recovers anything committed. It recovers **nothing** uncommitted or untracked, which is precisely the content this section exists to protect. Every requirement in §3.3 follows from here.
 
-### 0.5 The "inspection-only" rule does not carry over (NORMATIVE)
+### 0.5 The tm checkout is source-restricted, not read-only (NORMATIVE)
 
-`CLAUDE.md`'s rule that the main checkout is inspection-only was written about **the user's own clone**, under a topology where sessions lived elsewhere. It does not apply to the tm checkout, which is where sessions are now meant to live and write.
+`CLAUDE.md`'s rule that the main checkout is inspection-only was written about **the user's own clone**, under a topology where sessions lived elsewhere. It does not apply to the tm checkout as an inspection-only rule: the tm checkout is where sessions are meant to live and write, and it is not read-only.
 
-Stated so nobody re-imports the wrong constraint later: the tm checkout is not read-only, and read-only-ness is not a property this model wants, needs, or should try to enforce for it. The rule about the user's own clone is unaffected and still holds.
+**A narrower boundary does apply, and it is mechanically enforced.** [ADR-0044](../adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md), [ADR-0048](../adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md) and [ADR-0049](../adr/0049-docs-commits-are-permitted-in-a-main-checkout.md) make any main checkout — the tm checkout included — **source-restricted**, for the PM and every agent it dispatches:
+
+- **Documents and configuration are writable**, and since ADR-0049 they are also **committable** from the checkout they were written in, provided the staged set holds nothing else and no other live writer shares the HEAD.
+- **Source files are not writable there, and a commit whose staged set contains one is refused.** `tm hook --pm-guard` enforces both. Source work belongs in a worktree.
+- **`git pull`, `merge` and `rebase` are refused while another live writer shares the directory** (ADR-0048 decision 10). `git fetch` and `git add` are never restricted — neither moves HEAD.
+
+This section originally stated that read-only-ness "is not a property this model wants, needs, or should try to enforce" for the tm checkout. The first half of that stands and the second does not. The model does not want the checkout READ-ONLY, and nothing above makes it read-only — most of what a session writes there it may still write and now also land. But a boundary *is* enforced for it, and this spec no longer claims otherwise. ADR-0049 decision 7 is the record of that reconciliation; [ADR-0030](../adr/0030-sessions-own-many-workstreams-from-the-tm-checkout.md) is otherwise unaffected and remains Proposed.
+
+The rule about the user's own clone is unaffected and still holds.
 
 ---
 
@@ -143,7 +151,7 @@ The verified gap in today's code — `workspace_path` written once at spawn, no 
 Two consequences implementers must honour:
 
 - **Every dispatch carries an explicit worktree path.** An agent working in a workstream is launched with that workstream's `worktree_path` as its cwd. Inheriting the parent's cwd would land it in the tm checkout. `CLAUDE.md` already requires naming the worktree path in every dispatch prompt; under this model that requirement becomes load-bearing.
-- **Every command the session itself runs against a workstream is explicitly scoped** (`git -C <path>`, `cargo --manifest-path`, or an equivalent). An unscoped command runs against the tm checkout. That is not a safety failure — the tm checkout is a legitimate place to write (§0.5) — but it is a correctness failure, because the command then reports on the wrong tree.
+- **Every command the session itself runs against a workstream is explicitly scoped** (`git -C <path>`, `cargo --manifest-path`, or an equivalent). An unscoped command runs against the tm checkout. That is not a safety failure for documents and configuration — the tm checkout is a legitimate place to write those (§0.5) — but it is a correctness failure, because the command then reports on the wrong tree. For a source write or a commit, the same unscoped command is also refused by the §0.5 boundary.
 
 ### 2.3 Workstream states (NORMATIVE)
 

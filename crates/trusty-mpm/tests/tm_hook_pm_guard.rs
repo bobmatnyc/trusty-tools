@@ -1533,6 +1533,12 @@ fn pm_guard_denies_a_commit_in_a_main_checkout() {
     // The commit is where a write becomes permanent on a branch another
     // session is standing on — the step that produced `f1da7bce` landing on a
     // branch belonging to a different workstream.
+    //
+    // Since ADR-0049 this fixture reaches the deny through the UNKNOWN-index
+    // arm: `main_checkout_fixture` fabricates `.git` as a directory, so `git
+    // diff --cached` cannot run there and no staged set can license the commit.
+    // The documents-only carve-out is exercised against a real repository in
+    // `pm_guard_allows_a_documents_only_commit_in_a_main_checkout`.
     let (_dir, repo) = main_checkout_fixture();
     let stdout = run_pm_guard(&bash_payload_at("git commit -m 'wip'", &repo, ""), &[]);
     assert_denied(&stdout);
@@ -1554,6 +1560,272 @@ fn pm_guard_denies_a_commit_in_a_main_checkout() {
     for command in ["git status --short", "git log --oneline -5", "git add -A"] {
         let stdout = run_pm_guard(&bash_payload_at(command, &repo, ""), &[]);
         assert_eq!(stdout.trim(), "", "`{command}` must stay allowed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0049 — a documents-only commit is permitted in a main checkout
+// ---------------------------------------------------------------------------
+//
+// Every case here needs a REAL repository, because the whole rule is what git
+// reports as staged. `main_checkout_fixture`'s fabricated `.git` directory
+// reaches the unknown-index deny and would make each of these pass for the
+// wrong reason.
+
+/// A real git repository that classifies as a project main checkout, plus a
+/// `stage` closure for putting paths in its index.
+///
+/// Returns `None` when `git init` fails, which is the only way this can be
+/// unavailable; the caller skips rather than failing, matching how the rest of
+/// this workspace treats a missing git.
+fn real_main_checkout() -> Option<(tempfile::TempDir, std::path::PathBuf)> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let ok = Command::new("git")
+        .args(["init", "-q", "."])
+        .current_dir(&repo)
+        .status()
+        .ok()?
+        .success();
+    ok.then_some((dir, repo))
+}
+
+/// Write `name` under `repo` and put it in the index.
+fn stage(repo: &std::path::Path, name: &str) {
+    let path = repo.join(name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir");
+    }
+    std::fs::write(&path, "x").expect("write");
+    assert!(
+        Command::new("git")
+            .args(["add", "--", name])
+            .current_dir(repo)
+            .status()
+            .expect("git add")
+            .success(),
+        "git add {name}"
+    );
+}
+
+/// A commit payload carrying the session id the writer query needs.
+fn commit_payload(command: &str, cwd: &std::path::Path, extra_fields: &str) -> String {
+    bash_payload_at(
+        command,
+        cwd,
+        &format!(
+            r#"{extra_fields}"session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_commit","#
+        ),
+    )
+}
+
+#[test]
+fn pm_guard_allows_a_documents_only_commit_in_a_main_checkout() {
+    // THE regression test (ADR-0049 decision 1). Against pre-fix code this
+    // payload is DENIED: `evaluate_main_checkout_commit_command` matched the
+    // verb `commit`, found a main checkout, and returned a reason with no
+    // reference to what was staged. The allow below can only come from the
+    // staged-set classifier.
+    //
+    // ADR-0044 decision 1 already made every one of these files WRITABLE here;
+    // before this change none of them could be landed from where they were
+    // written.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    for name in [
+        "docs/adr/0049-x.md",
+        "CLAUDE.md",
+        "Cargo.toml",
+        ".claude/settings.json",
+        "TASK.md",
+        "Makefile",
+    ] {
+        stage(&repo, name);
+    }
+    let stdout = run_pm_guard(&commit_payload("git commit -m 'docs: x'", &repo, ""), &[]);
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "a documents-only commit in a main checkout must be allowed, got: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_allows_a_dispatched_agents_documents_only_commit() {
+    // The rule sits ahead of Guards 1 and 4, so both automatic subagent
+    // populations reach it. They must reach the ALLOW too — an agent writing a
+    // changelog fragment in the shared checkout is the case this exists for.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "crates/trusty-mpm/changelog.d/5782-x.md");
+    for (extra_fields, env) in [
+        (
+            r#""agent_id":"agent-xyz789","agent_type":"documentation","#,
+            vec![],
+        ),
+        ("", vec![("CLAUDE_MPM_SUB_AGENT", "1")]),
+    ] {
+        let stdout = run_pm_guard_at_with_env(
+            &commit_payload("git commit -m 'docs: x'", &repo, extra_fields),
+            "http://127.0.0.1:1/",
+            &repo,
+            &env,
+        );
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "a dispatched agent's documents-only commit must be allowed, got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_commit_whose_staged_set_contains_source() {
+    // ADR-0049 decisions 1, 2 and 6. Source-only and MIXED are one deny, and
+    // it names the source paths so the remedy is mechanical — naming the
+    // documents too would send the reader unstaging the files that were fine.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/keep.md");
+    stage(&repo, "crates/a/src/lib.rs");
+    stage(&repo, "crates/a/src/other.py");
+
+    let stdout = run_pm_guard(&commit_payload("git commit -m 'wip'", &repo, ""), &[]);
+    assert_denied(&stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(reason.contains("crates/a/src/lib.rs"), "{reason}");
+    assert!(reason.contains("crates/a/src/other.py"), "{reason}");
+    assert!(
+        !reason.contains("docs/keep.md"),
+        "the deny must name only what made the set unsafe: {reason}"
+    );
+    assert!(reason.contains("git restore --staged"), "{reason}");
+    assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+}
+
+#[test]
+fn pm_guard_denies_a_commit_the_staged_set_does_not_describe() {
+    // ADR-0049 decision 5. Each of these commits content the index does not
+    // hold, so a staged set of pure documents cannot license any of them.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/x.md");
+    for command in [
+        "git commit -a -m 'wip'",
+        "git commit -am 'wip'",
+        "git commit --amend --no-edit",
+        "git commit --only docs/x.md -m 'wip'",
+        "git commit -m 'wip' -- docs/x.md",
+    ] {
+        let stdout = run_pm_guard(&commit_payload(command, &repo, ""), &[]);
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("ADR-0049"),
+            "`{command}` must name the carve-out it missed: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_commit_with_nothing_staged() {
+    // An empty index is not evidence of a documents commit — it is `git
+    // commit` about to error, or about to be retried with `-a`. Deny is the
+    // pre-ADR-0049 behaviour and stays.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    let stdout = run_pm_guard(&commit_payload("git commit -m 'wip'", &repo, ""), &[]);
+    assert_denied(&stdout);
+}
+
+#[test]
+fn pm_guard_denies_a_documents_only_commit_beside_a_live_writer() {
+    // ADR-0049 decision 3, and the hazard the owner's ruling does not repeal:
+    // a commit MOVES HEAD, so a documents commit lands on whichever branch the
+    // other session's uncommitted work is sitting on, exactly as a source
+    // commit would. Same directory-keyed query ADR-0048 decision 10 uses.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/x.md");
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    let stdout = run_pm_guard_at(
+        &commit_payload("git commit -m 'docs: x'", &repo, ""),
+        &url,
+        &repo,
+    );
+
+    assert_denied(&stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(reason.contains("ADR-0049"), "{reason}");
+    assert!(
+        reason.contains("rust-engineer"),
+        "the deny must name the writer it protected: {reason}"
+    );
+    assert!(
+        reason.contains("unstaging it will not help"),
+        "the content was never the problem and the text must say so: {reason}"
+    );
+    assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+}
+
+#[test]
+fn pm_guard_allows_a_documents_only_commit_when_nobody_else_is_writing() {
+    // The other side of decision 3, and the common case: a solo session sees
+    // no friction at all. The mock answers an empty roster, which is also what
+    // an unreachable daemon degrades to.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/x.md");
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let stdout = run_pm_guard_at(
+        &commit_payload("git commit -m 'docs: x'", &repo, ""),
+        &url,
+        &repo,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "a documents commit with no other writer must be allowed, got: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_never_gates_git_add_in_a_main_checkout() {
+    // ADR-0049 decision 4, checked against the code rather than assumed:
+    // staging writes the index and moves no ref, so it creates none of the
+    // shared-HEAD hazard the commit and HEAD-move rules exist for. Source
+    // staged is still allowed — the gate is at the commit.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    for command in [
+        "git add -A",
+        "git add -- crates/a/src/lib.rs",
+        "git add .",
+        "git stage docs/x.md",
+    ] {
+        let stdout = run_pm_guard_at(&commit_payload(command, &repo, ""), &url, &repo);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "`{command}` moves no ref and must stay allowed, got: {stdout}"
+        );
     }
 }
 
