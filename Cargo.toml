@@ -12,7 +12,17 @@
 # as the two other Tauri GUIs — bare builds skip it) and is excluded from the
 # headless CI jobs (WebKit2GTK-dependent); a dedicated `agents-ui` CI job
 # build- and lint-verifies it.
-members = ["crates/*", "crates/trusty-agents/ui/src-tauri"]
+#
+# `crates/trusty-audit/ui/src-tauri` (#5477 phase 1, package `trusty-audit-ui`)
+# is nested the same way and is here for the same reason — the `crates/*` glob
+# reaches one level, not three. It gets the same treatment throughout: absent
+# from `default-members`, `--exclude`d from the headless workspace jobs, and
+# build/lint-verified by a dedicated `audit-ui` CI job.
+members = [
+    "crates/*",
+    "crates/trusty-agents/ui/src-tauri",
+    "crates/trusty-audit/ui/src-tauri",
+]
 resolver = "2"
 # Exclude paths inside copied projects that contain stray manifests we don't
 # want Cargo to treat as workspace members. trusty-agents bundles a `weather_alerter`
@@ -42,7 +52,8 @@ exclude = []
 # that `trusty-agents`' own build.rs populates, so a `--workspace` run that
 # happens to check/build `trusty-agents-ui` before that build script has run
 # panics on the missing path — a real cargo build-order race, not merely a
-# missing-toolchain skip (#3053).
+# missing-toolchain skip (#3053). `trusty-audit-ui` (#5477) is the fourth crate
+# in this category and carries the same `--exclude` for the same two reasons.
 #
 # Maintenance note: Cargo has no "members minus one" glob for
 # `default-members`, so this list must be updated by hand when a new crate
@@ -158,6 +169,13 @@ trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
 # fail-closed prebuilt download entry point (#5491, #5495). trusty-audit is
 # `publish = false`, so this entry exists for in-tree resolution.
 trusty-installer = { path = "crates/trusty-installer", version = "0.9" }
+# trusty-audit: consumed as a LIBRARY by the auditor client's Tauri shell
+# (`trusty-audit-ui`, #5477 phase 1), which calls `Session::execute` in-process
+# rather than serving HTTP or shelling out to the `taudit` binary — DOC-68 §11
+# fixes the shell as a view over that one API. Both crates are
+# `publish = false`, so there is no `version` to keep in step; the path entry
+# exists purely for in-tree resolution.
+trusty-audit = { path = "crates/trusty-audit" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────
 anyhow = "1"
