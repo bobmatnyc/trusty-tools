@@ -9,7 +9,7 @@
 //! Test: `round_trip_send_and_inbox`, `mark_read_is_atomic_under_concurrency`,
 //! `mark_read_is_idempotent`.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use std::path::Path;
 use std::sync::Arc;
 use trusty_common::memory_core::palace::{Drawer, RoomType};
@@ -205,131 +205,26 @@ pub fn cwd_palace_slug() -> Result<String> {
 /// injection protocol). The pin-file read path therefore always uses the
 /// non-writing variant (`project_slug_at_readonly`).
 ///
-/// Resolution order (issue #1217 extends the pre-existing pin-file primacy with
-/// project-identity derivation):
+/// Resolution order is [`trusty_common::palace_resolve::resolve_palace`]'s and
+/// is documented there: env override, committed
+/// `.trusty-tools/trusty-memory.yaml` pin, git `owner/repo`, then `parent/dir`
+/// of the MAIN worktree root. All git calls are best-effort and read-only; the
+/// pin read never writes, keeping the hook path clean.
 ///
-/// 1. `TRUSTY_MEMORY_PALACE` env override, slugified — wins unconditionally.
-/// 2. If `.trusty-tools/trusty-memory.yaml` exists anywhere above `start`,
-///    return its `palace` field — the canonical, rename-stable slug. This is
-///    what keeps existing palaces from being orphaned by the new derivation: a
-///    committed pin always wins, so a project already pinned to `trusty-tools`
-///    stays `trusty-tools`.
-/// 3. Otherwise derive from project identity via
-///    [`crate::palace_id_derive::derive_palace_id`]: the git `owner/repo` slug
-///    from `remote.origin.url` (`bobmatnyc/trusty-tools` →
-///    `bobmatnyc-trusty-tools`), else the `parent/dir` slug of the git toplevel
-///    (or `start` when not in a repo), e.g. `Projects/trusty-tools` →
-///    `projects-trusty-tools`.
-///
-/// All git calls are best-effort (no network, short-lived); a corrupt pin file
-/// at step 2 is logged to stderr and falls through to step 3 — it never emits
-/// to stdout and never panics.
-/// What: returns `Ok(slug)` or an error when no slug can be derived (empty
-/// cwd basename in a non-git context with no override).
-/// Test: `tests::cwd_palace_slug_uses_git_toplevel`,
-/// `tests::cwd_palace_slug_falls_back_to_parent_dir`,
-/// `tests::cwd_palace_slug_at_prefers_pin_file`,
+/// A pin file that exists but cannot be parsed is an ERROR here, not a
+/// fallthrough (#5811) — deriving past a broken pin hands the caller a
+/// plausible name and sends its writes to a palace nobody chose.
+/// What: returns `Ok(slug)`, or an error when no level yields one.
+/// Test: `tests::cwd_palace_slug_at_prefers_pin_file`,
 /// `tests::cwd_palace_slug_at_reads_pin_from_subdir`,
 /// `tests::cwd_palace_slug_at_pin_read_does_not_create_pin_file`,
 /// `tests::cwd_palace_slug_at_env_override_wins`,
-/// `tests::cwd_palace_slug_at_uses_git_owner_repo`.
+/// `tests::cwd_palace_slug_at_uses_git_owner_repo`, plus
+/// `trusty_common::palace_resolve`'s own suite.
 pub fn cwd_palace_slug_at(start: &Path) -> Result<String> {
-    // Step 1 (HIGHEST PRECEDENCE): explicit env override.
-    if let Some(ov) = crate::palace_id_derive::palace_override_from_env() {
-        let slug = crate::messaging::slugify_string(&ov);
-        if !slug.is_empty() {
-            return Ok(slug);
-        }
-    }
-
-    // Step 2 (PRIMARY): honour a committed pin file *only* — `pinned_slug_at`
-    // returns `Some` strictly when `.trusty-tools/trusty-memory.yaml` exists,
-    // and never falls back to the directory basename (that fallback would
-    // shadow the git derivation below and reduce #1217 to a no-op inside any
-    // project dir). This is the backward-compat anchor: any project already
-    // carrying a pin file keeps its existing palace id regardless of the new
-    // git/dir derivation, so existing palaces are never orphaned. The read is
-    // side-effect-free (no lazy pin write), keeping the hook path clean.
-    if let Some(slug) = crate::project_root::pinned_slug_at(start) {
-        if !slug.is_empty() {
-            return Ok(slug);
-        }
-    }
-
-    // Step 3: derive from project identity (git owner/repo, else parent/dir).
-    // Resolve the git toplevel (best-effort) so the parent/dir fallback uses the
-    // repo root rather than whatever subdirectory `start` happens to be.
-    let project_root = git_toplevel(start).unwrap_or_else(|| start.to_path_buf());
-    let git_remote = git_remote_origin(start);
-    if let Some(slug) =
-        crate::palace_id_derive::derive_palace_id(&project_root, git_remote.as_deref(), None)
-    {
-        if !slug.is_empty() {
-            return Ok(slug);
-        }
-    }
-
-    Err(anyhow!(
-        "could not derive palace slug from cwd {} — set {} or pass --palace explicitly",
-        start.display(),
-        crate::palace_id_derive::PALACE_OVERRIDE_ENV
-    ))
-}
-
-/// Resolve the git working-tree root for `start` via `git rev-parse`.
-///
-/// Why: the `parent/dir` fallback must describe the *project* root, not the
-/// arbitrary subdirectory a hook was launched from. Resolving the toplevel
-/// first makes `cd repo/crates/foo` and `cd repo` derive the same slug.
-/// What: runs `git rev-parse --show-toplevel` in `start`; returns the trimmed
-/// path on success, `None` when git is absent, `start` is not in a repo, or the
-/// command fails. Best-effort and side-effect-free (no network).
-/// Test: covered via `cwd_palace_slug_at_uses_git_owner_repo` and the existing
-/// `cwd_palace_slug_uses_git_toplevel`.
-fn git_toplevel(start: &Path) -> Option<std::path::PathBuf> {
-    let output = std::process::Command::new("git")
-        .arg("rev-parse")
-        .arg("--show-toplevel")
-        .current_dir(start)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let toplevel = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if toplevel.is_empty() {
-        None
-    } else {
-        Some(std::path::PathBuf::from(toplevel))
-    }
-}
-
-/// Read `remote.origin.url` for the repo containing `start`.
-///
-/// Why: the primary identity source for the default palace is the GitHub-style
-/// `owner/repo` path, which lives in the origin remote URL. Shelling out to
-/// `git config` (rather than reading `.git/config` directly) transparently
-/// handles worktrees, where `.git` is a file pointing at the parent repo.
-/// What: runs `git -C <start> config --get remote.origin.url`; returns the
-/// trimmed URL on success, `None` when there is no origin remote, git is
-/// absent, or `start` is not in a repo. Best-effort, no network.
-/// Test: covered via `cwd_palace_slug_at_uses_git_owner_repo`.
-fn git_remote_origin(start: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(start)
-        .arg("config")
-        .arg("--get")
-        .arg("remote.origin.url")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if url.is_empty() {
-        None
-    } else {
-        Some(url)
-    }
+    // #5811: every level now lives in one place. This used to inline the four
+    // steps, which made trusty-memory the only crate that read the pin — the
+    // other four callers derived past it, and trusty-mpm's pin-blind answer
+    // became the `TRUSTY_MEMORY_PALACE` variable that outranks the pin here.
+    Ok(trusty_common::palace_resolve::resolve_palace(start)?.id)
 }

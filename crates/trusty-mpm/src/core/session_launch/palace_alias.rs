@@ -49,6 +49,19 @@ pub(crate) fn maybe_register_palace_alias(project_path: &Path, git_remote: Optio
         return;
     }
 
+    // #5811: a committed pin is equally deliberate, and since the session now
+    // resolves THROUGH the pin, the `owner-repo` name it used to be aliased
+    // from is never asked for. Registering an alias here would mint a permanent
+    // redirect for a name nothing resolves to.
+    if let Some(root) = trusty_common::palace_resolve::find_project_root(project_path)
+        && matches!(
+            trusty_common::palace_resolve::read_project_pin(&root),
+            Ok(Some(_)) | Err(_)
+        )
+    {
+        return;
+    }
+
     let probed = match git_remote {
         Some(_) => None,
         None => git_remote_origin(project_path),

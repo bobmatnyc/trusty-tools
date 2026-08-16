@@ -352,26 +352,33 @@ pub(super) fn pm_guard_hook_value() -> serde_json::Value {
 /// wrote. ADR-0042 deleted that injector; the slug now becomes the
 /// `TRUSTY_MEMORY_PALACE` variable the spawn exports, resolved through
 /// [`crate::core::mcp_session_env::session_mcp_env`].
-/// What: reads the `TRUSTY_MEMORY_PALACE` env override (highest precedence),
-/// resolves the git remote (explicit arg, else best-effort `git -C
-/// <project_path> config --get remote.origin.url`), and returns
-/// `trusty_common::derive_palace_id(project_path, git_remote, override)`. Returns
-/// `None` when nothing usable can be derived (no override, no remote, root-less
-/// path), in which case the spawn exports no palace variable and trusty-memory
-/// falls back to its own cwd derivation. Best-effort and side-effect-free
-/// beyond the read-only `git config` probe; never panics.
-/// Test: `resolve_palace_slug_*` (override / git-fallback / none), plus
+///
+/// // #5811: this called `derive_palace_id` — the PURE three-level core, which
+/// never reads the committed `.trusty-tools/trusty-memory.yaml` pin. The value
+/// it produced then became `TRUSTY_MEMORY_PALACE`, which is precedence level 1,
+/// so a derived slug outranked the pin it was supposed to lose to: this repo's
+/// sessions resolved `bobmatnyc-trusty-tools` while its pin said `trusty-tools`.
+/// Routing through [`trusty_common::palace_resolve::resolve_palace_with_remote`]
+/// means the exported variable already carries the pinned answer.
+///
+/// What: returns the resolved palace id, or `None` when no level yields one OR
+/// when a pin file exists but cannot be trusted. `None` means the spawn exports
+/// no palace variable and the session's trusty-memory resolves for itself —
+/// through the same entry point, so it reaches the same verdict rather than
+/// papering over the failure. Read-only; never panics.
+/// Test: `resolve_palace_slug_*` (override / git-fallback / pin / none), plus
 /// `session_mcp_env_exports_palace_when_memory_enabled`.
 pub(crate) fn resolve_palace_slug(project_path: &Path, git_remote: Option<&str>) -> Option<String> {
-    let override_value = trusty_common::palace_override_from_env();
-    // Prefer the explicit (cloned-from) remote; otherwise probe the workspace's
-    // own origin remote so a local-path session still pins by repo identity.
-    let probed = match git_remote {
-        Some(_) => None,
-        None => git_remote_origin(project_path),
-    };
-    let effective_remote = git_remote.or(probed.as_deref());
-    trusty_common::derive_palace_id(project_path, effective_remote, override_value.as_deref())
+    match trusty_common::palace_resolve::resolve_palace_with_remote(project_path, git_remote) {
+        Ok(resolution) => Some(resolution.id),
+        Err(e) => {
+            tracing::warn!(
+                project = %project_path.display(),
+                "could not resolve a palace for this session ({e}); exporting no palace variable"
+            );
+            None
+        }
+    }
 }
 
 /// Read `remote.origin.url` for the repo containing `start` (best-effort).

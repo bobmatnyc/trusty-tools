@@ -104,19 +104,20 @@ impl Default for CatchupOptions {
 /// `derive_palace_id_for_git_remote_unchanged`; also covered indirectly by
 /// `generate_catchup_context_renders_all_sections`.
 fn derive_palace_id_for(project_dir: &Path) -> String {
-    let remote = std::process::Command::new("git")
-        .arg("-C")
-        .arg(project_dir)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let override_val = crate::palace_override_from_env();
-    crate::derive_palace_id(project_dir, remote.as_deref(), override_val.as_deref())
-        .unwrap_or_else(|| "unknown-project".to_string())
+    // #5811: this probed the remote itself and called the PURE three-level
+    // core, so it answered without the committed pin — a catch-up digest read
+    // a different palace than the daemon wrote to whenever a project was
+    // pinned. Both now route through the same four-level entry point.
+    match crate::palace_resolve::resolve_palace(project_dir) {
+        Ok(resolution) => resolution.id,
+        Err(e) => {
+            tracing::warn!(
+                project = %project_dir.display(),
+                "could not resolve a palace for catch-up ({e}); reporting the placeholder"
+            );
+            "unknown-project".to_string()
+        }
+    }
 }
 
 /// Probe the HEAD git SHA of a repo (for watermark advancement).

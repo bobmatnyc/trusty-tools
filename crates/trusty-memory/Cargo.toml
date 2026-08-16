@@ -81,7 +81,7 @@ path = "src/bin/mcp_bridge.rs"
 # the index itself rather than a UDS client for a subprocess that holds it.
 # `uds-supervisor` is NOT dropped — trusty-console and trusty-agents still
 # depend on the shared `UdsServiceSupervisor` for trusty-review / trusty-analyze.
-trusty-common = { path = "../trusty-common", version = "0.35", default-features = false, features = ["mcp", "memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config"] }
+trusty-common = { path = "../trusty-common", version = "0.35", default-features = false, features = ["mcp", "memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the

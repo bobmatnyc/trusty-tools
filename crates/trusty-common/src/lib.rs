@@ -708,6 +708,30 @@ pub use palace_id::{
     parent_dir_slug, repo_slug_from_git_remote,
 };
 
+/// The single entry point for "which palace does this project use?" (#5811).
+///
+/// Why: [`palace_id::derive_palace_id`] is the PURE core and covers only three
+/// of the four precedence levels — the committed `.trusty-tools/trusty-memory.yaml`
+/// pin needs filesystem I/O, so it lived above the core in ONE caller
+/// (trusty-memory). Every other caller therefore answered the question without
+/// the pin, and trusty-mpm's pin-blind answer became the `TRUSTY_MEMORY_PALACE`
+/// variable exported into managed sessions — the highest-precedence slot. A
+/// derived name outranked the pin it was meant to lose to. This module owns the
+/// whole rule, I/O included, so the split cannot reappear.
+/// What: Gated behind the `palace-resolve` feature. Exposes
+/// [`palace_resolve::resolve_palace`], [`palace_resolve::resolve_palace_with_remote`],
+/// [`palace_resolve::PalaceResolution`], [`palace_resolve::PalaceSource`],
+/// [`palace_resolve::PalaceResolveError`], the pin-file schema, and the shared
+/// `git` probes.
+/// Test: `cargo test -p trusty-common --features palace-resolve -- palace_resolve`.
+#[cfg(feature = "palace-resolve")]
+pub mod palace_resolve;
+#[cfg(feature = "palace-resolve")]
+pub use palace_resolve::{
+    PIN_FILE_REL, PIN_SCHEMA_VERSION, PalaceResolution, PalaceResolveError, PalaceSource,
+    ProjectPin, resolve_palace, resolve_palace_with_remote,
+};
+
 /// Palace-level alias map: redirect one palace name to another (issue #1939).
 ///
 /// Why: trusty-mpm pins a managed session to the `owner-repo` palace slug, but

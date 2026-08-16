@@ -569,6 +569,58 @@ mod tests {
     // sets the env var in the test harness. No unit test here — the env-var
     // bypass is a test-only escape hatch and not part of the public API contract.
 
+    // -----------------------------------------------------------------------
+    // Fail-closed on an untrustworthy pin (#5811)
+    // -----------------------------------------------------------------------
+
+    /// Why: THE fail-open regression. A pin file that exists but does not parse
+    /// used to log a warning and fall through to the directory basename, so a
+    /// project whose committed pin had a typo silently resolved to a different
+    /// palace and its writes landed where nobody intended. Against the pre-fix
+    /// commit this returns `Some("some-project")`; it must now return `None` so
+    /// the caller stops instead of guessing.
+    /// What: writes a syntactically-valid but wrong-shaped pin, then asserts the
+    /// read-only resolver declines rather than falling back.
+    /// Test: itself.
+    #[test]
+    fn malformed_pin_does_not_fall_back_to_basename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("some-project");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(TRUSTY_TOOLS_DIR)).unwrap();
+        fs::write(
+            root.join(PIN_FILE_REL),
+            "schema_version: 1\npalace:\n  not: a-string\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            project_slug_at_readonly(&root),
+            None,
+            "a malformed pin must stop resolution, not fall through to the basename"
+        );
+        assert_eq!(
+            pinned_slug_at(&root),
+            None,
+            "a malformed pin must not present as an absent pin"
+        );
+    }
+
+    /// Why: the fail-closed rule must not swallow the ordinary case — an ABSENT
+    /// pin is not an untrustworthy pin, and must still fall through to the
+    /// basename so unpinned projects keep working.
+    /// Test: itself.
+    #[test]
+    fn absent_pin_still_falls_back_to_basename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("unpinned-project");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        assert_eq!(
+            project_slug_at_readonly(&root).as_deref(),
+            Some("unpinned-project")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn lazy_write_non_fatal_on_readonly_dir() {

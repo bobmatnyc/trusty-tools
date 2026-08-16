@@ -463,19 +463,19 @@ async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) {
 /// three yield `None`.
 /// Test: `memory_sink::tests::derive_palace_id_for_project_falls_back_to_dirname`.
 pub fn derive_palace_id_for_project(project_dir: &Path) -> String {
-    let remote = std::process::Command::new("git")
-        .arg("-C")
-        .arg(project_dir)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let override_val = trusty_common::palace_override_from_env();
-    trusty_common::derive_palace_id(project_dir, remote.as_deref(), override_val.as_deref())
-        .unwrap_or_else(|| "unknown-project".to_string())
+    // #5811: this probed the remote itself and called the PURE three-level
+    // core, so a tcode session's turns landed in the derived palace even when
+    // the project committed a pin naming a different one.
+    match trusty_common::palace_resolve::resolve_palace(project_dir) {
+        Ok(resolution) => resolution.id,
+        Err(e) => {
+            tracing::warn!(
+                project = %project_dir.display(),
+                "could not resolve a palace for this project ({e}); using the placeholder"
+            );
+            "unknown-project".to_string()
+        }
+    }
 }
 
 #[cfg(test)]
