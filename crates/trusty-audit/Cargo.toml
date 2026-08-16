@@ -11,9 +11,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# #5502: not published to crates.io. The delivery path for this crate is the
-# handoff zip of pre-compiled macOS arm64 binaries (#5483), not `cargo install`
-# by the recipient. Flip this to a real publish only if that changes.
+# #5483: not published to crates.io. The delivery path is the signed/notarized client .app plus config and README, not `cargo install` by the recipient.
 publish = false
 
 [lib]
