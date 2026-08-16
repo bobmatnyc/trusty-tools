@@ -176,9 +176,10 @@ pub fn run_tmux_with_bin(
 /// because one operation issues many spawns — the loud line belongs at the
 /// entry point ([`create_managed_session`], `TmuxDriver::discover`,
 /// `discovery::discover_all`, the daemon's startup banner).
-/// Test: `run_tmux_with_bin_refuses_under_a_scratch_home`,
-/// `create_managed_session_refuses_under_a_scratch_home` in
-/// `tests/scratch_home_tmux_gate.rs`.
+/// Test: `scratch_home_daemon_does_not_spawn_tmux` in
+/// `tests/scratch_home_tmux_gate.rs` drives both a `create_managed_session`
+/// and a `run_tmux(KillSession)` through this guard and asserts each is
+/// refused with `PermissionDenied` and no subprocess.
 fn host_state_guard() -> std::io::Result<()> {
     match crate::core::host_state_gate::host_state_access().skip_reason() {
         None => Ok(()),

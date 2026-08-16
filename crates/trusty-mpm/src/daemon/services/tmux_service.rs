@@ -38,8 +38,10 @@ use crate::daemon::tmux::{AdoptedSession, SessionSnapshot, TmuxDriver};
 /// so a refusal becomes `TmuxUnavailable` carrying the full reason (including
 /// `TRUSTY_MPM_ALLOW_HOST_STATE`). Every other failure — tmux genuinely
 /// absent — keeps the historical `SessionNotFound` mapping for `name`.
-/// Test: `gated_environment_reports_the_gate_not_a_missing_session` in
-/// `tests/scratch_home_tmux_gate.rs`.
+/// Test: `scratch_home_daemon_does_not_spawn_tmux` in
+/// `tests/scratch_home_tmux_gate.rs` calls `TmuxService::adopt` under a
+/// scratch `$HOME` and asserts the error names the gate, not a missing
+/// session.
 fn discover_or_session_error(name: &str) -> Result<TmuxDriver, DaemonError> {
     if let Some(reason) = crate::core::host_state_gate::host_state_access().skip_reason() {
         return Err(DaemonError::TmuxUnavailable(reason));

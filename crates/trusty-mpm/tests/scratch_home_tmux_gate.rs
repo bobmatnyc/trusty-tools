@@ -24,6 +24,8 @@ use trusty_mpm::core::host_state_gate::ALLOW_HOST_STATE_ENV;
 use trusty_mpm::core::tmux::{TmuxCommand, create_managed_session, run_tmux};
 use trusty_mpm::daemon::DaemonState;
 use trusty_mpm::daemon::discovery::{DiscoveryResult, discover_all, discover_claude_sessions};
+use trusty_mpm::daemon::error::DaemonError;
+use trusty_mpm::daemon::services::TmuxService;
 
 /// RAII override of one environment variable, restored on drop.
 ///
@@ -156,6 +158,19 @@ fn scratch_home_daemon_does_not_spawn_tmux() {
         "no tmux spawn may have happened yet; it ran: {}",
         std::fs::read_to_string(&invocations).unwrap_or_default()
     );
+
+    // A gated environment is not a missing session. This path returned
+    // `SessionNotFound` — HTTP 404, "that session does not exist" — to an
+    // operator whose real problem is a reassigned `$HOME`.
+    let adopt_err =
+        TmuxService::adopt("tm-scratch").expect_err("adopt must be refused under a scratch $HOME");
+    match adopt_err {
+        DaemonError::TmuxUnavailable(reason) => assert!(
+            reason.contains(ALLOW_HOST_STATE_ENV),
+            "the refusal must name the hatch; got: {reason}"
+        ),
+        other => panic!("a gated environment must not read as a missing session: {other:?}"),
+    }
 
     // Indeterminate: `$HOME` absent entirely. The gate cannot classify the
     // environment, and fails toward leaving shared state alone.
