@@ -444,4 +444,29 @@ trusty-review = "0.15.1"
         assert!(SecretKey::new("   ").is_empty());
         assert!(!SecretKey::new("sk-or-v1-x").is_empty());
     }
+
+    /// #5797: the guided flow reports on a working directory that may hold no
+    /// config yet, so absence is a state to report rather than a failure.
+    #[test]
+    fn an_absent_config_is_not_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("engagement.toml");
+        assert!(
+            EngagementConfig::load_if_present(&missing)
+                .expect("absent is fine")
+                .is_none()
+        );
+    }
+
+    /// The other half of that contract: `load_if_present` tolerates absence and
+    /// nothing else. A config that is present and wrong must not read as one
+    /// that is not there — that would silently drop the pins.
+    #[test]
+    fn a_malformed_config_is_still_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("engagement.toml");
+        std::fs::write(&path, "this is not toml = = =").expect("write");
+        let err = EngagementConfig::load_if_present(&path).expect_err("malformed must fail");
+        assert!(matches!(err, AuditError::Parse { .. }), "{err:?}");
+    }
 }

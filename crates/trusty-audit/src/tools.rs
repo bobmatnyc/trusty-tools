@@ -952,6 +952,51 @@ trusty-review = "0.0.0-never-published"
         );
     }
 
+    /// The `UNVERIFIED` decision (#5797), pinned end to end: a binary that is
+    /// present but that no version record names is REINSTALLED, not kept.
+    /// `an_unverified_binary_is_unsatisfied` proves `unsatisfied` says so; this
+    /// proves `ensure` acts on it, which is the half a later change could drop
+    /// while leaving the predicate — and every other test here — green.
+    ///
+    /// Distinct from `ensure_over_an_unsatisfied_set_reaches_the_installer`,
+    /// where `tools/` is EMPTY: that is the `MISSING` case, and a change that
+    /// skipped present-but-unrecorded binaries would still pass it. Here the
+    /// four binaries exist, so only the missing record makes the set unsatisfied.
+    /// Same no-network proof: the symlink guard runs before `install` builds an
+    /// HTTP client.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn ensure_over_an_unverified_binary_reaches_the_installer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("work");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&root).expect("mkdir root");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
+        let work = WorkDir::new(&root);
+        std::os::unix::fs::symlink(&elsewhere, work.path(Area::Tools)).expect("symlink");
+
+        // Every binary on disk, no version record: the UNVERIFIED state.
+        for tool in RequiredTool::ALL {
+            std::fs::write(tool.path_in(&work), b"stub").expect("stub binary");
+        }
+        assert!(
+            status(&work).expect("reads").iter().all(|s| s.installed),
+            "the set must be on disk, or this tests the MISSING case instead"
+        );
+        assert!(
+            !record_path(&work).exists(),
+            "nothing may have recorded them"
+        );
+
+        let err = ensure(&work, &pins())
+            .await
+            .expect_err("an unverifiable binary must be replaced, not kept");
+        assert!(
+            matches!(err, AuditError::UnsafeToolsDir { .. }),
+            "ensure must reach install's guard, got {err:?}"
+        );
+    }
+
     #[test]
     fn install_errors_keep_the_installers_reason() {
         let source = trusty_installer::download::pinned::PinnedError::ChecksumMismatch {
