@@ -84,7 +84,7 @@ File a GitHub issue in bobmatnyc/trusty-tools for the error identified by `finge
 
 ## `session_new`
 
-Spawn a new managed Claude Code (or trusty-code) session in an isolated, freshly-provisioned workspace cloned from `repo_url` at `ref`. The daemon creates the tmux host, deploys agents/skills, and launches the harness with the given `task`. Returns the new managed session id, tmux name, workspace path, lifecycle state, and the `tmux attach-session` command.
+Spawn a new managed Claude Code (or trusty-code) session for `repo_url` at `ref`. A LOCAL `repo_url` — an absolute path to an existing directory — runs the session on that main checkout itself (ADR-0037); only a remote URL is cloned into a freshly-provisioned workspace. A main-checkout session may write documents and configuration only, and the writers it dispatches are given their own worktrees (ADR-0044, ADR-0048). The daemon creates the tmux host, deploys agents/skills, and launches the harness with the given `task`. Returns the new managed session id, tmux name, workspace path, lifecycle state, and the `tmux attach-session` command.
 
 | Parameter | Type | Required |
 |---|---|---|

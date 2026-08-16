@@ -1,9 +1,21 @@
 # Parallel Worktree Discipline — Extended Reference
 
-Multiple Claude Code sessions and subagents may share this repo concurrently.
-The main checkout often holds another session's uncommitted work. To prevent
-one session from stomping on another's edits, these rules protect all concurrent
-work.
+Multiple Claude Code sessions and subagents sharing this repo concurrently is
+the normal, intended arrangement, not a hazard to work around. The main
+checkout often holds another session's uncommitted work.
+
+**The write boundary that protects that work is mechanically enforced, not
+left to convention** (`tm hook --pm-guard`; [ADR-0044](../adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
+[ADR-0048](../adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md)).
+Documents and configuration — `.md`, `.toml`, `.json`, `.yaml`,
+extension-less files, `.claude/` framework deployment, `TASK.md` — stay
+writable directly in the main checkout for the PM and every agent it
+dispatches; source edits and `git commit` there are denied for both. A
+dispatched agent that may write is granted its own worktree under
+`.claude/worktrees/` automatically the moment the session is standing in a
+main checkout — see [ADR-0036](../adr/0036-all-worktrees-are-siblings-under-claude-worktrees.md)
+for where that worktree lives. The rules below are what remains a matter of
+discipline rather than mechanical enforcement.
 
 ## Why Worktree Discipline Matters
 

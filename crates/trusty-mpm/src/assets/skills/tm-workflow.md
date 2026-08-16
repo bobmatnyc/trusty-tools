@@ -202,16 +202,20 @@ make a red gate green by deleting a test, marking it skipped or ignored, gating
 it out of the build, or excluding it from the run. That hard line ("Sprint, then
 Harden") is unchanged.
 
-## Worktree Discipline (Mandatory Before Any Edit)
+## Worktree Discipline (Mandatory Before Any Source Edit)
 
-The main checkout is **inspection-only** — read-only `git status`/`log`/`diff`/
-`show` and file reads. Forbidden against it: any edit; any build or test run
-(whatever the project's gate is: `cargo build`/`test`, `npm run build`/`test`,
-`pytest`, …); any destructive git operation (`git reset --hard`,
-`git checkout .`, `git stash`, `git restore .`); any file-mutating command
-(`sed`/`awk`/`patch`) — or anything else that mutates the working tree, index,
-or build output. All write-side work happens in a dedicated worktree branched
-off `origin/main`:
+The main checkout's write boundary is mechanically enforced, not a convention
+to remember (`tm hook --pm-guard`; ADR-0044, ADR-0048). Documents and
+configuration stay writable there directly — `.md`, `.toml`, `.json`, `.yaml`,
+extension-less files, `.claude/` framework deployment, and `TASK.md` — for the
+PM and for every agent it dispatches. Forbidden against it: any SOURCE edit;
+`git commit`; any build or test run (whatever the project's gate is: `cargo
+build`/`test`, `npm run build`/`test`, `pytest`, …); any destructive git
+operation (`git reset --hard`, `git checkout .`, `git stash`,
+`git restore .`); any file-mutating command (`sed`/`awk`/`patch`) against a
+source file — or anything else that mutates the working tree, index, or build
+output outside that documents/configuration carve-out. All source write-side
+work happens in a dedicated worktree branched off `origin/main`:
 
 ```bash
 git fetch origin main
@@ -272,9 +276,10 @@ prevent refreshing, so the compliant path and the safe path are the same path.
 If the checkout has genuinely diverged instead, report it and stop.
 
 This is inspection hygiene only, so reads are not answered from stale code. The
-main checkout stays read-only for work; every edit still happens in a worktree.
-`git pull` is already on the PM's allowlist — no new authority, not a budgeted
-direct action.
+main checkout stays read-only for source; every source edit still happens in a
+worktree, and the boundary is enforced mechanically rather than left to
+discipline alone. `git pull` is already on the PM's allowlist — no new
+authority, not a budgeted direct action.
 
 **A worktree is a writer; the branch is the workstream.** The durable unit is
 the branch — one branch per workstream, one session per workstream. A worktree
