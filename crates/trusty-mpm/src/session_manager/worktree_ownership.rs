@@ -26,8 +26,21 @@
 //! [`SessionManager::resolve_ownerless_with_grace`] close that window: an
 //! absent-owner sentinel younger than the grace period is treated as
 //! "not yet provably ownerless" (skip, never reclaim) rather than ownerless.
-//! Test: `sentinel_owner_*` (parse matrix) and `resolve_ownerless_*` (terminal
-//! vs. live vs. absent-but-young vs. absent-and-aged owner) below.
+//!
+//! # Agent worktrees (#4311, DOC-66 §1.3)
+//!
+//! The payload widens to carry an [`AgentWorktreeOwner`] instead of a
+//! `ManagedSessionId`, for a worktree the HARNESS created for a dispatched
+//! agent. That is a THIRD owner answer, not a shape of the second: an agent has
+//! no session record, so routing it through
+//! [`SessionManager::resolve_ownerless_with_grace`] would report every agent
+//! worktree reclaimable once past [`OWNERLESS_GRACE`], and the orphan-GC's
+//! chain holds no liveness check. [`write_agent_sentinel`] is the write, and
+//! [`find_agent_worktree`] is the ADR-0023-point-4 rebuild the reap falls back
+//! to when a daemon restart has emptied the delegation map.
+//! Test: `sentinel_owner_*` (parse matrix), `agent_sentinel_*` (#4311), and
+//! `resolve_ownerless_*` (terminal vs. live vs. absent-but-young vs.
+//! absent-and-aged owner) below.
 
 use std::path::Path;
 
@@ -37,6 +50,8 @@ use serde::{Deserialize, Serialize};
 use super::decommission::WORKTREE_SENTINEL_FILE;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, SessionRecord};
+use crate::core::agent::DelegationId;
+use crate::core::session::SessionId;
 
 /// JSON payload written into every SM-created worktree's ownership sentinel
 /// (#3649), replacing the pre-#3649 zero-byte convention.
@@ -52,8 +67,52 @@ use super::record::{ManagedSessionId, SessionRecord};
 /// Test: `sentinel_owner_round_trips_valid_payload`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorktreeSentinel {
-    pub owner_session_id: ManagedSessionId,
+    /// The managed session that provisioned this worktree.
+    ///
+    /// `Option` since #4311: an AGENT worktree is owned by a dispatched agent,
+    /// and no managed session record exists for it. Every sentinel written
+    /// before #4311 carries this field, so widening it changes no existing
+    /// parse — and a payload naming neither owner reads as
+    /// [`SentinelOwner::Unknown`], the safe default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_session_id: Option<ManagedSessionId>,
     pub created_at: DateTime<Utc>,
+    /// The dispatched agent that owns this worktree (#4311), when one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentWorktreeOwner>,
+}
+
+/// Who owns a worktree the HARNESS created for a dispatched agent (#4311).
+///
+/// Why: DOC-66 §1.3 requires the sentinel to carry enough to rebuild the
+/// ownership record from disk alone (ADR-0023 point 4), and §5 defines an agent
+/// worktree's owner as "a recorded parent id and nothing more". Until #4311 the
+/// only record of that parentage was
+/// [`Delegation::worktree_path`](crate::core::agent::Delegation::worktree_path)
+/// in the daemon's in-memory `DashMap`, which a restart drops with no recovery
+/// path — so a restart silently returned every agent worktree to owner-unknown.
+/// What: `agent_id` — Claude Code's subagent id, the exact key `SubagentStop`
+/// quotes back and therefore the one the reap resolves on; `delegation_id` and
+/// `parent_session_id` — the dispatching delegation and session, which are the
+/// parentage §5 asks for.
+///
+/// # Substitution for DOC-66's `workstream_id`
+///
+/// §1.3 names `workstream_id` and `parent_workstream_id`. Neither exists:
+/// §1.2's workstream record is unimplemented, and DOC-66 states so itself. The
+/// fields here are the same parentage in the identity space that DOES exist
+/// today. When workstream identity lands, `parent_session_id` is what it
+/// replaces; a sentinel written now stays readable because both fields are
+/// optional by construction.
+/// Test: `agent_sentinel_round_trips`, `agent_sentinel_survives_a_lost_registry`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AgentWorktreeOwner {
+    /// Claude Code's subagent id — the reap's exact correlation key.
+    pub agent_id: String,
+    /// The delegation this worktree was granted to.
+    pub delegation_id: DelegationId,
+    /// The session that dispatched that delegation — DOC-66 §5's parent id.
+    pub parent_session_id: SessionId,
 }
 
 impl WorktreeSentinel {
@@ -62,12 +121,23 @@ impl WorktreeSentinel {
     /// Why: both sentinel WRITE sites (`workspace.rs`, `inproject.rs`) need
     /// the identical payload shape; centralising construction here keeps them
     /// from drifting.
-    /// What: `Self { owner_session_id: owner, created_at: Utc::now() }`.
+    /// What: `Self { owner_session_id: Some(owner), created_at: Utc::now() }`.
     /// Test: `sentinel_owner_round_trips_valid_payload`.
     pub(crate) fn new(owner: ManagedSessionId) -> Self {
         Self {
-            owner_session_id: owner,
+            owner_session_id: Some(owner),
             created_at: Utc::now(),
+            agent: None,
+        }
+    }
+
+    /// Build a fresh AGENT sentinel payload (#4311).
+    /// Test: `agent_sentinel_round_trips`.
+    pub(crate) fn for_agent(owner: AgentWorktreeOwner) -> Self {
+        Self {
+            owner_session_id: None,
+            created_at: Utc::now(),
+            agent: Some(owner),
         }
     }
 }
@@ -107,10 +177,23 @@ pub(crate) fn sentinel_payload_bytes(owner: ManagedSessionId) -> Vec<u8> {
 /// `sentinel_owner_empty_file_is_unknown`,
 /// `sentinel_owner_garbage_file_is_unknown`,
 /// `sentinel_owner_round_trips_valid_payload`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SentinelOwner {
     /// The sentinel parsed and named an owning session, created at this time.
     Known(ManagedSessionId, DateTime<Utc>),
+    /// The sentinel named a dispatched AGENT, not a managed session (#4311).
+    ///
+    /// Why this is a third answer and not a shape of `Known`: `Known`'s owner
+    /// is resolved through
+    /// [`SessionManager::resolve_ownerless_with_grace`], a SESSION-STORE
+    /// lookup. An agent has no session record, so that lookup finds nothing
+    /// and — past [`OWNERLESS_GRACE`] — reports the worktree reclaimable. The
+    /// orphan-GC would then delete a live agent's tree on a 60-second cadence
+    /// with no liveness check anywhere in its chain. Answering `Agent` keeps
+    /// the reclamation authority where it belongs: the agent's own exit
+    /// (`daemon::services::agent_worktree_reap`), which resolves on the exact
+    /// `agent_id` a `SubagentStop` quotes.
+    Agent(AgentWorktreeOwner, DateTime<Utc>),
     /// Absent, empty, or unparsable — legacy or corrupted; owner unknown.
     Unknown,
 }
@@ -135,9 +218,100 @@ pub(crate) fn read_sentinel_owner(worktree_path: &Path) -> SentinelOwner {
     if bytes.is_empty() {
         return SentinelOwner::Unknown;
     }
-    match serde_json::from_slice::<WorktreeSentinel>(&bytes) {
-        Ok(payload) => SentinelOwner::Known(payload.owner_session_id, payload.created_at),
-        Err(_) => SentinelOwner::Unknown,
+    let Ok(payload) = serde_json::from_slice::<WorktreeSentinel>(&bytes) else {
+        return SentinelOwner::Unknown;
+    };
+    // #4311: agent first. Both fields present is a payload no writer produces,
+    // and `Agent` is the answer that removes the LEAST authority — the
+    // orphan-GC never deletes it — so a malformed sentinel resolves toward
+    // keeping the directory.
+    if let Some(agent) = payload.agent {
+        return SentinelOwner::Agent(agent, payload.created_at);
+    }
+    match payload.owner_session_id {
+        Some(owner) => SentinelOwner::Known(owner, payload.created_at),
+        None => SentinelOwner::Unknown,
+    }
+}
+
+/// Write the AGENT ownership sentinel into `worktree_path` (#4311).
+///
+/// Why: this is the durable half of the registration. The in-memory delegation
+/// record grants the reaper authority to delete a directory; this file is the
+/// only evidence of that authority that survives a daemon restart, which is
+/// what ADR-0023 point 4 requires of the ownership record.
+/// What: serialises a [`WorktreeSentinel::for_agent`] payload and writes it to
+/// `<worktree_path>/.trusty-mpm-worktree`. Both failure modes are propagated
+/// rather than swallowed — the caller declines to register when this fails, so
+/// a silent success here would be the fail-open branch the write exists to
+/// close.
+///
+/// It is NOT atomic (no temp-file-and-rename). A torn write leaves content that
+/// does not parse, which [`read_sentinel_owner`] resolves to
+/// [`SentinelOwner::Unknown`] — the safe default that is never auto-deleted —
+/// and the next subagent tool call rewrites it. Atomicity would buy a stricter
+/// guarantee than the tolerant parse needs.
+/// Test: `agent_sentinel_round_trips`,
+/// `agent_sentinel_write_fails_when_the_path_is_not_writable`.
+pub(crate) fn write_agent_sentinel(
+    worktree_path: &Path,
+    owner: AgentWorktreeOwner,
+) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(&WorktreeSentinel::for_agent(owner))
+        .map_err(|e| std::io::Error::other(format!("serialize agent sentinel: {e}")))?;
+    std::fs::write(worktree_path.join(WORKTREE_SENTINEL_FILE), bytes)
+}
+
+/// Rebuild one agent worktree's ownership from disk alone (#4311).
+///
+/// Why: ADR-0023 point 4 — the ownership record must be reconstructable from
+/// on-disk sentinels plus `git worktree list --porcelain`, with no other
+/// durable input. The daemon's delegation map has neither persistence nor a
+/// load path (`daemon::state::core` initialises it empty), so after a restart
+/// this scan is the ONLY thing that can still answer "which directory did agent
+/// `X` have?" — without it a restart returns every agent worktree to
+/// owner-unknown and the reap never fires again for it.
+/// What: reads each immediate child of `store` (`…/.claude/worktrees/`), parses
+/// its sentinel, and returns the directory whose recorded `agent_id` equals
+/// `agent_id` — but ONLY when exactly one does. An exact key, never a
+/// heuristic: the same discipline `delegation_tracker::on_subagent_stop`
+/// applies, and for the same reason, except that here the named directory gets
+/// deleted.
+///
+/// # Two matches is undeterminable, not a permit
+///
+/// Nothing deletes a stale sentinel, and registration re-fires on every
+/// `PreToolUse`, so one `agent_id` CAN come to name several directories — an
+/// agent that moved between trees leaves the first one stamped. Returning the
+/// first `read_dir` hit would make the deletion target depend on filesystem
+/// enumeration order, which is not an ownership answer. Ambiguity resolves to
+/// `None` per ADR-0045, and the reap ends there, keeping both directories.
+/// Test: `agent_sentinel_survives_a_lost_registry`,
+/// `agent_sentinel_lookup_ignores_a_different_agent`,
+/// `agent_sentinel_lookup_refuses_an_ambiguous_match`.
+pub(crate) fn find_agent_worktree(store: &Path, agent_id: &str) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(store).ok()?;
+    let mut matches: Vec<std::path::PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let SentinelOwner::Agent(owner, _) = read_sentinel_owner(&path)
+            && owner.agent_id == agent_id
+        {
+            matches.push(path);
+        }
+    }
+    match matches.len() {
+        1 => matches.pop(),
+        0 => None,
+        n => {
+            tracing::warn!(
+                agent_id,
+                store = %store.display(),
+                "worktree ownership: {n} directories carry a sentinel naming this agent — \
+                 which one it owns is undeterminable, so none is reclaimed (#4311, ADR-0045)"
+            );
+            None
+        }
     }
 }
 
@@ -290,7 +464,9 @@ impl SessionManager {
         let ws = record.workspace_path.as_deref()?;
         match read_sentinel_owner(ws) {
             SentinelOwner::Known(owner, _created_at) => Some(owner),
-            SentinelOwner::Unknown => None,
+            // #4311: an agent worktree has no managed-session owner, so the
+            // decommission owner gate has nothing to gate on and never fires.
+            SentinelOwner::Agent(..) | SentinelOwner::Unknown => None,
         }
     }
 }
@@ -346,7 +522,208 @@ mod tests {
                     "created_at must be freshly stamped at write time"
                 );
             }
-            SentinelOwner::Unknown => panic!("expected Known, got Unknown"),
+            other => panic!("expected Known, got {other:?}"),
+        }
+    }
+
+    // ── agent sentinel (#4311, DOC-66 §1.3) ─────────────────────────────────
+
+    fn an_agent(agent_id: &str) -> AgentWorktreeOwner {
+        AgentWorktreeOwner {
+            agent_id: agent_id.to_string(),
+            delegation_id: DelegationId(uuid::Uuid::new_v4()),
+            parent_session_id: SessionId::new(),
+        }
+    }
+
+    /// An agent sentinel round-trips, and resolves as `Agent` — never `Known`.
+    ///
+    /// Why the distinction is the point: `Known` routes the owner through
+    /// `resolve_ownerless_with_grace`, a session-store lookup an agent has no
+    /// record in. Past the grace window that lookup reports "no owner" and the
+    /// orphan-GC deletes the tree on its 60-second cadence, with no liveness
+    /// check anywhere in its chain. If this assertion is ever relaxed to
+    /// `Known`, that is the failure it lets through.
+    #[test]
+    fn agent_sentinel_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = an_agent("a403cdbc078b5c474");
+        let before = Utc::now();
+
+        write_agent_sentinel(dir.path(), owner.clone()).expect("write agent sentinel");
+
+        match read_sentinel_owner(dir.path()) {
+            SentinelOwner::Agent(got, created_at) => {
+                assert_eq!(
+                    got, owner,
+                    "every recorded field must survive the round trip"
+                );
+                assert!(created_at >= before && created_at <= Utc::now());
+            }
+            other => panic!("an agent sentinel must resolve as Agent, got {other:?}"),
+        }
+    }
+
+    /// A pre-#4311 sentinel still reads as `Known` — widening the payload
+    /// migrates nothing and re-reads every sentinel already on disk.
+    #[test]
+    fn a_pre_agent_sentinel_still_resolves_to_its_session_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = ManagedSessionId::new();
+        // The exact bytes the pre-#4311 writer produced: no `agent` key at all.
+        let legacy = format!(
+            r#"{{"owner_session_id":"{owner}","created_at":"{}"}}"#,
+            Utc::now().to_rfc3339()
+        );
+        std::fs::write(dir.path().join(WORKTREE_SENTINEL_FILE), legacy).expect("write legacy");
+
+        assert!(
+            matches!(read_sentinel_owner(dir.path()), SentinelOwner::Known(got, _) if got == owner),
+            "a payload written before #4311 must keep resolving to its session owner"
+        );
+    }
+
+    /// A payload naming NEITHER owner is owner-unknown, not a half-answer.
+    #[test]
+    fn a_sentinel_naming_no_owner_at_all_is_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes = format!(r#"{{"created_at":"{}"}}"#, Utc::now().to_rfc3339());
+        std::fs::write(dir.path().join(WORKTREE_SENTINEL_FILE), bytes).expect("write");
+
+        assert_eq!(read_sentinel_owner(dir.path()), SentinelOwner::Unknown);
+    }
+
+    /// #4311 REGRESSION: the write's ERROR arm is reported, never swallowed.
+    ///
+    /// Why this test and not a happy-path one: the caller declines to register
+    /// the worktree when this fails, and that decision is only reachable if the
+    /// failure actually propagates. An implementation that logged and returned
+    /// `Ok(())` — or that fell back to empty bytes the way
+    /// `sentinel_payload_bytes` does — would leave the tree registered in
+    /// memory with nothing on disk backing it, which is the fail-open branch
+    /// the whole write exists to close.
+    ///
+    /// The injection is a DIRECTORY at the sentinel's path: `fs::write` cannot
+    /// truncate one, so the write fails for a real filesystem reason with no
+    /// mocking and no test-only production code.
+    #[test]
+    fn agent_sentinel_write_fails_when_the_path_is_not_writable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join(WORKTREE_SENTINEL_FILE)).expect("occupy the path");
+
+        let err = write_agent_sentinel(dir.path(), an_agent("a403"))
+            .expect_err("writing over a directory must fail, not silently succeed");
+
+        assert!(
+            !err.to_string().is_empty(),
+            "the reason must reach the caller"
+        );
+        assert_eq!(
+            read_sentinel_owner(dir.path()),
+            SentinelOwner::Unknown,
+            "nothing readable was written, so the tree stays owner-unknown"
+        );
+    }
+
+    /// #4311 REGRESSION: ownership is rebuildable from disk alone (ADR-0023
+    /// point 4) — no daemon state, no session store, no delegation map.
+    ///
+    /// Why: the delegation map is rebuilt empty at every daemon boot with no
+    /// load path, so this scan is the only thing that can still answer "which
+    /// directory did agent X have?" after a restart. A test exercising the
+    /// in-memory path would pass against an implementation that loses
+    /// everything on restart.
+    #[test]
+    fn agent_sentinel_survives_a_lost_registry() {
+        let store = tempfile::tempdir().expect("tempdir");
+        for name in ["agent-one", "agent-two", "agent-three"] {
+            let wt = store.path().join(name);
+            std::fs::create_dir(&wt).expect("create worktree dir");
+            write_agent_sentinel(&wt, an_agent(name)).expect("write sentinel");
+        }
+
+        assert_eq!(
+            find_agent_worktree(store.path(), "agent-two"),
+            Some(store.path().join("agent-two")),
+            "the sentinel alone must name the directory, with no registry consulted"
+        );
+    }
+
+    /// The lookup is an EXACT key match, never a nearest guess.
+    ///
+    /// Why: `on_subagent_stop` forbids a "most recent" fallback because under
+    /// concurrency it closes the wrong agent. Here the consequence is worse —
+    /// the wrong DIRECTORY gets deleted — so an unmatched id must end the
+    /// path rather than return a neighbour.
+    #[test]
+    fn agent_sentinel_lookup_ignores_a_different_agent() {
+        let store = tempfile::tempdir().expect("tempdir");
+        let wt = store.path().join("agent-one");
+        std::fs::create_dir(&wt).expect("create worktree dir");
+        write_agent_sentinel(&wt, an_agent("a403")).expect("write sentinel");
+        // A sibling with no sentinel at all must not be offered up either.
+        std::fs::create_dir(store.path().join("agent-bare")).expect("create bare dir");
+
+        assert_eq!(find_agent_worktree(store.path(), "a404"), None);
+        assert_eq!(find_agent_worktree(store.path(), ""), None);
+    }
+
+    /// #4311 REGRESSION: one `agent_id` in TWO directories resolves to neither.
+    ///
+    /// Why: nothing deletes a stale sentinel and registration re-fires on every
+    /// `PreToolUse`, so an agent that moved between trees leaves both stamped.
+    /// Returning the first `read_dir` hit would make the deletion target depend
+    /// on filesystem enumeration order — the reap would remove whichever
+    /// directory the OS happened to list first. Ambiguity is undeterminable
+    /// (ADR-0045), not a licence to pick one.
+    #[test]
+    fn agent_sentinel_lookup_refuses_an_ambiguous_match() {
+        let store = tempfile::tempdir().expect("tempdir");
+        for name in ["agent-first", "agent-second"] {
+            let wt = store.path().join(name);
+            std::fs::create_dir(&wt).expect("create worktree dir");
+            write_agent_sentinel(&wt, an_agent("a-moved-around")).expect("write sentinel");
+        }
+
+        assert_eq!(
+            find_agent_worktree(store.path(), "a-moved-around"),
+            None,
+            "two directories claiming one agent must reclaim neither"
+        );
+    }
+
+    /// Two agents registering concurrently keep separate directories.
+    ///
+    /// Why: a sentinel is written per worktree, so the interleaving that
+    /// matters is two writers racing against one STORE. An implementation
+    /// keyed on anything but the exact `agent_id` — a scan order, a "latest
+    /// sentinel wins" rule — resolves both stops to one directory and deletes
+    /// a live agent's tree.
+    #[test]
+    fn concurrent_agent_registrations_stay_separate() {
+        let store = tempfile::tempdir().expect("tempdir");
+        let paths: Vec<_> = (0..8)
+            .map(|i| {
+                let wt = store.path().join(format!("agent-{i}"));
+                std::fs::create_dir(&wt).expect("create worktree dir");
+                wt
+            })
+            .collect();
+
+        std::thread::scope(|s| {
+            for (i, wt) in paths.iter().enumerate() {
+                s.spawn(move || {
+                    write_agent_sentinel(wt, an_agent(&format!("id-{i}"))).expect("write");
+                });
+            }
+        });
+
+        for (i, wt) in paths.iter().enumerate() {
+            assert_eq!(
+                find_agent_worktree(store.path(), &format!("id-{i}")).as_ref(),
+                Some(wt),
+                "each agent must resolve to its OWN directory, never a sibling's"
+            );
         }
     }
 
