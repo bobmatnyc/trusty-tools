@@ -56,7 +56,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
-use trusty_common::mcp::Response;
+use trusty_mcp::Response;
 
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::{ConnectionContext, Router};

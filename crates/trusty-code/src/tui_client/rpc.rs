@@ -5,7 +5,7 @@
 //! STDIO — one place that builds the wire request, sends it, and unwraps the
 //! envelope — but over HTTP against an ALREADY-RUNNING daemon instead of a
 //! per-call spawned child. Reuses the exact same wire types
-//! (`trusty_common::mcp::{Request, Response}`) `StdioRpcClient` and
+//! (`trusty_mcp::{Request, Response}`) `StdioRpcClient` and
 //! `crate::serve::http::rpc_handler` already use, so there is exactly one
 //! `Request`/`Response` shape in this crate regardless of transport.
 //! What: [`RpcHttpClient::call`] mints a monotonic request id, POSTs the
@@ -20,7 +20,7 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use serde_json::Value;
-use trusty_common::mcp::{Request, Response};
+use trusty_mcp::{Request, Response};
 
 use super::error::EngineError;
 

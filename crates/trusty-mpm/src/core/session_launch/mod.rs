@@ -1066,7 +1066,7 @@ fn prepare_session_inner(
         // Discovery-first (issue #2030): resolves TRUSTY_MEMORY_URL when set,
         // else the daemon's actual discovered bound address, never a
         // hardcoded port.
-        let memory_url = trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
+        let memory_url = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
         let opts = crate::core::catchup::CatchupOptions {
             project_dir: project_dir.to_path_buf(),
             memory_url,

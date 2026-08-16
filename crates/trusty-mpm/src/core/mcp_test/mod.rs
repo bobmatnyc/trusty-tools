@@ -14,10 +14,10 @@
 //! probe matches the framing every trusty-* MCP server uses:
 //! newline-delimited JSON-RPC 2.0 (one compact JSON object per line, `\n`
 //! terminated), NOT LSP `Content-Length` — confirmed against
-//! [`trusty_common::mcp::run_stdio_loop`], the loop each `serve --stdio` server
+//! [`trusty_mcp::run_stdio_loop`], the loop each `serve --stdio` server
 //! runs, which reads with `BufReader::lines()` and writes `to_string(resp) +
 //! "\n"`. The `initialize` payload uses `protocolVersion` `"2024-11-05"`,
-//! matching [`trusty_common::mcp::initialize_response`]. Unlike
+//! matching [`trusty_mcp::initialize_response`]. Unlike
 //! `run_stdio_loop`'s plain `BufReader::lines()`, the probe's line reader is
 //! byte-capped (see [`MAX_LINE_BYTES`]) — a misbehaving server that writes
 //! non-newline-terminated noise to stdout cannot grow the read buffer
@@ -310,7 +310,7 @@ fn make_target(name: String, entry: Value) -> TestTarget {
 ///
 /// What: `{jsonrpc, id, method:"initialize", params:{protocolVersion,
 /// capabilities, clientInfo}}` with `protocolVersion` `"2024-11-05"` — the
-/// version [`trusty_common::mcp::initialize_response`] advertises.
+/// version [`trusty_mcp::initialize_response`] advertises.
 /// Test: `initialize_request_has_protocol_version`.
 pub fn initialize_request(id: i64) -> Value {
     json!({
@@ -469,7 +469,7 @@ async fn probe_stdio(entry: &Value, timeout: Duration) -> McpTestOutcome {
 /// Drive `initialize` → `initialized` → `tools/list` over the child's stdio.
 ///
 /// Framing: newline-delimited JSON-RPC 2.0 (one compact object per line, `\n`
-/// terminated), matching `trusty_common::mcp::run_stdio_loop`, with each line
+/// terminated), matching `trusty_mcp::run_stdio_loop`, with each line
 /// capped at [`MAX_LINE_BYTES`] (see [`read_bounded_line`]). Returns the tool
 /// count on success or an [`McpTestOutcome`] failure. The child is spawned with
 /// `kill_on_drop(true)`, so `child`'s `Drop` (run when this function returns,

@@ -10,7 +10,7 @@
 //! daemon running.
 //!
 //! What: [`run_stdio_bridge`] (1) ensures the daemon is reachable via the shared
-//! `trusty_common::mcp::ensure_daemon_up` helper (auto-starting `tm daemon`
+//! `trusty_mcp::ensure_daemon_up` helper (auto-starting `tm daemon`
 //! detached if absent, polling the lock file for the real dynamic port); (2)
 //! enters `run_stdio_loop`, forwarding each non-notification request to
 //! `POST /rpc` and returning the daemon's response verbatim. Transport errors
@@ -27,7 +27,8 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use trusty_common::mcp::{self, DaemonBridgeConfig, Request, Response};
+use trusty_mcp as mcp;
+use trusty_mcp::{DaemonBridgeConfig, Request, Response};
 
 /// Per-request forwarding timeout (60 s — headroom for slow tmux/provision ops).
 ///
@@ -86,7 +87,7 @@ fn build_rpc_client() -> Result<reqwest::Client> {
 /// Test: `build_bridge_config_no_spawn_matches_plist_probe` and
 /// `build_bridge_config_no_spawn_hint_names_real_plists` below;
 /// `ensure_daemon_up`'s no-spawn error path is unit-tested in
-/// `trusty_common::mcp::daemon_bridge` (`no_spawn_returns_err_without_spawning`,
+/// `trusty_mcp::daemon_bridge` (`no_spawn_returns_err_without_spawning`,
 /// `no_spawn_error_uses_hint_when_set`).
 fn build_bridge_config() -> DaemonBridgeConfig {
     let no_spawn = crate::commands::launchd_probe::compute_no_spawn(

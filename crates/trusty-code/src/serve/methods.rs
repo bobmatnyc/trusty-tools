@@ -273,7 +273,7 @@ mod tests {
     /// (rather than returning method-not-found).
     #[tokio::test]
     async fn methods_register_wires_ping_and_health() {
-        use trusty_common::mcp::Request;
+        use trusty_mcp::Request;
 
         let mut router = Router::new();
         register(&mut router, ProjectBinding::None);

@@ -30,11 +30,11 @@
 //! - `info` carries only `title`, `version`, and an optional `description`.
 //!   There is no `license` slot.
 //!
-//! Test: `cargo test -p trusty-common --features mcp mcp::openrpc` covers
+//! Test: `cargo test -p trusty-mcp openrpc` covers
 //! builder output, the `x-scopes` extension, and a representative tool with
 //! required params being flattened into the OpenRPC `params` array.
 
-use crate::mcp::service::ServiceDescriptor;
+use crate::service::ServiceDescriptor;
 use serde_json::{Map, Value, json};
 
 /// Fluent builder for an OpenRPC 1.3.2 service-description document.

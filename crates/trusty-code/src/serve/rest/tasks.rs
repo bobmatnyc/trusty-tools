@@ -29,7 +29,7 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use trusty_common::mcp::Response;
+use trusty_mcp::Response;
 
 use crate::jsonrpc::Router;
 

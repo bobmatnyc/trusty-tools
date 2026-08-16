@@ -17,7 +17,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::util::ServiceExt;
-use trusty_common::mcp::error_codes;
+use trusty_mcp::error_codes;
 
 async fn router_and_sessions() -> (Arc<Router>, Arc<SessionRegistry>, SharedWorkstreamStore) {
     let sessions = Arc::new(SessionRegistry::new());

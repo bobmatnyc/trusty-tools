@@ -988,7 +988,7 @@ them via the crate's `Cargo.toml` features. Key surfaces consumed here:
 
 | Feature / module | Contents |
 |------------------|----------|
-| `mcp` (`trusty_common::mcp`) | `McpRequest`/`McpResponse`/`JsonRpcError`, `run_stdio_loop`, CORS/Trace axum helpers (formerly `trusty-mcp-core`) |
+| the `trusty-mcp` crate (`trusty_mcp`) | `McpRequest`/`McpResponse`/`JsonRpcError`, `run_stdio_loop`, OpenRPC discovery — extracted out of `trusty_common::mcp` by ADR-0040 (#5803) |
 | `embedder` (`trusty_common::embedder`) | `Embedder` trait, `FastEmbedder` (LRU + persistent model cache), `MockEmbedder` (formerly `trusty-embedder`) |
 | core (always available) | `bind_with_auto_port`, `resolve_data_dir`/`cache_dir`, `ConcurrentRegistry`, `init_tracing`, `daemon_http_client` |
 

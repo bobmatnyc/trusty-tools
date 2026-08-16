@@ -68,7 +68,7 @@ impl Default for CatchupOptions {
             // set, else the daemon's actual discovered bound address, else a
             // guaranteed-unreachable placeholder that fails fast rather than
             // guessing a fixed (and likely wrong) port.
-            memory_url: crate::mcp::memory_rpc::resolve_memory_base_url_or_unreachable(),
+            memory_url: crate::memory_rpc::resolve_memory_base_url_or_unreachable(),
             include_git: true,
             include_palace: true,
             git_limit: 50,

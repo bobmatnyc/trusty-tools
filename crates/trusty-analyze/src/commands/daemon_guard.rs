@@ -102,15 +102,15 @@ pub async fn ensure_daemon_running(port: u16) -> Result<()> {
 /// call to the daemon's REST API. If the daemon is down, every tool call
 /// fails with a connection error. Auto-starting matches the pattern
 /// established by trusty-memory and trusty-search (issue #1078).
-/// What: uses the shared `trusty_common::mcp::DaemonBridgeConfig` to probe
+/// What: uses the shared `trusty_mcp::DaemonBridgeConfig` to probe
 /// the health endpoint derived from `analyzer_url`. On miss, spawns
 /// `<current_exe> serve --port <port>` detached and polls until ready (30s
 /// budget). Returns the live base URL so the caller can construct the
 /// `AnalyzerMcpServer` with the confirmed-reachable address.
-/// Test: covered by the `trusty_common::mcp::daemon_bridge` unit tests; the
+/// Test: covered by the `trusty_mcp::daemon_bridge` unit tests; the
 /// live path is exercised by `cargo run -- mcp` with no daemon running.
 pub async fn ensure_mcp_daemon_up(analyzer_url: &str) -> anyhow::Result<String> {
-    use trusty_common::mcp::DaemonBridgeConfig;
+    use trusty_mcp::DaemonBridgeConfig;
 
     let base_url = analyzer_url.to_string();
     let base_url_clone = base_url.clone();
@@ -144,7 +144,7 @@ pub async fn ensure_mcp_daemon_up(analyzer_url: &str) -> anyhow::Result<String> 
         no_spawn: false,     // trusty-analyze bridge may auto-start its sidecar
         no_spawn_hint: None, // unused: no_spawn is false
     };
-    trusty_common::mcp::ensure_daemon_up(&config).await
+    trusty_mcp::ensure_daemon_up(&config).await
 }
 
 #[cfg(test)]

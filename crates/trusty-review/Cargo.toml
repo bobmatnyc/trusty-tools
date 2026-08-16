@@ -97,6 +97,9 @@ clap         = { workspace = true }
 # receive half — the durable inbox, the listener, and the hardened UDS bind
 # this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.
 trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay", "gh-cli"] }
+# JSON-RPC / MCP primitives (ADR-0040, #5803). Optional: only the `mcp` feature
+# compiles `src/mcp/`.
+trusty-mcp = { workspace = true, optional = true }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console is
 # no longer bundled into trusty-review (single-owner-per-binary); the standalone
 # `trusty-console` crate is its sole producer.
@@ -142,14 +145,16 @@ features = ["http-server", "mcp", "report"]
 # without a manifest change in a later stage.
 default     = ["http-server", "mcp", "report"]
 http-server = ["dep:axum", "dep:tower", "dep:tower-http", "trusty-common/axum-server"]
-# Why: gates the MCP stdio JSON-RPC service + the trusty-common MCP primitives
-#      behind an opt-in feature so library-only consumers do not pull in the
-#      stdio loop.  Enabled by default so `cargo install` and the default binary
+# Why: gates the MCP stdio JSON-RPC service + the shared MCP primitives behind
+#      an opt-in feature so library-only consumers do not pull in the stdio
+#      loop.  Enabled by default so `cargo install` and the default binary
 #      include it out of the box.
-# What: enables `trusty-common/mcp` (Request, Response, run_stdio_loop, etc.)
-#       and compiles the `src/mcp/` module.
+# What: pulls in `trusty-mcp` (Request, Response, run_stdio_loop, etc.) and
+#       compiles the `src/mcp/` module. ADR-0040 (#5803) moved those primitives
+#       out of `trusty-common`, so this is a `dep:` entry rather than a
+#       `trusty-common/mcp` feature forward.
 # Test: `cargo test -p trusty-review --features mcp` covers dispatch/tools tests.
-mcp         = ["trusty-common/mcp", "trusty-common/console-metrics", "http-server"]
+mcp         = ["dep:trusty-mcp", "trusty-common/console-metrics", "http-server"]
 # Why (#5466): the `profile` feature was REMOVED along with `src/profile/` and
 #      the `profile` subcommand. Contributor profiling lives in tga (`tga
 #      profile`, tga 2.19.0); see #5468.

@@ -41,13 +41,13 @@ use trusty_common::catchup::{CatchupOptions, run_catchup};
 /// offline or the project has no git history.
 ///
 /// What: resolves `memory_url` via
-/// [`trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable`] (env override
+/// [`trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable`] (env override
 /// `TRUSTY_MEMORY_URL` first, else the daemon's discovered bound address,
 /// else a fail-fast placeholder — issue #2030), then delegates to
 /// [`pm_catchup_context_with_memory_url`].
 /// Test: `catchup::tests::pm_catchup_context_does_not_panic_on_empty_repo`.
 pub async fn pm_catchup_context(project_dir: &Path) -> Option<String> {
-    let memory_url = trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
+    let memory_url = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
     pm_catchup_context_with_memory_url(project_dir, memory_url).await
 }
 
@@ -62,7 +62,7 @@ pub async fn pm_catchup_context(project_dir: &Path) -> Option<String> {
 /// `cargo test`'s default parallelism runs every test in this crate's lib
 /// binary as threads of ONE process, so that leaked env value was observable
 /// by any concurrently-running test whose code path also calls
-/// [`trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable`]
+/// [`trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable`]
 /// (e.g. `run_task::tests::*`, via `execute_run_task` -> `pm_catchup_context`),
 /// producing false-red flakes unrelated to the leaking test itself. Threading
 /// `memory_url` through as a parameter — the same pattern
@@ -136,7 +136,7 @@ mod tests {
     /// A guaranteed-never-listening loopback address (port 1 is a reserved,
     /// unassigned TCP port) so a connection attempt fails fast rather than
     /// hanging or timing out — the same convention
-    /// `trusty_common::mcp::memory_rpc`'s own `UNREACHABLE_PLACEHOLDER` uses.
+    /// `trusty_common::memory_rpc`'s own `UNREACHABLE_PLACEHOLDER` uses.
     ///
     /// Why (#3003): passed directly to
     /// [`pm_catchup_context_with_memory_url`] instead of mutating the

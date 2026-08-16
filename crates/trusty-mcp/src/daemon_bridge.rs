@@ -220,7 +220,7 @@ pub async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<String> {
 /// child outlives the bridge process, and spawns. Does NOT wait for readiness —
 /// that is [`poll_until_ready`]'s job.
 /// Test: the spawn path is exercised end-to-end by
-/// `crates/trusty-common/tests/single_flight_exclusion.rs`.
+/// `crates/trusty-mcp/tests/single_flight_exclusion.rs`.
 pub(crate) fn spawn_daemon_detached(config: &DaemonBridgeConfig) -> Result<()> {
     eprintln!("\u{25cf} Starting {} daemon\u{2026}", config.service_name);
 
@@ -256,7 +256,7 @@ pub(crate) fn spawn_daemon_detached(config: &DaemonBridgeConfig) -> Result<()> {
 /// probes `/health`. Hard-errors once `startup_timeout` is exceeded. There is no
 /// success path that does not include a live 2xx health response.
 /// Test: `daemon_that_never_becomes_ready_is_a_hard_error` in
-/// `crates/trusty-common/tests/single_flight_exclusion.rs`.
+/// `crates/trusty-mcp/tests/single_flight_exclusion.rs`.
 pub(crate) async fn poll_until_ready(
     config: &DaemonBridgeConfig,
     startup_timeout: Duration,

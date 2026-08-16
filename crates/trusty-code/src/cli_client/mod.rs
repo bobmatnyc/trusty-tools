@@ -14,7 +14,7 @@
 //! child per CLI invocation (the "simplest robust M1 approach" the ticket
 //! specifies — no persistent daemon discovery/lifecycle needed yet) and
 //! speaks JSON-RPC 2.0 NDJSON over its stdio pipes, reusing
-//! `trusty_common::mcp::{Request, Response}` for the wire envelope.
+//! `trusty_mcp::{Request, Response}` for the wire envelope.
 //! [`render`] holds pure, unit-tested formatting functions (session table,
 //! one live-event line, transcript human view) shared by every CLI
 //! subcommand handler in the binary (`src/main.rs`/`src/cli/`), which own

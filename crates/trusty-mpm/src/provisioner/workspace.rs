@@ -951,8 +951,7 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
             // Discovery-first (issue #2030): resolves TRUSTY_MEMORY_URL when
             // set, else the daemon's actual discovered bound address, never
             // a hardcoded port.
-            let memory_url =
-                trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
+            let memory_url = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
             let override_value = trusty_common::palace_override_from_env();
             match trusty_common::derive_palace_id(
                 &workspace_path,

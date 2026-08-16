@@ -8,8 +8,10 @@ trusty-tools/               # workspace root
 ├── Cargo.lock
 ├── crates/                 # 20 members (matches `ls crates/`)
 │   ├── trusty-common/       # shared utilities, tracing, OpenRouter chat; hosts the
-│   │                        # consolidated mcp/rpc/embedder/symgraph/memory-core/
+│   │                        # consolidated rpc/embedder/symgraph/memory-core/
 │   │                        # tickets/monitor-tui modules behind feature flags
+│   ├── trusty-mcp/          # JSON-RPC 2.0 / MCP protocol primitives: envelopes, the
+│   │                        # stdio dispatch loop, OpenRPC discovery, daemon bridge
 │   ├── trusty-embedderd/    # fastembed wrapper — sidecar daemon for trusty-search
 │   ├── trusty-gworkspace/   # Google Workspace client (Calendar, Tasks, Drive)
 │   ├── trusty-cto-db/       # SQLite CTO database (rusqlite-backed)
@@ -39,6 +41,12 @@ trusty-tools/               # workspace root
 > they were absorbed into `trusty-common` behind the `symgraph`, `rpc`,
 > `tickets`, `mcp`, `embedder`, `memory-core`, and `monitor-tui` feature flags
 > respectively. Enable the relevant feature to pull in the corresponding module.
+>
+> **`mcp` is the one that came back out.** ADR-0040 (#5803) re-extracted those
+> primitives as the standalone `trusty-mcp` crate, because the consumer set is
+> MCP servers rather than every trusty-* binary. `trusty_common::mcp` no longer
+> exists and has no re-export shim; the trusty-memory JSON-RPC client it used to
+> contain stayed behind as `trusty_common::memory_rpc` (`memory-rpc` feature).
 
 For the source layout of any crate, read its `README.md` or browse
 `crates/<name>/src/`. Each crate owns its own `README.md` covering purpose,
@@ -49,6 +57,7 @@ usage, and design notes.
 Detailed implementation information for each crate lives in its own documentation:
 
 - **trusty-common** — see `crates/trusty-common/README.md` and `docs/trusty-common/`
+- **trusty-mcp** — see `crates/trusty-mcp/README.md` (JSON-RPC 2.0 / MCP protocol primitives; ADR-0040)
 - **trusty-embedderd** — see `crates/trusty-embedderd/README.md` and `docs/trusty-embedderd/` (fastembed sidecar daemon)
 - **trusty-memory** — see `crates/trusty-memory/README.md` and `docs/trusty-memory/` (storage engine lives in `trusty-common`'s `memory-core` feature)
 - **trusty-search** — see `crates/trusty-search/README.md` and **`docs/trusty-search/`** (primary worked example with regression testing, research, sessions)

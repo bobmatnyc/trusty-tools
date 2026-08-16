@@ -180,7 +180,7 @@ pub async fn session_context_catchup(
     }
 
     let config = crate::core::config::MpmConfig::load_default();
-    let memory_url = trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
+    let memory_url = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
 
     // #5072: `absorb` sums `undatable_sessions_dropped` across projects rather
     // than concatenating it — an empty `sessions` array is only "nothing

@@ -6,7 +6,7 @@
 //! daemon, so behaviour is identical.
 //!
 //! What: `run(state)` builds the shared state once and calls
-//! `trusty_common::mcp::run_stdio_loop`, which reads JSON-RPC requests
+//! `trusty_mcp::run_stdio_loop`, which reads JSON-RPC requests
 //! line-by-line from stdin and writes responses to stdout.  `run_deferred`
 //! answers `initialize` immediately and builds `AppState` lazily so the
 //! startup handshake is never delayed by provider/network calls (issue #1739).
@@ -32,7 +32,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use trusty_common::mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
+use trusty_mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
 
 use crate::config::ReviewConfig;
 use crate::integrations::{analyze_client::HttpAnalyzeClient, search_client::HttpSearchClient};

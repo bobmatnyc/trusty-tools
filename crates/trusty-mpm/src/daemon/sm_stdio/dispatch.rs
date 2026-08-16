@@ -14,11 +14,11 @@
 //! paths.
 
 use serde_json::Value;
-use trusty_common::mcp::{Response, error_codes};
+use trusty_mcp::{Response, error_codes};
 
 use super::SmDispatcher;
 use super::methods::{self, CODE_NOT_FOUND, CODE_UNAVAILABLE, MethodError};
-use trusty_common::mcp::Request;
+use trusty_mcp::Request;
 
 /// Route one request to its mapped SM surface and shape the JSON-RPC response.
 ///

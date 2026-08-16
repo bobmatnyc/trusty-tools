@@ -415,7 +415,7 @@ pub mod prompt;
 
 // ── Phase 5 daemon transport layer (#2053, M1 control-plane cut line) ──
 
-/// JSON-RPC 2.0 core: wire types (re-exported from `trusty_common::mcp`) plus
+/// JSON-RPC 2.0 core: wire types (re-exported from `trusty_mcp`) plus
 /// the tcode-specific `Router`/`RpcError` extensibility seam.
 ///
 /// Why: `tcode serve` must speak the same JSON-RPC-over-STDIO contract as
@@ -512,7 +512,7 @@ pub mod cli_client;
 /// thin-client axiom).
 /// What: `tui_client::discovery` (daemon lookup: `TCODE_DAEMON_URL` env var
 /// -> `serve::discovery`'s `http_addr` file -> liveness ping), `tui_client::rpc`
-/// (pooled `POST /rpc` client, reusing `trusty_common::mcp::{Request,Response}`
+/// (pooled `POST /rpc` client, reusing `trusty_mcp::{Request,Response}`
 /// exactly like `cli_client::stdio` does over STDIO), `tui_client::sse` (a
 /// minimal SSE line pump over `reqwest`'s byte stream), and
 /// `tui_client::engine::CodeEngine` (the `TuiEngine` impl itself).

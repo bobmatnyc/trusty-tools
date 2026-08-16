@@ -3,7 +3,7 @@
 //! Why: `tcode serve` must speak the exact same JSON-RPC-over-STDIO contract
 //! as the rest of the trusty-* family so tooling (CLI clients, MCP bridges,
 //! future TUI/GUI frontends) has one dispatch convention to learn. Re-using
-//! `trusty_common::mcp`'s wire types — rather than hand-rolling a second,
+//! `trusty_mcp`'s wire types — rather than hand-rolling a second,
 //! structurally-identical `Request`/`Response`/`JsonRpcError` — is the
 //! ecosystem-consistent choice: `trusty-search` (`mcp::stdio::run`) and
 //! `trusty-memory` (`commands::serve_stdio_bridge::run_stdio_bridge`) both
@@ -38,4 +38,4 @@ pub mod router;
 pub use context::{ConnectionContext, NotifySender};
 pub use error::RpcError;
 pub use router::{MethodHandler, Router};
-pub use trusty_common::mcp::{Request, Response, error_codes};
+pub use trusty_mcp::{Request, Response, error_codes};

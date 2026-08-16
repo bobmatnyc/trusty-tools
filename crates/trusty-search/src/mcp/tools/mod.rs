@@ -35,7 +35,7 @@ use serde_json::Value;
 // JSON-RPC 2.0 primitives from the shared `trusty-common` crate.
 // Re-exported here to keep `pub use` consumers (and `crate::mcp::tools::error_codes`
 // etc.) working.
-pub use trusty_common::mcp::{error_codes, initialize_response, JsonRpcError, Request, Response};
+pub use trusty_mcp::{error_codes, initialize_response, JsonRpcError, Request, Response};
 
 pub(crate) mod descriptors;
 pub(crate) mod health;

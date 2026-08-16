@@ -112,7 +112,7 @@ Each channel module has two layers, deliberately decoupled — mirroring
   base URL, provider key, and retry limits.
 - **`slack::server`** — MCP JSON-RPC dispatch. `handle_message` routes
   `initialize`, `tools/list`, and `tools/call`; `run_stdio` wires it into
-  `trusty_common::mcp::run_stdio_loop`.
+  `trusty_mcp::run_stdio_loop`.
 
 Adding a new tool means: implement the Slack call via `BaseClient::call_method`
 (or `call_method_user` for a user-scope-only method) in a handler under

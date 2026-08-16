@@ -34,7 +34,7 @@
 use crate::{ActivitySource, AppState, DaemonEvent, HookType, InjectionKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use trusty_common::mcp::initialize_response;
+use trusty_mcp::initialize_response;
 
 /// JSON-RPC 2.0 standard error codes used by [`dispatch`].
 ///
@@ -451,7 +451,7 @@ mod tests {
     /// Why: `initialize` is the first method Claude Code sends over the UDS/
     /// bridge path. Without a valid response the MCP client marks the server
     /// as failed. This confirms the dispatcher routes `initialize` to
-    /// `trusty_common::mcp::initialize_response` and returns the MCP
+    /// `trusty_mcp::initialize_response` and returns the MCP
     /// capability shape Claude Code expects.
     /// What: dispatch an `initialize` request, assert the result carries
     /// `protocolVersion`, `capabilities.tools`, and `serverInfo.name`.

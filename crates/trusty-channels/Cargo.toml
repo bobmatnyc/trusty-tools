@@ -17,7 +17,9 @@ name = "telegram-mcp"
 path = "src/bin/telegram-mcp.rs"
 
 [dependencies]
-trusty-common = { workspace = true, features = ["mcp", "credentials"] }
+trusty-common = { workspace = true, features = ["credentials"] }
+# JSON-RPC / MCP primitives, extracted from `trusty_common::mcp` by ADR-0040 (#5803).
+trusty-mcp = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

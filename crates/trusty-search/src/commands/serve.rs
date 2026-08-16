@@ -4,7 +4,7 @@ use super::daemon_utils::{daemon_base_url, mcp_http_addr_path};
 use super::serve_scope::{auto_pin_from_cwd, PinChoice};
 use anyhow::Result;
 use colored::Colorize;
-use trusty_common::mcp::DaemonBridgeConfig;
+use trusty_mcp::DaemonBridgeConfig;
 
 pub(crate) use super::serve_scope::resolve_pinned_index;
 
@@ -14,7 +14,7 @@ pub(crate) use super::serve_scope::resolve_pinned_index;
 /// What: routes between stdio-only (the default -- issue #123) and HTTP modes;
 /// HTTP is opt-in via `--with-http` (or the legacy explicit `--http <addr>`).
 /// In stdio mode, ensures the daemon is running (auto-starting it if absent via
-/// the shared `trusty_common::mcp::ensure_daemon_up` helper) before entering
+/// the shared `trusty_mcp::ensure_daemon_up` helper) before entering
 /// the MCP stdio loop; exits the process immediately when the MCP client closes
 /// its pipe (stdin EOF), so the process never lingers as an orphan after Claude
 /// Code's session ends (issue #457).
@@ -25,7 +25,7 @@ pub(crate) use super::serve_scope::resolve_pinned_index;
 /// daemon's `http_addr` file) so a crashed `serve` cannot clobber the daemon's
 /// discovery file (issue #117). EOF self-exit is unit-tested in
 /// `crates/trusty-common/src/mcp/mod.rs` (`stdio_loop_exits_on_eof`).
-/// Auto-start behavior covered by `trusty_common::mcp::daemon_bridge` tests.
+/// Auto-start behavior covered by `trusty_mcp::daemon_bridge` tests.
 pub async fn handle_serve(
     with_http: bool,
     port: u16,
@@ -130,7 +130,7 @@ pub async fn handle_serve(
 /// If the daemon is not running the bridge would emit connection errors on every
 /// tool call, which is confusing. Auto-starting matches the UX of the memory
 /// bridge (issue #1078) and aligns all three daemon-backed MCP servers.
-/// What: uses the shared `trusty_common::mcp::ensure_daemon_up` helper with the
+/// What: uses the shared `trusty_mcp::ensure_daemon_up` helper with the
 /// trusty-search-specific config: health path `/health`, spawn args
 /// `start --foreground` (which binds a fixed port written to the discovery
 /// file), and a `base_url_fn` that re-reads the address file on every poll.
@@ -139,7 +139,7 @@ pub async fn handle_serve(
 /// instead of a separate inline call to `trusty_common::read_daemon_addr`
 /// (which only honoured the test-only `TRUSTY_DATA_DIR_OVERRIDE` env var and
 /// could re-discover the wrong daemon instance).
-/// Test: covered by `trusty_common::mcp::daemon_bridge` unit tests; the live
+/// Test: covered by `trusty_mcp::daemon_bridge` unit tests; the live
 /// path is exercised by `cargo run -- serve` with no daemon running.
 async fn ensure_search_daemon_up() -> Result<String> {
     let config = DaemonBridgeConfig {
@@ -156,7 +156,7 @@ async fn ensure_search_daemon_up() -> Result<String> {
         no_spawn: false,     // trusty-search bridge may auto-start its daemon
         no_spawn_hint: None, // unused: no_spawn is false
     };
-    trusty_common::mcp::ensure_daemon_up(&config).await
+    trusty_mcp::ensure_daemon_up(&config).await
 }
 
 /// Run the MCP HTTP/SSE listener on `addr`. Writes the discovery file before
