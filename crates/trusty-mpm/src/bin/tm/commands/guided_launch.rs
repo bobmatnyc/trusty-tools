@@ -23,6 +23,7 @@ use anyhow::Context as _;
 use serde::Deserialize;
 
 use super::first_run::needs_first_run_clone;
+use super::picker_launch_new::LaunchIsolation;
 use super::tmux_attach::AttachOutcome;
 
 /// How long to wait between `provision-status` polls.
@@ -139,7 +140,10 @@ fn provisioning_message(label: Option<&str>, detail: Option<&str>) -> String {
 /// the picker's `n <name>`, ALREADY kebab-cased by
 /// `trusty_common::session_naming::leaf_slug_from_hint` so the daemon's own
 /// sanitization is a no-op; the key is omitted entirely for `None`, so the
-/// unnamed path's wire shape is unchanged); (3) if the daemon answered
+/// unnamed path's wire shape is unchanged), plus `worktree: true` when
+/// `isolation` is [`LaunchIsolation::OwnWorktree`] (#5773 — `n <name>
+/// --worktree`; the key is likewise omitted otherwise, so ADR-0037's
+/// `#[serde(default)]` main-checkout default still applies); (3) if the daemon answered
 /// synchronously (`201` with a
 /// name — an older daemon ignoring `background`) attaches immediately; (4)
 /// otherwise polls `GET .../{id}/provision-status` every [`POLL_INTERVAL`] up
@@ -162,6 +166,7 @@ pub(crate) async fn launch_new_session_and_attach(
     url: &str,
     repo_url: &str,
     name_hint: Option<&str>,
+    isolation: LaunchIsolation,
 ) -> anyhow::Result<AttachOutcome> {
     let first_run = needs_first_run_clone(repo_url);
     let progress_output = trusty_progress::Output::to_stderr();
@@ -189,6 +194,16 @@ pub(crate) async fn launch_new_session_and_attach(
     // `session::start`'s wire-shape tests already pin.
     if let Some(hint) = name_hint {
         body["name_hint"] = serde_json::Value::String(hint.to_string());
+    }
+    // #5773: the picker's `--worktree` travels on the SAME `worktree` key
+    // `tm launch --worktree` sets — ADR-0037 decision 1 makes that explicit
+    // launch-time request the one input deciding placement, and one key with
+    // one spelling is what keeps the two surfaces from drifting. Omitted
+    // entirely when nothing was asked for, so the default launch's wire shape
+    // stays byte-identical to what `session_start_posts_the_same_wire_shape_…`
+    // pins.
+    if isolation.requests_worktree() {
+        body["worktree"] = serde_json::Value::Bool(true);
     }
 
     let send_result = client
