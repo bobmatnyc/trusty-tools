@@ -76,6 +76,9 @@ mod live;
 mod narrator;
 mod output;
 mod progress;
+// #5823: the cross-process wire format, public as a module so both ends name
+// `relay::StageEvent` rather than re-spelling the grammar.
+pub mod relay;
 mod size;
 
 pub use components::{Component, ComponentTracker};

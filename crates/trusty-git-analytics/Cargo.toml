@@ -123,6 +123,12 @@ tracing-subscriber = { workspace = true }
 # Progress bars — workspace entry already declares 0.17 (#5197 drive-by:
 # the local pin duplicated the workspace table).
 indicatif = { workspace = true }
+# #5823: the cross-process progress wire format `trusty-audit` parses back.
+# Both ends name `trusty_progress::relay` rather than each spelling the grammar,
+# so the format cannot drift between producer and consumer. It brings no new
+# transitive weight — its only dependencies are indicatif (already here) and
+# thiserror.
+trusty-progress = { workspace = true }
 # TUI (#5197): `tga tui`. Pinned to the workspace versions (ratatui 0.29 /
 # crossterm 0.28) that trusty-common's `monitor-tui` feature also uses —
 # NOT the 0.30/0.29 pair in `crates/trusty-tui`, which would put two ratatui

@@ -20,6 +20,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use trusty_audit::cli::{self, Cli};
 use trusty_audit::config::EngagementConfig;
+use trusty_audit::progress::terminal::TerminalProgress;
 use trusty_audit::session::Session;
 use trusty_audit::workdir::{WORKDIR_ENV, WorkDir};
 
@@ -35,9 +36,14 @@ async fn main() -> Result<()> {
 
     // #5797: the policy lives on `Session`, so the Tauri shell sets it the same
     // way rather than reimplementing when to install.
+    // #5823: the CLI's display is injected here rather than reached for inside
+    // the library, which is what keeps `Session::execute` callable by a front
+    // end that has no terminal. `TerminalProgress` autodetects stderr: a
+    // spinner on a TTY, plain `info:` lines everywhere else.
     let mut session = Session::new(work)
         .with_config_path(EngagementConfig::resolve_path(cli.config.clone(), &cwd))
-        .with_auto_install(!cli.no_install);
+        .with_auto_install(!cli.no_install)
+        .with_progress(std::sync::Arc::new(TerminalProgress::to_stderr()));
     if let Some(path) = &cli.manifest {
         session = session.with_manifest_path(path);
     }
