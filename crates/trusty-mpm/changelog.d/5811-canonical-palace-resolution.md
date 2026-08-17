@@ -1,1 +1,3 @@
+Fixed
+
 - Session launch now resolves the palace it exports as `TRUSTY_MEMORY_PALACE` through `trusty_common::palace_resolve` rather than the pure `derive_palace_id` core. The core never reads `.trusty-tools/trusty-memory.yaml`, so the exported variable carried a git-derived name — and because the variable is the highest-precedence level, that name outranked the committed pin it was meant to lose to: this repo's sessions resolved `bobmatnyc-trusty-tools` while its pin said `trusty-tools`. Palace-alias registration also skips projects carrying a pin, since the aliased-from name is no longer resolved by anything ([#5811](https://github.com/bobmatnyc/trusty-tools/issues/5811))

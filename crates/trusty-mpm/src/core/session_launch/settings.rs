@@ -381,34 +381,6 @@ pub(crate) fn resolve_palace_slug(project_path: &Path, git_remote: Option<&str>)
     }
 }
 
-/// Read `remote.origin.url` for the repo containing `start` (best-effort).
-///
-/// Why: a local-path managed session (no `repo_url` in `LaunchParams`) should
-/// still pin its palace by the repo's GitHub identity rather than the directory
-/// basename. Shelling out to `git config` (rather than parsing `.git/config`)
-/// transparently handles worktrees, mirroring trusty-memory's own
-/// `git_remote_origin` so the two derive the same slug.
-/// What: runs `git -C <start> config --get remote.origin.url`; returns the
-/// trimmed URL on success, `None` when there is no origin remote, git is
-/// absent, or `start` is not in a repo. No network.
-/// Test: exercised indirectly via `resolve_palace_slug_falls_back_to_git_remote`
-/// (a temp git repo).
-pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(start)
-        .arg("config")
-        .arg("--get")
-        .arg("remote.origin.url")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if url.is_empty() { None } else { Some(url) }
-}
-
 /// Pre-seed per-directory trust acceptance for `workspace` in `~/.claude.json`,
 /// and strip any MCP approval a prior version left behind.
 ///

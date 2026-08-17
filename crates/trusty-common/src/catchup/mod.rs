@@ -78,46 +78,46 @@ impl Default for CatchupOptions {
     }
 }
 
-/// Derive the palace_id for a project directory (fail-open).
+/// Resolve the palace_id for a project directory.
 ///
-/// Why: the catch-up state is keyed by palace_id; deriving it from the project
-/// directory keeps it consistent with the session-launch palace pinning AND
-/// with the memory daemon's own `cwd_palace_slug_at`
-/// (`trusty-memory::messaging::operations`), which resolves the identical
-/// three-level precedence through the same `crate::derive_palace_id` core.
-/// Previously this function re-implemented its own 4th fallback — the RAW,
-/// unslugified `file_name()` basename — whenever `derive_palace_id` returned
-/// `None` (e.g. a leaf directory name that slugifies to empty). That
-/// caller-local fallback could both (a) diverge from the daemon, which has no
-/// such fallback and errors instead, and (b) leak a storage-unsafe,
-/// unslugified token as a palace id (see issue #1772). `derive_palace_id` is
-/// now the single source of truth for every precedence level, so this
-/// function no longer re-derives anything from `project_dir` on failure — it
-/// falls back to a fixed literal, never a directory-derived value — meaning
-/// it can never disagree with the daemon on a real project.
-/// What: probes git remote origin from the project dir, then calls
-/// `crate::derive_palace_id`. Falls back to the fixed literal
-/// `"unknown-project"` only when derivation yields `None` for every
-/// precedence level.
+/// Why: the catch-up state is keyed by palace_id, so it must be the SAME id the
+/// memory daemon writes under. It used to answer the shared literal
+/// `"unknown-project"` on failure, and [`run_catchup`] then wrote a watermark to
+/// `~/.trusty-mpm/projects/unknown-project/catchup-state.json`. Every other
+/// project landing on that literal read the same watermark, so a second project
+/// reported "no new activity" for commits, sessions and drawers that were all
+/// genuinely new (#5811). Returning the error lets both callers decline instead:
+/// no watermark is read, and none is written.
+/// What: delegates to [`crate::palace_resolve::resolve_palace`] — env override,
+/// then the committed pin, then the git `owner/repo` slug, then the `parent/dir`
+/// slug of the main worktree root.
 /// Test: `derive_palace_id_for_agrees_with_daemon_path_no_remote_no_env`,
 /// `derive_palace_id_for_env_override_unchanged`,
-/// `derive_palace_id_for_git_remote_unchanged`; also covered indirectly by
-/// `generate_catchup_context_renders_all_sections`.
-fn derive_palace_id_for(project_dir: &Path) -> String {
+/// `derive_palace_id_for_git_remote_unchanged`,
+/// `malformed_pin_does_not_advance_the_shared_watermark`.
+fn derive_palace_id_for(
+    project_dir: &Path,
+) -> Result<String, crate::palace_resolve::PalaceResolveError> {
     // #5811: this probed the remote itself and called the PURE three-level
     // core, so it answered without the committed pin — a catch-up digest read
     // a different palace than the daemon wrote to whenever a project was
     // pinned. Both now route through the same four-level entry point.
-    match crate::palace_resolve::resolve_palace(project_dir) {
-        Ok(resolution) => resolution.id,
-        Err(e) => {
-            tracing::warn!(
-                project = %project_dir.display(),
-                "could not resolve a palace for catch-up ({e}); reporting the placeholder"
-            );
-            "unknown-project".to_string()
-        }
-    }
+    crate::palace_resolve::resolve_palace(project_dir).map(|resolution| resolution.id)
+}
+
+/// The whole digest when the project's palace cannot be resolved (#5811).
+///
+/// Why: the operator has to be told, because every section below the palace is
+/// keyed by it. Rendering the usual three sections without a palace would report
+/// "no new activity" from a watermark belonging to a different project.
+/// What: one section naming the failure verbatim.
+/// Test: `malformed_pin_renders_a_resolution_failure_section`.
+fn palace_resolution_failed_section(e: &crate::palace_resolve::PalaceResolveError) -> String {
+    format!(
+        "## Catch-Up Unavailable\n\npalace resolution failed: {e}\n\n\
+         Catch-up is keyed by palace, so no watermark was read and none was \
+         advanced. Fix the pin (or set `TRUSTY_MEMORY_PALACE`) and re-run.\n\n"
+    )
 }
 
 /// Probe the HEAD git SHA of a repo (for watermark advancement).
@@ -186,9 +186,14 @@ fn render_sessions_section(filtered: &session_finder::FilteredSessions) -> Strin
 /// What: derives palace_id, loads watermark (None when full=true or absent),
 /// collects paused sessions / git commits / palace drawers since watermark,
 /// renders one markdown digest with three clearly labelled sections.
-/// Test: `generate_catchup_context_renders_all_sections`.
+/// Test: `generate_catchup_context_renders_all_sections`,
+/// `malformed_pin_renders_a_resolution_failure_section`.
 pub async fn generate_catchup_context(opts: &CatchupOptions) -> String {
-    let palace_id = derive_palace_id_for(&opts.project_dir);
+    // #5811: no palace, no watermark — see `palace_resolution_failed_section`.
+    let palace_id = match derive_palace_id_for(&opts.project_dir) {
+        Ok(id) => id,
+        Err(e) => return palace_resolution_failed_section(&e),
+    };
 
     // Load watermark (None → full history; also None when opts.full).
     let watermark: Option<DateTime<Utc>> = if opts.full {
@@ -288,7 +293,18 @@ pub async fn generate_catchup_context(opts: &CatchupOptions) -> String {
 pub async fn run_catchup(opts: &CatchupOptions, advance_watermark: bool) -> String {
     let context = generate_catchup_context(opts).await;
     if advance_watermark {
-        let palace_id = derive_palace_id_for(&opts.project_dir);
+        // #5811: the watermark file is named by the palace id, so an
+        // unresolvable palace must not write one — the shared placeholder made
+        // one project's watermark suppress another project's activity.
+        let palace_id = match derive_palace_id_for(&opts.project_dir) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!(
+                    "catchup: warning: palace resolution failed ({e}); watermark not advanced"
+                );
+                return context;
+            }
+        };
         let sha = probe_head_sha(&opts.project_dir);
         let state = CatchupState {
             last_catchup_at: Utc::now(),
@@ -573,7 +589,8 @@ mod tests {
         }
         let tmp = TempDir::new().unwrap();
 
-        let catchup_value = derive_palace_id_for(tmp.path());
+        let catchup_value =
+            derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
 
         // The "daemon path": trusty-memory's `cwd_palace_slug_at` step 3 calls
         // `crate::derive_palace_id(project_root, git_remote, None)` directly.
@@ -602,7 +619,7 @@ mod tests {
         unsafe {
             std::env::set_var(crate::PALACE_OVERRIDE_ENV, "My Override");
         }
-        let got = derive_palace_id_for(tmp.path());
+        let got = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
         unsafe {
             std::env::remove_var(crate::PALACE_OVERRIDE_ENV);
         }
@@ -638,7 +655,95 @@ mod tests {
             .output()
             .unwrap();
 
-        let got = derive_palace_id_for(tmp.path());
+        let got = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
         assert_eq!(got, "bobmatnyc-trusty-tools");
+    }
+
+    // -----------------------------------------------------------------------
+    // Unresolvable palace — the shared-placeholder watermark (#5811)
+    // -----------------------------------------------------------------------
+
+    /// A project root whose committed pin exists but does not parse.
+    ///
+    /// Why: only a real file on disk reaches the pin-trust failures.
+    /// `.trusty-tools/` is itself a project marker, so the returned directory IS
+    /// the root `find_project_root` stops at.
+    /// What: a `TempDir` holding a `.trusty-tools/trusty-memory.yaml` that is not
+    /// pin YAML. Keep the handle alive for the test's duration.
+    fn project_root_with_malformed_pin() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".trusty-tools");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("trusty-memory.yaml"),
+            "palace: [unclosed\n\t bad: :",
+        )
+        .unwrap();
+        tmp
+    }
+
+    fn opts_for(dir: &Path) -> CatchupOptions {
+        CatchupOptions {
+            project_dir: dir.to_path_buf(),
+            memory_url: "http://127.0.0.1:19999".to_string(),
+            include_git: true,
+            include_palace: false,
+            git_limit: 10,
+            drawer_limit: 5,
+            full: false,
+        }
+    }
+
+    /// The digest says the palace could not be resolved, instead of reporting
+    /// another project's activity window as this project's (#5811).
+    ///
+    /// Why: every section is keyed by the palace id, and the old code answered
+    /// the shared literal `"unknown-project"` — so a second project with a broken
+    /// pin read the FIRST one's watermark and rendered "no new activity" over
+    /// commits, sessions and drawers that were all genuinely new.
+    /// Test: itself.
+    #[tokio::test]
+    async fn malformed_pin_renders_a_resolution_failure_section() {
+        let tmp = project_root_with_malformed_pin();
+
+        let digest = generate_catchup_context(&opts_for(tmp.path())).await;
+
+        assert!(
+            digest.contains("palace resolution failed:"),
+            "digest must name the resolution failure, got: {digest}"
+        );
+        assert!(
+            !digest.contains("No new commits since last catch-up."),
+            "digest must not report a watermark-filtered result with no watermark, got: {digest}"
+        );
+    }
+
+    /// Advancing the watermark writes nothing when the palace is unresolvable
+    /// (#5811).
+    ///
+    /// Why: `save_catchup_state` names the file by palace id, so the shared
+    /// placeholder wrote every unresolvable project's watermark to the single
+    /// `~/.trusty-mpm/projects/unknown-project/catchup-state.json`. The next
+    /// project to land there read it and went silent about real activity.
+    /// What: snapshots that exact path before and after `run_catchup(.., true)`
+    /// and asserts it is untouched — correct whether or not a previous run of the
+    /// old code left one behind. No other test in this crate uses that id.
+    /// Test: itself.
+    #[tokio::test]
+    async fn malformed_pin_does_not_advance_the_shared_watermark() {
+        let placeholder = dirs::home_dir()
+            .expect("home dir")
+            .join(".trusty-mpm/projects/unknown-project/catchup-state.json");
+        let before = fs::read(&placeholder).ok();
+
+        let tmp = project_root_with_malformed_pin();
+        let _ = run_catchup(&opts_for(tmp.path()), true).await;
+
+        assert_eq!(
+            fs::read(&placeholder).ok(),
+            before,
+            "an unresolvable palace must not write the shared placeholder watermark at {}",
+            placeholder.display()
+        );
     }
 }

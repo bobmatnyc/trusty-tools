@@ -15,11 +15,7 @@ fn write_pin(root: &Path, palace: &str) -> PathBuf {
     let dir = root.join(TRUSTY_TOOLS_DIR);
     fs::create_dir_all(&dir).expect("create .trusty-tools");
     let path = root.join(PIN_FILE_REL);
-    let pin = ProjectPin {
-        schema_version: PIN_SCHEMA_VERSION,
-        palace: palace.to_string(),
-        note: None,
-    };
+    let pin = ProjectPin::new(palace);
     fs::write(&path, serde_yaml::to_string(&pin).expect("serialise")).expect("write pin");
     path
 }
@@ -291,12 +287,13 @@ fn malformed_pin_errors_even_under_env_override() {
 }
 
 // ---------------------------------------------------------------------------
-// Worktree stability — ADR-0050 §7
+// Worktree stability — ADR-0012 §1
 // ---------------------------------------------------------------------------
 
-/// Why: memory is one instance per project, shared across all worktrees
-/// (ADR-0050 §7). Before this fix the `parent/dir` fallback keyed on
-/// `git rev-parse --show-toplevel`, which names the WORKTREE — so a worktree at
+/// Why: a palace slug is per-project and shared across all worktrees and
+/// branches of the same repo (ADR-0012 §1). Before this fix the `parent/dir`
+/// fallback keyed on `git rev-parse --show-toplevel`, which names the
+/// WORKTREE — so a worktree at
 /// `<root>/.claude/worktrees/agent-x` derived `worktrees-agent-x` while its main
 /// checkout derived `<parent>-<root>`. Two palaces, one project.
 ///
@@ -465,4 +462,71 @@ impl Drop for EnvGuard {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// ProjectPin construction (#5811)
+// ---------------------------------------------------------------------------
+
+/// Why: [`ProjectPin`] is `#[non_exhaustive]`, so consumers cannot write the
+/// struct literal and must go through [`ProjectPin::new`]. That constructor is
+/// the only place the schema version is stamped, so a caller cannot pin an older
+/// one by copying an old literal.
+#[test]
+fn new_stamps_the_current_schema_version() {
+    let pin = ProjectPin::new("canonical-name");
+    assert_eq!(pin.schema_version, PIN_SCHEMA_VERSION);
+    assert_eq!(pin.palace, "canonical-name");
+    assert_eq!(pin.note, None);
+}
+
+/// Why: `note` is `skip_serializing_if = "Option::is_none"`, so both the present
+/// and absent shapes have to survive a YAML round trip through the reader every
+/// consumer uses.
+#[test]
+fn with_note_round_trips_through_yaml() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(tmp.path().join(TRUSTY_TOOLS_DIR)).unwrap();
+    let pin = ProjectPin::new("canonical-name").with_note(Some("pinned before reorg".to_string()));
+    fs::write(
+        tmp.path().join(PIN_FILE_REL),
+        serde_yaml::to_string(&pin).unwrap(),
+    )
+    .unwrap();
+
+    let read_back = read_project_pin(tmp.path()).expect("ok").expect("some");
+    assert_eq!(read_back, pin);
+}
+
+// ---------------------------------------------------------------------------
+// Non-project callers stay resolvable
+// ---------------------------------------------------------------------------
+
+/// Why: not every palace belongs to a software project — trusty-agents mints one
+/// per ASSISTANT, with no remote, no owner/repo and no project root. Making the
+/// pin fail CLOSED (#5811) must not have made a git identity a REQUIREMENT: a
+/// caller with none of those still resolves, via level 4, and only the three
+/// pin-TRUST failures produce an error. `NoIdentity` is the separate, narrow
+/// case where even the `parent/dir` slug is empty.
+///
+/// Creating an arbitrary palace by NAME never reaches this resolver at all —
+/// `palace_create { force: true }` bypasses trusty-memory's `validate_palace_name`
+/// gate outright (`dispatch_palace_create_force_allowed_in_single_tenant_default`),
+/// which is the path trusty-agents' `TrustyMemoryClient::ensure_palace` uses.
+#[test]
+#[serial_test::serial]
+fn a_caller_with_no_git_identity_still_resolves() {
+    let _env = EnvGuard::clear();
+    // No `.git`, no remote, no pin, no project marker of any kind.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plain = tmp.path().join("assistant-scratch");
+    fs::create_dir_all(&plain).unwrap();
+
+    let resolved = resolve_palace(&plain).expect("a directory with no git identity must resolve");
+
+    assert_eq!(resolved.source, PalaceSource::ParentDir);
+    assert!(
+        !resolved.id.is_empty(),
+        "level 4 must still produce a usable id"
+    );
 }

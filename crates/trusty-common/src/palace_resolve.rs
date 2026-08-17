@@ -23,9 +23,10 @@
 //!
 //! Two properties this module exists to guarantee:
 //!
-//! - **A worktree and its main checkout resolve to the same palace.** Memory is
-//!   one instance per project, shared across worktrees (ADR-0050 §7). Level 4
-//!   therefore keys on the main worktree root (`git rev-parse --git-common-dir`)
+//! - **A worktree and its main checkout resolve to the same palace.** A palace
+//!   slug is per-project and "shared across all worktrees and branches of the
+//!   same repo" — ADR-0012 §1, restated in that ADR's Context design anchors.
+//!   Level 4 therefore keys on the main worktree root (`git rev-parse --git-common-dir`)
 //!   rather than `--show-toplevel`, which names the worktree's own directory and
 //!   made `.claude/worktrees/agent-x` resolve to `worktrees-agent-x`.
 //! - **A pin file that exists but does not parse is an error, never a
@@ -80,7 +81,12 @@ pub const PROJECT_MARKERS: &[&str] = &[
 /// What: `schema_version` (always [`PIN_SCHEMA_VERSION`]), `palace` (the pinned
 /// slug, stored verbatim and never re-slugified), and an optional human `note`.
 /// Test: `reads_a_valid_pin`, plus trusty-memory's `write_and_read_pin_round_trips`.
+///
+/// `#[non_exhaustive]` because a future schema field must not be a breaking
+/// change for the crates.io consumers of this crate. That closes struct-literal
+/// construction outside `trusty-common`, so build one through [`Self::new`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProjectPin {
     /// Pin-file format version.
     pub schema_version: u32,
@@ -89,6 +95,31 @@ pub struct ProjectPin {
     /// Optional human note (e.g. "pinned before drive reorg 2026-06").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+impl ProjectPin {
+    /// A pin naming `palace`, at the current [`PIN_SCHEMA_VERSION`], with no note.
+    ///
+    /// Why: [`ProjectPin`] is `#[non_exhaustive]`, so no other crate can write
+    /// the struct literal. Stamping the version here also stops a caller pinning
+    /// an older one by copying an old literal.
+    /// What: the two required fields; chain [`Self::with_note`] to add the note.
+    /// Test: `new_stamps_the_current_schema_version`.
+    pub fn new(palace: impl Into<String>) -> Self {
+        Self {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: palace.into(),
+            note: None,
+        }
+    }
+
+    /// Attach the optional human note.
+    /// Test: `with_note_round_trips_through_yaml`.
+    #[must_use]
+    pub fn with_note(mut self, note: Option<String>) -> Self {
+        self.note = note;
+        self
+    }
 }
 
 /// Which precedence level produced a resolution.
@@ -352,7 +383,7 @@ pub fn resolve_palace_with_remote(
 /// Why: `git rev-parse --show-toplevel` names the CURRENT worktree, so the
 /// `parent/dir` fallback derived `worktrees-agent-x` inside a worktree and
 /// `projects-trusty-tools` in the main checkout — two palaces for one project,
-/// against ADR-0050 §7. `--git-common-dir` names the main repo's `.git` from
+/// against ADR-0012 §1. `--git-common-dir` names the main repo's `.git` from
 /// any worktree, so its parent is the one directory every worktree agrees on.
 /// What: runs `git rev-parse --path-format=absolute --git-common-dir` under
 /// `start` and returns that path's parent. Returns `None` when git is absent,

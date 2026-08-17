@@ -17,12 +17,13 @@
 //! and side-effect-only: every failure is swallowed with at most a `tracing` line
 //! so the launch and palace pinning proceed unchanged.
 //!
-//! Test: `tests` in this module cover the split-brain registration and the two
-//! no-op guards (owner-repo already exists; no bare palace).
+//! Test: `tests` in this module cover the split-brain registration and the
+//! no-op guards — owner-repo already exists, no bare palace, operator override
+//! set, and (#5811) the project carries a committed pin.
 
 use std::path::Path;
 
-use super::settings::git_remote_origin;
+use trusty_common::palace_resolve::git_remote_origin;
 
 /// Register a palace-level alias `owner-repo -> bare-repo` when needed (issue #1939).
 ///
@@ -41,7 +42,8 @@ use super::settings::git_remote_origin;
 /// trusty-memory registry dir ([`trusty_common::palace_alias::default_palace_registry_dir`]).
 /// Never returns a value or errors; failures are logged and ignored.
 /// Test: `creates_alias_for_split_brain`, `noop_when_owner_repo_exists`,
-/// `noop_when_no_bare_palace`, `noop_when_override_set`.
+/// `noop_when_no_bare_palace`, `noop_when_override_set`,
+/// `noop_when_project_is_pinned`.
 pub(crate) fn maybe_register_palace_alias(project_path: &Path, git_remote: Option<&str>) {
     // An explicit operator override means the palace name was chosen
     // deliberately — do not second-guess it with an alias.
@@ -249,6 +251,44 @@ mod tests {
             PalaceAliasStore::resolve_alias(&reg, OWNER_REPO).unwrap(),
             None,
             "no alias should be registered when no bare palace exists"
+        );
+    }
+
+    /// Why (#5811): a committed pin is as deliberate as the env override, and
+    /// the session now resolves THROUGH the pin — so the `owner-repo` name this
+    /// alias would be registered FROM is a name nothing resolves to any more.
+    /// Registering it would mint a permanent redirect for a dead name. The guard
+    /// must fire on the genuine split-brain shape (bare palace present,
+    /// owner-repo absent), which is the one input every other guard lets through.
+    /// What: a project root carrying `.trusty-tools/trusty-memory.yaml`. That
+    /// directory is itself a project marker, so `find_project_root` stops there
+    /// rather than walking up into the repo under test.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn noop_when_project_is_pinned() {
+        let data = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        let _override = EnvGuard::clear("TRUSTY_MEMORY_PALACE");
+        let _data = EnvGuard::set("TRUSTY_DATA_DIR_OVERRIDE", data.path());
+
+        let pin_dir = project.path().join(".trusty-tools");
+        std::fs::create_dir_all(&pin_dir).unwrap();
+        std::fs::write(
+            pin_dir.join("trusty-memory.yaml"),
+            "schema_version: 1\npalace: trusty-tools\n",
+        )
+        .unwrap();
+
+        let reg = registry_dir(data.path());
+        make_palace(&reg, BARE); // the genuine split-brain: bare present, owner-repo absent.
+
+        maybe_register_palace_alias(project.path(), Some(REMOTE));
+
+        assert_eq!(
+            PalaceAliasStore::resolve_alias(&reg, OWNER_REPO).unwrap(),
+            None,
+            "a committed pin must suppress alias registration even on a split-brain"
         );
     }
 

@@ -243,11 +243,7 @@ mod tests {
     #[test]
     fn write_and_read_pin_round_trips() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "my-project".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("my-project".to_string());
         write_project_pin(tmp.path(), &pin).expect("write ok");
         let read_back = read_project_pin(tmp.path())
             .expect("read ok")
@@ -263,11 +259,7 @@ mod tests {
     #[test]
     fn write_pin_omits_null_note() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "alpha".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("alpha".to_string());
         let path = write_project_pin(tmp.path(), &pin).expect("write ok");
         let raw = std::fs::read_to_string(&path).expect("read raw ok");
         assert!(
@@ -307,11 +299,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("actual-dir");
         fs::create_dir_all(root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "pinned-slug".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("pinned-slug".to_string());
         write_project_pin(&root, &pin).expect("write pin");
 
         let sub = root.join("src");
@@ -363,11 +351,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let old_root = tmp.path().join("old-name");
         fs::create_dir_all(old_root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "original-slug".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("original-slug".to_string());
         write_project_pin(&old_root, &pin).expect("write pin");
 
         // Simulate a directory rename.
@@ -415,11 +399,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("renamed-dir");
         fs::create_dir_all(root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "original-slug".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("original-slug".to_string());
         write_project_pin(&root, &pin).expect("write pin");
         let sub = root.join("src");
         fs::create_dir_all(&sub).unwrap();
@@ -461,11 +441,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("some-dir");
         fs::create_dir_all(root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "canonical-slug".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("canonical-slug".to_string());
         write_project_pin(&root, &pin).expect("write pin");
 
         let sub = root.join("nested");
@@ -539,11 +515,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("new-name");
         fs::create_dir_all(root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "original-slug".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("original-slug".to_string());
         write_project_pin(&root, &pin).expect("write pin");
 
         let sub = root.join("src");

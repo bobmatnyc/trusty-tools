@@ -146,11 +146,7 @@ pub fn project_slug_at(start: &Path) -> Option<String> {
         );
         return Some(slug);
     }
-    let pin = ProjectPin {
-        schema_version: PIN_SCHEMA_VERSION,
-        palace: slug.clone(),
-        note: None,
-    };
+    let pin = ProjectPin::new(slug.clone());
     match write_project_pin(&root, &pin) {
         Ok(path) => tracing::debug!(
             slug = %slug,

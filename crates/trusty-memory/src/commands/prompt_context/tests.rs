@@ -825,11 +825,7 @@ async fn spin_up_test_daemon_with_palace(
     // pin-file-primacy anchor that keeps existing palaces from being orphaned.
     crate::project_root::write_project_pin(
         &project_dir,
-        &crate::project_root::ProjectPin {
-            schema_version: crate::project_root::PIN_SCHEMA_VERSION,
-            palace: palace_slug.to_string(),
-            note: None,
-        },
+        &crate::project_root::ProjectPin::new(palace_slug.to_string()),
     )
     .expect("write project pin for fixture");
 

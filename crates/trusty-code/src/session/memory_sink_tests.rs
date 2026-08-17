@@ -453,8 +453,10 @@ fn enqueue_drops_newest_when_queue_full() {
 #[test]
 fn derive_palace_id_for_project_falls_back_to_dirname() {
     let tmp = TempDir::new().expect("tempdir");
-    let first = derive_palace_id_for_project(tmp.path());
-    let second = derive_palace_id_for_project(tmp.path());
+    let first =
+        derive_palace_id_for_project(tmp.path()).expect("a plain temp dir resolves to a palace");
+    let second =
+        derive_palace_id_for_project(tmp.path()).expect("a plain temp dir resolves to a palace");
     assert!(!first.is_empty(), "expected a non-empty fallback palace id");
     assert_eq!(
         first, second,
@@ -485,12 +487,60 @@ fn derive_palace_id_for_project_agrees_with_derive_palace_id_no_remote_no_env() 
     }
     let tmp = TempDir::new().expect("tempdir");
 
-    let project_value = derive_palace_id_for_project(tmp.path());
+    let project_value =
+        derive_palace_id_for_project(tmp.path()).expect("a plain temp dir resolves to a palace");
     let core_value = trusty_common::derive_palace_id(tmp.path(), None, None)
         .expect("a real temp dir always has a usable parent/dir slug");
 
     assert_eq!(
         project_value, core_value,
         "turn-recorder derivation must agree with the shared derive_palace_id core"
+    );
+}
+
+/// Write a project root whose committed pin exists but does not parse.
+///
+/// Why: three of the four palace-resolution failures are pin-trust failures, and
+/// only a real file on disk reaches them. `.trusty-tools/` is itself a project
+/// marker, so the returned directory IS the project root that `find_project_root`
+/// stops at — no walk up into the repo the test runs from.
+/// What: returns a `TempDir` holding `.trusty-tools/trusty-memory.yaml` with a
+/// body that is not pin YAML. Keep the handle alive for the test's duration.
+/// Test: `malformed_pin_is_an_error_not_the_shared_placeholder`.
+fn project_root_with_malformed_pin() -> TempDir {
+    let tmp = TempDir::new().expect("tempdir");
+    let dir = tmp.path().join(".trusty-tools");
+    std::fs::create_dir_all(&dir).expect("create .trusty-tools");
+    std::fs::write(
+        dir.join("trusty-memory.yaml"),
+        "palace: [unclosed\n\t bad: :",
+    )
+    .expect("write malformed pin");
+    tmp
+}
+
+/// A committed pin that does not parse is an error, never the shared
+/// `"unknown-project"` placeholder (#5811).
+///
+/// Why: the placeholder is one id shared by every project that fails to resolve,
+/// and `SessionRegistry::memory_sink_for` grants a durable root
+/// `PalaceCreation::Allowed` — so two projects with broken pins auto-created and
+/// then shared one palace holding both of their real prompts and responses. The
+/// error has to survive out of this function for the caller to be able to
+/// decline.
+/// Test: itself.
+#[test]
+fn malformed_pin_is_an_error_not_the_shared_placeholder() {
+    let tmp = project_root_with_malformed_pin();
+
+    let err = derive_palace_id_for_project(tmp.path())
+        .expect_err("a pin that does not parse must not resolve to any palace");
+
+    assert!(
+        matches!(
+            err,
+            trusty_common::palace_resolve::PalaceResolveError::PinMalformed { .. }
+        ),
+        "expected PinMalformed, got {err:?}"
     );
 }
