@@ -380,3 +380,85 @@ fn bus_drain_folds_into_aggregate() {
     assert_eq!(agg.summary(Stage::Collect).completed, 1);
     assert_eq!(agg.rows(Stage::Collect)[0].fraction(), Some(1.0));
 }
+
+// ----------------------------------------------------------------- relay
+
+/// Why (#5823): the line is the entire contract with a parent process, and a
+/// state derived wrongly would report a failed stage as a completed one.
+/// What: each constructor's event decodes back to the state, target and reason
+/// it was built with.
+/// Test: this is the test.
+#[test]
+fn relay_line_carries_the_stage_and_outcome() {
+    use trusty_progress::relay::{StageEvent, StageState};
+
+    let started = ProgressEvent::started(Stage::Audit, "collect", Some(9)).with_detail("stage 1");
+    let decoded = StageEvent::decode(&relay::line_for(&started)).expect("decodes");
+    assert_eq!(decoded.state, StageState::Started);
+    assert_eq!(decoded.stage, "Audit");
+    assert_eq!(decoded.target, "collect");
+    assert_eq!(decoded.total, Some(9));
+    assert_eq!(decoded.detail.as_deref(), Some("stage 1"));
+
+    let advanced = ProgressEvent::advanced(Stage::Collect, "acme/api", 12, Some(40));
+    let decoded = StageEvent::decode(&relay::line_for(&advanced)).expect("decodes");
+    assert_eq!(decoded.state, StageState::Advanced);
+    assert_eq!((decoded.done, decoded.total), (12, Some(40)));
+
+    let completed = ProgressEvent::completed(Stage::Audit, "report", 1);
+    assert_eq!(
+        StageEvent::decode(&relay::line_for(&completed))
+            .expect("decodes")
+            .state,
+        StageState::Completed
+    );
+
+    // The reason must survive: it is what an operator acts on, and it arrives
+    // as a multi-line `anyhow` cause chain.
+    let failed = ProgressEvent::failed(
+        Stage::Audit,
+        "jira sync",
+        "no project configured\ncaused by: missing key",
+    );
+    let decoded = StageEvent::decode(&relay::line_for(&failed)).expect("decodes");
+    assert_eq!(decoded.state, StageState::Failed);
+    assert_eq!(
+        decoded.detail.as_deref(),
+        Some("no project configured\ncaused by: missing key")
+    );
+
+    let skipped = ProgressEvent::skipped(Stage::Audit, "dora", "no deployments");
+    assert_eq!(
+        StageEvent::decode(&relay::line_for(&skipped))
+            .expect("decodes")
+            .state,
+        StageState::Skipped
+    );
+}
+
+/// Why (#5823): a hand-run `tga audit` must behave exactly as it did, so the
+/// relay is off unless a parent asked — and off means no bus at all, which is
+/// what makes every emit inside the sweep a no-op.
+/// What: an inactive relay hands the sweep `None`.
+/// Test: this is the test.
+#[test]
+fn relay_is_off_unless_the_parent_asks() {
+    assert!(relay::StageRelay::off().bus().is_none());
+}
+
+/// Why (#5823): the last events of a sweep are the ones a parent most needs,
+/// and they are emitted microseconds before the run ends. A relay that stopped
+/// without flushing would drop exactly the final verdict.
+/// What: events emitted immediately before `finish` leave the bus empty
+/// afterwards — the drainer ran once more on its way out.
+/// Test: this is the test.
+#[tokio::test]
+async fn relay_flushes_what_was_queued_before_it_stopped() {
+    let relay = relay::StageRelay::started();
+    let bus = relay.bus().expect("an active relay has a bus").clone();
+    for stage in ["collect", "classify", "report"] {
+        bus.emit(ProgressEvent::completed(Stage::Audit, stage, 1));
+    }
+    relay.finish().await;
+    assert_eq!(bus.queued(), 0, "the tail of the run was never written");
+}

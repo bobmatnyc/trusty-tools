@@ -294,7 +294,7 @@ docgen = []
 # already unconditional in this crate. Also requires `mcp` (issue #2030):
 # `catchup::palace` reaches trusty-memory via `mcp::memory_rpc`'s discovery +
 # JSON-RPC helper rather than a hardcoded REST URL.
-catchup = ["dep:rusqlite", "mcp"]
+catchup = ["dep:rusqlite", "mcp", "palace-resolve"]
 # Enables the `server` module: standard axum middleware stack (CORS, trace,
 # gzip) and a fast-fail reqwest client for daemon-to-daemon calls.
 axum-server = ["dep:axum", "dep:tower-http"]
@@ -549,6 +549,14 @@ cli-help = ["dep:serde_yaml", "dep:strsim", "dep:indexmap", "dep:thiserror"]
 # per-crate location. Pulls in `serde_yaml` (pinned 0.9 — see the workspace
 # manifest's pin note and #1250) and `dirs` (already an unconditional dep).
 crate-config = ["dep:serde_yaml", "dep:thiserror"]
+# Enables the `palace_resolve` module: the single entry point every crate routes
+# through to answer "which trusty-memory palace does this project use?" (#5811).
+# Owns all four precedence levels — env override, committed
+# `.trusty-tools/trusty-memory.yaml` pin, git `owner/repo`, `parent/dir` of the
+# MAIN worktree root — plus the shared `git` probes. The pure three-level core
+# (`palace_id`) stays unconditional; only the pin-file I/O needs `serde_yaml`,
+# and the fail-closed error enum needs `thiserror`.
+palace-resolve = ["dep:serde_yaml", "dep:thiserror"]
 # Enables the `update` module: throttled crates.io update-notification helper.
 # Checks once per 24 h via a JSON cache file in the OS cache directory. Opt-out
 # via `TRUSTY_NO_UPDATE_CHECK` or `CI` environment variables. Reuses the

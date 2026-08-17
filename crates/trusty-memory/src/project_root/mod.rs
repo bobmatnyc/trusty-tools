@@ -243,11 +243,7 @@ mod tests {
     #[test]
     fn write_and_read_pin_round_trips() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "my-project".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("my-project".to_string());
         write_project_pin(tmp.path(), &pin).expect("write ok");
         let read_back = read_project_pin(tmp.path())
             .expect("read ok")
@@ -263,11 +259,7 @@ mod tests {
     #[test]
     fn write_pin_omits_null_note() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "alpha".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("alpha".to_string());
         let path = write_project_pin(tmp.path(), &pin).expect("write ok");
         let raw = std::fs::read_to_string(&path).expect("read raw ok");
         assert!(
@@ -307,11 +299,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("actual-dir");
         fs::create_dir_all(root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "pinned-slug".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("pinned-slug".to_string());
         write_project_pin(&root, &pin).expect("write pin");
 
         let sub = root.join("src");
@@ -363,11 +351,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let old_root = tmp.path().join("old-name");
         fs::create_dir_all(old_root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "original-slug".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("original-slug".to_string());
         write_project_pin(&old_root, &pin).expect("write pin");
 
         // Simulate a directory rename.
@@ -415,11 +399,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("renamed-dir");
         fs::create_dir_all(root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "original-slug".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("original-slug".to_string());
         write_project_pin(&root, &pin).expect("write pin");
         let sub = root.join("src");
         fs::create_dir_all(&sub).unwrap();
@@ -461,11 +441,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("some-dir");
         fs::create_dir_all(root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "canonical-slug".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("canonical-slug".to_string());
         write_project_pin(&root, &pin).expect("write pin");
 
         let sub = root.join("nested");
@@ -539,11 +515,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("new-name");
         fs::create_dir_all(root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "original-slug".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("original-slug".to_string());
         write_project_pin(&root, &pin).expect("write pin");
 
         let sub = root.join("src");
@@ -568,6 +540,58 @@ mod tests {
     // name) is covered by `dispatch_palace_create_persists` in tools.rs, which
     // sets the env var in the test harness. No unit test here — the env-var
     // bypass is a test-only escape hatch and not part of the public API contract.
+
+    // -----------------------------------------------------------------------
+    // Fail-closed on an untrustworthy pin (#5811)
+    // -----------------------------------------------------------------------
+
+    /// Why: THE fail-open regression. A pin file that exists but does not parse
+    /// used to log a warning and fall through to the directory basename, so a
+    /// project whose committed pin had a typo silently resolved to a different
+    /// palace and its writes landed where nobody intended. Against the pre-fix
+    /// commit this returns `Some("some-project")`; it must now return `None` so
+    /// the caller stops instead of guessing.
+    /// What: writes a syntactically-valid but wrong-shaped pin, then asserts the
+    /// read-only resolver declines rather than falling back.
+    /// Test: itself.
+    #[test]
+    fn malformed_pin_does_not_fall_back_to_basename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("some-project");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(TRUSTY_TOOLS_DIR)).unwrap();
+        fs::write(
+            root.join(PIN_FILE_REL),
+            "schema_version: 1\npalace:\n  not: a-string\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            project_slug_at_readonly(&root),
+            None,
+            "a malformed pin must stop resolution, not fall through to the basename"
+        );
+        assert_eq!(
+            pinned_slug_at(&root),
+            None,
+            "a malformed pin must not present as an absent pin"
+        );
+    }
+
+    /// Why: the fail-closed rule must not swallow the ordinary case — an ABSENT
+    /// pin is not an untrustworthy pin, and must still fall through to the
+    /// basename so unpinned projects keep working.
+    /// Test: itself.
+    #[test]
+    fn absent_pin_still_falls_back_to_basename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("unpinned-project");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        assert_eq!(
+            project_slug_at_readonly(&root).as_deref(),
+            Some("unpinned-project")
+        );
+    }
 
     #[cfg(unix)]
     #[test]

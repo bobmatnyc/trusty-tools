@@ -1076,6 +1076,47 @@ async fn memory_sink_for_reuses_the_same_sink_across_calls() {
     );
 }
 
+/// (#5811) A session whose project palace cannot be RESOLVED gets no sink, so
+/// nothing is recorded for it.
+///
+/// Why: `derive_palace_id_for_project` used to collapse every resolution failure
+/// into the shared literal `"unknown-project"`. A durable project root carries
+/// `PalaceCreation::Allowed`, so the drain task auto-created a palace under that
+/// one id and `write_turn` posted the session's real prompt and response into
+/// it — two projects with broken pins commingled their conversation content in a
+/// palace neither of them chose. The fix is structural: with no palace id there
+/// is no sink, so there is nothing to write into.
+/// What: a project root carrying a `.trusty-tools/trusty-memory.yaml` that does
+/// not parse. `.trusty-tools/` is itself a project marker, so `find_project_root`
+/// stops at this directory rather than walking up into the repo under test.
+///
+/// This is the both-ways regression proof for #5811: at `878dbb863^` this test
+/// gets `Some(sink)` because the pin was never read at all, and the derived id
+/// was returned regardless.
+/// Test: itself.
+#[tokio::test]
+async fn memory_sink_for_unresolvable_palace_returns_no_sink() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pin_dir = tmp.path().join(".trusty-tools");
+    std::fs::create_dir_all(&pin_dir).unwrap();
+    std::fs::write(
+        pin_dir.join("trusty-memory.yaml"),
+        "palace: [unclosed\n\t bad: :",
+    )
+    .unwrap();
+
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    assert!(
+        registry
+            .memory_sink_for(&session.id, Some(tmp.path()))
+            .is_none(),
+        "a project whose pin cannot be parsed must get no sink — a shared \
+         placeholder palace would commingle two projects' turn content"
+    );
+}
+
 /// `memory_sink_for` on an unknown session must return `None`, not panic
 /// (best-effort, mirrors `set_run_outcome`'s framing).
 #[tokio::test]

@@ -562,6 +562,88 @@ async fn prompt_context_recalls_palace_drawers() {
     addr_handle.shutdown().await;
 }
 
+/// Why (#5810): the header named the DERIVED slug while the drawers under it were
+/// recalled through a palace-level alias, so it printed a name `palace_list` does
+/// not return and `memory_recall` / `palace_info` / `memory_remember` cannot take
+/// as input. This is the split-brain shape from the field: an `owner-repo` slug
+/// with no directory of its own, aliased to the bare-repo palace that holds the
+/// drawers.
+/// What: creates the canonical palace with one drawer, then a second project dir
+/// pinned to a slug that owns no palace, and registers the alias between them.
+/// Drives `build_injection_body` from the aliased cwd and asserts the header names
+/// the canonical palace — and that the unusable derived slug appears nowhere in the
+/// injection. Pre-#5810 this fails on the first assertion: the drawer arrives
+/// (the daemon redirects) under a header reading the derived slug.
+/// Test: itself.
+/// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+#[cfg(feature = "axum-server")]
+#[tokio::test]
+async fn prompt_context_header_names_the_alias_target() {
+    let _guard = crate::commands::env_test_lock().lock().await;
+    unsafe {
+        std::env::remove_var(ENV_MIN_SCORE);
+        std::env::remove_var(ENV_RECALL_DENY_TAGS);
+    }
+    let (state, _data_dir_tmp, project_dir_tmp, _project_dir, canonical, addr_handle) =
+        spin_up_test_daemon_with_palace("ptx-alias-canonical").await;
+
+    let _ = crate::tools::dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": canonical,
+            "text": "Rust integration uses tokio for async tasks and serde for JSON",
+            "room": "General",
+            "tags": ["rust", "tokio"],
+        }),
+    )
+    .await
+    .expect("memory_remember");
+
+    // The derived slug: a project dir pinned to a palace that was never created.
+    let derived = "ptx-alias-derived";
+    let aliased_project = project_dir_tmp.path().join(derived);
+    std::fs::create_dir_all(&aliased_project).expect("aliased project dir");
+    crate::project_root::write_project_pin(
+        &aliased_project,
+        &crate::project_root::ProjectPin::new(derived),
+    )
+    .expect("write pin for the aliased project");
+
+    let registry_dir =
+        trusty_common::palace_alias::default_palace_registry_dir().expect("registry dir");
+    assert!(
+        !registry_dir.join(derived).join("palace.json").exists(),
+        "the derived slug must own no palace, or this test proves nothing"
+    );
+    trusty_common::palace_alias::PalaceAliasStore::register_alias(
+        &registry_dir,
+        derived,
+        &canonical,
+    )
+    .expect("register palace alias");
+
+    let payload = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": aliased_project.to_string_lossy(),
+        "prompt": "how does rust integration work?"
+    })
+    .to_string();
+    let body = build_injection_body(&payload).await;
+
+    assert!(
+        body.contains(&format!("## Relevant memories from palace `{canonical}`")),
+        "the header must name the palace the drawers came from; got:\n{body}"
+    );
+    assert!(
+        !body.contains(derived),
+        "the pre-redirect slug is not a usable memory-tool input and must not \
+         appear in the injection; got:\n{body}"
+    );
+
+    addr_handle.shutdown().await;
+}
+
 /// Why (issue #5037, end to end): the unit tests above pin the floor over
 /// synthetic scores. This one proves the whole chain — real embedder, real HTTP
 /// recall, real `score` on the wire, real filter — turns an off-topic prompt
@@ -717,6 +799,13 @@ async fn spin_up_test_daemon_with_palace(
         std::env::remove_var(crate::prompt_log::ENV_ENABLED);
         std::env::remove_var(crate::prompt_log::ENV_DIR);
         std::env::remove_var(crate::prompt_log::ENV_HASH_PROMPTS);
+        // #5810: `TRUSTY_MEMORY_PALACE` is precedence level 1 and outranks the
+        // pin file written below, so an ambient value — every trusty-mpm managed
+        // session exports one — made these tests resolve the developer's own
+        // palace instead of the fixture's. Every one of them then recalled
+        // nothing and asserted against `EMPTY_PLACEHOLDER`. Scrub it here so the
+        // pin is authoritative, matching what the comment below already claims.
+        std::env::remove_var(trusty_common::PALACE_OVERRIDE_ENV);
         // Issue #88: bypass palace-slug enforcement so test palaces with
         // arbitrary names can be created without a matching project root.
         std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
@@ -732,11 +821,7 @@ async fn spin_up_test_daemon_with_palace(
     // pin-file-primacy anchor that keeps existing palaces from being orphaned.
     crate::project_root::write_project_pin(
         &project_dir,
-        &crate::project_root::ProjectPin {
-            schema_version: crate::project_root::PIN_SCHEMA_VERSION,
-            palace: palace_slug.to_string(),
-            note: None,
-        },
+        &crate::project_root::ProjectPin::new(palace_slug.to_string()),
     )
     .expect("write project pin for fixture");
 
@@ -748,9 +833,9 @@ async fn spin_up_test_daemon_with_palace(
     state.set_ready();
 
     // Create the palace via MCP dispatch so the on-disk metadata
-    // matches what a real client would have produced. The `TRUSTY_MEMORY_PALACE`
-    // override pinned above makes `cwd_palace_slug_at` (and thus the hook)
-    // resolve to exactly this slug (issue #1217).
+    // matches what a real client would have produced. The pin file written
+    // above makes `cwd_palace_slug_at` (and thus the hook) resolve to exactly
+    // this slug (issue #1217).
     let _ = crate::tools::dispatch_tool(&state, "palace_create", json!({"name": palace_slug}))
         .await
         .expect("palace_create");

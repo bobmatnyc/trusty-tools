@@ -40,10 +40,14 @@
 mod aggregate;
 mod bus;
 mod event;
+// #5823: the same events, written out of the process for a parent that spawned
+// it — the fourth piece, and the only one whose consumer is not in-process.
+pub mod relay;
 
 pub use aggregate::{ProgressAggregate, StageSummary, TargetRow, LOG_CAPACITY};
 pub use bus::{ProgressBus, DEFAULT_CAPACITY};
 pub use event::{Outcome, ProgressEvent, Stage};
+pub use relay::StageRelay;
 
 #[cfg(test)]
 mod tests;

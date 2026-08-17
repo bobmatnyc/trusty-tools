@@ -441,41 +441,35 @@ async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) {
     }
 }
 
-/// Derive the palace id for a project directory (#2345).
+/// Resolve the palace id for a project directory (#2345).
 ///
-/// Why: mirrors `trusty_common::catchup`'s own (private-to-that-module)
-/// `derive_palace_id_for` convention exactly, so a session's turns land in
-/// the SAME palace `catchup::pm_catchup_context` reads its digest from — the
-/// PM's own catch-up section and the turn recorder's writes must agree on
-/// "which palace is this project." Both this function and
-/// `trusty_common::catchup::derive_palace_id_for` previously carried their
-/// OWN copy of a 4th, unslugified `file_name()` fallback for when
-/// `derive_palace_id` returned `None`; since each copy re-derived the
-/// fallback from its own local `project_dir` handle, the two could in
-/// principle diverge (and could leak a storage-unsafe, unslugified token as
-/// a palace id) — see issue #1772. Both call sites now share the exact same
-/// terminal behavior — a fixed, non-derived placeholder — so `derive_palace_id`
-/// remains the single source of truth for every real precedence level.
-/// What: probes `git config --get remote.origin.url` from `project_dir`,
-/// then calls `trusty_common::derive_palace_id` (explicit override env ->
-/// git owner/repo slug -> parent/dir slug), falling back to the fixed
-/// literal `"unknown-project"` (never a directory-derived value) when all
-/// three yield `None`.
-/// Test: `memory_sink::tests::derive_palace_id_for_project_falls_back_to_dirname`.
-pub fn derive_palace_id_for_project(project_dir: &Path) -> String {
-    let remote = std::process::Command::new("git")
-        .arg("-C")
-        .arg(project_dir)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let override_val = trusty_common::palace_override_from_env();
-    trusty_common::derive_palace_id(project_dir, remote.as_deref(), override_val.as_deref())
-        .unwrap_or_else(|| "unknown-project".to_string())
+/// Why: mirrors `trusty_common::catchup`'s own `derive_palace_id_for`
+/// convention exactly, so a session's turns land in the SAME palace
+/// `catchup::pm_catchup_context` reads its digest from — the PM's own catch-up
+/// section and the turn recorder's writes must agree on "which palace is this
+/// project."
+///
+/// This used to answer `"unknown-project"` on any failure. That literal is
+/// SHARED: two projects that both fail resolution get the same id, and
+/// `SessionRegistry::memory_sink_for` grants a durable project root
+/// [`PalaceCreation::Allowed`], so the recorder auto-created one palace under
+/// the placeholder and posted both projects' real prompts and responses into it
+/// (#5811). While the only failure was "no identity at all" that was rare;
+/// routing through `palace_resolve` added three pin-trust failures to the same
+/// branch, so a typo in one committed pin was enough to reach it. The error is
+/// returned instead, and the caller declines to record.
+/// What: delegates to `trusty_common::palace_resolve::resolve_palace` — env
+/// override, then the committed pin, then the git `owner/repo` slug, then the
+/// `parent/dir` slug of the main worktree root.
+/// Test: `memory_sink::tests::derive_palace_id_for_project_falls_back_to_dirname`,
+/// `memory_sink::tests::malformed_pin_is_an_error_not_the_shared_placeholder`.
+pub fn derive_palace_id_for_project(
+    project_dir: &Path,
+) -> Result<String, trusty_common::palace_resolve::PalaceResolveError> {
+    // #5811: this probed the remote itself and called the PURE three-level
+    // core, so a tcode session's turns landed in the derived palace even when
+    // the project committed a pin naming a different one.
+    trusty_common::palace_resolve::resolve_palace(project_dir).map(|resolution| resolution.id)
 }
 
 #[cfg(test)]

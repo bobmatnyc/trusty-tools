@@ -52,7 +52,21 @@ with `curl`/`lsof`/`ps`/`netstat`.
 Full per-tool tables: `Skill(skill="tm-tool-usage-guide")`. A tool missing from
 your loaded list is not unavailable — load its schema with `ToolSearch` first.
 
-**External connectors — native-first (soft preference), not a block (ADR-0014):**
-prefer `mcp__gworkspace-mcp__*` over the `mcp__claude_ai_G*` family and
-`mcp__slack-mcp__*` over `mcp__claude_ai_Slack__*`; the hosted connectors stay
-available as fallback.
+**External connectors — native-first (soft preference), not a block (ADR-0014).**
+Google Workspace and Slack ship as crates in THIS workspace, and both are
+OPT-IN: an operator registers them with `tm mcp add`, so a session that has
+neither is behaving normally. Do not diagnose their absence, and never go
+hunting the machine for a similarly-named third-party package — these two are
+the implementations of record.
+
+| Connector | Crate | Binary | Hosted fallback |
+|---|---|---|---|
+| Google Workspace | `crates/trusty-gworkspace` | `trusty-gworkspace-mcp` | `mcp__claude_ai_G*` |
+| Slack | `crates/trusty-channels` | `slack-mcp` | `mcp__claude_ai_Slack__*` |
+
+Prefer the native server wherever one is registered. Its tool prefix is the NAME
+it was registered under, which the operator chose — read `tm mcp list` or your
+own tool listing rather than assuming a prefix. Registered is also not the same
+as working — each needs its own credentials, and `trusty-gworkspace-mcp doctor`
+names what Google Workspace is missing. Setup and tool inventories live in each
+crate's `README.md`; registration in `Skill(skill="tm-cli-operations")`.

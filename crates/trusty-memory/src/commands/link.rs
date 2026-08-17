@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use crate::project_root::{
     find_project_root, project_slug_from_basename, read_project_pin, write_project_pin, ProjectPin,
-    PIN_FILE_REL, PIN_SCHEMA_VERSION,
+    PIN_FILE_REL,
 };
 
 /// Entry point for `trusty-memory link [--path <dir>] [--slug <slug>]
@@ -102,11 +102,7 @@ pub fn handle_link(
         _ => {} // Absent or --force: proceed.
     }
 
-    let pin = ProjectPin {
-        schema_version: PIN_SCHEMA_VERSION,
-        palace: slug.clone(),
-        note,
-    };
+    let pin = ProjectPin::new(slug.clone()).with_note(note);
 
     write_project_pin(&root, &pin)
         .with_context(|| format!("write pin to {}", pin_path.display()))?;
@@ -141,6 +137,7 @@ pub fn resolve_link_root(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project_root::PIN_SCHEMA_VERSION;
     use std::fs;
 
     /// Why: the primary use-case — a fresh project directory has no pin file;
@@ -195,11 +192,7 @@ mod tests {
         fs::create_dir_all(root.join(".git")).unwrap();
 
         // Write an initial pin.
-        let initial = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "old-slug".to_string(),
-            note: None,
-        };
+        let initial = ProjectPin::new("old-slug".to_string());
         write_project_pin(&root, &initial).expect("initial write ok");
 
         // Re-link with a different slug + --force.
@@ -224,11 +217,7 @@ mod tests {
         let root = tmp.path().join("safe-project");
         fs::create_dir_all(root.join(".git")).unwrap();
 
-        let initial = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "guarded-slug".to_string(),
-            note: None,
-        };
+        let initial = ProjectPin::new("guarded-slug".to_string());
         write_project_pin(&root, &initial).expect("initial write ok");
 
         // Attempt to overwrite without --force.

@@ -45,6 +45,7 @@ use std::path::{Path, PathBuf};
 use trusty_common::gh::{GhCommand, GhError};
 
 use crate::error::AuditError;
+use crate::progress::{Operation, Progress, UnitOutcome};
 use crate::run::{self, SelectedRepo};
 use crate::workdir::{Area, WorkDir};
 
@@ -212,7 +213,11 @@ fn staging(work: &WorkDir, name_with_owner: &str) -> Result<PathBuf, AuditError>
 }
 
 /// Split and validate `owner/name`, the one place the charset is decided.
-fn split_name(name_with_owner: &str) -> Result<(&str, &str), AuditError> {
+///
+/// `pub(crate)` since #5822: registering a repository target validates the same
+/// identity before persisting it, and a second charset decision there would let
+/// `taudit add repo` accept a name `taudit clone` then refuses.
+pub(crate) fn split_name(name_with_owner: &str) -> Result<(&str, &str), AuditError> {
     let reject = || AuditError::InvalidRepoName {
         name: name_with_owner.to_string(),
     };
@@ -503,6 +508,7 @@ pub async fn clone_all(
     work: &WorkDir,
     repos: &[String],
     options: &CloneOptions,
+    progress: &Progress,
 ) -> Result<CloneReport, AuditError> {
     // #5215 review: the guard runs BEFORE `create`. The other order let
     // `create_dir_all` follow a DANGLING `repos/` symlink and build the target
@@ -518,9 +524,19 @@ pub async fn clone_all(
         .map(|r| Ok((r.clone(), destination(work, r)?, staging(work, r)?)))
         .collect::<Result<_, AuditError>>()?;
 
-    let mut out = Vec::with_capacity(planned.len());
+    // #5823: announced only once every name has validated, so a display never
+    // opens on an acquisition that a typo is about to refuse.
+    let total = planned.len();
+    progress.operation_started(Operation::CloneRepos, total);
+    let mut out = Vec::with_capacity(total);
     let mut spent: u64 = 0;
-    for (name_with_owner, dest, staged) in planned {
+    for (index, (name_with_owner, dest, staged)) in planned.into_iter().enumerate() {
+        progress.unit_started(
+            Operation::CloneRepos,
+            name_with_owner.as_str(),
+            index + 1,
+            total,
+        );
         // Each level between the area and the checkout is its own escape route.
         if let Some(owner_dir) = dest.parent() {
             ensure_real_dir(owner_dir.to_path_buf())?;
@@ -530,6 +546,7 @@ pub async fn clone_all(
         if dest.is_dir() {
             let (bytes, complete) = dir_size(&dest);
             spent = spent.saturating_add(bytes);
+            announce(progress, &name_with_owner, &CloneState::Reused);
             out.push(ClonedRepo {
                 name_with_owner,
                 path: dest,
@@ -540,12 +557,14 @@ pub async fn clone_all(
             continue;
         }
         if options.budget_bytes.is_some_and(|b| spent >= b) {
+            let state = CloneState::Skipped(format!(
+                "the {spent}-byte disk budget for clones was already spent"
+            ));
+            announce(progress, &name_with_owner, &state);
             out.push(ClonedRepo {
                 name_with_owner,
                 path: dest,
-                state: CloneState::Skipped(format!(
-                    "the {spent}-byte disk budget for clones was already spent"
-                )),
+                state,
                 bytes: 0,
                 bytes_complete: true,
             });
@@ -570,6 +589,7 @@ pub async fn clone_all(
             .map(|_| ());
         let (state, bytes, complete) = finish_one(&dest, &staged, ran);
         spent = spent.saturating_add(bytes);
+        announce(progress, &name_with_owner, &state);
         out.push(ClonedRepo {
             name_with_owner,
             path: dest,
@@ -578,9 +598,32 @@ pub async fn clone_all(
             bytes_complete: complete,
         });
     }
+    let usable = out.iter().filter(|r| r.state.is_usable()).count();
+    progress.operation_finished(Operation::CloneRepos, usable, total);
     let report = summarize(out)?;
     record_selection(work, &report)?;
     Ok(report)
+}
+
+/// Tell a watching front end how one repository ended.
+///
+/// Why: every arm of the acquisition loop ends a unit, including the two that
+/// return early, and a display left holding a repository the loop has already
+/// moved past is the wedged state #5823 names. One helper means the mapping
+/// from acquisition state to display verdict is written once.
+/// What: [`CloneState::Reused`] and [`CloneState::Cloned`] are successes;
+/// `Empty` is a failure (it is not a checkout anything can read); `Failed` and
+/// `Skipped` carry their own reasons.
+/// Test: `super::clone_tests::every_acquisition_outcome_is_reported_once`.
+fn announce(progress: &Progress, name_with_owner: &str, state: &CloneState) {
+    let outcome = match state {
+        CloneState::Cloned | CloneState::Reused => UnitOutcome::Succeeded,
+        CloneState::Failed(reason) | CloneState::Empty(reason) => {
+            UnitOutcome::Failed(reason.clone())
+        }
+        CloneState::Skipped(reason) => UnitOutcome::Skipped(reason.clone()),
+    };
+    progress.unit_finished(Operation::CloneRepos, name_with_owner, outcome);
 }
 
 #[cfg(test)]
@@ -733,6 +776,7 @@ mod clone_tests {
             &work,
             &["acme/api.partial".to_string(), "acme/api".to_string()],
             &CloneOptions::default(),
+            &Progress::none(),
         )
         .await
         .expect("the first repo is usable, so the run continues");
@@ -759,6 +803,7 @@ mod clone_tests {
             &work,
             &["acme/api".to_string(), "acme/web".to_string()],
             &CloneOptions::default(),
+            &Progress::none(),
         )
         .await
         .expect("both checkouts are present, so nothing is fetched");
@@ -780,12 +825,17 @@ mod clone_tests {
         let work = work_in(tmp.path());
         let dest = destination(&work, "acme/api").expect("valid");
         std::fs::create_dir_all(&dest).expect("mkdir");
-        clone_all(&work, &["acme/api".to_string()], &CloneOptions::default())
-            .await
-            .expect("a present checkout needs no network");
+        clone_all(
+            &work,
+            &["acme/api".to_string()],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("a present checkout needs no network");
         let recorded = std::fs::read_to_string(run::selection_path(&work)).expect("read");
 
-        clone_all(&work, &[], &CloneOptions::default())
+        clone_all(&work, &[], &CloneOptions::default(), &Progress::none())
             .await
             .expect("an empty request is empty, not failed");
         assert_eq!(
@@ -805,9 +855,14 @@ mod clone_tests {
         std::fs::create_dir_all(&outside).expect("target");
         std::os::unix::fs::symlink(&outside, work.path(Area::Repos).join("acme")).expect("symlink");
 
-        let err = clone_all(&work, &["acme/api".to_string()], &CloneOptions::default())
-            .await
-            .expect_err("an owner directory that is a symlink must be refused");
+        let err = clone_all(
+            &work,
+            &["acme/api".to_string()],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect_err("an owner directory that is a symlink must be refused");
         assert!(matches!(err, AuditError::UnsafeArea { .. }), "{err:?}");
         assert!(
             !outside.join("api").exists(),
@@ -825,9 +880,14 @@ mod clone_tests {
         let never = tmp.path().join("never-created");
         std::os::unix::fs::symlink(&never, work.path(Area::Repos)).expect("symlink");
 
-        let err = clone_all(&work, &["acme/api".to_string()], &CloneOptions::default())
-            .await
-            .expect_err("a dangling area symlink must be refused");
+        let err = clone_all(
+            &work,
+            &["acme/api".to_string()],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect_err("a dangling area symlink must be refused");
         assert!(matches!(err, AuditError::UnsafeArea { .. }), "{err:?}");
         assert!(
             !never.exists(),
@@ -977,9 +1037,14 @@ mod clone_tests {
         std::fs::create_dir_all(&dest).expect("mkdir");
         std::fs::write(dest.join("f"), b"1234").expect("write");
 
-        let report = clone_all(&work, &["acme/api".to_string()], &CloneOptions::default())
-            .await
-            .expect("a present checkout needs no network");
+        let report = clone_all(
+            &work,
+            &["acme/api".to_string()],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("a present checkout needs no network");
         assert_eq!(report.repos[0].state, CloneState::Reused);
         assert_eq!(report.total_bytes, 4);
     }
@@ -992,6 +1057,7 @@ mod clone_tests {
             &work,
             &["acme/api".to_string(), "../escape".to_string()],
             &CloneOptions::default(),
+            &Progress::none(),
         )
         .await
         .expect_err("the whole request is refused");
@@ -1018,6 +1084,7 @@ mod clone_tests {
                 shallow: true,
                 budget_bytes: Some(4),
             },
+            &Progress::none(),
         )
         .await
         .expect("the first repo is usable, so the run continues");
@@ -1043,11 +1110,52 @@ mod clone_tests {
             &work,
             &["octocat/Hello-World".to_string()],
             &CloneOptions::default(),
+            &Progress::none(),
         )
         .await
         .expect("a public repository clones");
         assert_eq!(report.repos[0].state, CloneState::Cloned);
         assert!(report.repos[0].path.join(".git").is_dir());
         assert!(report.total_bytes > 0, "the report must state disk use");
+    }
+    /// Why (#5823): every arm of the acquisition loop ends a unit, and two of
+    /// them return early. A missed one leaves a display holding a repository
+    /// the loop moved past minutes ago — and reports it as still cloning.
+    /// What: each acquisition state maps to the verdict a display renders, and
+    /// a reused checkout is a success rather than a silent nothing.
+    /// Test: this is the test.
+    #[test]
+    fn every_acquisition_outcome_is_reported_once() {
+        let (recorder, progress) = crate::progress::Recorder::new();
+        for state in [
+            CloneState::Cloned,
+            CloneState::Reused,
+            CloneState::Failed("remote refused".into()),
+            CloneState::Empty("no commits".into()),
+            CloneState::Skipped("budget spent".into()),
+        ] {
+            announce(&progress, "acme/api", &state);
+        }
+
+        let verdicts: Vec<UnitOutcome> = recorder
+            .updates()
+            .into_iter()
+            .filter_map(|u| match u {
+                crate::progress::ProgressUpdate::UnitFinished { outcome, .. } => Some(outcome),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            verdicts,
+            vec![
+                UnitOutcome::Succeeded,
+                UnitOutcome::Succeeded,
+                UnitOutcome::Failed("remote refused".into()),
+                // A commitless checkout is nothing a later stage can read, so
+                // it is a failure here even though `gh` exited zero.
+                UnitOutcome::Failed("no commits".into()),
+                UnitOutcome::Skipped("budget spent".into()),
+            ]
+        );
     }
 }

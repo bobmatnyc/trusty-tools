@@ -26,6 +26,8 @@
 //! | [`manifest`] | reading tga's `manifest.toml` rather than duplicating it |
 //! | [`tools`] | which pinned tools are needed, and the call that installs them |
 //! | [`discover`] | which repositories the recipient's `gh` credential can reach (#5487) |
+//! | [`registry`] | the repositories and boards this engagement targets (#5822) |
+//! | [`validate`] | proving a target can be read, before it is registered (#5822) |
 //! | [`clone`] | getting the selected repositories onto the recipient's disk (#5215) |
 //! | [`run`] | driving the pinned `tga audit` over the selected repositories |
 //! | [`package`] | assembling the unencrypted deliverable that goes back (#5499) |
@@ -73,9 +75,15 @@ pub mod error;
 pub mod inference;
 pub mod manifest;
 pub mod package;
+// #5823: the seam a front end renders live progress through, and the pump that
+// reads a spawned child's stages back out of its output.
+pub mod progress;
+pub mod registry;
+mod relay;
 pub mod run;
 pub mod session;
 pub mod tools;
+pub mod validate;
 pub mod workdir;
 
 pub use error::AuditError;
