@@ -118,16 +118,53 @@ fn workstream_summary_tag_renders_ws_summary_prefix() {
     assert_eq!(workstream_summary_tag("feat-x"), "ws-summary:feat-x");
 }
 
+/// Why (#5811): a directory with no project marker and no git remote is a
+/// LEGITIMATE palace owner, not a failure — trusty-agents mints a palace per
+/// assistant, and those have no repo at all. This used to assert the opposite,
+/// because the endpoint resolved through `project_slug_at_readonly`, which is
+/// pin-then-basename and returns `None` outside a project. The shared resolver
+/// answers via level 4 (`parent/dir` of the main worktree root), so a
+/// projectless caller resolves and the write proceeds to the daemon.
+/// What: asserts the call still fails LOUDLY (the daemon at port 1 is
+/// unreachable) but NOT for want of a project root.
+/// Test: itself.
 #[tokio::test]
-async fn create_tagged_drawer_at_no_project_root_errs() {
-    // Why: the write path must fail loudly (not silently drop the turn)
-    // when there is nowhere to write it — a tempdir with no project
-    // marker resolves no palace id.
+async fn create_tagged_drawer_at_without_a_project_root_still_resolves_a_palace() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let err = create_tagged_drawer_at(tmp.path(), "http://127.0.0.1:1", "content", vec![])
         .await
-        .expect_err("no project root must error, not silently succeed");
-    assert!(err.to_string().contains("no project root"));
+        .expect_err("an unreachable daemon must error, not silently succeed");
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("resolve palace for"),
+        "a projectless caller must still resolve a palace, got: {msg}"
+    );
+}
+
+/// Why (#5811): the one input that legitimately blocks the write is a committed
+/// pin that cannot be trusted. Deriving past it would send the drawer to a
+/// palace nobody chose, so the write must stop before any HTTP call.
+/// What: `.trusty-tools/` is itself a project marker, so the tempdir IS the root
+/// the resolver stops at, and the pin body is not valid pin YAML.
+/// Test: itself.
+#[tokio::test]
+async fn create_tagged_drawer_at_malformed_pin_errs() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pin_dir = tmp.path().join(".trusty-tools");
+    std::fs::create_dir_all(&pin_dir).expect("create .trusty-tools");
+    std::fs::write(
+        pin_dir.join("trusty-memory.yaml"),
+        "palace: [unclosed\n\t bad: :",
+    )
+    .expect("write malformed pin");
+
+    let err = create_tagged_drawer_at(tmp.path(), "http://127.0.0.1:1", "content", vec![])
+        .await
+        .expect_err("an untrustworthy pin must stop the write");
+    assert!(
+        err.to_string().contains("resolve palace for"),
+        "expected a resolution failure, got: {err}"
+    );
 }
 
 #[tokio::test]
