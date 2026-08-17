@@ -30,6 +30,15 @@
 //! [`run::boards`] owns that split. A board with no credential in the engagement
 //! config is still a gap, and still reported rather than dropped.
 //!
+//! The registry is read ONCE per [`audit`], in the materialize phase. The gaps
+//! that reach the return package and the board sections that reach each child
+//! come out of that single read: [`split_targets`] resolves, and [`collect`]
+//! forwards the result to [`run::sweep_with_boards`] rather than loading the
+//! registry again. Reading it twice is what the phases below make dangerous —
+//! tool install and every clone sit between them, so the two reads are an
+//! engagement's wall clock apart and a `taudit remove board` in another terminal
+//! lands cleanly inside the window (#5857).
+//!
 //! ## Partial success is the normal case, and it is not success
 //!
 //! With six repositories, one failing is ordinary. The chain CONTINUES past it,
@@ -213,8 +222,13 @@ pub async fn audit(
         .await
         .map_err(|e| stopped(Phase::InstallTools, e))?;
 
-    let (repos, mut gaps) =
+    // #5857: the registry is read ONCE for this whole invocation. `collect` is
+    // handed the resolution rather than repeating it, because the phases below
+    // span an engagement's worth of wall clock and the registry is a file
+    // another terminal can edit.
+    let (repos, boards) =
         split_targets(work, &config.boards).map_err(|e| stopped(Phase::Materialize, e))?;
+    let mut gaps = boards.gaps.clone();
     let acquired = materialize(work, &repos, progress)
         .await
         .map_err(|e| stopped(Phase::Materialize, e))?;
@@ -225,7 +239,7 @@ pub async fn audit(
         gaps.extend(acquired.gaps.iter().cloned());
     }
 
-    let run = collect(work, config, options, progress)
+    let run = collect(work, config, options, &boards, progress)
         .await
         .map_err(|e| stopped(Phase::Collect, e))?;
 
@@ -278,20 +292,20 @@ async fn install(
 ///
 /// Why: a registered BOARD used to land here as an unconditional gap — the
 /// wiring simply stopped at the repository arm (#5857). It now goes to
-/// [`run::boards::resolve`], the same call [`run::sweep`] makes when it
-/// generates each child's config, so the gap this states and the coverage that
-/// child gets are one decision rather than two that can disagree. What is left
-/// as a gap is narrow: a board whose provider has no credential in the
-/// engagement config, and a second JIRA project (tga's `jira.project_key` holds
-/// one).
-/// What: repositories by name for [`materialize`], and the resolver's gap lines
-/// verbatim.
+/// [`run::boards::resolve`], and the WHOLE resolution is returned rather than
+/// only its gap lines, because [`audit`] hands it to [`collect`]: the gaps this
+/// states and the sections that child gets are then one decision made once, not
+/// two reads of a mutable file hours apart. What is left as a gap is narrow: a
+/// board whose provider has no credential in the engagement config, and a second
+/// JIRA project (tga's `jira.project_key` holds one).
+/// What: repositories by name for [`materialize`], and the resolution itself.
 /// Test: `super::chain_tests::a_registered_board_with_a_credential_is_collected`,
-/// `super::chain_tests::a_board_with_no_configured_credential_is_still_a_gap`.
+/// `super::chain_tests::a_board_with_no_configured_credential_is_still_a_gap`,
+/// `super::chain_tests::a_board_removed_after_the_chain_resolved_it_still_reaches_the_child`.
 fn split_targets(
     work: &WorkDir,
     credentials: &BoardCredentials,
-) -> Result<(Vec<String>, Vec<String>), AuditError> {
+) -> Result<(Vec<String>, run::boards::Boards), AuditError> {
     let registry = Registry::load(work)?;
     let repos = registry
         .targets()
@@ -301,10 +315,7 @@ fn split_targets(
             Target::Board { .. } => None,
         })
         .collect();
-    Ok((
-        repos,
-        run::boards::resolve(registry.targets(), credentials).gaps,
-    ))
+    Ok((repos, run::boards::resolve(registry.targets(), credentials)))
 }
 
 /// Phase 2 — turn what is registered into checkouts the sweep can read.
@@ -358,21 +369,26 @@ async fn materialize(
 ///
 /// A repository that FAILED among others that succeeded is not this case — that
 /// package is worth sending and names what it omits.
-/// What: [`run::sweep`] unchanged, then the status check.
+/// What: [`run::sweep_with_boards`], then the status check. `boards` is
+/// [`split_targets`]'s resolution, forwarded so the sweep does not read the
+/// registry a second time — see that function and [`audit`].
 /// Test: `super::chain_tests::a_sweep_that_audited_nothing_stops_before_packaging`,
-/// `super::chain_tests::a_partly_failed_chain_packages_and_still_does_not_exit_zero`.
+/// `super::chain_tests::a_partly_failed_chain_packages_and_still_does_not_exit_zero`,
+/// `super::chain_tests::a_board_removed_after_the_chain_resolved_it_still_reaches_the_child`.
 async fn collect(
     work: &WorkDir,
     config: &EngagementConfig,
     options: &ChainOptions,
+    boards: &run::boards::Boards,
     progress: &Progress,
 ) -> Result<RunReport, AuditError> {
-    let report = run::sweep(
+    let report = run::sweep_with_boards(
         work,
         config,
         &RunOptions {
             fresh: options.fresh,
         },
+        boards,
         progress,
     )
     .await?;
@@ -757,6 +773,55 @@ trusty-review = "0.15.1"
             Outcome::Audit(report).exit_code(),
             0,
             "an unaudited target must not exit zero even when the sweep was clean"
+        );
+    }
+
+    /// The registry is read ONCE per `audit`, so nothing that happens to it
+    /// afterwards can move the coverage away from what the report states.
+    ///
+    /// Why this is worth a test: `audit` states its board gaps in the Materialize
+    /// phase and the sweep runs after tool install and every clone — an
+    /// hour-scale window. A `taudit remove board jira:ACME` inside it used to
+    /// leave the report claiming coverage (no gap) while the child got no `jira:`
+    /// section at all, and the engagement exited 0 having never read the board.
+    ///
+    /// Against `5a615fe0e` this fails on the `project_key: ACME` assertion:
+    /// `run::sweep` called `Registry::load` a second time and found nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_board_removed_after_the_chain_resolved_it_still_reaches_the_child() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = prepared(tmp.path(), &["acme-api"], &["acme-api"]);
+        register_boards(&work, &["jira:ACME"]);
+        let config = config_with_jira();
+
+        // Phase 2's half of `audit`: the one resolution, stating no gap.
+        let (_repos, boards) = split_targets(&work, &config.boards).expect("splits");
+        assert!(boards.gaps.is_empty(), "{:?}", boards.gaps);
+
+        // The window: install and every clone happen here, and a concurrent
+        // `taudit remove board` lands inside it.
+        Registry::default().save(&work).expect("writes");
+
+        // Phase 3, driven exactly as `audit` drives it.
+        let report = collect(
+            &work,
+            &config,
+            &ChainOptions::default(),
+            &boards,
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep runs");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let generated =
+            std::fs::read_to_string(work.path(Area::State).join("tga-00-acme-api.yaml"))
+                .expect("the generated tga config");
+        assert!(
+            generated.contains("project_key: ACME"),
+            "the report stated no gap for jira:ACME, so the child must have \
+             collected it: {generated}"
         );
     }
 

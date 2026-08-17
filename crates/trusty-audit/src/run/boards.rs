@@ -125,9 +125,17 @@ impl Boards {
 
 /// Turn the registered boards into config sections, or into stated gaps.
 ///
-/// Why: one function, called by both `crate::run::sweep` (which needs the
-/// sections) and `crate::chain::split_targets` (which needs the gaps), so the
-/// two cannot disagree about which boards a run covers.
+/// Why: one function, called by `crate::chain::split_targets` (which needs the
+/// gaps) and by `crate::run::sweep` (which needs the sections), so both read the
+/// registry through the same rules.
+///
+/// That alone does NOT make the two agree, and claiming it did was wrong: the
+/// same resolver over the same mutable file at two different times can return
+/// two different answers, and the chain's two calls were an engagement apart.
+/// The guarantee is one resolution per invocation. `crate::chain::audit`
+/// resolves here once and hands the result to `crate::run::sweep_with_boards`;
+/// `taudit run` resolves here once inside `crate::run::sweep`. Nothing calls it
+/// twice for one run.
 ///
 /// # Postconditions
 /// Every element of `targets` that is a [`Target::Board`] either contributes to

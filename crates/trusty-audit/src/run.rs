@@ -66,13 +66,12 @@ use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{EngagementConfig, ToolPins};
+use crate::config::EngagementConfig;
 use crate::error::AuditError;
 use crate::inference;
 use crate::progress::{Operation, Progress, StageEvent, StageState, UnitOutcome};
 use crate::registry;
 use crate::relay::{Scrubber, tee_and_relay};
-use crate::tools::{self, RequiredTool};
 use crate::workdir::{Area, WorkDir};
 
 // #5823: the selection file crossed run.rs past the 500-SLOC production cap, and
@@ -97,6 +96,13 @@ pub mod checkpoint;
 // judgement is what makes it a module rather than a step inside `run_one`.
 mod verify;
 
+// #5857: the pinned-tool preflight, split out when this file crossed the
+// 500-SLOC production cap. It runs to completion before any child starts and
+// answers one question — are the installed tools the ones this engagement pins
+// — so it separates cleanly.
+mod pins;
+
+use pins::{PinnedBinaries, pinned_binaries};
 use verify::verify_output;
 
 pub use checkpoint::{PROGRESS_FILE, Recollect, RunProgress, progress_path, read_progress};
@@ -234,85 +240,6 @@ pub struct RunOptions {
     pub fresh: bool,
 }
 
-/// The four binaries a run drives, each proven to be at the engagement's pin.
-///
-/// Why: named fields rather than a lookup table, so the "tool not found" branch
-/// does not exist. The obvious table version needs a fallback arm at every use
-/// site, and the natural fallback — the bare binary name — is a `PATH` lookup,
-/// which is the one thing this module must never do.
-#[derive(Debug, Clone)]
-struct PinnedBinaries {
-    tga: PathBuf,
-    search: PathBuf,
-    analyze: PathBuf,
-    review: PathBuf,
-}
-
-/// The pinned binaries this run drives, or a refusal naming what is wrong.
-///
-/// Why: the run must use the binaries THIS client installed and verified at the
-/// version THIS engagement pins — never whatever `tga` happens to be on the
-/// operator's `PATH`, and never a copy installed before the config was bumped.
-/// Both are the #5454 version-skew class, and there is no fallback for either.
-///
-/// Three conditions, each a refusal: the file is present, the version record
-/// this client wrote names it, and that recorded version equals the engagement's
-/// pin. The second matters because a binary someone dropped into `tools/` by
-/// hand reads as `installed` with no version — unverified is not a weaker kind
-/// of installed. The third matters because install and run are separate steps,
-/// so the config can change between them.
-/// What: reads [`tools::status`], checks all three conditions, and returns the
-/// paths by name.
-/// Test: `super::run_tests::a_run_without_the_pinned_tools_is_refused`,
-/// `super::run_tests::an_unverified_binary_does_not_count_as_installed`,
-/// `super::run_tests::a_binary_installed_at_a_different_pin_is_refused`.
-///
-/// # Errors
-///
-/// [`AuditError::ToolsNotInstalled`] naming every tool that is missing or
-/// unverified, [`AuditError::VersionMismatch`] for the first tool whose recorded
-/// version is not the engagement's pin, and whatever [`tools::status`] fails
-/// with.
-fn pinned_binaries(work: &WorkDir, pins: &ToolPins) -> Result<PinnedBinaries, AuditError> {
-    let statuses = tools::status(work)?;
-    let missing: Vec<&'static str> = statuses
-        .iter()
-        .filter(|s| !s.installed || s.version.is_none())
-        .map(|s| s.tool.binary_name())
-        .collect();
-    if !missing.is_empty() {
-        return Err(AuditError::ToolsNotInstalled { missing });
-    }
-
-    let path_of = |tool: RequiredTool| -> Result<PathBuf, AuditError> {
-        let pinned = tool.pin_in(pins).version();
-        let status = statuses.iter().find(|s| s.tool == tool).ok_or_else(|| {
-            AuditError::ToolsNotInstalled {
-                missing: vec![tool.binary_name()],
-            }
-        })?;
-        // `version` is Some: the missing check above rejected every None.
-        match status.version.as_deref() {
-            Some(v) if v == pinned => Ok(status.path.clone()),
-            Some(v) => Err(AuditError::VersionMismatch {
-                tool: tool.crate_name(),
-                pinned: pinned.to_owned(),
-                installed: v.to_owned(),
-            }),
-            None => Err(AuditError::ToolsNotInstalled {
-                missing: vec![tool.binary_name()],
-            }),
-        }
-    };
-
-    Ok(PinnedBinaries {
-        tga: path_of(RequiredTool::Tga)?,
-        search: path_of(RequiredTool::TrustySearch)?,
-        analyze: path_of(RequiredTool::TrustyAnalyze)?,
-        review: path_of(RequiredTool::TrustyReview)?,
-    })
-}
-
 /// A filename-safe, collision-free stem for one repository's files.
 ///
 /// Why: two things at once. The name comes from a selection file this client did
@@ -433,7 +360,47 @@ pub async fn sweep(
     options: &RunOptions,
     progress: &Progress,
 ) -> Result<RunReport, AuditError> {
-    sweep_with_budget(work, config, options, PER_REPO_TIMEOUT, progress).await
+    sweep_with_budget(work, config, options, None, PER_REPO_TIMEOUT, progress).await
+}
+
+/// [`sweep`], over boards the caller has already resolved.
+///
+/// Why: #5857 left `crate::chain` and this module each calling
+/// [`boards::resolve`] against their own [`registry::Registry::load`], hours
+/// apart — the chain states its board gaps in the Materialize phase and the
+/// sweep runs after tool install and every clone. A `taudit remove board`
+/// inside that window made the two reads disagree: the report claimed coverage
+/// while the child got no board section, and the engagement exited 0 having
+/// never read the board. The chain now resolves once and hands the result here,
+/// so there is one resolution per invocation rather than two reads that can
+/// diverge.
+///
+/// # Preconditions
+/// `boards` was resolved from the same [`EngagementConfig::boards`] passed as
+/// `config` — [`boards::Boards::env`] reads the secrets out of `config`, and a
+/// section resolved against different credentials would reference a variable
+/// this call does not set.
+/// Test: `crate::chain::chain_tests::a_board_removed_after_the_chain_resolved_it_still_reaches_the_child`.
+///
+/// # Errors
+///
+/// Exactly [`sweep`]'s, minus the registry read this call does not perform.
+pub async fn sweep_with_boards(
+    work: &WorkDir,
+    config: &EngagementConfig,
+    options: &RunOptions,
+    boards: &boards::Boards,
+    progress: &Progress,
+) -> Result<RunReport, AuditError> {
+    sweep_with_budget(
+        work,
+        config,
+        options,
+        Some(boards),
+        PER_REPO_TIMEOUT,
+        progress,
+    )
+    .await
 }
 
 /// [`sweep`], with the per-repository timeout as an argument.
@@ -448,10 +415,11 @@ async fn sweep_with_budget(
     work: &WorkDir,
     config: &EngagementConfig,
     options: &RunOptions,
+    boards: Option<&boards::Boards>,
     budget: std::time::Duration,
     progress: &Progress,
 ) -> Result<RunReport, AuditError> {
-    sweep_with_env(work, config, options, budget, progress, |name| {
+    sweep_with_env(work, config, options, boards, budget, progress, |name| {
         std::env::var(name).ok()
     })
     .await
@@ -472,6 +440,7 @@ async fn sweep_with_env<F>(
     work: &WorkDir,
     config: &EngagementConfig,
     options: &RunOptions,
+    resolved: Option<&boards::Boards>,
     budget: std::time::Duration,
     progress: &Progress,
     operator: F,
@@ -484,12 +453,22 @@ where
     // Resolved once, before any child: a half-named selection is identical for
     // every repository, so failing per-repo would just repeat one misconfiguration.
     let inference = inference::inference_env(config, operator)?;
-    // #5857: resolved once, from the same registry `crate::chain` reads, so
-    // `taudit run` and `taudit audit` collect the same boards. Every child gets
-    // the same sections — a board is a dimension of the engagement, not a unit
-    // of the sweep, and tga correlates it against whichever repository it is
-    // auditing.
-    let boards = boards::resolve(registry::Registry::load(work)?.targets(), &config.boards);
+    // #5857: ONE resolution per invocation. `crate::chain` resolved the boards
+    // an hour ago to state its gaps and hands that result down, so the coverage
+    // the report claims and the sections the child gets cannot diverge over a
+    // registry edited meanwhile. `taudit run` supplies nothing and resolves here
+    // — still once, and still after the refusals above, so a truncated registry
+    // is not reported ahead of a missing tool. Every child gets the same
+    // sections: a board is a dimension of the engagement, not a unit of the
+    // sweep, and tga correlates it against whichever repository it is auditing.
+    let owned;
+    let boards = match resolved {
+        Some(boards) => boards,
+        None => {
+            owned = boards::resolve(registry::Registry::load(work)?.targets(), &config.boards);
+            &owned
+        }
+    };
     let selected = load_selection(work)?;
     // #5869: materialized once for the whole sweep — resolving reads
     // `.env.local` and opens the secure store, which is not a per-child cost,
@@ -515,7 +494,7 @@ where
             Err(why) => {
                 announce_recollection(&repo.name, &why, progress);
                 run_one(
-                    work, config, &binaries, &inference, &boards, index, repo, budget, progress,
+                    work, config, &binaries, &inference, boards, index, repo, budget, progress,
                     total, &scrubber,
                 )
                 .await?
@@ -977,6 +956,7 @@ const ENV_REVIEW_BIN: &str = "TRUSTY_REVIEW_BIN";
 mod run_tests {
     use super::*;
     use crate::progress::{ProgressUpdate, Recorder, StageEvent, StageState};
+    use crate::tools::{self, RequiredTool};
     // The selection document itself, so a test can write a torn one by hand.
     use crate::run::selection::Selection;
 
@@ -1788,6 +1768,7 @@ trusty-review = "0.15.1"
             &work,
             &config(),
             &RunOptions::default(),
+            None,
             std::time::Duration::from_millis(200),
             &Progress::none(),
         )
@@ -1869,6 +1850,7 @@ trusty-review = "0.15.1"
             work,
             &config(),
             &RunOptions::default(),
+            None,
             PER_REPO_TIMEOUT,
             &Progress::none(),
             operator,
