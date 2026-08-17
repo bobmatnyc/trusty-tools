@@ -56,58 +56,92 @@ anyway. If a PM delegates "register the duetto-memory MCP" and an agent edits
 `.mcp.json` in whatever worktree happens to be open, that is the wrong scope —
 route it through `tm mcp add` instead.
 
-**Where these servers actually reach (issue #2739, plus the custom-server follow-up):**
+**Where these servers actually reach (issue #2739, inverted by #4181):**
 
 - The **standalone `tm run` driver** reads this user-scope map directly, so it
   sees **every** server you add here.
 - **Daemon-managed / fleet sessions** (`tm session new`) launch
-  `claude --setting-sources project,local`, which does NOT read the user tier.
-  Since the #2739 follow-up, this is bridged in TWO ways:
-  - **Native trusty MCP servers** — the allowlist `slack-mcp`, `telegram-mcp`,
-    `gworkspace-mcp`, `trusty-analyze` (plus the always-provisioned
-    `trusty-memory` / `trusty-search`, which have their own dedicated
-    injectors) — are bridged with `env` secrets routed to a workspace
-    `.env.local` (never the git-tracked `.mcp.json`).
-  - **Every other (custom, non-native) server you add** — stdio or remote
-    (http/sse) — is ALSO bridged now, with the same `env`-to-`.env.local`
-    routing for stdio servers. The one exception: a **remote server that
-    declares `headers`** (e.g. an `Authorization` bearer token) is **not**
-    bridged — there is no established out-of-band delivery channel for an
-    HTTP header secret into `.mcp.json` yet, so it fails closed rather than
-    leak the header into a git-tracked file. A remote server with a clean URL
-    and no `headers` bridges normally.
-  - **Project scope**: a project's own `<project>/.trusty-mpm/manifest.toml`
-    `[mcp.custom.<name>]` table (the same per-project override file
-    `[agents]`/`[skills]` already use) declares servers scoped to THAT
-    project's fleet sessions only, and — on a name collision — OVERRIDES the
-    user-scope registry entry of the same name. A `trusty-memory`/
-    `trusty-search`/native-allowlist name declared here is always REJECTED —
-    a project manifest can never override a reserved name (issue #3033).
-  - **Consent gate (issue #3033):** because a project-scope `[mcp.custom]`
-    entry ships with the cloned repo itself, it is honored ONLY after the
-    operator explicitly runs `tm project trust [--dir <path>]` for that
-    project — an untrusted project's `[mcp.custom]` table is skipped entirely
-    (a single warning names the project and hints the trust command). Trust
-    state lives in USER-scope config (`~/.trusty-tools/trusty-mpm/project-trust.json`),
-    never inside the repo, so a cloned repo can never self-trust. Revoke with
-    `tm project trust --revoke [--dir <path>]`; `tm project list`/`tm project
-    info` show an `[mcp-trusted]` marker / trust line for the current state.
-    User-scope registry entries (`tm mcp add`) are unaffected — you already
-    consented to those by registering them locally.
+  `claude --setting-sources user,project,local`, so they read that same
+  user-scope map directly. Since ADR-0042 (#4181) nothing is injected into a
+  workspace `.mcp.json`, and there is no native-server allowlist: any server you
+  `tm mcp add` reaches a fleet session under whatever name you gave it. Proof:
+  `prepare_session_reaches_an_operator_registered_server_through_user_scope`.
+- **Project scope**: a project's own `<project>/.trusty-mpm/manifest.toml`
+  `[mcp.custom.<name>]` table (the same per-project override file
+  `[agents]`/`[skills]` already use) declares servers scoped to THAT project's
+  fleet sessions only, and — on a name collision — OVERRIDES the user-scope
+  registry entry of the same name. Its `env` values route to the workspace
+  `.env.local`, never the git-tracked `.mcp.json`, and a remote entry carrying
+  `headers` is rejected outright rather than leaked into a tracked file. A
+  reserved name (`trusty-memory`, `trusty-mpm`, `trusty-review`,
+  `trusty-search`) declared here is always REJECTED — a project manifest can
+  never override one (issue #3033).
+- **Consent gate (issue #3033):** because a project-scope `[mcp.custom]` entry
+  ships with the cloned repo itself, it is honored ONLY after the operator
+  explicitly runs `tm project trust [--dir <path>]` for that project — an
+  untrusted project's `[mcp.custom]` table is skipped entirely (a single
+  warning names the project and hints the trust command). Trust state lives in
+  USER-scope config (`~/.trusty-tools/trusty-mpm/project-trust.json`), never
+  inside the repo, so a cloned repo can never self-trust. Revoke with
+  `tm project trust --revoke [--dir <path>]`; `tm project list`/`tm project
+  info` show an `[mcp-trusted]` marker / trust line for the current state.
+  User-scope registry entries (`tm mcp add`) are unaffected — you already
+  consented to those by registering them locally.
 
-### The 3 auto-provisioned framework built-ins
+### The 4 auto-provisioned framework built-ins
 
-Every managed session always gets these three, whether or not they appear in the
-`mcpServers` map:
+Every managed session always gets these four, whether or not they appear in the
+`mcpServers` map. The list is `mcp_config::BUILTIN_MANAGED_MCP_SERVERS` and the
+commands come from `mcp_config::builtin_server_entry`:
 
 | Server | Launch command |
 |---|---|
 | `trusty-memory` | `trusty-memory serve --stdio` |
+| `trusty-mpm` | `trusty-mpm serve --stdio` |
 | `trusty-review` | `trusty-review serve --stdio` |
 | `trusty-search` | `trusty-search serve` |
 
-You never register these — they are built in. `tm mcp add` is for **additional**
-servers on top of them.
+You never register these — they are built in, and their names are reserved.
+`tm mcp add` is for **additional** servers on top of them.
+
+### The opt-in native connectors — Google Workspace and Slack
+
+These two ship as crates in this workspace but are NOT auto-provisioned. A
+session sees neither until an operator registers it, so absence is the default
+state and not a fault to diagnose.
+
+| Connector | Crate | Binary | Install |
+|---|---|---|---|
+| Google Workspace | `crates/trusty-gworkspace` | `trusty-gworkspace-mcp` | `cargo install --path crates/trusty-gworkspace --locked` |
+| Slack | `crates/trusty-channels` | `slack-mcp` | `cargo install --path crates/trusty-channels --locked` |
+
+```bash
+tm mcp add trusty-gworkspace -- trusty-gworkspace-mcp
+tm mcp add slack-mcp -- slack-mcp
+```
+
+**The name you pass is the tool prefix.** Registering Google Workspace as
+`trusty-gworkspace` gives the session `mcp__trusty-gworkspace__*`; registering
+it as `gworkspace` gives `mcp__gworkspace__*`. The crate name, the binary name,
+and the server's own `serverInfo.name` (`gworkspace-mcp`) do not decide it. Run
+`tm mcp list` to see what is actually registered rather than inferring a prefix.
+
+**Do not install a third-party lookalike.** A PyPI `gworkspace-mcp` exists and
+is the predecessor of this crate; the Rust binary was renamed to
+`trusty-gworkspace-mcp` in #2644 precisely because both claimed the same `$PATH`
+name. If the native tools are missing, install and register the crate above —
+never search the machine for a package with a similar name.
+
+**Registered is not the same as working.** `trusty-gworkspace-mcp` needs a
+Google OAuth client and an authorized account (`trusty-gworkspace-mcp setup`);
+run `trusty-gworkspace-mcp doctor` and it names which of the two is missing.
+`slack-mcp` needs `SLACK_BOT_TOKEN`, plus `SLACK_USER_TOKEN` for
+`slack_search_messages`. Each crate's `README.md` carries its auth setup and
+full tool inventory.
+
+`crates/trusty-channels` also builds a `telegram-mcp` binary. It is a scaffold —
+its tool calls return a `not-yet-implemented` MCP error (#2641) — so do not
+register it expecting a working connector.
 
 ### Adding a server — `tm mcp add`
 
@@ -139,26 +173,18 @@ tm mcp add events -t sse -H "X-Api-Key: $KEY" https://host/sse
 
 ### Propagation caveat — an already-running session needs a relaunch
 
-`tm mcp add` writes the config immediately, but a **currently running**
-session does not hot-reload it: the workspace `.mcp.json` (and its trust seed)
-is only (re)built when a session **spawns or resumes**, never while the pane
-is live. Concretely:
-
-- **Standalone `tm run` driver** — sees the full user-scope map on its *next*
-  launch.
-- **Fleet sessions (`tm session new`)** — only the native-allowlist servers
-  (`slack-mcp`, `telegram-mcp`, `gworkspace-mcp`, `trusty-analyze`, plus the
-  always-provisioned `trusty-memory`/`trusty-search`) get bridged into the
-  workspace `.mcp.json`, and only at spawn/resume. A non-native/custom server
-  (e.g. an internal `duetto-memory`) reaches the standalone driver only — it
-  is not yet bridged into fleet sessions at all (tracked by #2739).
+`tm mcp add` writes the config immediately, but a **currently running** session
+does not hot-reload it. Claude Code reads the `mcpServers` map once, at launch,
+so both the standalone `tm run` driver and a fleet session pick up a new entry
+on their *next* spawn or resume — never while the pane is live.
 
 So if a newly `tm mcp add`-ed server isn't showing up in `/mcp` inside a
 session that was already running when you added it, the fix is to **relaunch
 the session** (`tm session resume <id>`, or the in-pane `tm` relaunch hint) —
-not to hand-edit that session's project `.mcp.json` as a workaround. That
-edit both reintroduces the anti-pattern above and gets clobbered on the next
-spawn anyway.
+not to hand-edit that session's project `.mcp.json` as a workaround. That edit
+reintroduces the anti-pattern above, and it puts a workspace-scope declaration
+back where ADR-0042 removed it — which is what makes Claude Code raise its
+approval gate in the first place.
 
 ### How added servers flow into the trust-seed
 
