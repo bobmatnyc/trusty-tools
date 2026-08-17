@@ -5,7 +5,3 @@ Added
 - `trusty-audit targets` lists the registry and `trusty-audit remove <target>` drops one entry. Both accept `owner/name` or `provider:key`, and matching ignores ASCII case because GitHub, JIRA and Linear all do ([#5822](https://github.com/bobmatnyc/trusty-tools/issues/5822))
 - The engagement config gained a `[boards]` table carrying the CLIENT's own JIRA (`url` / `email` / `token`) and Linear (`api_key`) credentials, as `SecretKey` values — no `Serialize`, redacting `Debug` and `Display`, the same rules the OpenRouter key has carried since [#5473](https://github.com/bobmatnyc/trusty-tools/issues/5473). Registering a board whose provider has no credential names the config field to set instead of returning an HTTP 401 ([#5822](https://github.com/bobmatnyc/trusty-tools/issues/5822))
 - `state/audit-targets.toml` is the registry file. It supersedes `state/selected-repos.toml` as the record of what the engagement TARGETS — it holds boards, which that file cannot express, and it exists before any clone. The selection file is unchanged and still what `trusty-audit run` reads as the record of what is on disk; `trusty-audit targets` names both so neither reads as lost ([#5822](https://github.com/bobmatnyc/trusty-tools/issues/5822))
-
-Changed
-
-- The temp-file-then-rename discipline the state files rely on moved to `workdir::write_atomically`, so `selected-repos.toml` and `audit-targets.toml` share one writer rather than restating it ([#5822](https://github.com/bobmatnyc/trusty-tools/issues/5822))
