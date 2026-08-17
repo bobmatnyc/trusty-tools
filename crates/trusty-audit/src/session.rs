@@ -1224,6 +1224,128 @@ trusty-review = "0.0.0-never-published"
         assert!(!package.platform.is_empty());
     }
 
+    /// A config carrying pins and instructions but no key — the shape a client
+    /// receives when the auditor conveys the key out of band (#5825).
+    const BLANK_KEY_CONFIG: &str = r#"
+openrouter_key = ""
+instructions = "Assess the last 52 weeks."
+
+[tools]
+tga = "0.0.0-never-published"
+trusty-search = "0.0.0-never-published"
+trusty-analyze = "0.0.0-never-published"
+trusty-review = "0.0.0-never-published"
+"#;
+
+    /// #5868: which capabilities a front end must resolve a credential for is a
+    /// property of the capability. The exhaustive match makes a new variant a
+    /// compile error; this pins the answers it gives today, so a variant moved
+    /// between tiers is a deliberate edit rather than a silent one.
+    #[test]
+    fn only_the_inference_capabilities_need_a_credential() {
+        assert_eq!(
+            Command::Run(RunOptions::default()).credential_need(),
+            CredentialNeed::Required
+        );
+        assert_eq!(
+            Command::Audit(ChainOptions::default()).credential_need(),
+            CredentialNeed::Required
+        );
+        // These handle a key without ever needing to obtain one, so they read
+        // the environment and never prompt.
+        assert_eq!(
+            Command::Package { destination: None }.credential_need(),
+            CredentialNeed::Environment
+        );
+        assert_eq!(
+            Command::Distribute(DistributeOptions::default()).credential_need(),
+            CredentialNeed::Environment
+        );
+        // A capability that sends nothing for inference must never make a
+        // client type a key to see their own working directory.
+        for command in [
+            Command::Guided,
+            Command::WorkDir,
+            Command::Manifest,
+            Command::Tools,
+            Command::InstallTools,
+            Command::Repos,
+            Command::DiscoverRepos,
+            Command::ListTargets,
+        ] {
+            assert_eq!(
+                command.credential_need(),
+                CredentialNeed::None,
+                "{command:?} should need no credential"
+            );
+        }
+    }
+
+    /// #5868: `OPENROUTER_API_KEY` beats the config's own key. Before this,
+    /// `run` handed the config's key to the `tga audit` child unconditionally,
+    /// so an exported variable was silently ignored.
+    #[test]
+    fn a_supplied_credential_beats_the_configs_own() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), UNPUBLISHABLE_CONFIG);
+
+        // Without one, the config's key stands.
+        let unchanged = session.engagement_config().expect("loads");
+        assert_eq!(unchanged.openrouter_key.expose(), "sk-or-v1-not-a-real-key");
+
+        let overridden = session
+            .with_credential(Some(SecretKey::new("sk-or-v1-resolved")))
+            .engagement_config()
+            .expect("loads");
+        assert_eq!(overridden.openrouter_key.expose(), "sk-or-v1-resolved");
+        // One field, not a whole config: the pins have to survive.
+        assert_eq!(overridden.tools.tga.version(), "0.0.0-never-published");
+    }
+
+    /// #5868: a present-but-blank key must be refused before the sweep starts.
+    ///
+    /// It was not a refusal anywhere downstream. `inference::inference_env`
+    /// reads a blank key as "select nothing" and returns NO variables, so the
+    /// `tga audit` child runs without its `TRUSTY_REVIEW_*` selection and
+    /// `trusty-review` falls back to its Bedrock default — found hours later at
+    /// the report stage, or not at all if the fallback happens to work.
+    #[tokio::test]
+    async fn a_blank_configured_key_refuses_before_the_sweep() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), BLANK_KEY_CONFIG);
+
+        let err = session
+            .execute(Command::Run(RunOptions::default()))
+            .await
+            .expect_err("a blank key cannot run an audit");
+        assert!(matches!(err, AuditError::BlankCredential { .. }), "{err:?}");
+
+        // Actionable: it names both ways to put a key in play.
+        let text = err.to_string();
+        assert!(text.contains(run::ENV_INFERENCE_CREDENTIAL), "{text}");
+        assert!(text.contains("openrouter_key"), "{text}");
+
+        // And a resolved credential is exactly what unblocks it — the refusal
+        // is about the key in play, not about the file's own field.
+        let config = session
+            .with_credential(Some(SecretKey::new("sk-or-v1-resolved")))
+            .engagement_config()
+            .expect("a supplied key makes the same config usable");
+        assert_eq!(config.openrouter_key.expose(), "sk-or-v1-resolved");
+    }
+
+    /// The check lives on `Session`, not in the CLI prompt, so a front end that
+    /// never prompts still cannot start a sweep on a blank key.
+    #[test]
+    fn a_blank_supplied_credential_is_refused_too() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = session_with_config(tmp.path(), UNPUBLISHABLE_CONFIG)
+            .with_credential(Some(SecretKey::new("   ")))
+            .engagement_config()
+            .expect_err("whitespace is not a credential");
+        assert!(matches!(err, AuditError::BlankCredential { .. }), "{err:?}");
+    }
+
     /// #5825: an exported credential is the one that reaches the recipient.
     ///
     /// The whole `execute` → `Session::distribute` → `distribute::assemble`
