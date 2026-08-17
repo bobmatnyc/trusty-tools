@@ -46,7 +46,19 @@
 //! unnecessary worktree to a read-only custom agent is the whole cost of that
 //! choice.
 //!
-//! Test: `grants_*`, `does_not_grant_*`, `task_dispatch_*` below;
+//! **A project may decline the grant entirely (#5814).** Isolation buys
+//! separation between concurrent writers and between build states. A writing or
+//! documentation repo has neither, so the grant costs it agent edits stranded in
+//! `.claude/worktrees/agent-<id>/` and trees left to reclaim. Such a project sets
+//! `agent_worktree = false` in its committed `.trusty-mpm.toml`, which
+//! [`trusty_mpm::project::dispatched_agent_worktree_enabled`] reads: the dispatch
+//! then gets [`WorktreeGrant::InPlace`] — its prompt annotated with
+//! `IN_PLACE_WORKFLOW_NOTE` and no `isolation` added — instead of a worktree.
+//! The check runs AFTER `is_main_checkout` so only a dispatch that would
+//! otherwise be granted pays for the file read, and an absent, malformed, or
+//! unreadable config leaves the grant exactly as it was.
+//!
+//! Test: `grants_*`, `does_not_grant_*`, `task_dispatch_*`, `in_place_*` below;
 //! `pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout` and siblings in
 //! `tests/tm_hook_pm_guard.rs` run it through the real binary.
 
@@ -58,6 +70,7 @@ use trusty_mpm::core::dispatch_isolation::{
     dispatch_agent, dispatch_isolation, requires_own_worktree_in_main_checkout,
 };
 use trusty_mpm::core::project_aliases::is_main_checkout;
+use trusty_mpm::project::dispatched_agent_worktree_enabled;
 
 /// The `isolation` value granted to a dispatch that needs its own tree.
 ///
@@ -95,6 +108,26 @@ pub(crate) const TASK_DENY_REASON: &str = "Unisolated dispatch denied in a main 
      own; `Task` carries no isolation parameter, so it cannot be given one here. A read-only \
      agent (research, review, analysis) is never blocked by this rule.";
 
+/// What an opted-out project's dispatch is told instead of being isolated.
+///
+/// Why (#5814): suppressing the grant is only half the fix. The agent still
+/// arrives carrying the framework's own worktree discipline and, finding itself
+/// in a main checkout with no tree of its own, stops rather than proceeds — the
+/// reported failure is a `version-control` agent that refused to commit for
+/// exactly that reason. The note states the workflow the project chose when it
+/// set the flag, and it reaches the agent as data: it is appended to the
+/// dispatch's own prompt through `hookSpecificOutput.updatedInput`, the same
+/// mechanism the grant uses, so it applies whether or not the PM read anything.
+/// What: appended verbatim, once, to a string `prompt`.
+/// Test: `in_place_notice_is_appended_to_the_prompt`,
+/// `in_place_notice_is_not_appended_twice`.
+const IN_PLACE_WORKFLOW_NOTE: &str = "\n\n---\nWorktree isolation is OFF for this project: it sets `agent_worktree = false` in \
+     `.trusty-mpm.toml` (trusty-tools#5814). No worktree has been created for you and none will \
+     be reclaimed, so work IN PLACE in the current working directory — edit the files where they \
+     are, commit on the branch the checkout already has, and push. Do not create a worktree, a \
+     branch, or a pull request unless this project's own instructions ask for one. The \
+     main-checkout write boundary is unchanged: a source-file edit here is still denied.";
+
 /// Decide what to do with one dispatch made from a main checkout.
 ///
 /// Why: the single entry point `pm_guard` calls, kept as one function so the
@@ -104,13 +137,15 @@ pub(crate) const TASK_DENY_REASON: &str = "Unisolated dispatch denied in a main 
 /// that already declares isolation, for a positively-identified read-only
 /// agent, and for any cwd that is not a main checkout. Otherwise
 /// [`WorktreeGrant::Rewrite`] carrying the dispatch's own input with
-/// `isolation` added, or [`WorktreeGrant::Deny`] when the tool cannot accept
-/// one.
+/// `isolation` added, [`WorktreeGrant::Deny`] when the tool cannot accept one,
+/// or [`WorktreeGrant::InPlace`] when the project declined isolation (#5814).
 ///
 /// `is_main_checkout` is tested LAST because it is the only branch that touches
-/// the filesystem, and every ordinary tool call must not pay for it.
+/// the filesystem, and every ordinary tool call must not pay for it. The #5814
+/// project opt-out reads a second file and therefore sits behind it.
 /// Test: `grants_a_worktree_to_an_unisolated_writer`,
-/// `does_not_grant_outside_a_main_checkout`, `does_not_grant_a_read_only_agent`.
+/// `does_not_grant_outside_a_main_checkout`, `does_not_grant_a_read_only_agent`,
+/// `grants_nothing_when_the_project_opts_out`.
 pub(crate) fn evaluate_worktree_grant(
     tool_name: &str,
     tool_input: Option<&Value>,
@@ -126,6 +161,11 @@ pub(crate) fn evaluate_worktree_grant(
     if !is_main_checkout(cwd) {
         return None;
     }
+    // #5814: a project with no concurrent writers and no build state declares
+    // `agent_worktree = false`, and its agents work in the checkout instead.
+    if !dispatched_agent_worktree_enabled(cwd) {
+        return with_in_place_notice(tool_input).map(WorktreeGrant::InPlace);
+    }
     if tool_name != ISOLATION_AWARE_DISPATCH_TOOL {
         return Some(WorktreeGrant::Deny(TASK_DENY_REASON));
     }
@@ -134,17 +174,26 @@ pub(crate) fn evaluate_worktree_grant(
 
 /// What [`evaluate_worktree_grant`] decided.
 ///
-/// Why: the two outcomes are different JSON objects on the hook's stdout — one
-/// replaces the tool's arguments, the other blocks the call — and a `PreToolUse`
-/// hook may print exactly one of them, so the choice has to be explicit rather
-/// than inferred from an `Option` at the call site.
-/// Test: `task_dispatch_is_denied_rather_than_rewritten`.
+/// Why: the outcomes are different JSON objects on the hook's stdout — two
+/// replace the tool's arguments, one blocks the call — and a `PreToolUse` hook
+/// may print exactly one of them, so the choice has to be explicit rather than
+/// inferred from an `Option` at the call site.
+/// Test: `task_dispatch_is_denied_rather_than_rewritten`,
+/// `grants_nothing_when_the_project_opts_out`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorktreeGrant {
     /// Replace the dispatch's arguments with these, isolation included.
     Rewrite(Value),
     /// Block the dispatch; the tool cannot be given isolation.
     Deny(&'static str),
+    /// The project declined isolation (#5814): these arguments carry the
+    /// original input plus the in-place workflow note, and NO `isolation`.
+    ///
+    /// It is a separate variant from [`Self::Rewrite`] because the call site
+    /// must not report a granted worktree to the daemon for a dispatch that was
+    /// given none — the delegation record would then name a tree that does not
+    /// exist. The concurrency question is still asked; see the call site.
+    InPlace(Value),
 }
 
 /// The dispatch's own input with `isolation` set to [`GRANTED_ISOLATION`].
@@ -165,6 +214,33 @@ fn with_granted_isolation(tool_input: Option<&Value>) -> Value {
     input
 }
 
+/// The dispatch's own input with [`IN_PLACE_WORKFLOW_NOTE`] appended to its prompt.
+///
+/// Why (#5814): `updatedInput` REPLACES a tool's arguments, so the whole input
+/// is carried and only the prompt changes — above all, `isolation` is NOT added,
+/// which is the entire point of the opt-out.
+/// What: `Some(input)` when the dispatch carries a string `prompt` that does not
+/// already end with the note; `None` otherwise, which leaves the dispatch
+/// untouched and unisolated. `None` covers both a dispatch with no prompt to
+/// annotate — there is nothing to say it to, and inventing a field the caller
+/// did not send is how a malformed rewrite gets built — and a re-evaluated
+/// dispatch, which must not accumulate a second copy of the note.
+/// Test: `in_place_notice_is_appended_to_the_prompt`,
+/// `in_place_notice_is_not_appended_twice`,
+/// `in_place_leaves_a_promptless_dispatch_alone`.
+fn with_in_place_notice(tool_input: Option<&Value>) -> Option<Value> {
+    let Some(Value::Object(map)) = tool_input else {
+        return None;
+    };
+    let prompt = map.get("prompt").and_then(Value::as_str)?;
+    if prompt.contains(IN_PLACE_WORKFLOW_NOTE) {
+        return None;
+    }
+    let mut input = Value::Object(map.clone());
+    input["prompt"] = Value::String(format!("{prompt}{IN_PLACE_WORKFLOW_NOTE}"));
+    Some(input)
+}
+
 /// Build the `hookSpecificOutput.updatedInput` body for a granted dispatch.
 ///
 /// Why: mirrors [`crate::commands::hook_rewrite::build_pretooluse_rewrite_response`]
@@ -172,7 +248,8 @@ fn with_granted_isolation(tool_input: Option<&Value>) -> Value {
 /// rather than reusing it, because that one is shaped for a Bash command string
 /// and this one carries a whole tool input.
 /// What: `{"hookSpecificOutput": {"hookEventName": "PreToolUse",
-/// "updatedInput": <input>}}`.
+/// "updatedInput": <input>}}`. The #5814 in-place rewrite prints through here
+/// too — the envelope is the same, only the input differs.
 /// Test: `grant_response_has_the_documented_shape`.
 pub(crate) fn build_worktree_grant_response(updated_input: &Value) -> String {
     serde_json::json!({
@@ -352,6 +429,114 @@ mod tests {
         assert_eq!(updated["model"], "sonnet");
         assert_eq!(updated["subagent_type"], "rust-engineer");
         assert_eq!(updated["isolation"], "worktree");
+    }
+
+    /// A project directory that is a main checkout AND carries a project config.
+    ///
+    /// Why: the opt-out is only reachable past `is_main_checkout`, so every
+    /// #5814 case needs both the `.git` directory and the config file.
+    fn main_checkout_with_config(body: &str) -> TempDir {
+        let dir = main_checkout();
+        std::fs::write(
+            dir.path()
+                .join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
+            body,
+        )
+        .expect("write project config");
+        dir
+    }
+
+    #[test]
+    fn grants_nothing_when_the_project_opts_out() {
+        // #5814: `agent_worktree = false` — the writer stays in the checkout,
+        // and the rewrite carries no `isolation` at all.
+        let dir = main_checkout_with_config("agent_worktree = false\n");
+        let sent = serde_json::json!({"subagent_type": "rust-engineer", "prompt": "do the thing"});
+        let grant = evaluate_worktree_grant("Agent", Some(&sent), dir.path())
+            .expect("an opted-out project must still annotate the dispatch");
+        let WorktreeGrant::InPlace(updated) = grant else {
+            panic!("an opted-out project must not be granted a worktree");
+        };
+        assert!(
+            updated.get("isolation").is_none(),
+            "the opt-out must not add isolation: {updated}"
+        );
+        assert_eq!(updated["subagent_type"], "rust-engineer");
+    }
+
+    #[test]
+    fn opt_out_covers_task_which_would_otherwise_be_denied() {
+        // A `Task` writer is denied today only because it needs a worktree it
+        // cannot be given. A project that needs no worktree has no such dispatch
+        // to refuse.
+        let dir = main_checkout_with_config("agent_worktree = false\n");
+        let sent = serde_json::json!({"subagent_type": "rust-engineer", "prompt": "go"});
+        assert!(
+            matches!(
+                evaluate_worktree_grant("Task", Some(&sent), dir.path()),
+                Some(WorktreeGrant::InPlace(_))
+            ),
+            "the opt-out must reach Task before the deny"
+        );
+    }
+
+    #[test]
+    fn grants_a_worktree_when_the_project_says_nothing_or_says_yes() {
+        // The default branch, which is every project that predates #5814: an
+        // absent key, an absent file, an unrelated key, and a config that cannot
+        // be parsed at all must ALL leave ADR-0048's grant exactly as it was.
+        for body in [
+            "default_model = \"opus\"\n",
+            "agent_worktree = true\n",
+            "worktree = false\n",
+            "agent_worktre = false\n",
+            "agent_worktree = \"false\"\n",
+            "agent_worktree = false\nnot toml at all(",
+        ] {
+            let dir = main_checkout_with_config(body);
+            let sent = serde_json::json!({"subagent_type": "rust-engineer", "prompt": "go"});
+            let grant = evaluate_worktree_grant("Agent", Some(&sent), dir.path())
+                .expect("a writer in a main checkout is still granted a worktree");
+            let WorktreeGrant::Rewrite(updated) = grant else {
+                panic!("expected the ordinary grant for config: {body}");
+            };
+            assert_eq!(updated["isolation"], "worktree", "config was: {body}");
+        }
+    }
+
+    #[test]
+    fn in_place_notice_is_appended_to_the_prompt() {
+        // The note is how the agent learns the workflow that replaces isolation;
+        // the original brief must survive in front of it.
+        let sent =
+            serde_json::json!({"subagent_type": "documentation", "prompt": "write the memo"});
+        let updated = with_in_place_notice(Some(&sent)).expect("a prompted dispatch is annotated");
+        let prompt = updated["prompt"].as_str().expect("prompt stays a string");
+        assert!(prompt.starts_with("write the memo"));
+        assert!(prompt.ends_with(IN_PLACE_WORKFLOW_NOTE));
+        assert!(prompt.contains("agent_worktree = false"));
+        assert_eq!(updated["subagent_type"], "documentation");
+    }
+
+    #[test]
+    fn in_place_notice_is_not_appended_twice() {
+        let sent = serde_json::json!({"prompt": format!("brief{IN_PLACE_WORKFLOW_NOTE}")});
+        assert_eq!(with_in_place_notice(Some(&sent)), None);
+    }
+
+    #[test]
+    fn in_place_leaves_a_promptless_dispatch_alone() {
+        // Nothing to annotate, and inventing a `prompt` the caller never sent
+        // would rewrite the dispatch into one it did not make.
+        assert_eq!(with_in_place_notice(None), None);
+        assert_eq!(
+            with_in_place_notice(Some(&serde_json::json!({"subagent_type": "documentation"}))),
+            None
+        );
+        assert_eq!(
+            with_in_place_notice(Some(&serde_json::json!({"prompt": 7}))),
+            None
+        );
     }
 
     #[test]

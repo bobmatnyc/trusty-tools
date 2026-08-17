@@ -13,9 +13,9 @@
 use std::path::Path;
 
 use super::{
-    REGISTRY_DIR_NAME, registry_data_dir_under, worktree_enabled_for_origin,
-    worktree_enabled_for_origin_at, worktree_enabled_for_project, worktree_enabled_in,
-    worktree_override_in_project,
+    REGISTRY_DIR_NAME, dispatched_agent_worktree_enabled, registry_data_dir_under,
+    worktree_enabled_for_origin, worktree_enabled_for_origin_at, worktree_enabled_for_project,
+    worktree_enabled_in, worktree_override_in_project,
 };
 use crate::project::{Project, ProjectRegistry};
 
@@ -528,5 +528,89 @@ async fn agent_isolation_stays_enabled_for_a_worktree_true_project() {
             .await,
         "`worktree: false` must still reach the main-checkout answer, or the two \
          assertions above would pass for a resolver hard-wired to `true`"
+    );
+}
+
+// ── Dispatched-agent worktree opt-out (#5814) ────────────────────────────────
+//
+// Why these four: the flag has exactly two branches that matter (a project that
+// opts out, and every project that does not), one failure mode that must not
+// change behaviour (a file that does not parse), and one collision to rule out
+// (the pre-existing `worktree` key must not reach this decision).
+
+/// Why: a project that predates this key must behave exactly as it does today.
+/// Both routes to "undecided" — no config file, and a config that sets other
+/// keys — keep the ADR-0048 grant.
+/// Test: itself.
+#[test]
+fn agent_worktree_defaults_true_without_a_config() {
+    let empty = tempfile::TempDir::new().expect("tempdir");
+    assert!(
+        dispatched_agent_worktree_enabled(empty.path()),
+        "a project with no .trusty-mpm.toml keeps ADR-0048's grant"
+    );
+
+    let other_keys = project_dir_with_config("default_model = \"opus\"\n");
+    assert!(
+        dispatched_agent_worktree_enabled(other_keys.path()),
+        "a config that declines to decide keeps ADR-0048's grant"
+    );
+
+    let missing = empty.path().join("never-created");
+    assert!(
+        dispatched_agent_worktree_enabled(&missing),
+        "a directory that does not exist keeps ADR-0048's grant"
+    );
+}
+
+/// Why: the feature itself — a writing repo declares it wants its agents in the
+/// checkout, and the resolver says so. `agent_worktree = true` is also asserted,
+/// so a resolver hard-wired to `false` fails here rather than passing.
+/// Test: itself.
+#[test]
+fn agent_worktree_opt_out_is_honoured() {
+    let opted_out = project_dir_with_config("agent_worktree = false\n");
+    assert!(!dispatched_agent_worktree_enabled(opted_out.path()));
+
+    let explicit_on = project_dir_with_config("agent_worktree = true\n");
+    assert!(dispatched_agent_worktree_enabled(explicit_on.path()));
+}
+
+/// Why: the config is COMMITTED, so a bad edit reaches everyone at once. A file
+/// that cannot be understood must leave isolation ON — the state the project had
+/// before the key existed — never strip it.
+/// Test: itself.
+#[test]
+fn agent_worktree_malformed_config_keeps_isolation() {
+    for body in [
+        "agent_worktre = false\n",       // misspelled key
+        "agent_worktree = \"false\"\n",  // wrong type
+        "agent_worktree = false\nthis(", // not TOML at all
+    ] {
+        let dir = project_dir_with_config(body);
+        assert!(
+            dispatched_agent_worktree_enabled(dir.path()),
+            "an unusable config must keep isolation ON, got OFF for: {body}"
+        );
+    }
+}
+
+/// Why: #3455's `worktree` key decides SESSION placement and ADR-0044 decision 6
+/// narrowed it further. If it reached this decision, every project that already
+/// launches on main would silently lose agent isolation too — the collision this
+/// key exists to avoid.
+/// Test: itself.
+#[test]
+fn agent_worktree_is_independent_of_the_session_worktree_key() {
+    let session_opt_out = project_dir_with_config("worktree = false\n");
+    assert!(
+        dispatched_agent_worktree_enabled(session_opt_out.path()),
+        "`worktree = false` must not reach the dispatched-agent decision"
+    );
+
+    let opposed = project_dir_with_config("worktree = true\nagent_worktree = false\n");
+    assert!(
+        !dispatched_agent_worktree_enabled(opposed.path()),
+        "the two keys are answered independently, in both directions"
     );
 }

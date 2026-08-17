@@ -2004,6 +2004,51 @@ fn pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout() {
 }
 
 #[test]
+fn pm_guard_keeps_an_opted_out_project_in_the_checkout() {
+    // #5814: the project declares `agent_worktree = false`, so the same dispatch
+    // that is granted a worktree above is left in the checkout and told the
+    // workflow that replaces isolation. Read through the real binary because the
+    // config read is a filesystem step the unit tests fake.
+    let (_dir, repo) = main_checkout_fixture();
+    std::fs::write(repo.join(".trusty-mpm.toml"), "agent_worktree = false\n")
+        .expect("write project config");
+    let input = r#"{"subagent_type":"documentation","prompt":"write the memo"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let updated = &value["hookSpecificOutput"]["updatedInput"];
+    assert!(
+        updated.get("isolation").is_none(),
+        "an opted-out project must not be granted a worktree: {stdout}"
+    );
+    let prompt = updated["prompt"].as_str().expect("prompt survives");
+    assert!(prompt.starts_with("write the memo"), "{stdout}");
+    assert!(prompt.contains("agent_worktree = false"), "{stdout}");
+    assert!(prompt.contains("work IN PLACE"), "{stdout}");
+}
+
+#[test]
+fn pm_guard_still_grants_when_the_project_config_is_unreadable() {
+    // #5814's default branch: a config that does not parse leaves ADR-0048's
+    // grant exactly as it was. A project that predates the key behaves today
+    // as it did before it existed — covered by the sibling above, which uses
+    // the same fixture with no config file at all.
+    let (_dir, repo) = main_checkout_fixture();
+    std::fs::write(repo.join(".trusty-mpm.toml"), "agent_worktre = false\n")
+        .expect("write project config");
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"do the thing"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(
+        value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
+        "a config that cannot be parsed must never strip isolation: {stdout}"
+    );
+}
+
+#[test]
 fn pm_guard_denies_a_granted_dispatch_beside_a_live_writer() {
     // #5769 finding 2: the grant used to return BEFORE the #4480 concurrency
     // check, so that verdict stopped being computed for every dispatch made from
