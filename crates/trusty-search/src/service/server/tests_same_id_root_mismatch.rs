@@ -222,16 +222,19 @@ async fn create_index_same_id_case_variant_root_is_not_a_mismatch() {
     );
 }
 
-/// A cold-parked entry's tree is just as claimed as a resident one's — the same
-/// conclusion #3993's second round reached for the mirror guard.
+/// The guard reads LIVE handles only, and a cold entry must stay exempt.
 ///
-/// Without the cold-store arm, an id parked in `state.cold_store` is invisible
-/// to `state.registry.get`, so a create at a different tree passes the check,
-/// registers a live handle, and the subsequent registry write overwrites the
-/// cold entry's row with the new tree. The parked index loses its tree with no
-/// race required at all.
+/// A cold record under this id at a different tree is the recreate-after-move
+/// case #3993 round 3 decided deliberately: the stale record is reaped and the
+/// id re-registers at the new tree, which is the only way an index whose tree
+/// moved gets recreated. Nothing is serving that tree, so there is no wrong
+/// answer to prevent — a resident handle IS serving, which is the whole
+/// difference. Extending the guard over the cold store broke
+/// `create_index_reaps_stale_cold_entry_for_recreated_id` and
+/// `create_index_reap_does_not_disturb_unrelated_cold_entry`; this pins the
+/// boundary from the near side so the next reader does not re-extend it.
 #[tokio::test]
-async fn create_index_same_id_different_root_is_refused_against_a_cold_entry() {
+async fn create_index_same_id_different_root_still_reaps_a_cold_entry() {
     let state = mock_state_async().await;
     let (_dir_a, root_a) = super::test_support::allowlisted_index_root("ts-mismatch-cold-a-");
     let (_dir_b, root_b) = super::test_support::allowlisted_index_root("ts-mismatch-cold-b-");
@@ -255,10 +258,17 @@ async fn create_index_same_id_different_root_is_refused_against_a_cold_entry() {
     .await;
     assert_eq!(
         resp.status(),
-        StatusCode::CONFLICT,
-        "a cold entry's tree must be defended exactly like a live handle's"
+        StatusCode::OK,
+        "recreating an id whose only claim is a stale COLD record must still \
+         succeed at the new tree — that is #3993 round 3's reap path"
     );
 
-    let body = json_body(resp).await;
-    assert_eq!(body["registered_root_path"], serde_json::json!(root_a));
+    let handle = state
+        .registry
+        .get(&IndexId::new("api".to_string()))
+        .expect("'api' is now resident");
+    assert_eq!(
+        handle.root_path, root_b,
+        "and it must be registered at the tree that was actually requested"
+    );
 }

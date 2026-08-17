@@ -268,19 +268,16 @@ pub(super) async fn create_index_handler(
     // supplied `root_path` was canonicalized directly above and then never
     // compared to the registered one. An index identifies one directory tree, so
     // the two roots must name the same tree or this request has not been
-    // satisfied. Cold-parked entries are checked with the same rule as live
-    // handles, for the reason #3993's second round gave for the mirror guard: a
-    // parked entry's tree is just as claimed as a resident one's.
-    let registered_root = state
-        .registry
-        .get(&id)
-        .map(|h| h.root_path.clone())
-        .or_else(|| {
-            state
-                .cold_store
-                .get_persisted(&id)
-                .map(|e| e.root_path.clone())
-        });
+    // satisfied.
+    //
+    // LIVE handles only. A COLD entry under this id at a different tree is the
+    // recreate-after-move case #3993 round 3 decided deliberately: the stale
+    // cold record is reaped and the id re-registers at the new tree, which is
+    // how an index whose tree moved gets recreated at all. Nothing is serving
+    // that tree, so there is no wrong answer to prevent — see
+    // `create_index_reaps_stale_cold_entry_for_recreated_id`. A resident handle
+    // IS serving, which is the whole difference.
+    let registered_root = state.registry.get(&id).map(|h| h.root_path.clone());
     if let Some(registered_root) = registered_root {
         if !identifies_same_root(&registered_root, &req.root_path) {
             tracing::warn!(
