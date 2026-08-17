@@ -437,11 +437,17 @@ pub async fn run_doctor(
 /// without inventing a heuristic.
 /// What: canonicalizes both sides (a workspace under `/tmp` resolves through a
 /// symlink on macOS, so a raw `==` would miss the match) and reports whether
-/// `project_dir` appears in the set. A path that cannot be canonicalized falls
-/// back to itself, so an absent directory simply fails to match — which is the
-/// safe answer: a workspace that is not on disk is not one to deploy into.
+/// `project_dir` appears in the set. A path that cannot be canonicalized —
+/// absent, dangling symlink, unreadable parent alike — falls back to its own
+/// raw spelling, so it is then compared verbatim. That is the safe answer in
+/// the sense that matters: it can still match a recorded workspace under the
+/// exact name the session recorded, but it can never match an unregistered
+/// directory, which is the promotion #5867 is about.
 /// Test: `unmanaged_cwd_audits_the_operator_home_tier`,
-/// `a_registered_workspace_still_gets_the_workspace_layout`.
+/// `a_registered_workspace_still_gets_the_workspace_layout`,
+/// `an_uncanonicalizable_path_is_not_a_managed_workspace`,
+/// `an_unreadable_directory_is_not_a_managed_workspace`,
+/// `an_absent_path_still_matches_the_recorded_spelling_of_itself`.
 fn is_managed_workspace(project_dir: &Path, active_workspace_paths: &[PathBuf]) -> bool {
     fn resolve(path: &Path) -> PathBuf {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())

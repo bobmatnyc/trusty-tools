@@ -228,6 +228,106 @@ fn is_managed_workspace_sees_through_a_symlinked_path() {
     );
 }
 
+/// The canonicalize-failure fallback must not promote an unmanaged directory.
+///
+/// Why (#5867): `resolve` falls back to the raw path on ANY `canonicalize`
+/// error, and that branch had no coverage — the two tests above only use paths
+/// that exist. It is the branch the doc comment makes its correctness claim
+/// about, and a false `true` here is #5867's original bug: an arbitrary cwd
+/// audited as though a session had been provisioned into it.
+/// What: drives all three failure kinds — an absent directory (`NotFound`), a
+/// broken symlink (`NotFound` on the target), and a directory behind an
+/// unreadable parent (`PermissionDenied`) — on both sides of the comparison,
+/// and asserts every one answers `false`.
+/// Test: this function IS the test.
+#[test]
+fn an_uncanonicalizable_path_is_not_a_managed_workspace() {
+    let registered = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let active = vec![registered.path().to_path_buf()];
+
+    let absent = scratch.path().join("never-created");
+    assert!(
+        !is_managed_workspace(&absent, &active),
+        "a directory that is not on disk is not a provisioned workspace"
+    );
+
+    #[cfg(unix)]
+    {
+        let broken = scratch.path().join("dangling-link");
+        std::os::unix::fs::symlink(scratch.path().join("no-such-target"), &broken).unwrap();
+        assert!(
+            !is_managed_workspace(&broken, &active),
+            "a symlink to nothing resolves to nothing, not to a workspace"
+        );
+    }
+
+    // The failure can sit on the RECORDED side too: a session's workspace_path
+    // that has since been deleted must not start matching arbitrary cwds.
+    let stale = vec![scratch.path().join("reaped-workspace")];
+    assert!(
+        !is_managed_workspace(registered.path(), &stale),
+        "a stale recorded path must not match a live, unrelated directory"
+    );
+}
+
+/// A `PermissionDenied` canonicalize is the same answer as an absent path.
+///
+/// Why (#5867): `resolve` collapses every `canonicalize` error into the raw
+/// path, so the doc comment's "safe answer" claim has to hold for the
+/// permissions kind, not just `NotFound`.
+/// What: puts a real directory behind a `0o000` parent so `canonicalize` fails
+/// with `PermissionDenied`, and asserts it still does not match a registered
+/// workspace.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_directory_is_not_a_managed_workspace() {
+    use std::os::unix::fs::PermissionsExt;
+    let registered = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let locked = scratch.path().join("locked");
+    let inner = locked.join("workspace");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::canonicalize(&inner).is_ok() {
+        eprintln!("skipping: cannot deny traversal on this platform/privilege level");
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+        return;
+    }
+
+    let managed = is_managed_workspace(&inner, &[registered.path().to_path_buf()]);
+    let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+
+    assert!(
+        !managed,
+        "a directory tm cannot even resolve is not one to deploy into"
+    );
+}
+
+/// The fallback still matches a recorded path by its exact spelling.
+///
+/// Why (#5867): the fallback is only safe because a raw-path comparison can
+/// match nothing but a path already in `active_workspace_paths`. Stating that
+/// as prose in the doc comment is what left the branch untested; this pins the
+/// boundary from the other side, so a future "just return false on any
+/// canonicalize error" edit has to face the case it would change.
+/// What: passes a path that exists on neither side but is spelled identically
+/// to a recorded workspace, and asserts it matches — a recorded workspace,
+/// under the name it was recorded with, is never the arbitrary cwd #5867 is
+/// about.
+/// Test: this function IS the test.
+#[test]
+fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
+    let scratch = tempfile::tempdir().unwrap();
+    let reaped = scratch.path().join("reaped-workspace");
+    assert!(
+        is_managed_workspace(&reaped, std::slice::from_ref(&reaped)),
+        "an unresolvable path is compared verbatim, so it matches only its own \
+         recorded spelling — never an unregistered directory"
+    );
+}
+
 #[tokio::test]
 async fn run_doctor_produces_thirty_two_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246

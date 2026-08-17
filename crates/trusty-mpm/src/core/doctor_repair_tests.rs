@@ -356,6 +356,67 @@ fn output_style_repair_applies_and_reports_from_disk() {
     );
 }
 
+/// A write that succeeded must report as a write, whatever a sibling did.
+///
+/// Why (#5866): the repair took the deploy's whole-batch `Err` as every step's
+/// status, so one unreadable style made a DIFFERENT style read `Failed` after
+/// being correctly rewritten to bundled content on disk. That is #5865's
+/// complaint — a report that contradicts the disk, leaving an operator re-running
+/// `tm doctor --fix` against a status that will not move — reintroduced by the
+/// #5866 fix.
+/// What: drifts `OUTPUT_STYLES[0]`, makes `OUTPUT_STYLES[1]` unreadable, applies
+/// the repair, and asserts the drifted step is `Applied` with bundled content on
+/// disk while only the unreadable one is refused.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn one_unreadable_style_does_not_fail_a_sibling_that_was_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    deploy_styles(home.path());
+    let drifted = style_path(home.path(), 0);
+    let blocked = style_path(home.path(), 1);
+    fs::write(&drifted, "stale text").unwrap();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&blocked).is_ok() {
+        eprintln!("skipping: cannot deny read on this platform/privilege level");
+        return;
+    }
+
+    let steps = repair_output_style(home.path(), RepairMode::Apply);
+    let _ = fs::set_permissions(&blocked, fs::Permissions::from_mode(0o600));
+
+    let drifted_step = steps
+        .iter()
+        .find(|s| s.path == drifted)
+        .unwrap_or_else(|| panic!("the drifted style must produce a step: {steps:?}"));
+    assert_eq!(
+        drifted_step.status,
+        StepStatus::Applied { backup: None },
+        "a style that was rewritten must report as written: {steps:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&drifted).unwrap(),
+        crate::core::bundle::OUTPUT_STYLES[0].content,
+        "and the report must match what is on disk"
+    );
+
+    let blocked_step = steps
+        .iter()
+        .find(|s| s.path == blocked)
+        .unwrap_or_else(|| panic!("the unreadable style must produce a step: {steps:?}"));
+    assert!(
+        matches!(blocked_step.status, StepStatus::Refused(_)),
+        "the unreadable style owns its own outcome: {steps:?}"
+    );
+    assert!(
+        !steps
+            .iter()
+            .any(|s| matches!(s.status, StepStatus::Failed(_))),
+        "no step may inherit a sibling's failure: {steps:?}"
+    );
+}
+
 /// Fail-open guard: a read failure is not evidence of staleness, so the repair
 /// refuses rather than overwriting a file it could not inspect.
 #[cfg(unix)]

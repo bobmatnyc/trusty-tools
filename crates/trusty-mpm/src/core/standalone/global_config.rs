@@ -197,9 +197,24 @@ fn deploy_agents_and_skills(managed_root: &Path, claude_config_dir: &Path) -> an
     // constants — no framework installation required.  These are always
     // framework-owned (never user-editable), so the deployer overwrites stale
     // copies and skips files whose checksum already matches (idempotent).
-    crate::core::output_style_deployer::deploy_output_styles(claude_config_dir).map_err(|e| {
-        anyhow::anyhow!("failed to deploy output styles into managed config dir: {e}")
-    })?;
+    let styles = crate::core::output_style_deployer::deploy_output_styles(claude_config_dir)
+        .map_err(|e| {
+            anyhow::anyhow!("failed to deploy output styles into managed config dir: {e}")
+        })?;
+    // #5866: the deployer now records a per-style IO failure and keeps going,
+    // so the batch verdict this caller owes its own callers is read from
+    // `failed` rather than from the return status.
+    if !styles.failed.is_empty() {
+        let detail = styles
+            .failed
+            .iter()
+            .map(|(file_name, why)| format!("{file_name}: {why}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(anyhow::anyhow!(
+            "failed to deploy output styles into managed config dir: {detail}"
+        ));
+    }
 
     Ok(())
 }

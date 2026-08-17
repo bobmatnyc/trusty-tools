@@ -285,14 +285,16 @@ pub const OUTPUT_STYLE_REMEDY: &str = "tm doctor --fix --yes";
 /// back up. In [`RepairMode::Apply`] a single
 /// [`crate::core::output_style_deployer::deploy_output_styles`] call writes
 /// every drifted and missing file atomically; each step then reports what that
-/// call actually did rather than what was planned. Orphaned files under
-/// `output-styles/` are deliberately NOT touched — `output_style_staleness`
+/// call actually did rather than what was planned, PER STYLE — a sibling's IO
+/// error cannot turn a completed write into `Failed` (#5866). Orphaned files
+/// under `output-styles/` are deliberately NOT touched — `output_style_staleness`
 /// names them and refuses to delete them, and so does this (issue #2333).
 /// Test: `output_style_repair_plans_the_drifted_file`,
 /// `output_style_repair_dry_run_writes_nothing`,
 /// `output_style_repair_applies_and_reports_from_disk`,
 /// `output_style_repair_is_empty_when_in_sync`,
-/// `output_style_repair_refuses_an_unreadable_file`.
+/// `output_style_repair_refuses_an_unreadable_file`,
+/// `one_unreadable_style_does_not_fail_a_sibling_that_was_written`.
 pub fn repair_output_style(home: &Path, mode: RepairMode) -> Vec<RepairStep> {
     use crate::core::output_style_deployer::{
         StyleDrift, deploy_output_styles, output_style_drift,
@@ -341,6 +343,9 @@ pub fn repair_output_style(home: &Path, mode: RepairMode) -> Vec<RepairStep> {
                 (_, Some(Ok(result))) => {
                     if result.deployed.iter().any(|d| d == file_name) {
                         StepStatus::Applied { backup: None }
+                    } else if let Some(why) = result.failure_reason(file_name) {
+                        // #5866: this style's own reason, never a sibling's.
+                        StepStatus::Failed(why.to_string())
                     } else {
                         // The deploy ran and left this file alone, which after a
                         // reported drift means something else rewrote it in the

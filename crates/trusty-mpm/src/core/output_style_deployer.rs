@@ -24,17 +24,34 @@ use crate::core::bundle::OUTPUT_STYLES;
 ///
 /// Why: callers (and tests) need to know which styles were freshly written vs.
 /// left untouched, so they can assert the deployer behaved correctly without
-/// inspecting the filesystem directly.
-/// What: counts split into freshly written and unchanged (checksum already
-/// matched).  There is no "skipped" category — output styles are always
-/// framework-owned, so the deployer unconditionally overwrites stale copies.
-/// Test: every test in this module asserts on these fields.
+/// inspecting the filesystem directly. `failed` exists because the outcome is
+/// PER STYLE: one file's IO error says nothing about the others, and reporting
+/// it as a batch verdict made a successful write read as a failure (#5866).
+/// What: three disjoint buckets — freshly written, unchanged (bytes already
+/// matched), and failed with that style's own reason. Every entry in
+/// [`OUTPUT_STYLES`] lands in exactly one. There is no "skipped" category —
+/// output styles are always framework-owned, so the deployer unconditionally
+/// overwrites stale copies.
+/// Test: every test in this module asserts on these fields;
+/// `deploy_continues_past_an_unreadable_style` covers the `failed` bucket.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OutputStyleDeployResult {
     /// File names successfully (re)written this run.
     pub deployed: Vec<String>,
     /// File names left untouched because their checksum already matched.
     pub unchanged: Vec<String>,
+    /// `(file_name, reason)` for every style this run could not read or write.
+    pub failed: Vec<(String, String)>,
+}
+
+impl OutputStyleDeployResult {
+    /// Why this run could not deploy `file_name`, if it could not (#5866).
+    pub fn failure_reason(&self, file_name: &str) -> Option<&str> {
+        self.failed
+            .iter()
+            .find(|(name, _)| name == file_name)
+            .map(|(_, why)| why.as_str())
+    }
 }
 
 /// Deploy all bundled output styles into `<claude_config_dir>/output-styles/`.
@@ -51,9 +68,18 @@ pub struct OutputStyleDeployResult {
 /// Files whose bytes already match the bundled content are skipped (idempotent);
 /// others are written atomically (temp-then-rename) via [`atomic_write`].  All
 /// logging goes to stderr.
+///
+/// One style's read or write failure is recorded in
+/// [`OutputStyleDeployResult::failed`] and the loop continues (#5866). It used
+/// to abort the batch and return `Err`, which made every style already written
+/// in the same call indistinguishable from one that never got near the disk —
+/// `repair_output_style` then reported a file it had correctly rewritten as
+/// `Failed`. The returned `Err` is now reserved for a failure that really is
+/// batch-wide: `output-styles/` itself cannot be created.
 /// Test: `deploy_output_styles_populates_output_styles_dir` (happy path),
 /// `deploy_output_styles_idempotent` (no spurious write on second call),
-/// `deploy_output_styles_refreshes_stale_file` (overwrite when source changed).
+/// `deploy_output_styles_refreshes_stale_file` (overwrite when source changed),
+/// `deploy_continues_past_an_unreadable_style` (per-style isolation).
 pub fn deploy_output_styles(claude_config_dir: &Path) -> anyhow::Result<OutputStyleDeployResult> {
     let styles_dir = claude_config_dir.join("output-styles");
     std::fs::create_dir_all(&styles_dir)?;
@@ -69,16 +95,21 @@ pub fn deploy_output_styles(claude_config_dir: &Path) -> anyhow::Result<OutputSt
         // hazards: (a) silently treating non-UTF-8 on-disk content as absent
         // (which would trigger a spurious rewrite), and (b) swallowing genuine
         // IO errors (e.g. permissions) via `.ok()`.  Only `NotFound` (the file
-        // genuinely does not exist yet) is treated as "needs write"; all other
-        // IO errors are propagated so the caller sees them.
+        // genuinely does not exist yet) is treated as "needs write"; any other
+        // IO error is recorded against THIS style and the loop moves on.
         let needs_write = match std::fs::read(&target) {
             Ok(disk_bytes) => disk_bytes != bundled_bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
             Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "failed to read on-disk style '{}' for idempotency check: {e}",
-                    target.display()
+                // #5866: one style's failure is not the batch's verdict.
+                result.failed.push((
+                    style.file_name.to_string(),
+                    format!(
+                        "failed to read on-disk style '{}' for idempotency check: {e}",
+                        target.display()
+                    ),
                 ));
+                continue;
             }
         };
 
@@ -89,14 +120,17 @@ pub fn deploy_output_styles(claude_config_dir: &Path) -> anyhow::Result<OutputSt
 
         // Write atomically (temp-then-rename) so a crash between writes cannot
         // leave a half-written style file.
-        atomic_write(&target, style.content).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to deploy output style '{}' to {}: {e}",
-                style.id,
-                target.display()
-            )
-        })?;
-        result.deployed.push(style.file_name.to_string());
+        match atomic_write(&target, style.content) {
+            Ok(()) => result.deployed.push(style.file_name.to_string()),
+            Err(e) => result.failed.push((
+                style.file_name.to_string(),
+                format!(
+                    "failed to deploy output style '{}' to {}: {e}",
+                    style.id,
+                    target.display()
+                ),
+            )),
+        }
     }
 
     Ok(result)
@@ -215,6 +249,65 @@ mod tests {
         assert!(
             matches!(drift[0].1, StyleDrift::Unreadable(_)),
             "an IO failure is not evidence of staleness: {drift:?}"
+        );
+    }
+
+    /// One unreadable style must not stop the others from being written.
+    ///
+    /// Why (#5866): the deploy used to `return Err` on the first read failure,
+    /// discarding the fact that earlier styles in the same call had already
+    /// been written. Nothing downstream could then tell a completed write from
+    /// one that never ran.
+    /// What: makes `OUTPUT_STYLES[0]` unreadable and `OUTPUT_STYLES[1]`
+    /// drifted, then asserts the call returns `Ok`, records [0] in `failed`
+    /// with its own reason, and still writes [1] to disk.
+    /// Test: this function IS the test.
+    #[cfg(unix)]
+    #[test]
+    fn deploy_continues_past_an_unreadable_style() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        deploy_output_styles(tmp.path()).unwrap();
+        let styles = tmp.path().join("output-styles");
+
+        let blocked = styles.join(OUTPUT_STYLES[0].file_name);
+        let drifted = styles.join(OUTPUT_STYLES[1].file_name);
+        std::fs::write(&drifted, "stale text").unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&blocked).is_ok() {
+            eprintln!("skipping: cannot deny read on this platform/privilege level");
+            return;
+        }
+
+        let result = deploy_output_styles(tmp.path()).unwrap();
+        let _ = std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o600));
+
+        assert_eq!(
+            result.failed.len(),
+            1,
+            "only the unreadable style may fail: {result:?}"
+        );
+        assert_eq!(result.failed[0].0, OUTPUT_STYLES[0].file_name);
+        assert!(
+            result
+                .failure_reason(OUTPUT_STYLES[0].file_name)
+                .is_some_and(|why| why.contains(OUTPUT_STYLES[0].file_name)),
+            "the reason must name the file it belongs to: {result:?}"
+        );
+        assert!(
+            result.failure_reason(OUTPUT_STYLES[1].file_name).is_none(),
+            "a sibling's failure must not attach to this style: {result:?}"
+        );
+        assert!(
+            result
+                .deployed
+                .contains(&OUTPUT_STYLES[1].file_name.to_string()),
+            "the drifted style must still be rewritten: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&drifted).unwrap(),
+            OUTPUT_STYLES[1].content,
+            "the write the result claims must have actually landed"
         );
     }
 
