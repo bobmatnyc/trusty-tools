@@ -64,6 +64,59 @@ const LINEAR_TEAM_PAGE: u32 = 250;
 /// message, matching `tga::collect::linear`'s own cap.
 const MAX_REASON_CHARS: usize = 300;
 
+/// Which `gh` invocations the repository check runs.
+///
+/// Why: #5822 — `validate_linear` takes its `endpoint` for exactly this reason,
+/// and the repository arm had no equivalent. Its only failure coverage was an
+/// `#[ignore]`d test needing network and an authenticated `gh`, so a default
+/// `cargo test -p trusty-audit` proved nothing about a refused repository. Two
+/// commands carried as data let a test supply a pair that cannot succeed,
+/// offline, without a second `Command::new("gh")` anywhere (CLAUDE.md's
+/// common-entry-point rule).
+/// What: function pointers rather than built commands, because the repository
+/// read needs the `owner/name` only the call site has. [`RepoProbe::real`] is
+/// what every front end gets.
+/// Test: `super::validate_tests::a_gh_that_cannot_answer_refuses_the_repository`.
+#[derive(Debug, Clone, Copy)]
+pub struct RepoProbe {
+    /// Builds the credential probe.
+    credential: fn() -> GhCommand,
+    /// Builds the repository read for one `owner/name`.
+    view: fn(&str) -> GhCommand,
+}
+
+impl RepoProbe {
+    /// The real pair: `crate::discover`'s one credential probe, then
+    /// [`view_command`].
+    pub fn real() -> Self {
+        Self {
+            credential: discover::credential_probe,
+            view: view_command,
+        }
+    }
+
+    /// A pair that cannot answer, for proving the refusal path offline.
+    ///
+    /// Why: `gh` has no [`NO_SUCH_SUBCOMMAND`], so an installed `gh` exits
+    /// non-zero and an absent one is `GhError::NotInstalled`. Both are
+    /// refusals, reached with no network and no authenticated account — which
+    /// is what makes the repository arm's fail-closed contract provable in a
+    /// default `cargo test -p trusty-audit` (#5822).
+    /// Test: `super::validate_tests::a_gh_that_cannot_answer_refuses_the_repository`,
+    /// `crate::session::session_tests::a_refused_repository_registration_writes_nothing`.
+    #[cfg(test)]
+    pub(crate) fn unusable() -> Self {
+        Self {
+            credential: || GhCommand::new([NO_SUCH_SUBCOMMAND]),
+            view: |_| GhCommand::new([NO_SUCH_SUBCOMMAND]),
+        }
+    }
+}
+
+/// A `gh` subcommand that does not exist. See [`RepoProbe::unusable`].
+#[cfg(test)]
+const NO_SUCH_SUBCOMMAND: &str = "no-such-subcommand-5822";
+
 /// Prove `target` can be read with the credential the sweep will use.
 ///
 /// Why: the gate `crate::registry` runs before it persists anything. Returning
@@ -72,7 +125,8 @@ const MAX_REASON_CHARS: usize = 300;
 /// second collector.
 /// What: dispatches on the target. A board whose provider has no credential in
 /// the engagement config is refused HERE rather than at the request, so the
-/// message names the config field instead of an HTTP 401.
+/// message names the config field instead of an HTTP 401. `gh` carries the
+/// repository arm's invocations — see [`RepoProbe`].
 /// Test: `super::validate_tests::a_board_with_no_credential_names_the_field`,
 /// and the `#[ignore]`d live probes.
 ///
@@ -85,9 +139,10 @@ const MAX_REASON_CHARS: usize = 300;
 pub async fn validate(
     target: &Target,
     config: Option<&EngagementConfig>,
+    gh: RepoProbe,
 ) -> Result<(), AuditError> {
     match target {
-        Target::Repo { name_with_owner } => validate_repo(name_with_owner).await,
+        Target::Repo { name_with_owner } => validate_repo(name_with_owner, gh).await,
         Target::Board { provider, key } => match provider {
             BoardProvider::Jira => {
                 let creds = config
@@ -139,16 +194,15 @@ struct ViewedRepo {
 /// The probe comes first for the reason `crate::discover` states: a whitespace
 /// `GH_TOKEN` makes `gh auth token` exit ZERO with blank stdout, and without
 /// the probe the failure would surface as a confusing "no such repository".
-async fn validate_repo(name_with_owner: &str) -> Result<(), AuditError> {
+async fn validate_repo(name_with_owner: &str, gh: RepoProbe) -> Result<(), AuditError> {
     let refuse = |source| AuditError::RepoUnreachable {
         name_with_owner: name_with_owner.to_owned(),
         source: Box::new(source),
     };
-    discover::credential_probe()
-        .nonempty_stdout()
-        .await
-        .map_err(refuse)?;
-    view_command(name_with_owner)
+    // #5822: both invocations come from the probe, so a test can supply a pair
+    // that cannot answer and prove the refusal offline.
+    (gh.credential)().nonempty_stdout().await.map_err(refuse)?;
+    (gh.view)(name_with_owner)
         .json::<ViewedRepo>()
         .await
         .map(|_| ())
@@ -388,7 +442,7 @@ trusty-review = "0.15.1"
             (BoardProvider::Jira, "boards.jira"),
             (BoardProvider::Linear, "boards.linear"),
         ] {
-            let err = validate(&board(provider, "ACME"), Some(&config))
+            let err = validate(&board(provider, "ACME"), Some(&config), RepoProbe::real())
                 .await
                 .expect_err("an unconfigured provider cannot be checked");
             let AuditError::BoardCredentialMissing { field: named, .. } = &err else {
@@ -403,9 +457,13 @@ trusty-review = "0.15.1"
     /// runs against working directories that have none.
     #[tokio::test]
     async fn a_board_with_no_config_at_all_names_the_field() {
-        let err = validate(&board(BoardProvider::Linear, "ENG"), None)
-            .await
-            .expect_err("no config, no check");
+        let err = validate(
+            &board(BoardProvider::Linear, "ENG"),
+            None,
+            RepoProbe::real(),
+        )
+        .await
+        .expect_err("no config, no check");
         assert!(matches!(err, AuditError::BoardCredentialMissing { .. }));
     }
 
@@ -416,9 +474,13 @@ trusty-review = "0.15.1"
         let config = config_with(&format!(
             "{BASE_CONFIG}\n[boards.linear]\napi_key = \"  \"\n"
         ));
-        let err = validate(&board(BoardProvider::Linear, "ENG"), Some(&config))
-            .await
-            .expect_err("a blank key is not a credential");
+        let err = validate(
+            &board(BoardProvider::Linear, "ENG"),
+            Some(&config),
+            RepoProbe::real(),
+        )
+        .await
+        .expect_err("a blank key is not a credential");
         assert!(
             matches!(err, AuditError::BoardCredentialMissing { .. }),
             "{err:?}"
@@ -427,9 +489,13 @@ trusty-review = "0.15.1"
         let config = config_with(&format!(
             "{BASE_CONFIG}\n[boards.jira]\nurl = \"\"\nemail = \"a@b.c\"\ntoken = \"t\"\n"
         ));
-        let err = validate(&board(BoardProvider::Jira, "ACME"), Some(&config))
-            .await
-            .expect_err("a blank site URL is not a credential");
+        let err = validate(
+            &board(BoardProvider::Jira, "ACME"),
+            Some(&config),
+            RepoProbe::real(),
+        )
+        .await
+        .expect_err("a blank site URL is not a credential");
         assert!(
             matches!(err, AuditError::BoardCredentialMissing { .. }),
             "{err:?}"
@@ -479,9 +545,13 @@ trusty-review = "0.15.1"
             "{BASE_CONFIG}\n[boards.jira]\nurl = \"http://user:hunter2@127.0.0.1:1\"\n\
              email = \"a@b.c\"\ntoken = \"jira-token-secret\"\n"
         ));
-        let err = validate(&board(BoardProvider::Jira, "ACME"), Some(&config))
-            .await
-            .expect_err("port 1 on loopback refuses the connection");
+        let err = validate(
+            &board(BoardProvider::Jira, "ACME"),
+            Some(&config),
+            RepoProbe::real(),
+        )
+        .await
+        .expect_err("port 1 on loopback refuses the connection");
         let rendered = err.to_string();
         assert!(
             matches!(err, AuditError::BoardUnreachable { .. }),
@@ -503,20 +573,38 @@ trusty-review = "0.15.1"
         assert!(status_reason("Linear", "team", 500).contains("HTTP 500"));
     }
 
+    /// The repository arm's fail-closed contract, offline (#5822). Until the
+    /// probe became a parameter, this path's only coverage was the `#[ignore]`d
+    /// live test below, so a default `cargo test -p trusty-audit` never
+    /// exercised a refused repository at all.
+    #[tokio::test]
+    async fn a_gh_that_cannot_answer_refuses_the_repository() {
+        let target = Target::Repo {
+            name_with_owner: "acme/api".to_owned(),
+        };
+        let err = validate(&target, None, RepoProbe::unusable())
+            .await
+            .expect_err("a gh that cannot answer must not register a repository");
+        assert!(matches!(err, AuditError::RepoUnreachable { .. }), "{err:?}");
+        assert!(err.to_string().contains("acme/api"), "{err}");
+    }
+
     #[test]
     fn the_repository_read_asks_for_a_field_rather_than_a_page() {
         let argv = view_command("acme/api").argv_display();
         assert_eq!(argv, "repo view acme/api --json nameWithOwner");
     }
 
-    /// The whole repository path against the recipient's real credential.
+    /// The whole repository path against the recipient's real credential and a
+    /// real `gh` — the coverage the offline test above adds to rather than
+    /// replaces.
     ///
     /// `#[ignore]` because it needs an authenticated `gh` and network —
     /// `cargo test -p trusty-audit -- --include-ignored` runs it.
     #[tokio::test]
     #[ignore = "needs an authenticated `gh` and network; run with --include-ignored"]
     async fn a_repository_that_does_not_exist_is_refused() {
-        let err = validate_repo("bobmatnyc/no-such-repository-5822")
+        let err = validate_repo("bobmatnyc/no-such-repository-5822", RepoProbe::real())
             .await
             .expect_err("a repository that does not exist must not register");
         assert!(matches!(err, AuditError::RepoUnreachable { .. }), "{err:?}");

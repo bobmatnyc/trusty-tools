@@ -12,7 +12,9 @@
 //! - **Additive.** Registering a target never disturbs the ones already there,
 //!   and registering one twice is a no-op rather than a failure. An operator
 //!   builds the set up over several invocations, which is how they actually
-//!   work — not in one exhaustive command.
+//!   work — not in one exhaustive command. [`register`] holds that against
+//!   concurrent invocations too: the load-mutate-save runs under an exclusive
+//!   lock, so two `taudit add` runs cannot discard each other's target.
 //! - **Validated before persisted.** `crate::validate` reaches the target with
 //!   the credential that will later read it, and a target that cannot be
 //!   reached is refused at the moment it is registered. The alternative is
@@ -38,6 +40,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use trusty_common::file_lock::with_exclusive_lock;
 
 use crate::clone;
 use crate::error::AuditError;
@@ -334,10 +337,13 @@ impl Registry {
         self.targets.iter().any(|t| t.same_as(target))
     }
 
-    /// Add a target. `false` when it was already there.
+    /// Add a target to this in-memory set. `false` when it was already there.
     ///
-    /// The additive property: this appends and never rewrites what is already
-    /// in the list, so a second `add` cannot lose the first one's work.
+    /// This appends and never rewrites what is already in the list. That makes
+    /// the VALUE additive; it does not make the FILE additive, because a second
+    /// process loading the same snapshot would still save over this one's work.
+    /// [`register`] is the entry point that holds the additive property against
+    /// concurrent writers, and the one every caller uses.
     pub fn insert(&mut self, target: Target) -> bool {
         if self.contains(&target) {
             return false;
@@ -371,6 +377,75 @@ impl Registry {
         })?;
         workdir::write_atomically(&path, &text)
     }
+}
+
+/// Append `target` to the registry, serialised against every other writer.
+///
+/// Why: #5822. [`Registry::load`] → [`Registry::insert`] → [`Registry::save`] is
+/// a read-modify-write, and nothing made it indivisible. Two `taudit add` runs
+/// against one working directory each load the same snapshot, each append their
+/// own target, and the later save discards the earlier one's — with both
+/// reporting success. [`workdir::write_atomically`] does not close that: it
+/// makes one write untearable, not a load-mutate-save atomic.
+/// What: runs the whole critical section under
+/// [`trusty_common::file_lock::with_exclusive_lock`], the workspace's one
+/// implementation of it — extracted for this exact failure after
+/// `trusty-search`'s `indexes.toml` lost updates the same way (#5344). Returns
+/// whether this call is the one that appended; `false` means another writer had
+/// registered the same target first, which is the ordinary idempotent no-op.
+/// Test: `super::registry_tests::concurrent_registrations_keep_every_target`.
+///
+/// Callers validate BEFORE calling this. Validation reaches the network under a
+/// 30-second ceiling, and the lock is not reentrant — holding it across a
+/// request would stall every other `add` in the working directory behind one
+/// unreachable site. Re-reading the file here is what keeps that safe: the
+/// append is decided against the snapshot that is current at write time, not
+/// the one the caller validated against.
+///
+/// # Errors
+///
+/// [`AuditError::RegistryLock`] when the lock cannot be taken — never a
+/// bypass — plus whatever [`Registry::load`] and [`Registry::save`] fail with.
+pub fn register(work: &WorkDir, target: &Target) -> Result<bool, AuditError> {
+    locked(work, || {
+        let mut registry = Registry::load(work)?;
+        if !registry.insert(target.clone()) {
+            return Ok(false);
+        }
+        registry.save(work)?;
+        Ok(true)
+    })
+}
+
+/// Drop `target` from the registry, under the same lock [`register`] takes.
+///
+/// Why: a removal is the same read-modify-write, so an unserialised one loses a
+/// concurrent add just as readily (#5822).
+/// What: returns whether the target was there to remove. Nothing is written when
+/// it was not.
+/// Test: `super::registry_tests::a_removal_holds_the_same_lock_an_add_does`.
+///
+/// # Errors
+///
+/// The same set as [`register`].
+pub fn deregister(work: &WorkDir, target: &Target) -> Result<bool, AuditError> {
+    locked(work, || {
+        let mut registry = Registry::load(work)?;
+        if !registry.remove(target) {
+            return Ok(false);
+        }
+        registry.save(work)?;
+        Ok(true)
+    })
+}
+
+/// Run `f` holding the registry's exclusive lock.
+///
+/// The lock guards [`Registry::path`] through its `.lock` sidecar, so it
+/// survives the rename [`Registry::save`] publishes with.
+fn locked<T>(work: &WorkDir, f: impl FnOnce() -> Result<T, AuditError>) -> Result<T, AuditError> {
+    let path = Registry::path(work);
+    with_exclusive_lock(&path, f).map_err(|source| AuditError::RegistryLock { path, source })?
 }
 
 /// The repository selection `crate::clone` wrote, when there is one.
@@ -486,6 +561,109 @@ mod registry_tests {
             text.find("count").expect("count") < text.find("[[targets]]").expect("targets"),
             "{text}"
         );
+    }
+
+    /// How many writers race in the two concurrency tests. Enough that an
+    /// unlocked load-mutate-save loses several, not just one.
+    const WRITERS: usize = 16;
+
+    /// Start every writer at the same instant, so their critical sections
+    /// overlap rather than queueing behind thread spawn.
+    fn race(work: &WorkDir, each: impl Fn(&WorkDir, usize) + Sync) {
+        let gate = std::sync::Barrier::new(WRITERS);
+        std::thread::scope(|scope| {
+            for n in 0..WRITERS {
+                let (gate, each) = (&gate, &each);
+                scope.spawn(move || {
+                    gate.wait();
+                    each(work, n);
+                });
+            }
+        });
+    }
+
+    fn registered_ids(work: &WorkDir) -> Vec<String> {
+        let mut ids: Vec<String> = Registry::load(work)
+            .expect("the registry reads")
+            .targets()
+            .iter()
+            .map(Target::id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// The lost update `register` exists to remove (#5822): several `taudit
+    /// add` runs against one working directory each load the same snapshot,
+    /// each append their own target, and the later save discards the earlier
+    /// one's while BOTH report success.
+    ///
+    /// Completeness is what is asserted, not merely that the file is untorn —
+    /// `run_tests::racing_writers_never_leave_a_torn_selection` covers untorn,
+    /// and a whole file holding four of sixteen targets still passes it.
+    #[test]
+    fn concurrent_registrations_keep_every_target() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+
+        race(&work, |work, n| {
+            assert!(
+                register(work, &repo(&format!("acme/repo-{n:02}"))).expect("a racing add succeeds"),
+                "acme/repo-{n:02} was reported as already registered"
+            );
+        });
+
+        let mut expected: Vec<String> = (0..WRITERS).map(|n| format!("acme/repo-{n:02}")).collect();
+        expected.sort();
+        assert_eq!(
+            registered_ids(&work),
+            expected,
+            "a concurrently-registered target was discarded"
+        );
+    }
+
+    /// The same read-modify-write, so the same lock: an unserialised removal
+    /// writes back a snapshot still holding the targets other writers dropped.
+    #[test]
+    fn a_removal_holds_the_same_lock_an_add_does() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let mut seeded = Registry::default();
+        for n in 0..WRITERS {
+            seeded.insert(repo(&format!("acme/repo-{n:02}")));
+        }
+        seeded.save(&work).expect("writes");
+
+        race(&work, |work, n| {
+            assert!(
+                deregister(work, &repo(&format!("acme/repo-{n:02}"))).expect("a racing remove"),
+                "acme/repo-{n:02} was reported as not registered"
+            );
+        });
+
+        assert!(
+            registered_ids(&work).is_empty(),
+            "a concurrent removal was undone: {:?}",
+            registered_ids(&work)
+        );
+    }
+
+    /// Registering the same target from every writer at once: exactly one call
+    /// reports the append, and the file carries one entry.
+    #[test]
+    fn only_one_racing_writer_claims_a_duplicate_registration() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let appended = std::sync::atomic::AtomicUsize::new(0);
+
+        race(&work, |work, _| {
+            if register(work, &repo("acme/api")).expect("a racing add succeeds") {
+                appended.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+
+        assert_eq!(appended.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(registered_ids(&work), vec!["acme/api"]);
     }
 
     #[test]

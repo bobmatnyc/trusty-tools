@@ -257,6 +257,8 @@ pub struct Session {
     manifest_path: PathBuf,
     config_path: PathBuf,
     auto_install: bool,
+    /// Which `gh` invocations a repository registration runs (#5822).
+    repo_probe: validate::RepoProbe,
 }
 
 impl Session {
@@ -276,7 +278,25 @@ impl Session {
             manifest_path,
             config_path,
             auto_install: true,
+            repo_probe: validate::RepoProbe::real(),
         }
+    }
+
+    /// Point the repository check at a different pair of `gh` invocations.
+    ///
+    /// Why: #5822 — the repository arm's fail-closed guarantee ("a refused
+    /// registration writes no file") was provable only by an `#[ignore]`d test
+    /// needing network and an authenticated `gh`. `#[cfg(test)]` because it is
+    /// the injection seam for that proof and nothing else: it does not exist in
+    /// a shipped build, so `Session::execute` remains the only door a front end
+    /// gets and no capability can hide behind it.
+    /// What: replaces the [`validate::RepoProbe`] `add` runs.
+    /// Test: `super::session_tests::a_refused_repository_registration_writes_nothing`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_repo_probe(mut self, probe: validate::RepoProbe) -> Self {
+        self.repo_probe = probe;
+        self
     }
 
     /// Whether a capability that needs the pinned tools may install them itself.
@@ -376,7 +396,7 @@ impl Session {
                 self.add_target(kind, &spec).await.map(Outcome::Registered)
             }
             Command::ListTargets => self.list_targets().map(Outcome::Targets),
-            Command::RemoveTarget { spec } => self.remove_target(&spec).map(Outcome::Removed),
+            Command::RemoveTarget { spec } => self.remove_target(&spec).await.map(Outcome::Removed),
             Command::Run => self.run().await.map(Outcome::Run),
             Command::Package { destination } => self.package(destination).map(Outcome::Package),
         }
@@ -394,14 +414,15 @@ impl Session {
     /// complete must not start failing over a network blip on an entry that
     /// already passed.
     /// What: [`registry::parse`] owns the spec, [`validate::validate`] owns the
-    /// access check, [`Registry`] owns the file.
+    /// access check, and [`registry::register`] owns the write — including the
+    /// lock that stops two concurrent `add` runs discarding each other's target.
     /// Test: `super::session_tests::a_rejected_target_is_not_persisted`,
-    /// `super::session_tests::re_adding_a_registered_target_changes_nothing`.
+    /// `super::session_tests::re_adding_a_registered_target_changes_nothing`,
+    /// `crate::registry::registry_tests::concurrent_registrations_keep_every_target`.
     async fn add_target(&self, kind: TargetKind, spec: &str) -> Result<Registration, AuditError> {
         let target = registry::parse(Some(kind), spec)?;
         self.work.create()?;
-        let mut registry = Registry::load(&self.work)?;
-        if registry.contains(&target) {
+        if Registry::load(&self.work)?.contains(&target) {
             return Ok(Registration {
                 target,
                 already_registered: true,
@@ -410,13 +431,47 @@ impl Session {
         // Absent rather than required: a repository target needs no config at
         // all, and a board target's refusal names the field to set (#5822).
         let config = EngagementConfig::load_if_present(&self.config_path)?;
-        validate::validate(&target, config.as_ref()).await?;
-        registry.insert(target.clone());
-        registry.save(&self.work)?;
+        // #5822: validation runs OUTSIDE the registry's lock — it reaches the
+        // network under a 30s ceiling, and holding the lock across that would
+        // stall every other `add` in this working directory behind one
+        // unreachable site. `register` re-reads the file, so the append is
+        // decided against the snapshot current at write time.
+        validate::validate(&target, config.as_ref(), self.repo_probe).await?;
+        let inserted = self
+            .under_registry_lock({
+                let target = target.clone();
+                move |work| registry::register(work, &target)
+            })
+            .await?;
         Ok(Registration {
             target,
-            already_registered: false,
+            // A concurrent writer that won the race registered the same target
+            // first; from this call's side that is the idempotent no-op.
+            already_registered: !inserted,
         })
+    }
+
+    /// Run one registry critical section off the async runtime's thread.
+    ///
+    /// Why: [`trusty_common::file_lock::with_exclusive_lock`] blocks until the
+    /// lock is free, and its own contract says an async caller must run it
+    /// where blocking is safe (#5822).
+    /// What: `spawn_blocking`. A panic escaping the section arrives as a
+    /// `JoinError` and becomes [`AuditError::RegistryLock`], so a failed
+    /// critical section can never read as a completed one.
+    /// Test: `super::session_tests::removing_operates_on_the_same_registry`.
+    async fn under_registry_lock<T, F>(&self, f: F) -> Result<T, AuditError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&WorkDir) -> Result<T, AuditError> + Send + 'static,
+    {
+        let work = self.work.clone();
+        tokio::task::spawn_blocking(move || f(&work))
+            .await
+            .map_err(|source| AuditError::RegistryLock {
+                path: Registry::path(&self.work),
+                source: std::io::Error::other(source),
+            })?
     }
 
     /// What is registered, plus the selection file the sweep still reads.
@@ -430,13 +485,17 @@ impl Session {
     }
 
     /// Drop one target. Removing one that is not registered writes nothing.
-    fn remove_target(&self, spec: &str) -> Result<Removal, AuditError> {
+    ///
+    /// Under the same lock `add` takes (#5822): a removal is the same
+    /// load-mutate-save, so an unserialised one discards a concurrent add.
+    async fn remove_target(&self, spec: &str) -> Result<Removal, AuditError> {
         let target = registry::parse(None, spec)?;
-        let mut registry = Registry::load(&self.work)?;
-        let was_registered = registry.remove(&target);
-        if was_registered {
-            registry.save(&self.work)?;
-        }
+        let was_registered = self
+            .under_registry_lock({
+                let target = target.clone();
+                move |work| registry::deregister(work, &target)
+            })
+            .await?;
         Ok(Removal {
             target,
             was_registered,
@@ -1054,6 +1113,30 @@ trusty-review = "0.15.1"
         assert!(
             !Registry::path(session.work_dir()).exists(),
             "a refused registration wrote a registry file"
+        );
+    }
+
+    /// The REPOSITORY arm of the same guarantee, deterministically (#5822).
+    /// `a_rejected_target_is_not_persisted` covers the board arm; the repo arm's
+    /// only refusal coverage was `validate`'s `#[ignore]`d live test, so a
+    /// default `cargo test -p trusty-audit` never proved that a refused
+    /// repository leaves no file behind.
+    #[tokio::test]
+    async fn a_refused_repository_registration_writes_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path()).with_repo_probe(validate::RepoProbe::unusable());
+
+        let err = session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: "acme/api".to_owned(),
+            })
+            .await
+            .expect_err("a gh that cannot answer must not register a repository");
+        assert!(matches!(err, AuditError::RepoUnreachable { .. }), "{err:?}");
+        assert!(
+            !Registry::path(session.work_dir()).exists(),
+            "a refused repository registration wrote a registry file"
         );
     }
 

@@ -227,7 +227,10 @@ impl WorkDir {
 /// unique suffix is what lets two writers race without either reading the
 /// other's half-written file. A failed rename removes the temporary file.
 /// Test: `crate::run::run_tests::racing_writers_never_leave_a_torn_selection`,
-/// `crate::registry::registry_tests::a_saved_registry_reads_back_whole`.
+/// `crate::registry::registry_tests::a_registry_round_trips_both_kinds`.
+///
+/// This makes ONE write untearable. It does not make a load-mutate-save
+/// indivisible — [`crate::registry::register`] takes a lock for that (#5822).
 ///
 /// # Errors
 ///

@@ -408,7 +408,7 @@ pub enum AuditError {
     /// "gh is not installed" and "you cannot see that repository" call for
     /// different actions.
     /// What: names the repository; the reason is `gh`'s own.
-    /// Test: `crate::registry::registry_tests::a_rejected_repository_is_not_persisted`.
+    /// Test: `crate::validate::validate_tests::a_gh_that_cannot_answer_refuses_the_repository`.
     #[error("cannot read {name_with_owner} with your GitHub credential: {source}")]
     RepoUnreachable {
         /// The repository that was refused.
@@ -426,7 +426,7 @@ pub enum AuditError {
     /// status and, for a GraphQL refusal, the provider's own message — never
     /// from the request, so the credential cannot reach this string. That is
     /// asserted directly rather than argued.
-    /// Test: `crate::registry::registry_tests::a_rejection_reason_never_carries_the_credential`.
+    /// Test: `crate::validate::validate_tests::a_provider_message_is_scrubbed_of_the_credential`.
     #[error("cannot read {provider} {key} with the configured credential: {reason}")]
     BoardUnreachable {
         /// `"jira"` or `"linear"`.
@@ -452,6 +452,27 @@ pub enum AuditError {
         declared: usize,
         /// How many `[[targets]]` entries it actually holds.
         found: usize,
+    },
+
+    /// The registry's read-modify-write could not be serialised.
+    ///
+    /// Why: #5822 — registering and removing a target both load
+    /// `state/audit-targets.toml`, mutate it and save it back. Two of those
+    /// running at once against one working directory each load the same
+    /// snapshot, and the later save discards the earlier one's target while both
+    /// report success. `trusty_common::file_lock::with_exclusive_lock` closes
+    /// that, and it never fails open — so a lock that cannot be taken has to be
+    /// a refusal here rather than an unserialised write.
+    /// What: names the registry the lock guards. `source` is the lock failure,
+    /// or the panic that escaped the critical section.
+    /// Test: `crate::registry::registry_tests::concurrent_registrations_keep_every_target`.
+    #[error("could not update {path} under its lock: {source}. Nothing was changed")]
+    RegistryLock {
+        /// The registry file whose lock could not be held.
+        path: PathBuf,
+        /// Why the critical section could not be entered or completed.
+        #[source]
+        source: std::io::Error,
     },
 
     /// A capability this scaffold declares but does not yet implement.

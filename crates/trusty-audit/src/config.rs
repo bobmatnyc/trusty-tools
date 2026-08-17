@@ -201,16 +201,79 @@ pub struct ModelPins {
 /// account email, and the API token, which pair as HTTP Basic auth. The field
 /// names match tga's own `jira` collector config so an operator who has
 /// configured one has configured both.
-/// Test: `super::config_tests::board_credentials_load_and_redact`.
-#[derive(Debug, Clone, Deserialize)]
+/// Test: `super::config_tests::board_credentials_load_and_redact`,
+/// `super::config_tests::a_url_carrying_credentials_never_reaches_debug`.
+#[derive(Clone, Deserialize)]
 #[non_exhaustive]
 pub struct JiraCredentials {
     /// Site base URL, e.g. `https://acme.atlassian.net`.
+    ///
+    /// May carry `user:password@` userinfo — [`crate::validate`] anticipates
+    /// that, and this module's `Debug` strips it (#5822).
     pub url: String,
     /// Account email, the Basic-auth username.
     pub email: String,
     /// API token, the Basic-auth password.
     pub token: SecretKey,
+}
+
+/// What replaces a URL's userinfo, and what a `Debug` render shows instead.
+const USERINFO_REDACTED: &str = "<redacted>";
+
+/// Redacts the URL. See [`redact_userinfo`].
+///
+/// Why: the derived `Debug` printed `url` verbatim, so `format!("{cfg:?}")` on
+/// an [`EngagementConfig`] — or any future `tracing::debug!("{:?}", config)` —
+/// published whatever an operator had pasted into it. `token` was already safe
+/// through [`SecretKey`]; this closes the same hole one field over (#5822).
+/// What: the derived layout with `url` passed through [`redact_userinfo`].
+/// `email` stays visible: it is the Basic-auth username, and with the password
+/// redacted it is not on its own a credential.
+/// Test: `super::config_tests::a_url_carrying_credentials_never_reaches_debug`.
+impl fmt::Debug for JiraCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JiraCredentials")
+            .field("url", &redact_userinfo(&self.url))
+            .field("email", &self.email)
+            .field("token", &self.token)
+            .finish()
+    }
+}
+
+/// Replace a URL's `user:password@` with [`USERINFO_REDACTED`].
+///
+/// Why: redacting rather than refusing the config at parse time. The stricter
+/// option would reject a userinfo-bearing `boards.jira.url` outright, which
+/// turns a deployment that works today — a JIRA reached through a proxy that
+/// wants inline credentials — into a hard failure the recipient cannot work
+/// around; they did not author this file. Redaction closes the leak and changes
+/// nothing about what loads or what [`crate::validate`] sends.
+///
+/// [`trusty_common::credentials::scrub_secrets`] does not cover this shape: it
+/// removes values the process already holds by name, and userinfo pasted into a
+/// URL is not one of them. Nothing else in the workspace redacts a URL
+/// structurally, and only this crate needs it, so it stays here (CLAUDE.md's
+/// common-entry-point rule governs capabilities shared ACROSS crates).
+/// What: cuts everything between `//` and the last `@` of the authority — the
+/// span before the first `/`, `?` or `#`. A URL with no userinfo, and text that
+/// is not a URL at all, come back unchanged.
+/// Test: `super::config_tests::a_url_carrying_credentials_never_reaches_debug`,
+/// `super::config_tests::redaction_leaves_an_ordinary_url_alone`.
+fn redact_userinfo(url: &str) -> String {
+    let Some(marker) = url.find("//") else {
+        return url.to_owned();
+    };
+    let authority_start = marker + 2;
+    let rest = &url[authority_start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let Some(at) = rest[..authority_end].rfind('@') else {
+        return url.to_owned();
+    };
+    format!(
+        "{}{USERINFO_REDACTED}@{}",
+        &url[..authority_start],
+        &rest[at + 1..]
+    )
 }
 
 /// The client's Linear credential. See [`JiraCredentials`].
@@ -494,6 +557,56 @@ trusty-review = "0.15.1"
             "Debug leaked: {debug}"
         );
         assert!(!debug.contains("lin_api_secret"), "Debug leaked: {debug}");
+    }
+
+    /// `boards.jira.url` is a plain `String` an operator may have pasted
+    /// credentials into — `crate::validate`'s own fixture does exactly that —
+    /// and the derived `Debug` printed them verbatim (#5822).
+    #[test]
+    fn a_url_carrying_credentials_never_reaches_debug() {
+        const URL: &str = "https://auditor:hunter2@acme.atlassian.net/jira";
+        let text = format!(
+            "{SAMPLE}\n[boards.jira]\nurl = \"{URL}\"\n\
+             email = \"auditor@acme.example\"\ntoken = \"jira-token-secret\"\n"
+        );
+        let cfg = EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("parses");
+
+        // The value itself is untouched — the request still has to carry it.
+        assert_eq!(
+            cfg.boards.jira.as_ref().expect("jira is configured").url,
+            URL
+        );
+
+        let debug = format!("{cfg:?}");
+        assert!(
+            !debug.contains("hunter2"),
+            "Debug leaked the password: {debug}"
+        );
+        assert!(
+            !debug.contains("auditor:"),
+            "Debug leaked the userinfo: {debug}"
+        );
+        assert!(
+            !debug.contains("jira-token-secret"),
+            "Debug leaked: {debug}"
+        );
+        assert!(
+            debug.contains("acme.atlassian.net/jira"),
+            "the site must still be identifiable: {debug}"
+        );
+    }
+
+    #[test]
+    fn redaction_leaves_a_url_without_userinfo_alone() {
+        for url in [
+            "https://acme.atlassian.net",
+            "https://acme.atlassian.net/rest/api/3?a=b",
+            "https://acme.atlassian.net/path@notuserinfo",
+            "not a url at all",
+            "",
+        ] {
+            assert_eq!(redact_userinfo(url), url, "{url}");
+        }
     }
 
     /// A repo-only engagement never names a board, so the table defaults.
