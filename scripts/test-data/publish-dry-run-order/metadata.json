@@ -1,0 +1,173 @@
+{
+  "_comment": [
+    "Fixture for scripts/publish-dry-run-order_selftest.sh (#5358).",
+    "",
+    "A cargo-metadata --format-version=1 --all-features document for a synthetic",
+    "five-crate workspace, shaped to carry the three edges the publish-order",
+    "computation has to get right. Checked in rather than produced by a live",
+    "`cargo metadata` run so the cases stay deterministic as the real workspace",
+    "changes: today trusty-analyze->trusty-review is the only optional internal",
+    "edge in the tree, and a test that depended on that staying true would go",
+    "vacuous the moment someone made the dependency unconditional.",
+    "",
+    "The mapping to the real defect:",
+    "  demo-analyze -> demo-review   OPTIONAL, feature-gated ('review'). Invisible",
+    "                                to a metadata run without --all-features.",
+    "                                This is trusty-analyze -> trusty-review.",
+    "  demo-mpm     -> demo-review   DEV-dependency only. Must still be counted:",
+    "                                cargo publish resolves a full lockfile.",
+    "                                This is trusty-mpm -> trusty-review.",
+    "  demo-private                  publish = false. Must never appear in the",
+    "                                order even though it depends on demo-analyze.",
+    "  serde                         external. Must never appear in the order.",
+    "",
+    "Only the keys publish-dry-run-order.sh reads are populated faithfully;",
+    "`deps` carries dep_kinds so the dev-edge case has real data to assert on.",
+    "That key is ignored by the script (it reads workspace_members, packages and",
+    "resolve.nodes) and exists to keep the fixture self-describing."
+  ],
+
+  "workspace_members": [
+    "path+file:///w/crates/demo-analyze#demo-analyze@0.1.0",
+    "path+file:///w/crates/demo-common#demo-common@0.1.0",
+    "path+file:///w/crates/demo-mpm#demo-mpm@0.1.0",
+    "path+file:///w/crates/demo-private#demo-private@0.1.0",
+    "path+file:///w/crates/demo-review#demo-review@0.1.0"
+  ],
+
+  "packages": [
+    {
+      "id": "path+file:///w/crates/demo-analyze#demo-analyze@0.1.0",
+      "name": "demo-analyze",
+      "version": "0.1.0",
+      "publish": null,
+      "features": {
+        "default": [],
+        "review": ["dep:demo-review"]
+      }
+    },
+    {
+      "id": "path+file:///w/crates/demo-common#demo-common@0.1.0",
+      "name": "demo-common",
+      "version": "0.1.0",
+      "publish": null,
+      "features": {}
+    },
+    {
+      "id": "path+file:///w/crates/demo-mpm#demo-mpm@0.1.0",
+      "name": "demo-mpm",
+      "version": "0.1.0",
+      "publish": null,
+      "features": {}
+    },
+    {
+      "id": "path+file:///w/crates/demo-private#demo-private@0.1.0",
+      "name": "demo-private",
+      "version": "0.1.0",
+      "publish": [],
+      "features": {}
+    },
+    {
+      "id": "path+file:///w/crates/demo-review#demo-review@0.1.0",
+      "name": "demo-review",
+      "version": "0.1.0",
+      "publish": null,
+      "features": {}
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0",
+      "name": "serde",
+      "version": "1.0.0",
+      "publish": null,
+      "features": {}
+    }
+  ],
+
+  "resolve": {
+    "root": null,
+    "nodes": [
+      {
+        "id": "path+file:///w/crates/demo-analyze#demo-analyze@0.1.0",
+        "dependencies": [
+          "path+file:///w/crates/demo-common#demo-common@0.1.0",
+          "path+file:///w/crates/demo-review#demo-review@0.1.0"
+        ],
+        "deps": [
+          {
+            "name": "demo_common",
+            "pkg": "path+file:///w/crates/demo-common#demo-common@0.1.0",
+            "dep_kinds": [{ "kind": null, "target": null }]
+          },
+          {
+            "name": "demo_review",
+            "pkg": "path+file:///w/crates/demo-review#demo-review@0.1.0",
+            "dep_kinds": [{ "kind": null, "target": null }]
+          }
+        ]
+      },
+      {
+        "id": "path+file:///w/crates/demo-common#demo-common@0.1.0",
+        "dependencies": [
+          "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0"
+        ],
+        "deps": [
+          {
+            "name": "serde",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0",
+            "dep_kinds": [{ "kind": null, "target": null }]
+          }
+        ]
+      },
+      {
+        "id": "path+file:///w/crates/demo-mpm#demo-mpm@0.1.0",
+        "dependencies": [
+          "path+file:///w/crates/demo-common#demo-common@0.1.0",
+          "path+file:///w/crates/demo-review#demo-review@0.1.0"
+        ],
+        "deps": [
+          {
+            "name": "demo_common",
+            "pkg": "path+file:///w/crates/demo-common#demo-common@0.1.0",
+            "dep_kinds": [{ "kind": null, "target": null }]
+          },
+          {
+            "name": "demo_review",
+            "pkg": "path+file:///w/crates/demo-review#demo-review@0.1.0",
+            "dep_kinds": [{ "kind": "dev", "target": null }]
+          }
+        ]
+      },
+      {
+        "id": "path+file:///w/crates/demo-private#demo-private@0.1.0",
+        "dependencies": [
+          "path+file:///w/crates/demo-analyze#demo-analyze@0.1.0"
+        ],
+        "deps": [
+          {
+            "name": "demo_analyze",
+            "pkg": "path+file:///w/crates/demo-analyze#demo-analyze@0.1.0",
+            "dep_kinds": [{ "kind": null, "target": null }]
+          }
+        ]
+      },
+      {
+        "id": "path+file:///w/crates/demo-review#demo-review@0.1.0",
+        "dependencies": [
+          "path+file:///w/crates/demo-common#demo-common@0.1.0"
+        ],
+        "deps": [
+          {
+            "name": "demo_common",
+            "pkg": "path+file:///w/crates/demo-common#demo-common@0.1.0",
+            "dep_kinds": [{ "kind": null, "target": null }]
+          }
+        ]
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0",
+        "dependencies": [],
+        "deps": []
+      }
+    ]
+  }
+}
