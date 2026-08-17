@@ -31,6 +31,7 @@
 //! | [`clone`] | getting the selected repositories onto the recipient's disk (#5215) |
 //! | [`run`] | driving the pinned `tga audit` over the selected repositories |
 //! | [`package`] | assembling the unencrypted deliverable that goes back (#5499) |
+//! | [`chain`] | driving all four of those in one call, resumably (#5824) |
 //!
 //! ## What this milestone is not
 //!
@@ -67,6 +68,8 @@
 // ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
 #![deny(rustdoc::broken_intra_doc_links)]
 
+// #5824: the one-shot chain over install, materialize, collect and package.
+pub mod chain;
 pub mod cli;
 pub mod clone;
 pub mod config;

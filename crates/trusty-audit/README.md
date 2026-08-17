@@ -40,7 +40,34 @@ trusty-audit run                # run `tga audit` over the selected repositories
                                 #   resuming an interrupted sweep
 trusty-audit run --fresh        # audit every selected repository again
 trusty-audit package            # assemble the deliverable zip to send back
+trusty-audit audit              # all four of the above, in one invocation
 ```
+
+## The one-shot run
+
+`trusty-audit audit` drives the whole engagement: it installs the pinned tools,
+clones the repositories `trusty-audit add repo` registered, sweeps them, and
+assembles the return package. It is the command an operator who has already
+registered their targets runs; the four separate verbs stay for debugging one
+phase at a time.
+
+Interrupt it and run it again. Installed tools, complete checkouts and audited
+repositories are all carried over — the same per-phase re-entrancy the separate
+verbs have, chained.
+
+It continues past a repository that fails, because one failure in six should not
+discard five audits. What it will not do is let that read as a whole engagement:
+the package names every repository it does not cover, the process exits non-zero
+whenever anything registered was not audited, and a sweep in which NOTHING was
+audited stops before the package phase rather than producing a zip of two
+generated files. A failure names the phase it came from — install, materialize,
+collect or package — so a stopped run says which step to look at.
+
+A registered board (`jira:ACME`, `linear:ENG`) is reported as a stated gap
+rather than collected. `tga audit` does take a JIRA project, but it reads that
+credential as a literal string in its config file, and this client passes
+secrets to a child through its environment and never through a file. Wiring
+boards through needs env-var expansion on tga's JIRA credential first.
 
 The same program is also installed as `taudit`, a shorter name for repeat use —
 `taudit workdir` and `trusty-audit workdir` are one binary built from one

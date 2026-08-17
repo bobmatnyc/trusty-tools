@@ -475,6 +475,66 @@ pub enum AuditError {
         source: std::io::Error,
     },
 
+    /// The one-shot audit stopped, and this is the phase it stopped in.
+    ///
+    /// Why: #5824 chains four fallible phases, and an operator who sees it stop
+    /// must know which one. Reporting every phase's failure as "the audit
+    /// failed" makes them re-derive the stage before they can act — "cannot read
+    /// the registry" and "`tga audit` exited with code 2" have nothing in common
+    /// as next steps.
+    /// What: the phase, plus the underlying refusal, which names the target and
+    /// the reason. `source` is boxed because nesting one `AuditError` inside
+    /// another unboxed would grow every `Result` in the crate past
+    /// `clippy::result_large_err`.
+    /// Test: `crate::chain::chain_tests::a_sweep_that_audited_nothing_stops_before_packaging`.
+    #[error("the audit stopped in the {phase} phase — {source}")]
+    ChainStopped {
+        /// Which link of the chain refused.
+        phase: crate::chain::Phase,
+        /// What it refused with.
+        #[source]
+        source: Box<AuditError>,
+    },
+
+    /// The sweep ran and audited no repository at all.
+    ///
+    /// Why: #5824's fail-open guard. The chain continues past a repository that
+    /// failed, because five audits are worth having when the sixth did not work.
+    /// A sweep in which EVERY repository failed is not that case: packaging it
+    /// would hand the recipient a zip of two generated files that looks like a
+    /// finished engagement. [`AuditError::NothingToPackage`] is the same refusal
+    /// one stage later, from `crate::package`; this one exists so the chain
+    /// attributes it to the phase that actually failed.
+    /// What: how many repositories were attempted. The per-repository reasons
+    /// are in `state/run-progress.toml` and in each repository's log.
+    /// Test: `crate::chain::chain_tests::a_sweep_that_audited_nothing_stops_before_packaging`.
+    #[error(
+        "no repository was audited ({attempted} attempted) — nothing was packaged; see the \
+         per-repository failures above, and `trusty-audit package` if you want the partial \
+         output anyway"
+    )]
+    NothingAudited {
+        /// How many repositories the sweep attempted.
+        attempted: usize,
+    },
+
+    /// The chain was asked to audit an engagement that targets nothing.
+    ///
+    /// Why: #5824. `NoRepositoriesSelected` names a file the operator has never
+    /// heard of and does not write, so on the one-shot path it is the wrong
+    /// message — the remedy is to register a target, not to go and edit
+    /// `state/selected-repos.toml`.
+    /// What: names the working directory and the command that fixes it.
+    /// Test: `crate::chain::chain_tests::an_engagement_with_nothing_to_audit_stops_in_materialize`.
+    #[error(
+        "nothing to audit in {root} — no repository is registered and no earlier clone left a \
+         selection; register one with `trusty-audit add repo <owner>/<name>`"
+    )]
+    NothingRegistered {
+        /// The working directory that targets nothing.
+        root: PathBuf,
+    },
+
     /// A capability this scaffold declares but does not yet implement.
     ///
     /// Why: a half-built capability must fail closed rather than silently
