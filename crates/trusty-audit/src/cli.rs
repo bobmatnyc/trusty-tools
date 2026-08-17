@@ -51,6 +51,15 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
+    /// Never download the pinned tools; report what is missing instead.
+    ///
+    /// The guided flow and `run` install the tools this engagement pins when
+    /// they are absent, unverified, or off the pin. Pass this to keep those
+    /// commands off the network and get the state as it stands. `tools` never
+    /// installs, with or without this flag.
+    #[arg(long, global = true)]
+    pub no_install: bool,
+
     /// Capability to run. Omit to enter the guided flow.
     #[command(subcommand)]
     pub verb: Option<Verb>,
@@ -185,6 +194,20 @@ pub fn render(outcome: &Outcome) -> String {
                     count_of(m.repositories.len(), "repository", "repositories")
                 )),
                 None => out.push_str("Engagement: no manifest yet — nothing has run here\n"),
+            }
+            // #5797: a download the operator did not ask for is otherwise just
+            // a pause. Naming the versions is also what makes the auto-install
+            // auditable after the fact.
+            if let Some(placed) = &status.installed {
+                out.push_str(&format!(
+                    "Installed {}: {}\n",
+                    count_of(placed.len(), "tool", "tools"),
+                    placed
+                        .iter()
+                        .map(|t| format!("{} {}", t.crate_name, t.version))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
             let installed = status.tools.iter().filter(|s| s.installed).count();
             out.push_str(&format!(

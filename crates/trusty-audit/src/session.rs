@@ -103,6 +103,10 @@ pub enum NextStep {
     /// No repositories are known yet; selection comes first (#5487, #5497).
     SelectRepositories,
     /// Repositories are known but tooling is missing (#5491, #5495).
+    ///
+    /// Since #5797 the flow installs rather than stopping here, so this state
+    /// means installing did not happen: `--no-install`, or no engagement config
+    /// to take pins from. It is reachable, not vestigial.
     InstallTools(Vec<RequiredTool>),
     /// Repositories are selected and the pinned triple is installed; sweep (#5555).
     ReadyForRun,
@@ -119,8 +123,16 @@ pub struct GuidedStatus {
     pub root: PathBuf,
     /// The companion manifest, when a previous run left one.
     pub manifest: Option<AuditManifest>,
-    /// Per-tool install state.
+    /// Per-tool install state, read AFTER any auto-install this flow performed.
     pub tools: Vec<ToolStatus>,
+    /// What this flow installed on its way here, when it installed anything.
+    ///
+    /// `None` covers both "nothing needed installing" and "auto-install is
+    /// off" — the front end distinguishes those from [`GuidedStatus::tools`],
+    /// which says what is actually on disk. This field exists so the flow can
+    /// report a download the operator did not ask for and would otherwise see
+    /// only as a pause (#5797).
+    pub installed: Option<Vec<InstalledTool>>,
     /// What to do next.
     pub next: NextStep,
 }
@@ -216,6 +228,7 @@ pub struct Session {
     work: WorkDir,
     manifest_path: PathBuf,
     config_path: PathBuf,
+    auto_install: bool,
 }
 
 impl Session {
@@ -234,7 +247,26 @@ impl Session {
             work,
             manifest_path,
             config_path,
+            auto_install: true,
         }
+    }
+
+    /// Whether a capability that needs the pinned tools may install them itself.
+    ///
+    /// Why: #5797. On by default, because the recipient double-clicks one thing
+    /// and the tooling is this client's own prerequisite, not a decision it
+    /// should hand back. The opt-out exists for the case the default gets wrong:
+    /// someone who wants to know the state of a working directory without this
+    /// process reaching the network. `trusty-audit tools` answers that without
+    /// the flag — it never installs — and the flag covers the flows that do.
+    /// What: `false` restores the previous behaviour exactly. `guided` reports
+    /// [`NextStep::InstallTools`] and `run` refuses with
+    /// [`AuditError::ToolsNotInstalled`], both as they did before auto-install.
+    /// Test: `super::session_tests::the_opt_out_leaves_guided_asking_for_tools`.
+    #[must_use]
+    pub fn with_auto_install(mut self, auto_install: bool) -> Self {
+        self.auto_install = auto_install;
+        self
     }
 
     /// Point at a manifest outside the working directory.
@@ -291,7 +323,7 @@ impl Session {
     /// capability a later milestone lands.
     pub async fn execute(&self, command: Command) -> Result<Outcome, AuditError> {
         match command {
-            Command::Guided => self.guided().map(Outcome::Guided),
+            Command::Guided => self.guided().await.map(Outcome::Guided),
             Command::WorkDir => self.work_dir_report().map(Outcome::WorkDir),
             Command::Manifest => AuditManifest::load(&self.manifest_path).map(Outcome::Manifest),
             Command::Tools => tools::status(&self.work).map(Outcome::Tools),
@@ -346,6 +378,15 @@ impl Session {
     /// (#5555).
     async fn run(&self) -> Result<RunReport, AuditError> {
         let config = EngagementConfig::load(&self.config_path)?;
+        // #5797: the sweep's own preflight refuses over a tool that is missing,
+        // unverified, or off the pin. Auto-install closes exactly that set
+        // first, using the same three conditions, so the operator does not run
+        // `install` by hand between two commands that both already know the
+        // pins. An install that cannot resolve every pin fails here and the
+        // sweep never starts — the #5454 guarantee, reached earlier.
+        if self.auto_install {
+            tools::ensure(&self.work, &config.tools).await?;
+        }
         run::sweep(&self.work, &config).await
     }
 
@@ -373,16 +414,28 @@ impl Session {
             .unwrap_or_default())
     }
 
-    fn guided(&self) -> Result<GuidedStatus, AuditError> {
+    async fn guided(&self) -> Result<GuidedStatus, AuditError> {
         self.work.create()?;
         let manifest = AuditManifest::load_if_present(&self.manifest_path)?;
-        let tools = tools::status(&self.work)?;
 
         // #5502: the epic's pre-sweep order is repo selection, then tooling —
         // so a missing repository set outranks a missing binary.
         let repos_known = manifest
             .as_ref()
             .is_some_and(|m| !m.repositories.is_empty());
+
+        // #5797: install at the point the flow would otherwise have printed
+        // "now go run `install`", and not one step earlier. Repository selection
+        // comes first, so a working directory with nothing chosen yet reports
+        // its state without this process reaching the network — the operator
+        // has not committed to an engagement here.
+        let installed = if self.auto_install && repos_known {
+            self.auto_install_tools().await?
+        } else {
+            None
+        };
+
+        let tools = tools::status(&self.work)?;
         let missing: Vec<RequiredTool> = tools
             .iter()
             .filter(|s| !s.installed)
@@ -410,8 +463,31 @@ impl Session {
             root: self.work.root().to_path_buf(),
             manifest,
             tools,
+            installed,
             next,
         })
+    }
+
+    /// Install the pinned set for the guided flow, when there is a set to pin to.
+    ///
+    /// Why: #5797. The guided flow runs against a working directory that may
+    /// carry no engagement config — it is the flow you enter before anything is
+    /// set up — and that case has to keep reporting rather than fail. There are
+    /// no pins without a config, and installing without pins means installing
+    /// whatever is current, which is the #5454 defect. So an absent config
+    /// declines to install and the flow names the step, exactly as before.
+    ///
+    /// A config that is PRESENT and unreadable or malformed is not that case and
+    /// propagates: `load_if_present` tolerates only absence.
+    /// What: `Ok(None)` when there is no config or the set was already
+    /// satisfied; `Ok(Some(installed))` naming what this call placed.
+    /// Test: `super::session_tests::guided_without_a_config_still_names_the_step`,
+    /// `super::session_tests::guided_propagates_a_malformed_config`.
+    async fn auto_install_tools(&self) -> Result<Option<Vec<InstalledTool>>, AuditError> {
+        let Some(config) = EngagementConfig::load_if_present(&self.config_path)? else {
+            return Ok(None);
+        };
+        tools::ensure(&self.work, &config.tools).await
     }
 }
 
@@ -684,6 +760,159 @@ trusty-review = "0.0.0-never-published"
             panic!("Guided command must yield a Guided outcome");
         };
         assert_eq!(status.next, NextStep::ReturnPackage);
+    }
+
+    /// A working directory whose `tools/` is a symlink, so `tools::install`
+    /// refuses at its own guard BEFORE building an HTTP client. That is what
+    /// makes "auto-install fired here" assertable offline: reaching the guard is
+    /// only possible by having decided to install (#5797).
+    #[cfg(unix)]
+    fn session_that_cannot_install(tmp: &Path) -> Session {
+        let session = session_with_config(tmp, UNPUBLISHABLE_CONFIG);
+        let work = session.work_dir();
+        std::fs::create_dir_all(work.root()).expect("mkdir root");
+        std::fs::create_dir_all(tmp.join("elsewhere")).expect("mkdir elsewhere");
+        std::os::unix::fs::symlink(tmp.join("elsewhere"), work.path(Area::Tools)).expect("symlink");
+        session
+    }
+
+    /// The behaviour the owner asked for: once repositories are chosen, the
+    /// guided flow installs the pinned set instead of printing an instruction to
+    /// go and do it (#5797). Before this change the same call returned `Ok`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn guided_installs_the_pinned_set_once_repositories_are_known() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_that_cannot_install(tmp.path());
+        write_manifest(&session, MANIFEST);
+
+        let err = session
+            .execute(Command::Guided)
+            .await
+            .expect_err("the guided flow must have tried to install");
+        assert!(
+            matches!(err, AuditError::UnsafeToolsDir { .. }),
+            "expected the install guard, got {err:?}"
+        );
+    }
+
+    /// The opt-out restores the previous behaviour exactly: no network, and the
+    /// flow names the step it would have performed (#5797).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_opt_out_leaves_guided_asking_for_tools() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_that_cannot_install(tmp.path()).with_auto_install(false);
+        write_manifest(&session, MANIFEST);
+
+        let Outcome::Guided(status) = session
+            .execute(Command::Guided)
+            .await
+            .expect("--no-install must not reach the installer")
+        else {
+            panic!("Guided command must yield a Guided outcome");
+        };
+        assert_eq!(
+            status.next,
+            NextStep::InstallTools(RequiredTool::ALL.to_vec())
+        );
+        assert!(status.installed.is_none(), "nothing was installed");
+    }
+
+    /// Repository selection comes first, so a working directory with nothing
+    /// chosen yet reports its state without reaching the network (#5502 order).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn guided_does_not_install_before_repositories_are_chosen() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_that_cannot_install(tmp.path());
+
+        let Outcome::Guided(status) = session
+            .execute(Command::Guided)
+            .await
+            .expect("selection comes before any download")
+        else {
+            panic!("Guided command must yield a Guided outcome");
+        };
+        assert_eq!(status.next, NextStep::SelectRepositories);
+        assert!(status.installed.is_none());
+    }
+
+    /// No config means no pins, and no pins must never mean "fetch latest" — so
+    /// the flow declines to install and names the step, as it always did.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn guided_without_a_config_still_names_the_step() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path());
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+        write_manifest(&session, MANIFEST);
+
+        let Outcome::Guided(status) = session
+            .execute(Command::Guided)
+            .await
+            .expect("an absent config is a state to report")
+        else {
+            panic!("Guided command must yield a Guided outcome");
+        };
+        assert_eq!(
+            status.next,
+            NextStep::InstallTools(RequiredTool::ALL.to_vec())
+        );
+    }
+
+    /// A config that is present and wrong is not the same as one that is
+    /// absent: `load_if_present` tolerates only absence.
+    #[tokio::test]
+    async fn guided_propagates_a_malformed_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), "this is not toml = = =");
+        write_manifest(&session, MANIFEST);
+
+        let err = session
+            .execute(Command::Guided)
+            .await
+            .expect_err("a malformed config must not be swallowed");
+        assert!(matches!(err, AuditError::Parse { .. }), "{err:?}");
+    }
+
+    /// The sweep's tooling is a prerequisite it can satisfy itself. Before this
+    /// change the same call refused with `ToolsNotInstalled` (#5797).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_installs_the_pinned_set_before_sweeping() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_that_cannot_install(tmp.path());
+
+        let err = session
+            .execute(Command::Run)
+            .await
+            .expect_err("the sweep must have tried to install");
+        assert!(
+            matches!(err, AuditError::UnsafeToolsDir { .. }),
+            "expected the install guard, got {err:?}"
+        );
+    }
+
+    /// With the opt-out, `run` refuses exactly as it did before auto-install —
+    /// the fail-closed preflight, untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_opt_out_leaves_run_refusing_over_missing_tools() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_that_cannot_install(tmp.path()).with_auto_install(false);
+
+        let err = session
+            .execute(Command::Run)
+            .await
+            .expect_err("no tools, no sweep");
+        assert!(
+            matches!(err, AuditError::ToolsNotInstalled { .. }),
+            "expected the sweep's own preflight, got {err:?}"
+        );
     }
 
     /// The whole path against the real release host: a version that cannot

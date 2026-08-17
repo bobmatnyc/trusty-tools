@@ -36,9 +36,20 @@
 //!
 //! Toward KEEPING the directory. Every gate below refuses on uncertainty, the
 //! dirt gate ([`crate::session_manager::worktree_safety::inspect_dirt`], reused
-//! rather than reimplemented) fails toward DIRTY, and removal is git-mediated
-//! with no `remove_dir_all` fallback — a `git worktree remove` this module
-//! cannot complete leaves the tree alone.
+//! rather than reimplemented) fails toward DIRTY, the liveness gate
+//! ([`crate::session_manager::worktree_liveness::process_holding`]) fails
+//! toward IN USE, and removal is git-mediated with no `remove_dir_all`
+//! fallback — a `git worktree remove` this module cannot complete leaves the
+//! tree alone.
+//!
+//! # The record survives a restart (#4311)
+//!
+//! `DaemonState::delegations` is a `DashMap` built empty at every boot with no
+//! load path, so a restart used to end the reap permanently for any agent alive
+//! across it — a `SubagentStop` arrives once. Registration now writes an
+//! ownership sentinel into the worktree, and [`rebuild_from_disk`] reads it
+//! back when the registry has nothing, which is the from-disk reconstruction
+//! ADR-0023 point 4 requires of an ownership record.
 //!
 //! Test: the `#[cfg(test)]` suite in `agent_worktree_reap_tests.rs`.
 
@@ -50,6 +61,10 @@ use serde_json::Value;
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
+use crate::session_manager::worktree_liveness::process_holding;
+use crate::session_manager::worktree_ownership::{
+    SentinelOwner, find_agent_worktree, read_sentinel_owner,
+};
 use crate::session_manager::worktree_safety::{DirtyWorktreePolicy, dirt_blocks_removal};
 
 /// What happened to one registered agent worktree.
@@ -128,9 +143,16 @@ pub(crate) fn is_harness_agent_worktree(path: &Path) -> bool {
 ///    This is #4091's check, reused — uncommitted files, untracked files, a
 ///    nested dirty checkout and unpushed commits are all one implementation, and
 ///    a second copy here would drift from it.
-/// 6. `git worktree remove --force` — force because a clean tree can still hold
-///    gitignored build output that plain `remove` refuses, and because gate 5
-///    has already established there is nothing to lose. A non-zero exit
+/// 6. [`process_holding`] finds a live process standing in the tree → refuse.
+///    Gates 3 and 5 are both REGISTRY reads: gate 3 asks what trusty-mpm
+///    recorded, gate 5 asks what git recorded. Neither can see a process
+///    nobody told either of them about, and on 2026-08-15 a
+///    `trusty-memory serve --foreground` started by hand inside an agent
+///    worktree ran for a day in exactly that blind spot. This gate asks the
+///    OS instead, and fails toward IN USE when it cannot get an answer.
+/// 7. `git worktree remove --force` — force because a clean tree can still hold
+///    gitignored build output that plain `remove` refuses, and because gates 5
+///    and 6 have already established there is nothing to lose. A non-zero exit
 ///    (a git-`locked` worktree exits 128) refuses.
 ///
 /// The branch is NOT deleted. It may carry the pushed commits an open PR is
@@ -138,8 +160,11 @@ pub(crate) fn is_harness_agent_worktree(path: &Path) -> bool {
 /// Test: `reap_removes_a_clean_pushed_worktree`, `reap_refuses_a_dirty_worktree`,
 /// `reap_refuses_an_unpushed_commit`, `reap_refuses_a_path_a_live_session_holds`,
 /// `reap_refuses_a_worktree_outside_the_harness_base`,
-/// `reap_reports_already_gone_when_the_harness_reclaimed_it`.
-pub(crate) fn reap_worktree(path: &Path, in_use: &[PathBuf]) -> ReapOutcome {
+/// `reap_reports_already_gone_when_the_harness_reclaimed_it`,
+/// `reap_refuses_a_worktree_a_live_process_is_standing_in`,
+/// `reap_refuses_a_path_whose_sentinel_names_another_agent`,
+/// `reap_refuses_a_path_with_no_sentinel`.
+pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> ReapOutcome {
     if !path.exists() {
         return ReapOutcome::AlreadyGone;
     }
@@ -149,6 +174,26 @@ pub(crate) fn reap_worktree(path: &Path, in_use: &[PathBuf]) -> ReapOutcome {
              ADR-0036 assigns to harness agent worktrees",
             path.display()
         ));
+    }
+    // #4311: confirm ownership against the DIRECTORY. Every other input to this
+    // decision — `d.worktree_path` from the registry, or the path
+    // `rebuild_from_disk` matched — was resolved somewhere else and could name
+    // a directory this agent never owned. The sentinel sitting IN the target is
+    // the only claim that cannot have been redirected on the way here, so it is
+    // read rather than trusted from the caller. This gate holds independently
+    // of the write-site claims in
+    // `delegation_tracker::register_agent_worktree`; either one alone would
+    // leave the removal reachable through the other path.
+    //
+    // Checked HERE so an unattributed path is refused before the expensive
+    // gates below, and again immediately before the removal — #4118's
+    // precedent, established when a per-candidate dirty verdict computed at
+    // scan time went stale across a minutes-long sweep. The gates between the
+    // two reads take real time (git subprocesses for the dirt check, ~1s of
+    // `lsof` for the liveness probe), so the authoritative read is the one
+    // adjacent to the deletion.
+    if let Some(refusal) = ownership_unconfirmed(path, agent_id) {
+        return ReapOutcome::Refused(refusal);
     }
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if in_use
@@ -178,6 +223,19 @@ pub(crate) fn reap_worktree(path: &Path, in_use: &[PathBuf]) -> ReapOutcome {
             dirt.unpushed_commits
         ));
     }
+    // #4311: the only gate that asks the OS rather than a record trusty-mpm or
+    // git wrote. Last, because it is the most expensive.
+    if let Some(holder) = process_holding(path) {
+        return ReapOutcome::Refused(format!("{} is still occupied — {holder}", path.display()));
+    }
+    // #4118 pattern: the authoritative ownership read is the one adjacent to
+    // the removal. The only in-window transition is another agent claiming this
+    // sentinel, which the write-site claims refuse while one is present — so
+    // this is a cheap re-read that makes the guarantee structural rather than
+    // dependent on that argument holding.
+    if let Some(refusal) = ownership_unconfirmed(path, agent_id) {
+        return ReapOutcome::Refused(refusal);
+    }
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(&registry_root)
@@ -201,6 +259,26 @@ pub(crate) fn reap_worktree(path: &Path, in_use: &[PathBuf]) -> ReapOutcome {
     }
 }
 
+/// Why `path`'s on-disk sentinel does not confirm `agent_id` owns it, or `None`
+/// when it does (#4311).
+///
+/// Why a function and not two inline matches: [`reap_worktree`] runs this twice
+/// — once to fail fast before the expensive gates, once immediately before the
+/// removal — and two copies of a refusal this load-bearing would eventually
+/// disagree.
+/// Test: `reap_refuses_a_path_whose_sentinel_names_another_agent`,
+/// `reap_refuses_a_path_with_no_sentinel`.
+fn ownership_unconfirmed(path: &Path, agent_id: &str) -> Option<String> {
+    match read_sentinel_owner(path) {
+        SentinelOwner::Agent(owner, _) if owner.agent_id == agent_id => None,
+        other => Some(format!(
+            "{} does not carry a sentinel naming agent {agent_id} (found {other:?}) — \
+             refusing to remove a directory whose ownership it cannot confirm on disk",
+            path.display()
+        )),
+    }
+}
+
 /// Every path a reap must leave alone because something live is in it.
 ///
 /// Why: gate 3 of [`reap_worktree`] needs both halves of "still in use", and
@@ -209,13 +287,16 @@ pub(crate) fn reap_worktree(path: &Path, in_use: &[PathBuf]) -> ReapOutcome {
 /// What: every managed session's `workspace_path` — deliberately UNFILTERED by
 /// record state, for the reason `prune.rs` gives (a record's state is
 /// bookkeeping, not a liveness signal) — plus the registered worktree of every
-/// delegation in this session that is not terminal, excluding `self_id`'s own.
-/// Test: `reap_refuses_a_path_a_live_session_holds`.
-async fn paths_in_use(
-    state: &Arc<DaemonState>,
-    session: SessionId,
-    self_agent_id: &str,
-) -> Vec<PathBuf> {
+/// non-terminal delegation in EVERY session, excluding `self_agent_id`'s own.
+///
+/// The delegation half was scoped to the stopping agent's own session until
+/// #4311's review. That scoping was wrong for the same reason the record-state
+/// filter above is: a sibling agent dispatched from a different session is
+/// exactly as live, and its worktree is exactly as un-deletable. Sessions are
+/// not an isolation boundary for "is something running in this directory".
+/// Test: `reap_refuses_a_path_a_live_session_holds`,
+/// `reap_spares_a_worktree_another_sessions_agent_still_holds`.
+async fn paths_in_use(state: &Arc<DaemonState>, self_agent_id: &str) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = state
         .session_manager()
         .await
@@ -224,7 +305,7 @@ async fn paths_in_use(
         .into_iter()
         .filter_map(|r| r.workspace_path)
         .collect();
-    for d in state.delegations_for(session) {
+    for d in state.all_delegations() {
         if d.status.is_terminal() || d.agent_id.as_deref() == Some(self_agent_id) {
             continue;
         }
@@ -233,6 +314,39 @@ async fn paths_in_use(
         }
     }
     out
+}
+
+/// Recover an agent's worktree path from on-disk sentinels alone (#4311).
+///
+/// Why: the delegation map is a `DashMap` built empty at every daemon boot with
+/// no load path, so a restart drops every registration and, before this, ended
+/// the reap for every agent alive across it — permanently, since a `SubagentStop`
+/// arrives once. ADR-0023 point 4 requires the ownership record to be
+/// rebuildable from on-disk sentinels plus git and nothing else; this is that
+/// rebuild, applied to the one record the stop needs.
+/// What: resolves the harness worktree store from the stopping payload's `cwd`
+/// — [`harness_root_for`](crate::core::harness_root::harness_root_for) maps any
+/// checkout back to the one that owns the project's state, and ADR-0036 puts
+/// every worktree flat under `<that>/.claude/worktrees/` — then asks
+/// [`find_agent_worktree`] for the directory whose sentinel names this exact
+/// `agent_id`.
+///
+/// Returns `None` for a payload with no `cwd`, a `cwd` outside any repository,
+/// or a store holding no sentinel for this agent. Every one of those ends the
+/// reap, which is the pre-#4311 behaviour and keeps the directory.
+/// Test: `stop_reaps_a_worktree_the_registry_lost_to_a_restart`,
+/// `stop_ignores_a_sentinel_naming_a_different_agent`.
+fn rebuild_from_disk(payload: &Value, agent_id: &str) -> Option<PathBuf> {
+    let cwd = payload.get("cwd").and_then(Value::as_str)?;
+    let root = crate::core::harness_root::harness_root_for(Path::new(cwd))?;
+    let found = find_agent_worktree(&root.join(".claude").join("worktrees"), agent_id)?;
+    tracing::info!(
+        agent_id,
+        worktree = %found.display(),
+        "agent-worktree reap: the delegation registry did not know this agent — its \
+         ownership sentinel did, so the reap proceeds against the rebuilt record (#4311)"
+    );
+    Some(found)
 }
 
 /// Reap the worktree of the agent a `SubagentStop` just ended (#4311).
@@ -274,25 +388,34 @@ pub fn spawn_on_stop(
     else {
         return;
     };
-    let Some((id, path)) = state
+    let registered = state
         .delegations_for(session)
         .into_iter()
         .find(|d| d.agent_id.as_deref() == Some(agent_id.as_str()))
-        .and_then(|d| d.worktree_path.clone().map(|p| (d.id, p)))
+        .and_then(|d| d.worktree_path.clone().map(|p| (Some(d.id), p)));
+    let Some((id, path)) =
+        registered.or_else(|| rebuild_from_disk(payload, &agent_id).map(|p| (None, p)))
     else {
         return;
     };
 
     let state = Arc::clone(state);
     tokio::spawn(async move {
-        let in_use = paths_in_use(&state, session, &agent_id).await;
+        let in_use = paths_in_use(&state, &agent_id).await;
         let removal_path = path.clone();
-        let outcome = tokio::task::spawn_blocking(move || reap_worktree(&removal_path, &in_use))
-            .await
-            .unwrap_or_else(|e| ReapOutcome::Refused(format!("reap task panicked: {e}")));
+        let reap_agent_id = agent_id.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            reap_worktree(&removal_path, &reap_agent_id, &in_use)
+        })
+        .await
+        .unwrap_or_else(|e| ReapOutcome::Refused(format!("reap task panicked: {e}")));
         match &outcome {
             ReapOutcome::Removed | ReapOutcome::AlreadyGone => {
-                state.mutate_delegation(id, |d| d.worktree_path = None);
+                // `None` when the path came from disk rather than the registry
+                // — there is no in-memory record left to clear.
+                if let Some(id) = id {
+                    state.mutate_delegation(id, |d| d.worktree_path = None);
+                }
             }
             ReapOutcome::Refused(reason) => {
                 tracing::info!(

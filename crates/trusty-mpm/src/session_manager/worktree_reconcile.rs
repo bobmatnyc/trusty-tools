@@ -519,9 +519,11 @@ fn classify(
 ) -> ReconciledWorktree {
     let key = worktree_key(path);
     let sentinel = read_sentinel_owner(path);
-    let sentinel_owner = match sentinel {
-        SentinelOwner::Known(owner, _) => Some(owner),
-        SentinelOwner::Unknown => None,
+    let sentinel_owner = match &sentinel {
+        SentinelOwner::Known(owner, _) => Some(*owner),
+        // #4311: an agent worktree's owner is a delegation, not a managed
+        // session, so it has no `ManagedSessionId` to report here.
+        SentinelOwner::Agent(..) | SentinelOwner::Unknown => None,
     };
     let mut entry = ReconciledWorktree {
         path: path.to_path_buf(),
@@ -602,8 +604,8 @@ fn classify(
         entry.state = ReconcileState::Live;
         return entry;
     }
-    if let SentinelOwner::Known(owner, created_at) = sentinel
-        && !provably_ownerless(owner, created_at, records, now)
+    if let SentinelOwner::Known(owner, created_at) = &sentinel
+        && !provably_ownerless(*owner, *created_at, records, now)
     {
         entry.reason = format!(
             "live: ownership sentinel names {owner}, which is neither terminal nor aged out"
@@ -620,7 +622,19 @@ fn classify(
         );
         return entry;
     }
-    let SentinelOwner::Known(owner, _) = sentinel else {
+    // #4311: an agent-owned tree IS attributed, so it must not be reported with
+    // the owner-unknown reason text. It is still never reclaimed from here —
+    // its reclamation authority is the agent's own exit
+    // (`daemon::services::agent_worktree_reap`), which is the only path that
+    // knows whether the agent has finished.
+    if let SentinelOwner::Agent(agent, _) = &sentinel {
+        entry.reason = format!(
+            "unknown: owned by agent {} — reclaimed when that agent exits, never from here",
+            agent.agent_id
+        );
+        return entry;
+    }
+    let SentinelOwner::Known(owner, _) = &sentinel else {
         entry.reason = "unknown: no ownership sentinel (absent, empty, or unparsable) — never \
                         auto-reclaimable, this is the 82-of-85 case"
             .to_string();

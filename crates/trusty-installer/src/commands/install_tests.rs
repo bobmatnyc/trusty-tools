@@ -114,6 +114,233 @@ fn report_all_ok_true_for_optional_only_success() {
     assert_eq!(report.exit_code(), 0);
 }
 
+/// Why (#5806): the error arm the test above never covered, and a fail-open.
+/// `filter(required).all(…)` over an empty iterator is vacuously `true`, so an
+/// all-OPTIONAL selection whose install genuinely FAILED reported
+/// `all_ok: true` and exit 0 — nothing installed, success reported, no signal
+/// until much later. This has been reachable via `tctl install tga`,
+/// `trusty-analyze`, and `trusty-console` all along; adding trusty-installer
+/// as an OPTIONAL member would have opened a fourth door.
+/// What: one optional, FAILED outcome must yield `all_ok: false` / exit 2, and
+/// so must each of the two other failure dimensions (service, shadow) on the
+/// same all-optional selection.
+/// Test: This is the test.
+#[test]
+fn all_optional_selection_does_not_fail_open() {
+    let failed = InstallReport::build(vec![optional_outcome("tga", false, "network error")]);
+    assert!(
+        !failed.all_ok,
+        "an all-optional selection that FAILED must not report success"
+    );
+    assert_eq!(failed.exit_code(), 2);
+
+    let mut service_failed = optional_outcome("tga", true, "installed");
+    service_failed.service_ok = false;
+    assert!(!InstallReport::build(vec![service_failed]).all_ok);
+
+    let mut shadowed = optional_outcome("tga", true, "installed");
+    shadowed.shadow_ok = false;
+    assert!(!InstallReport::build(vec![shadowed]).all_ok);
+}
+
+/// Why (#5806): the acceptance case for the fail-open fix. `tctl install
+/// trusty-installer` names exactly one member, and that member is OPTIONAL, so
+/// a failed self-install hit the vacuous-truth path above and exited 0 — the
+/// worst possible place for it, since "reported success, did nothing" on the
+/// installer means the operator keeps running the stale binary believing it
+/// was replaced.
+/// What: a lone failed trusty-installer outcome exits 2; the same outcome
+/// alongside a healthy REQUIRED member still degrades gracefully to exit 0,
+/// which is the graceful-degrade property this fix must not break.
+/// Test: This is the test.
+#[test]
+fn lone_optional_installer_failure_exits_nonzero() {
+    let alone = InstallReport::build(vec![optional_outcome(
+        "trusty-installer",
+        false,
+        "permission denied writing to bin dir",
+    )]);
+    assert!(!alone.all_ok);
+    assert_eq!(alone.exit_code(), 2);
+
+    let bulk = InstallReport::build(vec![
+        outcome("trusty-search", true, "installed"),
+        optional_outcome("trusty-installer", false, "no prebuilt for this platform"),
+    ]);
+    assert!(
+        bulk.all_ok,
+        "a bulk install runs from a working installer; failing to refresh it \
+         must not fail the whole stack"
+    );
+    assert_eq!(bulk.exit_code(), 0);
+}
+
+/// Why (#5806): `build(vec![])` was vacuously `all_ok: true` — `.all()` over an
+/// empty iterator, the same shape the required-filter fix removes one line up.
+/// `run` returns early on an empty selection so nothing reaches it today, but
+/// "installed nothing" is not evidence of a successful install, and leaving the
+/// shape inside the function being fixed for it is how it comes back.
+/// What: asserts an empty report is not `all_ok` and exits 2.
+/// Test: This is the test.
+#[test]
+fn empty_report_is_not_all_ok() {
+    let empty = InstallReport::build(Vec::new());
+    assert!(
+        !empty.all_ok,
+        "a report over zero members must not claim every member installed"
+    );
+    assert_eq!(empty.exit_code(), 2);
+}
+
+/// Why (#5806): the machine verdict was fixed and the human one was not. For an
+/// all-optional selection that failed, the footer printed `installed 0/0
+/// required component(s)`, an INFO-level "skipped", and then a green VERIFIED —
+/// while `build` exited 2. One run, two channels, opposite stories.
+/// What: asserts a lone failed OPTIONAL member produces a `0/1 selected`
+/// headline, an ERROR line naming the failure, and NO informational "skipped"
+/// line — and that the summary agrees with `all_ok` in every case.
+/// Test: This is the test.
+#[test]
+fn all_optional_failure_summary_does_not_read_as_success() {
+    let report = InstallReport::build(vec![optional_outcome("tga", false, "network error")]);
+    let lines = install_report::summary_lines(&report);
+
+    assert_eq!(lines.headline, "installed 0/1 selected component(s)");
+    assert_eq!(lines.errors, vec!["tga: network error".to_owned()]);
+    assert!(
+        lines.skipped.is_empty(),
+        "a failure the exit code gates on must not be downgraded to `skipped`: {:?}",
+        lines.skipped
+    );
+    assert!(!report.all_ok);
+    assert_eq!(
+        lines.errors.is_empty(),
+        report.all_ok,
+        "the human summary and `all_ok` must not disagree"
+    );
+}
+
+/// Why (#5806): the graceful-degrade wording this fix must NOT break. With a
+/// REQUIRED member present, an OPTIONAL member's failure still reads as an
+/// informational skip rather than a scary error, and the headline still counts
+/// the required subset.
+/// What: asserts a healthy REQUIRED member beside a failed OPTIONAL one yields
+/// `1/1 required`, no errors, and one `skipped` line.
+/// Test: This is the test.
+#[test]
+fn summary_lines_match_the_gating_set() {
+    let report = InstallReport::build(vec![
+        outcome("trusty-search", true, "installed"),
+        optional_outcome("tga", false, "no prebuilt for this platform"),
+    ]);
+    let lines = install_report::summary_lines(&report);
+
+    assert_eq!(lines.headline, "installed 1/1 required component(s)");
+    assert!(lines.errors.is_empty(), "{:?}", lines.errors);
+    assert_eq!(lines.skipped.len(), 1);
+    assert!(lines.skipped[0].starts_with("tga: skipped"));
+    assert!(report.all_ok);
+}
+
+/// Why (#5806): `summary_lines_match_the_gating_set` pins ONE selection shape,
+/// so the agreement between the footer and `all_ok` held there by construction
+/// rather than by rule. The defect this change closes was the two channels
+/// deriving the gating partition separately — pin the agreement across every
+/// shape the partition can take, so re-deriving it anywhere fails a test rather
+/// than shipping.
+/// What: over eight selections — all-required, all-optional and mixed, each
+/// healthy and each failing, plus the service-failure dimension — asserts
+/// `summary_lines(&r).errors.is_empty() == r.all_ok`, and that the table
+/// exercises both verdicts rather than passing vacuously.
+///
+/// The empty selection is excluded deliberately: `build(vec![])` is `all_ok:
+/// false` with no member able to fail, which `empty_report_is_not_all_ok`
+/// covers and `summary_lines`'s postcondition documents as the one exception.
+/// Test: This is the test.
+#[test]
+fn summary_errors_agree_with_all_ok_across_selection_shapes() {
+    let service_failed = |member: &str, required: bool| {
+        let mut o = if required {
+            outcome(member, true, "installed")
+        } else {
+            optional_outcome(member, true, "installed")
+        };
+        o.service_ok = false;
+        o.service_detail = "launchd bootstrap failed".to_owned();
+        o
+    };
+
+    let cases: Vec<(&str, Vec<InstallOutcome>)> = vec![
+        (
+            "all required, healthy",
+            vec![outcome("a", true, "installed"), outcome("b", true, "ok")],
+        ),
+        (
+            "all required, one binary failure",
+            vec![outcome("a", true, "installed"), outcome("b", false, "boom")],
+        ),
+        (
+            "all required, one service failure",
+            vec![outcome("a", true, "installed"), service_failed("b", true)],
+        ),
+        (
+            "all optional, healthy",
+            vec![
+                optional_outcome("a", true, "installed"),
+                optional_outcome("b", true, "installed"),
+            ],
+        ),
+        (
+            "all optional, one binary failure",
+            vec![
+                optional_outcome("a", true, "installed"),
+                optional_outcome("b", false, "boom"),
+            ],
+        ),
+        (
+            "all optional, lone service failure",
+            vec![service_failed("a", false)],
+        ),
+        (
+            "mixed, optional failure degrades gracefully",
+            vec![
+                outcome("a", true, "installed"),
+                optional_outcome("b", false, "no prebuilt for this platform"),
+            ],
+        ),
+        (
+            "mixed, required failure gates",
+            vec![
+                outcome("a", false, "boom"),
+                optional_outcome("b", true, "installed"),
+            ],
+        ),
+    ];
+
+    let (mut verdicts_ok, mut verdicts_failed) = (0, 0);
+    for (shape, members) in cases {
+        let report = InstallReport::build(members);
+        let lines = install_report::summary_lines(&report);
+        assert_eq!(
+            lines.errors.is_empty(),
+            report.all_ok,
+            "{shape}: the human footer and `all_ok` disagree — errors {:?}, all_ok {}",
+            lines.errors,
+            report.all_ok
+        );
+        if report.all_ok {
+            verdicts_ok += 1;
+        } else {
+            verdicts_failed += 1;
+        }
+    }
+    assert!(
+        verdicts_ok > 0 && verdicts_failed > 0,
+        "the table must exercise both verdicts, not pass vacuously: \
+         {verdicts_ok} ok / {verdicts_failed} failed"
+    );
+}
+
 /// Why: #2566 review — a binary can install cleanly (`ok: true`) while its
 /// SERVICE bootstrap genuinely fails; the report must not claim
 /// `all_ok: true` in that case (the exact failure class #2557 existed
@@ -472,7 +699,8 @@ fn dry_run_report_shape() {
         stable_member_for_test("trusty-search", "trusty-search", ManageStrategy::Launchd),
         stable_member_for_test("tga", "tga", ManageStrategy::None),
     ];
-    let report = build_dry_run_report(&members, true);
+    let dir = std::path::Path::new("/tmp/tctl-test-bin");
+    let report = build_dry_run_report(&members, true, dir);
     assert_eq!(report.command, "install");
     assert!(report.dry_run);
     assert!(report.service_bootstrap_enabled);
@@ -486,7 +714,7 @@ fn dry_run_report_shape() {
         "non-daemon member must not plan a service bootstrap"
     );
 
-    let disabled = build_dry_run_report(&members, false);
+    let disabled = build_dry_run_report(&members, false, dir);
     assert!(
         !disabled.members[0].service_bootstrap,
         "disabled service bootstrap must suppress every member"
@@ -514,12 +742,103 @@ fn dry_run_full_set_when_no_members_named() {
         "empty members must resolve to the full stable set"
     );
 
-    let report = build_dry_run_report(&resolved.members, true);
+    let report = build_dry_run_report(
+        &resolved.members,
+        true,
+        std::path::Path::new("/tmp/tctl-test-bin"),
+    );
     let names: Vec<&str> = report.members.iter().map(|m| m.member.as_str()).collect();
     let expected: Vec<&str> = all.iter().map(|m| m.crate_name.as_str()).collect();
     assert_eq!(
         names, expected,
         "dry-run preview must list every stable-set member, in order, when none are named"
+    );
+}
+
+/// Why (#5805): THE acceptance case. `tctl install trusty-installer
+/// --dry-run` returned `{"error": "unknown member(s): trusty-installer"}` and
+/// exit 3; it must now resolve, preview, and exit 0. `run` is called with
+/// `--json` so the interactive picker and the TTY-dependent confirmation gate
+/// are both bypassed — `--dry-run` returns before any install side effect, so
+/// this test writes nothing to disk.
+/// What: asserts exit 0 for both spellings the crate answers to,
+/// `trusty-installer` and the `tctl` alias binary.
+/// Test: This is the test.
+#[test]
+fn run_dry_run_accepts_the_installer_itself() {
+    for name in ["trusty-installer", "tctl"] {
+        let code = run(&[name.to_owned()], false, true, false, true, false, true);
+        assert_eq!(
+            code, 0,
+            "`tctl install {name} --dry-run` must succeed, not report an unknown member"
+        );
+    }
+}
+
+/// Why (#5805): the second half of the acceptance case — the preview must name
+/// the destination #5777 canonicalised. Before this change the report had no
+/// `install_dir` field at all, so an operator could not tell from a dry run
+/// whether the install would land in `$CARGO_HOME/bin` or somewhere a stale
+/// copy earlier on PATH would keep shadowing.
+/// What: asserts the reported directory is exactly what
+/// `download::install_dir_or_fallback()` resolves — the same call
+/// `install_one` makes, so the preview cannot name a directory the install
+/// would not use — and that it ends in `/bin`.
+/// Test: This is the test.
+#[test]
+fn dry_run_names_the_canonical_install_dir() {
+    let members = select_members_transitive(&["trusty-installer".to_owned()]).members;
+    let expected = crate::download::install_dir_or_fallback();
+    let report = build_dry_run_report(&members, true, &expected);
+    assert_eq!(report.install_dir, expected.display().to_string());
+    assert!(
+        report.install_dir.ends_with("/bin"),
+        "the canonical destination is a bin dir: {}",
+        report.install_dir
+    );
+}
+
+/// Why (#5805): the crate ships TWO binaries and the preview listed one. An
+/// operator reading `trusty-installer -> trusty-installer` would not learn
+/// that `tctl` — the name they actually type — is also about to be replaced.
+/// What: asserts the installer's preview row lists both binaries, and that no
+/// member's row is empty (the shared table falls back to `[crate_name]`).
+/// Test: This is the test.
+#[test]
+fn dry_run_lists_both_installer_binaries() {
+    let all = select_members_transitive(&[]).members;
+    let report = build_dry_run_report(&all, true, std::path::Path::new("/tmp/tctl-test-bin"));
+    let installer = report
+        .members
+        .iter()
+        .find(|m| m.member == "trusty-installer")
+        .expect("the installer previews as a member");
+    assert!(installer.binaries.contains(&"trusty-installer".to_owned()));
+    assert!(
+        installer.binaries.contains(&"tctl".to_owned()),
+        "the preview must name the `tctl` alias it also replaces: {:?}",
+        installer.binaries
+    );
+    for m in &report.members {
+        assert!(!m.binaries.is_empty(), "{} previewed no binary", m.member);
+    }
+}
+
+/// Why (#5805): membership pulls a member into the daemon-shaped subcommands,
+/// and `tctl start trusty-installer` must not try to bootstrap a launchd job
+/// for a CLI. `plans_service_bootstrap` is the shared predicate the preview
+/// and the real install loop both read, so pinning it here pins both.
+/// What: asserts the installer plans no service bootstrap even with service
+/// bootstrapping fully enabled.
+/// Test: This is the test.
+#[test]
+fn installer_never_plans_a_service_bootstrap() {
+    let members = select_members_transitive(&["trusty-installer".to_owned()]).members;
+    let report = build_dry_run_report(&members, true, std::path::Path::new("/tmp/tctl-test-bin"));
+    assert!(report.service_bootstrap_enabled);
+    assert!(
+        !report.members[0].service_bootstrap,
+        "a non-daemon must never plan a launchd service bootstrap"
     );
 }
 

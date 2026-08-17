@@ -203,6 +203,51 @@ pub async fn detect(
     }
 }
 
+/// Detect PATH shadowing for EVERY binary a member just placed (#5805).
+///
+/// Why: [`detect`] takes one name, and `install`/`upgrade` passed
+/// `StableMember::binary` — the health-probe name. Three members ship a second
+/// binary, and for trusty-installer the unprobed one is `tctl`, the name
+/// operators actually type and the one `--dry-run` now advertises. A stale
+/// `tctl` earlier on `$PATH` therefore kept winning every shell invocation
+/// while the install reported clear, which is precisely the #3554 failure class
+/// the primary-name check exists to catch.
+///
+/// What: derives each sibling's path from `primary_path`'s directory — the
+/// install directory both write paths use — and runs [`detect`] on each. A name
+/// with no file at that path is SKIPPED, not reported: a shadow claim compares
+/// against a binary that was actually placed, and a name the tarball never
+/// shipped was never placed. Returns every genuine report, in `binary_names`
+/// order.
+///
+/// # Postconditions
+/// - Empty result means no placed binary of this member is shadowed.
+/// - No report names a path that does not exist on disk.
+///
+/// Test: `detect_all_reports_a_shadowed_alias_when_the_primary_is_clear`,
+/// `detect_all_skips_a_binary_that_was_never_placed`.
+pub async fn detect_all(
+    binary_names: &[String],
+    primary_path: &Path,
+    install_version: Option<&str>,
+    search_path: &OsStr,
+) -> Vec<ShadowReport> {
+    let Some(dir) = primary_path.parent() else {
+        return Vec::new();
+    };
+    let mut reports = Vec::new();
+    for name in binary_names {
+        let path = dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        if let Some(r) = detect(name, &path, install_version, search_path).await {
+            reports.push(r);
+        }
+    }
+    reports
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +449,87 @@ mod tests {
         )
         .await;
         assert!(report.is_none(), "no shadow should be reported: {report:?}");
+    }
+
+    /// Why (#5805): the shadow check probed `StableMember::binary` only, so
+    /// `tctl` — the name operators type, and the second binary trusty-installer
+    /// places — was never checked. A stale `tctl` earlier on `$PATH` kept
+    /// winning while the install reported clear.
+    /// What: places both installer binaries, shadows ONLY `tctl` from an
+    /// earlier directory, and asserts `detect_all` reports exactly that one
+    /// while `detect` on the primary name alone finds nothing.
+    /// Test: This is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detect_all_reports_a_shadowed_alias_when_the_primary_is_clear() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let early_dir = tmp.path().join("early-bin");
+        std::fs::create_dir_all(&early_dir).expect("mkdir early");
+        write_versioned_binary(&early_dir.join("tctl"), "tctl 0.8.0");
+
+        let install_dir = tmp.path().join("cargo-bin");
+        std::fs::create_dir_all(&install_dir).expect("mkdir install");
+        let primary = install_dir.join("trusty-installer");
+        write_versioned_binary(&primary, "trusty-installer 0.9.0");
+        write_versioned_binary(&install_dir.join("tctl"), "tctl 0.9.0");
+
+        let search_path = format!("{}:{}", early_dir.display(), install_dir.display());
+        let names = vec!["trusty-installer".to_owned(), "tctl".to_owned()];
+
+        assert!(
+            detect(
+                "trusty-installer",
+                &primary,
+                Some("0.9.0"),
+                OsStr::new(&search_path)
+            )
+            .await
+            .is_none(),
+            "the primary name is clear — checking it alone is what missed the shadow"
+        );
+
+        let reports = detect_all(&names, &primary, Some("0.9.0"), OsStr::new(&search_path)).await;
+        assert_eq!(
+            reports.len(),
+            1,
+            "exactly the shadowed alias must be reported: {reports:?}"
+        );
+        assert_eq!(reports[0].binary_name, "tctl");
+        assert_eq!(reports[0].shadowing_path, early_dir.join("tctl"));
+        assert_eq!(reports[0].shadowing_version.as_deref(), Some("0.8.0"));
+    }
+
+    /// Why (#5805): a name in the member's binary list that the tarball never
+    /// shipped was never placed, so there is no installed file to compare
+    /// against. Reporting it as "shadowed" would turn a missing binary into a
+    /// false PATH warning naming a path that does not exist.
+    /// What: lists an alias with no file on disk and asserts `detect_all`
+    /// reports nothing for it, even with a same-named binary earlier on PATH.
+    /// Test: This is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detect_all_skips_a_binary_that_was_never_placed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let early_dir = tmp.path().join("early-bin");
+        std::fs::create_dir_all(&early_dir).expect("mkdir early");
+        write_versioned_binary(&early_dir.join("tctl"), "tctl 0.8.0");
+
+        let install_dir = tmp.path().join("cargo-bin");
+        std::fs::create_dir_all(&install_dir).expect("mkdir install");
+        let primary = install_dir.join("trusty-installer");
+        write_versioned_binary(&primary, "trusty-installer 0.9.0");
+        // No `tctl` in the install dir — it was listed but never placed.
+
+        let search_path = format!("{}:{}", early_dir.display(), install_dir.display());
+        let names = vec!["trusty-installer".to_owned(), "tctl".to_owned()];
+
+        let reports = detect_all(&names, &primary, Some("0.9.0"), OsStr::new(&search_path)).await;
+        assert!(
+            reports.is_empty(),
+            "an unplaced binary has nothing to be shadowed: {reports:?}"
+        );
     }
 
     #[tokio::test]

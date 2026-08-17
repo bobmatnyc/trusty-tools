@@ -486,6 +486,17 @@ pub struct OrphanSweepOutcome {
     /// Paths skipped because they hold unsaved work (#4091) — never
     /// auto-deleted under the default [`DirtyWorktreePolicy::Skip`].
     pub skipped_dirty: Vec<DirtyWorktree>,
+    /// Paths owned by a dispatched agent (#4311) — reclaimed by that agent's
+    /// exit, never by this sweep.
+    ///
+    /// Why this is reported rather than merely skipped: before #4311 these
+    /// carried no sentinel and landed in `owner_unknown`, so they were
+    /// unreclaimable but VISIBLE in `--dry-run`, the prune HTTP route, the MCP
+    /// tool, and `tm doctor`. Attributing them must not cost an operator that
+    /// view — a directory that vanishes from every report is worse than one
+    /// reported as unreclaimable.
+    /// Test: `prune_orphaned_worktrees_skips_an_agent_owned_worktree`.
+    pub agent_owned: Vec<std::path::PathBuf>,
 }
 
 impl SessionManager {
@@ -798,6 +809,7 @@ impl SessionManager {
         // deletion decision — applied identically under dry-run and real runs
         // so a preview reflects reality.
         let mut owner_unknown = Vec::new();
+        let mut agent_owned = Vec::new();
         let mut skipped_dirty: Vec<DirtyWorktree> = Vec::new();
         let mut reclaimable = Vec::new();
         for candidate in candidates {
@@ -809,6 +821,21 @@ impl SessionManager {
                          run `tm doctor` or inspect manually (#3649)"
                     );
                     owner_unknown.push(candidate);
+                }
+                // #4311: attributed to a dispatched agent, whose liveness this
+                // sweep cannot answer — there is no session record to look up,
+                // so `resolve_ownerless_with_grace` would report every agent
+                // worktree reclaimable once past the grace window. Skipped like
+                // the live-owner arm below: owned, and reclaimed by
+                // `daemon::services::agent_worktree_reap` on the agent's exit.
+                SentinelOwner::Agent(agent, _) => {
+                    info!(
+                        path = %candidate.display(),
+                        agent_id = %agent.agent_id,
+                        "prune-worktrees: owned by a dispatched agent — reclaimed when that \
+                         agent exits, never by this sweep (#4311)"
+                    );
+                    agent_owned.push(candidate);
                 }
                 SentinelOwner::Known(owner, created_at) => {
                     if !self.resolve_ownerless_with_grace(owner, created_at).await {
@@ -846,6 +873,7 @@ impl SessionManager {
                 removed: reclaimable,
                 owner_unknown,
                 skipped_dirty,
+                agent_owned,
             });
         }
 
@@ -992,6 +1020,7 @@ impl SessionManager {
             removed,
             owner_unknown,
             skipped_dirty,
+            agent_owned,
         })
     }
 

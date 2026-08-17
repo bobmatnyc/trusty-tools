@@ -36,7 +36,6 @@
 //! `OwnVerb` (#4925).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::probe_http::{probe_member_http_blocking, ProbeOutcome};
 use super::stable_set::ManageStrategy;
@@ -198,28 +197,88 @@ pub fn probe_member_health(binary: &str, manage: ManageStrategy) -> ProbeOutcome
     }
 }
 
+/// How long a forwarded contract verb may run before it is given up on.
+///
+/// Why (#5805): matches `trusty_common::update::verify_installed_binary_at_path`'s
+/// health-gate window, so the two subprocess probes `tctl` performs on a member
+/// binary give up after the same wait rather than each picking a number.
+const VERB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Spawn `<binary> <verb> --json` and return the parsed JSON value.
 ///
 /// Why: `config` and `doctor --self-check` both forward a member's `--json`
 /// contract verb and parse the envelope; one helper keeps the spawn + parse
 /// shape consistent and testable in the calling handler.
-/// What: returns `Err` when the binary is absent, the process fails to spawn,
-/// exits non-zero, or emits unparseable JSON; otherwise `Ok(value)`.
-/// Test: side-effecting (subprocess); the parse half is covered by
-/// `validate_version_envelope` and the handlers' aggregation tests.
+///
+/// Why the timeout (#5805): this ran `Command::output()` with no deadline, so a
+/// member binary that never exits — blocked on a lock, on stdin, on a hung
+/// network read — froze `tctl config` indefinitely with nothing on stdout. That
+/// is a defect in its own right, independent of the self-spawn recursion
+/// `config::partition_forwardable` fixes; it made the recursion unbounded
+/// rather than causing it, and a deadline alone would have left the fork
+/// storm intact. Same reasoning `shadow_check::detect` records for refusing
+/// the un-timed-out `update_engine::installed_version`.
+///
+/// # Postconditions
+/// - Returns within [`VERB_TIMEOUT`] plus parse time, whatever the child does.
+/// - A child still running at the deadline is killed, not orphaned — the
+///   `tokio::process::Command` future drops with `kill_on_drop` semantics.
+///
+/// What: resolves `binary` on `PATH`, then defers to [`spawn_json_at_path`].
+/// Callable only from a SYNCHRONOUS context — it builds its own tokio runtime,
+/// and a nested `block_on` inside one panics. Both callers (`config::run`,
+/// `doctor::run`) are synchronous `main.rs` handlers.
+///
+/// Test: `tests::spawn_json_at_path_gives_up_on_a_child_that_never_exits`,
+/// `tests::spawn_json_at_path_parses_a_well_formed_envelope`; the PATH
+/// resolution half is side-effecting.
 pub fn spawn_member_json(binary: &str, verb: &str) -> anyhow::Result<serde_json::Value> {
-    if which::which(binary).is_err() {
+    let Ok(path) = which::which(binary) else {
         anyhow::bail!("{binary} is not installed (not on PATH)");
-    }
-    let out = Command::new(binary)
-        .args([verb, "--json"])
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to spawn `{binary} {verb} --json`: {e}"))?;
+    };
+    super::runtime::block_on(spawn_json_at_path(&path, binary, verb))
+}
+
+/// Spawn `<path> <verb> --json` under [`VERB_TIMEOUT`] and parse the envelope.
+///
+/// Why: separating the concrete-path spawn from the `PATH` lookup is what makes
+/// the deadline testable — a test can point this at a script that hangs without
+/// mutating the process environment. Mirrors
+/// `trusty_common::update::verify_installed_binary_at_path`, which split for the
+/// same reason.
+///
+/// What: `label` is the name used in error messages (the binary name the caller
+/// asked for, not the resolved path). Returns `Err` when the process fails to
+/// spawn, exceeds [`VERB_TIMEOUT`], exits non-zero, or emits unparseable JSON.
+///
+/// Test: `tests::spawn_json_at_path_gives_up_on_a_child_that_never_exits`,
+/// `tests::spawn_json_at_path_parses_a_well_formed_envelope`.
+async fn spawn_json_at_path(
+    path: &Path,
+    label: &str,
+    verb: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let out = match tokio::time::timeout(
+        VERB_TIMEOUT,
+        tokio::process::Command::new(path)
+            .args([verb, "--json"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    {
+        Err(_) => anyhow::bail!(
+            "`{label} {verb} --json` did not answer within {}s",
+            VERB_TIMEOUT.as_secs()
+        ),
+        Ok(Err(e)) => anyhow::bail!("failed to spawn `{label} {verb} --json`: {e}"),
+        Ok(Ok(out)) => out,
+    };
     if !out.status.success() {
-        anyhow::bail!("`{binary} {verb} --json` exited with {}", out.status);
+        anyhow::bail!("`{label} {verb} --json` exited with {}", out.status);
     }
     serde_json::from_slice::<serde_json::Value>(&out.stdout)
-        .map_err(|e| anyhow::anyhow!("`{binary} {verb} --json` emitted invalid JSON: {e}"))
+        .map_err(|e| anyhow::anyhow!("`{label} {verb} --json` emitted invalid JSON: {e}"))
 }
 
 /// The outcome of validating a member's `version --json` capability envelope.
@@ -483,6 +542,81 @@ mod tests {
     #[test]
     fn resolve_binary_path_none_when_absent_everywhere() {
         assert!(resolve_binary_path("definitely-not-a-real-binary-xyz-3876").is_none());
+    }
+
+    /// Write `body` as an executable `#!/bin/sh` script at `path`.
+    #[cfg(unix)]
+    fn write_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+        let mut perms = std::fs::metadata(path).expect("stat script").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod script");
+    }
+
+    /// Why (#5805): `spawn_member_json` ran `Command::output()` with no
+    /// deadline, so a member binary that never exits froze `tctl config`
+    /// forever with nothing on stdout. That is what made the self-spawn
+    /// recursion unbounded instead of merely wasteful, and it bites just as
+    /// hard for any OTHER member binary that hangs.
+    ///
+    /// `start_paused = true` puts the TIMEOUT on tokio's virtual clock while
+    /// the `sleep 300` child runs on the real one — the child really is spawned
+    /// and really never answers, so the runtime goes idle and tokio advances to
+    /// the 10s deadline at no wall-clock cost. The `elapsed` assertion keeps
+    /// that honest: it proves the `Err` came from the deadline expiring, not
+    /// from a spawn failure that never exercised the hang.
+    /// What: points `spawn_json_at_path` at a hanging script and asserts it
+    /// returns an error naming the timeout, after a full [`VERB_TIMEOUT`].
+    /// Test: This is the test.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn spawn_json_at_path_gives_up_on_a_child_that_never_exits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("hangs");
+        write_script(&script, "sleep 300\necho '{}'");
+
+        let started = tokio::time::Instant::now();
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            spawn_json_at_path(&script, "hangs", "config"),
+        )
+        .await
+        .expect("must return, never hang")
+        .expect_err("a child that never exits must not report a config envelope");
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string().contains("did not answer within"),
+            "the error must name the timeout, not a parse failure: {err}"
+        );
+        assert!(
+            elapsed >= VERB_TIMEOUT,
+            "the Err must come from the deadline expiring, but it gave up after \
+             {elapsed:?} — this test would no longer catch an un-timed-out spawn"
+        );
+    }
+
+    /// Why: the timeout must not have broken the ordinary path — a member that
+    /// answers promptly still yields its parsed envelope.
+    /// What: points `spawn_json_at_path` at a script echoing a version envelope
+    /// and asserts the parsed value round-trips.
+    /// Test: This is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_json_at_path_parses_a_well_formed_envelope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("answers");
+        write_script(
+            &script,
+            r#"echo '{"contract_version":1,"verbs":["config"]}'"#,
+        );
+
+        let v = spawn_json_at_path(&script, "answers", "version")
+            .await
+            .expect("a prompt, well-formed answer must parse");
+        assert_eq!(v["contract_version"], 1);
+        assert!(validate_version_envelope(&v).conformant);
     }
 
     /// Why: A fully-conformant envelope (contract_version + non-empty verbs)

@@ -464,8 +464,9 @@ fn young_absent_sentinel_owner_is_live_not_orphaned() {
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("mid-provisioning");
     let payload = serde_json::to_vec(&super::super::worktree_ownership::WorktreeSentinel {
-        owner_session_id: ManagedSessionId::new(),
+        owner_session_id: Some(ManagedSessionId::new()),
         created_at: Utc::now(),
+        agent: None,
     })
     .expect("serialize sentinel");
     std::fs::write(
