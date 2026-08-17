@@ -406,7 +406,7 @@ impl CodeIndexer {
             return 0;
         }
         let evicted = bm25.len();
-        // #5828: reconstruct the trusty-search wrapper, not the shared scorer.
+        // #5835: reconstruct the trusty-search wrapper, not the shared scorer.
         *bm25 = CodeBm25Index::new();
         drop(bm25);
 

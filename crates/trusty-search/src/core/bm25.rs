@@ -1,5 +1,5 @@
 //! BM25 lexical index for the code corpus — trusty-search's domain wrapper
-//! around the shared scorer in `trusty_common::bm25` (issues #156, #5828).
+//! around the shared scorer in `trusty_common::bm25` (issues #156, #5835).
 //!
 //! Why: the BM25 implementation lives in `trusty-common` so trusty-search and
 //! trusty-memory score identically. The two crates diverge on everything
@@ -16,7 +16,7 @@
 //! delegates straight through, so scoring, tokenization, and the per-document
 //! term cap are byte-for-byte the shared core's.
 //!
-//! #5828 removed the historic `pub use trusty_common::bm25::{tokenize,
+//! #5835 removed the historic `pub use trusty_common::bm25::{tokenize,
 //! BM25Index as Bm25Index}` this module used to be. It left `core::bm25`
 //! exporting two names for BM25 — the shared scorer under an alias, and now a
 //! domain type — when trusty-search itself called neither the alias nor
@@ -53,7 +53,7 @@ pub struct CodeBm25Index {
 impl CodeBm25Index {
     /// Construct an empty index with the shared scorer's default parameters.
     pub fn new() -> Self {
-        // #5828: delegate rather than reimplement — k1/b stay the shared core's.
+        // #5835: delegate rather than reimplement — k1/b stay the shared core's.
         Self {
             inner: BM25Index::new(),
         }

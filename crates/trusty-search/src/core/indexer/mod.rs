@@ -179,7 +179,7 @@ pub struct CodeIndexer {
 
     /// Persistent BM25 index kept hot alongside the HNSW index.
     ///
-    /// #5828: a trusty-search domain type, not the shared scorer directly.
+    /// #5835: a trusty-search domain type, not the shared scorer directly.
     pub(super) bm25: Arc<RwLock<CodeBm25Index>>,
 
     /// LRU cache of query → embedding, keyed by `hash_query`.

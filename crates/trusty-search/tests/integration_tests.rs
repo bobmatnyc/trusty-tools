@@ -13,7 +13,7 @@ fn test_query_classifier_smoke() {
 
 #[test]
 fn test_bm25_smoke() {
-    // #5828: `add_document` / `score` are the shared scorer's slot-index API,
+    // #5835: `add_document` / `score` are the shared scorer's slot-index API,
     // which trusty-search never calls, so `CodeBm25Index` does not expose them.
     use trusty_common::bm25::BM25Index;
     let mut idx = BM25Index::new();
@@ -25,7 +25,7 @@ fn test_bm25_smoke() {
 
 // ── CodeBm25Index boundary / property tests ──────────────────────────────────────
 //
-// These exercise the `CodeBm25Index` wrapper (#5828) through the crate's
+// These exercise the `CodeBm25Index` wrapper (#5835) through the crate's
 // public API — the same corpus/scoring assertions they made against the
 // re-exported scorer before, now proving the wrapper's delegation preserves
 // them. Unit-level wrapper coverage lives in `src/core/bm25.rs`.
