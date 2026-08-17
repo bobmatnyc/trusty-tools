@@ -596,11 +596,13 @@ pub use slug::slugify_string;
 /// another. Centralising the rule here — the crate both already depend on —
 /// keeps them in lockstep without a trusty-mpm → trusty-search dependency edge.
 /// What: Exposes [`index_id::derive_index_id`], [`index_id::resolve_project_root`],
-/// and [`index_id::find_git_root`].
+/// [`index_id::find_git_root`], and [`index_id::identifies_same_path`] — the one
+/// implementation of "do these two paths name the same directory tree?" that
+/// both registration guards route through.
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// index_id::tests`.
 pub mod index_id;
-pub use index_id::{derive_index_id, find_git_root, resolve_project_root};
+pub use index_id::{derive_index_id, find_git_root, identifies_same_path, resolve_project_root};
 
 /// Project-derived trusty-search index identity — the PARTITIONING key
 /// (epic #4207; supersedes the approach closed as won't-do in #4063).

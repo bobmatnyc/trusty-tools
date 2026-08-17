@@ -21,7 +21,8 @@ use crate::core::registry::{IndexHandle, IndexId};
 
 use super::helpers::{
     embedder_error_response, embedder_initializing_response, find_root_path_collision,
-    root_path_collision_response, validate_root_path,
+    identifies_same_root, root_path_collision_response, root_path_mismatch_response,
+    validate_root_path,
 };
 use super::router::{CreateIndexRequest, IndexDetailEntry, IndexListResponse};
 use super::state::{DaemonEvent, SearchAppState};
@@ -258,11 +259,46 @@ pub(super) async fn create_index_handler(
     // readiness check further down so even a `503` answer is not issued about an
     // id whose fate is still being decided.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&id).await;
-    if state.registry.get(&id).is_some() {
+    let handles = state.registry.list_handles();
+    let cold_entries = state.cold_store.snapshot();
+    // The id is already taken. Registration was ASYMMETRIC here: a request for a
+    // registered TREE under a new id was refused (#2336, #3993), but a request
+    // for a registered ID over a different tree was accepted with
+    // `200 {created: false}` and the OLD tree kept serving every query. The
+    // supplied `root_path` was canonicalized directly above and then never
+    // compared to the registered one. An index identifies one directory tree, so
+    // the two roots must name the same tree or this request has not been
+    // satisfied. Cold-parked entries are checked with the same rule as live
+    // handles, for the reason #3993's second round gave for the mirror guard: a
+    // parked entry's tree is just as claimed as a resident one's.
+    let registered_root = state
+        .registry
+        .get(&id)
+        .map(|h| h.root_path.clone())
+        .or_else(|| {
+            state
+                .cold_store
+                .get_persisted(&id)
+                .map(|e| e.root_path.clone())
+        });
+    if let Some(registered_root) = registered_root {
+        if !identifies_same_root(&registered_root, &req.root_path) {
+            tracing::warn!(
+                "create_index: refusing to re-register '{}' at {} — that id already \
+                 identifies the tree at {}",
+                req.id,
+                req.root_path.display(),
+                registered_root.display(),
+            );
+            return root_path_mismatch_response(&id, &registered_root, &req.root_path);
+        }
         return Json(serde_json::json!({
             "id": req.id,
             "created": false,
             "reason": "already exists",
+            // Reported so the caller can verify which tree it was joined to
+            // rather than inferring success from a 2xx alone.
+            "root_path": registered_root,
         }))
         .into_response();
     }
@@ -281,8 +317,6 @@ pub(super) async fn create_index_handler(
     // race required (the cold entry just sat parked); the collision only
     // surfaced later, and on the wrong side, when the cold entry's first
     // query hit `restore_index_on_demand`'s live-handle check.
-    let handles = state.registry.list_handles();
-    let cold_entries = state.cold_store.snapshot();
     if let Some(existing_id) =
         find_root_path_collision(&handles, &cold_entries, &req.root_path, Some(&id))
     {

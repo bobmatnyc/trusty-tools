@@ -1,0 +1,3 @@
+Fixed
+
+`POST /indexes` now refuses with `409` when the requested `root_path` names a different directory tree than the one already registered under that id. Registration was asymmetric: a second id claiming a registered tree was rejected and hardened three times over, but the same id over a new tree was accepted with `200 {created: false}` while the previously registered tree went on answering every query. Both live handles and cold-parked entries are checked. A genuine re-registration of the same tree — including a differently-cased spelling of one inode — stays idempotent, and the `already exists` response now names the tree it joined so a client can verify rather than infer.
