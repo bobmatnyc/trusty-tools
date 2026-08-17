@@ -11,8 +11,25 @@
 //! cross-references them against the persisted store (live → `Active`, gone →
 //! `Stopped`, unknown-to-the-store → adopted as an external `Active` record),
 //! and optionally auto-resumes every session it marked `Stopped`.
+//!
+//! **A terminal record with a live tmux session is reported, not repaired.**
+//! Such a record is provably self-contradictory, but nothing distinguishes its
+//! two causes. It is either a session wrongly tombstoned by a dedup pass that
+//! misread an unobservable tmux as an empty one (the failure
+//! [`super::dedup::SessionManager::observed_live_managed_names`] now refuses),
+//! or the case #2777 designed for: a correctly-decommissioned session whose
+//! pane lingers as a bare shell printing "run `tm` to relaunch", which the
+//! operator may well be attached to. Reviving on liveness would resurrect
+//! every one of those. `decommission` also clears `workspace_path`, so an
+//! automatic revive would restore a record the picker keys on incomplete
+//! fields. #2777 made revival an explicit in-pane operator action for these
+//! reasons and this keeps it one — the loop logs the contradiction and the
+//! command that resolves it.
+//!
 //! Test: `manager_reconcile_gone_tmux_yields_stopped`,
-//! `manager_reconcile_adopts_new_prefix_session` in `tests.rs`.
+//! `manager_reconcile_adopts_new_prefix_session` in `tests.rs`;
+//! `reconcile_never_revives_a_terminal_record_with_a_live_session` in
+//! `dedup_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
@@ -79,6 +96,22 @@ impl SessionManager {
             // and must be used here so a future terminal variant can never
             // slip past this check again the way `Deleted` did.
             if record.state.is_terminal() {
+                // #5856: a tombstoned record whose tmux session is LIVE is a
+                // provable contradiction — `tm session info` reports
+                // `"attached": true` beside `"state": "decommissioned"` — and
+                // the picker hides the row either way. Report it; never
+                // auto-revive it (see this module's doc).
+                if live_names.contains(&record.tmux_name) {
+                    warn!(
+                        id = %record.id,
+                        name = %record.tmux_name,
+                        state = ?record.state,
+                        "reconcile: terminal record has a LIVE tmux session — the picker hides \
+                         this row. If the session is genuinely in use, revive it with: curl -sS \
+                         -X POST $TRUSTY_MPM_URL/api/v1/sessions/managed/{}/reactivate",
+                        record.id
+                    );
+                }
                 // #4400 backfill: rows tombstoned before the decommission-path
                 // fix landed can still carry a stale `pending_decision` (the
                 // `FleetMetrics` filter is defense in depth, not a cure — the
