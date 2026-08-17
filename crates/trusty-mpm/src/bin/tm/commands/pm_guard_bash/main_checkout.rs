@@ -701,8 +701,9 @@ fn deny_reason(verb: &str, target: &Path) -> String {
         "Destructive git command denied in a main checkout (ADR-0037): `git {verb}` would \
          overwrite or delete uncommitted work in {}, which is a project's main checkout rather \
          than a worktree. Another session may be standing in that directory, and what this \
-         removes is not in git — it cannot be recovered. ADR-0037 makes the main checkout \
-         read-only apart from documents and configuration. Do this work in a worktree instead: \
+         removes is not in git — it cannot be recovered. ADR-0037's rule is that a main \
+         checkout's files are not EDITED or destroyed; UPDATING it is expected, and `git fetch` \
+         is never blocked. Do this work in a worktree instead: \
          `git worktree add .claude/worktrees/<name>`, or ask the PM to re-dispatch you with \
          `isolation: \"worktree\"`. Read-only git (`status`, `log`, `diff`), branch creation \
          (`checkout -b`), and a plain `git reset` are never blocked by this rule.",
