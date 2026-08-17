@@ -54,6 +54,11 @@
 //! file persists on disk, and a command-line argument is world-readable in
 //! `ps`).
 //!
+//! A registered board's credential travels the same way (#5857). The generated
+//! config gets a `${TRUSTY_AUDIT_JIRA_TOKEN}`-style reference and the value goes
+//! in the environment beside it; [`boards`] owns that split and the reasons for
+//! it.
+//!
 //! Test: `super::run_tests`.
 
 use std::path::{Path, PathBuf};
@@ -65,6 +70,7 @@ use crate::config::{EngagementConfig, ToolPins};
 use crate::error::AuditError;
 use crate::inference;
 use crate::progress::{Operation, Progress, StageEvent, StageState, UnitOutcome};
+use crate::registry;
 use crate::relay::{Scrubber, tee_and_relay};
 use crate::tools::{self, RequiredTool};
 use crate::workdir::{Area, WorkDir};
@@ -74,6 +80,12 @@ use crate::workdir::{Area, WorkDir};
 // `crate::run::SelectedRepo` and friends stay where every caller already names
 // them.
 mod selection;
+
+// #5857: what a registered board contributes to a child — the generated config
+// section, the variable carrying its secret, and the gap when it cannot be
+// collected. Public because `crate::chain` states the same gaps in the return
+// package and must reach them through this one resolution, not a second copy.
+pub mod boards;
 
 // #5494: the checkpoint and its resume rules are one subject and they are not
 // this file's — `run.rs` drives children, `checkpoint.rs` decides what a re-run
@@ -348,10 +360,20 @@ fn sanitize(name: &str) -> String {
 /// The database is placed under `extract/`, which is the area `workdir` names
 /// for exactly that, so it is inside the root that `rm -rf` cleans.
 /// The engagement credential is deliberately NOT here; see the module docs.
+///
+/// #5857: a registered board adds a `jira:` or `linear:` section, and those
+/// carry a `${VAR}` reference rather than the board's secret — the secret
+/// itself still travels only in the child's environment. Both are omitted when
+/// no board is registered, so a repo-only engagement generates exactly the
+/// document it always did.
 #[derive(Debug, Serialize)]
 struct TgaConfig {
     repositories: Vec<TgaRepository>,
     database: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jira: Option<boards::TgaJira>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linear: Option<boards::TgaLinear>,
 }
 
 #[derive(Debug, Serialize)]
@@ -462,6 +484,12 @@ where
     // Resolved once, before any child: a half-named selection is identical for
     // every repository, so failing per-repo would just repeat one misconfiguration.
     let inference = inference::inference_env(config, operator)?;
+    // #5857: resolved once, from the same registry `crate::chain` reads, so
+    // `taudit run` and `taudit audit` collect the same boards. Every child gets
+    // the same sections — a board is a dimension of the engagement, not a unit
+    // of the sweep, and tga correlates it against whichever repository it is
+    // auditing.
+    let boards = boards::resolve(registry::Registry::load(work)?.targets(), &config.boards);
     let selected = load_selection(work)?;
     // #5869: materialized once for the whole sweep — resolving reads
     // `.env.local` and opens the secure store, which is not a per-child cost,
@@ -487,8 +515,8 @@ where
             Err(why) => {
                 announce_recollection(&repo.name, &why, progress);
                 run_one(
-                    work, config, &binaries, &inference, index, repo, budget, progress, total,
-                    &scrubber,
+                    work, config, &binaries, &inference, &boards, index, repo, budget, progress,
+                    total, &scrubber,
                 )
                 .await?
             }
@@ -590,6 +618,7 @@ async fn run_one(
     config: &EngagementConfig,
     binaries: &PinnedBinaries,
     inference: &[(&'static str, String)],
+    boards: &boards::Boards,
     index: usize,
     repo: SelectedRepo,
     budget: std::time::Duration,
@@ -604,13 +633,14 @@ async fn run_one(
     progress.unit_started(Operation::Sweep, repo.name.as_str(), index + 1, total);
 
     let mut gaps = Vec::new();
-    let result = match prepare(work, &output, &stem, &checkout)? {
+    let result = match prepare(work, &output, &stem, &checkout, boards)? {
         Err(reason) => RepoResult::Failed { reason },
         Ok(config_path) => {
             match spawn_tga(
                 binaries,
                 config,
                 inference,
+                boards,
                 &config_path,
                 &output,
                 &log,
@@ -661,6 +691,7 @@ fn prepare(
     output: &Path,
     stem: &str,
     checkout: &Path,
+    boards: &boards::Boards,
 ) -> Result<Result<PathBuf, String>, AuditError> {
     if !checkout.is_dir() {
         return Ok(Err(format!(
@@ -676,6 +707,10 @@ fn prepare(
             name: stem.to_string(),
         }],
         database: work.path(Area::Extract).join(format!("{stem}.db")),
+        // #5857: `${TRUSTY_AUDIT_JIRA_TOKEN}`, not the token — see
+        // `boards`'s module docs for why the file may never hold the value.
+        jira: boards.jira.clone(),
+        linear: boards.linear.clone(),
     };
     // Infallible in practice — the document is owned strings and paths with no
     // map keys — but a serializer error must not be swallowed into a default.
@@ -752,6 +787,7 @@ async fn spawn_tga(
     binaries: &PinnedBinaries,
     config: &EngagementConfig,
     inference: &[(&'static str, String)],
+    boards: &boards::Boards,
     config_path: &Path,
     output: &Path,
     log: &Path,
@@ -799,6 +835,12 @@ async fn spawn_tga(
     // named too. Resolved by `sweep_with_env`: either all four or none, never a
     // subset that could pair one provider with another's model ids.
     for (name, value) in inference {
+        command.env(name, value);
+    }
+    // #5857: the board credential the generated config only references. Exposed
+    // here rather than held on `Boards`, so it lives no longer than this
+    // `Command` — the same shape as the inference credential above.
+    for (name, value) in boards.env(&config.boards) {
         command.env(name, value);
     }
 
@@ -1493,6 +1535,166 @@ trusty-review = "0.15.1"
                 path.display()
             );
         }
+    }
+
+    // ── #5857: a registered board reaches the child ──────────────────────────
+
+    /// The JIRA API token this engagement is given. Never expected on disk.
+    const JIRA_TOKEN: &str = "jira-token-never-on-disk";
+
+    /// The Linear personal API key. Never expected on disk.
+    const LINEAR_KEY: &str = "lin_api_never-on-disk";
+
+    /// An engagement carrying both board credentials.
+    fn board_config() -> EngagementConfig {
+        let text = format!(
+            "{CONFIG}\n[boards.jira]\nurl = \"https://acme.atlassian.net\"\n\
+             email = \"auditor@acme.example\"\ntoken = \"{JIRA_TOKEN}\"\n\
+             \n[boards.linear]\napi_key = \"{LINEAR_KEY}\"\n"
+        );
+        EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("parses")
+    }
+
+    /// Register boards the way `taudit add board` does, so the sweep reads them
+    /// from the file it actually reads rather than from an injected value.
+    fn register_boards(work: &WorkDir, specs: &[&str]) {
+        let mut targets = registry::Registry::default();
+        for spec in specs {
+            targets
+                .insert(registry::parse(Some(registry::TargetKind::Board), spec).expect("parses"));
+        }
+        targets.save(work).expect("write registry");
+    }
+
+    /// The generated config carries a REFERENCE to each board credential and
+    /// never the credential, and the JIRA section carries both halves of the
+    /// Basic-auth pair.
+    ///
+    /// The `username` assertion is the one that catches the silent failure:
+    /// `JiraClient::new` builds its credential from `(&username, &token)` and
+    /// takes the `(Some, Some)` arm only, so a section with the token alone
+    /// runs UNAUTHENTICATED and reports no error at all.
+    ///
+    /// Against `origin/main` this fails at the first assertion — `TgaConfig` had
+    /// no `jira` field, so the board never reached the document.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_generated_config_references_the_board_secret_and_never_holds_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        register_boards(&work, &["jira:ACME", "linear:ENG"]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let generated =
+            std::fs::read_to_string(work.path(Area::State).join("tga-00-acme-api.yaml"))
+                .expect("the generated tga config");
+        assert!(
+            generated.contains("${TRUSTY_AUDIT_JIRA_TOKEN}"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("${TRUSTY_AUDIT_LINEAR_API_KEY}"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("username: auditor@acme.example"),
+            "a token without a username is an unauthenticated client: {generated}"
+        );
+        assert!(generated.contains("project_key: ACME"), "{generated}");
+        assert!(generated.contains("- ENG"), "{generated}");
+
+        // Not just this file: every file the run left anywhere under the root.
+        for path in files_under(work.root()) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains(JIRA_TOKEN) && !text.contains(LINEAR_KEY),
+                "{} carries a board credential",
+                path.display()
+            );
+        }
+    }
+
+    /// A stub that records the board variables it was handed.
+    fn records_its_board_env() -> String {
+        format!(
+            "{}{}",
+            writes_a_manifest(None).trim_end_matches("exit 0\n"),
+            "{\n  echo \"jira=$TRUSTY_AUDIT_JIRA_TOKEN\"\n  \
+             echo \"linear=$TRUSTY_AUDIT_LINEAR_API_KEY\"\n} > \"$out/board-env.txt\"\nexit 0\n",
+        )
+    }
+
+    /// The `${…}` reference is worth nothing unless the variable is set, so this
+    /// asserts on what the SPAWNED PROCESS received — not on what this crate
+    /// computed. tga expands the reference on the far side.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_child_environment_carries_the_real_board_credentials() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &records_its_board_env());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        register_boards(&work, &["jira:ACME", "linear:ENG"]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let seen = std::fs::read_to_string(report.repos[0].output.join("board-env.txt"))
+            .expect("the stub recorded its environment");
+        assert!(seen.contains(&format!("jira={JIRA_TOKEN}")), "{seen}");
+        assert!(seen.contains(&format!("linear={LINEAR_KEY}")), "{seen}");
+    }
+
+    /// An engagement that registers no board generates the document it always
+    /// did, and exports no board variable — so the sections and the variables
+    /// appear together or not at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_repo_only_engagement_gets_no_board_section_and_no_board_variable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &records_its_board_env());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+
+        let generated =
+            std::fs::read_to_string(work.path(Area::State).join("tga-00-acme-api.yaml"))
+                .expect("the generated tga config");
+        assert!(!generated.contains("jira"), "{generated}");
+        assert!(!generated.contains("linear"), "{generated}");
+        let seen = std::fs::read_to_string(report.repos[0].output.join("board-env.txt"))
+            .expect("the stub recorded its environment");
+        assert!(seen.contains("jira=\n"), "{seen}");
+        assert!(seen.contains("linear=\n"), "{seen}");
     }
 
     /// The CRITICAL arm: `tga audit` exits 0 whenever the sweep COMPLETED,

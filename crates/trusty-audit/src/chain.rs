@@ -23,8 +23,12 @@
 //! records the usable checkouts as the selection. A registered repository now
 //! reaches the sweep because it was registered.
 //!
-//! A registered BOARD does not, and is reported as a gap rather than dropped —
-//! see [`board_gap`] for what passing one through would cost today.
+//! A registered BOARD reaches it too, since #5857. It is not a unit of the
+//! sweep — there is nothing to clone — so it becomes a `jira:` or `linear:`
+//! section on every child's generated config, with its credential referenced as
+//! `${TRUSTY_AUDIT_JIRA_TOKEN}` and delivered through the child's environment.
+//! [`run::boards`] owns that split. A board with no credential in the engagement
+//! config is still a gap, and still reported rather than dropped.
 //!
 //! ## Partial success is the normal case, and it is not success
 //!
@@ -63,7 +67,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::clone::{self, CloneOptions, CloneReport};
-use crate::config::EngagementConfig;
+use crate::config::{BoardCredentials, EngagementConfig};
 use crate::error::AuditError;
 use crate::package::{self, ReturnPackage};
 use crate::progress::{Operation, Progress, UnitOutcome};
@@ -157,10 +161,11 @@ pub struct ChainReport {
     pub package: ReturnPackage,
     /// What this engagement targets and the chain never attempted.
     ///
-    /// Two sources: a registered board, which [`board_gap`] explains, and a
-    /// registered repository that failed to clone. Neither reaches the sweep, so
-    /// neither can appear among [`RunReport::failures`] — which is why the chain
-    /// carries them itself rather than deriving everything from the sweep.
+    /// Two sources: a registered board [`run::boards::resolve`] could not turn
+    /// into a config section, and a registered repository that failed to clone.
+    /// Neither reaches the sweep, so neither can appear among
+    /// [`RunReport::failures`] — which is why the chain carries them itself
+    /// rather than deriving everything from the sweep.
     ///
     /// [`ReturnPackage::excluded`] is the superset: these lines PLUS the
     /// repositories the sweep attempted and failed. Non-empty here makes the
@@ -208,7 +213,8 @@ pub async fn audit(
         .await
         .map_err(|e| stopped(Phase::InstallTools, e))?;
 
-    let (repos, mut gaps) = split_targets(work).map_err(|e| stopped(Phase::Materialize, e))?;
+    let (repos, mut gaps) =
+        split_targets(work, &config.boards).map_err(|e| stopped(Phase::Materialize, e))?;
     let acquired = materialize(work, &repos, progress)
         .await
         .map_err(|e| stopped(Phase::Materialize, e))?;
@@ -269,37 +275,36 @@ async fn install(
 
 /// The registered repositories, and one gap line per target the chain cannot
 /// audit.
-fn split_targets(work: &WorkDir) -> Result<(Vec<String>, Vec<String>), AuditError> {
-    let registry = Registry::load(work)?;
-    let mut repos = Vec::new();
-    let mut gaps = Vec::new();
-    for target in registry.targets() {
-        match target {
-            Target::Repo { name_with_owner } => repos.push(name_with_owner.clone()),
-            Target::Board { .. } => gaps.push(board_gap(target)),
-        }
-    }
-    Ok((repos, gaps))
-}
-
-/// Why a registered board is a gap rather than a collected dimension.
 ///
-/// Why: `tga audit` does take a board — its config has a `jira:` section and it
-/// runs a `JiraSync` stage — but tga reads that section's `token` as a literal
-/// string, with none of the `${VAR}` expansion its Linear and Azure DevOps
-/// clients apply (`tga::collect::env_expand::expand_env_var`). Passing a JIRA
-/// board through today therefore means writing the board credential into the
-/// generated `state/tga-<stem>.yaml`, and this crate's whole credential posture
-/// is that a secret reaches a child through its environment and never through a
-/// file (DOC-68 §13, `crate::run`'s module docs). The chain states the gap
-/// instead, and the durable fix is env-var expansion on tga's JIRA credential.
-/// What: one line naming the board, safe to show the recipient.
-/// Test: `super::chain_tests::a_registered_board_is_stated_as_a_gap`.
-fn board_gap(target: &Target) -> String {
-    format!(
-        "{target} was not audited — this client cannot pass a board to `tga audit` without \
-         writing its credential to a file, which it will not do (#5824)"
-    )
+/// Why: a registered BOARD used to land here as an unconditional gap — the
+/// wiring simply stopped at the repository arm (#5857). It now goes to
+/// [`run::boards::resolve`], the same call [`run::sweep`] makes when it
+/// generates each child's config, so the gap this states and the coverage that
+/// child gets are one decision rather than two that can disagree. What is left
+/// as a gap is narrow: a board whose provider has no credential in the
+/// engagement config, and a second JIRA project (tga's `jira.project_key` holds
+/// one).
+/// What: repositories by name for [`materialize`], and the resolver's gap lines
+/// verbatim.
+/// Test: `super::chain_tests::a_registered_board_with_a_credential_is_collected`,
+/// `super::chain_tests::a_board_with_no_configured_credential_is_still_a_gap`.
+fn split_targets(
+    work: &WorkDir,
+    credentials: &BoardCredentials,
+) -> Result<(Vec<String>, Vec<String>), AuditError> {
+    let registry = Registry::load(work)?;
+    let repos = registry
+        .targets()
+        .iter()
+        .filter_map(|target| match target {
+            Target::Repo { name_with_owner } => Some(name_with_owner.clone()),
+            Target::Board { .. } => None,
+        })
+        .collect();
+    Ok((
+        repos,
+        run::boards::resolve(registry.targets(), credentials).gaps,
+    ))
 }
 
 /// Phase 2 — turn what is registered into checkouts the sweep can read.
@@ -679,24 +684,75 @@ trusty-review = "0.15.1"
         assert_eq!(report.run.repos.len(), 1);
     }
 
-    /// A registered board is something this engagement targets and this chain
-    /// cannot audit. Dropping it silently would leave the recipient sending a
-    /// package that claims to cover an engagement it does not.
+    /// Register boards the way `taudit add board` does.
+    fn register_boards(work: &WorkDir, specs: &[&str]) {
+        let mut targets = Registry::default();
+        for spec in specs {
+            targets.insert(registry::parse(Some(TargetKind::Board), spec).expect("parses"));
+        }
+        targets.save(work).expect("writes");
+    }
+
+    /// An engagement carrying the JIRA credential the registered board needs.
+    fn config_with_jira() -> EngagementConfig {
+        let text = format!(
+            "{CONFIG}\n[boards.jira]\nurl = \"https://acme.atlassian.net\"\n\
+             email = \"auditor@acme.example\"\ntoken = \"jira-token-never-on-disk\"\n"
+        );
+        EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("parses")
+    }
+
+    /// #5857's whole point: a registered board with a credential is COLLECTED.
+    /// It contributes no gap, so a clean sweep over it exits zero.
+    ///
+    /// Against `origin/main` this fails on the gap assertion: `split_targets`
+    /// turned every board into a gap line unconditionally, and the non-zero exit
+    /// that followed made `taudit audit && send-it` refuse a whole engagement.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_registered_board_is_stated_as_a_gap() {
+    async fn a_registered_board_with_a_credential_is_collected() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = prepared(tmp.path(), &["acme-api"], &["acme-api"]);
-        let mut registry = Registry::default();
-        registry.insert(registry::parse(Some(TargetKind::Board), "jira:ACME").expect("parses"));
-        registry.save(&work).expect("writes");
+        register_boards(&work, &["jira:ACME"]);
 
+        let report = audit(
+            &work,
+            &config_with_jira(),
+            &ChainOptions::default(),
+            true,
+            &Progress::none(),
+        )
+        .await
+        .expect("the chain runs");
+
+        assert!(report.gaps.is_empty(), "{:?}", report.gaps);
+        assert!(report.package.excluded.is_empty(), "{:?}", report.package);
+        assert_eq!(
+            Outcome::Audit(report).exit_code(),
+            0,
+            "a collected board must not hold the engagement at a non-zero exit"
+        );
+    }
+
+    /// The one board case still stated as a gap: registered, but the engagement
+    /// config carries no credential for its provider. Dropping it silently would
+    /// leave the recipient sending a package that claims to cover an engagement
+    /// it does not.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_board_with_no_configured_credential_is_still_a_gap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = prepared(tmp.path(), &["acme-api"], &["acme-api"]);
+        register_boards(&work, &["jira:ACME"]);
+
+        // `config()` names no `[boards]` table at all.
         let report = run_chain(&work, &Progress::none())
             .await
             .expect("the chain runs");
 
         assert_eq!(report.gaps.len(), 1, "{:?}", report.gaps);
         assert!(report.gaps[0].contains("jira:ACME"), "{:?}", report.gaps);
+        assert!(report.gaps[0].contains("boards.jira"), "{:?}", report.gaps);
         assert_ne!(
             Outcome::Audit(report).exit_code(),
             0,
