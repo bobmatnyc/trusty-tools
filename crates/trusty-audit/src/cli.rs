@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::clone::{CloneOptions, CloneState};
-use crate::run::{RepoResult, RunStatus};
+use crate::run::{RepoResult, RunOptions, RunStatus};
 use crate::session::{Command, NextStep, Outcome};
 
 /// The auditor client's command line.
@@ -98,7 +98,19 @@ pub enum Verb {
         budget_gb: Option<u64>,
     },
     /// Run the audit sweep over the selected repositories.
-    Run,
+    ///
+    /// A repository an earlier run already audited is skipped, so an
+    /// interrupted sweep is resumed rather than repeated. A repository the
+    /// earlier run recorded as FAILED is retried.
+    Run {
+        /// Audit every selected repository again, ignoring recorded progress.
+        ///
+        /// Reach for this when the recorded outputs are stale rather than
+        /// missing — re-cloned repositories, or a config change that should
+        /// reach work already done. Hours-long: it re-collects everything.
+        #[arg(long)]
+        fresh: bool,
+    },
     /// Assemble the unencrypted deliverable zip to send back.
     Package {
         /// Where to write the zip (default: <work-dir>/audit-return-package.zip).
@@ -152,7 +164,9 @@ impl Cli {
                     },
                 },
             },
-            Some(Verb::Run) => Command::Run,
+            // #5494: resume is the default and re-collection is the opt-in,
+            // because the expensive direction is the one to ask for by name.
+            Some(Verb::Run { fresh }) => Command::Run(RunOptions { fresh: *fresh }),
             Some(Verb::Package { out }) => Command::Package {
                 destination: out.clone(),
             },
@@ -329,6 +343,14 @@ pub fn render(outcome: &Outcome) -> String {
             let mut out = String::new();
             for run in &report.repos {
                 match &run.result {
+                    // #5494: a repository this run carried over from an earlier
+                    // one reads differently from one it audited. Silent
+                    // skipping is the defect the resume path exists not to be.
+                    RepoResult::Succeeded if run.resumed => out.push_str(&format!(
+                        "resumed {:<24} {}\n",
+                        run.repo.name,
+                        run.output.display()
+                    )),
                     RepoResult::Succeeded => out.push_str(&format!(
                         "ok      {:<24} {}\n",
                         run.repo.name,
@@ -347,6 +369,17 @@ pub fn render(outcome: &Outcome) -> String {
                 }
             }
             let audited = report.repos.len() - report.failures().count();
+            // #5494: a run that audited nothing because everything was already
+            // done is a legitimate outcome, and it has to say so — otherwise
+            // "Audited 6 repositories" over a four-second run reads as a bug.
+            let resumed = report.resumed().count();
+            if resumed > 0 {
+                out.push_str(&format!(
+                    "\nResumed {} from an earlier run; {} audited now.\n",
+                    count_of(resumed, "repository", "repositories"),
+                    audited - resumed
+                ));
+            }
             out.push_str(&match report.status {
                 RunStatus::AllSucceeded => format!(
                     "\nAudited {}.\n",
@@ -496,7 +529,7 @@ mod cli_tests {
             Command::Repos => vec!["taudit", "repos"],
             Command::DiscoverRepos => vec!["taudit", "discover"],
             Command::CloneRepos { .. } => vec!["taudit", "clone", "acme/api"],
-            Command::Run => vec!["taudit", "run"],
+            Command::Run(_) => vec!["taudit", "run"],
             Command::Package { .. } => vec!["taudit", "package"],
         }
     }
@@ -518,7 +551,7 @@ mod cli_tests {
                 repos: vec!["acme/api".to_owned()],
                 options: CloneOptions::default(),
             },
-            Command::Run,
+            Command::Run(RunOptions::default()),
             Command::Package { destination: None },
         ]
     }
@@ -828,6 +861,7 @@ mod cli_tests {
             output: PathBuf::from("/work/out/00-acme-api"),
             log: PathBuf::from("/work/logs/00-acme-api.log"),
             gaps: vec!["Collection stage `jira sync` did not complete.".to_owned()],
+            resumed: false,
             result,
         };
         let ok = run(RepoResult::Succeeded);

@@ -737,6 +737,7 @@ trusty-review = "0.15.1"
             output,
             log: work.path(Area::Logs).join(format!("{stem}.log")),
             gaps: Vec::new(),
+            resumed: false,
             result: RepoResult::Succeeded,
         }
     }
@@ -754,6 +755,7 @@ trusty-review = "0.15.1"
                 output: work.path(Area::Output).join(stem),
                 log: work.path(Area::Logs).join(format!("{stem}.log")),
                 gaps: Vec::new(),
+                resumed: false,
                 result: RepoResult::Succeeded,
             }
         }

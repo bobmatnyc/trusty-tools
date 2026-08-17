@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AuditError;
-use crate::workdir::{Area, WorkDir};
+use crate::workdir::{self, Area, WorkDir};
 
 /// File under `state/` naming the repositories the run should audit.
 ///
@@ -143,9 +143,9 @@ pub fn load_selection(work: &WorkDir) -> Result<Vec<SelectedRepo>, AuditError> {
 /// atomic-rename and `count`-first obligations are one decision rather than a
 /// note each producer re-reads; #5497's picker writes through here too.
 /// What: renders `count` ahead of the entries (serde field order, and `toml`
-/// emits values before tables), writes to a uniquely-named temporary file in
-/// the same directory, and renames it into place. The unique name is what lets
-/// two writers race without either reading the other's half-written file.
+/// emits values before tables), then publishes through
+/// [`workdir::write_atomically`], which owns the temporary-file-and-rename
+/// obligation for every state document this crate writes (#5494).
 /// Test: `super::run_tests::a_saved_selection_reads_back_whole`,
 /// `super::run_tests::racing_writers_never_leave_a_torn_selection`.
 ///
@@ -155,9 +155,6 @@ pub fn load_selection(work: &WorkDir) -> Result<Vec<SelectedRepo>, AuditError> {
 /// file cannot be written, or the rename fails.
 pub fn save_selection(work: &WorkDir, repos: &[SelectedRepo]) -> Result<(), AuditError> {
     let path = selection_path(work);
-    let dir = work.path(Area::State);
-    std::fs::create_dir_all(&dir).map_err(|source| AuditError::WorkDir { path: dir, source })?;
-
     let selection = Selection {
         count: repos.len(),
         repositories: repos.to_vec(),
@@ -166,22 +163,5 @@ pub fn save_selection(work: &WorkDir, repos: &[SelectedRepo]) -> Result<(), Audi
         path: path.clone(),
         source: std::io::Error::other(e),
     })?;
-
-    let temp = path.with_file_name(format!("{SELECTION_FILE}.{}.tmp", writer_tag()));
-    std::fs::write(&temp, text).map_err(|source| AuditError::WorkDir {
-        path: temp.clone(),
-        source,
-    })?;
-    std::fs::rename(&temp, &path).map_err(|source| {
-        let _ = std::fs::remove_file(&temp);
-        AuditError::WorkDir { path, source }
-    })
-}
-
-/// A suffix no two concurrent writers share: process, plus thread within it.
-fn writer_tag() -> String {
-    use std::hash::{Hash as _, Hasher as _};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::thread::current().id().hash(&mut hasher);
-    format!("{}-{}", std::process::id(), hasher.finish())
+    workdir::write_atomically(&path, &text)
 }
