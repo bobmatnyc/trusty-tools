@@ -41,15 +41,37 @@ fn harness_worktree_for(fx: &GitWorktreeFixture, name: &str, agent_id: &str) -> 
 
 /// Stamp `path`'s ownership sentinel as belonging to `agent_id`.
 fn attribute(path: &std::path::Path, agent_id: &str) {
+    attribute_to(path, agent_id, crate::core::session::SessionId::new());
+}
+
+/// [`attribute`], naming `parent` as the dispatching session.
+///
+/// Why a separate helper: the `SessionEnd` sweep resolves candidates by
+/// `parent_session_id`, so a fixture stamped with a random one is invisible to
+/// it and would exercise the "not my agent" arm instead of the gate under test.
+fn attribute_to(path: &std::path::Path, agent_id: &str, parent: crate::core::session::SessionId) {
     write_agent_sentinel(
         path,
         crate::session_manager::worktree_ownership::AgentWorktreeOwner {
             agent_id: agent_id.to_string(),
             delegation_id: crate::core::agent::DelegationId(uuid::Uuid::new_v4()),
-            parent_session_id: crate::core::session::SessionId::new(),
+            parent_session_id: parent,
         },
     )
     .expect("write agent sentinel");
+}
+
+/// [`harness_worktree_for`], attributed to `agent_id` under parent `parent`.
+fn harness_worktree_under(
+    fx: &GitWorktreeFixture,
+    name: &str,
+    agent_id: &str,
+    parent: crate::core::session::SessionId,
+) -> PathBuf {
+    let base = fx.repo.join(".claude").join("worktrees");
+    let wt = fx.add_worktree_at(&base, name);
+    attribute_to(&wt, agent_id, parent);
+    wt
 }
 
 /// #4311 REGRESSION: a finished agent's clean, fully-pushed worktree is removed.
@@ -432,6 +454,171 @@ async fn stop_ignores_a_sentinel_naming_a_different_agent() {
         wt.exists(),
         "another agent's worktree must never be reaped by this stop"
     );
+}
+
+// ── the session-end trigger (#4311 follow-up) ───────────────────────────────
+
+/// Deliver `event` through the real hook pipeline, as the daemon does.
+///
+/// Why the pipeline and not `spawn_on_session_end` directly: the defect was that
+/// no trigger reached the reap at all, so a test calling the reap by hand would
+/// prove the gate stack and skip the wiring that was actually missing.
+fn deliver(
+    state: &std::sync::Arc<crate::daemon::state::DaemonState>,
+    session: crate::core::session::SessionId,
+    event: HookEvent,
+    payload: serde_json::Value,
+) {
+    crate::daemon::services::hook_service::HookService::new(std::sync::Arc::clone(state))
+        .process(session, event, payload);
+}
+
+/// REGRESSION: a `SessionEnd` reaps the worktree of an agent whose
+/// `SubagentStop` never arrived.
+///
+/// Why this test and not a happy-path one: `spawn_on_stop` was the reap's ONLY
+/// trigger, so every exit route that emits no `SubagentStop` — the harness
+/// session exiting or restarting under an in-flight agent, an interrupt, a
+/// `tm hook` POST that lost its 2 s budget — left the tree registered, owned,
+/// and unreclaimable. `prune_orphaned_worktrees` skips `SentinelOwner::Agent`
+/// by design (#4311), so nothing else would ever pick it up: the leak was
+/// permanent and, for this class, entirely unlogged.
+///
+/// The fixture delivers NO stop for `a801`. Against the pre-fix commit the
+/// `SessionEnd` reaches `HookService::process`, which routes it to the overseer,
+/// the idle nudge, the delegation tracker and the ring buffer — none of which
+/// look at worktrees — and `await_gone` panics with the directory still there.
+#[tokio::test]
+async fn session_end_reaps_a_worktree_whose_agent_never_stopped() {
+    let (state, _dir, session) = hermetic();
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree_under(&fx, "agent-abandoned", "a801", session);
+    std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+
+    deliver(
+        &state,
+        session,
+        HookEvent::SessionEnd,
+        serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
+    );
+
+    await_gone(&wt).await;
+}
+
+/// Every agent of the ending session is reclaimed, not just the first.
+///
+/// Why: the sweep resolves each candidate's own `in_use` set, and each of these
+/// trees is registered to a live-looking delegation of the SAME session. An
+/// implementation that computed `paths_in_use` once, or that failed to exclude
+/// each candidate's own registration, would find every tree "still in use" and
+/// reclaim none.
+#[tokio::test]
+async fn session_end_reaps_every_agent_of_the_ending_session() {
+    let (state, _dir, session) = hermetic();
+    let fx = GitWorktreeFixture::new();
+    let mut trees = Vec::new();
+    for (name, agent) in [("agent-one", "a901"), ("agent-two", "a902")] {
+        let wt = harness_worktree_under(&fx, name, agent, session);
+        std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
+        GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+        let mut d = crate::core::agent::Delegation::observed(
+            session,
+            "rust-engineer",
+            "work",
+            Some(format!("toolu_{agent}")),
+        );
+        d.agent_id = Some(agent.to_string());
+        d.worktree_path = Some(wt.clone());
+        state.upsert_delegation(d);
+        trees.push(wt);
+    }
+
+    deliver(
+        &state,
+        session,
+        HookEvent::SessionEnd,
+        serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
+    );
+
+    for wt in &trees {
+        await_gone(wt).await;
+    }
+}
+
+/// A tree holding unsaved work survives the session's end.
+///
+/// Why: the new trigger reuses `reap_worktree` unchanged, so the dirt gate must
+/// still refuse. A `SessionEnd` proves the agent exited; it proves nothing about
+/// whether its work was saved, and an uncommitted edit is the one thing this
+/// module must never destroy.
+#[tokio::test]
+async fn session_end_keeps_a_worktree_that_holds_unsaved_work() {
+    let (state, _dir, session) = hermetic();
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree_under(&fx, "agent-dirty-at-exit", "a803", session);
+    std::fs::write(wt.join("README.md"), "edited, never committed\n").expect("write edit");
+
+    deliver(
+        &state,
+        session,
+        HookEvent::SessionEnd,
+        serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
+    );
+    await_settled().await;
+
+    assert!(wt.exists(), "an uncommitted edit must survive its session");
+}
+
+/// Another session's agent is untouched by this session's end.
+///
+/// Why: the sweep's key is the sentinel's `parent_session_id`. Two PMs run
+/// against one project store on this machine, so a sweep keyed on the store
+/// alone would reclaim a live peer's tree the moment either session ended.
+#[tokio::test]
+async fn session_end_spares_another_sessions_agent() {
+    let (state, _dir, session) = hermetic();
+    let other = crate::core::session::SessionId(uuid::Uuid::new_v4());
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree_under(&fx, "agent-peer", "a804", other);
+    std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+
+    deliver(
+        &state,
+        session,
+        HookEvent::SessionEnd,
+        serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
+    );
+    await_settled().await;
+
+    assert!(wt.exists(), "a peer session's agent worktree must survive");
+}
+
+/// A `SessionEnd` with no `cwd` resolves no store and reclaims nothing.
+#[tokio::test]
+async fn session_end_without_a_cwd_reaps_nothing() {
+    let (state, _dir, session) = hermetic();
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree_under(&fx, "agent-no-cwd", "a805", session);
+    std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+
+    deliver(
+        &state,
+        session,
+        HookEvent::SessionEnd,
+        serde_json::json!({}),
+    );
+    await_settled().await;
+
+    assert!(wt.exists(), "an unresolvable store must reclaim nothing");
+}
+
+/// Give a detached reap task the same window a correct one gets, so a negative
+/// assertion is not merely racing it.
+async fn await_settled() {
+    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
 }
 
 /// Poll until `path` is gone, or fail with what is still there.

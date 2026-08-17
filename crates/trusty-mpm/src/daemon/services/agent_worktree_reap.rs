@@ -51,6 +51,19 @@
 //! back when the registry has nothing, which is the from-disk reconstruction
 //! ADR-0023 point 4 requires of an ownership record.
 //!
+//! # Two triggers, because one was not enough (#4311 follow-up)
+//!
+//! [`spawn_on_stop`] was the only caller of [`reap_worktree`], so the reap ran
+//! exactly once per agent and only when a `SubagentStop` actually arrived. Every
+//! other exit route — the harness session exiting or restarting under an
+//! in-flight agent, an interrupt, a `tm hook` POST that lost its 2 s budget —
+//! reached it never, and `prune_orphaned_worktrees` skips a `SentinelOwner::Agent`
+//! tree by design, so nothing else could reclaim it either. [`spawn_on_session_end`]
+//! is the second trigger: a session's end is proof its agents exited, and it
+//! runs the same gates against the same store.
+//!
+//! Stated gap: an agent interrupted inside a session that keeps running still
+//! reaches neither trigger, and its tree waits for that session to end.
 //! Test: the `#[cfg(test)]` suite in `agent_worktree_reap_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -58,12 +71,13 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::core::agent::DelegationId;
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::worktree_liveness::process_holding;
 use crate::session_manager::worktree_ownership::{
-    SentinelOwner, find_agent_worktree, read_sentinel_owner,
+    AgentWorktreeOwner, SentinelOwner, find_agent_worktree, read_sentinel_owner,
 };
 use crate::session_manager::worktree_safety::{DirtyWorktreePolicy, dirt_blocks_removal};
 
@@ -401,29 +415,167 @@ pub fn spawn_on_stop(
 
     let state = Arc::clone(state);
     tokio::spawn(async move {
-        let in_use = paths_in_use(&state, &agent_id).await;
-        let removal_path = path.clone();
-        let reap_agent_id = agent_id.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
-            reap_worktree(&removal_path, &reap_agent_id, &in_use)
-        })
-        .await
-        .unwrap_or_else(|e| ReapOutcome::Refused(format!("reap task panicked: {e}")));
-        match &outcome {
-            ReapOutcome::Removed | ReapOutcome::AlreadyGone => {
-                // `None` when the path came from disk rather than the registry
-                // — there is no in-memory record left to clear.
-                if let Some(id) = id {
-                    state.mutate_delegation(id, |d| d.worktree_path = None);
-                }
-            }
-            ReapOutcome::Refused(reason) => {
-                tracing::info!(
-                    path = %path.display(),
-                    "agent-worktree reap: keeping this worktree — {reason} (#4311)"
-                );
+        reap_and_record(&state, &agent_id, path, id).await;
+    });
+}
+
+/// Run the reap for one agent's worktree and record what happened (#4311).
+///
+/// Why a shared body: [`spawn_on_stop`] and [`spawn_on_session_end`] are two
+/// TRIGGERS for one decision. Two copies of the gate call, the registry
+/// clear and the refusal log would eventually disagree about what a reap does,
+/// and the trigger is the only thing that legitimately differs between them.
+/// What: resolves this agent's `in_use` set, runs [`reap_worktree`] on a
+/// blocking thread (it shells out to git and `lsof`), clears the delegation's
+/// `worktree_path` on a removal so nothing reads a path that no longer exists,
+/// and reports a refusal.
+///
+/// `id` is `None` when the path came from disk rather than the registry — there
+/// is no in-memory record to clear.
+///
+/// The refusal is `warn!` and not `info!` (#4311 follow-up): a refusal is the
+/// ONLY notice anyone gets that a tree was kept, and nothing retries it. On this
+/// machine 7 worktrees were refused as holding unsaved work, logged once at
+/// `info!`, and left on disk indefinitely with nothing surfacing them. A
+/// refusal is a tree that now needs a human, so it is logged as one.
+/// Test: `session_end_keeps_a_worktree_that_holds_unsaved_work`,
+/// `reap_removes_a_clean_pushed_worktree`.
+async fn reap_and_record(
+    state: &Arc<DaemonState>,
+    agent_id: &str,
+    path: PathBuf,
+    id: Option<DelegationId>,
+) -> ReapOutcome {
+    let in_use = paths_in_use(state, agent_id).await;
+    let removal_path = path.clone();
+    let reap_agent_id = agent_id.to_string();
+    let outcome =
+        tokio::task::spawn_blocking(move || reap_worktree(&removal_path, &reap_agent_id, &in_use))
+            .await
+            .unwrap_or_else(|e| ReapOutcome::Refused(format!("reap task panicked: {e}")));
+    match &outcome {
+        ReapOutcome::Removed | ReapOutcome::AlreadyGone => {
+            if let Some(id) = id {
+                state.mutate_delegation(id, |d| d.worktree_path = None);
             }
         }
+        ReapOutcome::Refused(reason) => {
+            tracing::warn!(
+                agent_id,
+                path = %path.display(),
+                "agent-worktree reap: keeping this worktree — {reason} (#4311)"
+            );
+        }
+    }
+    outcome
+}
+
+/// Every worktree in `store` whose sentinel names `session` as its parent.
+///
+/// Why the sentinel and not the delegation registry: the registry is a `DashMap`
+/// built empty at every boot, so after a restart it knows none of the trees this
+/// sweep exists to reclaim. The sentinel is the durable record ADR-0023 point 4
+/// requires, and `parent_session_id` is the field DOC-66 §5 defines as an agent
+/// worktree's parentage.
+/// What: reads each immediate child of `store` and keeps those whose sentinel is
+/// [`SentinelOwner::Agent`] with a matching `parent_session_id`. An unreadable
+/// store yields nothing, which reclaims nothing.
+/// Test: `session_end_spares_another_sessions_agent`,
+/// `session_end_reaps_every_agent_of_the_ending_session`.
+fn agent_worktrees_of(store: &Path, session: SessionId) -> Vec<(PathBuf, AgentWorktreeOwner)> {
+    let Ok(entries) = std::fs::read_dir(store) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            match read_sentinel_owner(&path) {
+                SentinelOwner::Agent(owner, _) if owner.parent_session_id == session => {
+                    Some((path, owner))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Reap the worktrees of every agent the session that just ended dispatched
+/// (#4311 follow-up).
+///
+/// Why: [`spawn_on_stop`] was the reap's ONLY trigger, and it fires only on a
+/// `SubagentStop` the daemon actually receives. An agent that ends any other way
+/// — the harness session it runs inside exits or restarts under it, a user
+/// interrupt, a `tm hook` POST that loses its 2 s budget — emits no stop, so the
+/// reap never ran and nothing recorded that it had not. `prune_orphaned_worktrees`
+/// skips `SentinelOwner::Agent` by design, so nothing else would ever reclaim
+/// the tree: the leak was permanent and, for this class, entirely silent. In
+/// this machine's daemon log, 54 registered agent worktrees produced 30
+/// removals; 17 of the 24 survivors carry no reap decision of any kind.
+///
+/// A leaked worktree is not only disk. The harness reassigns a stale worktree to
+/// a later agent along with the branch the previous one left checked out, which
+/// is how an unrelated commit reached an open PR's branch on 2026-08-17. That
+/// makes prompt reclamation a correctness property, not housekeeping.
+/// What: on `SessionEnd`, resolves the harness worktree store from the payload's
+/// `cwd` exactly as [`rebuild_from_disk`] does, then runs the UNCHANGED
+/// [`reap_worktree`] gate stack against every directory whose sentinel names
+/// this session as its parent, and reports the split.
+///
+/// # Why a `SessionEnd` is proof its agents exited
+///
+/// A subagent runs inside its parent Claude Code session's process and cannot
+/// outlive it. `SessionEnd` is Claude Code self-reporting that this conversation
+/// ended — the same signal #4337 already treats as unambiguous when it clears a
+/// stale `claude_session_id`. That is the strength of proof `SubagentStop`
+/// carries, applied to every child at once, so no gate is weakened to use it: a
+/// candidate still has to pass the sentinel, in-use, git-registry, dirt and
+/// process-liveness gates, and a tree holding unsaved work is still kept.
+/// Test: `session_end_reaps_a_worktree_whose_agent_never_stopped`,
+/// `session_end_reaps_every_agent_of_the_ending_session`,
+/// `session_end_keeps_a_worktree_that_holds_unsaved_work`,
+/// `session_end_spares_another_sessions_agent`,
+/// `session_end_without_a_cwd_reaps_nothing`.
+pub fn spawn_on_session_end(
+    state: &Arc<DaemonState>,
+    session: SessionId,
+    event: HookEvent,
+    payload: &Value,
+) {
+    if event != HookEvent::SessionEnd {
+        return;
+    }
+    let Some(cwd) = payload.get("cwd").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(root) = crate::core::harness_root::harness_root_for(Path::new(cwd)) else {
+        return;
+    };
+    let candidates = agent_worktrees_of(&root.join(".claude").join("worktrees"), session);
+    if candidates.is_empty() {
+        return;
+    }
+
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        let (mut reclaimed, mut kept) = (0usize, 0usize);
+        for (path, owner) in candidates {
+            // Each candidate resolves its OWN `in_use` set, which excludes its
+            // own delegation. These agents never reported a stop, so their
+            // records are still live and a set computed once would name every
+            // candidate as in use — the sweep would then reclaim nothing.
+            match reap_and_record(&state, &owner.agent_id, path, Some(owner.delegation_id)).await {
+                ReapOutcome::Refused(_) => kept += 1,
+                _ => reclaimed += 1,
+            }
+        }
+        tracing::info!(
+            session = %session.0,
+            reclaimed,
+            kept,
+            "agent-worktree reap: this session ended — reclaimed {reclaimed} of its agents' \
+             worktrees and kept {kept} (#4311)"
+        );
     });
 }
 

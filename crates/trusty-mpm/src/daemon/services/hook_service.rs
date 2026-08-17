@@ -270,6 +270,19 @@ impl HookService {
             &payload,
         );
 
+        // 1e (#4311 follow-up): the SECOND trigger. `SubagentStop` was the only
+        // one, so an agent killed by its session exiting or restarting emitted
+        // no stop and its worktree leaked permanently — the orphan sweep skips
+        // agent-owned trees by design. A `SessionEnd` proves every agent that
+        // session dispatched has exited, so it reclaims them through the same
+        // gate stack. Detached like 1b and 1d, and cannot change the verdict.
+        crate::daemon::services::agent_worktree_reap::spawn_on_session_end(
+            &self.state,
+            session,
+            event,
+            &payload,
+        );
+
         // 2. PostToolUse: compress tool output before it enters the ring buffer.
         if event == HookEvent::PostToolUse {
             let tool_name = payload
