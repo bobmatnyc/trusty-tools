@@ -498,7 +498,16 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
             // #5819: a second provenance gate — drop drawers written while
             // working on a different repository. Runs before the floor for the
             // same reason the deny filter does.
-            let drawers = filter_drawers_by_project_scope(drawers, session_root.as_deref());
+            let scope = filter_drawers_by_project_scope(drawers, session_root.as_deref());
+            // #5819: the count is the alarm. Two fail-closed defects shipped
+            // through this filter unobserved because it dropped silently.
+            tracing::debug!(
+                session_root = session_root.as_deref().unwrap_or("<unresolved>"),
+                kept = scope.kept.len(),
+                dropped = scope.dropped,
+                "prompt-context project-scope filter"
+            );
+            let drawers = scope.kept;
             // #5037: the deny filter judges provenance; this one judges
             // relevance. It runs last so a drawer excluded for where it came
             // from is never also counted as "withheld below the floor" — the
@@ -764,11 +773,16 @@ fn resolve_palace_slug(stdin_payload: &str) -> Option<String> {
 /// falling back to the process cwd. `--git-common-dir` names the main repo's
 /// `.git` from inside a linked worktree, so a dispatched agent under
 /// `.claude/worktrees/<name>` and the main checkout answer with one path.
-/// Returns `None` when git cannot name a repository, which disables the filter
-/// rather than making it guess — deliberately without
-/// `find_project_root`'s marker walk as a fallback, since that walk is the
-/// defect above.
+/// Returns `None` when git cannot name a repository, and also when the answer
+/// cannot be confirmed as a working tree of that repository — inside a submodule
+/// the common dir is `<outer>/.git/modules/<name>`, whose parent is a git
+/// internals directory rather than a checkout. Either way the filter is disabled
+/// rather than pointed at a path no drawer can sit under; the confirmation lives
+/// in [`trusty_common::palace_resolve::main_worktree_root`] so every consumer of
+/// that probe gets it. Deliberately without `find_project_root`'s marker walk as
+/// a fallback, since that walk is the defect above.
 /// Test: `session_project_root_resolves_a_worktree_to_its_main_checkout`,
+/// `session_project_root_is_none_inside_a_separate_git_dir_child`,
 /// `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`.
 fn resolve_session_project_root(stdin_payload: &str) -> Option<String> {
     let start = payload_cwd(stdin_payload)

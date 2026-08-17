@@ -259,6 +259,13 @@ pub(super) fn select_relevant_triples(
 /// Fails OPEN in every ambiguous case — absent tag, absent `session_root`,
 /// empty path — because dropping a drawer the filter cannot judge would lose
 /// real knowledge to a heuristic.
+///
+/// Returns both counts, not just the drop, because a drop count with no
+/// denominator does not tell an operator whether the drop is expected. Two
+/// fail-closed defects shipped through this function unnoticed while the
+/// relevance floor beside it reported `withheld` (#5819). The `debug!` that
+/// renders the pair lives at the call site in `mod.rs`, so the disabled-filter
+/// case — no resolvable session root, the early return below — is logged too.
 /// Test: `project_scope_drops_foreign_cwd_drawer`,
 /// `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`,
 /// `project_scope_keeps_in_tree_writers_and_drops_prefix_siblings`.
@@ -267,14 +274,33 @@ pub(super) fn select_relevant_triples(
 pub(super) fn filter_drawers_by_project_scope(
     drawers: Vec<RecalledDrawer>,
     session_root: Option<&str>,
-) -> Vec<RecalledDrawer> {
+) -> ScopeOutcome {
     let Some(root) = session_root.filter(|r| !r.is_empty()) else {
-        return drawers;
+        return ScopeOutcome {
+            kept: drawers,
+            dropped: 0,
+        };
     };
-    drawers
+    let total = drawers.len();
+    let kept: Vec<RecalledDrawer> = drawers
         .into_iter()
         .filter(|d| drawer_is_in_project_scope(d, root))
-        .collect()
+        .collect();
+    let dropped = total - kept.len();
+    ScopeOutcome { kept, dropped }
+}
+
+/// What [`filter_drawers_by_project_scope`] kept, and how much it dropped.
+///
+/// Why: the count is the alarm. Kept as its own type rather than reusing
+/// [`FloorOutcome`] because that struct's `withheld` is rendered to the model as
+/// "`memory_recall` would show more" — a promise this filter must never make,
+/// since a drawer excluded for where it came from is not something the reader
+/// wants back.
+/// Test: `project_scope_counts_what_it_drops`.
+pub(super) struct ScopeOutcome {
+    pub(super) kept: Vec<RecalledDrawer>,
+    pub(super) dropped: usize,
 }
 
 /// Decide whether one drawer's recorded cwd belongs to `root`.

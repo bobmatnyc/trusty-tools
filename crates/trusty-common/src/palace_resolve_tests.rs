@@ -397,6 +397,63 @@ fn worktree_and_main_checkout_agree_when_pinned() {
 // git helpers
 // ---------------------------------------------------------------------------
 
+/// Why (#5819): `--git-common-dir` is `<outer>/.git/modules/<name>` inside a
+/// submodule, so "parent of the common dir" is `<outer>/.git/modules` — git
+/// internals, not a working tree — and the probe returned it confidently. A
+/// caller cannot tell that answer from a real root by looking at the path, and
+/// trusty-memory's prompt-context filter drops every drawer whose recorded cwd
+/// falls outside the root it is given.
+/// What: builds the `.git`-file structure a submodule produces, via `git init
+/// --separate-git-dir` into `<outer>/.git/modules/sub`, then asserts the probe
+/// declines instead of naming the internals directory.
+/// Test: itself. Fails against `0ac9e1f4`, which returns
+/// `<outer>/.git/modules`.
+#[test]
+fn separate_git_dir_child_yields_none_not_a_git_internals_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outer = tmp.path().join("outer");
+    let sub = outer.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    if !init_repo(&outer, None) {
+        eprintln!(
+            "skipping separate_git_dir_child_yields_none_not_a_git_internals_path: git unavailable"
+        );
+        return;
+    }
+    let modules = outer.join(".git").join("modules");
+    fs::create_dir_all(&modules).unwrap();
+    let separate = modules.join("sub");
+    let init = Command::new("git")
+        .arg("-C")
+        .arg(&sub)
+        .args([
+            "init",
+            "-q",
+            &format!("--separate-git-dir={}", separate.display()),
+            ".",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !init {
+        eprintln!(
+            "skipping separate_git_dir_child_yields_none_not_a_git_internals_path: cannot init"
+        );
+        return;
+    }
+    assert!(
+        sub.join(".git").is_file(),
+        "fixture must reproduce the `.git` FILE a submodule checkout carries"
+    );
+
+    let resolved = main_worktree_root(&sub);
+    assert_eq!(
+        resolved, None,
+        "a common dir under `.git/modules` names no working tree; the probe must \
+         decline rather than return {resolved:?}"
+    );
+}
+
 /// Why: outside a repo both probes must decline rather than guess.
 #[test]
 fn git_probes_outside_a_repo_are_none() {

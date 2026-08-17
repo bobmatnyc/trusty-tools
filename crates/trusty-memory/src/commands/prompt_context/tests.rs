@@ -477,13 +477,14 @@ fn project_scope_drops_foreign_cwd_drawer() {
             vec!["creator:cwd=/users/bob/proj/trusty-tools/crates/trusty-memory".to_string()],
         ),
     ];
-    let kept = filter_drawers_by_project_scope(drawers, Some("/users/bob/proj/trusty-tools"));
-    let names: Vec<&str> = kept.iter().map(|d| d.content.as_str()).collect();
+    let out = filter_drawers_by_project_scope(drawers, Some("/users/bob/proj/trusty-tools"));
+    let names: Vec<&str> = out.kept.iter().map(|d| d.content.as_str()).collect();
     assert_eq!(
         names,
         vec!["untagged", "in-tree"],
         "only the other repository's drawer may be dropped"
     );
+    assert_eq!(out.dropped, 1, "the drop must be counted, not silent");
 }
 
 /// Run one git command inside `dir` and fail the test with git's own stderr.
@@ -626,11 +627,11 @@ fn project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate() {
             score: Some(0.7),
         }
     };
-    let kept = filter_drawers_by_project_scope(
+    let out = filter_drawers_by_project_scope(
         vec![mk(&repo), mk(&sibling_crate), mk(&foreign)],
         Some(&root),
     );
-    let names: Vec<&str> = kept.iter().map(|d| d.content.as_str()).collect();
+    let names: Vec<&str> = out.kept.iter().map(|d| d.content.as_str()).collect();
     assert_eq!(
         names,
         vec![
@@ -667,11 +668,11 @@ fn project_scope_keeps_in_tree_writers_and_drops_prefix_siblings() {
     let shouty = "/Users/Bob/Proj/Trusty-Tools/crates/";
     let sibling = "/users/bob/proj/trusty-tools-fork";
 
-    let kept = filter_drawers_by_project_scope(
+    let out = filter_drawers_by_project_scope(
         vec![mk(&worktree), mk(&nested), mk(shouty), mk(sibling)],
         Some(root),
     );
-    let names: Vec<&str> = kept.iter().map(|d| d.content.as_str()).collect();
+    let names: Vec<&str> = out.kept.iter().map(|d| d.content.as_str()).collect();
     assert_eq!(
         names,
         vec![worktree.as_str(), nested.as_str(), shouty],
@@ -689,15 +690,111 @@ fn project_scope_keeps_in_tree_writers_and_drops_prefix_siblings() {
     let empty_cwd = mk("   ");
     let open = filter_drawers_by_project_scope(vec![untagged, empty_cwd], Some(root));
     assert_eq!(
-        open.len(),
+        open.kept.len(),
         2,
         "a drawer with no recorded cwd, or an empty one, is unjudgeable and stays"
     );
+    assert_eq!(open.dropped, 0);
     let no_root = filter_drawers_by_project_scope(vec![mk(sibling)], None);
     assert_eq!(
-        no_root.len(),
+        no_root.kept.len(),
         1,
         "an unresolvable session root disables the filter rather than dropping content"
+    );
+    assert_eq!(
+        no_root.dropped, 0,
+        "the disabled filter must report a zero drop, not an unreported one"
+    );
+}
+
+/// Why (#5819): two fail-closed defects shipped through this filter unnoticed
+/// because it dropped drawers silently. The relevance floor beside it has always
+/// reported `withheld`; the operator had no equivalent number here, so recall
+/// degrading to only the untagged drawers looked like an empty palace.
+/// What: filters four drawers against a root two of them sit outside, and
+/// asserts both halves of the pair — a drop count with no denominator does not
+/// say whether the drop is expected.
+/// Test: itself. Fails against `0ac9e1f4`, where the filter returns a bare
+/// `Vec` and no count exists to assert.
+#[test]
+fn project_scope_counts_what_it_drops() {
+    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    let root = "/users/bob/proj/trusty-tools";
+    let mk = |cwd: &str| RecalledDrawer {
+        content: cwd.to_string(),
+        tags: vec![format!("creator:cwd={cwd}")],
+        layer: Some(2),
+        score: Some(0.7),
+    };
+    let out = filter_drawers_by_project_scope(
+        vec![
+            mk(root),
+            mk("/users/bob/proj/trusty-tools/crates/trusty-memory"),
+            mk("/users/bob/duetto/cto"),
+            mk("/users/bob/proj/some-other-repo"),
+        ],
+        Some(root),
+    );
+    assert_eq!((out.kept.len(), out.dropped), (2, 2));
+}
+
+/// Why (#5819): inside a submodule — or any repo created with
+/// `--separate-git-dir` — `git rev-parse --git-common-dir` is
+/// `<outer>/.git/modules/<name>`, so the parent the resolver used to trust is
+/// `<outer>/.git/modules`. That is not a working tree, so no drawer's recorded
+/// cwd can sit inside it: every provenance-tagged drawer failed the containment
+/// test, then canonicalised successfully (the internals directory exists) and
+/// failed it again, and was dropped. Untagged drawers survived, so recall
+/// degraded instead of emptying.
+/// What: builds the `.git`-file structure a submodule produces, resolves the
+/// session root from a payload whose `cwd` is the child checkout, asserts the
+/// resolver declines rather than naming the internals directory, and asserts a
+/// drawer recorded inside that child is KEPT.
+/// Test: itself. Fails against `0ac9e1f4`, where the root resolves to
+/// `<outer>/.git/modules` and the drawer is dropped.
+#[test]
+fn session_project_root_is_none_inside_a_separate_git_dir_child() {
+    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outer = tmp.path().join("outer");
+    let child = outer.join("sub");
+    std::fs::create_dir_all(&child).expect("mkdir child");
+    init_test_repo(&outer);
+    let modules = outer.join(".git/modules");
+    std::fs::create_dir_all(&modules).expect("mkdir modules");
+    git_in(
+        &child,
+        &[
+            "init",
+            "-q",
+            &format!("--separate-git-dir={}", modules.join("sub").display()),
+            ".",
+        ],
+    );
+    assert!(
+        child.join(".git").is_file(),
+        "fixture must reproduce the `.git` FILE a submodule checkout carries"
+    );
+
+    let payload = serde_json::json!({ "cwd": child.to_string_lossy() }).to_string();
+    let resolved = resolve_session_project_root(&payload);
+    assert_eq!(
+        resolved, None,
+        "a root that is not a working tree must disable the filter, not become it"
+    );
+
+    let cwd = child.to_string_lossy().to_string();
+    let drawer = RecalledDrawer {
+        content: cwd.clone(),
+        tags: vec![format!("creator:cwd={cwd}")],
+        layer: Some(2),
+        score: Some(0.7),
+    };
+    let out = filter_drawers_by_project_scope(vec![drawer], resolved.as_deref());
+    assert_eq!(
+        (out.kept.len(), out.dropped),
+        (1, 0),
+        "a drawer written inside the child checkout is this project's own"
     );
 }
 
