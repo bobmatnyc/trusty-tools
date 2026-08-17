@@ -34,6 +34,10 @@ pub use operations::{
     cwd_palace_slug, cwd_palace_slug_at, list_messages, list_unread_messages, mark_message_read,
     send_message_to_palace,
 };
+// #5819: crate-internal — `prompt-context` resolves its session project root
+// with the same call `cwd_palace_slug_at` uses, so the scope filter and the
+// palace it filters never disagree about which tree the session is in.
+pub(crate) use operations::git_toplevel;
 pub use types::{
     build_message_tags, slugify_for_palace, slugify_string, Message, MSG_MARKER_TAG,
     TAG_FROM_PREFIX, TAG_PURPOSE_PREFIX, TAG_READ_PREFIX, TAG_SENT_AT_PREFIX, TAG_TO_PREFIX,

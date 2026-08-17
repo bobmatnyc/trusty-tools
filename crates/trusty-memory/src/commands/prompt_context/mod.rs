@@ -20,7 +20,7 @@
 //!
 //! Failures on any branch are isolated — each fetch is bounded by
 //! `HTTP_TIMEOUT` and individual errors are skipped without failing the
-//! hook. When every section is empty the command prints **nothing** (#5817):
+//! hook. When every section is empty the command prints **nothing** (#5819):
 //! this runs on every prompt of every session, so an injection that has no
 //! content to carry must cost no tokens to say so.
 //!
@@ -460,7 +460,7 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
     //    to the process cwd. Both lookups are wrapped in `ok()` so failure
     //    just yields `None` (we'll skip palace-specific sections).
     let palace_slug = resolve_palace_slug(trigger_payload);
-    // #5817: resolved once per firing, not per drawer — the walk touches the
+    // #5819: resolved once per firing, not per drawer — the walk touches the
     // filesystem and the answer is the same for every candidate.
     let session_root = resolve_session_project_root(trigger_payload);
 
@@ -495,7 +495,7 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
             // back to global hot facts via the existing branch below.
             let deny_tags = configured_deny_tags();
             let drawers = filter_drawers_by_deny_tags(drawers, &deny_tags);
-            // #5817: a second provenance gate — drop drawers written while
+            // #5819: a second provenance gate — drop drawers written while
             // working on a different repository. Runs before the floor for the
             // same reason the deny filter does.
             let drawers = filter_drawers_by_project_scope(drawers, session_root.as_deref());
@@ -514,7 +514,7 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
         None => (global_fut.await, Vec::new(), 0, Vec::new()),
     };
 
-    // 5. Compose the injection. An empty composition stays empty — #5817
+    // 5. Compose the injection. An empty composition stays empty — #5819
     //    replaced the `EMPTY_PLACEHOLDER` fallback, which spent 27 bytes per
     //    firing announcing that there was nothing to inject. The constant
     //    survives because `fetch_global_prompt_context` still recognises it as
@@ -746,22 +746,33 @@ fn resolve_palace_slug(stdin_payload: &str) -> Option<String> {
 /// Resolve the project tree this firing belongs to, normalised for comparison
 /// against a drawer's recorded `creator:cwd`.
 ///
-/// Why (#5817): [`filter_drawers_by_project_scope`] needs one stable answer to
+/// Why (#5819): [`filter_drawers_by_project_scope`] needs one stable answer to
 /// "which project is this session working on?". The stdin `cwd` is the source of
 /// truth for the same reason [`resolve_palace_slug`] uses it — the hook process'
 /// own cwd is whatever Claude Code launched it with, not where the user is.
-/// What: walks up from the stdin `cwd` (falling back to the process cwd) via
-/// [`crate::project_root::find_project_root`], then normalises the result the
-/// same way drawer paths are normalised, so an agent worktree under
-/// `.claude/worktrees/` resolves to the main checkout rather than to itself.
-/// Returns `None` when no project marker is found, which disables the filter
-/// rather than making it guess.
-/// Test: `session_project_root_normalises_a_worktree_to_its_checkout`.
+///
+/// The resolver has to be the SAME one that picked the palace these drawers came
+/// out of. It was [`crate::project_root::find_project_root`], whose marker list
+/// includes `Cargo.toml` and whose walk is inclusive of `start`, so in a Cargo
+/// workspace it stopped at the CRATE directory while
+/// [`crate::messaging::cwd_palace_slug_at`] resolved the palace from the
+/// workspace root. Recall then ran against the right palace and the filter
+/// dropped every drawer written from the repo root or a sibling crate — silently,
+/// uncounted, and against this filter's own fail-open contract.
+/// What: asks git for the working-tree root of the stdin `cwd` (falling back to
+/// the process cwd) via [`crate::messaging::git_toplevel`] — the same call
+/// `cwd_palace_slug_at` makes — then truncates any `.claude/worktrees/<name>`
+/// suffix through [`filter::normalise_project_path`], because git answers a
+/// dispatched agent's cwd with the worktree rather than the checkout that owns
+/// it. Returns `None` when git cannot name a working tree, which disables the
+/// filter rather than making it guess.
+/// Test: `session_project_root_normalises_a_worktree_to_its_checkout`,
+/// `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`.
 fn resolve_session_project_root(stdin_payload: &str) -> Option<String> {
     let start = payload_cwd(stdin_payload)
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
-    let root = crate::project_root::find_project_root(&start)?;
+    let root = crate::messaging::git_toplevel(&start)?;
     let normalised = filter::normalise_project_path(&root.to_string_lossy());
     if normalised.is_empty() {
         None

@@ -200,7 +200,7 @@ pub(super) fn filter_drawers_by_relevance_floor(
 ///
 /// # Spec References
 /// - [ADR-0028 D7](docs/adr/0028-memory-recall-tiers-standing-current-episodic.md)
-// #5817: the allow-list is the whole fix for the provenance/SHA noise.
+// #5819: the allow-list is the whole fix for the provenance/SHA noise.
 pub(super) fn select_relevant_triples(
     triples: &[RawTriple],
     prompt: &str,
@@ -241,69 +241,113 @@ pub(super) fn select_relevant_triples(
 /// only its own provenance tag records where it came from. Reading that tag is
 /// the one signal available at recall time.
 /// What: keeps every drawer that carries no `creator:cwd=` tag, and every
-/// drawer whose recorded cwd sits inside `session_root`. `session_root` and each
-/// recorded cwd are compared after [`normalise_project_path`], so a worktree
-/// under `.claude/worktrees/` and a crate subdirectory both resolve to the same
-/// root as the main checkout. Fails OPEN in every ambiguous case — absent tag,
-/// absent `session_root`, unparseable path — because dropping a drawer the
-/// filter cannot judge would lose real knowledge to a heuristic.
+/// drawer whose recorded cwd sits at or inside `session_root`. `session_root` is
+/// the session's git working-tree root with any `.claude/worktrees/<name>`
+/// suffix truncated (`resolve_session_project_root` in `mod.rs`), so the main
+/// checkout, a crate subdirectory under it, and an agent worktree all produce
+/// the same root; each recorded cwd goes through the same
+/// [`normalise_project_path`] before the containment test.
+///
+/// A recorded cwd that lands outside is not dropped on the string comparison
+/// alone. `creator:cwd` is stored verbatim — `std::env::current_dir()` on the
+/// self-attributed path, a caller-supplied string on the daemon path — while
+/// `session_root` came back from git already symlink-resolved, so the path is
+/// canonicalised and retested before the drop. A recorded cwd that does not
+/// resolve on this machine has no evidence beyond its own string, and that
+/// string already said "outside"; the asymmetry closes only for paths that
+/// still exist here.
+///
+/// Fails OPEN in every ambiguous case — absent tag, absent `session_root`,
+/// empty path — because dropping a drawer the filter cannot judge would lose
+/// real knowledge to a heuristic.
 /// Test: `project_scope_drops_foreign_cwd_drawer`,
-/// `project_scope_keeps_worktree_and_subdirectory_writers`. The first asserts
-/// both halves against one mixed fixture — the foreign drawer dropped, the
-/// untagged and in-tree ones kept; the second covers worktree normalisation and
-/// the fail-open paths.
-// #5817: cross-project leakage, read-side mitigation only — the write that put
+/// `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`,
+/// `project_scope_keeps_in_tree_writers_and_drops_prefix_siblings`.
+// #5819: cross-project leakage, read-side mitigation only — the write that put
 // the drawer in this palace is the actual defect.
 pub(super) fn filter_drawers_by_project_scope(
     drawers: Vec<RecalledDrawer>,
     session_root: Option<&str>,
 ) -> Vec<RecalledDrawer> {
-    let Some(root) = session_root else {
+    let Some(root) = session_root.filter(|r| !r.is_empty()) else {
         return drawers;
     };
     drawers
         .into_iter()
-        .filter(|d| match drawer_creator_root(d) {
-            Some(drawer_root) => path_contains(root, &drawer_root),
-            None => true,
-        })
+        .filter(|d| drawer_is_in_project_scope(d, root))
         .collect()
 }
 
-/// Extract a drawer's normalised `creator:cwd` project path, if it records one.
+/// Decide whether one drawer's recorded cwd belongs to `root`.
+///
+/// Why: the keep/drop decision has five exits and four of them keep. Splitting
+/// them out of the filter closure leaves each one visible instead of collapsed
+/// into a match arm.
+/// What: `true` when the drawer records no cwd, when that cwd normalises to
+/// nothing, when it sits at or inside `root`, or when canonicalising it lands
+/// inside `root`. `false` only when the recorded cwd is outside `root` both as
+/// written and as resolved.
+/// Test: `project_scope_drops_foreign_cwd_drawer`,
+/// `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`.
+fn drawer_is_in_project_scope(d: &RecalledDrawer, root: &str) -> bool {
+    let Some(raw) = drawer_creator_cwd(d) else {
+        return true;
+    };
+    let normalised = normalise_project_path(&raw);
+    if normalised.is_empty() {
+        return true;
+    }
+    if path_contains(root, &normalised) {
+        return true;
+    }
+    // #5819: resolve symlinked components before believing the mismatch. A path
+    // that no longer exists here cannot be resolved, so the string verdict
+    // stands.
+    match std::fs::canonicalize(&raw) {
+        Ok(resolved) => path_contains(root, &normalise_project_path(&resolved.to_string_lossy())),
+        Err(_) => false,
+    }
+}
+
+/// Extract a drawer's recorded `creator:cwd` value, verbatim.
 ///
 /// Why: split out so the tag-shape handling is asserted directly rather than
-/// only through the filter.
+/// only through the filter, and returned unnormalised so the caller can hand the
+/// original string to `std::fs::canonicalize`.
 /// What: finds the first tag starting with [`crate::attribution::CREATOR_CWD_PREFIX`]
 /// (case-insensitively — the tag is lowercased on some write paths) and returns
-/// its value through [`normalise_project_path`]. `None` when absent or empty.
+/// its trimmed value. `None` when absent or empty.
 /// Test: `project_scope_drops_foreign_cwd_drawer`.
-fn drawer_creator_root(d: &RecalledDrawer) -> Option<String> {
+fn drawer_creator_cwd(d: &RecalledDrawer) -> Option<String> {
     const PREFIX: &str = crate::attribution::CREATOR_CWD_PREFIX;
     let raw = d.tags.iter().find_map(|t| {
         let (head, rest) = t.split_at_checked(PREFIX.len())?;
         head.eq_ignore_ascii_case(PREFIX).then_some(rest)
     })?;
-    let normalised = normalise_project_path(raw);
-    if normalised.is_empty() {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
         None
     } else {
-        Some(normalised)
+        Some(trimmed.to_string())
     }
 }
 
 /// Reduce a filesystem path to the project tree it belongs to.
 ///
-/// Why: the same project is written from three shapes of path — the main
-/// checkout, a crate subdirectory under it, and an agent worktree under
-/// `.claude/worktrees/<name>` (ADR-0036). Comparing raw strings would call a
-/// worktree writer "another project", which is the false positive that would
-/// make this filter lose real content.
+/// Why: a dispatched agent's cwd is an agent worktree under
+/// `.claude/worktrees/<name>` (ADR-0036), and `git rev-parse --show-toplevel`
+/// answers with the worktree itself. Left alone, that would make the session
+/// root a sibling of every drawer written from the main checkout and drop them
+/// all — the false positive that would cost more real content than the leak this
+/// filter exists to stop.
 /// What: lowercases, trims a trailing `/`, and truncates at the
 /// `/.claude/worktrees/` segment when present. macOS is case-insensitive and
 /// some write paths lowercase the tag, so the comparison is lowercase on both
 /// sides.
-/// Test: `project_scope_keeps_worktree_and_subdirectory_writers`.
+/// Test: `session_project_root_normalises_a_worktree_to_its_checkout` covers the
+/// truncation against a real `git worktree`;
+/// `project_scope_keeps_in_tree_writers_and_drops_prefix_siblings` covers the case and
+/// trailing-slash folding.
 pub(super) fn normalise_project_path(path: &str) -> String {
     let lower = path.trim().trim_end_matches('/').to_lowercase();
     match lower.find("/.claude/worktrees/") {
@@ -317,7 +361,7 @@ pub(super) fn normalise_project_path(path: &str) -> String {
 /// Why: a plain `starts_with` on strings would treat `/a/foo-other` as inside
 /// `/a/foo`. The separator check is what makes the containment test a path
 /// test rather than a prefix test.
-/// Test: `project_scope_keeps_worktree_and_subdirectory_writers`.
+/// Test: `project_scope_keeps_in_tree_writers_and_drops_prefix_siblings`.
 fn path_contains(root: &str, candidate: &str) -> bool {
     candidate == root || candidate.starts_with(&format!("{root}/"))
 }

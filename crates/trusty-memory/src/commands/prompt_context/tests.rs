@@ -86,7 +86,7 @@ fn filter_drawers_by_deny_tags_handles_edge_cases() {
 /// injection just dumps random graph noise.
 /// What: build a small set of hot-predicate triples; query a prompt that
 /// mentions only one subject; assert exactly the matching triple comes back.
-/// #5817 changed the fixture's predicates from `is-a` to hot ones so this test
+/// #5819 changed the fixture's predicates from `is-a` to hot ones so this test
 /// keeps covering the *overlap* rule rather than silently passing because the
 /// predicate gate rejected everything.
 /// Test: itself.
@@ -119,14 +119,14 @@ fn select_relevant_triples_filters_by_prompt_overlap() {
     assert!(none.is_empty());
 }
 
-/// Why (#5817, ADR-0028 D7): the selector judged only whether a triple's
+/// Why (#5819, ADR-0028 D7): the selector judged only whether a triple's
 /// endpoints appeared in the prompt, never whether the triple asserted
 /// knowledge. Storage plumbing reached the model under a "Relevant KG facts"
 /// heading — the three shapes below are verbatim from real injected output.
 /// What: builds one triple of each observed noise shape plus one genuine hot
 /// triple, uses a prompt that overlaps ALL of them so the overlap rule cannot
 /// be what excludes anything, and asserts only the hot triple survives.
-/// Test: itself. Fails against the pre-#5817 selector, which returns all four.
+/// Test: itself. Fails against the pre-#5819 selector, which returns all four.
 #[test]
 fn select_relevant_triples_drops_structural_predicates() {
     use filter::{select_relevant_triples, RawTriple};
@@ -163,7 +163,7 @@ fn select_relevant_triples_drops_structural_predicates() {
     assert_eq!(chosen[0].predicate, "has_convention");
 }
 
-/// Why (#5817): the specific line the owner cited —
+/// Why (#5819): the specific line the owner cited —
 /// `tag:creator:client=trusty-memory-mcp **tags** drawer:58141829-…` — is
 /// write-path provenance rendered to the model as a fact. This pins that exact
 /// shape rather than the general rule, so a future change that reintroduces
@@ -171,7 +171,7 @@ fn select_relevant_triples_drops_structural_predicates() {
 /// one silently.
 /// What: composes the three `creator:*` triple shapes stamped on every drawer
 /// and asserts none is selected, with a prompt that overlaps them.
-/// Test: itself. Fails against the pre-#5817 selector.
+/// Test: itself. Fails against the pre-#5819 selector.
 #[test]
 fn select_relevant_triples_drops_creator_provenance_triples() {
     use filter::{select_relevant_triples, RawTriple};
@@ -378,7 +378,7 @@ fn compose_injection_announces_withheld_drawers() {
     );
 }
 
-/// Why (#5817, superseding #5037 requirement 4 for the total-silence case):
+/// Why (#5819, superseding #5037 requirement 4 for the total-silence case):
 /// #5037 announced an all-withheld recall so the reader could tell it apart
 /// from an empty palace. That sentence rendered on every prompt with no good
 /// match — most prompts — and spent ~200 bytes per turn to report having
@@ -388,7 +388,7 @@ fn compose_injection_announces_withheld_drawers() {
 /// What: composes with zero kept and five withheld, then with zero of both.
 /// Asserts BOTH render as an empty injection, and that no fragment of the
 /// retired notice survives anywhere.
-/// Test: itself. Fails against the pre-#5817 composer, which returns ~200
+/// Test: itself. Fails against the pre-#5819 composer, which returns ~200
 /// bytes for the first case.
 #[test]
 fn compose_injection_is_silent_when_everything_was_withheld() {
@@ -418,13 +418,13 @@ fn compose_injection_is_silent_when_everything_was_withheld() {
     }
 }
 
-/// Why (#5817, ADR-0028 D7): the KG section had no length control beyond the
+/// Why (#5819, ADR-0028 D7): the KG section had no length control beyond the
 /// triple count, and a triple's rendered width is unbounded. D7 allocates it
 /// 256 bytes.
 /// What: hands the composer ten hot triples whose rendered lines total well
 /// past the cap, and asserts the emitted section stays inside it while still
 /// carrying at least one fact.
-/// Test: itself. Fails against the pre-#5817 composer, which renders all ten.
+/// Test: itself. Fails against the pre-#5819 composer, which renders all ten.
 #[test]
 fn compose_injection_caps_kg_section_bytes() {
     use filter::RawTriple;
@@ -448,14 +448,14 @@ fn compose_injection_caps_kg_section_bytes() {
     );
 }
 
-/// Why (#5817): a drawer tagged `creator:cwd=/Users/bob/Duetto/cto` — a note
+/// Why (#5819): a drawer tagged `creator:cwd=/Users/bob/Duetto/cto` — a note
 /// about a different repository — was recalled into `trusty-tools` sessions
 /// turn after turn. The drawer lives in this palace, so palace resolution
 /// cannot exclude it; its own provenance tag is the only signal.
 /// What: three drawers — one from another repo, one untagged, one from a
 /// subdirectory of the session root — filtered against a session root. Asserts
 /// only the foreign one is dropped.
-/// Test: itself. Fails against the pre-#5817 pipeline, which has no such
+/// Test: itself. Fails against the pre-#5819 pipeline, which has no such
 /// filter and returns all three.
 #[test]
 fn project_scope_drops_foreign_cwd_drawer() {
@@ -486,24 +486,86 @@ fn project_scope_drops_foreign_cwd_drawer() {
     );
 }
 
-/// Why (#5817): the session root feeding the project-scope filter is resolved
+/// Run one git command inside `dir` and fail the test with git's own stderr.
+///
+/// Why (#5819): the fixtures below need repositories git will actually answer
+/// for, and a silently-failing `git init` would leave a fixture that proves the
+/// opposite of what its test claims.
+/// What: runs `git -C <dir> <args>` with identity and signing pinned per
+/// invocation so the runner's global config cannot fail the commit, then
+/// asserts a zero exit.
+/// Test: used by `session_project_root_normalises_a_worktree_to_its_checkout`
+/// and `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`.
+fn git_in(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .expect("git must be on PATH for these fixtures");
+    assert!(
+        out.status.success(),
+        "git {args:?} in {} failed: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Create a git repository at `dir` carrying one empty commit.
+///
+/// Why: `git worktree add` needs a HEAD, and `rev-parse --show-toplevel` needs
+/// a real repository — a hand-made `.git` directory answers neither.
+/// What: creates `dir`, runs `git init`, and commits `--allow-empty`.
+/// Test: used by `session_project_root_normalises_a_worktree_to_its_checkout`
+/// and `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`.
+fn init_test_repo(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).expect("mkdir repo");
+    git_in(dir, &["init", "-q"]);
+    git_in(dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+}
+
+/// Why (#5819): the session root feeding the project-scope filter is resolved
 /// from the stdin `cwd`, and a dispatched agent's cwd is almost always a
-/// worktree. If that resolved to the worktree directory itself, every drawer
-/// written from the main checkout would look foreign and be dropped — the
-/// filter would delete more real content than the leak it exists to stop.
-/// What: lays down a project marker at a temp root, puts a worktree beneath it,
-/// and asserts a payload whose `cwd` is the worktree resolves to the root.
-/// Test: itself.
+/// worktree. `git rev-parse --show-toplevel` answers a linked worktree with the
+/// worktree itself, so without truncation every drawer written from the main
+/// checkout would look foreign and be dropped — the filter would delete more
+/// real content than the leak it exists to stop.
+/// What: creates a real repository, adds a real `git worktree` under
+/// `.claude/worktrees/`, asserts git wrote the `.git` FILE that makes the
+/// worktree its own toplevel, and asserts the resolved root is the checkout.
+/// Test: itself. Fails with the `/.claude/worktrees/` truncation removed from
+/// `normalise_project_path`, which then resolves to the worktree.
 #[test]
 fn session_project_root_normalises_a_worktree_to_its_checkout() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().join("trusty-tools");
+    init_test_repo(&root);
     let worktree = root.join(".claude/worktrees/agent-abc123");
-    std::fs::create_dir_all(&worktree).expect("mkdir worktree");
-    // `.git` at the root is the marker `find_project_root` walks up to. The
-    // worktree carries none of its own, matching how git writes a `.git` FILE
-    // there rather than a directory.
-    std::fs::create_dir_all(root.join(".git")).expect("mkdir .git");
+    git_in(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-abc123",
+            &worktree.to_string_lossy(),
+        ],
+    );
+    // Production takes this path: git marks a linked worktree with a `.git`
+    // FILE, and answers `--show-toplevel` from inside it with the worktree.
+    assert!(
+        worktree.join(".git").is_file(),
+        "fixture must reproduce git's linked-worktree `.git` file"
+    );
 
     let payload = serde_json::json!({ "cwd": worktree.to_string_lossy() }).to_string();
     let resolved = resolve_session_project_root(&payload).expect("root resolves");
@@ -519,16 +581,77 @@ fn session_project_root_normalises_a_worktree_to_its_checkout() {
     );
 }
 
-/// Why (#5817): the filter must never mistake this project's own worktrees for
-/// another project — every dispatched agent writes from
-/// `.claude/worktrees/<name>`, so a naive string prefix would drop most of the
-/// corpus. It must also fail open when it cannot judge.
-/// What: asserts a worktree writer and a nested-subdirectory writer both
-/// survive, that a sibling directory sharing a name prefix does not, and that
-/// an absent session root disables the filter entirely.
-/// Test: itself.
+/// Why (#5819): the filter's own contract is that it fails OPEN, and it did the
+/// opposite in the commonest shape there is. The session root came from a marker
+/// walk that counts `Cargo.toml` and stops at the first hit, so a session
+/// working inside `crates/trusty-memory` resolved its root to that crate while
+/// `cwd_palace_slug_at` resolved the palace to the workspace. Recall then ran
+/// against the right palace and this filter discarded every drawer written from
+/// the repo root or a sibling crate — no count, no log line.
+/// What: builds a real repository laid out as a Cargo workspace, resolves the
+/// session root from a payload whose `cwd` is the crate directory, and asserts a
+/// repo-root writer and a sibling-crate writer both survive while a genuinely
+/// foreign repository is still dropped. The drawer cwds are the uncanonicalised
+/// temp paths, so this also covers the symlink rescue — macOS hands out
+/// `/var/folders/…` for a `/private/var/folders/…` tree.
+/// Test: itself. Fails against `0f24dbe65`, where both in-tree writers are
+/// dropped.
 #[test]
-fn project_scope_keeps_worktree_and_subdirectory_writers() {
+fn project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate() {
+    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("trusty-tools");
+    init_test_repo(&repo);
+    let crate_dir = repo.join("crates/trusty-memory");
+    let sibling_crate = repo.join("crates/trusty-search");
+    let foreign = tmp.path().join("some-other-repo");
+    for d in [&crate_dir, &sibling_crate, &foreign] {
+        std::fs::create_dir_all(d).expect("mkdir");
+    }
+    // The marker that used to truncate the session root to the crate.
+    std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").expect("workspace manifest");
+    std::fs::write(crate_dir.join("Cargo.toml"), "[package]\n").expect("crate manifest");
+
+    let payload = serde_json::json!({ "cwd": crate_dir.to_string_lossy() }).to_string();
+    let root = resolve_session_project_root(&payload).expect("session root resolves");
+
+    let mk = |dir: &std::path::Path| {
+        let cwd = dir.to_string_lossy().to_string();
+        RecalledDrawer {
+            content: cwd.clone(),
+            tags: vec![format!("creator:cwd={cwd}")],
+            layer: Some(2),
+            score: Some(0.7),
+        }
+    };
+    let kept = filter_drawers_by_project_scope(
+        vec![mk(&repo), mk(&sibling_crate), mk(&foreign)],
+        Some(&root),
+    );
+    let names: Vec<&str> = kept.iter().map(|d| d.content.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            repo.to_string_lossy().as_ref(),
+            sibling_crate.to_string_lossy().as_ref()
+        ],
+        "a session inside one crate must keep the repo root and its sibling crates; \
+         session root resolved to {root}"
+    );
+}
+
+/// Why (#5819): the containment test is a path test, not a string prefix — a
+/// sibling checkout named `trusty-tools-fork` must not read as inside
+/// `trusty-tools`. The filter must also fail open on the three inputs it cannot
+/// judge: no session root, no `creator:cwd` tag, an empty one.
+/// What: asserts a worktree writer, a nested-subdirectory writer, and a writer
+/// recorded with a trailing slash and mixed case all survive; that the
+/// name-prefix sibling does not; and that each fail-open input keeps its drawer.
+/// Test: itself. The `.claude/worktrees/` truncation is NOT what keeps the
+/// worktree writer here — it is inside the root either way — that branch is
+/// covered by `session_project_root_normalises_a_worktree_to_its_checkout`.
+#[test]
+fn project_scope_keeps_in_tree_writers_and_drops_prefix_siblings() {
     use filter::{filter_drawers_by_project_scope, RecalledDrawer};
     let root = "/users/bob/proj/trusty-tools";
     let mk = |cwd: &str| RecalledDrawer {
@@ -539,21 +662,38 @@ fn project_scope_keeps_worktree_and_subdirectory_writers() {
     };
     let worktree = format!("{root}/.claude/worktrees/agent-abc123");
     let nested = format!("{root}/crates/trusty-memory/src");
+    let shouty = "/Users/Bob/Proj/Trusty-Tools/crates/";
     let sibling = "/users/bob/proj/trusty-tools-fork";
 
-    let kept =
-        filter_drawers_by_project_scope(vec![mk(&worktree), mk(&nested), mk(sibling)], Some(root));
+    let kept = filter_drawers_by_project_scope(
+        vec![mk(&worktree), mk(&nested), mk(shouty), mk(sibling)],
+        Some(root),
+    );
     let names: Vec<&str> = kept.iter().map(|d| d.content.as_str()).collect();
     assert_eq!(
         names,
-        vec![worktree.as_str(), nested.as_str()],
-        "worktrees and subdirectories are this project; a name-prefix sibling is not"
+        vec![worktree.as_str(), nested.as_str(), shouty],
+        "worktrees, subdirectories, and case/slash variants are this project; \
+         a name-prefix sibling is not"
     );
 
-    // No resolvable session root → the filter must not guess.
-    let unjudgeable = filter_drawers_by_project_scope(vec![mk(sibling)], None);
+    // The three fail-open inputs.
+    let untagged = RecalledDrawer {
+        content: "untagged".into(),
+        tags: vec!["worktree".into()],
+        layer: Some(2),
+        score: Some(0.7),
+    };
+    let empty_cwd = mk("   ");
+    let open = filter_drawers_by_project_scope(vec![untagged, empty_cwd], Some(root));
     assert_eq!(
-        unjudgeable.len(),
+        open.len(),
+        2,
+        "a drawer with no recorded cwd, or an empty one, is unjudgeable and stays"
+    );
+    let no_root = filter_drawers_by_project_scope(vec![mk(sibling)], None);
+    assert_eq!(
+        no_root.len(),
         1,
         "an unresolvable session root disables the filter rather than dropping content"
     );
@@ -768,7 +908,7 @@ async fn prompt_context_recalls_palace_drawers() {
     let elapsed_ms = start.elapsed().as_millis();
     eprintln!("prompt_context_recalls_palace_drawers latency: {elapsed_ms}ms");
 
-    // #5817: an empty body is now legal, so a `!=` against the placeholder no
+    // #5819: an empty body is now legal, so a `!=` against the placeholder no
     // longer proves recall worked. Assert real content instead.
     assert!(
         !body.is_empty() && body != EMPTY_PLACEHOLDER,
@@ -884,18 +1024,18 @@ async fn prompt_context_header_names_the_alias_target() {
     addr_handle.shutdown().await;
 }
 
-/// Why (issue #5037 end to end, outcome inverted by #5817): the unit tests
+/// Why (issue #5037 end to end, outcome inverted by #5819): the unit tests
 /// above pin the floor over synthetic scores. This one proves the whole chain —
 /// real embedder, real HTTP recall, real `score` on the wire, real filter —
 /// turns an off-topic prompt into zero injected bytes. #5037 required a visible
-/// withheld notice here; #5817 requires silence, because that notice rendered
+/// withheld notice here; #5819 requires silence, because that notice rendered
 /// on every prompt nothing answered and spent tokens to report having nothing
 /// to say. The probe query is unchanged ("what is the capital of France", which
 /// returned five drawers at 0.15 rendered as if they matched).
 /// What: populates a palace with three Rust/Python/KG drawers, then submits a
 /// prompt about none of them. Asserts no drawer content reaches the injection
 /// and that the body is empty.
-/// Test: itself. Fails against the pre-#5817 handler, which emits the
+/// Test: itself. Fails against the pre-#5819 handler, which emits the
 /// "cleared the relevance floor" paragraph.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
 #[cfg(feature = "axum-server")]
@@ -953,7 +1093,7 @@ async fn prompt_context_off_topic_prompt_injects_nothing() {
             "off-topic prompt must not inject `{leaked}`; got:\n{body}"
         );
     }
-    // #5817: this asserted `body.contains("relevance floor")`. Going silent is
+    // #5819: this asserted `body.contains("relevance floor")`. Going silent is
     // now the required outcome, and this is the end-to-end proof of it — the
     // whole path, through a real daemon and a real populated palace, emits
     // zero bytes for a prompt nothing answers.
@@ -966,13 +1106,13 @@ async fn prompt_context_off_topic_prompt_injects_nothing() {
     addr_handle.shutdown().await;
 }
 
-/// Why (issue #134, negative case; contract inverted by #5817): when the
+/// Why (issue #134, negative case; contract inverted by #5819): when the
 /// resolved palace has no drawers AND no global hot facts have been asserted,
 /// the hook must emit nothing. It used to emit `EMPTY_PLACEHOLDER`, which
 /// spent bytes on every firing to report an absence.
 /// What: spin up the same daemon shape but skip the drawer-population
 /// step; assert the body is empty.
-/// Test: itself. Fails against the pre-#5817 handler, which returns
+/// Test: itself. Fails against the pre-#5819 handler, which returns
 /// `"No prompt facts stored yet."`.
 /// Note (issue #226): gated on `axum-server`; spawns the HTTP daemon.
 #[cfg(feature = "axum-server")]
@@ -989,7 +1129,7 @@ async fn prompt_context_empty_palace_falls_back_to_global() {
     })
     .to_string();
     let body = build_injection_body(&payload).await;
-    // #5817: this used to assert `EMPTY_PLACEHOLDER`. An empty palace now
+    // #5819: this used to assert `EMPTY_PLACEHOLDER`. An empty palace now
     // injects nothing at all — the placeholder spent 27 bytes per firing to
     // say so, on a hook that fires on every prompt of every session.
     assert!(
@@ -1762,7 +1902,7 @@ async fn prompt_context_injection_has_no_provenance_tags() {
     .to_string();
     let body = build_injection_body(&payload).await;
 
-    // #5817: `assert_ne!(body, EMPTY_PLACEHOLDER)` passed vacuously once an
+    // #5819: `assert_ne!(body, EMPTY_PLACEHOLDER)` passed vacuously once an
     // empty body became legal, so this now asserts real content.
     assert!(
         !body.is_empty() && body != EMPTY_PLACEHOLDER,

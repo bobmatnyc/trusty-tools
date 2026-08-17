@@ -97,7 +97,7 @@ pub(super) const KG_SECTION_BYTE_CAP: usize = 256;
 /// Returns an empty string when every section is empty, and the caller prints
 /// nothing rather than a placeholder. Silence is the correct output for a
 /// prompt with no relevant memory: it costs zero tokens, and a sentence saying
-/// so costs real ones on every turn of every session (#5817).
+/// so costs real ones on every turn of every session (#5819).
 /// Test: `compose_injection_truncates_at_cap`,
 /// `compose_injection_announces_withheld_drawers`,
 /// `compose_injection_is_silent_when_everything_was_withheld`,
@@ -114,7 +114,7 @@ pub(super) fn compose_injection(
     if let Some(facts) = global_facts {
         push_section(&mut out, facts.trim_end());
     }
-    // #5817: `withheld > 0` used to open this section on its own, so a prompt
+    // #5819: `withheld > 0` used to open this section on its own, so a prompt
     // that matched nothing still rendered a paragraph announcing the fact.
     if !drawers.is_empty() {
         let mut section = String::new();
@@ -143,7 +143,7 @@ pub(super) fn compose_injection(
         let mut rendered = 0usize;
         for t in triples {
             let line = format!("- {} **{}** {}\n", t.subject, t.predicate, t.object);
-            // #5817 (ADR-0028 D7): the KG section gets its own byte budget, so
+            // #5819 (ADR-0028 D7): the KG section gets its own byte budget, so
             // a palace with many hot triples cannot crowd out drawer recall.
             if section.len() + line.len() > KG_SECTION_BYTE_CAP {
                 break;
@@ -175,7 +175,7 @@ pub(super) fn compose_injection(
 /// Render the "further results were withheld" line for a non-empty drawer
 /// section.
 ///
-/// Why (issue #5037, requirement 4, narrowed by #5817): when the injection
+/// Why (issue #5037, requirement 4, narrowed by #5819): when the injection
 /// already shows the reader some memories, saying how many more exist below the
 /// floor is cheap and tells them `memory_recall` would return more. #5037 also
 /// emitted a longer variant when the floor kept *nothing*, on the reasoning that

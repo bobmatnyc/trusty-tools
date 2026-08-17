@@ -285,8 +285,11 @@ pub fn cwd_palace_slug_at(start: &Path) -> Result<String> {
 /// path on success, `None` when git is absent, `start` is not in a repo, or the
 /// command fails. Best-effort and side-effect-free (no network).
 /// Test: covered via `cwd_palace_slug_at_uses_git_owner_repo` and the existing
-/// `cwd_palace_slug_uses_git_toplevel`.
-fn git_toplevel(start: &Path) -> Option<std::path::PathBuf> {
+/// `cwd_palace_slug_uses_git_toplevel`; also
+/// `session_project_root_normalises_a_worktree_to_its_checkout`.
+// #5819: `prompt-context`'s project-scope filter calls this directly so its
+// session root and the palace it is filtering come from one resolver.
+pub(crate) fn git_toplevel(start: &Path) -> Option<std::path::PathBuf> {
     let output = std::process::Command::new("git")
         .arg("rev-parse")
         .arg("--show-toplevel")
