@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use crate::clone::{self, CloneOptions, CloneReport};
 use crate::config::EngagementConfig;
 use crate::discover::{self, DiscoveredRepo};
+use crate::distribute::{self, DistributeOptions, InstallPackage};
 use crate::error::AuditError;
 use crate::manifest::{AuditManifest, RepositoryEntry};
 use crate::package::{self, ReturnPackage};
@@ -103,6 +104,17 @@ pub enum Command {
         /// Where to write the zip, or `None` for the default inside the work dir.
         destination: Option<PathBuf>,
     },
+    /// Assemble the install package that goes TO a client (#5825).
+    ///
+    /// The one capability here the AUDITOR runs rather than the recipient: it
+    /// builds the zip every other capability presupposes has already been
+    /// extracted. Carries its options because the output directory and the
+    /// binary to ship are both operator choices with defaults.
+    ///
+    /// Deliberately NOT [`Command::Package`] with a direction flag — the two
+    /// travel opposite ways and disagree about the credential, so they are two
+    /// variants dispatching to two modules. See [`crate::distribute`].
+    Distribute(DistributeOptions),
 }
 
 /// The working directory's layout, as reported to a front end.
@@ -208,6 +220,9 @@ pub enum Outcome {
     Run(RunReport),
     /// From [`Command::Package`] — the file to send back, and what it omits.
     Package(ReturnPackage),
+    /// From [`Command::Distribute`] — the file to send a client, and what it
+    /// will run on.
+    Distributed(InstallPackage),
 }
 
 /// Exit status for a run that succeeded but did not cover everything asked for.
@@ -433,6 +448,7 @@ impl Session {
             Command::RemoveTarget { spec } => self.remove_target(&spec).await.map(Outcome::Removed),
             Command::Run(options) => self.run(&options).await.map(Outcome::Run),
             Command::Package { destination } => self.package(destination).map(Outcome::Package),
+            Command::Distribute(options) => self.distribute(&options).map(Outcome::Distributed),
         }
     }
 
@@ -575,6 +591,37 @@ impl Session {
         }
         let destination = destination.unwrap_or_else(|| package::default_destination(&self.work));
         package::assemble(&self.work, &config, &progress.report(), &destination)
+    }
+
+    /// Assemble the install package that goes TO a client (#5825).
+    ///
+    /// Why: the only capability run on the AUDITOR's machine, so it takes
+    /// nothing from the working directory — a client's engagement has not
+    /// started yet. It reads the engagement config as a TEMPLATE rather than as
+    /// this session's own config: the file on the auditor's disk supplies the
+    /// instructions, the pins and the labels, and the credential that reaches
+    /// the generated copy is preferably one that was never written down.
+    ///
+    /// The credential is read from the process environment HERE, at the one
+    /// place that has to touch it, rather than inside [`distribute::assemble`].
+    /// That keeps the assembly function pure — its tests never mutate a global
+    /// every other test in the binary shares — and it is the same division
+    /// `main.rs` already uses for `TRUSTY_AUDIT_WORKDIR`. No CLI flag carries
+    /// the key: argv is world-readable through `ps` and lands in shell history.
+    /// What: resolves the key, then hands off. Everything else — validation,
+    /// the fail-open guards, the zip — is [`distribute::assemble`]'s.
+    /// Test: `super::session_tests::distributing_without_a_template_is_refused`,
+    /// `crate::distribute::distribute_tests`.
+    fn distribute(&self, options: &DistributeOptions) -> Result<InstallPackage, AuditError> {
+        let supplied = std::env::var(run::ENV_INFERENCE_CREDENTIAL)
+            .ok()
+            .map(crate::config::SecretKey::new);
+        distribute::assemble(
+            &self.config_path,
+            options,
+            supplied.as_ref(),
+            &self.progress,
+        )
     }
 
     /// Read the engagement's key and pins, then sweep the selected repositories.
@@ -929,6 +976,69 @@ trusty-review = "0.0.0-never-published"
             !crate::package::default_destination(session.work_dir()).exists(),
             "a refused package must leave no file"
         );
+    }
+
+    /// #5825: the inbound package reaches the recipient through `execute`, the
+    /// same door as everything else — and it is the AUDITOR-side capability, so
+    /// it needs no sweep, no manifest, and nothing in the working directory.
+    #[tokio::test]
+    async fn distributing_builds_a_package_from_the_template_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), UNPUBLISHABLE_CONFIG);
+        let binary = tmp.path().join("taudit-fixture");
+        std::fs::write(&binary, b"bytes to copy").expect("write binary");
+        let out = tmp.path().join("packages");
+
+        let outcome = session
+            .execute(Command::Distribute(DistributeOptions {
+                output_dir: Some(out.clone()),
+                binary: Some(binary),
+            }))
+            .await
+            .expect("assembles");
+        let Outcome::Distributed(package) = outcome else {
+            panic!("expected Distributed");
+        };
+        assert_eq!(
+            package.path,
+            out.join(crate::distribute::PACKAGE_FILE_NAME),
+            "the package lands where the operator asked"
+        );
+        assert!(package.path.is_file());
+        assert_eq!(package.files.len(), 4);
+        // `key_from_environment` is deliberately not asserted here: it depends
+        // on whether the machine running the tests exports the credential.
+        // `distribute_tests` covers both sources with the value injected.
+        assert!(!package.platform.is_empty());
+    }
+
+    /// #5825: a missing template is a refusal, not an empty config the
+    /// recipient discovers on their own machine.
+    #[tokio::test]
+    async fn distributing_without_a_template_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out = tmp.path().join("packages");
+        // `session_in` points the config path at a file nothing wrote.
+        let session = session_in(tmp.path());
+
+        let err = session
+            .execute(Command::Distribute(DistributeOptions {
+                output_dir: Some(out.clone()),
+                binary: None,
+            }))
+            .await
+            .expect_err("no template, no package");
+        assert!(
+            matches!(
+                err,
+                AuditError::MissingPackageInput {
+                    what: "engagement config template",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(!out.exists(), "a refused package must leave no directory");
     }
 
     /// #5494: the checkpoint is written after every repository now, so a record

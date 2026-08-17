@@ -31,6 +31,7 @@
 //! | [`clone`] | getting the selected repositories onto the recipient's disk (#5215) |
 //! | [`run`] | driving the pinned `tga audit` over the selected repositories |
 //! | [`package`] | assembling the unencrypted deliverable that goes back (#5499) |
+//! | [`distribute`] | assembling the install package that goes to a client (#5825) |
 //!
 //! ## What this milestone is not
 //!
@@ -71,6 +72,10 @@ pub mod cli;
 pub mod clone;
 pub mod config;
 pub mod discover;
+// #5825: the INBOUND package, built on the auditor's machine. `package` is the
+// outbound one built on the recipient's. Two modules, opposite directions,
+// opposite rules about the credential — never one with a flag.
+pub mod distribute;
 pub mod error;
 pub mod inference;
 pub mod manifest;

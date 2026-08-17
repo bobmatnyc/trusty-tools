@@ -35,7 +35,7 @@ pub use trusty_progress::relay::{StageEvent, StageState};
 /// Why: a renderer says "cloning 12 repositories", not "doing 12 things", and
 /// the noun differs per operation. Carrying the operation on every update means
 /// a sink can render without tracking what it is inside.
-/// What: the three capabilities that take long enough to need a display.
+/// What: the four capabilities that take long enough to need a display.
 /// `#[non_exhaustive]` so a later one is additive.
 /// Test: `super::progress_tests::labels_name_the_unit_being_counted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +47,8 @@ pub enum Operation {
     CloneRepos,
     /// Running `tga audit` over the selected repositories (#5555).
     Sweep,
+    /// Assembling the inbound install package to send a client (#5825).
+    Distribute,
 }
 
 impl Operation {
@@ -56,6 +58,7 @@ impl Operation {
             Self::InstallTools => "installing pinned tools",
             Self::CloneRepos => "cloning repositories",
             Self::Sweep => "auditing repositories",
+            Self::Distribute => "assembling the install package",
         }
     }
 
@@ -64,6 +67,7 @@ impl Operation {
         match self {
             Self::InstallTools => "tool",
             Self::CloneRepos | Self::Sweep => "repository",
+            Self::Distribute => "file",
         }
     }
 
@@ -75,6 +79,7 @@ impl Operation {
         match self {
             Self::InstallTools => "tools",
             Self::CloneRepos | Self::Sweep => "repositories",
+            Self::Distribute => "files",
         }
     }
 }

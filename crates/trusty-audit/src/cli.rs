@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::clone::{CloneOptions, CloneState};
+use crate::distribute::DistributeOptions;
 use crate::registry::TargetKind;
 use crate::run::{RepoResult, RunOptions, RunStatus};
 use crate::session::{Command, NextStep, Outcome};
@@ -136,6 +137,28 @@ pub enum Verb {
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
+    /// Build the install package to send a client (auditor-side).
+    ///
+    /// Writes one zip holding this binary, a launcher, an engagement.toml
+    /// carrying the OpenRouter key, and a README. The key comes from
+    /// OPENROUTER_API_KEY when it is set, and from --config otherwise — there is
+    /// deliberately no flag for it, because argv is visible to every process on
+    /// this machine and lands in your shell history.
+    ///
+    /// Refuses rather than overwriting a package that is already there.
+    Distribute {
+        /// Directory to write the package into (default: ~/duetto/audit).
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+
+        /// The taudit binary to ship (default: the one running).
+        ///
+        /// The default is right whenever you are packaging for a machine like
+        /// this one. Name a path to ship a binary built for the client's
+        /// platform instead.
+        #[arg(long, value_name = "FILE")]
+        binary: Option<PathBuf>,
+    },
 }
 
 /// What `taudit add` was asked to register.
@@ -225,6 +248,12 @@ impl Cli {
             Some(Verb::Package { out }) => Command::Package {
                 destination: out.clone(),
             },
+            // #5825: the inbound package. A separate variant from `Package`
+            // because the two travel opposite ways — see `crate::distribute`.
+            Some(Verb::Distribute { out, binary }) => Command::Distribute(DistributeOptions {
+                output_dir: out.clone(),
+                binary: binary.clone(),
+            }),
         }
     }
 }
@@ -566,6 +595,31 @@ pub fn render(outcome: &Outcome) -> String {
             ));
             out
         }
+        Outcome::Distributed(package) => {
+            let mut out = format!("Install package: {}\n", package.path.display());
+            out.push_str(&format!(
+                "  {} in {}, for {}\n",
+                count_of(package.files.len(), "file", "files"),
+                human_bytes(package.packaged_bytes),
+                package.platform
+            ));
+            for file in &package.files {
+                out.push_str(&format!(
+                    "  {:>10}  {}\n",
+                    human_bytes(file.bytes),
+                    file.entry
+                ));
+            }
+            // #5825: which key shipped is the one thing about this package the
+            // operator cannot check by opening it without reading a credential.
+            out.push_str(if package.key_from_environment {
+                "  credential: from OPENROUTER_API_KEY\n"
+            } else {
+                "  credential: from the template config\n"
+            });
+            out.push_str(&format!("\nSend this file: {}\n", package.path.display()));
+            out
+        }
     }
 }
 
@@ -657,6 +711,7 @@ mod cli_tests {
             Command::RemoveTarget { .. } => vec!["taudit", "remove", "acme/api"],
             Command::Run(_) => vec!["taudit", "run"],
             Command::Package { .. } => vec!["taudit", "package"],
+            Command::Distribute(_) => vec!["taudit", "distribute"],
         }
     }
 
@@ -691,6 +746,7 @@ mod cli_tests {
             },
             Command::Run(RunOptions::default()),
             Command::Package { destination: None },
+            Command::Distribute(DistributeOptions::default()),
         ]
     }
 
