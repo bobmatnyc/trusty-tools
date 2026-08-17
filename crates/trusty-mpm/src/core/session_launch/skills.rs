@@ -51,15 +51,21 @@ pub(super) fn deploy_session_skills(
     // #4583/#4604: a long-lived worktree that never re-provisioned keeps the old
     // skill text (e.g. an outdated attribution footer) until this very deploy
     // self-heals it. The warn makes that drift auditable. Non-fatal, read-only.
-    let stale =
-        crate::core::skill_staleness::stale_skills(&plan.skill_source, &fw.claude_skills_dir());
-    if !stale.is_empty() {
-        tracing::warn!(
+    match crate::core::skill_staleness::stale_skills(&plan.skill_source, &fw.claude_skills_dir()) {
+        Ok(stale) if !stale.is_empty() => tracing::warn!(
             project_dir = %project_dir.display(),
             stale_skills = %stale.join(", "),
             "deployed skills were stale relative to bundled assets — refreshing now \
              (run `tm doctor` to audit; long-lived worktrees drift until re-provisioned)"
-        );
+        ),
+        Ok(_) => {}
+        // #5626: the probe could not run. It is advisory, so the launch
+        // continues — but the deploy below reads the same ledger and will
+        // refuse there, so this must not read as "nothing was stale".
+        Err(e) => roster_errors.push(format!(
+            "skill staleness undetermined — the ownership ledger at {} could not be read: {e}",
+            fw.claude_skills_dir().display()
+        )),
     }
 
     // DOC-42 (issue #2889): fold every deployed agent's declared `skills:` into

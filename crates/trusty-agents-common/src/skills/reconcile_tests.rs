@@ -51,7 +51,7 @@ fn adopt_registers_the_skill_and_its_references() {
             "tm-workflow/references/a.md".to_string()
         ]
     );
-    let manifest = SkillManifest::load(dest.path());
+    let manifest = SkillManifest::load(dest.path()).unwrap();
     assert!(manifest.is_managed("tm-workflow"));
     assert!(manifest.is_managed("tm-workflow/references/a.md"));
     // The recorded checksum is of the content ON DISK, so the deployer sees
@@ -102,7 +102,11 @@ fn adopt_leaves_an_operator_skill_alone() {
             .unwrap();
 
     assert!(adopted.is_empty());
-    assert!(!SkillManifest::load(dest.path()).is_managed("my-own-skill"));
+    assert!(
+        !SkillManifest::load(dest.path())
+            .unwrap()
+            .is_managed("my-own-skill")
+    );
     assert_eq!(
         fs::read_to_string(dest.path().join("my-own-skill").join("SKILL.md")).unwrap(),
         "mine"
@@ -176,7 +180,7 @@ fn preview_matches_what_adoption_touches() {
     let backups = TempDir::new().unwrap();
     stage_untracked(dest.path(), "tm-workflow", "stale");
 
-    let preview = preview_unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"]));
+    let preview = preview_unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"])).unwrap();
     let adopted =
         adopt_unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"]), backups.path())
             .unwrap();
@@ -271,7 +275,11 @@ fn force_adopt_leaves_an_operator_skill_alone() {
 
     assert!(adopted.is_empty(), "{adopted:?}");
     assert_eq!(fs::read_to_string(&path).unwrap(), "OPERATOR CONTENT");
-    assert!(!SkillManifest::load(dest.path()).is_managed("my-own-skill"));
+    assert!(
+        !SkillManifest::load(dest.path())
+            .unwrap()
+            .is_managed("my-own-skill")
+    );
 }
 
 #[test]
@@ -303,7 +311,7 @@ fn force_adopt_leaves_an_operator_reference_stray_untracked() {
         vec!["tm-workflow".to_string()],
         "only the tracked entry point may be re-stamped: {adopted:?}"
     );
-    let manifest = SkillManifest::load(dest.path());
+    let manifest = SkillManifest::load(dest.path()).unwrap();
     assert!(
         !manifest.is_managed("tm-workflow/references/my-notes.md"),
         "the operator's stray must stay untracked"

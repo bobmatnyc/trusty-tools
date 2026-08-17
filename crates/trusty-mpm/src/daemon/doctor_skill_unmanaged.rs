@@ -75,7 +75,24 @@ pub(super) fn check_skill_unmanaged(
 
     let mut findings: Vec<String> = Vec::new();
     for tier in skill_deploy_tiers(paths, project_dir) {
-        for skill in unmanaged_bundled_skills(&tier.dir, &bundled) {
+        // #5626: an unreadable ledger classifies nothing, and reporting `Ok`
+        // for such a tier is the same unverifiable-rendered-as-healthy shape
+        // the empty-roster guard above already refuses.
+        let found = match unmanaged_bundled_skills(&tier.dir, &bundled) {
+            Ok(found) => found,
+            Err(e) => {
+                return DoctorCheck::new(
+                    CHECK_NAME,
+                    CheckStatus::Unknown,
+                    format!(
+                        "the ownership ledger at {} could not be read, so which deployed \
+                         skills are tm's is undetermined: {e}",
+                        tier.dir.display()
+                    ),
+                );
+            }
+        };
+        for skill in found {
             findings.push(format!("{}/{}", tier.label, skill.stem));
         }
     }

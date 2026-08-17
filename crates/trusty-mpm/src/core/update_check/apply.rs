@@ -415,7 +415,10 @@ fn prune_skills_locked(
     user_stems: &BTreeSet<String>,
     backup_root: &Path,
 ) -> Result<PruneOutcome, ApplyError> {
-    let mut manifest = SkillManifest::load(target);
+    // #5626: the prune deletes files and rewrites the ledger. On the empty
+    // default it also republished that default over the real ledger through
+    // `save_merging`, unrecording every skill in the tier.
+    let mut manifest = SkillManifest::load(target)?;
     // #4881: the snapshot the merging save replays this run's delta against —
     // here the delta is REMOVALS, which `save_merging` applies to the current
     // on-disk document rather than reverting a concurrent writer's inserts.

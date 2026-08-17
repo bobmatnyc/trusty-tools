@@ -244,7 +244,26 @@ fn repair_tier_locked(
         return outcomes;
     }
 
-    let mut manifest = SkillManifest::load(&tier.dir);
+    // #5626: `audit_deployed_skills` above already refuses an unreadable
+    // ledger, so reaching this arm means the file changed under us between the
+    // two reads. Report it as the same unverifiable skip rather than repairing
+    // against an empty ledger — that would stamp every file in the tier as
+    // tm-owned.
+    let mut manifest = match SkillManifest::load(&tier.dir) {
+        Ok(m) => m,
+        Err(e) => {
+            outcomes.push(RepairOutcome {
+                tier: tier.label,
+                stem: "<manifest>".to_string(),
+                path: tier.dir.clone(),
+                action: RepairAction::SkippedUnverifiable(format!(
+                    "{e} — refusing to touch this tier; repairing it would rewrite an \
+                     ownership ledger that cannot be read"
+                )),
+            });
+            return outcomes;
+        }
+    };
     // #4881: the snapshot the merging save replays this run's delta against.
     let base = manifest.clone();
     let mut manifest_dirty = false;

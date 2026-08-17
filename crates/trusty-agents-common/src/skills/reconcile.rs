@@ -100,7 +100,7 @@ pub fn adopt_unmanaged_bundled_skills(
     // neither blocks on a concurrent writer nor leaves a lock sidecar in a
     // directory it will not touch — `adopt_no_findings_writes_nothing` holds
     // the target byte-identical. The authoritative scan happens again inside.
-    if unmanaged_bundled_skills(dest, bundled).is_empty() {
+    if unmanaged_bundled_skills(dest, bundled)?.is_empty() {
         return Ok(Vec::new());
     }
     with_skill_manifest_lock(dest, || adopt_locked(dest, bundled, backup_root))
@@ -120,12 +120,16 @@ fn adopt_locked(
     bundled: &BTreeSet<String>,
     backup_root: &Path,
 ) -> Result<Vec<AdoptedSkill>> {
-    let found = unmanaged_bundled_skills(dest, bundled);
+    let found = unmanaged_bundled_skills(dest, bundled)?;
     if found.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut manifest = SkillManifest::load(dest);
+    // #5626: adoption writes ownership records over files the ledger may
+    // already track. An unreadable ledger read as empty makes every managed
+    // skill look unmanaged, and adoption then re-stamps each one against its
+    // CURRENT bytes — erasing the hand-edit evidence the checksum carried.
+    let mut manifest = SkillManifest::load(dest)?;
     // #4881: the snapshot the merging save replays this run's delta against.
     let base = manifest.clone();
     let now = chrono::Utc::now().to_rfc3339();
@@ -178,7 +182,7 @@ fn adopt_locked(
 pub fn preview_unmanaged_bundled_skills(
     dest: &Path,
     bundled: &BTreeSet<String>,
-) -> Vec<UnmanagedBundledSkill> {
+) -> Result<Vec<UnmanagedBundledSkill>> {
     unmanaged_bundled_skills(dest, bundled)
 }
 
@@ -241,7 +245,11 @@ fn force_adopt_locked(
     bundled: &BTreeSet<String>,
     backup_root: &Path,
 ) -> Result<Vec<AdoptedSkill>> {
-    let mut manifest = SkillManifest::load(dest);
+    // #5626: re-stamping decides ownership from this ledger. On the empty
+    // default an unreadable ledger reads as "tm owns nothing", so every
+    // bundled-named skill in the target — the operator's edits included —
+    // becomes tm's on the strength of a read that failed.
+    let mut manifest = SkillManifest::load(dest)?;
     let base = manifest.clone();
     let now = chrono::Utc::now().to_rfc3339();
     let mut adopted = Vec::new();

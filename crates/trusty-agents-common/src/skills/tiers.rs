@@ -245,7 +245,11 @@ pub fn list_project_custom_stems(dest: &Path) -> Result<BTreeSet<String>> {
     if !dest.is_dir() {
         return Ok(stems);
     }
-    let manifest = SkillManifest::load(dest);
+    // #5626: an unreadable ledger cannot answer "which of these did tm deploy?",
+    // and the empty default answers "none of them" — which would hand the
+    // planner every bundled skill in the target as project-custom and let each
+    // one shadow its own source.
+    let manifest = SkillManifest::load(dest)?;
     for entry in std::fs::read_dir(dest)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {

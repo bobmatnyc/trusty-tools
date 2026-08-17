@@ -169,7 +169,25 @@ pub fn session_asset_staleness_with_shared(
     deployed_agents: &DeployedAgentHashes,
 ) -> StalenessReport {
     let skills_dir = fw.claude_skills_dir();
-    let deployed_skills = crate::core::skill_manifest::SkillManifest::load(&skills_dir);
+    // #5626: an unreadable ledger is `unknown`, not fresh. The empty default
+    // made every deployed skill look absent, so `detect` reported the whole
+    // catalog as `new` — or, once the plan selected nothing, reported currency
+    // this read never established. `unknown` is the report's own documented
+    // "nothing authoritative to compare against" state.
+    let deployed_skills = match crate::core::skill_manifest::SkillManifest::load(&skills_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                dir = %skills_dir.display(),
+                error = %e,
+                "skill ownership ledger unreadable — staleness is undetermined"
+            );
+            return StalenessReport {
+                unknown: true,
+                ..StalenessReport::default()
+            };
+        }
+    };
     catalog.detect(
         deployed_agents,
         &deployed_skills,
