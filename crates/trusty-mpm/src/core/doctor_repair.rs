@@ -33,10 +33,12 @@
 //!    than silent: `legacy_sources` findings are REPORTED with their paths and
 //!    a reason, never acted on. See #4409.
 //!
-//! What: [`RepairMode`], the [`RepairStep`] outcome model, and the three
+//! What: [`RepairMode`], the [`RepairStep`] outcome model, and the four
 //! repairs `--fix` drives — [`repair_hooks_contamination`],
-//! [`repair_push_guard`], and (via [`crate::core::skill_repair`]) the skill
-//! redeploy — plus [`refuse_legacy_sources`].
+//! [`repair_push_guard`], [`repair_output_style`] (#5866 — the one check whose
+//! remedy string named a command with no such step), and (via
+//! [`crate::core::skill_repair`]) the skill redeploy — plus
+//! [`refuse_legacy_sources`].
 //! Test: `doctor_repair_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -250,6 +252,114 @@ pub fn repair_push_guard(repo_path: &Path, mode: RepairMode) -> Vec<RepairStep> 
         what: description.to_string(),
         status,
     }]
+}
+
+/// The `tm doctor --fix` invocation that applies an output-style repair.
+///
+/// Why (#5866): `output_style_staleness` and `check_output_style` both told the
+/// operator to "run `tm install` to redeploy", and `tm install` has no
+/// output-style step at all — its 366-line log named none, and the deployed
+/// file kept its mtime across a full run. A remedy string is only as good as
+/// the command it names, so the string and the repair that honours it are
+/// pinned to one constant.
+/// Test: `output_style_remedy_names_the_fix_command`.
+pub const OUTPUT_STYLE_REMEDY: &str = "tm doctor --fix --yes";
+
+/// Redeploy the operator's bundled output styles (#5866).
+///
+/// Why: nothing repaired this. `tm install` never touched output styles;
+/// [`crate::core::session_launch`]'s `deploy_output_style` and
+/// [`crate::core::output_style_deployer::deploy_output_styles`] both run only
+/// on a session launch or a managed-config bootstrap, so an operator whose
+/// `~/.claude/output-styles/` had drifted had no command to run. This is that
+/// command, kept as narrow as the rest of this module: output styles are
+/// framework-owned files tm wrote, with no operator-authored variant to
+/// protect, which is why the redeploy is additive rather than gated on a
+/// checksum ledger the way the skill repair is.
+/// What: scans `<home>/.claude/output-styles/` with
+/// [`crate::core::output_style_deployer::output_style_drift`] — the SAME scan
+/// `check_output_style_staleness` reports from, so preview and report cannot
+/// disagree — and emits one step per non-matching style. An unreadable file
+/// produces [`StepStatus::Refused`]: an IO failure is not evidence of
+/// staleness, and overwriting on it would destroy a file tm cannot read to
+/// back up. In [`RepairMode::Apply`] a single
+/// [`crate::core::output_style_deployer::deploy_output_styles`] call writes
+/// every drifted and missing file atomically; each step then reports what that
+/// call actually did rather than what was planned. Orphaned files under
+/// `output-styles/` are deliberately NOT touched — `output_style_staleness`
+/// names them and refuses to delete them, and so does this (issue #2333).
+/// Test: `output_style_repair_plans_the_drifted_file`,
+/// `output_style_repair_dry_run_writes_nothing`,
+/// `output_style_repair_applies_and_reports_from_disk`,
+/// `output_style_repair_is_empty_when_in_sync`,
+/// `output_style_repair_refuses_an_unreadable_file`.
+pub fn repair_output_style(home: &Path, mode: RepairMode) -> Vec<RepairStep> {
+    use crate::core::output_style_deployer::{
+        StyleDrift, deploy_output_styles, output_style_drift,
+    };
+
+    let claude = home.join(".claude");
+    let styles_dir = claude.join("output-styles");
+    let drift = output_style_drift(&styles_dir);
+    if drift.is_empty() {
+        return Vec::new();
+    }
+
+    let writable: Vec<&(&'static str, StyleDrift)> = drift
+        .iter()
+        .filter(|(_, state)| !matches!(state, StyleDrift::Unreadable(_)))
+        .collect();
+
+    // One deploy call covers every writable file; run it once, up front, so each
+    // step below reports the outcome that actually happened on disk.
+    let applied = match (mode, writable.is_empty()) {
+        (RepairMode::Apply, false) => Some(deploy_output_styles(&claude)),
+        _ => None,
+    };
+
+    drift
+        .iter()
+        .map(|(file_name, state)| {
+            let path = styles_dir.join(file_name);
+            let what = match state {
+                StyleDrift::Drifted => {
+                    format!(
+                        "redeploy `{file_name}` from the bundled output style (content drifted)"
+                    )
+                }
+                StyleDrift::Missing => {
+                    format!("write `{file_name}` from the bundled output style (currently absent)")
+                }
+                StyleDrift::Unreadable(_) => format!("redeploy `{file_name}`"),
+            };
+            let status = match (state, &applied) {
+                (StyleDrift::Unreadable(why), _) => StepStatus::Refused(format!(
+                    "{why} — tm will not overwrite a file it could not read"
+                )),
+                (_, None) => StepStatus::Planned,
+                (_, Some(Err(e))) => StepStatus::Failed(e.to_string()),
+                (_, Some(Ok(result))) => {
+                    if result.deployed.iter().any(|d| d == file_name) {
+                        StepStatus::Applied { backup: None }
+                    } else {
+                        // The deploy ran and left this file alone, which after a
+                        // reported drift means something else rewrote it in the
+                        // meantime. Report what happened, never what was planned.
+                        StepStatus::Refused(
+                            "already matched the bundled content by the time the write ran"
+                                .to_string(),
+                        )
+                    }
+                }
+            };
+            RepairStep {
+                check: "output_style_staleness",
+                path,
+                what,
+                status,
+            }
+        })
+        .collect()
 }
 
 /// Report every `legacy_sources` finding as REFUSED — never delete one.

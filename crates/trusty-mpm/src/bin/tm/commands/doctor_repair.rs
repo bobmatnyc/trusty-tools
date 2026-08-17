@@ -19,7 +19,7 @@
 use colored::Colorize;
 use trusty_mpm::core::doctor_repair::{
     RepairMode, RepairStep, StepStatus, refuse_legacy_sources, repair_hooks_contamination,
-    repair_push_guard,
+    repair_output_style, repair_push_guard,
 };
 use trusty_mpm::core::skill_repair::RepairAction;
 use trusty_mpm::core::stray_mcp::{quarantine_explicit, quarantine_strays};
@@ -113,7 +113,8 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// deliberate act that lets one write.
 /// What: runs, in order, the skill redeploy (`skill_staleness`), the project
 /// hook cleanup (`hooks_contamination`), the push-guard retrofit
-/// (`push_guard`), the `legacy_sources` refusals, and the stray-`.mcp.json`
+/// (`push_guard`), the output-style redeploy (`output_style_staleness`, #5866),
+/// the `legacy_sources` refusals, and the stray-`.mcp.json`
 /// sweep (`stray_mcp_json`) — printing each item's path, what would change,
 /// and the outcome. In dry run it closes by naming the flag that applies. It
 /// never deletes: `legacy_sources` findings are reported as refused, and a
@@ -142,6 +143,10 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
     }
 
     if let Some(home) = dirs::home_dir() {
+        // #5866: `output_style_staleness` named `tm install` as its remedy and
+        // `tm install` has no output-style step, so the finding had no repair at
+        // all. This is it.
+        steps.extend(repair_output_style(&home, mode));
         steps.extend(refuse_legacy_sources(&home));
         // A `.mcp.json` above the workspace configures every session started
         // beneath it. This quarantines ONLY the ones the provenance ledger

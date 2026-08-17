@@ -102,10 +102,121 @@ pub fn deploy_output_styles(claude_config_dir: &Path) -> anyhow::Result<OutputSt
     Ok(result)
 }
 
+/// How one bundled output style compares to its deployed copy (#5866).
+///
+/// Why: the doctor report and the `tm doctor --fix` repair must agree
+/// file-for-file about what is stale, or the preview names a file the repair
+/// leaves alone. Two independent byte-comparisons is how that drifts, so both
+/// consume [`output_style_drift`] and neither re-derives the predicate.
+/// What: the three states that matter to a caller. `Unreadable` is deliberately
+/// distinct from `Drifted` — a permissions failure is not evidence of staleness,
+/// and the repair must not overwrite on it.
+/// Test: `drift_reports_missing_drifted_and_unreadable`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StyleDrift {
+    /// The deployed file's bytes differ from the bundled content.
+    Drifted,
+    /// No file is deployed at this path.
+    Missing,
+    /// The file exists but could not be read; the string says why.
+    Unreadable(String),
+}
+
+/// Compare every bundled style against `styles_dir`, reporting only the
+/// non-matching ones (#5866).
+///
+/// Why: see [`StyleDrift`]. `check_output_style_staleness` reports drift and
+/// `core::doctor_repair::repair_output_style` fixes it; sharing this scan is
+/// what lets the remedy string name a command that provably acts on exactly the
+/// files the report listed.
+/// What: for each [`OUTPUT_STYLES`] entry, byte-compares
+/// `<styles_dir>/<file_name>` against the bundled `content`. Returns
+/// `(file_name, StyleDrift)` for every entry that is not byte-identical, in
+/// [`OUTPUT_STYLES`] order; an in-sync style produces no entry. Reads only —
+/// it never creates `styles_dir`.
+/// Test: `drift_is_empty_when_in_sync`, `drift_reports_missing_drifted_and_unreadable`.
+pub fn output_style_drift(styles_dir: &Path) -> Vec<(&'static str, StyleDrift)> {
+    OUTPUT_STYLES
+        .iter()
+        .filter_map(|style| {
+            let state = match std::fs::read(styles_dir.join(style.file_name)) {
+                Ok(bytes) if bytes == style.content.as_bytes() => return None,
+                Ok(_) => StyleDrift::Drifted,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => StyleDrift::Missing,
+                Err(e) => StyleDrift::Unreadable(e.to_string()),
+            };
+            Some((style.file_name, state))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn drift_is_empty_when_in_sync() {
+        let tmp = TempDir::new().unwrap();
+        deploy_output_styles(tmp.path()).unwrap();
+        assert!(
+            output_style_drift(&tmp.path().join("output-styles")).is_empty(),
+            "a freshly deployed tier must report no drift"
+        );
+    }
+
+    #[test]
+    fn drift_reports_missing_drifted_and_unreadable() {
+        // #5866: the repair must be able to tell a stale file from an absent one
+        // — it writes both — and must never treat an unreadable file as stale.
+        let tmp = TempDir::new().unwrap();
+        let styles = tmp.path().join("output-styles");
+        std::fs::create_dir_all(&styles).unwrap();
+
+        // Nothing deployed at all: every style is Missing.
+        let all_missing = output_style_drift(&styles);
+        assert_eq!(all_missing.len(), OUTPUT_STYLES.len());
+        assert!(
+            all_missing
+                .iter()
+                .all(|(_, state)| *state == StyleDrift::Missing)
+        );
+
+        deploy_output_styles(tmp.path()).unwrap();
+        let first = &OUTPUT_STYLES[0];
+        std::fs::write(styles.join(first.file_name), "stale text").unwrap();
+
+        let drift = output_style_drift(&styles);
+        assert_eq!(
+            drift,
+            vec![(first.file_name, StyleDrift::Drifted)],
+            "only the rewritten file may be reported"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_style_is_not_reported_as_drifted() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        deploy_output_styles(tmp.path()).unwrap();
+        let styles = tmp.path().join("output-styles");
+        let target = styles.join(OUTPUT_STYLES[0].file_name);
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&target).is_ok() {
+            eprintln!("skipping: cannot deny read on this platform/privilege level");
+            return;
+        }
+
+        let drift = output_style_drift(&styles);
+        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600));
+
+        assert_eq!(drift.len(), 1);
+        assert!(
+            matches!(drift[0].1, StyleDrift::Unreadable(_)),
+            "an IO failure is not evidence of staleness: {drift:?}"
+        );
+    }
 
     /// Deploy to a fresh directory must write all three bundled styles.
     ///

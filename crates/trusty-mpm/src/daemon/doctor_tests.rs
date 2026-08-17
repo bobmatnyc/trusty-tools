@@ -138,6 +138,97 @@ async fn agents_check_probes_the_managed_config_tier_not_the_workspace() {
 }
 
 #[tokio::test]
+async fn unmanaged_cwd_audits_the_operator_home_tier() {
+    // #5867: `tm doctor` sends the process cwd as `project`, so `run_doctor`
+    // took the `for_managed_workspace` arm for any directory at all. That
+    // pointed `claude_skills_dir()` at `<cwd>/.claude/skills` — the same path
+    // the "project" tier candidate builds — and `skill_deploy_tiers`' dedup
+    // dropped the duplicate, leaving `~/.claude/skills` unaudited. The `skills`
+    // probe reads the same root, so it names the directory it looked at and is
+    // the observable half of that resolution.
+    //
+    // Before the fix this asserted false: the message read
+    // "<tmp>/.claude/skills does not exist".
+    let project = tempfile::tempdir().unwrap();
+    let report = run_doctor(Some(project.path()), None, &[]).await;
+    let skills = report
+        .checks
+        .iter()
+        .find(|c| c.name == "skills")
+        .expect("skills check present");
+
+    let workspace_tier = project.path().join(".claude").join("skills");
+    assert!(
+        !skills
+            .message
+            .contains(&workspace_tier.display().to_string()),
+        "an unregistered directory is not a managed workspace and must not be \
+         probed as one: {}",
+        skills.message
+    );
+}
+
+#[tokio::test]
+async fn a_registered_workspace_still_gets_the_workspace_layout() {
+    // The other arm of #5867: a directory a live session was provisioned into
+    // MUST keep the #2149/#1931 workspace scoping, or a managed workspace with
+    // an empty roster goes back to reporting a false `Ok` off the operator's
+    // own populated `$HOME/.claude`.
+    let project = tempfile::tempdir().unwrap();
+    let active = vec![project.path().to_path_buf()];
+    let report = run_doctor(Some(project.path()), None, &active).await;
+    let skills = report
+        .checks
+        .iter()
+        .find(|c| c.name == "skills")
+        .expect("skills check present");
+
+    let workspace_tier = project.path().join(".claude").join("skills");
+    assert!(
+        skills
+            .message
+            .contains(&workspace_tier.display().to_string()),
+        "a registered workspace must still be probed at its own tier: {}",
+        skills.message
+    );
+}
+
+#[test]
+fn is_managed_workspace_matches_only_a_registered_path() {
+    let registered = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let active = vec![registered.path().to_path_buf()];
+
+    assert!(is_managed_workspace(registered.path(), &active));
+    assert!(!is_managed_workspace(other.path(), &active));
+    assert!(
+        !is_managed_workspace(registered.path(), &[]),
+        "with no live sessions nothing is a managed workspace"
+    );
+}
+
+#[test]
+fn is_managed_workspace_sees_through_a_symlinked_path() {
+    // On macOS a workspace under `/tmp` is reached through a `/private/tmp`
+    // symlink, so the daemon's recorded path and the cwd the CLI sends can be
+    // two spellings of one directory. A raw `==` would miss the match and drop
+    // a real managed workspace back to the home layout.
+    let real = tempfile::tempdir().unwrap();
+    let link_parent = tempfile::tempdir().unwrap();
+    let link = link_parent.path().join("workspace-link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(real.path(), &link).unwrap();
+    #[cfg(not(unix))]
+    return;
+
+    let active = vec![real.path().to_path_buf()];
+    assert!(
+        is_managed_workspace(&link, &active),
+        "a symlink to a registered workspace is that workspace"
+    );
+}
+
+#[tokio::test]
 async fn run_doctor_produces_thirty_two_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
