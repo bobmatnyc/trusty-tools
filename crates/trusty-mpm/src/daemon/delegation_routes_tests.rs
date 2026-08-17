@@ -100,7 +100,7 @@ async fn a_grant_and_the_tracker_converge_in_either_order() {
     // same event and race, and `on_dispatch` returns early when the `tool_use_id`
     // already exists — so an `observe`-based grant would correct the record only
     // in the orders it happened to win. Both orders must converge on ONE isolated
-    // record, or `git pull` in this checkout is denied for the six hours of
+    // record, or a HEAD move in this checkout is denied for the six hours of
     // `RUNNING_STALE_AFTER_SECS` on a writer that is not there.
     for guard_first in [true, false] {
         let (state, _dir, session) = hermetic();
@@ -150,7 +150,7 @@ async fn a_grant_and_the_tracker_converge_in_either_order() {
             Some("worktree"),
             "guard_first={guard_first}: the granted isolation must survive both orders"
         );
-        // The property the whole fix exists for: a later `git pull` in this
+        // The property the whole fix exists for: a later `git merge` in this
         // checkout asks exactly this question, and a non-empty answer denies it.
         assert!(
             state
@@ -623,7 +623,7 @@ async fn shared_tree_dispatch_route_answers_a_bash_query_without_claiming() {
     // `pm_guard_dispatch::live_shared_tree_writers`, which sends the Bash call's
     // own payload — `tool: "Bash"` and an `input` projected to nothing. Two
     // halves of that contract are pinned here, because the rule depends on both.
-    // It must ANSWER: a `git pull` beside a live writer is the deny this exists
+    // It must ANSWER: a `git merge` beside a live writer is the deny this exists
     // for. And it must claim NOTHING: a pull is not a dispatch, and a claim it
     // took would occupy a directory no `SubagentStop` will ever release.
     let (state, _dir, session) = hermetic();

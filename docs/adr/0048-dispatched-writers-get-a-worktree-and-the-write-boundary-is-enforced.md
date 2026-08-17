@@ -1,6 +1,6 @@
 # 0048. Dispatched writers are granted a worktree, and the main-checkout write boundary is enforced
 
-- **Status:** Amended by [0049](0049-docs-commits-are-permitted-in-a-main-checkout.md)
+- **Status:** Amended by [0049](0049-docs-commits-are-permitted-in-a-main-checkout.md), [0053](0053-fetch-and-pull-are-permitted-in-a-main-checkout.md)
 - **Date:** 2026-08-15
 - **Scope:** crate `trusty-mpm` — `tm hook --pm-guard` (`pm_guard_worktree_grant`,
   `pm_guard_write_boundary`, `pm_guard_bash::main_checkout`), the agent
@@ -19,7 +19,16 @@
   makes decision 4's `git commit` deny conditional on the staged set — a
   documents-and-configuration staged set may commit, subject to decision 10's
   live-writer check — and scopes ADR-0030's DOC-66 §0.5 position. Decisions
-  1-3 and 5-10 stand as accepted.
+  1-3 and 5-9 stand as accepted.
+  [ADR-0053](0053-fetch-and-pull-are-permitted-in-a-main-checkout.md) narrows
+  decision 10 to `git merge` and `git rebase`: `git fetch` and `git pull` are
+  permitted in a main checkout, unconditionally by this rule and without
+  reaching the live-writer query. Owner ruling of 2026-08-17, verbatim: "fetch
+  and pull operations are permitted. Only direct code editing is not."
+  Decision 10's remaining machinery — the directory test, the two query keys,
+  the first-position `--abort`/`--continue` carve-out, and the fail-open on an
+  unreachable daemon — is unchanged, as is the write boundary in decisions 4
+  and 5.
 - **Supersedes / Superseded by:** Amends [ADR-0044](0044-main-checkout-write-boundary-and-agent-worktree-ownership.md).
   ADR-0044's write boundary and its assignment of worktree ownership to the
   harness both remain in force.

@@ -382,7 +382,8 @@ pub(crate) async fn live_shared_tree_writers_in(
 /// Why: two problems with one shape. The daemon's `matcher: "*"` tracker records
 /// this dispatch from the ORIGINAL payload, so a granted writer stays recorded
 /// as writing unisolated in the main checkout and ADR-0048 decision 10 then
-/// denies `git pull` there on a phantom for six hours. And the #4480 concurrency
+/// denies a `git merge` or `git rebase` there on a phantom for six hours (it
+/// denied `git pull` too, until ADR-0053). And the #4480 concurrency
 /// check no longer runs on a granted dispatch at all, because the grant returns
 /// first — so if the harness does not apply `updatedInput`, a second unisolated
 /// writer that used to be denied is now admitted. Both need the daemon, and both
@@ -442,7 +443,8 @@ pub(crate) async fn evaluate_granted_worktree(
 /// every step — so "nobody is here" and "I could not reach the daemon" and "the
 /// daemon refused to record" all arrive as the same empty vec. Only one of the
 /// three leaves the delegation record uncorrected, and that is the state the
-/// HEAD-move rule then denies a `git pull` on for six hours. The one signal
+/// HEAD-move rule then denies a `git merge` or `git rebase` on for six hours.
+/// The one signal
 /// separating them is `claimed`, and discarding it discards the signal.
 /// What: one stderr line, which Claude Code surfaces without it reaching the
 /// hook's stdout verdict. It does NOT deny: a daemon that predates this route
@@ -462,7 +464,8 @@ fn warn_on_unrecorded_grant(body: Option<&Value>, live: &[String], cwd: &Path) {
     eprintln!(
         "tm hook --pm-guard: granted a worktree in {} but the daemon recorded nothing (#5769). \
          The dispatch's delegation record therefore still reads as unisolated, so this agent will \
-         be named as writing in this checkout and `git pull` here will be denied until the record \
+         be named as writing in this checkout and `git merge`/`git rebase` here will be denied \
+         until the record \
          goes stale. The usual cause is a running daemon older than the `tm` on PATH, built \
          before the granted-worktree route existed — restart the daemon (`tm restart`) to clear \
          it. Granting anyway: this path fails open by design.",

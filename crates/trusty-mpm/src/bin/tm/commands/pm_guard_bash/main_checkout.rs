@@ -61,8 +61,9 @@
 //! along with every other, which remains tracked as #3981.
 //!
 //! **The HEAD-moving verbs decide with the daemon, not alone (ADR-0048
-//! decision 10).** [`main_checkout_head_move`] classifies `git pull`, `merge`
-//! and `rebase` the same lexical way, but it returns the verb and the directory
+//! decision 10, narrowed by ADR-0053).** [`main_checkout_head_move`] classifies
+//! `git merge` and `git rebase` the same lexical way, but it returns the verb
+//! and the directory
 //! instead of a reason: the caller then asks the daemon's directory-keyed
 //! `live_shared_tree_writers` who else is writing there and denies only when
 //! the answer is non-empty. That second half is what makes the rule safe to
@@ -70,6 +71,9 @@
 //! work and stays allowed; only a HEAD move under another live writer is
 //! refused, and a daemon that cannot answer answers "nobody here", so this
 //! branch fails open exactly like the #4480 guard it borrows the query from.
+//! `git fetch` and `git pull` are outside the classifier entirely (ADR-0048
+//! decision 9, ADR-0053) and never reach that query — see
+//! [`starts_a_head_move`] for why `pull` left the table on 2026-08-17.
 //!
 //! **Residuals specific to the HEAD-move rule, stated rather than hidden
 //! (#5769).** Four of them, each an ALLOW where a deny might be expected:
@@ -107,7 +111,7 @@
 //! lexical halves already match, so ordinary Bash traffic never pays for it,
 //! the same discipline the HEAD-move rule uses before its daemon call. A
 //! documents-only staged set then takes the same live-writer query, because a
-//! commit moves the shared HEAD exactly as far as a pull does. Every other
+//! commit moves the shared HEAD exactly as far as a merge does. Every other
 //! arm — a staged source file, an unreadable index, an empty index, and every
 //! flag form that commits content the index does not hold — keeps the
 //! unconditional deny ADR-0048 decision 4 shipped, so this rule can only turn a
@@ -218,9 +222,10 @@ pub(crate) enum CommitVerdict {
 /// switching a branch under another session is part of the same incident.
 /// Their safe and unsafe forms differ by argument rather than by verb and a
 /// loose rule there costs a false deny on ordinary work — the failure #5356 was
-/// filed for. `pull`, `merge` and `rebase` left that family in ADR-0048
-/// decision 10 and are handled by [`main_checkout_head_move`], which needs no
-/// argument analysis: none of the three has a form that leaves HEAD alone.
+/// filed for. `merge` and `rebase` left that family in ADR-0048 decision 10 and
+/// are handled by [`main_checkout_head_move`], which needs no argument
+/// analysis: neither has a form that leaves HEAD alone. `pull` was there too
+/// until ADR-0053 permitted it.
 /// `git add` is not covered by any of them and deliberately so: it writes the
 /// index and moves no ref, so it creates none of the shared-HEAD hazard these
 /// rules exist for (ADR-0049 decision 4). It is still refused when CHAINED to a
@@ -434,7 +439,7 @@ fn commit_flags_leave_the_index_authoritative(tail: &[String]) -> bool {
 /// The verb and directory of a HEAD-moving git command aimed at a main
 /// checkout (ADR-0048 decision 10).
 ///
-/// Why: `pull`, `merge` and `rebase` move HEAD and write the working tree of
+/// Why: `merge` and `rebase` move HEAD and write the working tree of
 /// the directory they run in. In a worktree that HEAD belongs to the one
 /// session that owns it, so the move races nothing. In a main checkout the HEAD
 /// is shared, and moving it changes the ground another session's uncommitted
@@ -453,7 +458,7 @@ fn commit_flags_leave_the_index_authoritative(tail: &[String]) -> bool {
 /// `tm hook`'s own process directory, which may be either. Both name one HEAD,
 /// so the caller asks both — and the test that the directory belongs to a
 /// checkout is now [`main_checkout_root`], not [`is_main_checkout`], which
-/// closes a second hole in the same place: `cd crates/foo && git pull` resolved
+/// closes a second hole in the same place: `cd crates/foo && git merge` resolved
 /// a subdirectory, `is_main_checkout` on it was still true, and the query then
 /// keyed a directory no record could match.
 /// Test: `main_checkout_head_move_*`, and end to end in
@@ -486,15 +491,28 @@ const IN_PROGRESS_CONTROL_FLAGS: &[&str] = &[
 /// Whether a git subcommand, given its argv tail, would START moving HEAD.
 ///
 /// Why: this is the second false-positive boundary in this module, and the
-/// reason ADR-0048 originally left these three verbs uncovered is that a loose
-/// rule here costs false denies on ordinary work (#5356). What makes a
-/// verb-only rule safe for exactly these three is that none of them has a form
-/// that leaves HEAD and the working tree alone: `git pull` is a fetch plus a
-/// merge or fast-forward, and `merge`/`rebase` rewrite the current branch.
-/// There is no pathspec-vs-ref ambiguity to resolve, which is what keeps
+/// reason ADR-0048 originally left these verbs uncovered is that a loose rule
+/// here costs false denies on ordinary work (#5356). What makes a verb-only
+/// rule safe for `merge` and `rebase` is that neither has a form that leaves
+/// HEAD and the working tree alone: both rewrite the current branch, and a
+/// merge can stop with conflict markers in a tree another session is standing
+/// in. There is no pathspec-vs-ref ambiguity to resolve, which is what keeps
 /// `checkout` and `switch` out of this rule and in the doc comment above.
 /// Neighbouring verbs are separate subcommand names (`merge-base`,
 /// `merge-tree`, `rebase--helper`) and never match.
+///
+/// **`pull` left this table in ADR-0053 (2026-08-17).** It was here from
+/// ADR-0048 decision 10 on the same has-no-safe-form ground, which is true of
+/// it and not decisive: a pull that fast-forwards advances the branch to an
+/// already-published commit and git refuses to run it when the working tree
+/// would be disturbed. Owner ruling, verbatim: "fetch and pull operations are
+/// permitted. Only direct code editing is not." So a pull never reaches the
+/// caller's live-writer query and is allowed whoever else is in the tree.
+/// `fetch` was never classified (ADR-0048 decision 9). The residual is stated
+/// in ADR-0053's Consequences and accepted: a bare `git pull` can still merge,
+/// and this rule reads the verb rather than the arguments, so it permits that
+/// form too. The write boundary is untouched — this is about moving HEAD, never
+/// about editing.
 ///
 /// The one carve-out is [`IN_PROGRESS_CONTROL_FLAGS`]. Those resolve a state
 /// that already exists — the operation started before this call — and denying
@@ -508,12 +526,14 @@ const IN_PROGRESS_CONTROL_FLAGS: &[&str] = &[
 /// with the flag as a commit message — passed straight through. Git itself
 /// accepts these only as the first argument, so the narrower match is also the
 /// accurate one.
-/// Test: `starts_a_head_move_covers_the_three_verbs`,
+/// Test: `starts_a_head_move_still_covers_merge_and_rebase`,
+/// `starts_a_head_move_permits_pull_and_fetch`,
 /// `starts_a_head_move_allows_in_progress_control`,
 /// `starts_a_head_move_matches_in_progress_control_positionally`,
 /// `starts_a_head_move_ignores_everything_else`.
 fn starts_a_head_move(subcommand: &str, tail: &[String]) -> bool {
-    matches!(subcommand, "pull" | "merge" | "rebase")
+    // ADR-0053: `pull` was in this table until 2026-08-17.
+    matches!(subcommand, "merge" | "rebase")
         && !tail
             .first()
             .is_some_and(|t| IN_PROGRESS_CONTROL_FLAGS.contains(&t.as_str()))
@@ -524,12 +544,12 @@ fn starts_a_head_move(subcommand: &str, tail: &[String]) -> bool {
 /// Why: as [`deny_reason`] and [`commit_deny_reason`] — ADR-0048 decision 6
 /// requires every deny to name what to do instead. This one has two remedies to
 /// offer rather than one, and the cheap one comes first: most calls that reach
-/// here want updated refs, and `git fetch` gives exactly that with no HEAD move
-/// (ADR-0048 decision 9), so a reader who only needed `origin/main` refreshed is
-/// unblocked without provisioning anything.
+/// here want an updated checkout, and `git fetch` or `git pull` gives exactly
+/// that (ADR-0048 decision 9, ADR-0053), so a reader who only needed the
+/// checkout refreshed is unblocked without provisioning anything.
 /// What: names the verb, the directory, the sibling agents the daemon reports,
-/// `git fetch` as the ref-updating remedy, a worktree as the merge-or-rebase
-/// remedy, and the forms this rule never blocks.
+/// `git fetch` and `git pull` as the update remedies, a worktree as the
+/// merge-or-rebase remedy, and the forms this rule never blocks.
 ///
 /// **It attributes, rather than asserts (#5769).** The text used to state as
 /// fact that another agent "is already writing there without a worktree of its
@@ -552,14 +572,15 @@ pub(crate) fn head_move_deny_reason(verb: &str, target: &Path, live: &[String]) 
          standing in the same directory. Moving HEAD under a live writer changes the branch its \
          uncommitted work sits on, and git reports no error when it happens. If you \
          believe that record is stale — the agent finished without its stop signal reaching the \
-         daemon — report it to the PM rather than retrying this command. If you need the remote \
-         refs updated, run \
-         `git fetch` instead: it writes only `refs/remotes/origin/*` and never touches HEAD or \
-         the working tree, so it is never blocked here — then branch and diff against \
-         `origin/main` rather than local `main`, which only a pull moves. If you need the merge \
+         daemon — report it to the PM rather than retrying this command. If you only need this \
+         checkout updated, run `git fetch` or `git pull` instead: both are permitted here \
+         whoever else is in the tree (ADR-0053), and `git fetch` writes only \
+         `refs/remotes/origin/*` without touching HEAD or the working tree — then branch and \
+         diff against `origin/main` rather than local `main`, which only a pull moves. If you \
+         need the merge \
          or rebase itself, do it in a worktree: ask the PM to re-dispatch you with \
          `isolation: \"worktree\"`, or `git worktree add .claude/worktrees/<name>`. Read-only git \
-         (`status`, `log`, `diff`), `git fetch`, `git rebase --abort`/`--continue`, \
+         (`status`, `log`, `diff`), `git fetch`, `git pull`, `git rebase --abort`/`--continue`, \
          `git merge --abort`, and everything under `.claude/worktrees/**` are never blocked by \
          this rule.",
         target.display(),
@@ -658,7 +679,7 @@ fn staged_source_deny_reason(target: &Path, source: &[&str]) -> String {
 /// live writer shares the HEAD.
 ///
 /// Why: ADR-0049 decision 3 gives a docs commit the same concurrency test
-/// ADR-0048 decision 10 gives `pull`/`merge`/`rebase`, because the hazard is
+/// ADR-0048 decision 10 gives `merge`/`rebase`, because the hazard is
 /// the same one — a commit MOVES HEAD, and the branch it moves is whichever one
 /// the other session's uncommitted work is sitting on. The reader has to be
 /// told that the content was fine and the timing was not, or the obvious retry
@@ -1457,14 +1478,37 @@ mod tests {
     }
 
     #[test]
-    fn starts_a_head_move_covers_the_three_verbs() {
-        // ADR-0048 decision 10. Every form of these three moves HEAD, which is
-        // what lets the rule be stated by verb with no argument analysis.
+    fn starts_a_head_move_permits_pull_and_fetch() {
+        // ADR-0053. Owner ruling of 2026-08-17: "fetch and pull operations are
+        // permitted. Only direct code editing is not." Every `pull` form below
+        // was DENIED under ADR-0048 decision 10 — `("pull", vec!["--ff-only"])`
+        // sat in the covers-the-three-verbs table this test inverts. `fetch` was
+        // already permitted (decision 9) and is pinned here beside it so the
+        // remedy the deny still names cannot regress with it.
         for (verb, args) in [
             ("pull", vec![]),
             ("pull", vec!["--rebase"]),
             ("pull", vec!["origin", "main"]),
             ("pull", vec!["--ff-only"]),
+            ("fetch", vec!["origin"]),
+            ("fetch", vec!["--all", "--prune"]),
+        ] {
+            assert!(
+                !starts_a_head_move(verb, &tail(&args)),
+                "`git {verb} {}` is permitted in a main checkout (ADR-0053)",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn starts_a_head_move_still_covers_merge_and_rebase() {
+        // ADR-0053 permits `pull` and leaves these two exactly as ADR-0048
+        // decision 10 shipped them: a merge can conflict the shared tree and a
+        // rebase rewrites the branch another session's work sits on, neither of
+        // which `pull --ff-only` can do. Every form of both moves HEAD, which is
+        // what lets the rule be stated by verb with no argument analysis.
+        for (verb, args) in [
             ("merge", vec!["origin/main"]),
             ("merge", vec!["--no-ff", "feature/x"]),
             ("merge", vec!["--squash", "feature/x"]),
@@ -1560,11 +1604,11 @@ mod tests {
         let sub = checkout.path().join("crates/foo");
         std::fs::create_dir_all(&sub).expect("mkdir sub");
         let (verb, target, root) = main_checkout_head_move(
-            &format!("cd {} && git pull", sub.display()),
+            &format!("cd {} && git merge origin/main", sub.display()),
             checkout.path(),
         )
-        .expect("a pull from a subdirectory must resolve");
-        assert_eq!(verb, "pull");
+        .expect("a merge from a subdirectory must resolve");
+        assert_eq!(verb, "merge");
         assert_eq!(target, sub);
         assert_eq!(root, checkout.path());
     }
@@ -1572,18 +1616,22 @@ mod tests {
     #[test]
     fn main_checkout_head_move_finds_the_checkout_and_skips_a_worktree() {
         let checkout = main_checkout_dir();
-        let (verb, target, root) = main_checkout_head_move("git pull --rebase", checkout.path())
-            .expect("a pull in a main checkout must resolve");
-        assert_eq!(verb, "pull");
+        let (verb, target, root) =
+            main_checkout_head_move("git rebase origin/main", checkout.path())
+                .expect("a rebase in a main checkout must resolve");
+        assert_eq!(verb, "rebase");
         assert_eq!(target, checkout.path());
         assert_eq!(root, checkout.path());
 
         // A linked worktree carries a `.git` FILE. Its HEAD belongs to the one
-        // session that owns it, so a pull there races nothing and must resolve
+        // session that owns it, so a rebase there races nothing and must resolve
         // nothing — this is the ordinary-work case the directory test protects.
         let worktree = tempfile::tempdir().expect("tempdir");
         std::fs::write(worktree.path().join(".git"), "gitdir: /elsewhere").expect("write .git");
-        assert_eq!(main_checkout_head_move("git pull", worktree.path()), None);
+        assert_eq!(
+            main_checkout_head_move("git rebase origin/main", worktree.path()),
+            None
+        );
 
         // Not a repository at all: nothing to protect.
         let plain = tempfile::tempdir().expect("tempdir");
@@ -1606,25 +1654,40 @@ mod tests {
                 .expect("-C must move the target");
         assert_eq!(via_dash_c, checkout.path());
 
-        let (_, via_cd, _) =
-            main_checkout_head_move(&format!("cd {path} && git pull"), outside.path())
-                .expect("cd must move the target");
+        let (_, via_cd, _) = main_checkout_head_move(
+            &format!("cd {path} && git merge origin/main"),
+            outside.path(),
+        )
+        .expect("cd must move the target");
         assert_eq!(via_cd, checkout.path());
 
         // A benign leading verb must not hide the HEAD move behind it — this is
-        // the ordinary `git fetch && git pull` shape.
-        let (verb, _, _) = main_checkout_head_move("git fetch origin && git pull", checkout.path())
-            .expect("the second segment must be classified");
-        assert_eq!(verb, "pull");
+        // the ordinary `git fetch && git merge` shape, and since ADR-0053
+        // `git pull && git merge` is one too: the permitted first segment must
+        // not shield the second.
+        for command in [
+            "git fetch origin && git merge origin/main",
+            "git pull && git merge origin/main",
+        ] {
+            let (verb, _, _) = main_checkout_head_move(command, checkout.path())
+                .expect("the second segment must be classified");
+            assert_eq!(verb, "merge", "`{command}` must classify its merge");
+        }
     }
 
     #[test]
     fn main_checkout_head_move_is_none_for_ordinary_work_in_a_checkout() {
-        // Even inside a main checkout, everything that is not one of the three
-        // verbs resolves nothing and never reaches the daemon query.
+        // Even inside a main checkout, everything that is not `merge` or
+        // `rebase` resolves nothing and never reaches the daemon query.
         let checkout = main_checkout_dir();
         for command in [
             "git fetch origin",
+            // ADR-0053: every pull form resolves nothing, so the daemon is
+            // never asked and the answer cannot deny.
+            "git pull",
+            "git pull --ff-only",
+            "git pull --rebase",
+            "cd crates/foo && git pull",
             "git status --porcelain",
             "git log --oneline -5",
             "git worktree list",
@@ -1643,17 +1706,22 @@ mod tests {
     #[test]
     fn head_move_deny_reason_names_the_verb_the_path_and_both_remedies() {
         let reason = head_move_deny_reason(
-            "pull",
+            "merge",
             Path::new("/repo/main"),
             &["rust-engineer".to_string(), "rust-engineer".to_string()],
         );
         assert!(reason.contains("ADR-0048"), "{reason}");
-        assert!(reason.contains("git pull"), "{reason}");
+        assert!(reason.contains("git merge"), "{reason}");
         assert!(reason.contains("/repo/main"), "{reason}");
         // The sibling is named once, not repeated per delegation.
         assert_eq!(reason.matches("rust-engineer").count(), 1, "{reason}");
-        // Both remedies: the cheap one (fetch) and the general one (worktree).
+        // Both remedies: the cheap one (update the checkout in place) and the
+        // general one (worktree). Since ADR-0053 the cheap one is two commands,
+        // and naming only `fetch` would send a reader looking for a workaround
+        // to a restriction that no longer exists.
         assert!(reason.contains("git fetch"), "{reason}");
+        assert!(reason.contains("git pull"), "{reason}");
+        assert!(reason.contains("ADR-0053"), "{reason}");
         assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
     }
 
@@ -1663,7 +1731,7 @@ mod tests {
         // another agent is doing. A record can outlive its agent, and a grant
         // whose isolation POST failed is recorded unisolated — so stating the
         // claim as fact made the deny assert something it could not check.
-        let reason = head_move_deny_reason("pull", Path::new("/repo/main"), &["qa".to_string()]);
+        let reason = head_move_deny_reason("merge", Path::new("/repo/main"), &["qa".to_string()]);
         assert!(
             reason.contains("the daemon's delegation records name"),
             "the claim must be attributed to its source: {reason}"
