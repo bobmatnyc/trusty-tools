@@ -116,16 +116,31 @@ claims, and disputed results. Full rule in
 [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md)
 ("How Much Gate Output the PR Body Owes").
 
-### What CI actually gates (audited 2026-08-14)
+### What CI actually gates
 
-🔴 **A merge waits on six required checks, not on full green.** Branch protection
-requires exactly these contexts and nothing else: `Format check`, `Clippy`,
-`MSRV check`, `500-line file-size cap`, `trusty-search daemon smoke test`, and
-`PR version bump vs crates.io (issue #4421)`. All six trigger unconditionally and
-gate their expensive steps inside the job body on a `docs_only` boolean
+🔴 **The required-checks list drifts — read it from the API, not from this
+file.** The list below is a snapshot, and a stale snapshot has already cost a
+merge (next paragraph). Before trusting a count, run:
+
+```bash
+gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
+  --jq '.required_status_checks.contexts'
+```
+
+As of 2026-08-17 branch protection requires nine contexts: `Format check`,
+`Clippy`, `MSRV check`, `500-line file-size cap`, `trusty-search daemon smoke
+test`, `PR version bump vs crates.io (issue #4421)`, `Doc-comment pointer lint
+(Why/What/Test)`, `Durable writes hold the teardown guard`, and `No leaked
+AI-generation / tool-call artifacts`. All nine trigger unconditionally and gate
+their expensive steps inside the job body on a `docs_only` boolean
 (`ci.yml:145-172`) — a `paths:` filter on a required job would leave the check
-pending forever, which is why none of them has one. On a code PR the six settle
-in about 4 minutes; on a docs-only PR, in under one.
+pending forever, which is why none of them has one.
+
+🔴 **A stale copy of this list costs a real merge.** A stale six-item copy of
+this list cost [#5836](https://github.com/bobmatnyc/trusty-tools/pull/5836) a
+merge attempt: every documented check was green, and `gh pr merge` refused
+anyway with "the base branch policy prohibits the merge." That error names no
+check, so it never points back at the stale list as the cause.
 
 🔴 **`Rust tests (pre-publish gate)` — the eight shards — does not run on pull
 requests.** It runs ~9.6 minutes per shard, roughly 3x the entire required set,
@@ -149,17 +164,19 @@ the `ci-red-main`-labelled tracking issue, then fails the run. It is a GitHub is
 not a page — nobody is woken up.
 
 🟡 **A `BEHIND` branch cannot merge — update it.** `gh pr merge` refuses with "the
-head branch is not up to date with the base branch" even when all six required
+head branch is not up to date with the base branch" even when all nine required
 contexts have passed, so run `gh pr update-branch <n>` and let them re-report; on a
-docs-only PR that costs well under a minute. The mechanism is UNCONFIRMED —
-`required_status_checks.strict` is readable only with admin access, which the working
-account does not have — so treat this as observed behaviour, not a verified setting.
-A genuine `CONFLICTING` state is a different and harder problem.
+docs-only PR that costs well under a minute. `required_status_checks.strict` is
+readable without admin access and reads `false` — the classic "require branches up
+to date" setting is OFF, so it does not explain the refusal. The actual mechanism
+stays unconfirmed; a repository ruleset invisible to the
+`branches/main/protection` endpoint is the likely candidate. A genuine
+`CONFLICTING` state is a different and harder problem.
 
 🟡 **`gh pr merge --admin` bypasses nothing on this repo.** The working account is
 push-only (`admin: false`), so the flag is silently ineffective. `gh`'s own refusal
 message offers `--admin` as the remedy — following that suggestion is a dead end,
-not a fix. A PR merges when its six required contexts pass AND its branch is current
+not a fix. A PR merges when its nine required contexts pass AND its branch is current
 with base.
 
 ### Baseline failures — the Rust specifics
