@@ -258,7 +258,7 @@ impl fmt::Debug for JiraCredentials {
 /// span before the first `/`, `?` or `#`. A URL with no userinfo, and text that
 /// is not a URL at all, come back unchanged.
 /// Test: `super::config_tests::a_url_carrying_credentials_never_reaches_debug`,
-/// `super::config_tests::redaction_leaves_an_ordinary_url_alone`.
+/// `super::config_tests::redaction_leaves_a_url_without_userinfo_alone`.
 fn redact_userinfo(url: &str) -> String {
     let Some(marker) = url.find("//") else {
         return url.to_owned();
