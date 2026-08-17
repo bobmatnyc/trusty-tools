@@ -159,8 +159,16 @@ impl L1Cache {
             return Ok(Vec::new());
         }
         let bytes = std::fs::read(&target).map_err(|e| L1CacheError::io(target.clone(), e))?;
-        let drawers: Vec<Drawer> =
+        let mut drawers: Vec<Drawer> =
             serde_json::from_slice(&bytes).map_err(|e| L1CacheError::json(target, e))?;
+        // #5902: derive the content digest rather than trust the snapshot's copy.
+        // A snapshot written before the field existed carries `ContentHash::UNSET`,
+        // and one written by a binary on a different `CONTENT_HASH_VERSION`
+        // carries a digest from another space; both would otherwise leak into
+        // export as an identity no other machine can reproduce.
+        for d in &mut drawers {
+            d.refresh_content_hash();
+        }
         Ok(drawers)
     }
 

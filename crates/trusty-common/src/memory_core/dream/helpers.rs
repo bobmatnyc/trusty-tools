@@ -131,7 +131,12 @@ pub(crate) fn merge_into(handle: &Arc<PalaceHandle>, survivor: &Drawer, loser: &
         // panics when the cap lands inside a multi-byte char.
         let cut = char_safe_prefix(&combined, MERGED_CONTENT_CAP).len();
         combined.truncate(cut);
-        target.content = combined;
+        // #5902: `set_content` rather than a bare field assignment — the merged
+        // body is a new fact, so its content digest must move with it. This is
+        // the only production path that rewrites a stored drawer's content in
+        // place, and a direct assignment here would leave the drawer exporting
+        // under the pre-merge identity.
+        target.set_content(combined);
         target.importance = target.importance.max(loser.importance);
         for tag in &loser.tags {
             if !target.tags.contains(tag) {

@@ -13,6 +13,7 @@
 //! Test: `cargo test -p trusty-memory-core palace::` constructs each type and
 //! verifies serde round-trips.
 
+use crate::memory_core::content_hash::{ContentHash, memory_content_hash};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -165,6 +166,30 @@ impl DrawerType {
         }
     }
 
+    /// The inverse of [`Self::as_str`]: a stored or transmitted tag back to a
+    /// variant.
+    ///
+    /// Why (#5902): the projection existed only as `parse_drawer_type` inside
+    /// `store::kg_redb::types`, private to that module, so the JSONL import path
+    /// would have needed a second copy of the same match — and a copy is how the
+    /// two spellings drift the next time a variant is added. It belongs beside
+    /// `as_str`, whose inverse it is. `kg_redb`'s helper now delegates here.
+    /// What: `None` and any unrecognised tag both yield `Unknown`, which is the
+    /// documented decode default for a row or record written by a version that
+    /// knew a variant this one does not.
+    /// Test: `drawer_type_tag_round_trips_every_variant`,
+    /// `drawer_type_from_unknown_tag_is_unknown`.
+    pub fn from_tag(tag: Option<&str>) -> Self {
+        match tag {
+            Some("UserFact") => DrawerType::UserFact,
+            Some("SessionEvent") => DrawerType::SessionEvent,
+            Some("AgentNote") => DrawerType::AgentNote,
+            Some("Commit") => DrawerType::Commit,
+            Some("Task") => DrawerType::Task,
+            _ => DrawerType::Unknown,
+        }
+    }
+
     /// Whether this drawer type is protected from the dream cycle.
     ///
     /// Why (spec-001): `Task` drawers hold goals/checkpoints an application
@@ -223,6 +248,35 @@ pub struct Drawer {
     /// `#[serde(default)]`.
     #[serde(default)]
     pub fact_key: Option<String>,
+    /// #5902: content-addressed identity of [`Self::content`] — the join key
+    /// that lets two machines recognise one fact written twice.
+    ///
+    /// Why: this coexists with [`Self::id`] rather than replacing it. That UUID
+    /// is the HNSW vector-store key, the `drawer:{id}` KG triple subject, and
+    /// the value in the `DRAWERS_BY_FACT_KEY` slot index; replacing it would
+    /// mean rewiring all three. The digest answers a different question — "is
+    /// this the same fact?" — which no UUID can answer across machines.
+    ///
+    /// Why it is DERIVED, not persisted: the digest is a pure function of
+    /// `content`, so storing it in the redb `DrawerRecord` would create a second
+    /// source of truth that can disagree with the first. It would, too:
+    /// `dream::helpers::merge_into` rewrites `content` in place on the
+    /// in-memory table. So this field is a cache, recomputed from `content` at
+    /// every point a drawer enters memory — [`Self::new`], the redb hydration in
+    /// `store::kg_redb::read_ops::load_drawers`, and the L1-snapshot load — and
+    /// recomputed on the one path that changes content, [`Self::set_content`].
+    /// Nothing reads it from disk, so no postcard migration and no stale digest
+    /// is reachable.
+    ///
+    /// What: [`ContentHash::UNSET`] via `#[serde(default)]` for JSON written
+    /// before this field existed; [`Self::refresh_content_hash`] replaces the
+    /// sentinel (or a stale value) with the digest of the current content.
+    /// Test: `drawer_new_hashes_its_content`,
+    /// `set_content_recomputes_the_hash`,
+    /// `refresh_content_hash_heals_an_unset_or_stale_digest`,
+    /// `drawer_type_serde_default_is_unknown` (the legacy-decode arm).
+    #[serde(default)]
+    pub content_hash: ContentHash,
 }
 
 impl Drawer {
@@ -233,10 +287,14 @@ impl Drawer {
     /// What: Returns a `Drawer` with a fresh UUID and `created_at = now`.
     /// Test: Assert `Drawer::new(room, "x").importance == 0.5` and `id != Uuid::nil()`.
     pub fn new(room_id: Uuid, content: impl Into<String>) -> Self {
+        let content = content.into();
+        // #5902: the digest is derived from content at every entry point, so a
+        // freshly built drawer never carries the UNSET sentinel.
+        let content_hash = memory_content_hash(&content);
         Self {
             id: Uuid::new_v4(),
             room_id,
-            content: content.into(),
+            content,
             importance: 0.5,
             source_file: None,
             created_at: Utc::now(),
@@ -249,7 +307,43 @@ impl Drawer {
             // #4884: a drawer claims no slot until a Tier C write names one,
             // exactly as `expires_at` stays `None` until a TTL is set.
             fact_key: None,
+            content_hash,
         }
+    }
+
+    /// Replace this drawer's body, keeping [`Self::content_hash`] in agreement
+    /// with it (#5902).
+    ///
+    /// Why: `content` is a public field, so a direct assignment can desync the
+    /// derived digest. This is the one supported way to change a body, and
+    /// `dream::helpers::merge_into` — the only production path that rewrites
+    /// content in place — routes through it. A drawer whose digest disagreed
+    /// with its content would export under an identity nobody else can
+    /// reproduce, so the two must move together.
+    /// What: stores `content` verbatim (no normalization — normalization is for
+    /// hashing only) and recomputes the digest from it.
+    /// Test: `set_content_recomputes_the_hash`,
+    /// `dream::tests::merge_into_keeps_the_content_hash_in_step`.
+    pub fn set_content(&mut self, content: impl Into<String>) {
+        self.content = content.into();
+        self.content_hash = memory_content_hash(&self.content);
+    }
+
+    /// Recompute [`Self::content_hash`] from the current content (#5902).
+    ///
+    /// Why: the digest is derived, and every path that materialises a `Drawer`
+    /// from bytes it did not compute — redb hydration, the L1 JSON snapshot, an
+    /// imported JSONL record — must derive it rather than trust what it read.
+    /// That covers three cases with one call: a legacy row that has no digest
+    /// (decodes to [`ContentHash::UNSET`]), a snapshot written by an older
+    /// binary under a different [`crate::memory_core::content_hash::CONTENT_HASH_VERSION`],
+    /// and a hostile or corrupt file asserting a digest its body does not have.
+    /// What: unconditionally sets the digest to the hash of the current content.
+    /// Cheap enough to call per row on a cold open — a SHA-256 over a few
+    /// hundred bytes, against the redb decode and NFC pass already happening.
+    /// Test: `refresh_content_hash_heals_an_unset_or_stale_digest`.
+    pub fn refresh_content_hash(&mut self) {
+        self.content_hash = memory_content_hash(&self.content);
     }
 
     /// Builder helper: set the `drawer_type` and apply the matching default
@@ -414,6 +508,33 @@ mod tests {
         assert_eq!(DrawerType::Unknown.as_str(), "Unknown");
     }
 
+    /// #5902: `as_str` and `from_tag` are one projection, so every variant must
+    /// survive a round trip. A variant added to only one half is the drift this
+    /// pairing exists to make impossible.
+    #[test]
+    fn drawer_type_tag_round_trips_every_variant() {
+        for t in [
+            DrawerType::UserFact,
+            DrawerType::SessionEvent,
+            DrawerType::AgentNote,
+            DrawerType::Commit,
+            DrawerType::Task,
+            DrawerType::Unknown,
+        ] {
+            assert_eq!(DrawerType::from_tag(Some(t.as_str())), t, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn drawer_type_from_unknown_tag_is_unknown() {
+        assert_eq!(DrawerType::from_tag(None), DrawerType::Unknown);
+        assert_eq!(
+            DrawerType::from_tag(Some("SomethingFromTheFuture")),
+            DrawerType::Unknown
+        );
+        assert_eq!(DrawerType::from_tag(Some("userfact")), DrawerType::Unknown);
+    }
+
     #[test]
     fn task_drawer_is_protected() {
         assert!(DrawerType::Task.is_protected());
@@ -464,12 +585,61 @@ mod tests {
             "created_at": Utc::now().to_rfc3339(),
             "tags": [],
         });
-        let d: Drawer = serde_json::from_value(json).expect("legacy decode");
+        let mut d: Drawer = serde_json::from_value(json).expect("legacy decode");
         assert_eq!(d.drawer_type, DrawerType::Unknown);
         assert!(d.expires_at.is_none());
         // #4884: JSON written before `fact_key` existed must decode to "claims
         // no slot", not fail the whole drawer.
         assert!(d.fact_key.is_none());
+        // #5902: JSON written before `content_hash` existed decodes to the UNSET
+        // sentinel, and the hydration paths' `refresh_content_hash` is what
+        // turns that into a real digest.
+        assert!(d.content_hash.is_unset());
+        d.refresh_content_hash();
+        assert_eq!(d.content_hash, memory_content_hash("legacy"));
+    }
+
+    /// #5902: the derived-digest invariant at the drawer's own two write points.
+    #[test]
+    fn drawer_new_hashes_its_content() {
+        let d = Drawer::new(Uuid::new_v4(), "the daemon binds loopback only");
+        assert!(!d.content_hash.is_unset());
+        assert_eq!(
+            d.content_hash,
+            memory_content_hash("the daemon binds loopback only")
+        );
+        // Two drawers with the same body share an identity while their UUIDs
+        // differ — the whole point of the field.
+        let e = Drawer::new(Uuid::new_v4(), "the daemon binds loopback only");
+        assert_eq!(d.content_hash, e.content_hash);
+        assert_ne!(d.id, e.id);
+    }
+
+    #[test]
+    fn set_content_recomputes_the_hash() {
+        let mut d = Drawer::new(Uuid::new_v4(), "first");
+        let first = d.content_hash;
+        d.set_content("second");
+        assert_eq!(d.content, "second", "content is stored verbatim");
+        assert_ne!(d.content_hash, first);
+        assert_eq!(d.content_hash, memory_content_hash("second"));
+    }
+
+    /// Why: the hydration paths must DERIVE the digest, never trust what they
+    /// read. This covers all three ways a read digest can be wrong: absent,
+    /// stale, and outright false.
+    /// Test: This test.
+    #[test]
+    fn refresh_content_hash_heals_an_unset_or_stale_digest() {
+        let mut d = Drawer::new(Uuid::new_v4(), "body");
+
+        d.content_hash = ContentHash::UNSET;
+        d.refresh_content_hash();
+        assert_eq!(d.content_hash, memory_content_hash("body"));
+
+        d.content_hash = memory_content_hash("a different body entirely");
+        d.refresh_content_hash();
+        assert_eq!(d.content_hash, memory_content_hash("body"));
     }
 
     /// #4885: the one predicate the open-time sweep, `purge_expired`, and every

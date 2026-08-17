@@ -119,7 +119,7 @@ trusty-code = { path = "crates/trusty-code", version = "0.3.0" }
 # epic #3411). Not yet published (Slice 1, #3425).
 trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.6.0" }
-trusty-common = { path = "crates/trusty-common", version = "0.35" }
+trusty-common = { path = "crates/trusty-common", version = "0.36" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 # Why: `default-features = false` HERE, not only on the member entry (mirrors
@@ -241,6 +241,11 @@ jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 # a full SHA-1 digest rather than the colliding 16-byte fold they replace.
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 sha2 = "0.10"
+# NFC canonical composition for the memory content-hash contract (#5902): two
+# machines that typed the same sentence must produce one digest even when their
+# editors disagree about composition form. Already in `Cargo.lock` transitively,
+# so declaring it direct adds no new dependency to the graph.
+unicode-normalization = "0.1"
 # Cross-process advisory file locking for trusty-gworkspace's tokens.json
 # read-modify-write critical section (issue #3502) — small, actively
 # maintained, no unsafe beyond the platform lock syscalls it wraps.

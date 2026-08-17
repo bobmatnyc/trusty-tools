@@ -296,6 +296,11 @@ impl KgStoreRedb {
             let completed_at = record
                 .completed_at_ms
                 .and_then(DateTime::from_timestamp_millis);
+            // #5902: the content digest is DERIVED from the row's content, never
+            // stored in `DrawerRecord` — one source of truth, and no postcard
+            // positional migration for a value that is already recomputable.
+            let content_hash =
+                crate::memory_core::content_hash::memory_content_hash(&record.content);
             out.push(Drawer {
                 id,
                 room_id,
@@ -310,6 +315,7 @@ impl KgStoreRedb {
                 expires_at,
                 completed_at,
                 fact_key: record.fact_key,
+                content_hash,
             });
         }
         Ok(out)

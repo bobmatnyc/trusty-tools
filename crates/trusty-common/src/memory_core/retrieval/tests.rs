@@ -1357,21 +1357,12 @@ fn rescore_l1_by_similarity_patches_scores() {
     let room_id = uuid::Uuid::new_v4();
 
     // L0 identity entry (must remain untouched).
-    let identity_drawer = Drawer {
-        id: Uuid::nil(),
-        room_id: Uuid::nil(),
-        content: "identity".into(),
-        importance: 1.0,
-        source_file: None,
-        created_at: chrono::Utc::now(),
-        tags: Vec::new(),
-        last_accessed_at: None,
-        access_count: 0,
-        drawer_type: crate::memory_core::palace::DrawerType::UserFact,
-        expires_at: None,
-        completed_at: None,
-        fact_key: None,
-    };
+    // #5902: built through `Drawer::new` so the derived `content_hash` is
+    // computed rather than hand-written, matching how `layers.rs` synthesizes it.
+    let mut identity_drawer = Drawer::new(Uuid::nil(), "identity");
+    identity_drawer.id = Uuid::nil();
+    identity_drawer.importance = 1.0;
+    identity_drawer.drawer_type = crate::memory_core::palace::DrawerType::UserFact;
 
     // L1 drawer that appears in the similarity map.
     let mut matched = Drawer::new(room_id, "matched drawer");
