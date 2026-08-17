@@ -123,6 +123,8 @@ fn cli_parses_projects_register_full() {
         "acme-bot",
         "--gh-account",
         "acme-bot",
+        "--gh-config-dir",
+        "/home/bob/.config/gh-acme",
     ]);
     match action {
         ProjectsAction::Register {
@@ -134,6 +136,7 @@ fn cli_parses_projects_register_full() {
             stack_hint,
             gh_user,
             gh_account,
+            gh_config_dir,
         } => {
             assert_eq!(name, "widget");
             assert_eq!(repo_url, "https://github.com/acme/widget");
@@ -143,6 +146,12 @@ fn cli_parses_projects_register_full() {
             assert_eq!(stack_hint.as_deref(), Some("rust"));
             assert_eq!(gh_user.as_deref(), Some("acme-bot"));
             assert_eq!(gh_account.as_deref(), Some("acme-bot"));
+            // #5851: `--gh-account` and `--gh-config-dir` set together in one
+            // command is what arms `configured_account_pair`.
+            assert_eq!(
+                gh_config_dir.as_deref(),
+                Some(std::path::Path::new("/home/bob/.config/gh-acme"))
+            );
         }
         other => panic!("expected register, got {other:?}"),
     }
