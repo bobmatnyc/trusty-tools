@@ -23,6 +23,7 @@
 //! chain.
 //! Test: this file.
 
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -38,6 +39,122 @@ use super::*;
 
 /// One captured `/rpc` call: the JSON-RPC `method` and its `params`.
 type Captured = Arc<Mutex<Vec<(String, Value)>>>;
+
+/// An observer that keeps every outcome it is handed, in arrival order.
+#[derive(Default)]
+struct RecordingObserver(Mutex<Vec<MemoryTurnOutcome>>);
+
+impl MemoryDurabilityObserver for RecordingObserver {
+    fn observe(&self, outcome: MemoryTurnOutcome) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(outcome);
+    }
+}
+
+const REDACTION_CHILD_ENV: &str = "TCODE_MEMORY_WARNING_REDACTION_CHILD";
+const REDACTION_CHILD_TEST_PATH: &str =
+    "session::memory_sink::tests::memory_warning_redaction_child";
+/// Server-controlled markers the daemon mock plants in its error and `reason`
+/// text. A default warning must carry none of them.
+const CREDENTIAL_SENTINEL: &str = "sk-live-memory-credential-do-not-leak";
+const REASON_SENTINEL: &str = "Bearer credential-preview-do-not-leak";
+const OVERSIZED_SENTINEL: &str = "OVERSIZED_MEMORY_ERROR_DO_NOT_LEAK";
+
+/// Drive one dual-write against a daemon that plants credential-shaped text in
+/// both its error message and its `reason` field.
+///
+/// Runs only under the parent below — a bare `cargo test` sees it return
+/// immediately.
+#[tokio::test]
+async fn memory_warning_redaction_child() {
+    if std::env::var_os(REDACTION_CHILD_ENV).is_none() {
+        return;
+    }
+
+    async fn handle(Json(body): Json<Value>) -> Json<Value> {
+        let tool = body["params"]["name"].as_str().unwrap_or_default();
+        let response = match tool {
+            "chat_turn_append" => json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {
+                    "code": -32603,
+                    "message": format!(
+                        "{CREDENTIAL_SENTINEL} {}",
+                        OVERSIZED_SENTINEL.repeat(512)
+                    )
+                }
+            }),
+            "memory_remember" => json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": wrapped_result(&json!({
+                    "status": "skipped",
+                    "reason": REASON_SENTINEL
+                }))
+            }),
+            _ => json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": wrapped_result(&json!({"ok": true}))
+            }),
+        };
+        Json(response)
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let addr = listener.local_addr().expect("mock address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, Router::new().route("/rpc", post(handle))).await;
+    });
+
+    crate::logging::init_tracing_for_test();
+    let outcome = write_turn(
+        &format!("http://{addr}"),
+        "test-palace",
+        &QueuedTurn {
+            sequence: 1,
+            session_id: "session-redaction".into(),
+            prompt: "prompt".into(),
+            response: "response".into(),
+        },
+    )
+    .await;
+    assert!(matches!(outcome, MemoryTurnOutcome::Degraded { .. }));
+}
+
+/// #2425: the default turn-recorder warnings must name the failure category and
+/// carry NO daemon-controlled payload.
+///
+/// A subprocess because the assertion is about what reaches stderr, and this
+/// binary's tracing subscriber is process-global.
+#[test]
+fn default_memory_warnings_redact_server_payloads_in_subprocess() {
+    let output = Command::new(std::env::current_exe().expect("current test binary"))
+        .args([
+            "--exact",
+            REDACTION_CHILD_TEST_PATH,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(REDACTION_CHILD_ENV, "1")
+        .env("RUST_LOG", "warn")
+        .output()
+        .expect("run memory warning redaction child");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "child failed: {stderr}");
+    for secret in [CREDENTIAL_SENTINEL, REASON_SENTINEL, OVERSIZED_SENTINEL] {
+        assert!(
+            !stderr.contains(secret),
+            "default warning leaked server-controlled payload marker {secret}: {stderr}"
+        );
+    }
+    assert!(stderr.contains("failure_category"), "{stderr}");
+    assert!(stderr.contains("chat_turn_append"), "{stderr}");
+    assert!(stderr.contains("memory_remember_skipped"), "{stderr}");
+}
 
 /// Wrap `inner` as the real daemon's `tools/call` response envelope: the
 /// tool result STRINGIFIED inside `content[0].text` (mirrors the
@@ -353,6 +470,8 @@ async fn forbidden_creation_still_writes_to_an_existing_palace() {
 /// subscriber in a real deployment, not asserted on here (no test-local
 /// tracing capture exists in this crate yet), so this test's assertion is:
 /// the drain task tolerates a skipped envelope exactly like a stored one.
+/// (#2425) It also pins that a skipped envelope reports `Degraded`, not
+/// `Durable` — a thinned recall surface is a degraded turn.
 #[tokio::test]
 async fn write_turn_warns_on_skipped_status() {
     async fn handle_skipped(Json(body): Json<Value>) -> Json<Value> {
@@ -371,15 +490,71 @@ async fn write_turn_warns_on_skipped_status() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let sink = TurnMemorySink::new(
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = TurnMemorySink::new_observed(
         format!("http://{addr}"),
         "test-palace".to_string(),
         PalaceCreation::Allowed,
+        observer.clone(),
     );
     sink.enqueue("sess-skip", "prompt", "response");
     // The assertion is simply that this never panics/hangs; give the drain
     // task a moment to run.
     tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(matches!(
+        observer
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_slice(),
+        [MemoryTurnOutcome::Degraded {
+            category: MemoryFailureCategory::MemoryRememberSkipped,
+            ..
+        }]
+    ));
+}
+
+/// (#2425) A turn that lost ONE half of the dual-write is exactly one degraded
+/// turn, reported under the half that failed first — not two, and not durable.
+#[tokio::test]
+async fn partial_dual_write_counts_once_as_failed_turn() {
+    async fn handle_partial(Json(body): Json<Value>) -> Json<Value> {
+        if body["params"]["name"].as_str() == Some("chat_turn_append") {
+            return Json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": {"code": -32603, "message": "sensitive raw response"}
+            }));
+        }
+        Json(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": wrapped_result(&json!({"ok": true}))
+        }))
+    }
+    let app = Router::new().route("/rpc", post(handle_partial));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let outcome = write_turn(
+        &format!("http://{addr}"),
+        "test-palace",
+        &QueuedTurn {
+            sequence: 1,
+            session_id: "s".into(),
+            prompt: "credential-shaped prompt".into(),
+            response: "secret response".into(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        MemoryTurnOutcome::Degraded {
+            category: MemoryFailureCategory::ChatTurnAppend,
+            ..
+        }
+    ));
 }
 
 /// [`TurnMemorySink::base_url`]/[`TurnMemorySink::palace`] must expose
@@ -393,6 +568,8 @@ fn base_url_and_palace_expose_construction_args() {
         base_url: "http://example.test:1234".to_string(),
         palace: "a-palace".to_string(),
         creation: PalaceCreation::Allowed,
+        observer: Arc::new(NoopMemoryDurabilityObserver),
+        next_sequence: AtomicU64::new(1),
     };
     assert_eq!(sink.base_url(), "http://example.test:1234");
     assert_eq!(sink.palace(), "a-palace");
@@ -429,6 +606,8 @@ fn enqueue_drops_newest_when_queue_full() {
         base_url: String::new(),
         palace: String::new(),
         creation: PalaceCreation::Allowed,
+        observer: Arc::new(NoopMemoryDurabilityObserver),
+        next_sequence: AtomicU64::new(1),
     };
 
     sink.enqueue("s1", "p1", "r1");
@@ -440,6 +619,74 @@ fn enqueue_drops_newest_when_queue_full() {
         rx.try_recv().is_err(),
         "second turn must have been dropped, not queued"
     );
+}
+
+/// (#2425) Both of `enqueue`'s synchronous drop paths report a degraded turn,
+/// so a turn the drain never sees still reaches the session's status.
+#[test]
+fn queue_full_and_closed_drain_are_immediate_failures() {
+    let observer = Arc::new(RecordingObserver::default());
+    let (tx, mut rx) = mpsc::channel(1);
+    let sink = TurnMemorySink {
+        tx,
+        base_url: String::new(),
+        palace: String::new(),
+        creation: PalaceCreation::Allowed,
+        observer: observer.clone(),
+        next_sequence: AtomicU64::new(1),
+    };
+    sink.enqueue("s", "p1", "r1");
+    sink.enqueue("s", "p2", "r2"); // queue full
+    let _ = rx.try_recv();
+    drop(rx); // drain gone
+    sink.enqueue("s", "p3", "r3");
+
+    let outcomes = observer.0.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(matches!(
+        outcomes.as_slice(),
+        [
+            MemoryTurnOutcome::Degraded {
+                sequence: 2,
+                category: MemoryFailureCategory::QueueFull,
+                ..
+            },
+            MemoryTurnOutcome::Degraded {
+                sequence: 3,
+                category: MemoryFailureCategory::DrainClosed,
+                ..
+            }
+        ]
+    ));
+}
+
+/// (#2425) The detached drain must release its observer when the sink drops —
+/// otherwise a registry-backed observer would outlive every session.
+#[tokio::test]
+async fn dropping_sink_releases_detached_drain_observer() {
+    let observer: Arc<dyn MemoryDurabilityObserver> = Arc::new(RecordingObserver::default());
+    let observer_weak = Arc::downgrade(&observer);
+    let sink = TurnMemorySink::with_capacity_observed(
+        "http://127.0.0.1:1".into(),
+        "p".into(),
+        1,
+        PalaceCreation::Allowed,
+        Arc::clone(&observer),
+    );
+    drop(observer);
+    assert!(
+        observer_weak.upgrade().is_some(),
+        "sink/drain must own the observer while the sink is live"
+    );
+
+    drop(sink);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while observer_weak.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached drain did not release its observer after sender closure");
+    assert!(observer_weak.upgrade().is_none());
 }
 
 /// No git remote, no override -> falls back to a non-empty, stable slug

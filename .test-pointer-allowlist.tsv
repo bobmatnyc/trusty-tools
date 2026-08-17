@@ -176,7 +176,7 @@ crates/trusty-code/src/runner/in_process.rs	with_timeout_secs_overrides_only_tim
 crates/trusty-code/src/serve/http.rs	http_session_events_sse_streams_replay_then_live_event
 crates/trusty-code/src/session/registry.rs	cancel_is_idempotent_on_terminal_session
 crates/trusty-code/src/session/registry.rs	detach_stops_the_forwarder
-crates/trusty-code/src/session/registry.rs	get_transcript_returns_stored_record
+crates/trusty-code/src/session/registry_transcript.rs	get_transcript_returns_stored_record
 crates/trusty-code/src/session/transcript.rs	get_transcript_returns_stored_record
 crates/trusty-code/src/skills/mod.rs	load_skill_body_io_error
 crates/trusty-code/src/tools/registry.rs	register_panics_on_duplicate_in_debug
