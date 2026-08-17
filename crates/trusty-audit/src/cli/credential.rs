@@ -153,6 +153,21 @@ pub trait Tty {
     /// Whatever reading the terminal failed with.
     fn read_hidden(&mut self, prompt: &str) -> io::Result<String>;
 
+    /// Show `prompt` and read one line with the terminal's echo left ON.
+    ///
+    /// Why: the guided registration loop (#5885) asks for repository and board
+    /// names, which the operator must be able to see and correct as they type.
+    /// It lives on THIS trait rather than a second one so the crate has one
+    /// terminal seam: [`DevTty`] is the only production implementation of
+    /// either read, and a fake drives both.
+    /// What: `Ok(None)` at end of input, which is how the loop stops when the
+    /// terminal closes rather than spinning on empty reads.
+    ///
+    /// # Errors
+    ///
+    /// Whatever reading the terminal failed with.
+    fn read_line(&mut self, prompt: &str) -> io::Result<Option<String>>;
+
     /// Show one line of operator-facing guidance. Never a credential.
     ///
     /// # Errors
@@ -204,6 +219,23 @@ impl DevTty {
 impl Tty for DevTty {
     fn read_hidden(&mut self, prompt: &str) -> io::Result<String> {
         rpassword::prompt_password(prompt)
+    }
+
+    /// A READ handle on `/dev/tty` is opened per call, and dropped with it.
+    ///
+    /// Two reasons, both about not stealing bytes. The handle this struct holds
+    /// is write-only, so nothing here changes what [`Tty::say`] or `rpassword`
+    /// see. And a reader that outlived one call could buffer past the newline —
+    /// on a terminal in canonical mode one `read` returns exactly one line, so a
+    /// fresh reader per prompt cannot carry the next entry away with it.
+    fn read_line(&mut self, prompt: &str) -> io::Result<Option<String>> {
+        use std::io::{BufRead as _, Write as _};
+        write!(self.out, "{prompt}")?;
+        self.out.flush()?;
+
+        let mut line = String::new();
+        let read = io::BufReader::new(std::fs::File::open(Self::PATH)?).read_line(&mut line)?;
+        Ok((read > 0).then_some(line))
     }
 
     fn say(&mut self, line: &str) -> io::Result<()> {
@@ -477,6 +509,14 @@ trusty-review = "0.15.1"
             self.answers
                 .pop_front()
                 .unwrap_or_else(|| Err(io::Error::other("the script ran out of answers")))
+        }
+
+        /// Answered from the same queue, so a script that mixes the two reads
+        /// stays in one place. Nothing in this module calls it; the guided
+        /// registration loop is what does (#5885).
+        fn read_line(&mut self, prompt: &str) -> io::Result<Option<String>> {
+            self.prompts.push(prompt.to_owned());
+            self.answers.pop_front().transpose()
         }
 
         fn say(&mut self, line: &str) -> io::Result<()> {

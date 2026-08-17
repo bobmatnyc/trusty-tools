@@ -493,6 +493,22 @@ pub enum AuditError {
         source: std::io::Error,
     },
 
+    /// The terminal broke while the guided flow was collecting audit targets.
+    ///
+    /// Why: separate from [`AuditError::CredentialPromptFailed`] because the two
+    /// name different prompts, and an operator whose terminal died mid-
+    /// registration needs to know that what they already entered is on disk
+    /// (#5885). Every entry is persisted as it lands, so re-running resumes.
+    /// What: carries the underlying I/O failure. A refused TARGET is not this —
+    /// that is reported in the loop and the loop asks again.
+    /// Test: `crate::cli::registration::registration_tests::a_terminal_that_dies_keeps_what_was_already_registered`.
+    #[error("cannot read the audit targets from the terminal: {source}")]
+    RegistrationPromptFailed {
+        /// What the terminal read or write failed with.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// The install package's destination is already taken.
     ///
     /// Why: #5825 — an operator regenerating a package must not destroy the one

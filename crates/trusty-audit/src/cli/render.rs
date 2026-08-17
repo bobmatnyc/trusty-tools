@@ -143,8 +143,16 @@ pub fn render(outcome: &Outcome) -> String {
             out
         }
         Outcome::Repos(repos) => {
+            // #5885: this reads the companion manifest, which `tga audit`
+            // writes once a sweep COMPLETES — so it is empty however many
+            // targets are registered. The old wording ("run the guided flow to
+            // pick them") sent an operator who had just registered several
+            // repositories back to do it again, reading their success as a
+            // failure. It names `targets`, which answers the question they
+            // actually asked.
             if repos.is_empty() {
-                return "No repositories configured yet — run the guided flow to pick them.\n"
+                return "No sweep has recorded any repositories yet — `trusty-audit targets` \
+                        lists what this engagement is registered to audit.\n"
                     .to_string();
             }
             repos

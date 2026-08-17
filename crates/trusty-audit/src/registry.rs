@@ -621,6 +621,15 @@ mod registry_tests {
         }
     }
 
+    /// #5885: whoever prints this appends nothing to it, so the paragraph has to
+    /// close itself. It is the last line of the guided card, and a trailing
+    /// colon there reads as a list that never arrives.
+    #[test]
+    fn the_coverage_coaching_closes_its_own_sentence() {
+        assert!(COVERAGE_COACHING.ends_with('.'), "{COVERAGE_COACHING}");
+        assert!(!COVERAGE_COACHING.ends_with(":."), "{COVERAGE_COACHING}");
+    }
+
     #[test]
     fn a_registry_round_trips_both_kinds() {
         let tmp = tempfile::tempdir().expect("tempdir");

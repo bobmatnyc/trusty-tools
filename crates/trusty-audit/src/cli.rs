@@ -313,6 +313,10 @@ pub fn exit_code(outcome: &Outcome) -> i32 {
 // past the 500-SLOC production cap. Re-exported, so `crate::cli::render` stays
 // the name every caller and test already uses.
 pub mod credential;
+// #5885: the launch walks the operator into registration rather than naming a
+// command for them to run next. Beside `credential` because both are prompts,
+// and a prompt is a front-end concern the library must never acquire.
+pub mod registration;
 mod render;
 
 pub use render::render;
@@ -492,10 +496,17 @@ mod cli_tests {
         assert!(text.contains("trusty-search index remove"), "{text}");
     }
 
+    /// #5885: `repos` reads the manifest a completed sweep writes, so it is
+    /// empty however many targets are registered. It must point at `targets`,
+    /// not send the operator back to register what they already registered.
     #[test]
     fn rendering_an_empty_repo_list_says_what_to_do() {
         let text = render(&Outcome::Repos(Vec::new()));
-        assert!(text.contains("guided flow"), "{text}");
+        assert!(text.contains("trusty-audit targets"), "{text}");
+        assert!(
+            !text.contains("configured yet"),
+            "a successful registration must not read as a failure: {text}"
+        );
     }
 
     #[tokio::test]
@@ -525,6 +536,12 @@ mod cli_tests {
         assert!(text.contains("Coverage: "), "{text}");
         assert!(text.contains("database schema or migrations"), "{text}");
         assert!(text.contains("ticketing board"), "{text}");
+        // #5885: the paragraph ends a sentence. A trailing colon reads as
+        // "…and here it comes", with nothing after it.
+        assert!(
+            !text.trim_end().ends_with(':'),
+            "the card ends with a stray colon: {text}"
+        );
         // #5884: the "Next:" line must name the registering path, not the
         // listing one — `repos` lists what `add` already registered.
         assert!(text.contains("Next: register"), "{text}");
