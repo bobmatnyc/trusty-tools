@@ -751,28 +751,30 @@ fn resolve_palace_slug(stdin_payload: &str) -> Option<String> {
 /// truth for the same reason [`resolve_palace_slug`] uses it — the hook process'
 /// own cwd is whatever Claude Code launched it with, not where the user is.
 ///
-/// The resolver has to be the SAME one that picked the palace these drawers came
-/// out of. It was [`crate::project_root::find_project_root`], whose marker list
-/// includes `Cargo.toml` and whose walk is inclusive of `start`, so in a Cargo
-/// workspace it stopped at the CRATE directory while
+/// The resolver has to agree with the one that picked the palace these drawers
+/// came out of. It was [`crate::project_root::find_project_root`], whose marker
+/// list includes `Cargo.toml` and whose walk is inclusive of `start`, so in a
+/// Cargo workspace it stopped at the CRATE directory while
 /// [`crate::messaging::cwd_palace_slug_at`] resolved the palace from the
 /// workspace root. Recall then ran against the right palace and the filter
 /// dropped every drawer written from the repo root or a sibling crate — silently,
 /// uncounted, and against this filter's own fail-open contract.
-/// What: asks git for the working-tree root of the stdin `cwd` (falling back to
-/// the process cwd) via [`crate::messaging::git_toplevel`] — the same call
-/// `cwd_palace_slug_at` makes — then truncates any `.claude/worktrees/<name>`
-/// suffix through [`filter::normalise_project_path`], because git answers a
-/// dispatched agent's cwd with the worktree rather than the checkout that owns
-/// it. Returns `None` when git cannot name a working tree, which disables the
-/// filter rather than making it guess.
-/// Test: `session_project_root_normalises_a_worktree_to_its_checkout`,
+/// What: asks [`trusty_common::palace_resolve::main_worktree_root`] — the level-4
+/// probe `resolve_palace` uses — for the MAIN worktree root of the stdin `cwd`,
+/// falling back to the process cwd. `--git-common-dir` names the main repo's
+/// `.git` from inside a linked worktree, so a dispatched agent under
+/// `.claude/worktrees/<name>` and the main checkout answer with one path.
+/// Returns `None` when git cannot name a repository, which disables the filter
+/// rather than making it guess — deliberately without
+/// `find_project_root`'s marker walk as a fallback, since that walk is the
+/// defect above.
+/// Test: `session_project_root_resolves_a_worktree_to_its_main_checkout`,
 /// `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`.
 fn resolve_session_project_root(stdin_payload: &str) -> Option<String> {
     let start = payload_cwd(stdin_payload)
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
-    let root = crate::messaging::git_toplevel(&start)?;
+    let root = trusty_common::palace_resolve::main_worktree_root(&start)?;
     let normalised = filter::normalise_project_path(&root.to_string_lossy());
     if normalised.is_empty() {
         None

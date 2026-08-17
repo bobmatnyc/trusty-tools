@@ -1304,5 +1304,15 @@ async fn launch_protected_workspace(
     // #5274: the fallback already provisioned the protected worktree it
     // wants this session to run in, and passes it as `dir`; `launch` must not
     // provision a SECOND one on top, so the worktree request stays `false`.
-    super::launch::launch(client, url, Some(dir), None, false).await
+    // #5836: it must not re-resolve that placement either — doing so redirected
+    // the session into the shared base clone and abandoned this worktree.
+    super::launch::launch(
+        client,
+        url,
+        Some(dir),
+        None,
+        false,
+        super::managed_workspace::LaunchDir::CallerResolved,
+    )
+    .await
 }

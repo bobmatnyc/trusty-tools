@@ -98,7 +98,139 @@ fn staleness_catches_drift_the_stale_cache_hid() {
         "{}",
         check.message
     );
+    // #5865: the remedy is now stated per tier. This fixture drifts at the
+    // operator-home tier, which IS the one `tm install` writes, so the claim
+    // stands — but it must now say which tier it is talking about.
     assert!(check.message.contains("REPAIRABLE"), "{}", check.message);
+    assert!(
+        check.message.contains("operator home tier"),
+        "the remedy must name the tier it applies to: {}",
+        check.message
+    );
+}
+
+/// #5865: `tm install` deploys into `paths.claude_skills_dir()` and nowhere
+/// else, so only operator-home drift is repairable by it.
+#[test]
+fn drift_names_the_tm_install_remedy_only_for_the_operator_home_tier() {
+    let tmp = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let _src = deploy_real(
+        &paths.claude_skills_dir(),
+        "tm-delegation-patterns",
+        "v1",
+        None,
+    );
+
+    let check = report(
+        &reference_of(&[("tm-delegation-patterns", "v2")]),
+        &paths,
+        None,
+    );
+    assert!(
+        check
+            .message
+            .contains("1 drifted at the operator home tier — REPAIRABLE by `tm install`"),
+        "{}",
+        check.message
+    );
+}
+
+/// #5865, the reported defect: managed-config drift claimed `tm install` would
+/// repair it, so the operator re-ran `tm install` and the count never moved.
+#[test]
+fn managed_config_drift_does_not_claim_tm_install_repairs_it() {
+    let tmp = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let managed = paths.agent_deploy_dir().parent().unwrap().join("skills");
+    let _src = deploy_real(&managed, "tm-delegation-patterns", "v1", None);
+
+    let check = report(
+        &reference_of(&[("tm-delegation-patterns", "v2")]),
+        &paths,
+        None,
+    );
+    assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+    assert!(
+        check.message.contains("managed config tier"),
+        "{}",
+        check.message
+    );
+    assert!(
+        check.message.contains("does NOT write this tier"),
+        "the remedy must say `tm install` cannot repair this tier: {}",
+        check.message
+    );
+    assert!(
+        !check.message.contains("REPAIRABLE by `tm install`"),
+        "this is the #5865 defect verbatim: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains("tm doctor --fix-skills"),
+        "a tier `tm install` cannot reach must still name a remedy that can: {}",
+        check.message
+    );
+}
+
+/// #5865: the project tier has its own writer too — a managed session's
+/// prepare step — and `tm install` is not it.
+#[test]
+fn project_tier_drift_names_a_remedy_that_writes_the_project_tier() {
+    let tmp = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let _src = deploy_real(
+        &project.path().join(".claude").join("skills"),
+        "tm-delegation-patterns",
+        "v1",
+        None,
+    );
+
+    let check = report(
+        &reference_of(&[("tm-delegation-patterns", "v2")]),
+        &paths,
+        Some(project.path()),
+    );
+    assert!(check.message.contains("project tier"), "{}", check.message);
+    assert!(
+        !check.message.contains("REPAIRABLE by `tm install`"),
+        "{}",
+        check.message
+    );
+}
+
+/// #5865 severity guard: making the remedy tier-aware must not soften the
+/// conventions escalation, which is stated per SKILL and fires at every tier.
+/// A masked `Fail` here is the failure mode the issue warns about.
+#[test]
+fn managed_config_conventions_drift_still_escalates_to_fail() {
+    let tmp = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let managed = paths.agent_deploy_dir().parent().unwrap().join("skills");
+    let _src = deploy_real(&managed, "tm-workflow", "v1", None);
+
+    let check = report(&reference_of(&[("tm-workflow", "v2")]), &paths, None);
+    assert_eq!(
+        check.status,
+        CheckStatus::Fail,
+        "conventions drift must escalate at EVERY tier: {}",
+        check.message
+    );
+    assert!(
+        check.message.to_lowercase().contains("convention"),
+        "{}",
+        check.message
+    );
+}
+
+/// A tier added without extending the table must not inherit a claim about
+/// `tm install` that may be false.
+#[test]
+fn an_unknown_tier_label_never_claims_tm_install_repairs_it() {
+    let remedy = drift_remedy("some future tier");
+    assert!(!remedy.contains("tm install"), "{remedy}");
+    assert!(remedy.contains("tm doctor --fix-skills"), "{remedy}");
 }
 
 #[test]
@@ -173,9 +305,17 @@ fn staleness_reports_frozen_separately_from_repairable_drift() {
         "the frozen report must name the opt-in remedy: {}",
         check.message
     );
+    // #5865 keeps this guarantee and narrows it: a frozen-only finding produces
+    // no drift fragment at all, so no tier's remedy — `tm install`'s included —
+    // can be attached to it.
     assert!(
         !check.message.contains("REPAIRABLE"),
         "a frozen-only finding must not claim `tm install` repairs it: {}",
+        check.message
+    );
+    assert!(
+        !check.message.contains("drifted at the"),
+        "a frozen-only finding has no repairable-drift clause: {}",
         check.message
     );
 }

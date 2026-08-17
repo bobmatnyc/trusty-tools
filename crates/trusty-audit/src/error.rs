@@ -360,6 +360,346 @@ pub enum AuditError {
         source: std::io::Error,
     },
 
+    /// A generated file could not be serialized.
+    ///
+    /// Why: [`crate::config::generate`] re-renders a TOML table, and a render
+    /// that fails must not produce a config the recipient would run against
+    /// (#5825). Separate from [`AuditError::Parse`], which is about reading.
+    /// What: names what was being written. Never quotes the content, because
+    /// the content is the config carrying the credential.
+    /// Test: `crate::config::config_tests::generating_a_config_that_would_not_load_fails_here`
+    /// covers the neighbouring refusal; this arm has no reachable trigger for
+    /// a `toml::Table` and exists so one cannot be swallowed.
+    #[error("cannot render {what}: {source}")]
+    Render {
+        /// What was being written, e.g. `"engagement config"`.
+        what: &'static str,
+        /// The underlying serialization failure. Boxed for the same reason
+        /// [`AuditError::Parse`]'s is.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// An input the inbound install package cannot be assembled without.
+    ///
+    /// Why: #5825's packaging step is the classic fail-open — a missing binary
+    /// or an unreadable template that produces a zip anyway ships a deliverable
+    /// that cannot run, and the operator finds out from the client. Every input
+    /// is checked before a byte is written, and a refusal leaves nothing behind.
+    /// What: names which input and where it was looked for.
+    /// Test: `crate::distribute::distribute_tests::a_missing_binary_is_refused_and_leaves_no_file`,
+    /// `crate::distribute::distribute_tests::a_missing_template_is_refused_and_leaves_no_file`.
+    #[error("cannot build the install package: no {what} at {path}")]
+    MissingPackageInput {
+        /// Which input, e.g. `"taudit binary"`.
+        what: &'static str,
+        /// Where it was looked for.
+        path: PathBuf,
+    },
+
+    /// No OpenRouter key to write into the generated engagement config.
+    ///
+    /// Why: the inbound package's whole purpose is that the recipient can run
+    /// the audit without supplying anything of ours, and a config with a blank
+    /// key produces a package that installs, launches, and then fails at the
+    /// first inference call (#5825). Refusing at packaging time is where the
+    /// operator can still fix it.
+    /// What: names the environment variable to set and the template that could
+    /// have carried one instead. The key itself is never quoted, and neither is
+    /// a blank one — there is nothing to quote.
+    /// Test: `crate::distribute::distribute_tests::a_blank_credential_is_refused_and_leaves_no_file`.
+    #[error(
+        "cannot build the install package: no OpenRouter key. Set {env}, or put one in the \
+         template config at {template}"
+    )]
+    MissingCredential {
+        /// The environment variable that supplies it.
+        env: &'static str,
+        /// The template config that could carry one instead.
+        template: PathBuf,
+    },
+
+    /// The engagement config carries a key, but it is blank.
+    ///
+    /// Why: a present-but-empty `openrouter_key` used to sail through. The
+    /// sweep started, [`crate::inference::inference_env`] read the blank key as
+    /// "select nothing" and returned no variables, and the `tga audit` child
+    /// ran without its `TRUSTY_REVIEW_*` selection — so `trusty-review` fell
+    /// back to its Bedrock default. The operator found out hours later, at the
+    /// report stage, as a missing-AWS-credentials failure; the worse outcome is
+    /// the one where it works and bills a provider nobody chose. Refusing
+    /// before the sweep starts is the whole point (#5868).
+    /// What: names the file and both ways to put a key in play. Nothing is
+    /// quoted — a blank key has nothing to quote.
+    /// Test: `crate::session::session_tests::a_blank_configured_key_refuses_before_the_sweep`.
+    #[error(
+        "the OpenRouter key in {config} is blank. The audit's report stage cannot run without \
+         one: set {env} in the environment, or set `openrouter_key` in that file"
+    )]
+    BlankCredential {
+        /// The engagement config carrying the blank key.
+        config: PathBuf,
+        /// The environment variable that supplies one instead.
+        env: &'static str,
+    },
+
+    /// Nothing configured a credential, and there is no terminal to ask on.
+    ///
+    /// Why: the install path this crate is heading for is `curl … | sh`, where
+    /// stdin is the pipe carrying the script text. A run with no controlling
+    /// terminal must therefore say what to do and stop — hanging on a read, or
+    /// treating the next line of that pipe as a credential, are the two
+    /// failures this refusal exists to rule out (#5868).
+    /// What: names both ways to supply the key. The key itself is never
+    /// quoted, because there is none to quote.
+    /// Test: `crate::cli::credential::credential_tests::without_a_terminal_the_refusal_names_both_sources`.
+    #[error(
+        "no OpenRouter key is configured, and there is no terminal to ask on. Either set {env} \
+         in the environment, or set `openrouter_key` in {config}"
+    )]
+    NoCredentialSource {
+        /// The environment variable that supplies it.
+        env: &'static str,
+        /// The engagement config that could carry one instead.
+        config: PathBuf,
+    },
+
+    /// The operator was asked and did not produce a usable key.
+    ///
+    /// Why: the prompt re-asks a mistyped or blank entry rather than exiting on
+    /// the first mistake, but it cannot re-ask forever — a `/dev/tty` that
+    /// opens and then immediately reports end-of-file would spin (#5868).
+    /// What: names how many attempts were made. Never quotes what was typed,
+    /// including the entry that failed to match.
+    /// Test: `crate::cli::credential::credential_tests::a_prompt_that_never_agrees_gives_up`.
+    #[error("no usable OpenRouter key was entered after {attempts} attempts")]
+    CredentialNotEntered {
+        /// How many times the key was asked for.
+        attempts: usize,
+    },
+
+    /// The terminal could not be read from or written to.
+    ///
+    /// Why: distinguished from [`AuditError::CredentialNotEntered`] because the
+    /// operator did nothing wrong and re-running will not help until whatever
+    /// broke the terminal is fixed (#5868).
+    /// What: carries the underlying I/O failure. `std::io::Error` renders the
+    /// OS message only, so nothing that was typed can reach it.
+    /// Test: `crate::cli::credential::credential_tests::a_terminal_that_fails_is_reported_without_the_entry`.
+    #[error("cannot read the OpenRouter key from the terminal: {source}")]
+    CredentialPromptFailed {
+        /// What the terminal read or write failed with.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The install package's destination is already taken.
+    ///
+    /// Why: #5825 — an operator regenerating a package must not destroy the one
+    /// they already sent. Versioning the name instead would leave two files a
+    /// hand could pick the wrong one of; a refusal puts the decision at the
+    /// moment the mistake would happen, and `rm` is the explicit act that says
+    /// the old package no longer matters.
+    /// What: names the file and what to do about it.
+    /// Test: `crate::distribute::distribute_tests::an_existing_package_is_never_overwritten`.
+    #[error(
+        "{path} already exists. This client never overwrites a package that may already have \
+         been sent — remove it, or choose another --out"
+    )]
+    PackageExists {
+        /// The destination that is already taken.
+        path: PathBuf,
+    },
+
+    /// The install package could not be read, written, or renamed into place.
+    ///
+    /// Deliberately a different variant from [`AuditError::Package`]: the two
+    /// travel in opposite directions and their messages must not be confusable
+    /// in an operator's terminal (#5825).
+    #[error("install package {path}: {source}")]
+    Distribute {
+        /// The path that failed.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A registration spec is not a target this client will register.
+    ///
+    /// Why: #5822. `taudit add` writes the spec into a file the sweep later
+    /// reads, and a repository identity becomes a path under the working
+    /// directory, so the same containment argument as
+    /// [`AuditError::InvalidRepoName`] applies — `crate::registry` reuses
+    /// `crate::clone`'s charset check rather than deciding a second one.
+    /// What: quotes the rejected input and names the shape that was expected.
+    /// Test: `crate::registry::registry_tests::a_spec_that_is_neither_shape_is_refused`.
+    #[error("{spec} is not a target this client will register — {expected}")]
+    InvalidTarget {
+        /// What was asked for, verbatim.
+        spec: String,
+        /// The shape that was expected, e.g. `"expected owner/name"`.
+        expected: &'static str,
+    },
+
+    /// A board was registered and the engagement config carries no credential
+    /// for its provider.
+    ///
+    /// Why: registration VALIDATES before it persists (#5822), and a validation
+    /// that cannot even be attempted must say what to go and set — the
+    /// recipient is not the author of this config. Refusing here also keeps the
+    /// registry honest: nothing is persisted that was never checked.
+    /// What: names the provider and the exact config field.
+    /// Test: `crate::registry::registry_tests::a_board_without_a_credential_names_the_config_field`.
+    #[error(
+        "no {provider} credential in the engagement config, so {key} cannot be checked; \
+         set `{field}` in the engagement config and add it again — nothing was registered"
+    )]
+    BoardCredentialMissing {
+        /// `"jira"` or `"linear"`.
+        provider: &'static str,
+        /// The board that could not be checked.
+        key: String,
+        /// The config field to set, e.g. `"boards.jira"`.
+        field: &'static str,
+    },
+
+    /// A repository was registered and the recipient's `gh` credential cannot
+    /// read it.
+    ///
+    /// Why: #5822's whole point — a target that cannot be reached is rejected at
+    /// registration, not discovered an hour into a sweep. The `gh` failure is
+    /// kept structured for the same reason [`AuditError::Discovery`] keeps it:
+    /// "gh is not installed" and "you cannot see that repository" call for
+    /// different actions.
+    /// What: names the repository; the reason is `gh`'s own.
+    /// Test: `crate::validate::validate_tests::a_gh_that_cannot_answer_refuses_the_repository`.
+    #[error("cannot read {name_with_owner} with your GitHub credential: {source}")]
+    RepoUnreachable {
+        /// The repository that was refused.
+        name_with_owner: String,
+        /// The underlying `gh` failure, verbatim. Boxed for the same
+        /// `clippy::result_large_err` reason as [`AuditError::Install`].
+        #[source]
+        source: Box<trusty_common::gh::GhError>,
+    },
+
+    /// A board was registered and the configured credential cannot read it.
+    ///
+    /// Why: the board half of [`AuditError::RepoUnreachable`] (#5822).
+    /// What: names the provider and the board. `reason` is built from the HTTP
+    /// status and, for a GraphQL refusal, the provider's own message — never
+    /// from the request, so the credential cannot reach this string. That is
+    /// asserted directly rather than argued.
+    /// Test: `crate::validate::validate_tests::a_provider_message_is_scrubbed_of_the_credential`.
+    #[error("cannot read {provider} {key} with the configured credential: {reason}")]
+    BoardUnreachable {
+        /// `"jira"` or `"linear"`.
+        provider: &'static str,
+        /// The board that was refused.
+        key: String,
+        /// Why, in one line. Never carries a credential.
+        reason: String,
+    },
+
+    /// The target registry carries fewer entries than it declares.
+    ///
+    /// The registry's half of [`AuditError::TruncatedSelection`], for the same
+    /// reason and detected the same way — see `crate::registry` (#5822).
+    #[error(
+        "{path} declares {declared} targets but carries {found} — it was written partially. \
+         Register them again; nothing was changed"
+    )]
+    TruncatedRegistry {
+        /// The registry file.
+        path: PathBuf,
+        /// The `count` the file declared.
+        declared: usize,
+        /// How many `[[targets]]` entries it actually holds.
+        found: usize,
+    },
+
+    /// The registry's read-modify-write could not be serialised.
+    ///
+    /// Why: #5822 — registering and removing a target both load
+    /// `state/audit-targets.toml`, mutate it and save it back. Two of those
+    /// running at once against one working directory each load the same
+    /// snapshot, and the later save discards the earlier one's target while both
+    /// report success. `trusty_common::file_lock::with_exclusive_lock` closes
+    /// that, and it never fails open — so a lock that cannot be taken has to be
+    /// a refusal here rather than an unserialised write.
+    /// What: names the registry the lock guards. `source` is the lock failure,
+    /// or the panic that escaped the critical section.
+    /// Test: `crate::registry::registry_tests::concurrent_registrations_keep_every_target`.
+    #[error("could not update {path} under its lock: {source}. Nothing was changed")]
+    RegistryLock {
+        /// The registry file whose lock could not be held.
+        path: PathBuf,
+        /// Why the critical section could not be entered or completed.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The one-shot audit stopped, and this is the phase it stopped in.
+    ///
+    /// Why: #5824 chains four fallible phases, and an operator who sees it stop
+    /// must know which one. Reporting every phase's failure as "the audit
+    /// failed" makes them re-derive the stage before they can act — "cannot read
+    /// the registry" and "`tga audit` exited with code 2" have nothing in common
+    /// as next steps.
+    /// What: the phase, plus the underlying refusal, which names the target and
+    /// the reason. `source` is boxed because nesting one `AuditError` inside
+    /// another unboxed would grow every `Result` in the crate past
+    /// `clippy::result_large_err`.
+    /// Test: `crate::chain::chain_tests::a_sweep_that_audited_nothing_stops_before_packaging`.
+    #[error("the audit stopped in the {phase} phase — {source}")]
+    ChainStopped {
+        /// Which link of the chain refused.
+        phase: crate::chain::Phase,
+        /// What it refused with.
+        #[source]
+        source: Box<AuditError>,
+    },
+
+    /// The sweep ran and audited no repository at all.
+    ///
+    /// Why: #5824's fail-open guard. The chain continues past a repository that
+    /// failed, because five audits are worth having when the sixth did not work.
+    /// A sweep in which EVERY repository failed is not that case: packaging it
+    /// would hand the recipient a zip of two generated files that looks like a
+    /// finished engagement. [`AuditError::NothingToPackage`] is the same refusal
+    /// one stage later, from `crate::package`; this one exists so the chain
+    /// attributes it to the phase that actually failed.
+    /// What: how many repositories were attempted. The per-repository reasons
+    /// are in `state/run-progress.toml` and in each repository's log.
+    /// Test: `crate::chain::chain_tests::a_sweep_that_audited_nothing_stops_before_packaging`.
+    #[error(
+        "no repository was audited ({attempted} attempted) — nothing was packaged; see the \
+         per-repository failures above, and `trusty-audit package` if you want the partial \
+         output anyway"
+    )]
+    NothingAudited {
+        /// How many repositories the sweep attempted.
+        attempted: usize,
+    },
+
+    /// The chain was asked to audit an engagement that targets nothing.
+    ///
+    /// Why: #5824. `NoRepositoriesSelected` names a file the operator has never
+    /// heard of and does not write, so on the one-shot path it is the wrong
+    /// message — the remedy is to register a target, not to go and edit
+    /// `state/selected-repos.toml`.
+    /// What: names the working directory and the command that fixes it.
+    /// Test: `crate::chain::chain_tests::an_engagement_with_nothing_to_audit_stops_in_materialize`.
+    #[error(
+        "nothing to audit in {root} — no repository is registered and no earlier clone left a \
+         selection; register one with `trusty-audit add repo <owner>/<name>`"
+    )]
+    NothingRegistered {
+        /// The working directory that targets nothing.
+        root: PathBuf,
+    },
+
     /// A capability this scaffold declares but does not yet implement.
     ///
     /// Why: a half-built capability must fail closed rather than silently

@@ -36,6 +36,11 @@ path = "src/main.rs"
 [dependencies]
 # Binary/CLI error handling (CLAUDE.md: anyhow for binaries, thiserror for libs).
 anyhow = { workspace = true }
+# #5825: expanding the `~` in the inbound package's default output directory
+# (`~/duetto/audit`) without shelling out. The workspace's existing home-dir
+# resolver — `trusty-common` reaches for the same crate in six places — so this
+# is the shared answer rather than a second one.
+dirs = { workspace = true }
 # Argument parsing. The parser lives in the LIBRARY (`cli.rs`) so every CLI
 # invocation is unit-testable without spawning the binary.
 clap = { workspace = true }
@@ -48,6 +53,14 @@ toml = { workspace = true }
 serde_yaml = { workspace = true }
 # Library error type.
 thiserror = { workspace = true }
+# #5868: first-run credential entry with echo disabled. Already the workspace's
+# hidden-input answer (`trusty-common`'s `config keys set` reaches for it), so
+# this is the shared choice rather than a second one, and it is why this crate
+# spells no `termios` call of its own. Its unix defaults are what the feature
+# needs: it reads AND prompts on `/dev/tty` rather than stdin — which under
+# `curl … | sh` is the pipe carrying the script — and it restores the terminal's
+# previous state when it drops.
+rpassword = { workspace = true }
 # #5495: the pinned, fail-closed download entry point. Downloading, verifying
 # and placing binaries is this crate's domain, not ours — CLAUDE.md's
 # common-entry-point rule makes a second implementation here a defect. It also
@@ -57,13 +70,25 @@ trusty-installer = { workspace = true }
 # #5487: the workspace's single `gh` entry point (#5475). Discovery shells out
 # to `gh repo list`, and CLAUDE.md's common-entry-point rule makes a second
 # `Command::new("gh")` here a defect — so this crate never spells one.
-trusty-common = { workspace = true, features = ["gh-cli"] }
+# #5822: `credentials` adds `scrub_secrets`, the workspace's one redaction entry
+# point, used where a board provider's own error text reaches an operator.
+trusty-common = { workspace = true, features = ["gh-cli", "credentials"] }
+# #5822: board validation issues HTTP requests, so it needs `reqwest`'s types —
+# the RequestBuilder, and the error it classifies without quoting the URL. The
+# CLIENT still comes from `trusty_installer::download::http_client`, which stays
+# this crate's one client constructor under the common-entry-point rule.
+reqwest = { workspace = true }
 # Deserializing `gh --json` payloads. `GhCommand::json` hands back a typed value
 # via serde; the derive lives on this crate's own `DiscoveredRepo`.
 serde_json = { workspace = true }
 # Async runtime for the binary. `Session::execute` is async because installing
 # the pinned tools downloads; the Tauri shell will drive the same future.
 tokio = { workspace = true }
+# #5823: the workspace's single progress renderer (#1315), and the wire format
+# the `tga audit` child relays its stage events through. Reaching for
+# `indicatif` here instead would be a second implementation of a shared
+# capability, which CLAUDE.md's common-entry-point rule makes a defect.
+trusty-progress = { workspace = true }
 # #5499: the return package is one zip file, because the return channel is
 # manual (#5642) and a directory cannot be attached to an email.
 zip = { workspace = true }
@@ -76,3 +101,8 @@ walkdir = { workspace = true }
 [dev-dependencies]
 # Real directories for the working-directory creation tests.
 tempfile = { workspace = true }
+# #5824: `tests/cli_end_to_end.rs` opens the return package the chain wrote and
+# reads its generated members, because what the recipient receives is the zip
+# rather than the console output that produced it. Already a dependency above,
+# so this costs no extra compilation.
+zip = { workspace = true }

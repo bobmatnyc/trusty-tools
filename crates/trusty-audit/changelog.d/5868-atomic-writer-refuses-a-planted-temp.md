@@ -1,0 +1,3 @@
+Fixed
+
+- The atomic state-file writer opens its temporary with `O_EXCL`, so it refuses whatever is already at that path instead of opening through it. The temporary's name is guessable — it is the pid plus a fixed-seed hash of a thread id — and a local attacker who pre-planted a symlink at it had the write follow the link: `trusty-audit`'s first-run prompt wrote the plaintext OpenRouter key into the attacker's file and left `engagement.toml` a symlink pointing there. Mode 0600 did not prevent it, because that mode constrains a file at creation and an open that follows a symlink creates nothing. A temporary left behind by a writer that crashed is still recovered, by unlinking and re-creating once ([#5868](https://github.com/bobmatnyc/trusty-tools/issues/5868))

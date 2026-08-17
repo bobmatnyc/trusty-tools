@@ -123,7 +123,11 @@ pub struct ReturnPackage {
     pub total_bytes: u64,
     /// Size of the zip on disk.
     pub packaged_bytes: u64,
-    /// One line per repository the package does not cover, and why.
+    /// One line per target the package does not cover, and why.
+    ///
+    /// The sweep's own failures, plus whatever the caller passed as
+    /// `unattempted` — a repository that never cloned reaches the sweep's
+    /// records nowhere, so it can only arrive that way (#5824).
     pub excluded: Vec<String>,
 }
 
@@ -134,6 +138,7 @@ pub struct ReturnPackage {
 /// redacted copy, so there is no field for the credential to be carried in and
 /// no `skip_serializing` a later edit could remove.
 /// What: scalars first, then the two table arrays — TOML requires that order.
+/// `not_attempted` is a plain string array, so it sits with the scalars.
 #[derive(Debug, Serialize)]
 struct PackageMetadata {
     generated_by: String,
@@ -142,6 +147,16 @@ struct PackageMetadata {
     instructions: String,
     repositories_audited: usize,
     repositories_excluded: usize,
+    /// Targets that never reached the sweep, so `repositories` cannot list them
+    /// and `repositories_excluded` cannot count them (#5824).
+    ///
+    /// A repository that failed to clone and a registered board are both here.
+    /// Kept separate from `repositories_excluded` rather than folded into it,
+    /// because a board is not a repository and counting one as an excluded
+    /// repository would overstate what the sweep was asked to do. Always
+    /// emitted, so an empty array is a positive claim of full coverage rather
+    /// than an absent key a reader has to interpret.
+    not_attempted: Vec<String>,
     tools: Vec<ToolVersion>,
     repositories: Vec<PackagedRepo>,
 }
@@ -194,10 +209,61 @@ struct PackagedRepo {
 /// `extract/`,
 /// [`AuditError::CredentialInPackage`] when a member carries the engagement key,
 /// and [`AuditError::Package`] for any read, write, or rename failure.
+/// Assemble from the sweep's own record, refusing one that did not finish.
+///
+/// Why: #5824 gave packaging a second caller. The completion check used to live
+/// in `Session::package`, so the chain would either have had to duplicate it or
+/// to skip it by passing the report it already held in memory — and skipping it
+/// is how a sweep that died three repositories into six gets sent as a whole
+/// engagement. One function, both callers, one precondition.
+///
+/// The completion signal is [`crate::run::RunProgress::complete`], not the
+/// record's mere presence: since #5494 the record is written after every
+/// repository, so an unfinished sweep leaves one behind.
+/// What: reads `state/run-progress.toml`, requires it to be complete, and hands
+/// its report to [`assemble`].
+/// Test: `crate::session::session_tests::packaging_before_any_sweep_is_refused`,
+/// `crate::session::session_tests::packaging_an_unfinished_sweep_is_refused`,
+/// `crate::chain::chain_tests::the_chain_installs_collects_and_packages`.
+///
+/// # Errors
+///
+/// [`AuditError::NothingToPackage`] when no sweep has finished here, and
+/// whatever [`assemble`] fails with.
+pub fn from_checkpoint(
+    work: &WorkDir,
+    config: &EngagementConfig,
+    unattempted: &[String],
+    destination: &Path,
+) -> Result<ReturnPackage, AuditError> {
+    let progress =
+        crate::run::read_progress(work)?.ok_or_else(|| AuditError::NothingToPackage {
+            reason: format!(
+                "no sweep has finished in {} — run `trusty-audit run` first",
+                work.root().display()
+            ),
+        })?;
+    if !progress.complete {
+        return Err(AuditError::NothingToPackage {
+            reason: format!(
+                "the last sweep in {} did not finish — {} recorded so far; \
+                 run `trusty-audit run` to resume it",
+                work.root().display(),
+                match progress.repos.len() {
+                    1 => "1 repository".to_owned(),
+                    n => format!("{n} repositories"),
+                }
+            ),
+        });
+    }
+    assemble(work, config, &progress.report(), unattempted, destination)
+}
+
 pub fn assemble(
     work: &WorkDir,
     config: &EngagementConfig,
     report: &RunReport,
+    unattempted: &[String],
     destination: &Path,
 ) -> Result<ReturnPackage, AuditError> {
     let audited: Vec<&RepoRun> = report
@@ -226,8 +292,10 @@ pub fn assemble(
     }
     collected.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let excluded = exclusions(report);
-    let metadata = render_metadata(work, config, report, &audited)?;
+    // #5824: the sweep's own failures, then the targets that never reached it.
+    let mut excluded = exclusions(report);
+    excluded.extend(unattempted.iter().cloned());
+    let metadata = render_metadata(work, config, report, &audited, unattempted)?;
     let readme = render_readme(config, &audited, &excluded);
 
     write_archive(destination, config, readme, metadata, collected, excluded)
@@ -409,6 +477,7 @@ fn render_metadata(
     config: &EngagementConfig,
     report: &RunReport,
     audited: &[&RepoRun],
+    unattempted: &[String],
 ) -> Result<String, AuditError> {
     let tools = tools::read_record(work)?
         .into_iter()
@@ -437,6 +506,7 @@ fn render_metadata(
         instructions: config.instructions.clone(),
         repositories_audited: audited.len(),
         repositories_excluded: report.repos.len() - audited.len(),
+        not_attempted: unattempted.to_vec(),
         tools,
         repositories,
     };
@@ -609,7 +679,30 @@ fn start(zip: &mut Archive, entry: &str, bytes: u64, temporary: &Path) -> Result
         })
 }
 
-/// Copy one file into the archive, refusing it if it carries the credential.
+/// Every secret this engagement holds, as the bytes a member may not carry.
+///
+/// Why: the guard used to scan for `openrouter_key` alone, and #5857 put two
+/// more secrets on the same trust boundary — the JIRA token and the Linear API
+/// key reach a `tga audit` child through its environment, and the files that
+/// child writes are exactly the files this function's caller packages and sends
+/// off the recipient's network. One list, so a credential added to
+/// [`EngagementConfig`] is refused here the moment it is configured.
+/// What: [`EngagementConfig::configured_secrets`] as byte slices — the same
+/// list [`crate::run`]'s child-log scrubber uses as its needles, so the two
+/// guards cannot come to disagree about what a secret is. A provider with no
+/// entry contributes no needle.
+/// Test: `super::package_tests::a_member_carrying_the_jira_token_is_refused_and_leaves_no_zip`,
+/// `super::package_tests::a_member_carrying_the_linear_api_key_is_refused_and_leaves_no_zip`,
+/// `super::package_tests::a_member_carrying_several_secrets_is_refused_on_the_first_pass`.
+fn secret_needles(config: &EngagementConfig) -> Vec<&[u8]> {
+    config
+        .configured_secrets()
+        .into_iter()
+        .map(str::as_bytes)
+        .collect()
+}
+
+/// Copy one file into the archive, refusing it if it carries any credential.
 fn copy_member(
     zip: &mut Archive,
     entry: &str,
@@ -624,8 +717,8 @@ fn copy_member(
     let bytes = input.metadata().map(|m| m.len()).unwrap_or(0);
     start(zip, entry, bytes, temporary)?;
 
-    let needle = config.openrouter_key.expose().as_bytes().to_vec();
-    let mut scan = CredentialScan::over(&needle);
+    let needles = secret_needles(config);
+    let mut scan = CredentialScan::over(&needles);
     let mut buffer = vec![0_u8; CHUNK_BYTES];
     let mut written = 0_u64;
     loop {
@@ -651,37 +744,54 @@ fn copy_member(
     Ok(written)
 }
 
-/// A substring search across a stream, without holding the stream in memory.
+/// A multi-needle substring search across a stream, without holding the stream
+/// in memory.
 ///
 /// Why: the credential check has to cover an extract database that can run to
 /// hundreds of megabytes, and a match that straddles two reads is exactly the
-/// case a naive per-chunk search misses. Keeping the last `needle.len() - 1`
-/// bytes as the next window's prefix is what closes that gap.
+/// case a naive per-chunk search misses. Keeping the last `len - 1` bytes as the
+/// next window's prefix is what closes that gap.
+///
+/// The carried tail is sized to the LONGEST needle (#5857): one buffer serves
+/// every needle, and a tail cut to the shortest would let a longer secret
+/// straddle two reads undetected — the precise failure a per-needle tail exists
+/// to prevent. One shared window also means one copy per chunk rather than one
+/// per needle per chunk, which matters at extract-database size.
 /// Test: `super::package_tests::a_credential_split_across_two_reads_is_caught`.
 struct CredentialScan<'a> {
-    needle: &'a [u8],
+    /// Every secret to refuse. Empty needles are dropped at construction — an
+    /// unset credential must not match every file.
+    needles: Vec<&'a [u8]>,
+    /// Bytes to carry into the next window: `longest needle - 1`.
+    keep: usize,
     tail: Vec<u8>,
 }
 
 impl<'a> CredentialScan<'a> {
-    fn over(needle: &'a [u8]) -> Self {
+    fn over(needles: &[&'a [u8]]) -> Self {
+        let needles: Vec<&'a [u8]> = needles.iter().copied().filter(|n| !n.is_empty()).collect();
+        let keep = needles.iter().map(|n| n.len()).max().unwrap_or(1) - 1;
         Self {
-            needle,
+            needles,
+            keep,
             tail: Vec::new(),
         }
     }
 
-    /// Whether the needle appears in the stream up to and including `chunk`.
+    /// Whether any needle appears in the stream up to and including `chunk`.
     fn feed(&mut self, chunk: &[u8]) -> bool {
-        if self.needle.is_empty() {
+        if self.needles.is_empty() {
             return false;
         }
         let mut window = std::mem::take(&mut self.tail);
         window.extend_from_slice(chunk);
-        let found = window
-            .windows(self.needle.len())
-            .any(|candidate| candidate == self.needle);
-        let keep = (self.needle.len() - 1).min(window.len());
+        let found = self.needles.iter().any(|needle| {
+            window.len() >= needle.len()
+                && window
+                    .windows(needle.len())
+                    .any(|candidate| candidate == *needle)
+        });
+        let keep = self.keep.min(window.len());
         self.tail = window[window.len() - keep..].to_vec();
         found
     }
@@ -737,6 +847,7 @@ trusty-review = "0.15.1"
             output,
             log: work.path(Area::Logs).join(format!("{stem}.log")),
             gaps: Vec::new(),
+            resumed: false,
             result: RepoResult::Succeeded,
         }
     }
@@ -754,6 +865,7 @@ trusty-review = "0.15.1"
                 output: work.path(Area::Output).join(stem),
                 log: work.path(Area::Logs).join(format!("{stem}.log")),
                 gaps: Vec::new(),
+                resumed: false,
                 result: RepoResult::Succeeded,
             }
         }
@@ -795,7 +907,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        let package = assemble(&work, &config(), &report, &destination).expect("assembles");
+        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
 
         assert_eq!(package.path, destination);
         assert!(destination.is_file(), "the zip was not written");
@@ -822,7 +934,7 @@ trusty-review = "0.15.1"
         install_record(&work);
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
-        assemble(&work, &config(), &report, &destination).expect("assembles");
+        assemble(&work, &config(), &report, &[], &destination).expect("assembles");
 
         // `by_index` succeeding with no password IS the unencrypted property:
         // the zip crate returns `UnsupportedArchive` for an encrypted entry.
@@ -859,7 +971,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination)
             .expect_err("a package carrying the key must not be produced");
         assert!(
             matches!(err, AuditError::CredentialInPackage { .. }),
@@ -875,17 +987,157 @@ trusty-review = "0.15.1"
         );
     }
 
-    /// A needle straddling two reads is the case the chunked scan exists for.
+    /// The board credentials #5857 routes through this crate, on the same
+    /// engagement that already carries the OpenRouter key.
+    const BOARD_CONFIG: &str = r#"
+openrouter_key = "sk-or-v1-not-a-real-key"
+instructions = "Assess the last 52 weeks."
+client = "Acme"
+
+[tools]
+tga = "2.9.4"
+trusty-search = "0.47.0"
+trusty-analyze = "0.9.2"
+trusty-review = "0.15.1"
+
+[boards.jira]
+url = "https://acme.atlassian.net"
+email = "auditor@acme.example"
+token = "jira-token-do-not-package-me"
+
+[boards.linear]
+api_key = "lin_api_do-not-package-me"
+"#;
+
+    fn config_with_boards() -> EngagementConfig {
+        EngagementConfig::from_toml(BOARD_CONFIG, Path::new("engagement.toml")).expect("parses")
+    }
+
+    /// Package one member carrying `leaked`, and return what `assemble` did.
+    fn packaging_a_member_carrying(
+        work: &WorkDir,
+        config: &EngagementConfig,
+        leaked: &str,
+    ) -> Result<ReturnPackage, AuditError> {
+        install_record(work);
+        let run = audited(work, "00-acme-api", "acme-api");
+        std::fs::write(run.output.join("leaked.log"), leaked).expect("write");
+        let report = RunReport::of(vec![run]);
+        assemble(work, config, &report, &[], &default_destination(work))
+    }
+
+    /// The JIRA token is a secret this crate now hands to a child, so the
+    /// package guard owes it the refusal the OpenRouter key already gets.
+    ///
+    /// Against `5a615fe0e` this fails on the first assertion: `copy_member`
+    /// scanned for `openrouter_key` alone, so the token was packaged and the
+    /// engagement's own board credential left the recipient's network.
+    #[test]
+    fn a_member_carrying_the_jira_token_is_refused_and_leaves_no_zip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let destination = default_destination(&work);
+
+        let err = packaging_a_member_carrying(
+            &work,
+            &config_with_boards(),
+            "authorization: Basic jira-token-do-not-package-me\n",
+        )
+        .expect_err("a package carrying the JIRA token must not be produced");
+
+        assert!(
+            matches!(err, AuditError::CredentialInPackage { .. }),
+            "{err:?}"
+        );
+        assert!(
+            !destination.exists(),
+            "a refused package must leave no file"
+        );
+        assert!(
+            !destination.with_extension("zip.part").exists(),
+            "the temporary must be removed too"
+        );
+    }
+
+    /// The Linear key, same reason. Two providers, one guard.
+    #[test]
+    fn a_member_carrying_the_linear_api_key_is_refused_and_leaves_no_zip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let destination = default_destination(&work);
+
+        let err = packaging_a_member_carrying(
+            &work,
+            &config_with_boards(),
+            "LINEAR_API_KEY=lin_api_do-not-package-me\n",
+        )
+        .expect_err("a package carrying the Linear key must not be produced");
+
+        assert!(
+            matches!(err, AuditError::CredentialInPackage { .. }),
+            "{err:?}"
+        );
+        assert!(!destination.exists());
+        assert!(!destination.with_extension("zip.part").exists());
+    }
+
+    /// Several needles in one member: neither board secret hides behind the
+    /// other, and neither depends on the OpenRouter key being present to trip
+    /// the guard.
+    #[test]
+    fn a_member_carrying_several_secrets_is_refused_on_the_first_pass() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+
+        let err = packaging_a_member_carrying(
+            &work,
+            &config_with_boards(),
+            "jira=jira-token-do-not-package-me\nlinear=lin_api_do-not-package-me\n",
+        )
+        .expect_err("a package carrying two board secrets must not be produced");
+
+        assert!(
+            matches!(err, AuditError::CredentialInPackage { .. }),
+            "{err:?}"
+        );
+        assert!(!default_destination(&work).exists());
+    }
+
+    /// A member carrying none of them still packages — the widened scan must not
+    /// refuse ordinary output.
+    #[test]
+    fn an_ordinary_member_still_packages_under_the_widened_scan() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+
+        let package =
+            packaging_a_member_carrying(&work, &config_with_boards(), "commits: 412\nauthors: 9\n")
+                .expect("output carrying no secret packages");
+
+        assert!(package.path.is_file(), "{package:?}");
+    }
+
+    /// A needle straddling two reads is the case the chunked scan exists for,
+    /// and with several needles the tail has to be sized to the LONGEST — a tail
+    /// cut to the shortest would let the longest one straddle undetected.
     #[test]
     fn a_credential_split_across_two_reads_is_caught() {
-        let needle = b"sk-or-v1-secret";
-        let mut scan = CredentialScan::over(needle);
+        let mut scan = CredentialScan::over(&[b"sk-or-v1-secret".as_slice()]);
         assert!(!scan.feed(b"noise sk-or-v1-"));
         assert!(scan.feed(b"secret more noise"));
 
+        // The LONGEST needle straddles while a shorter one is also registered —
+        // a tail sized to the shortest would miss this.
+        let mut several =
+            CredentialScan::over(&[b"lin_api".as_slice(), b"jira-token-that-is-long".as_slice()]);
+        assert!(!several.feed(b"noise jira-token-"));
+        assert!(several.feed(b"that-is-long more noise"));
+
         // And an empty key never matches everything.
-        let mut blank = CredentialScan::over(b"");
+        let mut blank = CredentialScan::over(&[b"".as_slice()]);
         assert!(!blank.feed(b"anything at all"));
+        let mut nothing = CredentialScan::over(&[]);
+        assert!(!nothing.feed(b"anything at all"));
     }
 
     /// Following a symlink would read a file outside the working directory into
@@ -903,7 +1155,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination)
             .expect_err("a symlink must not be followed into the package");
         assert!(
             matches!(err, AuditError::UnsafePackageEntry { .. }),
@@ -928,7 +1180,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination)
             .expect_err("a hardlink must not carry outside content into the package");
         let AuditError::UnsafePackageEntry { kind, .. } = &err else {
             panic!("expected UnsafePackageEntry, got {err:?}");
@@ -960,7 +1212,7 @@ trusty-review = "0.15.1"
         .expect("hard link");
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination)
             .expect_err("a hardlink under extract/ must be refused too");
         let AuditError::UnsafePackageEntry { kind, .. } = &err else {
             panic!("expected UnsafePackageEntry, got {err:?}");
@@ -991,7 +1243,7 @@ trusty-review = "0.15.1"
             assert_eq!(links, 1, "{} has {links} links", path.display());
         }
         let report = RunReport::of(vec![run]);
-        assemble(&work, &config(), &report, &default_destination(&work))
+        assemble(&work, &config(), &report, &[], &default_destination(&work))
             .expect("ordinary output must still package");
     }
 
@@ -1004,7 +1256,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![failed(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination)
             .expect_err("no audited repository means no package");
         assert!(
             matches!(err, AuditError::NothingToPackage { .. }),
@@ -1026,7 +1278,7 @@ trusty-review = "0.15.1"
         ]);
         let destination = default_destination(&work);
 
-        let package = assemble(&work, &config(), &report, &destination).expect("assembles");
+        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
         assert_eq!(package.excluded.len(), 1);
         assert!(
             package.excluded[0].contains("acme-web"),
@@ -1073,7 +1325,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = tmp.path().join("Desktop/return.zip");
 
-        let package = assemble(&work, &config(), &report, &destination).expect("assembles");
+        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
         assert_eq!(package.path, destination);
         assert!(destination.is_file());
         assert!(!destination.starts_with(work.root()));
@@ -1096,7 +1348,7 @@ trusty-review = "0.15.1"
         std::fs::write(work.path(Area::Extract).join("09-other.db"), b"other").expect("write");
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &destination).expect("assembles");
+        assemble(&work, &config(), &report, &[], &destination).expect("assembles");
         let names = entries(&destination);
         assert!(
             names.contains(&"extract/00-acme-api.db".to_owned()),

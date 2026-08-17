@@ -494,7 +494,7 @@ fn project_scope_drops_foreign_cwd_drawer() {
 /// What: runs `git -C <dir> <args>` with identity and signing pinned per
 /// invocation so the runner's global config cannot fail the commit, then
 /// asserts a zero exit.
-/// Test: used by `session_project_root_normalises_a_worktree_to_its_checkout`
+/// Test: used by `session_project_root_resolves_a_worktree_to_its_main_checkout`
 /// and `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`.
 fn git_in(dir: &std::path::Path, args: &[&str]) {
     let out = std::process::Command::new("git")
@@ -524,7 +524,7 @@ fn git_in(dir: &std::path::Path, args: &[&str]) {
 /// Why: `git worktree add` needs a HEAD, and `rev-parse --show-toplevel` needs
 /// a real repository — a hand-made `.git` directory answers neither.
 /// What: creates `dir`, runs `git init`, and commits `--allow-empty`.
-/// Test: used by `session_project_root_normalises_a_worktree_to_its_checkout`
+/// Test: used by `session_project_root_resolves_a_worktree_to_its_main_checkout`
 /// and `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`.
 fn init_test_repo(dir: &std::path::Path) {
     std::fs::create_dir_all(dir).expect("mkdir repo");
@@ -535,16 +535,18 @@ fn init_test_repo(dir: &std::path::Path) {
 /// Why (#5819): the session root feeding the project-scope filter is resolved
 /// from the stdin `cwd`, and a dispatched agent's cwd is almost always a
 /// worktree. `git rev-parse --show-toplevel` answers a linked worktree with the
-/// worktree itself, so without truncation every drawer written from the main
-/// checkout would look foreign and be dropped — the filter would delete more
-/// real content than the leak it exists to stop.
+/// worktree itself, which would make every drawer written from the main checkout
+/// look foreign — the filter would delete more real content than the leak it
+/// exists to stop. `--git-common-dir` is the probe that does not have that
+/// property, and this asserts the resolver uses it.
 /// What: creates a real repository, adds a real `git worktree` under
 /// `.claude/worktrees/`, asserts git wrote the `.git` FILE that makes the
-/// worktree its own toplevel, and asserts the resolved root is the checkout.
-/// Test: itself. Fails with the `/.claude/worktrees/` truncation removed from
-/// `normalise_project_path`, which then resolves to the worktree.
+/// worktree its own toplevel, and asserts the resolved root is the checkout
+/// anyway.
+/// Test: itself. Fails against any resolver keyed on `--show-toplevel` or on
+/// `find_project_root`'s marker walk, both of which stop at the worktree.
 #[test]
-fn session_project_root_normalises_a_worktree_to_its_checkout() {
+fn session_project_root_resolves_a_worktree_to_its_main_checkout() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().join("trusty-tools");
     init_test_repo(&root);
@@ -647,9 +649,9 @@ fn project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate() {
 /// What: asserts a worktree writer, a nested-subdirectory writer, and a writer
 /// recorded with a trailing slash and mixed case all survive; that the
 /// name-prefix sibling does not; and that each fail-open input keeps its drawer.
-/// Test: itself. The `.claude/worktrees/` truncation is NOT what keeps the
-/// worktree writer here — it is inside the root either way — that branch is
-/// covered by `session_project_root_normalises_a_worktree_to_its_checkout`.
+/// Test: itself. The worktree writer here is kept by plain containment — it sits
+/// under the root. Worktree identity on the SESSION side is
+/// `session_project_root_resolves_a_worktree_to_its_main_checkout`.
 #[test]
 fn project_scope_keeps_in_tree_writers_and_drops_prefix_siblings() {
     use filter::{filter_drawers_by_project_scope, RecalledDrawer};
@@ -982,11 +984,7 @@ async fn prompt_context_header_names_the_alias_target() {
     std::fs::create_dir_all(&aliased_project).expect("aliased project dir");
     crate::project_root::write_project_pin(
         &aliased_project,
-        &crate::project_root::ProjectPin {
-            schema_version: crate::project_root::PIN_SCHEMA_VERSION,
-            palace: derived.to_string(),
-            note: None,
-        },
+        &crate::project_root::ProjectPin::new(derived),
     )
     .expect("write pin for the aliased project");
 
@@ -1213,11 +1211,7 @@ async fn spin_up_test_daemon_with_palace(
     // pin-file-primacy anchor that keeps existing palaces from being orphaned.
     crate::project_root::write_project_pin(
         &project_dir,
-        &crate::project_root::ProjectPin {
-            schema_version: crate::project_root::PIN_SCHEMA_VERSION,
-            palace: palace_slug.to_string(),
-            note: None,
-        },
+        &crate::project_root::ProjectPin::new(palace_slug.to_string()),
     )
     .expect("write project pin for fixture");
 

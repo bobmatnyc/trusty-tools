@@ -1,0 +1,4 @@
+Added
+
+- `trusty-audit run` and `trusty-audit audit` ask for the OpenRouter key when nothing else supplies one, instead of refusing until someone hand-edits `engagement.toml`. The key is typed with the terminal's echo disabled, confirmed by a retype, and saved back to the engagement config at mode 0600. The prompt accepts either the key an auditor conveyed out of band or the client's own OpenRouter key, and reports which source a run used without ever printing the value ([#5868](https://github.com/bobmatnyc/trusty-tools/issues/5868))
+- `Session::with_credential` lets a front end hand in a resolved credential. The prompt lives in the CLI, so `Session::execute` stays callable by a front end with no terminal — the Tauri shell today, a TUI next ([#5868](https://github.com/bobmatnyc/trusty-tools/issues/5868))

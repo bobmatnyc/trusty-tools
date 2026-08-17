@@ -108,7 +108,7 @@ use crate::session_manager::worktree_ownership::{
     AgentWorktreeOwner, SentinelOwner, read_sentinel_owner, write_agent_sentinel,
 };
 
-use super::agent_worktree_reap::is_harness_agent_worktree;
+use crate::session_manager::worktree_ownership::is_harness_agent_worktree;
 
 /// How long after an `agent_delegate` call an observed dispatch may be treated
 /// as the *same* delegation.
@@ -454,7 +454,8 @@ fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
 /// checkout into an isolated one (ADR-0048 decision 1), but [`on_dispatch`]
 /// observes the ORIGINAL payload, so the record read `isolation: None` — naming
 /// an agent that had just been moved into its own worktree as a live writer in
-/// the shared checkout. Decision 10 then denies `git pull` there on that record,
+/// the shared checkout. Decision 10 then denies a `git merge` or `git rebase`
+/// there on that record,
 /// for the six hours of `RUNNING_STALE_AFTER_SECS`, which blocks the release
 /// flow's fast-forward of the main checkout.
 ///

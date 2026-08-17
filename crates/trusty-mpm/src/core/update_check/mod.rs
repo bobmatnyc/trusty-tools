@@ -823,7 +823,22 @@ pub fn detect_for_framework(
     let agents_dir = fw.agent_deploy_dir();
     let skills_dir = fw.claude_skills_dir();
     let deployed_agents = AgentManifest::load(&agents_dir);
-    let deployed_skills = SkillManifest::load(&skills_dir);
+    // #5626: same rule as `session_assets` — a ledger this read could not
+    // establish leaves staleness `unknown`, never fresh.
+    let deployed_skills = match SkillManifest::load(&skills_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                dir = %skills_dir.display(),
+                error = %e,
+                "skill ownership ledger unreadable — catalog staleness is undetermined"
+            );
+            return StalenessReport {
+                unknown: true,
+                ..StalenessReport::default()
+            };
+        }
+    };
 
     detect_staleness(
         &plan.agent_source,

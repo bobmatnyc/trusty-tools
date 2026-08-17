@@ -33,6 +33,8 @@ pub(crate) struct RegisterInput {
     pub stack_hint: Option<String>,
     pub gh_user: Option<String>,
     pub gh_account: Option<String>,
+    /// #5851: scoped `gh` config home written to `github.config_dir`.
+    pub gh_config_dir: Option<std::path::PathBuf>,
 }
 
 /// Build a `DaemonClient` from the CLI's shared `(reqwest::Client, url)` pair.
@@ -83,6 +85,9 @@ pub(crate) async fn register(
         stack_hint: input.stack_hint,
         gh_user: input.gh_user,
         gh_account: input.gh_account,
+        // #5851: pairs with `gh_account` so one command arms both keys
+        // `configured_account_pair` requires.
+        gh_config_dir: input.gh_config_dir,
         // #3455: not a `register`-time flag — set via `tm projects config
         // <name> set worktree true|false` instead (mirrors how the other
         // configurator-only fields have no `register` flag either).

@@ -269,7 +269,9 @@ fn staleness_ok_when_in_sync() {
 fn staleness_warns_on_drift() {
     // This is the exact incident condition (issue #2333): PR #2328
     // corrected the bundled content, but the deployed copy never got
-    // refreshed. A byte-level mismatch must Warn and point at `tm install`.
+    // refreshed. A byte-level mismatch must Warn and point at a command that
+    // actually redeploys — #5866: it used to name `tm install`, which has no
+    // output-style step at all, so the remedy was a no-op.
     let home = tempfile::tempdir().unwrap();
     deploy_all_styles(home.path());
     let styles_dir = home.path().join(".claude").join("output-styles");
@@ -283,7 +285,19 @@ fn staleness_warns_on_drift() {
     let check = check_output_style_staleness(None, home.path());
     assert_eq!(check.status, CheckStatus::Warn);
     assert!(check.message.contains(first.file_name));
-    assert!(check.message.contains("tm install"));
+    assert!(
+        check
+            .message
+            .contains(crate::core::doctor_repair::OUTPUT_STYLE_REMEDY),
+        "the remedy must name the command that redeploys: {}",
+        check.message
+    );
+    assert!(
+        !check.message.contains("tm install"),
+        "#5866: `tm install` has no output-style step — naming it sends the \
+         operator to a no-op: {}",
+        check.message
+    );
 }
 
 #[test]

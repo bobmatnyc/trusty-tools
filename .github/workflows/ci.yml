@@ -547,9 +547,12 @@ jobs:
       # local branch list includes "main". GitHub Actions PR checkouts only create
       # a local branch for the PR head; "main" is only a remote ref unless we
       # explicitly create a local tracking branch for it.
+      # #5693: `git fetch origin main:main || true` gave a GitHub 500 and the
+      # expected push-to-main refusal the same exit 128, so a real failure ran on
+      # with no local `main` and surfaced as an unrelated trusty-agents test.
       - name: Create local main branch for git tests
         if: needs.changes.outputs.docs_only != 'true'
-        run: git fetch origin main:main || true
+        run: bash scripts/ci-create-local-main.sh
 
       - name: Install stable toolchain
         if: needs.changes.outputs.docs_only != 'true'

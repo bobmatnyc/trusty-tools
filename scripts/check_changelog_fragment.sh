@@ -12,8 +12,13 @@
 #   fragment is a NEW file, and its presence or absence is unambiguous.
 #
 # What: diffs the working branch against a base ref and, for every crate whose
-#   `crates/<crate>/src/**` changed, requires evidence that the change was
-#   recorded. Accepted evidence, per crate:
+#   source changed, requires evidence that the change was recorded. A path is
+#   crate source when it lies under `crates/` and carries a `/src/` directory
+#   segment — the selector is unchanged since #4476; what changed in #4576 is
+#   only that a NESTED one (`crates/trusty-audit/ui/src-tauri/src/main.rs`,
+#   `crates/trusty-agents/ui/src/App.svelte`) is now attributed to the crate that
+#   ships it instead of being silently dropped. See ATTRIBUTION BY STRUCTURE.
+#   Accepted evidence, per crate:
 #     1. an ADDED-or-MODIFIED `crates/<crate>/changelog.d/<name>.md` fragment
 #        that the release assembler ACCEPTS                        (the rule)
 #     2. a `crates/<crate>/CHANGELOG.md` edit that adds a bullet   (TRANSITIONAL)
@@ -49,9 +54,17 @@
 #   maintain and no cleanup PR to remember. It also requires the diff to add a
 #   real bullet line, so a whitespace-only CHANGELOG.md touch is not evidence.
 #
+# ATTRIBUTION BY STRUCTURE (#4576). The crate that owns a changed path is found
+#   by walking UP to the nearest ancestor directory holding a Cargo.toml, then
+#   rolling that owner up to the `crates/<crate>/` directory that owns
+#   changelog.d/. No path depth is hardcoded, so a crate nested three levels
+#   deep needs no second fix. A path this gate SELECTS as source but cannot
+#   attribute is a hard failure naming the path (UNATTRIBUTED SOURCE), never a
+#   silent drop — see the fail-open it replaces in `resolve_source_crate`.
+#
 # Exemptions (a crate is NOT required to have evidence when):
-#   - no `crates/<crate>/src/**` path changed at all — this is what makes
-#     docs-only and CI-only PRs pass, per the documented rule;
+#   - no crate source path changed at all — this is what makes docs-only and
+#     CI-only PRs pass, per the documented rule;
 #   - the only changed paths under that crate's src/** are test files, using
 #     check_line_cap.sh's own classification (basename `tests.rs`, or ending
 #     `_test.rs`/`_tests.rs`, or a `/tests/` or `/benches/` path segment). A
@@ -123,9 +136,12 @@
 #   synthetic repo — a branch touching crate A only, with crate B's src/**
 #   changed and B's fragments consumed by a release on main since the fork
 #   point — and asserts the stale base is refused, the live branch base passes
-#   naming only A, and a genuinely missing fragment still fails. Fragment
-#   validation is covered by scripts/assemble_changelog_selftest.sh and the
-#   scan floor by scripts/check_scan_floor_selftest.sh.
+#   naming only A, and a genuinely missing fragment still fails.
+#   scripts/check_changelog_attribution_selftest.sh replays the #4576 shape:
+#   a nested crate source path must be attributed, not dropped, and an
+#   unattributable one must fail the gate. Fragment validation is covered by
+#   scripts/assemble_changelog_selftest.sh and the scan floor by
+#   scripts/check_scan_floor_selftest.sh.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   only — `git`, `grep`, `sed`, `sort`.
@@ -147,7 +163,8 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h | --help)
-      sed -n '2,80p' "$0" >&2
+      # Through the exemption list — keep this range in step with the header.
+      sed -n '2,92p' "$0" >&2
       exit 0
       ;;
     *)
@@ -286,6 +303,75 @@ is_test_path() {
   return 1
 }
 
+# #4576: attribute a source path to its crate by STRUCTURE, not by path depth.
+#
+# Why: the source arm used to extract the crate with
+# `sed -E 's#^crates/([^/]+)/src/.*#\1#'`, which spans exactly one directory
+# level. The `case` glob that selects the path does NOT — bash `case` lets `*`
+# span `/` — so every NESTED crate source path was selected and then silently
+# discarded by the `[[ "$crate" == */* ]] && continue` guard that followed. It
+# raised nothing: the gate concluded "no crate source changed" and reported
+# success. PR #5796 added crates/trusty-audit/ui/src-tauri/src/** and the gate
+# said exactly that while passing. A green meaning "examined nothing" is
+# indistinguishable from one meaning "checked and clean" — the #5620 shape.
+# Widening the sed by one more hardcoded level would only move the wrong depth.
+#
+# What: `nearest_manifest_dir` walks UP from a path's directory to the nearest
+# ancestor holding a Cargo.toml at <rev>, bounded to directories under crates/.
+# `resolve_source_crate` then rolls that owner up to the top-level `crates/<name>`
+# directory, which is the unit changelog.d/ and `assemble-changelog.sh <crate-dir>`
+# are keyed to — a nested member such as crates/trusty-audit/ui/src-tauri owns no
+# changelog.d/ of its own, so its changes are recorded by the crate that ships it.
+# HEAD is tried first, then the merge base, so a path whose crate this PR DELETED
+# still attributes and reaches the #3732 dissolution exemption below.
+#
+# Neither uses command substitution: `path_exists_at_rev` hard-exits the gate on
+# a genuine git failure, and a `$(...)` would trap that exit in a subshell and
+# hand back a garbage crate name — reintroducing a fail-open inside the fix for
+# one.
+#
+# Test: scripts/check_changelog_attribution_selftest.sh.
+OWNER_DIR=""
+nearest_manifest_dir() {
+  local rev="$1" dir="$2"
+  OWNER_DIR=""
+  while [[ "$dir" == crates/?* ]]; do
+    if path_exists_at_rev "$rev" "${dir}/Cargo.toml"; then
+      OWNER_DIR="$dir"
+      return 0
+    fi
+    dir="${dir%/*}"
+  done
+  return 1
+}
+
+# `git diff --name-only` emits sorted paths, so files in one directory arrive
+# adjacent; caching the last directory's answer collapses the repeated walk on a
+# large diff without a bash-3.2-hostile associative array.
+ATTRIB_DIR=""
+ATTRIB_CRATE=""
+
+# Sets SOURCE_CRATE to the owning top-level crate name; returns 1 when the path
+# is under crates/ and looks like source but belongs to no crate at either rev.
+SOURCE_CRATE=""
+resolve_source_crate() {
+  local path="$1" dir
+  dir="${path%/*}"
+  if [[ "$dir" == "$ATTRIB_DIR" ]]; then
+    SOURCE_CRATE="$ATTRIB_CRATE"
+    [[ -n "$SOURCE_CRATE" ]]
+    return
+  fi
+  SOURCE_CRATE=""
+  if nearest_manifest_dir HEAD "$dir" || nearest_manifest_dir "$MERGE_BASE" "$dir"; then
+    SOURCE_CRATE="${OWNER_DIR#crates/}"
+    SOURCE_CRATE="${SOURCE_CRATE%%/*}"
+  fi
+  ATTRIB_DIR="$dir"
+  ATTRIB_CRATE="$SOURCE_CRATE"
+  [[ -n "$SOURCE_CRATE" ]]
+}
+
 # Why: `case` globs let `*` span `/`, so the pattern `crates/*/changelog.d/*.md`
 # also matches `crates/a/b/changelog.d/x.md` and a naive sed extraction then
 # emits a whole path where a crate name belongs. Extract first, then verify the
@@ -306,24 +392,67 @@ needs=""
 has_fragment=""
 # Crates with transitional CHANGELOG.md evidence.
 has_changelog=""
+# #4576: source paths this gate could not attribute to any crate. An
+# unattributable path is a gap in the gate's own knowledge, never an exemption.
+unattributed=""
+# Source paths actually attributed, reported so a future silent drop is visible
+# in the log the way the scan floor's path count already is (#4618).
+attributed_count=0
+# "<crate>\t<path>" for paths attributed from OUTSIDE crates/<crate>/src/. The
+# failure line names `crates/<crate>/src/**`, which is where a reader would look
+# and not find a nested change; one sample path saves that trip.
+nested_samples=""
 
 # Source changes come from the deletion-inclusive view.
 while IFS= read -r path; do
   [[ -z "$path" ]] && continue
   case "$path" in
     crates/*/src/*)
-      crate="$(printf '%s' "$path" | sed -E 's#^crates/([^/]+)/src/.*#\1#')"
-      [[ "$crate" == */* ]] && continue
       is_test_path "$path" && continue
+      # #4576: attribute by structure. A path this arm SELECTED but cannot
+      # attribute is reported, never dropped — the silent drop is what made the
+      # gate report success over a whole nested source tree.
+      if ! resolve_source_crate "$path"; then
+        unattributed="${unattributed}${path}"$'\n'
+        continue
+      fi
+      crate="$SOURCE_CRATE"
+      attributed_count=$((attributed_count + 1))
+      case "$path" in
+        "crates/${crate}/src/"*) ;;
+        *) nested_samples="${nested_samples}${crate}"$'\t'"${path}"$'\n' ;;
+      esac
       # The crate was dissolved by this PR — there is no changelog.d/ left to
       # put a fragment in, and the assembler cannot run for it. See the
       # "crate no longer EXISTS at HEAD" exemption above. A git FAILURE here is
       # not the exemption; path_exists_at_rev hard-fails on one (#4618).
-      path_exists_at_rev HEAD "crates/${crate}/Cargo.toml" || continue
-      needs="${needs}${crate}"$'\n'
+      if path_exists_at_rev HEAD "crates/${crate}/Cargo.toml"; then
+        needs="${needs}${crate}"$'\n'
+      elif ! path_exists_at_rev "$MERGE_BASE" "crates/${crate}/Cargo.toml"; then
+        # #4576: not a dissolution — the top-level crate directory holds no
+        # manifest at EITHER rev, so there is no changelog.d/ this path could
+        # ever be recorded in and nothing said so. Report it.
+        unattributed="${unattributed}${path}"$'\n'
+      fi
       ;;
   esac
 done <<<"$CHANGED"
+
+# #4576: fail CLOSED. Pre-fix these paths vanished from the changed set with no
+# message, so the gate printed "no crate source changed … — OK" over them.
+if [[ -n "$unattributed" ]]; then
+  echo "FAIL: UNATTRIBUTED SOURCE — path(s) under crates/ that look like crate" >&2
+  echo "      source belong to no crate this gate can name, at HEAD or at the" >&2
+  echo "      merge base ${MERGE_BASE:0:10}:" >&2
+  printf '%s' "$unattributed" | grep -v '^$' | sed 's/^/         /' >&2
+  echo "      Attribution walks up from each path to the nearest ancestor" >&2
+  echo "      directory holding a Cargo.toml, then to the crates/<crate>/ that" >&2
+  echo "      owns changelog.d/. None was found, so the gate cannot say which" >&2
+  echo "      crate must record the change — and will not call that an" >&2
+  echo "      exemption. Add the crate's Cargo.toml, or move the file out of" >&2
+  echo "      crates/ if it is not crate source (issue #4576)." >&2
+  exit 1
+fi
 
 # Evidence comes from the view that excludes deletions.
 while IFS= read -r path; do
@@ -353,7 +482,7 @@ done <<<"$PRESENT"
 needs="$(printf '%s' "$needs" | grep -v '^$' | LC_ALL=C sort -u || true)"
 
 if [[ -z "$needs" ]]; then
-  echo "changelog-fragment gate: scanned ${CHANGED_COUNT} changed path(s); no crate source changed (docs-only / CI-only / test-only) — OK."
+  echo "changelog-fragment gate: scanned ${CHANGED_COUNT} changed path(s); attributed ${attributed_count} crate-source path(s); no crate source changed (docs-only / CI-only / test-only) — OK."
   exit 0
 fi
 
@@ -375,6 +504,12 @@ while IFS= read -r crate; do
     echo "OK   ${crate}: CHANGELOG.md entry (TRANSITIONAL — branch predates #4476)"
   else
     echo "FAIL ${crate}: crates/${crate}/src/** changed with no changelog record" >&2
+    # #4576: name a nested path when that is what changed, so the reader is not
+    # sent to crates/<crate>/src/ to find nothing there.
+    sample="$(printf '%s' "$nested_samples" | grep -m1 "^${crate}	" || true)"
+    if [[ -n "$sample" ]]; then
+      echo "       nested source, e.g. ${sample#*	}" >&2
+    fi
     fail=1
   fi
 done <<<"$needs"
@@ -408,4 +543,4 @@ EOF
 fi
 
 crate_count="$(printf '%s\n' "$needs" | grep -c '[^[:space:]]' || true)"
-echo "changelog-fragment gate: scanned ${CHANGED_COUNT} changed path(s); all ${crate_count} crate(s) with source changes are recorded."
+echo "changelog-fragment gate: scanned ${CHANGED_COUNT} changed path(s); attributed ${attributed_count} crate-source path(s); all ${crate_count} crate(s) with source changes are recorded."

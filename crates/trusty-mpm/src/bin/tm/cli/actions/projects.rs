@@ -57,6 +57,14 @@ pub(crate) enum ProjectsAction {
         /// (#3025); resolved into `GH_TOKEN`/`GH_USER` at spawn/relaunch.
         #[arg(long)]
         gh_account: Option<String>,
+        /// Scoped `gh` config home for this project (#5851) — written to
+        /// `github.config_dir` and injected as `GH_CONFIG_DIR` at
+        /// spawn/relaunch. Pair it with `--gh-account`: unlike
+        /// `gh auth token -u`, a scoped config dir actually selects the
+        /// account, and setting both here is what arms the `#2081`
+        /// enforcement path (`configured_account_pair`).
+        #[arg(long)]
+        gh_config_dir: Option<std::path::PathBuf>,
     },
     /// Show a project's config PLUS a read-only nested sessions listing.
     Show {

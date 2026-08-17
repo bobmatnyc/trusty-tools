@@ -486,6 +486,35 @@ jobs:
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
 
+          elif [[ "$CRATE" == "trusty-audit" ]]; then
+            # Binaries: trusty-audit + taudit (#5502) — two [[bin]] targets over
+            # ONE src/main.rs, the trusty-installer / tctl precedent. `taudit` is
+            # what crates/trusty-audit/install.sh (#5870) downloads and launches.
+            #
+            # #5870: before this branch existed, a `trusty-audit-v*` tag fell
+            # through to the library-only green-skip below and published nothing,
+            # which is exactly the "missing binary release is silent" caveat the
+            # green-skip comment warns about. The self-downloading installer has
+            # no asset to fetch without it.
+            #
+            # `publish = false` in Cargo.toml governs crates.io only and does not
+            # affect this workflow, which builds from the tag — trusty-code is the
+            # existing precedent for a publish=false crate in this allowlist.
+            #
+            # No required-features on either bin target. No UI embedding (the
+            # crate's ui/ is not a rust-embed bundle), so no SKIP_UI_BUILD. No ORT
+            # anywhere in the graph, so ordinary zigbuild on Linux and no AL2023
+            # variant.
+            CARGO_PKG="trusty-audit"
+            BINARIES="trusty-audit taudit"
+            SKIP_UI_BUILD="false"
+            CARGO_FEATURES=""
+            NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
+            AL2023_VARIANT="false"
+            AL2023_NO_DEFAULT="false"
+            AL2023_FEATURES=""
+
           elif [[ "$CRATE" == "trusty-console" ]]; then
             # Binaries: trusty-console
             # As of #1318 (single-owner-per-binary) the standalone trusty-console
@@ -542,7 +571,8 @@ jobs:
             echo "::notice title=Library-only crate — release skipped::Crate '$CRATE' is not in the binary-release allowlist; treating it as library-only and skipping the binary release gracefully (green, not an error)."
             echo "Binary-producing crates (built + released): trusty-search, trusty-memory,"
             echo "  trusty-analyze, trusty-review, trusty-mpm, trusty-git-analytics (tga),"
-            echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias)."
+            echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias),"
+            echo "  trusty-audit (+ taudit alias)."
             echo "Library-only / internal crates (green-skip, no standalone binary):"
             echo "  trusty-common, trusty-embedderd, trusty-progress,"
             echo "  trusty-agents*, trusty-mpm-gui, tc-services,"

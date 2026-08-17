@@ -242,10 +242,9 @@ pub(super) fn select_relevant_triples(
 /// the one signal available at recall time.
 /// What: keeps every drawer that carries no `creator:cwd=` tag, and every
 /// drawer whose recorded cwd sits at or inside `session_root`. `session_root` is
-/// the session's git working-tree root with any `.claude/worktrees/<name>`
-/// suffix truncated (`resolve_session_project_root` in `mod.rs`), so the main
-/// checkout, a crate subdirectory under it, and an agent worktree all produce
-/// the same root; each recorded cwd goes through the same
+/// the session's MAIN worktree root (`resolve_session_project_root` in
+/// `mod.rs`), so the main checkout, a crate subdirectory under it, and an agent
+/// worktree all produce the same root; each recorded cwd goes through the same
 /// [`normalise_project_path`] before the containment test.
 ///
 /// A recorded cwd that lands outside is not dropped on the string comparison
@@ -332,28 +331,19 @@ fn drawer_creator_cwd(d: &RecalledDrawer) -> Option<String> {
     }
 }
 
-/// Reduce a filesystem path to the project tree it belongs to.
+/// Fold a filesystem path into the form both sides of the containment test use.
 ///
-/// Why: a dispatched agent's cwd is an agent worktree under
-/// `.claude/worktrees/<name>` (ADR-0036), and `git rev-parse --show-toplevel`
-/// answers with the worktree itself. Left alone, that would make the session
-/// root a sibling of every drawer written from the main checkout and drop them
-/// all — the false positive that would cost more real content than the leak this
-/// filter exists to stop.
-/// What: lowercases, trims a trailing `/`, and truncates at the
-/// `/.claude/worktrees/` segment when present. macOS is case-insensitive and
-/// some write paths lowercase the tag, so the comparison is lowercase on both
-/// sides.
-/// Test: `session_project_root_normalises_a_worktree_to_its_checkout` covers the
-/// truncation against a real `git worktree`;
-/// `project_scope_keeps_in_tree_writers_and_drops_prefix_siblings` covers the case and
-/// trailing-slash folding.
+/// Why: macOS is case-insensitive and some write paths lowercase the
+/// `creator:cwd` tag, so a case difference between the recorded cwd and the
+/// resolved session root is not a difference in project. Worktree folding is NOT
+/// done here — `main_worktree_root` already answers a linked worktree with its
+/// main checkout, and duplicating that as a `/.claude/worktrees/` string
+/// truncation would be a second implementation of one rule.
+/// What: trims surrounding whitespace and a trailing `/`, then lowercases.
+/// Test: `project_scope_keeps_in_tree_writers_and_drops_prefix_siblings` covers
+/// the case and trailing-slash folding.
 pub(super) fn normalise_project_path(path: &str) -> String {
-    let lower = path.trim().trim_end_matches('/').to_lowercase();
-    match lower.find("/.claude/worktrees/") {
-        Some(i) => lower[..i].to_string(),
-        None => lower,
-    }
+    path.trim().trim_end_matches('/').to_lowercase()
 }
 
 /// Return `true` when `candidate` is `root` or sits inside it.

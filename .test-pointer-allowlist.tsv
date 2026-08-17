@@ -308,11 +308,7 @@ crates/trusty-memory/src/lib.rs	health_endpoint_reports_bound_addr
 crates/trusty-memory/src/lib.rs	sse_stream_receives_palace_created
 crates/trusty-memory/src/messaging/operations.rs	cwd_palace_slug_falls_back_to_basename
 crates/trusty-memory/src/project_root/detection.rs	lazy_write_skipped_for_temp_dir_root
-crates/trusty-memory/src/project_root/detection.rs	project_slug_personal_always_allowed
 crates/trusty-memory/src/project_root/mod.rs	project_slug_personal_always_allowed
-crates/trusty-memory/src/project_root/pin_file.rs	project_slug_from_basename_basic
-crates/trusty-memory/src/project_root/pin_file.rs	write_project_pin_creates_expected_yaml
-crates/trusty-memory/src/project_root/pin_file.rs	write_project_pin_round_trips_through_read
 crates/trusty-memory/src/prompt_facts.rs	gather_hot_triples_skips_non_hot
 crates/trusty-memory/src/prompt_facts.rs	rebuild_prompt_cache_populates_triples_and_formatted
 crates/trusty-memory/src/prompt_facts.rs	rebuild_prompt_cache_reflects_writes

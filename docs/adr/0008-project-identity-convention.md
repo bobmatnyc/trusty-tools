@@ -1,6 +1,6 @@
 # 0008. Project-identity convention: full-path slug of the nearest git root
 
-- **Status:** Amended by [0012](0012-per-instance-guid-and-marker-file-identity.md)
+- **Status:** Amended by [0012](0012-per-instance-guid-and-marker-file-identity.md), [0052](0052-one-index-per-checkout-worktrees-as-tagged-chunk-rows.md)
 - **Date:** 2026-06-08
 - **Scope:** Workspace-wide (the `trusty-controller`/`tctl` control plane and
   every project-scoped tool it manages — trusty-search, trusty-memory, and any

@@ -26,9 +26,13 @@
 //! | [`manifest`] | reading tga's `manifest.toml` rather than duplicating it |
 //! | [`tools`] | which pinned tools are needed, and the call that installs them |
 //! | [`discover`] | which repositories the recipient's `gh` credential can reach (#5487) |
+//! | [`registry`] | the repositories and boards this engagement targets (#5822) |
+//! | [`validate`] | proving a target can be read, before it is registered (#5822) |
 //! | [`clone`] | getting the selected repositories onto the recipient's disk (#5215) |
 //! | [`run`] | driving the pinned `tga audit` over the selected repositories |
 //! | [`package`] | assembling the unencrypted deliverable that goes back (#5499) |
+//! | [`chain`] | driving all four of those in one call, resumably (#5824) |
+//! | [`distribute`] | assembling the install package that goes to a client (#5825) |
 //!
 //! ## What this milestone is not
 //!
@@ -65,17 +69,29 @@
 // ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
 #![deny(rustdoc::broken_intra_doc_links)]
 
+// #5824: the one-shot chain over install, materialize, collect and package.
+pub mod chain;
 pub mod cli;
 pub mod clone;
 pub mod config;
 pub mod discover;
+// #5825: the INBOUND package, built on the auditor's machine. `package` is the
+// outbound one built on the recipient's. Two modules, opposite directions,
+// opposite rules about the credential — never one with a flag.
+pub mod distribute;
 pub mod error;
 pub mod inference;
 pub mod manifest;
 pub mod package;
+// #5823: the seam a front end renders live progress through, and the pump that
+// reads a spawned child's stages back out of its output.
+pub mod progress;
+pub mod registry;
+mod relay;
 pub mod run;
 pub mod session;
 pub mod tools;
+pub mod validate;
 pub mod workdir;
 
 pub use error::AuditError;

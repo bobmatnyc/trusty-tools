@@ -80,7 +80,7 @@ fn retire_removes_a_pristine_orphan() {
     assert_eq!(retired[0].stem, "tm-pr-workflow");
     assert!(retired[0].removed, "{retired:?}");
     assert!(!dest.join("tm-pr-workflow").exists());
-    let manifest = SkillManifest::load(&dest);
+    let manifest = SkillManifest::load(&dest).unwrap();
     assert!(
         manifest
             .managed
@@ -116,7 +116,11 @@ fn retire_spares_a_user_tier_skill() {
         dest.join("my-own-skill").join("SKILL.md").is_file(),
         "a user-tier skill was removed"
     );
-    assert!(SkillManifest::load(&dest).is_managed("my-own-skill"));
+    assert!(
+        SkillManifest::load(&dest)
+            .unwrap()
+            .is_managed("my-own-skill")
+    );
 }
 
 #[test]
@@ -171,7 +175,9 @@ fn retire_keeps_a_hand_edited_orphan_but_releases_the_ledger() {
         "an operator edit was destroyed"
     );
     assert!(
-        !SkillManifest::load(&dest).is_managed("tm-pr-workflow"),
+        !SkillManifest::load(&dest)
+            .unwrap()
+            .is_managed("tm-pr-workflow"),
         "the ledger still claims a skill nothing ships"
     );
 }
@@ -320,7 +326,7 @@ fn verdict_allows_a_pristine_skill() {
     let tmp = TempDir::new().unwrap();
     let dest = tmp.path().join("skills");
     let _src = deploy_real(&dest, "tm-doctor", "v1", Some(("extra.md", "reference")));
-    let manifest = SkillManifest::load(&dest);
+    let manifest = SkillManifest::load(&dest).unwrap();
     assert_eq!(
         skill_removal_verdict(&manifest, &dest, "tm-doctor"),
         SkillRemoval::Removable
@@ -333,7 +339,7 @@ fn verdict_keeps_a_hand_edited_skill() {
     let dest = tmp.path().join("skills");
     let _src = deploy_real(&dest, "tm-doctor", "v1", None);
     fs::write(dest.join("tm-doctor").join("SKILL.md"), "edited").unwrap();
-    let manifest = SkillManifest::load(&dest);
+    let manifest = SkillManifest::load(&dest).unwrap();
     assert!(matches!(
         skill_removal_verdict(&manifest, &dest, "tm-doctor"),
         SkillRemoval::Kept(_)
@@ -346,7 +352,7 @@ fn verdict_keeps_an_untracked_file() {
     let dest = tmp.path().join("skills");
     let _src = deploy_real(&dest, "tm-doctor", "v1", None);
     fs::write(dest.join("tm-doctor").join("stray.md"), "mine").unwrap();
-    let manifest = SkillManifest::load(&dest);
+    let manifest = SkillManifest::load(&dest).unwrap();
     assert!(matches!(
         skill_removal_verdict(&manifest, &dest, "tm-doctor"),
         SkillRemoval::Kept(_)

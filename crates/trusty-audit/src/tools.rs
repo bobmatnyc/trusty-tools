@@ -51,6 +51,7 @@ use trusty_installer::download::pinned::{PinnedInstall, PinnedTool};
 
 use crate::config::{ToolPin, ToolPins};
 use crate::error::AuditError;
+use crate::progress::{Operation, Progress, UnitOutcome};
 use crate::workdir::{Area, WorkDir};
 
 /// File under `state/` recording the exact versions that were installed.
@@ -342,7 +343,11 @@ pub fn verify(
 /// reports the wrong version — [`AuditError::VersionMismatch`] when the returned
 /// set does not match the pins, and [`AuditError::WorkDir`] when the record
 /// cannot be written.
-pub async fn install(work: &WorkDir, pins: &ToolPins) -> Result<Vec<InstalledTool>, AuditError> {
+pub async fn install(
+    work: &WorkDir,
+    pins: &ToolPins,
+    progress: &Progress,
+) -> Result<Vec<InstalledTool>, AuditError> {
     work.create()?;
     let install_dir = work.path(Area::Tools);
     // #5495: workdir.rs left this check to this issue — a symlinked `tools/`
@@ -350,6 +355,13 @@ pub async fn install(work: &WorkDir, pins: &ToolPins) -> Result<Vec<InstalledToo
     ensure_real_directory(&install_dir)?;
 
     let plan = plan(pins);
+    // #5823: the download is a single all-or-none call into `trusty-installer`,
+    // which reports nothing per tool — so this is honest about what it knows.
+    // The operation start is what puts a spinner on screen for the wait; the
+    // per-tool lines come after, from the set that actually landed. Per-tool
+    // progress DURING the download needs a hook in `install_pinned_set` that
+    // does not exist, and inventing one here would mean a second downloader.
+    progress.operation_started(Operation::InstallTools, plan.len());
     let installs = trusty_installer::download::pinned::install_pinned_set(
         &trusty_installer::download::http_client(),
         &plan,
@@ -362,6 +374,20 @@ pub async fn install(work: &WorkDir, pins: &ToolPins) -> Result<Vec<InstalledToo
 
     let reported: Vec<InstalledTool> = installs.iter().map(InstalledTool::from).collect();
     let installed = verify(pins, &reported)?;
+    for (index, tool) in installed.iter().enumerate() {
+        progress.unit_started(
+            Operation::InstallTools,
+            tool.crate_name.as_str(),
+            index + 1,
+            installed.len(),
+        );
+        progress.unit_finished(
+            Operation::InstallTools,
+            tool.crate_name.as_str(),
+            UnitOutcome::Succeeded,
+        );
+    }
+    progress.operation_finished(Operation::InstallTools, installed.len(), plan.len());
     write_record(work, &installed)?;
     Ok(installed)
 }
@@ -432,11 +458,12 @@ pub fn unsatisfied(work: &WorkDir, pins: &ToolPins) -> Result<Vec<RequiredTool>,
 pub async fn ensure(
     work: &WorkDir,
     pins: &ToolPins,
+    progress: &Progress,
 ) -> Result<Option<Vec<InstalledTool>>, AuditError> {
     if unsatisfied(work, pins)?.is_empty() {
         return Ok(None);
     }
-    install(work, pins).await.map(Some)
+    install(work, pins, progress).await.map(Some)
 }
 
 /// Refuse an install target that is not a real directory.
@@ -773,7 +800,7 @@ trusty-review = "0.15.1"
         let work = WorkDir::new(&root);
         std::os::unix::fs::symlink(&elsewhere, work.path(Area::Tools)).expect("symlink");
 
-        let err = install(&work, &pins())
+        let err = install(&work, &pins(), &Progress::none())
             .await
             .expect_err("the guard must fire before the network is touched");
         assert!(matches!(err, AuditError::UnsafeToolsDir { .. }));
@@ -923,7 +950,7 @@ trusty-review = "0.0.0-never-published"
         let work = work_in(tmp.path());
         place_verified_set(&work, "0.0.0-never-published");
 
-        let placed = ensure(&work, &unpublishable_pins())
+        let placed = ensure(&work, &unpublishable_pins(), &Progress::none())
             .await
             .expect("a satisfied set is not reinstalled");
         assert!(placed.is_none(), "nothing may be downloaded: {placed:?}");
@@ -943,7 +970,7 @@ trusty-review = "0.0.0-never-published"
         let work = WorkDir::new(&root);
         std::os::unix::fs::symlink(&elsewhere, work.path(Area::Tools)).expect("symlink");
 
-        let err = ensure(&work, &pins())
+        let err = ensure(&work, &pins(), &Progress::none())
             .await
             .expect_err("an empty tools area must not be treated as satisfied");
         assert!(
@@ -988,7 +1015,7 @@ trusty-review = "0.0.0-never-published"
             "nothing may have recorded them"
         );
 
-        let err = ensure(&work, &pins())
+        let err = ensure(&work, &pins(), &Progress::none())
             .await
             .expect_err("an unverifiable binary must be replaced, not kept");
         assert!(

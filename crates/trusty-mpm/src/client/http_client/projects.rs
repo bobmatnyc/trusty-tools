@@ -59,6 +59,10 @@ pub struct RegisterProjectArgs {
     /// GitHub account login pinned for this project's spawned sessions (#3025).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gh_account: Option<String>,
+    /// Scoped `gh` config home written to `github.config_dir` and injected as
+    /// `GH_CONFIG_DIR` at spawn (#5851).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gh_config_dir: Option<std::path::PathBuf>,
     /// "Launch on main" opt-out (#3455): `None`/`Some(true)` → default
     /// worktree isolation; `Some(false)` → sessions run directly in the
     /// resolved local checkout, no worktree.
@@ -368,6 +372,7 @@ mod tests {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         };
         let v = serde_json::to_value(&args).unwrap();
@@ -380,6 +385,30 @@ mod tests {
         assert!(v.get("stack_hint").is_none());
         assert!(v.get("gh_user").is_none());
         assert!(v.get("gh_account").is_none());
+        assert!(v.get("gh_config_dir").is_none());
+    }
+
+    /// Why (#5851): `--gh-config-dir` only reaches the daemon if it survives
+    /// serialization; a missing `Serialize` field would silently drop the one
+    /// key that selects the account.
+    /// Test: itself.
+    #[test]
+    fn register_args_serializes_gh_config_dir() {
+        let args = RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: None,
+            tags: None,
+            stack_hint: None,
+            gh_user: None,
+            gh_account: Some("acme-bot".into()),
+            gh_config_dir: Some("/home/bob/.config/gh-acme".into()),
+            worktree: None,
+        };
+        let v = serde_json::to_value(&args).unwrap();
+        assert_eq!(v["gh_account"], "acme-bot");
+        assert_eq!(v["gh_config_dir"], "/home/bob/.config/gh-acme");
     }
 
     /// The list wrapper deserializes the `{ projects, count }` shape and drops the

@@ -88,6 +88,10 @@ pub enum DeploymentGap {
     AgentFrontmatterInvalid(String, String),
     /// `.claude/skills/.trusty-mpm-skills-manifest.json` does not exist.
     SkillManifestMissing,
+    /// The skill manifest exists but could not be read — malformed, or an I/O
+    /// failure (#5626). Distinct from missing: the ledger is there and its
+    /// contents are undetermined, so nothing in the tier is attributable.
+    SkillManifestCorrupt(String),
     /// A canonical bundled skill (`<name>/SKILL.md`) is not deployed on disk.
     SkillMissing(String),
     /// `.claude/settings.json` itself does not exist.
@@ -128,6 +132,7 @@ impl DeploymentGap {
                 "skill ownership manifest ({}) is missing",
                 skill_manifest::SKILL_MANIFEST_FILE
             ),
+            Self::SkillManifestCorrupt(detail) => format!("skill manifest is corrupt: {detail}"),
             Self::SkillMissing(name) => format!("skill `{name}` is not deployed"),
             Self::SettingsMissing => ".claude/settings.json is missing".to_string(),
             Self::SettingsMalformed(detail) => {
@@ -235,7 +240,20 @@ fn validate_skills(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
     if !manifest_present {
         gaps.push(DeploymentGap::SkillManifestMissing);
     }
-    let manifest = manifest_present.then(|| skill_manifest::SkillManifest::load(&target));
+    // #5626: a ledger that is present but unreadable is its own gap. Folding it
+    // into `None` made `expected_skill_stems` fall back to the bundled roster
+    // and report every skill as deployed-or-missing against a ledger nobody read.
+    let manifest = match manifest_present.then(|| skill_manifest::SkillManifest::load(&target)) {
+        None => None,
+        Some(Ok(m)) => Some(m),
+        Some(Err(e)) => {
+            gaps.push(DeploymentGap::SkillManifestCorrupt(format!(
+                "{}: {e}",
+                target.join(skill_manifest::SKILL_MANIFEST_FILE).display()
+            )));
+            None
+        }
+    };
     for name in expected_skill_stems(fw, manifest.as_ref()) {
         if !target.join(&name).join("SKILL.md").is_file() {
             gaps.push(DeploymentGap::SkillMissing(name));

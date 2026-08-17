@@ -248,10 +248,11 @@ impl ManagedTmuxDriver for RealTmuxDriver {
 /// on a host without `tmux`; operations that genuinely need a pane return a
 /// typed error rather than panicking, and read-only operations keep working.
 /// What: every method that mutates tmux state returns
-/// [`ManagedError::TmuxUnavailable`]; `list_sessions` returns an empty list so
-/// reconciliation treats every stored session as orphaned.
+/// [`ManagedError::TmuxUnavailable`], and so does `list_sessions` — see its
+/// own doc for why reporting zero sessions was worse than refusing.
 /// Test: side-effect-only fallback; covered indirectly by the daemon's
-/// `session_manager` accessor when tmux is absent.
+/// `session_manager` accessor when tmux is absent, and directly by
+/// `noop_driver_list_sessions_refuses_rather_than_reporting_zero`.
 pub struct NoopTmuxDriver;
 
 impl ManagedTmuxDriver for NoopTmuxDriver {
@@ -271,8 +272,33 @@ impl ManagedTmuxDriver for NoopTmuxDriver {
         Ok(String::new())
     }
 
+    /// Refuse, rather than report zero live sessions.
+    ///
+    /// Why: this driver is installed exactly when `RealTmuxDriver::discover()`
+    /// FAILED — tmux off PATH, or the #5784 host-state gate refusing access on
+    /// a reassigned `$HOME` — so it has never asked tmux anything. Answering
+    /// `Ok(vec![])` made "tmux is unreachable" byte-identical to "tmux is
+    /// running zero sessions", and
+    /// [`super::SessionManager::dedup_stale_duplicates`] reads an empty live
+    /// set as proof every candidate record is dead. That decommissioned a
+    /// live, attached session: the record was tombstoned, its
+    /// `workspace_path` cleared, and the row hidden from every picker view,
+    /// while the operator sat in the pane. No amount of error handling at the
+    /// call site could have caught it, because there was no error.
+    /// What: returns [`ManagedError::TmuxUnavailable`]. Both liveness callers
+    /// route through
+    /// [`super::SessionManager::observed_live_managed_names`] and skip their
+    /// pass on `Err` rather than inventing an empty set. The one caller that
+    /// can tolerate an unknown still degrades explicitly: the trait's
+    /// `session_exists` default maps `Err` to `false` (#5859).
+    /// Test: `noop_driver_list_sessions_refuses_rather_than_reporting_zero`,
+    /// and end-to-end by
+    /// `dedup_refuses_on_the_noop_driver_rather_than_reading_zero_as_dead`.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-        Ok(Vec::new())
+        // #5856: unknown is not empty.
+        Err(ManagedError::TmuxUnavailable(
+            "tmux not installed or inaccessible: live-session state is unknown, not empty".into(),
+        ))
     }
 
     /// Fails loudly like every other mutating op on this driver — mirrors
@@ -366,6 +392,27 @@ mod tests {
         // same way it fails create_session/send_line, not silently no-op.
         let driver = NoopTmuxDriver;
         assert!(driver.set_environment("s", "K", "v").is_err());
+    }
+
+    /// The tmux-absent fallback must report "unknown", never "zero".
+    ///
+    /// Why: `dedup_stale_duplicates` treats an empty live set as proof every
+    /// candidate record is dead and decommissions on it. `Ok(vec![])` from a
+    /// driver that never reached tmux made that proof fraudulent, and no error
+    /// handling at the call site could have detected it. Asserting the error
+    /// here — not merely at the dedup call site — keeps the guarantee attached
+    /// to the driver that has to make it.
+    /// Test: this function IS the test.
+    #[test]
+    fn noop_driver_list_sessions_refuses_rather_than_reporting_zero() {
+        let driver = NoopTmuxDriver;
+        let err = driver
+            .list_sessions()
+            .expect_err("the tmux-absent fallback must refuse, not report zero sessions");
+        assert!(
+            matches!(err, ManagedError::TmuxUnavailable(_)),
+            "expected TmuxUnavailable, got {err:?}"
+        );
     }
 
     #[test]

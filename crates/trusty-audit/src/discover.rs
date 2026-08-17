@@ -90,7 +90,11 @@ struct Org {
 /// What: `gh auth token`, with `GH_REPO` stripped so an ambient override cannot
 /// redirect the probe.
 /// Test: `super::discover_tests::the_credential_probe_asks_gh_for_a_token`.
-fn credential_probe() -> GhCommand {
+///
+/// `pub(crate)` since #5822: registering a repository probes the same credential
+/// before reading the repository, and a second probe there would be a second
+/// answer to "is this account usable".
+pub(crate) fn credential_probe() -> GhCommand {
     GhCommand::new(["auth", "token"]).env_remove("GH_REPO")
 }
 

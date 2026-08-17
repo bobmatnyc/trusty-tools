@@ -38,9 +38,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::worktree_reclaim::{
-    BranchPrState, NOT_INSPECTED_REASON, PrIndex, ReclaimCandidate, ReclaimMode, ReclaimOutcome,
-    ReclaimSurvey, ReclaimVerdict, classify, is_live, measure_bytes_until, pr_state_for_branch,
-    tm_provisioned,
+    AgentStateProbe, BranchPrState, NOT_INSPECTED_REASON, PrIndex, ReclaimCandidate, ReclaimMode,
+    ReclaimOutcome, ReclaimSurvey, ReclaimVerdict, agent_ownership_blocks, classify, is_live,
+    measure_bytes_until, pr_state_for_branch, tm_provisioned,
 };
 use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
 use super::worktree_safety::inspect_dirt;
@@ -108,6 +108,7 @@ pub(crate) fn survey_with_index(
     repos_root: &Path,
     in_use: &[PathBuf],
     index_for: &dyn Fn(&Path) -> PrIndex,
+    agent_state: AgentStateProbe<'_>,
     budget: SurveyBudget,
     per_branch_fallback: bool,
 ) -> ReclaimSurvey {
@@ -144,6 +145,7 @@ pub(crate) fn survey_with_index(
             is_live(&scanned.path, in_use),
             &pr,
             &inspect_dirt,
+            agent_state,
         );
         candidates.push(ReclaimCandidate {
             // Measured in a SECOND pass — see below.
@@ -208,6 +210,7 @@ fn measure_reclaimable_first(candidates: &mut [ReclaimCandidate], deadline: Opti
 pub(crate) fn survey(
     repos_root: &Path,
     in_use: &[PathBuf],
+    agent_state: AgentStateProbe<'_>,
     budget: SurveyBudget,
     per_branch_fallback: bool,
 ) -> ReclaimSurvey {
@@ -215,6 +218,7 @@ pub(crate) fn survey(
         repos_root,
         in_use,
         &PrIndex::from_gh,
+        agent_state,
         budget,
         per_branch_fallback,
     )
@@ -284,6 +288,7 @@ fn git_still_permits(path: &Path) -> Result<(), String> {
 /// `recheck_refuses_a_worktree_locked_after_the_survey`,
 /// `recheck_refuses_a_path_git_no_longer_lists`,
 /// `recheck_refuses_a_worktree_that_lost_its_ownership_marker`,
+/// `recheck_refuses_a_worktree_an_agent_claimed_after_the_survey`,
 /// `recheck_refuses_when_the_pr_is_no_longer_merged`,
 /// `recheck_refuses_a_worktree_dirtied_after_the_survey`,
 /// `recheck_permits_a_clean_merged_owned_worktree`.
@@ -291,6 +296,7 @@ pub(crate) fn recheck_before_delete(
     path: &Path,
     in_use_now: Option<&[PathBuf]>,
     pr_now: &BranchPrState,
+    agent_state: AgentStateProbe<'_>,
 ) -> Option<String> {
     let Some(in_use_now) = in_use_now else {
         return Some("the live session set could not be re-read — refusing to delete".into());
@@ -303,6 +309,13 @@ pub(crate) fn recheck_before_delete(
     }
     if !tm_provisioned(path) {
         return Some("no longer carries a trusty-mpm ownership marker".into());
+    }
+    // #5661: re-read the ownership sentinel adjacent to the deletion, for the
+    // reason #4118 established — an agent can be dispatched into a tree while a
+    // survey that takes minutes is still running, and the survey's verdict knows
+    // nothing about it.
+    if let Some(reason) = agent_ownership_blocks(path, agent_state) {
+        return Some(reason);
     }
     if !matches!(pr_now, BranchPrState::Merged { .. }) {
         return Some(format!(
@@ -333,6 +346,12 @@ pub(crate) struct FreshProbes<'a> {
     pub in_use_now: &'a dyn Fn() -> Option<Vec<PathBuf>>,
     /// Rebuild a repository's pull-request index.
     pub index_for: &'a dyn Fn(&Path) -> PrIndex,
+    /// Ask the delegation registry about the agent a sentinel names (#5661).
+    ///
+    /// Read at classify time AND again per candidate immediately before its
+    /// deletion, so an agent dispatched during a minutes-long survey still
+    /// protects its tree.
+    pub agent_state: AgentStateProbe<'a>,
 }
 
 /// Survey, and in [`ReclaimMode::Remove`] reclaim, merged-PR worktrees (#2919).
@@ -360,6 +379,7 @@ pub(crate) fn reclaim_with_probes(
         repos_root,
         &initial,
         probes.index_for,
+        probes.agent_state,
         SurveyBudget::unbounded(),
         true,
     );
@@ -405,7 +425,9 @@ pub(crate) fn reclaim_with_probes(
         // FRESH, per candidate, and now genuinely immediately before the
         // re-check that judges it.
         let in_use_now = (probes.in_use_now)();
-        if let Some(reason) = recheck_before_delete(&path, in_use_now.as_deref(), &pr_now) {
+        if let Some(reason) =
+            recheck_before_delete(&path, in_use_now.as_deref(), &pr_now, probes.agent_state)
+        {
             tracing::warn!(
                 path = %path.display(),
                 "worktree-reclaim: re-check refused a surveyed candidate — {reason} (#2919)"
@@ -456,6 +478,7 @@ pub(crate) fn reclaim_with_probes(
 pub(crate) fn reclaim_merged_pr_worktrees(
     repos_root: &Path,
     in_use_paths: &dyn Fn() -> Option<Vec<PathBuf>>,
+    agent_state: AgentStateProbe<'_>,
     mode: ReclaimMode,
 ) -> ReclaimOutcome {
     reclaim_with_probes(
@@ -463,6 +486,7 @@ pub(crate) fn reclaim_merged_pr_worktrees(
         &FreshProbes {
             in_use_now: in_use_paths,
             index_for: &PrIndex::from_gh,
+            agent_state,
         },
         mode,
     )

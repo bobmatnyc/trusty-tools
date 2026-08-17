@@ -14,7 +14,7 @@
 //! --porcelain` decides existence, never a directory walk) that pairs every
 //! registered worktree with its branch's pull-request state and its on-disk
 //! byte count, and classifies it [`Reclaimable`](ReclaimVerdict::Reclaimable)
-//! ONLY when four independent gates all pass. Removal is a separate,
+//! ONLY when six independent gates all pass. Removal is a separate,
 //! non-default [`ReclaimMode::Remove`] opt-in; the survey itself never deletes.
 //!
 //! FAIL-CLOSED, by construction: [`classify`] reaches `Reclaimable` only by
@@ -36,8 +36,20 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use super::worktree_ownership::{
+    AgentDelegationState, AgentWorktreeOwner, SentinelOwner, is_harness_agent_worktree,
+    read_sentinel_owner,
+};
 use super::worktree_registry::Admission;
 use super::worktree_safety::DirtyWorktree;
+
+/// Resolves the delegation registry's answer for the agent a sentinel names.
+///
+/// Why: named so the four call sites that pass one around agree on the shape,
+/// and so a caller that has no registry to consult has to say so explicitly by
+/// returning [`AgentDelegationState::Unknown`] rather than by passing an empty
+/// list that reads as "nobody claims it".
+pub(crate) type AgentStateProbe<'a> = &'a dyn Fn(&AgentWorktreeOwner) -> AgentDelegationState;
 
 /// How many pull requests one `gh pr list` call retrieves (#2919).
 ///
@@ -494,6 +506,79 @@ pub(crate) fn tm_provisioned(path: &Path) -> bool {
         || super::decommission::is_session_worktree(path)
 }
 
+/// Why a DISPATCHED AGENT's ownership forbids reclaiming `path`, or `None` when
+/// it does not (#5661).
+///
+/// Why: `SentinelOwner::Agent` exists to stop an agent-owned worktree being
+/// reclaimed by a sweep that has no way to tell whether the agent is still
+/// working. `prune_orphaned_worktrees` and `worktree_reconcile::classify` both
+/// apply it; the merged-PR reclaim path never read the sentinel at all, so a
+/// worktree that carried an agent sentinel, had no `SessionRecord`, and sat on a
+/// branch whose PR had merged passed every gate and was deleted out from under
+/// the agent holding it. That happened three times on 2026-08-15/16, twice
+/// against trees holding unpushed commits.
+///
+/// What: reads the sentinel through [`read_sentinel_owner`] — the same tolerant
+/// parse the orphan path uses, not a second one — and refuses on two answers.
+///
+/// 1. [`SentinelOwner::Agent`] whose agent the registry calls
+///    [`Live`](AgentDelegationState::Live) or
+///    [`Unknown`](AgentDelegationState::Unknown). `Unknown` refuses because the
+///    delegation map is rebuilt empty at every daemon boot: after a restart it
+///    reports nothing for an agent that is still working, and an unanswerable
+///    liveness question must never resolve to "free" (ADR-0045).
+/// 2. [`SentinelOwner::Unknown`] for a path inside the harness agent store
+///    ([`is_harness_agent_worktree`]). Reaching this gate means gate 3 already
+///    found a sentinel FILE there — `tm_provisioned`'s other tier,
+///    `.worktrees/<name>`, cannot match an agent-store path — so the file exists
+///    and its content does not name an owner. Empty, truncated, garbage or
+///    unreadable are indistinguishable to the tolerant parse, and any of them
+///    could be hiding an agent claim. Undeterminable, not absent.
+///
+/// # What this deliberately does NOT change
+///
+/// A worktree outside the agent store whose sentinel is absent, empty or
+/// unparsable keeps today's behaviour: the merged PR is its landing evidence and
+/// `tm_provisioned` its ownership evidence. Widening the refusal to every
+/// owner-unknown sentinel would make the `.worktrees/` population — the 1.1 TiB
+/// this module was written to reclaim — permanently unreclaimable, which is the
+/// opposite failure and not #5661's.
+/// Test: `classify_blocks_a_live_agents_worktree`,
+/// `classify_blocks_an_agent_the_registry_never_heard_of`,
+/// `classify_allows_a_finished_agents_merged_worktree`,
+/// `classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel`,
+/// `classify_leaves_a_session_owned_worktree_alone`.
+pub(crate) fn agent_ownership_blocks(
+    path: &Path,
+    agent_state: AgentStateProbe<'_>,
+) -> Option<String> {
+    match read_sentinel_owner(path) {
+        SentinelOwner::Agent(owner, _) => match agent_state(&owner) {
+            AgentDelegationState::Live => Some(format!(
+                "owned by dispatched agent {} — a delegation naming it has not ended, so it is \
+                 still working in this tree (#5661)",
+                owner.agent_id
+            )),
+            AgentDelegationState::Unknown => Some(format!(
+                "owned by dispatched agent {} and the delegation registry holds no record of \
+                 that agent — a registry rebuilt empty at daemon boot cannot tell a finished \
+                 agent from a working one, so its silence is undeterminable, not absent \
+                 (#5661, ADR-0045)",
+                owner.agent_id
+            )),
+            AgentDelegationState::Ended => None,
+        },
+        SentinelOwner::Unknown if is_harness_agent_worktree(path) => Some(
+            "carries an ownership sentinel that names no owner (empty, malformed or unreadable) \
+             inside the harness agent-worktree store — it could be an agent claim this cannot \
+             read, and an unreadable claim on a destructive path is undeterminable, not absent \
+             (#5661, ADR-0045)"
+                .to_string(),
+        ),
+        SentinelOwner::Known(..) | SentinelOwner::Unknown => None,
+    }
+}
+
 /// The refusal reason a survey records for a worktree it ran out of time to
 /// inspect (#2919).
 ///
@@ -550,25 +635,39 @@ impl ReclaimVerdict {
 /// 3. **Removability** — [`tm_provisioned`]: the classifier applies exactly the
 ///    ownership predicate the REMOVER applies, so nothing is ever advertised as
 ///    reclaimable that `remove_session_worktree` would refuse.
-/// 4. **Landing evidence** — only [`BranchPrState::Merged`] proceeds.
-/// 5. **Unsaved work** — `probe_dirt` is a closure rather than a precomputed
+/// 4. **Agent ownership** (#5661) — [`agent_ownership_blocks`]. Gate 2 reads
+///    session records only, and a dispatched agent has none, so a live agent's
+///    worktree was invisible to every gate above this one.
+/// 5. **Landing evidence** — only [`BranchPrState::Merged`] proceeds.
+/// 6. **Unsaved work** — `probe_dirt` is a closure rather than a precomputed
 ///    `Option` on purpose: passing the value would let a caller reach this gate
 ///    with a `None` that means "not checked" instead of "checked and clean".
 ///    The probe is [`inspect_dirt`], which fails toward DIRTY on every error.
 ///
+/// `agent_state` is a closure for the same reason `probe_dirt` is: a caller with
+/// no delegation registry to consult must say so by returning
+/// [`AgentDelegationState::Unknown`], which refuses, rather than by handing over
+/// an empty list that would read as "no agent claims this".
+///
 /// Test: one refusal test per gate — `classify_blocks_non_admitted_worktree`,
 /// `classify_blocks_live_session_workspace`,
-/// `classify_blocks_a_worktree_trusty_mpm_does_not_own`, `classify_blocks_open_pr`,
+/// `classify_blocks_a_worktree_trusty_mpm_does_not_own`,
+/// `classify_blocks_a_live_agents_worktree`,
+/// `classify_blocks_an_agent_the_registry_never_heard_of`,
+/// `classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel`,
+/// `classify_blocks_open_pr`,
 /// `classify_blocks_closed_unmerged_pr`, `classify_blocks_no_pr`,
 /// `classify_blocks_unknown_pr_state`, `classify_blocks_dirty_worktree` —
-/// plus `classify_allows_clean_pushed_merged_worktree` for the one path that
-/// says yes.
+/// plus `classify_allows_clean_pushed_merged_worktree` and
+/// `classify_allows_a_finished_agents_merged_worktree` for the paths that say
+/// yes.
 pub(crate) fn classify(
     path: &Path,
     admission: Admission,
     live: bool,
     pr: &BranchPrState,
     probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    agent_state: AgentStateProbe<'_>,
 ) -> ReclaimVerdict {
     // Gate 1 (#2919): git decides existence and eligibility, per ADR-0023.
     if admission != Admission::Admitted {
@@ -590,7 +689,13 @@ pub(crate) fn classify(
              and `prune-worktrees` cannot remove it",
         );
     }
-    // Gate 4 (#2919): the merged PR is the landing evidence DOC-52 §3.4 makes
+    // Gate 4 (#5661): a dispatched agent has no session record, so gate 2 is
+    // blind to it, and gate 3 reads only whether a sentinel FILE exists — never
+    // whose claim it carries. See `agent_ownership_blocks`.
+    if let Some(reason) = agent_ownership_blocks(path, agent_state) {
+        return ReclaimVerdict::blocked(reason);
+    }
+    // Gate 5 (#2919): the merged PR is the landing evidence DOC-52 §3.4 makes
     // the reclamation trigger. Everything else — including "we could not find
     // out" — refuses.
     let merged_pr = match pr {
@@ -611,7 +716,7 @@ pub(crate) fn classify(
             );
         }
     };
-    // Gate 5 (#2919): a merged PR does NOT prove the directory holds nothing
+    // Gate 6 (#2919): a merged PR does NOT prove the directory holds nothing
     // novel — the 2026-07-21 salvage found merged-PR worktrees carrying real
     // unpushed source. This is the last gate and it fails toward dirty.
     if let Some(dirt) = probe_dirt(path) {

@@ -69,7 +69,9 @@ use crate::core::skill_manifest::SkillManifest;
 /// Test: `regenerated_paths_includes_managed_agent`,
 /// `regenerated_paths_includes_skill_entry_and_references`,
 /// `regenerated_paths_includes_all_output_styles`.
-fn regenerated_scaffold_paths(project_dir: &Path) -> BTreeSet<String> {
+fn regenerated_scaffold_paths(
+    project_dir: &Path,
+) -> crate::core::agent_manifest::Result<BTreeSet<String>> {
     let mut paths = BTreeSet::new();
 
     let agent_manifest = AgentManifest::load(&project_dir.join(".claude").join("agents"));
@@ -77,7 +79,11 @@ fn regenerated_scaffold_paths(project_dir: &Path) -> BTreeSet<String> {
         paths.insert(format!(".claude/agents/{filename}"));
     }
 
-    let skill_manifest = SkillManifest::load(&project_dir.join(".claude").join("skills"));
+    // #5626: an unreadable ledger contributes no paths and says so. The empty
+    // default silently shrank "what tm regenerates", and the intersection this
+    // feeds then reported a tracked scaffold file as tm-untouched.
+    let skills_dir = project_dir.join(".claude").join("skills");
+    let skill_manifest = SkillManifest::load(&skills_dir)?;
     for key in skill_manifest.managed.keys() {
         if key.contains('/') {
             paths.insert(format!(".claude/skills/{key}"));
@@ -90,7 +96,7 @@ fn regenerated_scaffold_paths(project_dir: &Path) -> BTreeSet<String> {
         paths.insert(format!(".claude/output-styles/{}", style.file_name));
     }
 
-    paths
+    Ok(paths)
 }
 
 /// Paths under the three harness subtrees that `git` tracks in `project_dir`.
@@ -184,7 +190,23 @@ pub(super) fn check_scaffold_tracking(project_dir: Option<&Path>) -> DoctorCheck
         );
     };
 
-    let regenerated = regenerated_scaffold_paths(project);
+    // #5626: an unreadable ledger shrinks the regenerated set, and a smaller
+    // set means a smaller intersection — the check would report no collision it
+    // never looked for. Say so instead.
+    let regenerated = match regenerated_scaffold_paths(project) {
+        Ok(paths) => paths,
+        Err(e) => {
+            return DoctorCheck::new(
+                "scaffold_tracking",
+                CheckStatus::Warn,
+                format!(
+                    "an ownership ledger under {}/.claude could not be read, so which paths tm \
+                     regenerates is UNDETERMINED and this check could not run: {e}",
+                    project.display()
+                ),
+            );
+        }
+    };
     let collisions: BTreeSet<String> = tracked.intersection(&regenerated).cloned().collect();
 
     if collisions.is_empty() {

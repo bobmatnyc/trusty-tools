@@ -43,8 +43,17 @@
 //! (belt-and-suspenders against a TOCTOU race); a loser that fails the
 //! recheck is skipped with a `warn!`, never decommissioned.
 //!
+//! **Liveness is evidence, and absence of it is not.** Every rule above reads
+//! "this record's `tmux_name` is not in the live set" as proof the session is
+//! gone, and acts on that proof with `decommission` — which is irreversible:
+//! it tombstones the record, clears `workspace_path`, and hides the row from
+//! every picker view. The live set must therefore come from tmux actually
+//! having been asked and answered. See
+//! [`SessionManager::observed_live_managed_names`], which refuses rather than
+//! reporting an empty set it cannot stand behind.
+//!
 //! Test: `plan_dedup_*`, `is_resolved_existing_*`, and `reconcile_dedup_*` in
-//! `dedup_tests.rs`.
+//! `dedup_tests.rs`; the refusal contract in `dedup_refuses_*`.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -56,6 +65,48 @@ use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
 impl SessionManager {
+    /// Live managed tmux session names, or an error when tmux could not be
+    /// observed at all.
+    ///
+    /// Why: the two callers both read ABSENCE from this set as proof a session
+    /// is gone, and both act on that proof. `dedup_stale_duplicates`
+    /// `decommission`s; `reconcile_on_boot` marks the record `Stopped` and,
+    /// under `auto_resume`, queues it for a relaunch it does not need. So an
+    /// empty set means "every candidate is dead". Two paths used to hand that
+    /// empty set over without tmux ever having answered. First,
+    /// `list_sessions()` returning an error, swallowed by
+    /// `unwrap_or_default()` in dedup and by `unwrap_or_else(warn, Vec::new)`
+    /// in reconcile. Second, and the one no error handling could have caught:
+    /// [`super::real_tmux::NoopTmuxDriver`] — installed whenever
+    /// `RealTmuxDriver::discover()` fails, which includes tmux being off PATH
+    /// AND the #5784 host-state gate refusing tmux access on a reassigned
+    /// `$HOME` — answered `Ok(vec![])`, a value indistinguishable from a host
+    /// genuinely running zero sessions. Either path decommissions a session
+    /// the operator is attached to. A liveness check that cannot see tmux is
+    /// not proof of death.
+    /// What: runs the #3823/#3886 `ensure_server_up` guard first, so a cold
+    /// socket is STARTED rather than misread as empty; then propagates
+    /// `list_sessions()`'s error instead of defaulting it away; then filters
+    /// to managed names. Every way of failing to observe tmux reaches the
+    /// caller as `Err`. Each caller decides what to skip; neither may invent
+    /// an empty set.
+    /// Test: `dedup_refuses_when_list_sessions_fails`,
+    /// `dedup_refuses_when_the_tmux_server_cannot_be_started`,
+    /// `dedup_refuses_on_the_noop_driver_rather_than_reading_zero_as_dead`,
+    /// `reconcile_refuses_to_stop_sessions_when_tmux_cannot_be_observed`.
+    pub(super) fn observed_live_managed_names(&self) -> Result<HashSet<String>, ManagedError> {
+        // #5856: refuse, never assume — see this function's doc. The guard
+        // mirrors `resolve_session_name`'s (#3886): it belongs next to the
+        // `list-sessions` probe it protects, not on the callers.
+        self.tmux.ensure_server_up()?;
+        Ok(self
+            .tmux
+            .list_sessions()?
+            .into_iter()
+            .filter(|n| crate::core::names::is_managed_session_name(n))
+            .collect())
+    }
+
     /// Collapse stale duplicate session records per project (#2306).
     ///
     /// Why: see the module docs — quiesced projects with a canonical record AND
@@ -73,18 +124,29 @@ impl SessionManager {
     /// (skips + `warn!`s if the path has reappeared since planning) before
     /// decommissioning through the standard `decommission` path. Decommission
     /// failures are logged, not fatal. Returns the ids actually decommissioned.
-    /// Test: `reconcile_dedup_collapses_stopped_duplicates` and siblings.
+    ///
+    /// When tmux cannot be observed at all, the whole pass is skipped and no
+    /// record is decommissioned — see
+    /// [`Self::observed_live_managed_names`]. The skip returns `Ok(vec![])`
+    /// rather than an error so `reconcile_on_boot`, which propagates this
+    /// call with `?`, still runs its deploy-validate and auto-resume tail.
+    /// Test: `reconcile_dedup_collapses_stopped_duplicates` and siblings;
+    /// the refusal in `dedup_refuses_when_list_sessions_fails` and siblings.
     pub(crate) async fn dedup_stale_duplicates(
         &self,
         to_resume: &mut Vec<ManagedSessionId>,
     ) -> Result<Vec<ManagedSessionId>, ManagedError> {
-        let live_names: HashSet<String> = self
-            .tmux
-            .list_sessions()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|n| crate::core::names::is_managed_session_name(n))
-            .collect();
+        // #5856: an unobservable tmux is not an empty tmux. Skip the pass.
+        let live_names: HashSet<String> = match self.observed_live_managed_names() {
+            Ok(names) => names,
+            Err(e) => {
+                warn!(
+                    "dedup: tmux liveness could not be observed ({e}); skipping this pass — \
+                     no record is decommissioned without positive evidence its session is gone"
+                );
+                return Ok(Vec::new());
+            }
+        };
         let records = self.store.write().await.all().await?;
         let mut losers = plan_dedup(&records, &live_names);
 

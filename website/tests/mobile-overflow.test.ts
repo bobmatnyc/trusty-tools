@@ -71,13 +71,17 @@ import { whatsNewSections } from '../src/lib/changelog/site';
  * overflow. 1px is kept as an explicit, narrow allowance for exactly that —
  * not "a wider hidden" — and stays two orders of magnitude below anything a
  * real clipped-content regression produces (the injection proof below reads
- * main.scrollWidth 1697 against a 375 clientWidth). The homepage's OWN
- * 320px reading is different in kind, not degree — its `/` card grid
- * overflows main by 37px, a real layout defect with a real card clipped,
- * pre-existing and unrelated to this fix (present on `origin/main` before
- * it, confirmed by re-running this measurement against the unmodified
- * `app.css`). Silently tolerating that would be the masking this file
- * exists to prevent, so `/` is asserted at 375px only here — see #5255.
+ * main.scrollWidth 1697 against a 375 clientWidth).
+ *
+ * The homepage's own card-grid overflow (#5255) is fixed rather than tolerated,
+ * so `/` is now asserted at both widths. Its cards carried no `min-w-0`, and a
+ * grid item's automatic minimum size is its content's min-content width — the
+ * what's-new strip's changelog prose measured 367px, widening the card to 417px
+ * inside a 343px column. That read main.scrollWidth 433 against a 375
+ * clientWidth; with `min-w-0` on the card both widths land exactly on their
+ * clientWidth. Nothing about it was specific to 320px, and the earlier reading
+ * of "37px at 320px only" was taken while this file's `beforeAll` was timing
+ * out at 60s and skipping every measurement in it (#5200).
  * Test: this file.
  */
 
@@ -118,10 +122,10 @@ const SAFE_UNESCAPED_IDENTIFIER = /^[\w./:-]+$/;
 /**
  * Why: pinning one specific identifier (`pipeline::citation_check::…`) broke
  * the moment its release aged out of `/whats-new`'s `DETAILED_RELEASES`
- * window (#5461) — trusty-review shipped past 0.11.0, and CI never runs this
- * suite (#5200), so the drift was silent. `whatsNewSections()` is the exact
- * data `/whats-new` renders from, so picking a probe out of it can never
- * target content the page has stopped showing.
+ * window (#5461) — trusty-review shipped past 0.11.0, and at the time CI ran
+ * this suite nowhere (#5200), so the drift was silent. `whatsNewSections()` is
+ * the exact data `/whats-new` renders from, so picking a probe out of it can
+ * never target content the page has stopped showing.
  * What: the longest whitespace-free `<code>` run across every flagship
  * crate's currently-detailed releases — standing in for "a long inline
  * identifier", whichever one happens to be current.
@@ -145,16 +149,6 @@ function longestInlineCodeIdentifier(): string {
 		}
 	}
 	return longest;
-}
-
-/**
- * `/` at 320px has its own pre-existing, unrelated overflow (#5255 — a card
- * grid, not changelog prose) that this PR does not fix. Skipping it here is
- * not masking: it is asserted at 375px like every other route, and the gap
- * is named, not silently widened away.
- */
-function isKnownPreexistingGap(route: string, width: number): boolean {
-	return route === '/' && width === 320;
 }
 
 /** `/whats-new` -> `whats-new.html`; `/` -> `index.html`; `/a/b` -> `a/b.html`. */
@@ -231,7 +225,9 @@ beforeAll(async () => {
 	const { port } = server.address() as AddressInfo;
 	baseUrl = `http://127.0.0.1:${port}`;
 	browser = await chromium.launch();
-}, 60_000);
+	// #5200: no per-hook override — this hook runs a real `vite build` (1m21s
+	// measured), so the project's own `hookTimeout: 300_000` governs.
+});
 
 afterAll(async () => {
 	await browser?.close();
@@ -241,8 +237,7 @@ afterAll(async () => {
 describe('no page scrolls horizontally on mobile', () => {
 	for (const width of WIDTHS) {
 		for (const route of ROUTES) {
-			const testFn = isKnownPreexistingGap(route, width) ? it.skip : it;
-			testFn(`${route} at ${width}px`, async () => {
+			it(`${route} at ${width}px`, async () => {
 				const page = await browser.newPage({ viewport: { width, height: 800 } });
 				try {
 					await page.goto(baseUrl + route, { waitUntil: 'networkidle' });

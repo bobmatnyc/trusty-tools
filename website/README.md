@@ -28,6 +28,13 @@ pnpm dev        # http://localhost:5173
 pnpm `9.15.9`, pinned in `packageManager` to match the seven UI packages under
 `crates/*/ui/`.
 
+`pnpm test` runs in CI as `.github/workflows/website-tests.yml` (#5200), on
+Node 20 with Chromium installed for the mobile-overflow smoke test. It is a
+separate workflow rather than a leg on `ci.yml`'s `ui-checks` matrix because
+`scripts/detect-docs-only.sh` buckets `website/**` as docs-only, and every
+`ui-checks` step is gated on `docs_only != 'true'` — a leg there would skip on
+exactly the PRs it exists to check.
+
 ## Vercel project settings
 
 Three settings must be configured on the Vercel project. Only the first is

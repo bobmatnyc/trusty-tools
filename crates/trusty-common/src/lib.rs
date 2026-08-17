@@ -596,11 +596,13 @@ pub use slug::slugify_string;
 /// another. Centralising the rule here — the crate both already depend on —
 /// keeps them in lockstep without a trusty-mpm → trusty-search dependency edge.
 /// What: Exposes [`index_id::derive_index_id`], [`index_id::resolve_project_root`],
-/// and [`index_id::find_git_root`].
+/// [`index_id::find_git_root`], and [`index_id::identifies_same_path`] — the one
+/// implementation of "do these two paths name the same directory tree?" that
+/// both registration guards route through.
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// index_id::tests`.
 pub mod index_id;
-pub use index_id::{derive_index_id, find_git_root, resolve_project_root};
+pub use index_id::{derive_index_id, find_git_root, identifies_same_path, resolve_project_root};
 
 /// Project-derived trusty-search index identity — the PARTITIONING key
 /// (epic #4207; supersedes the approach closed as won't-do in #4063).
@@ -706,6 +708,30 @@ pub mod palace_id;
 pub use palace_id::{
     PALACE_OVERRIDE_ENV, derive_palace_id, owner_repo_from_git_remote, palace_override_from_env,
     parent_dir_slug, repo_slug_from_git_remote,
+};
+
+/// The single entry point for "which palace does this project use?" (#5811).
+///
+/// Why: [`palace_id::derive_palace_id`] is the PURE core and covers only three
+/// of the four precedence levels — the committed `.trusty-tools/trusty-memory.yaml`
+/// pin needs filesystem I/O, so it lived above the core in ONE caller
+/// (trusty-memory). Every other caller therefore answered the question without
+/// the pin, and trusty-mpm's pin-blind answer became the `TRUSTY_MEMORY_PALACE`
+/// variable exported into managed sessions — the highest-precedence slot. A
+/// derived name outranked the pin it was meant to lose to. This module owns the
+/// whole rule, I/O included, so the split cannot reappear.
+/// What: Gated behind the `palace-resolve` feature. Exposes
+/// [`palace_resolve::resolve_palace`], [`palace_resolve::resolve_palace_with_remote`],
+/// [`palace_resolve::PalaceResolution`], [`palace_resolve::PalaceSource`],
+/// [`palace_resolve::PalaceResolveError`], the pin-file schema, and the shared
+/// `git` probes.
+/// Test: `cargo test -p trusty-common --features palace-resolve -- palace_resolve`.
+#[cfg(feature = "palace-resolve")]
+pub mod palace_resolve;
+#[cfg(feature = "palace-resolve")]
+pub use palace_resolve::{
+    PIN_FILE_REL, PIN_SCHEMA_VERSION, PalaceResolution, PalaceResolveError, PalaceSource,
+    ProjectPin, resolve_palace, resolve_palace_with_remote,
 };
 
 /// Palace-level alias map: redirect one palace name to another (issue #1939).

@@ -382,6 +382,45 @@ fn partial_template_override_leaves_other_sections_generic() {
     assert!(req.system.contains("deal-analytic paragraph"));
 }
 
+/// Why: an audit is only as complete as the set of targets the operator
+/// registered, and the report is the only place that gap becomes visible.  The
+/// instruction must be static — a template that overrides `executive_summary`
+/// must not be able to drop it — and it must name schema/migration
+/// repositories, the kind operators forget most often.
+/// What: asserts the coverage-gaps block reaches `req.system` with the
+/// register-and-re-run recommendation, the schema-repository call-out, and the
+/// no-speculation constraint; asserts it survives an `executive_summary`
+/// override; and asserts the digest emits the "Applications assessed" heading
+/// the instruction tells the model to compare references against.
+/// Test: this test itself.
+#[test]
+fn system_prompt_asks_for_unregistered_target_gaps() {
+    let mut model = fixture_model(vec![]);
+    model.section_instructions.insert(
+        "executive_summary".to_string(),
+        "OVERRIDE: lead with the TQI posture.".to_string(),
+    );
+    let req = build_synthesis_prompt(&model, "stub/model", false);
+    for needle in [
+        "Coverage gaps in the assessed set",
+        "coverage-gaps note",
+        "register the named targets and re-run",
+        "schema and migration repositories",
+        "Never list one you infer probably exists",
+    ] {
+        assert!(
+            req.system.contains(needle),
+            "coverage-gaps instruction must survive a template override and contain {needle:?}: {}",
+            req.system
+        );
+    }
+    assert!(
+        req.messages[0].content.contains("Applications assessed"),
+        "the digest must name the assessed set the instruction compares against: {}",
+        req.messages[0].content
+    );
+}
+
 // ── Synthesize: happy path + fail-closed paths ──────────────────────────────
 
 fn good_response() -> String {

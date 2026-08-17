@@ -34,9 +34,12 @@
 //!   despite a write failure. A caller of this module cannot report success
 //!   without having looked at the status.
 //!
-//! The run-progress record is written LAST, after every child has finished, and
-//! a failure to write it fails the whole call — a record that cannot be written
-//! must not leave the client claiming a run it cannot describe.
+//! The run-progress record is written after EVERY child has finished, not once
+//! at the end (#5494), and a failure to write it fails the whole call — a
+//! record that cannot be written must not leave the client claiming a run it
+//! cannot describe. That checkpoint is also what makes the sweep re-entrant:
+//! see [`checkpoint`] for the resume rules and for why the unit is a repository
+//! rather than a tga stage.
 //!
 //! ## The credential
 //!
@@ -51,6 +54,11 @@
 //! file persists on disk, and a command-line argument is world-readable in
 //! `ps`).
 //!
+//! A registered board's credential travels the same way (#5857). The generated
+//! config gets a `${TRUSTY_AUDIT_JIRA_TOKEN}`-style reference and the value goes
+//! in the environment beside it; [`boards`] owns that split and the reasons for
+//! it.
+//!
 //! Test: `super::run_tests`.
 
 use std::path::{Path, PathBuf};
@@ -58,73 +66,47 @@ use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{EngagementConfig, ToolPins};
+use crate::config::EngagementConfig;
 use crate::error::AuditError;
 use crate::inference;
-use crate::manifest::AuditManifest;
-use crate::tools::{self, RequiredTool};
+use crate::progress::{Operation, Progress, StageEvent, StageState, UnitOutcome};
+use crate::registry;
+use crate::relay::{Scrubber, tee_and_relay};
 use crate::workdir::{Area, WorkDir};
 
-/// File under `state/` naming the repositories the run should audit.
-///
-/// Why: repository selection is separate work (#5487, #5497) and repository
-/// cloning is separate again (#5215). #5555 does not implement either — it
-/// defines the file both will write, so neither has to redesign this module's
-/// input. The shape is deliberately the same `{ name, path }` pair as tga's own
-/// manifest, because that is what a selection is.
-///
-/// ```toml
-/// # <work-dir>/state/selected-repos.toml
-/// count = 2                   # how many entries follow — REQUIRED
-///
-/// [[repositories]]
-/// name = "acme-api"
-/// path = "repos/acme-api"     # relative paths anchor to the work-dir root
-///
-/// [[repositories]]
-/// name = "acme-web"
-/// path = "repos/acme-web"
-/// ```
-///
-/// ## Two obligations on whoever writes it
-///
-/// 1. **Write to a temporary file in the same directory and rename it into
-///    place.** A rename is atomic; a direct write is not, and a producer that
-///    crashes part-way through one leaves syntactically valid TOML holding a
-///    prefix of the entries.
-/// 2. **Declare `count` first**, before the `[[repositories]]` tables. TOML
-///    requires top-level keys to precede tables anyway, so a truncated file
-///    keeps the count and loses entries — which is exactly the direction that
-///    makes the mismatch detectable. A `count` that disagrees with the number of
-///    entries is [`AuditError::TruncatedSelection`], not a smaller selection.
-///
-/// Obligation 2 is what makes obligation 1 checkable rather than a request. A
-/// sweep that silently audits three of five repositories and reports
-/// `AllSucceeded` is the same fail-open shape as a sweep over none.
-pub const SELECTION_FILE: &str = "selected-repos.toml";
+// #5823: the selection file crossed run.rs past the 500-SLOC production cap, and
+// it is the one concern here with producers outside this crate. Re-exported, so
+// `crate::run::SelectedRepo` and friends stay where every caller already names
+// them.
+mod selection;
 
-/// File under `state/` recording what the last sweep did, per repository.
-pub const PROGRESS_FILE: &str = "run-progress.toml";
+// #5857: what a registered board contributes to a child — the generated config
+// section, the variable carrying its secret, and the gap when it cannot be
+// collected. Public because `crate::chain` states the same gaps in the return
+// package and must reach them through this one resolution, not a second copy.
+pub mod boards;
 
-/// One repository the run was asked to audit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct SelectedRepo {
-    /// Display name, used for the output directory and the log file.
-    pub name: String,
-    /// Checkout path. Relative paths anchor to the working-directory root.
-    pub path: PathBuf,
-}
+// #5494: the checkpoint and its resume rules are one subject and they are not
+// this file's — `run.rs` drives children, `checkpoint.rs` decides what a re-run
+// may skip.
+pub mod checkpoint;
 
-/// The `state/selected-repos.toml` document.
-///
-/// `count` is required and is the truncation check — see [`SELECTION_FILE`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Selection {
-    count: usize,
-    #[serde(default)]
-    repositories: Vec<SelectedRepo>,
-}
+// #5494: "is this output worth believing" gained a second caller — the resume
+// path asks it about a directory no child in this run wrote. Two callers of one
+// judgement is what makes it a module rather than a step inside `run_one`.
+mod verify;
+
+// #5857: the pinned-tool preflight, split out when this file crossed the
+// 500-SLOC production cap. It runs to completion before any child starts and
+// answers one question — are the installed tools the ones this engagement pins
+// — so it separates cleanly.
+mod pins;
+
+use pins::{PinnedBinaries, pinned_binaries};
+use verify::verify_output;
+
+pub use checkpoint::{PROGRESS_FILE, Recollect, RunProgress, progress_path, read_progress};
+pub use selection::{SELECTION_FILE, SelectedRepo, load_selection, save_selection, selection_path};
 
 /// What happened to one repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +146,15 @@ pub struct RepoRun {
     /// fail the repository; see [`verify_output`] for which ones do.
     #[serde(default)]
     pub gaps: Vec<String>,
+    /// Whether this entry was carried over from an earlier sweep (#5494).
+    ///
+    /// `true` means no `tga audit` child ran for this repository in the sweep
+    /// that produced this report — an earlier run audited it, and the output it
+    /// left is still on disk and still passes [`verify_output`]. It is recorded
+    /// so a re-run reads as a resume rather than as work that went suspiciously
+    /// fast.
+    #[serde(default)]
+    pub resumed: bool,
     /// How it ended.
     pub result: RepoResult,
 }
@@ -220,197 +211,33 @@ impl RunReport {
     pub fn failures(&self) -> impl Iterator<Item = &RepoRun> {
         self.repos.iter().filter(|r| !r.result.succeeded())
     }
-}
 
-/// Where the repository selection is read from.
-pub fn selection_path(work: &WorkDir) -> PathBuf {
-    work.path(Area::State).join(SELECTION_FILE)
-}
-
-/// Where the run-progress record is written.
-pub fn progress_path(work: &WorkDir) -> PathBuf {
-    work.path(Area::State).join(PROGRESS_FILE)
-}
-
-/// Read the repository selection.
-///
-/// Why: the input contract #5487/#5215 fill. Absent and empty are the same
-/// state — nothing was selected — and both are a refusal rather than a
-/// zero-repository success, because a sweep that audits nothing and exits 0 is
-/// the fail-open shape this module exists to avoid.
-///
-/// A THIRD state is a refusal too: a file whose `count` does not match the
-/// entries it carries. That is the truncated-write case a producer crashing
-/// mid-write leaves behind, and it is indistinguishable from a smaller
-/// selection unless the count says otherwise.
-/// What: parses `state/`[`SELECTION_FILE`] and checks the count.
-/// Test: `super::run_tests::an_absent_selection_is_a_refusal`,
-/// `super::run_tests::a_truncated_selection_is_refused`.
-///
-/// # Errors
-///
-/// [`AuditError::NoRepositoriesSelected`] when the file is absent or lists
-/// nothing, [`AuditError::TruncatedSelection`] when `count` disagrees with the
-/// entries, [`AuditError::Read`] when it exists but cannot be read, and
-/// [`AuditError::Parse`] when it does not match the schema — including when
-/// `count` is absent, since a file without it cannot be checked at all.
-pub fn load_selection(work: &WorkDir) -> Result<Vec<SelectedRepo>, AuditError> {
-    let path = selection_path(work);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AuditError::NoRepositoriesSelected { path });
-        }
-        Err(source) => return Err(AuditError::Read { path, source }),
-    };
-    let selection: Selection = toml::from_str(&text).map_err(|source| AuditError::Parse {
-        path: path.clone(),
-        what: "repository selection",
-        source: Box::new(source),
-    })?;
-    if selection.repositories.is_empty() {
-        return Err(AuditError::NoRepositoriesSelected { path });
+    /// The repositories an earlier sweep audited and this one carried over.
+    pub fn resumed(&self) -> impl Iterator<Item = &RepoRun> {
+        self.repos.iter().filter(|r| r.resumed)
     }
-    // #5555: a prefix of a crashed write parses cleanly; only the count catches it.
-    if selection.count != selection.repositories.len() {
-        return Err(AuditError::TruncatedSelection {
-            path,
-            declared: selection.count,
-            found: selection.repositories.len(),
-        });
-    }
-    Ok(selection.repositories)
 }
 
-/// Record the repositories the next sweep should audit.
+/// How to run the sweep.
 ///
-/// Why: [`SELECTION_FILE`] states two obligations on whoever writes it, and
-/// #5556 found there was no writer at all — `taudit clone` acquired the
-/// checkouts, `taudit run` then refused with "nothing to audit", and every
-/// per-stage test passed throughout. The writer lives beside the reader so the
-/// atomic-rename and `count`-first obligations are one decision rather than a
-/// note each producer re-reads; #5497's picker writes through here too.
-/// What: renders `count` ahead of the entries (serde field order, and `toml`
-/// emits values before tables), writes to a uniquely-named temporary file in
-/// the same directory, and renames it into place. The unique name is what lets
-/// two writers race without either reading the other's half-written file.
-/// Test: `super::run_tests::a_saved_selection_reads_back_whole`,
-/// `super::run_tests::racing_writers_never_leave_a_torn_selection`.
-///
-/// # Errors
-///
-/// [`AuditError::WorkDir`] when the state area cannot be made, the temporary
-/// file cannot be written, or the rename fails.
-pub fn save_selection(work: &WorkDir, repos: &[SelectedRepo]) -> Result<(), AuditError> {
-    let path = selection_path(work);
-    let dir = work.path(Area::State);
-    std::fs::create_dir_all(&dir).map_err(|source| AuditError::WorkDir { path: dir, source })?;
-
-    let selection = Selection {
-        count: repos.len(),
-        repositories: repos.to_vec(),
-    };
-    let text = toml::to_string_pretty(&selection).map_err(|e| AuditError::WorkDir {
-        path: path.clone(),
-        source: std::io::Error::other(e),
-    })?;
-
-    let temp = path.with_file_name(format!("{SELECTION_FILE}.{}.tmp", writer_tag()));
-    std::fs::write(&temp, text).map_err(|source| AuditError::WorkDir {
-        path: temp.clone(),
-        source,
-    })?;
-    std::fs::rename(&temp, &path).map_err(|source| {
-        let _ = std::fs::remove_file(&temp);
-        AuditError::WorkDir { path, source }
-    })
-}
-
-/// A suffix no two concurrent writers share: process, plus thread within it.
-fn writer_tag() -> String {
-    use std::hash::{Hash as _, Hasher as _};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::thread::current().id().hash(&mut hasher);
-    format!("{}-{}", std::process::id(), hasher.finish())
-}
-
-/// The four binaries a run drives, each proven to be at the engagement's pin.
-///
-/// Why: named fields rather than a lookup table, so the "tool not found" branch
-/// does not exist. The obvious table version needs a fallback arm at every use
-/// site, and the natural fallback — the bare binary name — is a `PATH` lookup,
-/// which is the one thing this module must never do.
-#[derive(Debug, Clone)]
-struct PinnedBinaries {
-    tga: PathBuf,
-    search: PathBuf,
-    analyze: PathBuf,
-    review: PathBuf,
-}
-
-/// The pinned binaries this run drives, or a refusal naming what is wrong.
-///
-/// Why: the run must use the binaries THIS client installed and verified at the
-/// version THIS engagement pins — never whatever `tga` happens to be on the
-/// operator's `PATH`, and never a copy installed before the config was bumped.
-/// Both are the #5454 version-skew class, and there is no fallback for either.
-///
-/// Three conditions, each a refusal: the file is present, the version record
-/// this client wrote names it, and that recorded version equals the engagement's
-/// pin. The second matters because a binary someone dropped into `tools/` by
-/// hand reads as `installed` with no version — unverified is not a weaker kind
-/// of installed. The third matters because install and run are separate steps,
-/// so the config can change between them.
-/// What: reads [`tools::status`], checks all three conditions, and returns the
-/// paths by name.
-/// Test: `super::run_tests::a_run_without_the_pinned_tools_is_refused`,
-/// `super::run_tests::an_unverified_binary_does_not_count_as_installed`,
-/// `super::run_tests::a_binary_installed_at_a_different_pin_is_refused`.
-///
-/// # Errors
-///
-/// [`AuditError::ToolsNotInstalled`] naming every tool that is missing or
-/// unverified, [`AuditError::VersionMismatch`] for the first tool whose recorded
-/// version is not the engagement's pin, and whatever [`tools::status`] fails
-/// with.
-fn pinned_binaries(work: &WorkDir, pins: &ToolPins) -> Result<PinnedBinaries, AuditError> {
-    let statuses = tools::status(work)?;
-    let missing: Vec<&'static str> = statuses
-        .iter()
-        .filter(|s| !s.installed || s.version.is_none())
-        .map(|s| s.tool.binary_name())
-        .collect();
-    if !missing.is_empty() {
-        return Err(AuditError::ToolsNotInstalled { missing });
-    }
-
-    let path_of = |tool: RequiredTool| -> Result<PathBuf, AuditError> {
-        let pinned = tool.pin_in(pins).version();
-        let status = statuses.iter().find(|s| s.tool == tool).ok_or_else(|| {
-            AuditError::ToolsNotInstalled {
-                missing: vec![tool.binary_name()],
-            }
-        })?;
-        // `version` is Some: the missing check above rejected every None.
-        match status.version.as_deref() {
-            Some(v) if v == pinned => Ok(status.path.clone()),
-            Some(v) => Err(AuditError::VersionMismatch {
-                tool: tool.crate_name(),
-                pinned: pinned.to_owned(),
-                installed: v.to_owned(),
-            }),
-            None => Err(AuditError::ToolsNotInstalled {
-                missing: vec![tool.binary_name()],
-            }),
-        }
-    };
-
-    Ok(PinnedBinaries {
-        tga: path_of(RequiredTool::Tga)?,
-        search: path_of(RequiredTool::TrustySearch)?,
-        analyze: path_of(RequiredTool::TrustyAnalyze)?,
-        review: path_of(RequiredTool::TrustyReview)?,
-    })
+/// Why: a struct rather than a bare `bool` argument, matching
+/// [`crate::clone::CloneOptions`] — the flag is operator-facing and reaches
+/// this crate through [`crate::session::Command::Run`], so it will grow
+/// neighbours (an audit window, a repository subset) and a positional boolean
+/// at every call site is where those go wrong.
+/// What: one field today. [`RunOptions::default`] is the resuming behaviour.
+/// Test: `super::run_tests::a_fresh_run_re_audits_everything`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RunOptions {
+    /// Ignore the recorded progress and audit every selected repository again.
+    ///
+    /// Why: resume is a judgement about what is still valid, and an operator
+    /// who disagrees with that judgement needs a way to overrule it — a
+    /// recipient who has re-cloned their repositories has outputs that verify
+    /// fine and describe source that has moved on. Defaults to `false`, because
+    /// the expensive direction has to be the one asked for by name.
+    pub fresh: bool,
 }
 
 /// A filename-safe, collision-free stem for one repository's files.
@@ -460,10 +287,20 @@ fn sanitize(name: &str) -> String {
 /// The database is placed under `extract/`, which is the area `workdir` names
 /// for exactly that, so it is inside the root that `rm -rf` cleans.
 /// The engagement credential is deliberately NOT here; see the module docs.
+///
+/// #5857: a registered board adds a `jira:` or `linear:` section, and those
+/// carry a `${VAR}` reference rather than the board's secret — the secret
+/// itself still travels only in the child's environment. Both are omitted when
+/// no board is registered, so a repo-only engagement generates exactly the
+/// document it always did.
 #[derive(Debug, Serialize)]
 struct TgaConfig {
     repositories: Vec<TgaRepository>,
     database: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jira: Option<boards::TgaJira>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linear: Option<boards::TgaLinear>,
 }
 
 #[derive(Debug, Serialize)]
@@ -484,10 +321,13 @@ struct TgaRepository {
 /// # Postconditions
 /// On `Ok`, every selected repository has an entry in [`RunReport::repos`] in
 /// selection order, each child's combined output is at its `log` path, and
-/// `state/`[`PROGRESS_FILE`] records the same results. [`RunReport::status`] is
+/// `state/`[`PROGRESS_FILE`] records the same results with
+/// [`RunProgress::complete`] set. [`RunReport::status`] is
 /// [`RunStatus::AllSucceeded`] only when every child exited 0 AND left the
-/// artifacts [`verify_output`] requires. On `Err`, no claim is made about any
-/// repository.
+/// artifacts [`verify_output`] requires. On `Err`, the checkpoint holds every
+/// repository this call settled before the failure PLUS every one it had
+/// already decided to carry over, and is marked incomplete; no claim is made
+/// about the rest.
 ///
 /// What: checks the tools, reads the selection, then per repository writes a
 /// generated tga config under `state/`, spawns the pinned `tga audit` with the
@@ -506,8 +346,61 @@ struct TgaRepository {
 /// [`AuditError::WorkDir`] when an output, log or state file cannot be written.
 /// A failing repository is NOT an error — it is a recorded failure and a
 /// non-`AllSucceeded` status.
-pub async fn sweep(work: &WorkDir, config: &EngagementConfig) -> Result<RunReport, AuditError> {
-    sweep_with_budget(work, config, PER_REPO_TIMEOUT).await
+/// `progress` is where a front end learns what the sweep is doing, including
+/// the stages each `tga audit` child reports from inside itself (#5823).
+/// [`Progress::none`] is a complete answer — the sweep behaves identically and
+/// nothing is rendered.
+/// A repository an earlier run already audited is SKIPPED rather than re-run,
+/// unless [`RunOptions::fresh`] says otherwise — `checkpoint::plan` decides,
+/// and every skip is announced through `progress` and marked on the report
+/// (#5494).
+pub async fn sweep(
+    work: &WorkDir,
+    config: &EngagementConfig,
+    options: &RunOptions,
+    progress: &Progress,
+) -> Result<RunReport, AuditError> {
+    sweep_with_budget(work, config, options, None, PER_REPO_TIMEOUT, progress).await
+}
+
+/// [`sweep`], over boards the caller has already resolved.
+///
+/// Why: #5857 left `crate::chain` and this module each calling
+/// [`boards::resolve`] against their own [`registry::Registry::load`], hours
+/// apart — the chain states its board gaps in the Materialize phase and the
+/// sweep runs after tool install and every clone. A `taudit remove board`
+/// inside that window made the two reads disagree: the report claimed coverage
+/// while the child got no board section, and the engagement exited 0 having
+/// never read the board. The chain now resolves once and hands the result here,
+/// so there is one resolution per invocation rather than two reads that can
+/// diverge.
+///
+/// # Preconditions
+/// `boards` was resolved from the same [`EngagementConfig::boards`] passed as
+/// `config` — [`boards::Boards::env`] reads the secrets out of `config`, and a
+/// section resolved against different credentials would reference a variable
+/// this call does not set.
+/// Test: `crate::chain::chain_tests::a_board_removed_after_the_chain_resolved_it_still_reaches_the_child`.
+///
+/// # Errors
+///
+/// Exactly [`sweep`]'s, minus the registry read this call does not perform.
+pub async fn sweep_with_boards(
+    work: &WorkDir,
+    config: &EngagementConfig,
+    options: &RunOptions,
+    boards: &boards::Boards,
+    progress: &Progress,
+) -> Result<RunReport, AuditError> {
+    sweep_with_budget(
+        work,
+        config,
+        options,
+        Some(boards),
+        PER_REPO_TIMEOUT,
+        progress,
+    )
+    .await
 }
 
 /// [`sweep`], with the per-repository timeout as an argument.
@@ -521,9 +414,15 @@ pub async fn sweep(work: &WorkDir, config: &EngagementConfig) -> Result<RunRepor
 async fn sweep_with_budget(
     work: &WorkDir,
     config: &EngagementConfig,
+    options: &RunOptions,
+    boards: Option<&boards::Boards>,
     budget: std::time::Duration,
+    progress: &Progress,
 ) -> Result<RunReport, AuditError> {
-    sweep_with_env(work, config, budget, |name| std::env::var(name).ok()).await
+    sweep_with_env(work, config, options, boards, budget, progress, |name| {
+        std::env::var(name).ok()
+    })
+    .await
 }
 
 /// [`sweep_with_budget`], with the operator's environment as an argument.
@@ -536,10 +435,14 @@ async fn sweep_with_budget(
 /// races every other thread in a parallel test binary.
 /// Test: `super::run_tests::a_fully_set_operator_environment_is_left_alone`,
 /// `super::run_tests::a_partial_operator_environment_refuses_before_any_child_runs`.
+#[allow(clippy::too_many_arguments)]
 async fn sweep_with_env<F>(
     work: &WorkDir,
     config: &EngagementConfig,
+    options: &RunOptions,
+    resolved: Option<&boards::Boards>,
     budget: std::time::Duration,
+    progress: &Progress,
     operator: F,
 ) -> Result<RunReport, AuditError>
 where
@@ -550,47 +453,188 @@ where
     // Resolved once, before any child: a half-named selection is identical for
     // every repository, so failing per-repo would just repeat one misconfiguration.
     let inference = inference::inference_env(config, operator)?;
+    // #5857: ONE resolution per invocation. `crate::chain` resolved the boards
+    // an hour ago to state its gaps and hands that result down, so the coverage
+    // the report claims and the sections the child gets cannot diverge over a
+    // registry edited meanwhile. `taudit run` supplies nothing and resolves here
+    // — still once, and still after the refusals above, so a truncated registry
+    // is not reported ahead of a missing tool. Every child gets the same
+    // sections: a board is a dimension of the engagement, not a unit of the
+    // sweep, and tga correlates it against whichever repository it is auditing.
+    let owned;
+    let boards = match resolved {
+        Some(boards) => boards,
+        None => {
+            owned = boards::resolve(registry::Registry::load(work)?.targets(), &config.boards);
+            &owned
+        }
+    };
     let selected = load_selection(work)?;
+    // #5869: materialized once for the whole sweep — resolving reads
+    // `.env.local` and opens the secure store, which is not a per-child cost,
+    // let alone a per-line one.
+    let scrubber = child_output_scrubber(config);
+    // #5494: decided once, against the whole selection, so a repository's fate
+    // does not depend on a record another repository's child rewrote meanwhile.
+    let plan = checkpoint::plan(work, &selected, options.fresh)?;
 
-    let mut runs = Vec::with_capacity(selected.len());
-    for (index, repo) in selected.into_iter().enumerate() {
-        runs.push(run_one(work, config, &binaries, &inference, index, repo, budget).await?);
+    // #5823: the operation is announced only once the refusals above are past,
+    // so a display never opens on a sweep that is not going to run.
+    let total = selected.len();
+    progress.operation_started(Operation::Sweep, total);
+    // #5494: the record starts as the PLAN, not as an empty list. A repository
+    // this run will carry over is already audited and already on disk, and
+    // rebuilding the record from only what this loop has visited so far would
+    // erase those entries the moment a later repository ends the sweep early —
+    // costing the next run the hours the checkpoint exists to save.
+    let mut runs: Vec<Option<RepoRun>> = plan.iter().map(|c| c.as_ref().ok().cloned()).collect();
+    for ((index, repo), carried) in selected.into_iter().enumerate().zip(plan) {
+        runs[index] = Some(match carried {
+            Ok(done) => skip_one(&done, index, progress, total),
+            Err(why) => {
+                announce_recollection(&repo.name, &why, progress);
+                run_one(
+                    work, config, &binaries, &inference, boards, index, repo, budget, progress,
+                    total, &scrubber,
+                )
+                .await?
+            }
+        });
+        // #5494: the record advances with the work, not after it. A crash, a
+        // timeout or a Ctrl-C after this point costs the repositories still to
+        // come and none of the ones already done.
+        checkpoint::write_progress(work, &RunProgress::checkpoint(&decided(&runs)))?;
     }
 
-    let report = RunReport::of(runs);
-    write_progress(work, &report)?;
+    let report = RunReport::of(decided(&runs));
+    progress.operation_finished(
+        Operation::Sweep,
+        report.repos.iter().filter(|r| r.result.succeeded()).count(),
+        total,
+    );
+    checkpoint::write_progress(work, &RunProgress::finished(&report))?;
     Ok(report)
 }
 
+/// Every credential this process can name, for stripping out of a child's log.
+///
+/// Why: #5869. The `tga audit` child is handed the engagement's OpenRouter key
+/// and spawns `trusty-review` with it, so any of them can echo it into the log —
+/// and the log is both what a human opens to diagnose a failure and what the
+/// planned guided-help path would excerpt into a prompt body sent to OpenRouter.
+/// The needle set is deliberately WIDER than the one key this crate hands over:
+/// a `gh` token embedded in a git remote URL is a different credential from a
+/// different source, and scrubbing only what we passed would miss it.
+/// What: the registry-wide resolved set from
+/// [`trusty_common::credentials::resolved_secret_values`] — the shared entry
+/// point, so a credential added there is scrubbed without this changing — plus
+/// [`EngagementConfig::configured_secrets`], which is every credential this
+/// engagement's TOML carries and so reaches none of that registry.
+///
+/// #5857: the board credentials are in that second half for the same reason the
+/// OpenRouter key always was. `resolved_secret_values` walks
+/// `registered_providers`, and no provider there is a board, so a child that
+/// quotes a JIRA token in an auth error would otherwise write it to the log
+/// verbatim. [`crate::package::secret_needles`] draws from the same list.
+///
+/// This removes only values this process already holds; see [`crate::relay`]
+/// for what that leaves behind.
+/// Test: `super::run_tests::a_child_that_echoes_the_key_does_not_leave_it_in_the_log`,
+/// `super::run_tests::a_child_that_echoes_a_board_credential_does_not_leave_it_in_the_log`.
+fn child_output_scrubber(config: &EngagementConfig) -> Scrubber {
+    let mut secrets = trusty_common::credentials::resolved_secret_values();
+    secrets.extend(config.configured_secrets().into_iter().map(str::to_owned));
+    Scrubber::over(secrets)
+}
+
+/// The entries whose fate this run has settled, in selection order.
+///
+/// #5494: a slot is `None` only while its repository is still to be audited, so
+/// dropping those is what turns the plan-seeded vector into a record.
+fn decided(runs: &[Option<RepoRun>]) -> Vec<RepoRun> {
+    runs.iter().flatten().cloned().collect()
+}
+
+/// Carry an earlier sweep's result over, saying so as it happens.
+///
+/// #5494: a resumed repository still opens and closes its unit, because a
+/// display that shows nothing for it is indistinguishable from one that lost
+/// track of it — and the closing verdict carries the reason, so "why was this
+/// not re-collected" is answerable from the run's own output.
+fn skip_one(done: &RepoRun, index: usize, progress: &Progress, total: usize) -> RepoRun {
+    progress.unit_started(Operation::Sweep, done.repo.name.as_str(), index + 1, total);
+    progress.unit_finished(
+        Operation::Sweep,
+        done.repo.name.as_str(),
+        UnitOutcome::Skipped(format!(
+            "already audited by an earlier run — {}",
+            done.output.display()
+        )),
+    );
+    done.clone()
+}
+
+/// State why a repository is being audited again rather than carried over.
+///
+/// Why: #5494 — a resumed sweep that re-collects a repository the operator
+/// believed was saved must say what made the record ineligible, or the only
+/// visible difference is that the run took four hours longer than expected.
+/// What: one stage line inside the unit, through the same relay a `tga audit`
+/// child's own stages use. [`Recollect::NotRecorded`] is suppressed: on a first
+/// run it is true of every repository and carries no information.
+/// Test: `super::run_tests::a_deleted_output_is_re_audited_rather_than_reported_complete`.
+fn announce_recollection(name: &str, why: &Recollect, progress: &Progress) {
+    if matches!(why, Recollect::NotRecorded) {
+        return;
+    }
+    progress.unit_stage(
+        name,
+        StageEvent::new("Sweep", name, StageState::Started).with_detail(why.reason()),
+    );
+}
+
 /// Audit one repository, recording rather than propagating its failure.
+///
+/// #5823: the unit's start and its verdict bracket everything else, so a
+/// display can never be left holding a repository that has already finished —
+/// including the arms that never spawn a child at all.
 #[allow(clippy::too_many_arguments)]
 async fn run_one(
     work: &WorkDir,
     config: &EngagementConfig,
     binaries: &PinnedBinaries,
     inference: &[(&'static str, String)],
+    boards: &boards::Boards,
     index: usize,
     repo: SelectedRepo,
     budget: std::time::Duration,
+    progress: &Progress,
+    total: usize,
+    scrubber: &Scrubber,
 ) -> Result<RepoRun, AuditError> {
     let stem = stem(index, &repo.name);
     let output = work.path(Area::Output).join(&stem);
     let log = work.path(Area::Logs).join(format!("{stem}.log"));
     let checkout = absolute_checkout(work, &repo.path);
+    progress.unit_started(Operation::Sweep, repo.name.as_str(), index + 1, total);
 
     let mut gaps = Vec::new();
-    let result = match prepare(work, &output, &stem, &checkout)? {
+    let result = match prepare(work, &output, &stem, &checkout, boards)? {
         Err(reason) => RepoResult::Failed { reason },
         Ok(config_path) => {
             match spawn_tga(
                 binaries,
                 config,
                 inference,
+                boards,
                 &config_path,
                 &output,
                 &log,
                 work.root(),
                 budget,
+                progress,
+                &repo.name,
+                scrubber,
             )
             .await?
             {
@@ -605,91 +649,22 @@ async fn run_one(
             }
         }
     };
+    progress.unit_finished(
+        Operation::Sweep,
+        repo.name.as_str(),
+        match &result {
+            RepoResult::Succeeded => UnitOutcome::Succeeded,
+            RepoResult::Failed { reason } => UnitOutcome::Failed(reason.clone()),
+        },
+    );
     Ok(RepoRun {
         repo,
         output,
         log,
         gaps,
+        resumed: false,
         result,
     })
-}
-
-/// The gap line `tga` writes when a collection stage failed but the sweep
-/// continued (`tga::audit::gaps::sweep_gap_lines`, DOC-67 §9).
-///
-/// Why: `tga audit` exits 0 whenever the sweep COMPLETED, failed stages
-/// included — its own docs say so. The failure reaches the manifest as prose,
-/// which is the only channel tga offers today, so matching that prose is the
-/// only way this client can tell "assessed" from "assessed nothing".
-const COLLECT_FAILED_MARKER: &str = "stage `collect` did not complete";
-
-/// What a zero exit is allowed to mean.
-///
-/// Why: the finding that made this necessary. `tga audit` returns `Ok` whenever
-/// the sweep completed even with failed stages, so exit 0 alone does not say
-/// anything was assessed — a collect stage that failed on auth, a rate limit or
-/// an empty clone still exits 0. Believing that status is how the recipient gets
-/// a report assessing nothing with every signal green.
-///
-/// # Postconditions
-/// On `Ok`, `<output>/manifest.toml` exists, parses, names at least one
-/// repository, and states no failed COLLECT stage. The returned gap lines are
-/// whatever else the manifest stated. On `Err`, the string is a one-line reason
-/// safe to show the recipient.
-///
-/// What: two checks of different confidence, and the difference is deliberate.
-///
-/// - **Structural**, and reliable: the manifest is there, parses, and names a
-///   repository. A child that wrote nothing cannot pass this whatever tga's
-///   wording does.
-/// - **Textual**, and brittle: a gap line naming a failed `collect` stage. tga
-///   owns that prose and could reword it, at which point this check silently
-///   stops firing. It is a second layer over the structural check, never the
-///   only one — and every other gap is recorded on the [`RepoRun`] and rendered,
-///   so a reworded marker still reaches the operator as a stated gap rather than
-///   disappearing. The durable fix is structured per-stage status in the
-///   manifest, which is tga's to add.
-///
-/// Other failed stages (jira, dora, pr-metrics) are NOT failures here: DOC-67
-/// §9 makes them named gaps on a report that is still worth delivering, and
-/// failing on any gap would fail nearly every real engagement.
-/// Test: `super::run_tests::a_child_that_exits_zero_having_written_nothing_fails`,
-/// `super::run_tests::a_manifest_reporting_a_failed_collect_stage_fails`,
-/// `super::run_tests::ordinary_gaps_do_not_fail_the_repository`.
-fn verify_output(output: &Path) -> Result<Vec<String>, String> {
-    let manifest_path = output.join(AuditManifest::FILE_NAME);
-    let manifest = match AuditManifest::load_if_present(&manifest_path) {
-        Ok(Some(manifest)) => manifest,
-        Ok(None) => {
-            return Err(format!(
-                "`tga audit` exited 0 but wrote no manifest to {} — nothing was assessed",
-                output.display()
-            ));
-        }
-        Err(e) => {
-            return Err(format!(
-                "`tga audit` exited 0 but its manifest at {} cannot be read: {e}",
-                manifest_path.display()
-            ));
-        }
-    };
-    if manifest.repositories.is_empty() {
-        return Err(format!(
-            "`tga audit` exited 0 but its manifest at {} names no repository — nothing was assessed",
-            manifest_path.display()
-        ));
-    }
-    if let Some(gap) = manifest
-        .report
-        .gaps
-        .iter()
-        .find(|g| g.contains(COLLECT_FAILED_MARKER))
-    {
-        return Err(format!(
-            "`tga audit` exited 0 but collection did not complete: {gap}"
-        ));
-    }
-    Ok(manifest.report.gaps)
 }
 
 /// Everything that must be true before a child is worth starting.
@@ -702,6 +677,7 @@ fn prepare(
     output: &Path,
     stem: &str,
     checkout: &Path,
+    boards: &boards::Boards,
 ) -> Result<Result<PathBuf, String>, AuditError> {
     if !checkout.is_dir() {
         return Ok(Err(format!(
@@ -717,6 +693,10 @@ fn prepare(
             name: stem.to_string(),
         }],
         database: work.path(Area::Extract).join(format!("{stem}.db")),
+        // #5857: `${TRUSTY_AUDIT_JIRA_TOKEN}`, not the token — see
+        // `boards`'s module docs for why the file may never hold the value.
+        jira: boards.jira.clone(),
+        linear: boards.linear.clone(),
     };
     // Infallible in practice — the document is owned strings and paths with no
     // map keys — but a serializer error must not be swallowed into a default.
@@ -777,16 +757,31 @@ pub const PER_REPO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 ///
 /// A child that outlives `budget` is killed and recorded as a failure, so one
 /// hung repository costs that repository rather than the whole run.
+///
+/// #5823: the child's streams are PIPED rather than pointed straight at the log
+/// file, and this function tees them — every byte still reaches the log, and the
+/// progress lines the child writes on stderr additionally reach `progress`. The
+/// log is unchanged as a record; what changed is that it is no longer the only
+/// place the output goes.
+///
+/// #5869: `scrubber` filters both streams on the way to the log, because the
+/// credential this function puts in the child's environment can come back out
+/// of it — a provider's 401 body, a `git` remote URL in a clone failure. See
+/// [`crate::relay`] for what that filtering can and cannot promise.
 #[allow(clippy::too_many_arguments)]
 async fn spawn_tga(
     binaries: &PinnedBinaries,
     config: &EngagementConfig,
     inference: &[(&'static str, String)],
+    boards: &boards::Boards,
     config_path: &Path,
     output: &Path,
     log: &Path,
     cwd: &Path,
     budget: std::time::Duration,
+    progress: &Progress,
+    target: &str,
+    scrubber: &Scrubber,
 ) -> Result<RepoResult, AuditError> {
     let file = std::fs::File::create(log).map_err(|source| AuditError::WorkDir {
         path: log.to_path_buf(),
@@ -806,6 +801,10 @@ async fn spawn_tga(
         .arg(output)
         .current_dir(cwd)
         .env(ENV_INFERENCE_CREDENTIAL, config.openrouter_key.expose())
+        // #5823: ask the child to write its per-stage events where this process
+        // can read them. A child too old to know the variable ignores it, and
+        // the sweep shows the coarse per-repository progress it derives itself.
+        .env(ENV_PROGRESS_RELAY, "1")
         // #5670: `tga audit` starts trusty-search and indexes each repository
         // through it. On a recipient's clean machine the pinned copy in
         // `work/tools/` is the only one there is, so without this the guard falls
@@ -814,14 +813,20 @@ async fn spawn_tga(
         .env(ENV_ANALYZE_BIN, &binaries.analyze)
         .env(ENV_REVIEW_BIN, &binaries.review)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::from(errors))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     // #5671: the credential alone never reached OpenRouter — trusty-review
     // defaults to Bedrock, so the provider and the three role models must be
     // named too. Resolved by `sweep_with_env`: either all four or none, never a
     // subset that could pair one provider with another's model ids.
     for (name, value) in inference {
+        command.env(name, value);
+    }
+    // #5857: the board credential the generated config only references. Exposed
+    // here rather than held on `Boards`, so it lives no longer than this
+    // `Command` — the same shape as the inference credential above.
+    for (name, value) in boards.env(&config.boards) {
         command.env(name, value);
     }
 
@@ -836,7 +841,31 @@ async fn spawn_tga(
         }
     };
 
-    Ok(match tokio::time::timeout(budget, child.wait()).await {
+    // #5823: both streams are pumped concurrently with the wait. Reading them
+    // is not optional now that they are pipes — a child that fills a pipe
+    // buffer nobody drains blocks forever, which would turn every sizeable
+    // sweep into the four-hour timeout.
+    let mut pumps = Vec::with_capacity(2);
+    if let Some(stream) = child.stdout.take() {
+        pumps.push(tokio::spawn(tee_and_relay(
+            stream,
+            tokio::fs::File::from_std(file),
+            progress.clone(),
+            target.to_owned(),
+            scrubber.clone(),
+        )));
+    }
+    if let Some(stream) = child.stderr.take() {
+        pumps.push(tokio::spawn(tee_and_relay(
+            stream,
+            tokio::fs::File::from_std(errors),
+            progress.clone(),
+            target.to_owned(),
+            scrubber.clone(),
+        )));
+    }
+
+    let verdict = match tokio::time::timeout(budget, child.wait()).await {
         Ok(Ok(status)) if status.success() => RepoResult::Succeeded,
         Ok(Ok(status)) => RepoResult::Failed {
             reason: format!(
@@ -866,11 +895,60 @@ async fn spawn_tga(
                 ),
             }
         }
-    })
+    };
+
+    // The child has exited or been killed, so both pipes are at EOF and the
+    // pumps end on their own. Awaiting them is what guarantees the log holds
+    // everything the child said before this function reports on it.
+    Ok(join_pumps(pumps, log, verdict).await)
+}
+
+/// Wait for the output pumps, downgrading a success whose log is incomplete.
+///
+/// Why: the log is the only record a failed sweep is diagnosed from, and this
+/// module's posture is that a run whose result cannot be recorded must not
+/// return as a success (#5655). A pump that failed means the log is missing
+/// bytes the child wrote, so a `Succeeded` verdict resting on it is downgraded
+/// rather than reported. A verdict that was already a failure keeps its own
+/// reason — the pump error is the less useful of the two.
+/// What: awaits each pump; on the first error, replaces a `Succeeded` verdict.
+/// A pump task that panicked is treated the same way.
+/// Test: `super::run_tests::a_childs_stage_events_reach_the_progress_sink`
+/// covers the whole-log obligation this protects.
+async fn join_pumps(
+    pumps: Vec<tokio::task::JoinHandle<std::io::Result<()>>>,
+    log: &Path,
+    verdict: RepoResult,
+) -> RepoResult {
+    let mut broken: Option<String> = None;
+    for pump in pumps {
+        let failure = match pump.await {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e.to_string()),
+            Err(e) => Some(e.to_string()),
+        };
+        broken = broken.or(failure);
+    }
+    match (broken, &verdict) {
+        (Some(reason), RepoResult::Succeeded) => RepoResult::Failed {
+            reason: format!(
+                "`tga audit` finished but its output could not be written to {}: {reason}",
+                log.display()
+            ),
+        },
+        _ => verdict,
+    }
 }
 
 /// The variable `tga audit` reads the inference credential from.
 pub const ENV_INFERENCE_CREDENTIAL: &str = "OPENROUTER_API_KEY";
+
+/// The variable that asks a child to relay its progress events (#5823).
+///
+/// Why: named through `trusty-progress` rather than spelled here, because the
+/// producer reads the same constant — a literal in this file would be a second
+/// copy of the contract, free to drift.
+const ENV_PROGRESS_RELAY: &str = trusty_progress::relay::ENV_RELAY;
 
 /// The variable `tga audit` reads its trusty-search binary from (#5670).
 const ENV_SEARCH_BIN: &str = "TRUSTY_SEARCH_BIN";
@@ -881,53 +959,13 @@ const ENV_ANALYZE_BIN: &str = "TRUSTY_ANALYZE_BIN";
 /// The variable `tga audit` reads its report renderer from.
 const ENV_REVIEW_BIN: &str = "TRUSTY_REVIEW_BIN";
 
-/// Record what the sweep did, per repository.
-///
-/// Why: `workdir` names `state/` as where run progress lives, and #5499
-/// assembles the deliverable from it. Writing it last means a record only ever
-/// describes a sweep that finished.
-/// What: overwrites `state/`[`PROGRESS_FILE`] with the whole report.
-/// Test: `super::run_tests::the_progress_record_survives_a_partial_run`.
-///
-/// # Errors
-///
-/// [`AuditError::WorkDir`] when the record cannot be written. This is NOT
-/// downgraded to a warning: a run whose result cannot be recorded must not
-/// return as a success (#5655).
-fn write_progress(work: &WorkDir, report: &RunReport) -> Result<(), AuditError> {
-    let path = progress_path(work);
-    let text = toml::to_string_pretty(report).map_err(|e| AuditError::WorkDir {
-        path: path.clone(),
-        source: std::io::Error::other(e),
-    })?;
-    std::fs::write(&path, text).map_err(|source| AuditError::WorkDir { path, source })
-}
-
-/// Read the last sweep's record, or nothing when none has run.
-///
-/// # Errors
-///
-/// [`AuditError::Read`] when the record exists but cannot be read, and
-/// [`AuditError::Parse`] when it is malformed.
-pub fn read_progress(work: &WorkDir) -> Result<Option<RunReport>, AuditError> {
-    let path = progress_path(work);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(AuditError::Read { path, source }),
-    };
-    toml::from_str(&text)
-        .map(Some)
-        .map_err(|source| AuditError::Parse {
-            path,
-            what: "run progress record",
-            source: Box::new(source),
-        })
-}
-
 #[cfg(test)]
 mod run_tests {
     use super::*;
+    use crate::progress::{ProgressUpdate, Recorder, StageEvent, StageState};
+    use crate::tools::{self, RequiredTool};
+    // The selection document itself, so a test can write a torn one by hand.
+    use crate::run::selection::Selection;
 
     const CONFIG: &str = r#"
 openrouter_key = "sk-or-v1-not-a-real-key"
@@ -1164,7 +1202,7 @@ trusty-review = "0.15.1"
         let work = work_in(tmp.path());
         select(&work, &[("acme-api", "repos/acme-api")]);
 
-        let err = sweep(&work, &config())
+        let err = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
             .await
             .expect_err("no pinned tga means no run");
         let AuditError::ToolsNotInstalled { missing } = err else {
@@ -1278,6 +1316,7 @@ trusty-review = "0.15.1"
             output: "/o/a".into(),
             log: "/l/a.log".into(),
             gaps: Vec::new(),
+            resumed: false,
             result: RepoResult::Succeeded,
         };
         let bad = RepoRun {
@@ -1315,7 +1354,9 @@ trusty-review = "0.15.1"
             ],
         );
 
-        let report = sweep(&work, &config()).await.expect("the sweep completes");
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
         assert_eq!(report.status, RunStatus::AllFailed);
         assert_eq!(report.repos.len(), 2, "every repository was attempted");
         for run in &report.repos {
@@ -1327,7 +1368,7 @@ trusty-review = "0.15.1"
         let recorded = read_progress(&work)
             .expect("record reads")
             .expect("present");
-        assert_eq!(recorded, report);
+        assert_eq!(recorded.report(), report);
     }
 
     /// A checkout the selection names but that is not there fails that
@@ -1344,7 +1385,9 @@ trusty-review = "0.15.1"
             &[("acme-api", "repos/acme-api"), ("gone", "repos/gone")],
         );
 
-        let report = sweep(&work, &config()).await.expect("the sweep completes");
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
         assert_eq!(report.status, RunStatus::Partial);
         assert_eq!(report.failures().count(), 1);
         let failed = report.failures().next().expect("one failure");
@@ -1408,7 +1451,9 @@ trusty-review = "0.15.1"
         make_repo(&work, "acme-api");
         select(&work, &[("acme-api", "repos/acme-api")]);
 
-        let report = sweep(&work, &config()).await.expect("the sweep completes");
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
         assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
 
         let files = files_under(work.root());
@@ -1418,6 +1463,289 @@ trusty-review = "0.15.1"
             assert!(
                 !text.contains("sk-or-v1-not-a-real-key"),
                 "{} carries the key",
+                path.display()
+            );
+        }
+    }
+
+    /// Why: #5869 — the test above walks the whole root but its stub never
+    /// ECHOES the key, so it passed against a log written verbatim. This is the
+    /// arm that did not hold: a child that prints the credential back, on both
+    /// streams, in the two shapes a real one would — a provider's rejection body
+    /// and a `git` remote URL in a clone failure.
+    /// What: the key reaches neither the log nor any other file the run wrote,
+    /// and the surrounding diagnostic text survives so the log is still useful.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_echoes_the_key_does_not_leave_it_in_the_log() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let mut script = String::from(
+            "#!/bin/sh\n\
+             echo \"ERROR 401 from provider: {\\\"message\\\":\\\"key $OPENROUTER_API_KEY \
+             is not valid\\\"}\"\n\
+             echo \"fatal: could not read from \
+             https://x-access-token:$OPENROUTER_API_KEY@github.com/acme/api\" >&2\n",
+        );
+        script.push_str(writes_a_manifest(None).trim_start_matches("#!/bin/sh\n"));
+        install_stubs(&work, &script);
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let log = std::fs::read_to_string(&report.repos[0].log).expect("read the child log");
+        assert!(
+            !log.contains("sk-or-v1-not-a-real-key"),
+            "the log carries the key:\n{log}"
+        );
+        // The child really did echo it — otherwise the assertion above proves
+        // nothing about the filter.
+        assert_eq!(
+            log.matches("[REDACTED]").count(),
+            2,
+            "both echoes must be masked, one per stream:\n{log}"
+        );
+        // The log is still a log: masking replaced the key, not the diagnosis.
+        assert!(log.contains("ERROR 401 from provider"), "{log}");
+        assert!(log.contains("github.com/acme/api"), "{log}");
+
+        for path in files_under(work.root()) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains("sk-or-v1-not-a-real-key"),
+                "{} carries the key",
+                path.display()
+            );
+        }
+    }
+
+    // ── #5857: a registered board reaches the child ──────────────────────────
+
+    /// The JIRA API token this engagement is given. Never expected on disk.
+    const JIRA_TOKEN: &str = "jira-token-never-on-disk";
+
+    /// The Linear personal API key. Never expected on disk.
+    const LINEAR_KEY: &str = "lin_api_never-on-disk";
+
+    /// An engagement carrying both board credentials.
+    fn board_config() -> EngagementConfig {
+        let text = format!(
+            "{CONFIG}\n[boards.jira]\nurl = \"https://acme.atlassian.net\"\n\
+             email = \"auditor@acme.example\"\ntoken = \"{JIRA_TOKEN}\"\n\
+             \n[boards.linear]\napi_key = \"{LINEAR_KEY}\"\n"
+        );
+        EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("parses")
+    }
+
+    /// Register boards the way `taudit add board` does, so the sweep reads them
+    /// from the file it actually reads rather than from an injected value.
+    fn register_boards(work: &WorkDir, specs: &[&str]) {
+        let mut targets = registry::Registry::default();
+        for spec in specs {
+            targets
+                .insert(registry::parse(Some(registry::TargetKind::Board), spec).expect("parses"));
+        }
+        targets.save(work).expect("write registry");
+    }
+
+    /// The generated config carries a REFERENCE to each board credential and
+    /// never the credential, and the JIRA section carries both halves of the
+    /// Basic-auth pair.
+    ///
+    /// The `username` assertion is the one that catches the silent failure:
+    /// `JiraClient::new` builds its credential from `(&username, &token)` and
+    /// takes the `(Some, Some)` arm only, so a section with the token alone
+    /// runs UNAUTHENTICATED and reports no error at all.
+    ///
+    /// Against `origin/main` this fails at the first assertion — `TgaConfig` had
+    /// no `jira` field, so the board never reached the document.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_generated_config_references_the_board_secret_and_never_holds_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        register_boards(&work, &["jira:ACME", "linear:ENG"]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let generated =
+            std::fs::read_to_string(work.path(Area::State).join("tga-00-acme-api.yaml"))
+                .expect("the generated tga config");
+        assert!(
+            generated.contains("${TRUSTY_AUDIT_JIRA_TOKEN}"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("${TRUSTY_AUDIT_LINEAR_API_KEY}"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("username: auditor@acme.example"),
+            "a token without a username is an unauthenticated client: {generated}"
+        );
+        assert!(generated.contains("project_key: ACME"), "{generated}");
+        assert!(generated.contains("- ENG"), "{generated}");
+
+        // Not just this file: every file the run left anywhere under the root.
+        for path in files_under(work.root()) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains(JIRA_TOKEN) && !text.contains(LINEAR_KEY),
+                "{} carries a board credential",
+                path.display()
+            );
+        }
+    }
+
+    /// A stub that records the board variables it was handed.
+    fn records_its_board_env() -> String {
+        format!(
+            "{}{}",
+            writes_a_manifest(None).trim_end_matches("exit 0\n"),
+            "{\n  echo \"jira=$TRUSTY_AUDIT_JIRA_TOKEN\"\n  \
+             echo \"linear=$TRUSTY_AUDIT_LINEAR_API_KEY\"\n} > \"$out/board-env.txt\"\nexit 0\n",
+        )
+    }
+
+    /// The `${…}` reference is worth nothing unless the variable is set, so this
+    /// asserts on what the SPAWNED PROCESS received — not on what this crate
+    /// computed. tga expands the reference on the far side.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_child_environment_carries_the_real_board_credentials() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &records_its_board_env());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        register_boards(&work, &["jira:ACME", "linear:ENG"]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let seen = std::fs::read_to_string(report.repos[0].output.join("board-env.txt"))
+            .expect("the stub recorded its environment");
+        assert!(seen.contains(&format!("jira={JIRA_TOKEN}")), "{seen}");
+        assert!(seen.contains(&format!("linear={LINEAR_KEY}")), "{seen}");
+    }
+
+    /// An engagement that registers no board generates the document it always
+    /// did, and exports no board variable — so the sections and the variables
+    /// appear together or not at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_repo_only_engagement_gets_no_board_section_and_no_board_variable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &records_its_board_env());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+
+        let generated =
+            std::fs::read_to_string(work.path(Area::State).join("tga-00-acme-api.yaml"))
+                .expect("the generated tga config");
+        assert!(!generated.contains("jira"), "{generated}");
+        assert!(!generated.contains("linear"), "{generated}");
+        let seen = std::fs::read_to_string(report.repos[0].output.join("board-env.txt"))
+            .expect("the stub recorded its environment");
+        assert!(seen.contains("jira=\n"), "{seen}");
+        assert!(seen.contains("linear=\n"), "{seen}");
+    }
+
+    /// Why: #5869's filter is the OpenRouter test above, one credential over.
+    /// [`child_output_scrubber`] builds its needles from
+    /// `resolved_secret_values`, which enumerates the registered providers —
+    /// openrouter, anthropic, github, slack, and no board. A board credential
+    /// arrives from the engagement TOML rather than the environment, so before
+    /// #5857 appended it nothing put it in the needle set and a child that
+    /// quoted it wrote it to `work/logs/<repo>.log` in the clear.
+    /// What: a child that echoes both board credentials back, on both streams,
+    /// in the shapes a real one would — a provider rejection body quoting the
+    /// token, and an auth failure quoting the key — leaves neither in the log
+    /// nor in any other file the run wrote.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_echoes_a_board_credential_does_not_leave_it_in_the_log() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let mut script = String::from(
+            "#!/bin/sh\n\
+             echo \"jira 401: {\\\"message\\\":\\\"token \
+             $TRUSTY_AUDIT_JIRA_TOKEN is not valid\\\"}\"\n\
+             echo \"linear auth failed: key $TRUSTY_AUDIT_LINEAR_API_KEY rejected\" >&2\n",
+        );
+        script.push_str(writes_a_manifest(None).trim_start_matches("#!/bin/sh\n"));
+        install_stubs(&work, &script);
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        register_boards(&work, &["jira:ACME", "linear:ENG"]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let log = std::fs::read_to_string(&report.repos[0].log).expect("read the child log");
+        assert!(
+            !log.contains(JIRA_TOKEN),
+            "the log carries the token:\n{log}"
+        );
+        assert!(!log.contains(LINEAR_KEY), "the log carries the key:\n{log}");
+        // The child really did echo both — otherwise the assertions above prove
+        // nothing about the filter.
+        assert_eq!(
+            log.matches("[REDACTED]").count(),
+            2,
+            "both echoes must be masked, one per stream:\n{log}"
+        );
+        // The log is still a log: masking replaced the credentials, not the
+        // diagnosis.
+        assert!(log.contains("jira 401"), "{log}");
+        assert!(log.contains("linear auth failed"), "{log}");
+
+        for path in files_under(work.root()) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains(JIRA_TOKEN) && !text.contains(LINEAR_KEY),
+                "{} carries a board credential",
                 path.display()
             );
         }
@@ -1435,7 +1763,9 @@ trusty-review = "0.15.1"
         make_repo(&work, "acme-api");
         select(&work, &[("acme-api", "repos/acme-api")]);
 
-        let report = sweep(&work, &config()).await.expect("the sweep completes");
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
         assert_eq!(report.status, RunStatus::AllFailed, "{report:?}");
         let reason = match &report.repos[0].result {
             RepoResult::Failed { reason } => reason.clone(),
@@ -1461,7 +1791,9 @@ trusty-review = "0.15.1"
         make_repo(&work, "acme-api");
         select(&work, &[("acme-api", "repos/acme-api")]);
 
-        let report = sweep(&work, &config()).await.expect("the sweep completes");
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
         assert_eq!(report.status, RunStatus::AllFailed, "{report:?}");
         let reason = match &report.repos[0].result {
             RepoResult::Failed { reason } => reason.clone(),
@@ -1487,7 +1819,9 @@ trusty-review = "0.15.1"
         make_repo(&work, "acme-api");
         select(&work, &[("acme-api", "repos/acme-api")]);
 
-        let report = sweep(&work, &config()).await.expect("the sweep completes");
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
         assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
         assert_eq!(report.repos[0].gaps.len(), 1, "the gap must be surfaced");
         assert!(report.repos[0].gaps[0].contains("jira sync"));
@@ -1504,9 +1838,16 @@ trusty-review = "0.15.1"
         make_repo(&work, "acme-api");
         select(&work, &[("acme-api", "repos/acme-api")]);
 
-        let report = sweep_with_budget(&work, &config(), std::time::Duration::from_millis(200))
-            .await
-            .expect("the sweep completes rather than hanging");
+        let report = sweep_with_budget(
+            &work,
+            &config(),
+            &RunOptions::default(),
+            None,
+            std::time::Duration::from_millis(200),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes rather than hanging");
         assert_eq!(report.status, RunStatus::AllFailed);
         let reason = match &report.repos[0].result {
             RepoResult::Failed { reason } => reason.clone(),
@@ -1529,7 +1870,9 @@ trusty-review = "0.15.1"
         make_repo(&work, "acme-api");
         select(&work, &[("../../escape", "repos/acme-api")]);
 
-        let report = sweep(&work, &config()).await.expect("the sweep completes");
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
         for run in &report.repos {
             assert!(run.output.starts_with(work.root()), "{:?}", run.output);
             assert!(run.log.starts_with(work.root()), "{:?}", run.log);
@@ -1577,7 +1920,16 @@ trusty-review = "0.15.1"
     where
         F: Fn(&str) -> Option<String>,
     {
-        sweep_with_env(work, &config(), PER_REPO_TIMEOUT, operator).await
+        sweep_with_env(
+            work,
+            &config(),
+            &RunOptions::default(),
+            None,
+            PER_REPO_TIMEOUT,
+            &Progress::none(),
+            operator,
+        )
+        .await
     }
 
     /// #5671: the child must carry the provider AND all three model ids, not
@@ -1674,5 +2026,552 @@ trusty-review = "0.15.1"
             .map(|entries| entries.count())
             .unwrap_or(0);
         assert_eq!(spawned, 0, "a refused selection must not spawn any child");
+    }
+    /// A stub `tga` that relays the stage lines it is given, then optionally
+    /// writes the manifest a real one would.
+    ///
+    /// It emits ONLY when `TRUSTY_PROGRESS_RELAY` is set, which is what proves
+    /// the sweep asks for the relay rather than the child volunteering it.
+    fn relays_stages(events: &[StageEvent], exit: i32, manifest: bool) -> String {
+        let emits: String = events
+            .iter()
+            .map(|e| format!("  printf '%s\\n' '{}' >&2\n", e.encode()))
+            .collect();
+        let write = if manifest {
+            "printf '[report]\\ntitle = \"Acme\"\\n\\n[[repositories]]\\nname = \"acme\"\\n\
+             path = \"/r\"\\n' > \"$out/manifest.toml\"\n"
+        } else {
+            ""
+        };
+        format!(
+            "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  \
+             case \"$1\" in --output) out=\"$2\"; shift;; esac\n  shift\ndone\n\
+             mkdir -p \"$out\"\n\
+             echo 'INFO tga starting' >&2\n\
+             if [ -n \"$TRUSTY_PROGRESS_RELAY\" ]; then\n{emits}fi\n\
+             {write}exit {exit}\n"
+        )
+    }
+
+    /// Why (#5823): the whole point of the ticket. A sweep spends up to four
+    /// hours inside one child, and until now every stage that child reported
+    /// went into a log file nobody was reading. This proves the events reach
+    /// the front end's sink — driven by a synthetic child, not a real sweep.
+    ///
+    /// It also proves the two things that must NOT change: the log still holds
+    /// the child's whole output, relayed lines included, and the child only
+    /// speaks when asked (the stub emits nothing unless the sweep sets
+    /// `TRUSTY_PROGRESS_RELAY`).
+    /// What: a stub emitting three stage events is swept with a recording sink.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_childs_stage_events_reach_the_progress_sink() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let events = vec![
+            StageEvent::new("Audit", "collect", StageState::Started)
+                .with_counts(0, Some(9))
+                .with_detail("stage 1 of 9"),
+            StageEvent::new("Collect", "acme-api", StageState::Advanced).with_counts(12, Some(40)),
+            StageEvent::new("Audit", "report", StageState::Completed).with_counts(1, Some(1)),
+        ];
+        install_stubs(&work, &relays_stages(&events, 0, true));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let (recorder, progress) = Recorder::new();
+        let report = sweep(&work, &config(), &RunOptions::default(), &progress)
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded);
+
+        assert_eq!(
+            recorder.stages(),
+            events,
+            "every stage the child reported must reach the sink"
+        );
+        let updates = recorder.updates();
+        assert!(
+            matches!(
+                updates.first(),
+                Some(ProgressUpdate::OperationStarted {
+                    operation: Operation::Sweep,
+                    total: 1
+                })
+            ),
+            "{updates:?}"
+        );
+        assert!(
+            updates.iter().any(|u| matches!(
+                u,
+                ProgressUpdate::UnitFinished { target, outcome: UnitOutcome::Succeeded, .. }
+                    if target == "acme-api"
+            )),
+            "{updates:?}"
+        );
+        assert!(
+            matches!(
+                updates.last(),
+                Some(ProgressUpdate::OperationFinished {
+                    succeeded: 1,
+                    total: 1,
+                    ..
+                })
+            ),
+            "{updates:?}"
+        );
+
+        // The log is not a casualty of the relay: it still holds everything.
+        let log = std::fs::read_to_string(&report.repos[0].log).expect("the log was written");
+        assert!(log.contains("INFO tga starting"), "{log}");
+        for event in &events {
+            assert!(log.contains(&event.encode()), "{log}");
+        }
+    }
+
+    /// Why (#5823): a child killed or crashed mid-stage is the case that wedges
+    /// a display — the last thing it said was "collect started", and nothing
+    /// ever contradicts it. The verdict must still arrive, and the underlying
+    /// failure must not be swallowed by the display path.
+    /// What: a stub that announces a stage and then exits 3 produces the started
+    /// stage, a `Failed` unit verdict naming the exit code, and an `AllFailed`
+    /// report with its log intact.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_dies_mid_stage_still_reports_its_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let started = StageEvent::new("Audit", "classify", StageState::Started)
+            .with_counts(0, Some(9))
+            .with_detail("stage 3 of 9");
+        install_stubs(
+            &work,
+            &relays_stages(std::slice::from_ref(&started), 3, false),
+        );
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let (recorder, progress) = Recorder::new();
+        let report = sweep(&work, &config(), &RunOptions::default(), &progress)
+            .await
+            .expect("a failing child is a recorded failure, not an error");
+        assert_eq!(report.status, RunStatus::AllFailed);
+
+        assert_eq!(recorder.stages(), vec![started.clone()]);
+        let verdict = recorder
+            .updates()
+            .into_iter()
+            .find_map(|u| match u {
+                ProgressUpdate::UnitFinished { outcome, .. } => Some(outcome),
+                _ => None,
+            })
+            .expect("the unit must be closed even though the child died inside it");
+        let UnitOutcome::Failed(reason) = verdict else {
+            panic!("expected a failure, got {verdict:?}");
+        };
+        assert!(reason.contains("code 3"), "{reason}");
+
+        // The display never becomes the only record.
+        let log = std::fs::read_to_string(&report.repos[0].log).expect("the log survives");
+        assert!(log.contains(&started.encode()), "{log}");
+    }
+
+    // ── #5494: the incremental checkpoint, and resuming against it ───────────
+
+    /// A stub `tga` that appends its `--output` to `invocations.txt` in the
+    /// work-dir root, then writes the manifest a real one would. It exits 3 for
+    /// any repository whose output path ends with `fails`, so a test can make
+    /// one repository of several fail without a second script.
+    ///
+    /// The invocation log is what "was this repository re-collected" is read
+    /// from: the report says what the sweep CLAIMS, and this says what ran.
+    fn counts_invocations(fails: &str) -> String {
+        format!(
+            "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  \
+             case \"$1\" in --output) out=\"$2\"; shift;; esac\n  shift\ndone\n\
+             echo \"$out\" >> invocations.txt\n\
+             if [ -f state/run-progress.toml ]; then \
+             cp state/run-progress.toml \"$out.seen.toml\"; fi\n\
+             mkdir -p \"$out\"\n\
+             case \"$out\" in *{fails}) exit 3;; esac\n\
+             printf '[report]\\ntitle = \"Acme\"\\n\\n[[repositories]]\\n\
+             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n"
+        )
+    }
+
+    /// A pattern `counts_invocations` can never match, for a stub that always
+    /// succeeds.
+    const NEVER: &str = "--no-such-repository--";
+
+    /// Every `--output` a stub child was handed, in the order they ran.
+    fn invocations(work: &WorkDir) -> Vec<String> {
+        std::fs::read_to_string(work.root().join("invocations.txt"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn two_repos_ready(work: &WorkDir, fails: &str) {
+        install_stubs(work, &counts_invocations(fails));
+        make_repo(work, "acme-api");
+        make_repo(work, "acme-web");
+        select(
+            work,
+            &[
+                ("acme-api", "repos/acme-api"),
+                ("acme-web", "repos/acme-web"),
+            ],
+        );
+    }
+
+    /// Why (#5494): the whole ticket. The record used to be written once, after
+    /// every child had finished, so a crash mid-sweep left nothing at all. This
+    /// proves the record advances WITH the work — the second child reads a
+    /// checkpoint that already names the first — and that it stays marked
+    /// incomplete until the sweep reaches the end of its selection, which is
+    /// what stops a crashed run being packaged as a whole engagement.
+    /// What: two repositories, a stub that copies the record it finds.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_checkpoint_advances_with_the_sweep_and_completes_only_at_the_end() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        two_repos_ready(&work, NEVER);
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        // What the SECOND child saw when it started.
+        let seen = std::fs::read_to_string(
+            work.path(Area::Output)
+                .join("01-acme-web.seen.toml")
+                .as_path(),
+        )
+        .expect("the second child found a checkpoint the first one's completion wrote");
+        let mid: RunProgress = toml::from_str(&seen).expect("the checkpoint parses");
+        assert_eq!(mid.repos.len(), 1, "{mid:?}");
+        assert_eq!(mid.repos[0].repo.name, "acme-api");
+        assert!(
+            !mid.complete,
+            "a checkpoint written mid-sweep must not claim the sweep finished"
+        );
+
+        // And the first child found nothing, so the checkpoint is this run's.
+        assert!(
+            !work
+                .path(Area::Output)
+                .join("00-acme-api.seen.toml")
+                .exists()
+        );
+
+        let final_record = read_progress(&work).expect("reads").expect("present");
+        assert!(final_record.complete);
+        assert_eq!(final_record.repos.len(), 2);
+    }
+
+    /// Why (#5494, the fail-open check): recording progress is now a branch
+    /// that runs after every repository, and the tempting shape is to warn and
+    /// carry on. That would spend hours auditing repositories nothing on disk
+    /// records, and report them as audited. So the write is a refusal: the
+    /// sweep stops at the first repository whose completion it could not
+    /// record, and never returns a report claiming that repository succeeded.
+    ///
+    /// Downgrade that write to a warning and both children run, the sweep
+    /// returns `Ok(AllSucceeded)`, and two repositories are reported as audited
+    /// by a run nothing on disk describes. The invocation count is what
+    /// separates the two behaviours.
+    /// What: a non-empty directory at the record's path, which no rename can
+    /// replace. The run is `fresh`, so the plan never READS that path — the
+    /// only failure under test is the write.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_checkpoint_that_cannot_be_written_stops_the_sweep() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        two_repos_ready(&work, NEVER);
+        let blocked = progress_path(&work);
+        std::fs::create_dir_all(&blocked).expect("mkdir");
+        std::fs::write(blocked.join("occupied"), b"x").expect("write");
+
+        let (recorder, progress) = Recorder::new();
+        let err = sweep(&work, &config(), &RunOptions { fresh: true }, &progress)
+            .await
+            .expect_err("a run whose progress cannot be recorded must not report success");
+        assert!(matches!(err, AuditError::WorkDir { .. }), "{err:?}");
+
+        let ran = invocations(&work);
+        assert_eq!(
+            ran.len(),
+            1,
+            "the sweep must stop at the repository whose completion could not be \
+             recorded, not audit the rest against a record it cannot write: {ran:?}"
+        );
+        assert!(
+            !recorder.updates().iter().any(|u| matches!(
+                u,
+                ProgressUpdate::OperationFinished { succeeded, .. } if *succeeded > 0
+            )),
+            "no repository may be reported as audited: {:?}",
+            recorder.updates()
+        );
+    }
+
+    /// Why (#5494): the point of the checkpoint. A re-run must not spend four
+    /// hours re-auditing a repository an earlier run finished — and must retry
+    /// one it recorded as failed, because a failure is usually the transient
+    /// thing the operator re-ran to clear, and skipping it would make the
+    /// re-run a no-op that reports the same failure forever.
+    /// What: two repositories, the second failing; the second sweep runs one
+    /// child. The skip is announced, not silent.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_re_run_skips_what_succeeded_and_retries_what_failed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        two_repos_ready(&work, "acme-web");
+
+        let first = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(first.status, RunStatus::Partial, "{first:?}");
+        assert_eq!(invocations(&work).len(), 2);
+        assert_eq!(first.resumed().count(), 0);
+
+        let (recorder, progress) = Recorder::new();
+        let second = sweep(&work, &config(), &RunOptions::default(), &progress)
+            .await
+            .expect("the sweep completes");
+        assert_eq!(second.status, RunStatus::Partial, "{second:?}");
+
+        let ran = invocations(&work);
+        assert_eq!(
+            ran.len(),
+            3,
+            "only the failed repository may run again: {ran:?}"
+        );
+        assert!(ran[2].ends_with("01-acme-web"), "{ran:?}");
+
+        assert!(second.repos[0].resumed, "{:?}", second.repos[0]);
+        assert!(!second.repos[1].resumed, "{:?}", second.repos[1]);
+        assert_eq!(second.resumed().count(), 1);
+
+        // Silent skipping is the defect: the operator has to be told.
+        let skipped = recorder
+            .updates()
+            .into_iter()
+            .find_map(|u| match u {
+                ProgressUpdate::UnitFinished {
+                    target,
+                    outcome: UnitOutcome::Skipped(why),
+                    ..
+                } if target == "acme-api" => Some(why),
+                _ => None,
+            })
+            .expect("the carried-over repository must be announced");
+        assert!(skipped.contains("already audited"), "{skipped}");
+    }
+
+    /// Why (#5494): a sweep that ends early must not erase what it had already
+    /// decided to carry over. The checkpoint is republished whole after every
+    /// repository, so building it from only the repositories the loop has
+    /// VISITED drops the ones further down the selection — repositories an
+    /// earlier run audited, whose output is on disk and verified, and which the
+    /// next run would then re-collect from scratch. That is the four-hours-lost
+    /// failure this ticket exists to prevent, reappearing one selection later.
+    /// What: four repositories. `a` and `d` are re-collected (their outputs are
+    /// gone), `b` and `c` carry over. `d`'s output path is occupied by a regular
+    /// file, so its `mkdir` fails and the sweep ends after `a` — which is a
+    /// crash's shape: the record on disk is whatever the last checkpoint wrote.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sweep_that_ends_early_keeps_the_entries_it_was_carrying_over() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &counts_invocations(NEVER));
+        for name in ["a", "d", "b", "c"] {
+            make_repo(&work, name);
+        }
+        select(
+            &work,
+            &[
+                ("a", "repos/a"),
+                ("d", "repos/d"),
+                ("b", "repos/b"),
+                ("c", "repos/c"),
+            ],
+        );
+
+        let first = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(first.status, RunStatus::AllSucceeded, "{first:?}");
+
+        // `a` re-collects because its output is gone. `d` re-collects for the
+        // same reason AND cannot be re-collected: a regular file where its
+        // output directory belongs fails `mkdir`, so the sweep ends there.
+        std::fs::remove_dir_all(work.path(Area::Output).join("00-a")).expect("drop a's output");
+        std::fs::remove_dir_all(work.path(Area::Output).join("01-d")).expect("drop d's output");
+        std::fs::write(work.path(Area::Output).join("01-d"), b"not a directory").expect("occupy");
+
+        let err = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect_err("a repository whose output directory cannot be made ends the sweep");
+        assert!(matches!(err, AuditError::WorkDir { .. }), "{err:?}");
+
+        let record = read_progress(&work).expect("reads").expect("present");
+        assert!(!record.complete, "{record:?}");
+        let names: Vec<&str> = record.repos.iter().map(|r| r.repo.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["a", "b", "c"],
+            "the sweep re-collected `a` and died on `d`; `b` and `c` were already \
+             audited and carried over, and dropping them costs the next run their \
+             collection time all over again"
+        );
+        assert!(
+            record.repos[1].resumed && record.repos[2].resumed,
+            "{record:?}"
+        );
+    }
+
+    /// Why (#5494): resume trusts a record about files it does not re-read, so
+    /// the one thing it must never do is report a repository as complete when
+    /// its data is gone. The record still says `Succeeded`; the disk decides.
+    /// What: a successful sweep, its output deleted, then a re-run — which
+    /// audits it again and says why.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_deleted_output_is_re_audited_rather_than_reported_complete() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &counts_invocations(NEVER));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let first = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(first.status, RunStatus::AllSucceeded);
+        std::fs::remove_dir_all(&first.repos[0].output).expect("delete the output");
+
+        let (recorder, progress) = Recorder::new();
+        let second = sweep(&work, &config(), &RunOptions::default(), &progress)
+            .await
+            .expect("the sweep completes");
+        assert_eq!(invocations(&work).len(), 2, "the repository must run again");
+        assert!(!second.repos[0].resumed, "{:?}", second.repos[0]);
+        assert!(second.repos[0].output.join("manifest.toml").is_file());
+
+        let stated = recorder
+            .stages()
+            .into_iter()
+            .find_map(|s| s.detail)
+            .expect("the re-collection must state its reason");
+        assert!(stated.contains("no longer usable"), "{stated}");
+    }
+
+    /// Why (#5494): a checkpoint entry is matched to the CURRENT selection, not
+    /// merely to a repository name. `stem` carries the selection index, so a
+    /// reordered selection means a different `out/<stem>/` — and reusing the
+    /// old entry would report a repository as audited into a directory this run
+    /// never wrote.
+    /// What: one repository audited, then a selection with another ahead of it.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reordered_selection_does_not_reuse_the_wrong_output() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        two_repos_ready(&work, NEVER);
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(invocations(&work).len(), 1);
+
+        select(
+            &work,
+            &[
+                ("acme-web", "repos/acme-web"),
+                ("acme-api", "repos/acme-api"),
+            ],
+        );
+        let second = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(
+            invocations(&work).len(),
+            3,
+            "a repository at a new position writes a new output and must be re-audited"
+        );
+        assert_eq!(second.resumed().count(), 0, "{second:?}");
+    }
+
+    /// Why (#5494): the operator's override. A recipient who re-cloned their
+    /// repositories has outputs that verify fine and describe source that has
+    /// moved on, and no automatic check can see that.
+    /// What: `--fresh` re-audits a repository the record says was audited.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fresh_run_re_audits_everything() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &counts_invocations(NEVER));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(invocations(&work).len(), 1);
+
+        let report = sweep(
+            &work,
+            &config(),
+            &RunOptions { fresh: true },
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(
+            invocations(&work).len(),
+            2,
+            "`--fresh` must run the child again"
+        );
+        assert_eq!(report.resumed().count(), 0);
+    }
+
+    /// Why (#5823): piping the child's streams to read them is the change most
+    /// able to break something unrelated — a sweep that no longer works is a
+    /// worse outcome than one with no display. This is the no-sink path, which
+    /// is what `Session` uses unless a front end supplies one.
+    /// What: a sweep with [`Progress::none`] still succeeds and still logs.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sweep_without_a_sink_is_unchanged() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded);
+        assert!(report.repos[0].log.is_file(), "the log is still written");
     }
 }

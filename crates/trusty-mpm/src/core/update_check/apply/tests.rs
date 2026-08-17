@@ -382,7 +382,7 @@ fn apply_prune_removes_deselected_skill() {
         fw.claude_skills_dir().join("keep-me/SKILL.md").is_file(),
         "selected skill retained"
     );
-    let manifest = SkillManifest::load(&fw.claude_skills_dir());
+    let manifest = SkillManifest::load(&fw.claude_skills_dir()).unwrap();
     assert!(!manifest.is_managed("drop-me"));
     assert!(manifest.is_managed("keep-me"));
 }
@@ -422,7 +422,9 @@ fn apply_prune_skips_hand_edited_skill() {
     // The ledger entry stays too — dropping it would reclassify the file as
     // user-owned and freeze it against every future deploy (#4881's shape).
     assert!(
-        SkillManifest::load(&fw.claude_skills_dir()).is_managed("edited"),
+        SkillManifest::load(&fw.claude_skills_dir())
+            .unwrap()
+            .is_managed("edited"),
         "the kept skill stays managed"
     );
 }
@@ -460,7 +462,9 @@ fn apply_prune_spares_user_tier_skill() {
         "the user tier deploys regardless of the bundled selection"
     );
     assert!(
-        SkillManifest::load(&fw.claude_skills_dir()).is_managed("mine"),
+        SkillManifest::load(&fw.claude_skills_dir())
+            .unwrap()
+            .is_managed("mine"),
         "and it lands in the ledger looking exactly like a bundled skill"
     );
 
@@ -571,7 +575,11 @@ fn apply_prune_keeps_the_ledger_entry_for_a_selected_skills_carried_file() {
     apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
 
     let key = "carrier/references/notes.md";
-    assert!(SkillManifest::load(&fw.claude_skills_dir()).is_managed(key));
+    assert!(
+        SkillManifest::load(&fw.claude_skills_dir())
+            .unwrap()
+            .is_managed(key)
+    );
 
     let report = apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, true).unwrap();
 
@@ -585,7 +593,9 @@ fn apply_prune_keeps_the_ledger_entry_for_a_selected_skills_carried_file() {
             .is_file()
     );
     assert!(
-        SkillManifest::load(&fw.claude_skills_dir()).is_managed(key),
+        SkillManifest::load(&fw.claude_skills_dir())
+            .unwrap()
+            .is_managed(key),
         "a selected skill's carried file keeps its ledger entry"
     );
 }

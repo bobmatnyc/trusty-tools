@@ -34,10 +34,6 @@ pub use operations::{
     cwd_palace_slug, cwd_palace_slug_at, list_messages, list_unread_messages, mark_message_read,
     send_message_to_palace,
 };
-// #5819: crate-internal — `prompt-context` resolves its session project root
-// with the same call `cwd_palace_slug_at` uses, so the scope filter and the
-// palace it filters never disagree about which tree the session is in.
-pub(crate) use operations::git_toplevel;
 pub use types::{
     build_message_tags, slugify_for_palace, slugify_string, Message, MSG_MARKER_TAG,
     TAG_FROM_PREFIX, TAG_PURPOSE_PREFIX, TAG_READ_PREFIX, TAG_SENT_AT_PREFIX, TAG_TO_PREFIX,
@@ -345,16 +341,12 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn cwd_palace_slug_at_prefers_pin_file() {
-        use crate::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+        use crate::project_root::{write_project_pin, ProjectPin};
         let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("actual-dir");
         std::fs::create_dir_all(root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "pinned-name".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("pinned-name".to_string());
         write_project_pin(&root, &pin).expect("write pin");
 
         let slug = cwd_palace_slug_at(&root).expect("slug");
@@ -375,16 +367,12 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn cwd_palace_slug_at_reads_pin_from_subdir() {
-        use crate::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+        use crate::project_root::{write_project_pin, ProjectPin};
         let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("my-repo");
         std::fs::create_dir_all(root.join(".git")).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "my-repo".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("my-repo".to_string());
         write_project_pin(&root, &pin).expect("write pin");
 
         let sub = root.join("crates").join("foo");

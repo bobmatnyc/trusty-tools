@@ -15,6 +15,83 @@
 
 use super::*;
 
+/// Every archived backup of `dest`, found by NAME rather than by calling the
+/// implementation's own path builder (#4461).
+///
+/// Why: a test that asks `stale_backup_path` where to look would agree with
+/// the implementation by construction, including when the implementation is
+/// wrong — the whole defect was a backup that silently never got written.
+/// Scanning the directory for `<name>.stale.*.bak` also matches the legacy
+/// fixed `<name>.stale.bak`, so these tests measure how many distinct
+/// contents are recoverable, not what the files happen to be called.
+/// What: reads `dest`'s parent directory and returns every sibling whose name
+/// starts with `<dest file name>.stale.` and ends with `.bak`, sorted.
+/// Test: used by `refresh_backs_up_differing_content`,
+/// `existing_stale_backup_is_never_clobbered`,
+/// `repeated_divergence_is_recoverable_across_reprovisions`,
+/// `identical_content_reuses_one_backup_path`.
+fn stale_backups_of(dest: &Path) -> Vec<PathBuf> {
+    let dir = dest.parent().expect("dest sits inside the target dir");
+    let name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .expect("bundled paths are UTF-8");
+    let prefix = format!("{name}.stale.");
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .expect("the package directory exists after a deploy")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".bak"))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// The archived content of every backup of `dest`, in path order.
+fn stale_backup_contents(dest: &Path) -> Vec<String> {
+    stale_backups_of(dest)
+        .iter()
+        .map(|path| std::fs::read_to_string(path).expect("a backup must be readable"))
+        .collect()
+}
+
+/// Every `*.bak` file anywhere under `root` (#4461).
+///
+/// Why: "an untouched file must not litter backups" is a claim about the
+/// WHOLE deploy tree, not one package — a per-file check would miss a backup
+/// written beside some other bundled agent.
+/// What: walks `root` depth-first and collects every file whose name ends
+/// with `.bak`.
+/// Test: used by `first_run_writes_no_backups`,
+/// `pristine_files_are_reprovisioned_without_littering_backups`.
+fn all_backup_files(root: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut found = Vec::new();
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.ends_with(".bak"))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 /// Why: the core contract — a fresh empty target directory gets every
 /// embedded file, and the count matches what was actually written.
 /// Test: itself.
@@ -157,20 +234,137 @@ fn refresh_backs_up_differing_content() {
     assert_eq!(report.backed_up, 1);
     assert_eq!(report.refreshed, 1);
 
-    let backup_path = tmp.path().join("assistant").join("agent.toml.stale.bak");
-    let backup_content = std::fs::read_to_string(&backup_path).unwrap();
+    let backups = stale_backups_of(&assistant_toml);
+    assert_eq!(backups.len(), 1, "exactly one archived copy: {backups:?}");
+    let backup_content = std::fs::read_to_string(&backups[0]).unwrap();
     assert_eq!(
         backup_content, hand_edited,
         "backup must preserve the pre-refresh content verbatim"
     );
 }
 
-/// Why (#3556 code-critic follow-up, HIGH): a `.stale.bak` is a one-shot
-/// recovery copy — if a SECOND refresh pass (e.g. a later process recovering
-/// from an earlier pass's crash, or simply another edit) finds a backup
-/// already there, it must NOT overwrite it with whatever is on disk NOW.
-/// Without this, a genuine hand-edit backed up by pass 1 could be silently
-/// destroyed by pass 2 backing up torn or already-refreshed content over it.
+/// Why (#4461 — the defect this test would have caught): the backup used to
+/// be written only when NO backup existed yet, so the first reprovision
+/// preserved a hand-edit and every later one overwrote the file while
+/// skipping the backup. Two edit-then-reprovision cycles lost the second
+/// edit with no error, no warning, and no recoverable copy — which is how a
+/// `cto-assistant` tool grant was destroyed on 2026-07-31.
+/// What: edits a bundled file, reprovisions, edits it differently,
+/// reprovisions again, then asserts BOTH edits are still readable from
+/// archived backups. Against the pre-fix code the second pass reports
+/// `backed_up == 0` and the second edit is unrecoverable.
+/// Test: itself.
+#[test]
+fn repeated_divergence_is_recoverable_across_reprovisions() {
+    let tmp = tempfile::tempdir().unwrap();
+    deploy_bundled_agents(tmp.path()).unwrap();
+    let assistant_toml = tmp.path().join("assistant").join("agent.toml");
+
+    let first_edit = "# edit one — an owner-requested tool grant\n[agent]\nname = \"assistant\"\n";
+    std::fs::write(&assistant_toml, first_edit).unwrap();
+    let first_pass = force_reprovision_bundled_agents(tmp.path()).unwrap();
+    assert_eq!(first_pass.backed_up, 1, "the first edit must be archived");
+
+    let second_edit =
+        "# edit two — made after the first reprovision\n[agent]\nname = \"assistant\"\n";
+    std::fs::write(&assistant_toml, second_edit).unwrap();
+    let second_pass = force_reprovision_bundled_agents(tmp.path()).unwrap();
+    assert_eq!(
+        second_pass.backed_up, 1,
+        "the second edit is new content and must be archived too"
+    );
+    assert_eq!(second_pass.refreshed, 1);
+
+    let archived = stale_backup_contents(&assistant_toml);
+    assert!(
+        archived.iter().any(|c| c == first_edit),
+        "the first edit must still be recoverable: {archived:?}"
+    );
+    assert!(
+        archived.iter().any(|c| c == second_edit),
+        "the second edit must still be recoverable — this is the data loss \
+         #4461 reported: {archived:?}"
+    );
+}
+
+/// Why (#4461): naming a backup after its content is what bounds the set —
+/// re-archiving bytes that are already archived must reuse the same path
+/// rather than adding a generation. Without this, the fix would trade silent
+/// data loss for an unbounded pile of files.
+/// What: applies the SAME edit twice, with a reprovision after each, and
+/// asserts exactly one backup exists holding that content.
+/// Test: itself.
+#[test]
+fn identical_content_reuses_one_backup_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    deploy_bundled_agents(tmp.path()).unwrap();
+    let assistant_toml = tmp.path().join("assistant").join("agent.toml");
+
+    let edit =
+        "# the same hand edit, re-applied after each repair\n[agent]\nname = \"assistant\"\n";
+    for _ in 0..2 {
+        std::fs::write(&assistant_toml, edit).unwrap();
+        force_reprovision_bundled_agents(tmp.path()).unwrap();
+    }
+
+    let backups = stale_backups_of(&assistant_toml);
+    assert_eq!(
+        backups.len(),
+        1,
+        "identical content must archive to one path, not one per pass: {backups:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), edit);
+}
+
+/// Why (#4461): a reprovision over files the user never touched must leave no
+/// backups at all — an operator who runs `tagent agents repair` routinely
+/// should never accumulate `.bak` files for it.
+/// What: deploys, then force-reprovisions twice with no edit in between, and
+/// asserts no `*.bak` file exists anywhere under the target directory.
+/// Test: itself.
+#[test]
+fn pristine_files_are_reprovisioned_without_littering_backups() {
+    let tmp = tempfile::tempdir().unwrap();
+    deploy_bundled_agents(tmp.path()).unwrap();
+
+    for _ in 0..2 {
+        let report = force_reprovision_bundled_agents(tmp.path()).unwrap();
+        assert_eq!(report.backed_up, 0);
+        assert_eq!(report.refreshed, 0, "on-disk content already matches");
+    }
+
+    let backups = all_backup_files(tmp.path());
+    assert!(
+        backups.is_empty(),
+        "an untouched deploy must produce no backups: {backups:?}"
+    );
+}
+
+/// Why (#4461): on a machine with no deployed roster yet there is nothing to
+/// overwrite, so the backup path must not run at all.
+/// What: points a stamp-aware deploy at an empty directory and asserts files
+/// were written, none were backed up, and no `*.bak` exists.
+/// Test: itself.
+#[test]
+fn first_run_writes_no_backups() {
+    let tmp = tempfile::tempdir().unwrap();
+    let report = ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+
+    assert!(report.written > 0, "a first run establishes the roster");
+    assert_eq!(report.backed_up, 0, "nothing existed to back up");
+    let backups = all_backup_files(tmp.path());
+    assert!(backups.is_empty(), "no backups on a first run: {backups:?}");
+}
+
+/// Why (#3556 code-critic follow-up, HIGH; naming reworked by #4461): a
+/// second refresh pass — a later process recovering from an earlier pass's
+/// crash, or simply another edit — must never overwrite an existing backup
+/// with whatever is on disk NOW. #3556 bought that by refusing to write a
+/// second backup at all, which is exactly what destroyed the second edit
+/// (#4461); the digest-named path buys the same protection without the loss,
+/// because torn or already-refreshed content resolves to its own path.
+/// What: backs up one hand edit, then reprovisions again over DIFFERENT
+/// content and asserts the first backup is still byte-identical.
 /// Test: itself.
 #[test]
 fn existing_stale_backup_is_never_clobbered() {
@@ -186,8 +380,10 @@ fn existing_stale_backup_is_never_clobbered() {
     assert_eq!(first_pass.backed_up, 1);
     assert_eq!(first_pass.refreshed, 1);
 
-    let backup_path = tmp.path().join("assistant").join("agent.toml.stale.bak");
-    assert_eq!(std::fs::read_to_string(&backup_path).unwrap(), first_edit);
+    let first_backup = stale_backups_of(&assistant_toml)
+        .pop()
+        .expect("the first edit must be archived");
+    assert_eq!(std::fs::read_to_string(&first_backup).unwrap(), first_edit);
 
     // A second stale pass — standing in for a crash-recovering later process
     // or another hand edit — must not clobber the FIRST backup.
@@ -195,13 +391,9 @@ fn existing_stale_backup_is_never_clobbered() {
     std::fs::write(&assistant_toml, second_edit).unwrap();
 
     let second_pass = force_reprovision_bundled_agents(tmp.path()).unwrap();
-    assert_eq!(
-        second_pass.backed_up, 0,
-        "a backup already exists — a second pass must not overwrite it"
-    );
     assert_eq!(second_pass.refreshed, 1, "dest itself is still refreshed");
     assert_eq!(
-        std::fs::read_to_string(&backup_path).unwrap(),
+        std::fs::read_to_string(&first_backup).unwrap(),
         first_edit,
         "the ORIGINAL backup must survive untouched"
     );
@@ -229,9 +421,10 @@ fn non_bundled_user_file_untouched_by_refresh() {
         after, user_content,
         "a non-bundled user file must never be touched by a refresh pass"
     );
+    let backups = stale_backups_of(&user_file);
     assert!(
-        !tmp.path().join("my-custom-agent.toml.stale.bak").exists(),
-        "no backup should be created for a file the bundle doesn't own"
+        backups.is_empty(),
+        "no backup should be created for a file the bundle doesn't own: {backups:?}"
     );
 }
 
