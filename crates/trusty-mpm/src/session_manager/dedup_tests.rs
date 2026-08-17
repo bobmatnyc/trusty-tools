@@ -1191,3 +1191,164 @@ async fn reconcile_never_revives_a_terminal_record_with_a_live_session() {
         "a live tmux session must not silently revive a terminal record"
     );
 }
+
+/// The contradiction is REPORTED — the warning is the whole operator-facing
+/// value of leaving the record terminal.
+///
+/// Why (PR #5856 review, finding 2): the test above executes the `warn!` block
+/// but asserts nothing about it, so inverting the `live_names.contains` check
+/// or deleting the block outright left it green. A record that is silently
+/// left broken is not the designed behavior; a record that is left broken AND
+/// named, with the call that fixes it, is.
+/// What: captures the reconcile pass through the crate's existing
+/// [`trusty_common::log_buffer::LogBufferLayer`] entry point — the pattern
+/// `ensure_managed_config_dir_emits_the_frozen_skill_warning` and
+/// `log_reload_fallback_separates_corruption_from_a_transient_error` already
+/// use — and asserts the line's level, the record it names, and the remedy it
+/// carries. `with_subscriber` rather than `with_default` because the call
+/// under test is a future: it attaches the dispatcher to each poll instead of
+/// to one synchronous closure. Sound here because the `warn!` is emitted
+/// inline in `reconcile_on_boot`'s own record loop, on the task that awaits
+/// it — a `tokio::spawn`ed emitter would escape this and every other
+/// thread-local capture (#5846).
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn reconcile_warns_that_a_terminal_record_has_a_live_tmux_session() {
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    // #4181: `tracing` short-circuits every macro on a process-global
+    // MAX_LEVEL that starts at OFF and is raised only when some test installs
+    // a GLOBAL default. A thread-local dispatcher never raises it, so without
+    // this the capture below would record `[]` whenever no other test in the
+    // binary happened to run first. See
+    // `ensure_managed_config_dir_emits_the_frozen_skill_warning`.
+    static RAISE_MAX_LEVEL: std::sync::Once = std::sync::Once::new();
+    RAISE_MAX_LEVEL.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    });
+
+    let dir = TempDir::new().unwrap();
+    let ws_dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push("tm-lingering".into());
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let tombstone = rec(
+        "tm-lingering",
+        Some("proj"),
+        Some(&ws_dir.path().to_path_buf()),
+        ManagedSessionState::Decommissioned,
+        1,
+    );
+    let tombstone_id = tombstone.id;
+    mgr.store.write().await.upsert(tombstone).await.unwrap();
+
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    mgr.reconcile_on_boot(false)
+        .with_subscriber(subscriber)
+        .await
+        .expect("reconcile");
+
+    let lines = buffer.tail(64);
+    let line = lines
+        .iter()
+        .find(|l| l.contains("terminal record has a LIVE tmux session"))
+        .unwrap_or_else(|| {
+            panic!(
+                "reconcile left `tm-lingering` terminal while its tmux session was live and \
+                 said nothing — the operator has no way to learn the picker is hiding a \
+                 session they are sitting in. Captured lines: {lines:#?}"
+            )
+        });
+    assert!(
+        line.contains("WARN"),
+        "a hidden-but-live session must not be logged below WARN: {line}"
+    );
+    assert!(
+        line.contains(&tombstone_id.to_string()),
+        "the warning must name the record so `reactivate` can be aimed at it: {line}"
+    );
+    assert!(
+        line.contains("/reactivate"),
+        "the warning must carry the call that resolves the contradiction: {line}"
+    );
+}
+
+/// A tmux that cannot be observed must not mark a live session `Stopped`
+/// (PR #5856 review, finding 1).
+///
+/// Why: `dedup_stale_duplicates` was not the only fail-open in this file.
+/// `reconcile_on_boot` built its live set with
+/// `list_sessions().unwrap_or_else(warn, Vec::new)`, which reads an
+/// unobservable tmux as an empty one — every running session falls through to
+/// the "gone" arm and is marked `Stopped`, and under `auto_resume` each is
+/// queued for a relaunch it does not need. `auto_resume = true` here so the
+/// queueing half is exercised, not just the state write.
+/// What: the failure is raised AT the liveness query, so the pass provably
+/// reaches it. `report.stopped` and the driver's `create_cwd_calls` are the
+/// load-bearing assertions — against the pre-fix code the record's own state
+/// reads `Active` at the end anyway, because auto-resume respawned the session
+/// it had just wrongly stopped. The last assertion pins the other half of the
+/// fix: the skip is not an early return, so the dedup / deploy-validate /
+/// auto-resume tail still runs (dedup's own `ensure_server_up` is the
+/// observable proof it was reached).
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_refuses_to_stop_sessions_when_tmux_cannot_be_observed() {
+    let dir = TempDir::new().unwrap();
+    let ws_dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    fake.seeded_names.lock().unwrap().push("tm-attached".into());
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let live = rec(
+        "tm-attached",
+        Some("proj"),
+        Some(&ws_dir.path().to_path_buf()),
+        ManagedSessionState::Active,
+        1,
+    );
+    let live_id = live.id;
+    mgr.store.write().await.upsert(live).await.unwrap();
+
+    *fake.list_sessions_should_fail.lock().unwrap() = true;
+    let report = mgr
+        .reconcile_on_boot(true)
+        .await
+        .expect("an unobservable tmux is a skip, not an error to the caller");
+
+    assert!(
+        report.stopped.is_empty(),
+        "an attached session was reported gone because tmux could not be queried; that list \
+         is also the auto-resume queue, so every entry is relaunched next: {:?}",
+        report.stopped
+    );
+    let created = fake.create_cwd_calls.lock().unwrap().clone();
+    assert!(
+        created.is_empty(),
+        "auto-resume respawned a session tmux was never asked about — the operator's own \
+         pane gets a fresh launch on top of the one they are sitting in: {created:?}"
+    );
+    assert_eq!(
+        mgr.get(&live_id).await.unwrap().state,
+        ManagedSessionState::Active,
+        "the record must be left exactly as it was found"
+    );
+    assert!(
+        report.adopted.is_empty() && report.external_adopted.is_empty(),
+        "a tmux that never answered cannot have produced a session to adopt"
+    );
+    assert!(
+        *fake.ensure_server_up_calls.lock().unwrap() >= 2,
+        "the skip must not be an early return: reconcile's own liveness query and the dedup \
+         pass in its tail each run the server-up guard, so the tail was never reached"
+    );
+}

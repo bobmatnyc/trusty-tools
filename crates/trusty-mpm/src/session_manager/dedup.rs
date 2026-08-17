@@ -68,12 +68,15 @@ impl SessionManager {
     /// Live managed tmux session names, or an error when tmux could not be
     /// observed at all.
     ///
-    /// Why: dedup's only irreversible branch — `decommission` — fires when a
-    /// record's `tmux_name` is ABSENT from this set, so an empty set means
-    /// "every candidate is dead". Two paths used to hand dedup an empty set
-    /// without tmux ever having answered. First, `list_sessions()` returning
-    /// an error, swallowed by `unwrap_or_default()`. Second, and the one no
-    /// error handling could have caught:
+    /// Why: the two callers both read ABSENCE from this set as proof a session
+    /// is gone, and both act on that proof. `dedup_stale_duplicates`
+    /// `decommission`s; `reconcile_on_boot` marks the record `Stopped` and,
+    /// under `auto_resume`, queues it for a relaunch it does not need. So an
+    /// empty set means "every candidate is dead". Two paths used to hand that
+    /// empty set over without tmux ever having answered. First,
+    /// `list_sessions()` returning an error, swallowed by
+    /// `unwrap_or_default()` in dedup and by `unwrap_or_else(warn, Vec::new)`
+    /// in reconcile. Second, and the one no error handling could have caught:
     /// [`super::real_tmux::NoopTmuxDriver`] — installed whenever
     /// `RealTmuxDriver::discover()` fails, which includes tmux being off PATH
     /// AND the #5784 host-state gate refusing tmux access on a reassigned
@@ -85,11 +88,13 @@ impl SessionManager {
     /// socket is STARTED rather than misread as empty; then propagates
     /// `list_sessions()`'s error instead of defaulting it away; then filters
     /// to managed names. Every way of failing to observe tmux reaches the
-    /// caller as `Err`.
+    /// caller as `Err`. Each caller decides what to skip; neither may invent
+    /// an empty set.
     /// Test: `dedup_refuses_when_list_sessions_fails`,
     /// `dedup_refuses_when_the_tmux_server_cannot_be_started`,
-    /// `dedup_refuses_on_the_noop_driver_rather_than_reading_zero_as_dead`.
-    fn observed_live_managed_names(&self) -> Result<HashSet<String>, ManagedError> {
+    /// `dedup_refuses_on_the_noop_driver_rather_than_reading_zero_as_dead`,
+    /// `reconcile_refuses_to_stop_sessions_when_tmux_cannot_be_observed`.
+    pub(super) fn observed_live_managed_names(&self) -> Result<HashSet<String>, ManagedError> {
         // #5856: refuse, never assume — see this function's doc. The guard
         // mirrors `resolve_session_name`'s (#3886): it belongs next to the
         // `list-sessions` probe it protects, not on the callers.

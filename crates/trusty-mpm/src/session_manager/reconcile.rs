@@ -12,11 +12,19 @@
 //! `Stopped`, unknown-to-the-store → adopted as an external `Active` record),
 //! and optionally auto-resumes every session it marked `Stopped`.
 //!
+//! **An unobservable tmux is not an empty tmux.** The live set comes from
+//! [`SessionManager::observed_live_managed_names`], which refuses rather than
+//! reporting an empty set it cannot stand behind, and reconciliation skips
+//! every liveness-derived decision when it refuses. Before #5856 this file
+//! read a failed `list_sessions()` as zero live sessions, which marked every
+//! running session `Stopped` and, under `auto_resume`, queued each one for a
+//! relaunch it did not need.
+//!
 //! **A terminal record with a live tmux session is reported, not repaired.**
 //! Such a record is provably self-contradictory, but nothing distinguishes its
 //! two causes. It is either a session wrongly tombstoned by a dedup pass that
 //! misread an unobservable tmux as an empty one (the failure
-//! [`super::dedup::SessionManager::observed_live_managed_names`] now refuses),
+//! [`SessionManager::observed_live_managed_names`] now refuses),
 //! or the case #2777 designed for: a correctly-decommissioned session whose
 //! pane lingers as a bare shell printing "run `tm` to relaunch", which the
 //! operator may well be attached to. Reviving on liveness would resurrect
@@ -28,7 +36,9 @@
 //!
 //! Test: `manager_reconcile_gone_tmux_yields_stopped`,
 //! `manager_reconcile_adopts_new_prefix_session` in `tests.rs`;
-//! `reconcile_never_revives_a_terminal_record_with_a_live_session` in
+//! `reconcile_refuses_to_stop_sessions_when_tmux_cannot_be_observed`,
+//! `reconcile_never_revives_a_terminal_record_with_a_live_session` and
+//! `reconcile_warns_that_a_terminal_record_has_a_live_tmux_session` in
 //! `dedup_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -53,22 +63,36 @@ impl SessionManager {
     /// `Decommissioned`). External managed sessions unknown to the store are
     /// adopted as `Active`.
     /// When `auto_resume` is true, all `Stopped` sessions are immediately resumed.
+    ///
+    /// When tmux cannot be observed at all, every liveness-derived decision is
+    /// skipped: no record changes state, nothing is adopted, and nothing is
+    /// queued for auto-resume. See
+    /// [`Self::observed_live_managed_names`]. The liveness-independent work
+    /// still runs — the #4400 `pending_decision` backfill on terminal records,
+    /// and the dedup / deploy-validate / auto-resume tail below, each of which
+    /// makes its own decision about a tmux it cannot see.
     /// Test: `manager_reconcile_gone_tmux_yields_stopped`,
-    /// `manager_reconcile_adopts_new_prefix_session`.
+    /// `manager_reconcile_adopts_new_prefix_session`;
+    /// `reconcile_refuses_to_stop_sessions_when_tmux_cannot_be_observed`.
     pub async fn reconcile_on_boot(
         &self,
         auto_resume: bool,
     ) -> Result<ReconcileReport, ManagedError> {
-        let live_names: std::collections::HashSet<String> = self
-            .tmux
-            .list_sessions()
-            .unwrap_or_else(|e| {
-                warn!("reconcile: list_sessions failed: {e}; assuming no live sessions");
-                Vec::new()
-            })
-            .into_iter()
-            .filter(|n| crate::core::names::is_managed_session_name(n))
-            .collect();
+        // #5856: an unobservable tmux is not an empty tmux. `None` means tmux
+        // was never successfully asked — it is NOT a set of zero live
+        // sessions, and no record's state may be derived from it.
+        let live_names: Option<std::collections::HashSet<String>> =
+            match self.observed_live_managed_names() {
+                Ok(names) => Some(names),
+                Err(e) => {
+                    warn!(
+                        "reconcile: tmux liveness could not be observed ({e}); leaving every \
+                         record's state untouched — no session is marked Stopped, queued for \
+                         auto-resume, or adopted without positive evidence about its pane"
+                    );
+                    None
+                }
+            };
 
         let mut report = ReconcileReport::default();
         let mut guard = self.store.write().await;
@@ -101,7 +125,10 @@ impl SessionManager {
                 // `"attached": true` beside `"state": "decommissioned"` — and
                 // the picker hides the row either way. Report it; never
                 // auto-revive it (see this module's doc).
-                if live_names.contains(&record.tmux_name) {
+                if live_names
+                    .as_ref()
+                    .is_some_and(|live| live.contains(&record.tmux_name))
+                {
                     warn!(
                         id = %record.id,
                         name = %record.tmux_name,
@@ -131,6 +158,15 @@ impl SessionManager {
                 }
                 continue;
             }
+
+            // #5856: without an observed live set there is no evidence either
+            // way, so the record keeps whatever state it already has. The
+            // pre-#5856 code fell through to the `else` arm here and marked
+            // every live session `Stopped` — under `auto_resume` it then
+            // queued each one for a relaunch it did not need.
+            let Some(live_names) = live_names.as_ref() else {
+                continue;
+            };
 
             if live_names.contains(&record.tmux_name) {
                 // Session is alive — re-adopt as Active.
@@ -175,8 +211,10 @@ impl SessionManager {
         // and provisioned like any other managed workspace; a pane whose cwd
         // cannot be resolved is left CLEARLY flagged as unmanaged in `task`
         // rather than an indistinguishable-from-normal "adopted session".
+        // #5856: `flatten` yields nothing when liveness was never observed, so
+        // an unreachable tmux adopts no external session either.
         let mut newly_resolved: Vec<(ManagedSessionId, PathBuf)> = Vec::new();
-        for name in &live_names {
+        for name in live_names.iter().flatten() {
             if !known_names.contains(name) {
                 let resolved_cwd = self.tmux.get_pane_cwd(name).filter(|p| p.is_dir());
                 // #3396: a live tmux session unknown BY NAME can still resolve

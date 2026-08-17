@@ -285,11 +285,12 @@ impl ManagedTmuxDriver for NoopTmuxDriver {
     /// `workspace_path` cleared, and the row hidden from every picker view,
     /// while the operator sat in the pane. No amount of error handling at the
     /// call site could have caught it, because there was no error.
-    /// What: returns [`ManagedError::TmuxUnavailable`]. Callers that can
-    /// tolerate an unknown already degrade explicitly — `reconcile_on_boot`
-    /// warns and proceeds with an empty set (unchanged behavior, now logged),
-    /// and the trait's `session_exists` default maps `Err` to `false`. The
-    /// callers that must not be lied to now get told.
+    /// What: returns [`ManagedError::TmuxUnavailable`]. Both liveness callers
+    /// route through
+    /// [`super::SessionManager::observed_live_managed_names`] and skip their
+    /// pass on `Err` rather than inventing an empty set. The one caller that
+    /// can tolerate an unknown still degrades explicitly: the trait's
+    /// `session_exists` default maps `Err` to `false` (#5859).
     /// Test: `noop_driver_list_sessions_refuses_rather_than_reporting_zero`,
     /// and end-to-end by
     /// `dedup_refuses_on_the_noop_driver_rather_than_reading_zero_as_dead`.
