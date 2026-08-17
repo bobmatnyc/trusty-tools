@@ -30,8 +30,12 @@ use crate::inference::types::SecretString;
 /// pure function of this value.
 /// What: `provider` is the resolved [`ProviderId`]; `model` is the (possibly
 /// re-homed) slug to send; `key` is the resolved credential or `None` for
-/// Bedrock. `Debug` is safe to log — `key`'s [`SecretString`] redacts itself.
-/// Test: every resolver test asserts the resolved fields.
+/// Bedrock. `Debug` is safe to log: `key`'s [`SecretString`] renders a constant
+/// that is computed from no part of the credential (#4632 — before that fix
+/// this sentence was false, and a `Debug` dump here printed the key's first
+/// four characters).
+/// Test: `resolved_provider_debug_is_redacted` in `tests/inference_foundation.rs`;
+/// every resolver test asserts the resolved fields.
 #[derive(Debug, Clone)]
 pub struct ResolvedProvider {
     provider: ProviderId,
