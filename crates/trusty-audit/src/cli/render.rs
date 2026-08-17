@@ -268,7 +268,7 @@ fn render_chain(report: &ChainReport) -> String {
 /// Why: #5499 closure condition 3 — the recipient has to be able to find the
 /// file. The path is the first and last line, and everything between is what
 /// they can check before sending it.
-/// Test: `super::cli_tests::a_package_that_omits_a_repository_does_not_exit_zero`.
+/// Test: `super::cli_tests::rendering_a_package_names_the_file_to_send_and_its_members`.
 fn render_package(package: &crate::package::ReturnPackage) -> String {
     let mut out = format!("Return package: {}\n", package.path.display());
     out.push_str(&format!(
@@ -301,7 +301,8 @@ fn render_package(package: &crate::package::ReturnPackage) -> String {
 /// arm since #5824, so the chain renders the sweep identically to `taudit run`
 /// rather than growing a second wording.
 /// What: one line per repository, then the resumed count and the verdict.
-/// Test: `super::cli_tests::a_partial_sweep_is_never_rendered_as_a_clean_one`.
+/// Test: `super::cli_tests::a_partial_sweep_does_not_exit_zero`,
+/// `super::cli_tests::a_resumed_sweep_says_what_it_carried_over_and_what_it_audited`.
 fn render_run(report: &crate::run::RunReport) -> String {
     let mut out = String::new();
     for run in &report.repos {
@@ -363,7 +364,7 @@ fn render_run(report: &crate::run::RunReport) -> String {
 
 /// What acquisition put on disk, and what it could not.
 ///
-/// Test: `super::cli_tests::a_failed_clone_is_rendered_as_an_exclusion`.
+/// Test: `super::cli_tests::rendering_a_clone_report_names_every_exclusion`.
 fn render_cloned(report: &crate::clone::CloneReport) -> String {
     let mut out = String::new();
     for repo in &report.repos {

@@ -402,3 +402,374 @@ fn assemble(
     progress.operation_finished(Operation::Package, usize::from(assembled.is_ok()), 1);
     assembled
 }
+
+#[cfg(test)]
+mod chain_tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::progress::{ProgressUpdate, Recorder};
+    use crate::registry::{self, TargetKind};
+    use crate::run::{RepoResult, SelectedRepo};
+    use crate::session::{Outcome, Session};
+    use crate::tools::RequiredTool;
+    use crate::workdir::Area;
+
+    const CONFIG: &str = r#"
+openrouter_key = "sk-or-v1-not-a-real-key"
+instructions = "Assess the last 52 weeks."
+
+[tools]
+tga = "2.9.4"
+trusty-search = "0.47.0"
+trusty-analyze = "0.9.2"
+trusty-review = "0.15.1"
+"#;
+
+    fn config() -> EngagementConfig {
+        EngagementConfig::from_toml(CONFIG, Path::new("engagement.toml")).expect("parses")
+    }
+
+    fn work_in(dir: &Path) -> WorkDir {
+        let work = WorkDir::new(dir.join("work"));
+        work.create().expect("create");
+        work
+    }
+
+    /// A stub `tga` that writes the manifest a real one would for every
+    /// repository whose output stem is in `succeed`, and exits 1 for the rest.
+    ///
+    /// Matching on the stem is what lets one script produce a MIXED sweep, which
+    /// is the case the fail-open test needs — a partial run, not a clean one and
+    /// not a total failure.
+    fn tga_stub(succeed: &[&str]) -> String {
+        let cases: String = succeed
+            .iter()
+            .map(|stem| format!("  *{stem}*) ok=1 ;;\n"))
+            .collect();
+        format!(
+            "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  \
+             case \"$1\" in --output) out=\"$2\"; shift;; esac\n  shift\ndone\n\
+             ok=0\ncase \"$out\" in\n{cases}esac\n\
+             [ \"$ok\" = 1 ] || exit 1\n\
+             mkdir -p \"$out\"\n\
+             printf '[report]\\ntitle = \"Acme\"\\n\\n[[repositories]]\\n\
+             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n"
+        )
+    }
+
+    /// The stub binaries AND the version record, which together are what the
+    /// sweep's `pinned_binaries` preflight accepts — so the install phase finds
+    /// the pins satisfied and never reaches the network.
+    fn install_stubs(work: &WorkDir, script: &str) {
+        for tool in RequiredTool::ALL {
+            let path = tool.path_in(work);
+            std::fs::write(&path, script).expect("stub binary");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+        }
+        let record = format!(
+            "[[tools]]\ncrate_name = \"tga\"\nversion = \"2.9.4\"\nbinary = \"{tga}\"\n\
+             [[tools]]\ncrate_name = \"trusty-search\"\nversion = \"0.47.0\"\nbinary = \"{s}\"\n\
+             [[tools]]\ncrate_name = \"trusty-analyze\"\nversion = \"0.9.2\"\nbinary = \"{a}\"\n\
+             [[tools]]\ncrate_name = \"trusty-review\"\nversion = \"0.15.1\"\nbinary = \"{r}\"\n",
+            tga = RequiredTool::Tga.path_in(work).display(),
+            s = RequiredTool::TrustySearch.path_in(work).display(),
+            a = RequiredTool::TrustyAnalyze.path_in(work).display(),
+            r = RequiredTool::TrustyReview.path_in(work).display(),
+        );
+        std::fs::write(crate::tools::record_path(work), record).expect("write record");
+    }
+
+    /// A checkout on disk and a selection naming it.
+    ///
+    /// The chain's materialize phase falls back to the selection when the
+    /// registry names no repository, which is what makes an offline test of the
+    /// whole chain possible — cloning would reach GitHub.
+    fn select(work: &WorkDir, names: &[&str]) {
+        let repos: Vec<SelectedRepo> = names
+            .iter()
+            .map(|name| {
+                std::fs::create_dir_all(work.path(Area::Repos).join(name)).expect("mkdir repo");
+                SelectedRepo {
+                    name: (*name).to_owned(),
+                    path: PathBuf::from(format!("repos/{name}")),
+                }
+            })
+            .collect();
+        run::save_selection(work, &repos).expect("write selection");
+    }
+
+    /// One prepared working directory: stubs installed, checkouts on disk.
+    fn prepared(dir: &Path, repos: &[&str], succeed: &[&str]) -> WorkDir {
+        let work = work_in(dir);
+        install_stubs(&work, &tga_stub(succeed));
+        select(&work, repos);
+        work
+    }
+
+    async fn run_chain(work: &WorkDir, progress: &Progress) -> Result<ChainReport, AuditError> {
+        audit(work, &config(), &ChainOptions::default(), true, progress).await
+    }
+
+    /// The whole point of #5824: four verbs' worth of work from one call, ending
+    /// in a file the recipient can send.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_chain_installs_collects_and_packages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = prepared(tmp.path(), &["acme-api"], &["acme-api"]);
+
+        let report = run_chain(&work, &Progress::none())
+            .await
+            .expect("the chain runs");
+
+        assert_eq!(
+            report.run.status,
+            RunStatus::AllSucceeded,
+            "{:?}",
+            report.run
+        );
+        assert!(report.package.path.is_file(), "the package must be a file");
+        assert!(report.package.excluded.is_empty(), "{:?}", report.package);
+        assert!(report.gaps.is_empty(), "{:?}", report.gaps);
+        // The pins were already satisfied, so nothing was downloaded.
+        assert!(report.installed.is_none());
+        // Nothing registered, so the materialize phase cloned nothing and used
+        // the selection already on disk.
+        assert!(report.acquired.is_none());
+        assert_eq!(Outcome::Audit(report).exit_code(), 0);
+    }
+
+    /// The fail-open guard, and the reason this PR needed one (#5824).
+    ///
+    /// The chain CONTINUES past a repository that failed — that is deliberate,
+    /// and it is what makes a partial run reach the package phase at all. What
+    /// must not happen is that partial run reading as a whole engagement: the
+    /// package has to name the repository it does not cover, and the process
+    /// exit status has to be non-zero so `taudit audit && send-it` stops.
+    ///
+    /// Without the `Outcome::Audit` arm of `Outcome::exit_code`, this fails on
+    /// the last assertion with a zero status over a package covering one
+    /// repository of two.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_partly_failed_chain_packages_and_still_does_not_exit_zero() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Only the first repository's output stem is accepted by the stub.
+        let work = prepared(tmp.path(), &["acme-api", "acme-web"], &["00-acme-api"]);
+
+        let report = run_chain(&work, &Progress::none())
+            .await
+            .expect("one repository failing is not a failure of the chain");
+
+        assert_eq!(report.run.status, RunStatus::Partial, "{:?}", report.run);
+        assert!(report.package.path.is_file());
+        assert_eq!(report.package.excluded.len(), 1, "{:?}", report.package);
+        assert!(
+            report.package.excluded[0].contains("acme-web"),
+            "the package must name what it does not cover: {:?}",
+            report.package.excluded
+        );
+        assert_ne!(
+            Outcome::Audit(report).exit_code(),
+            0,
+            "a partial engagement must not exit zero"
+        );
+    }
+
+    /// The second half of the same guard: when NOTHING was audited there is no
+    /// package at all, and the refusal names the phase that failed rather than
+    /// the packaging it would otherwise trip one stage later.
+    ///
+    /// Without the `RunStatus::AllFailed` check in `collect`, the chain reaches
+    /// `package::from_checkpoint`, which refuses too — so this fails on the
+    /// phase assertion, reporting a collection failure as a packaging one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sweep_that_audited_nothing_stops_before_packaging() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No stem is accepted, so every child exits 1.
+        let work = prepared(tmp.path(), &["acme-api", "acme-web"], &[]);
+
+        let err = run_chain(&work, &Progress::none())
+            .await
+            .expect_err("a sweep that audited nothing must not produce a package");
+
+        let AuditError::ChainStopped { phase, source } = &err else {
+            panic!("expected a phase-attributed refusal, got {err:?}");
+        };
+        assert_eq!(*phase, Phase::Collect, "{err}");
+        assert!(
+            matches!(**source, AuditError::NothingAudited { attempted: 2 }),
+            "{source:?}"
+        );
+        assert!(
+            !package::default_destination(&work).exists(),
+            "a chain that audited nothing left a package behind"
+        );
+    }
+
+    /// An engagement that targets nothing is a refusal naming the remedy, not an
+    /// empty run — and it is attributed to the phase that could not proceed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_engagement_with_nothing_to_audit_stops_in_materialize() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &tga_stub(&["acme-api"]));
+
+        let err = run_chain(&work, &Progress::none())
+            .await
+            .expect_err("nothing is registered and nothing was cloned");
+
+        let AuditError::ChainStopped { phase, source } = &err else {
+            panic!("expected a phase-attributed refusal, got {err:?}");
+        };
+        assert_eq!(*phase, Phase::Materialize, "{err}");
+        assert!(
+            matches!(**source, AuditError::NothingRegistered { .. }),
+            "{source:?}"
+        );
+        assert!(
+            err.to_string().contains("trusty-audit add repo"),
+            "the refusal must name the remedy: {err}"
+        );
+    }
+
+    /// #5824 requirement 4: the operator who cloned by hand before the registry
+    /// existed keeps working. An empty registry is not a refusal while a
+    /// selection is on disk.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_empty_registry_falls_back_to_an_existing_selection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = prepared(tmp.path(), &["acme-api"], &["acme-api"]);
+
+        let report = run_chain(&work, &Progress::none())
+            .await
+            .expect("the chain runs");
+        assert!(report.acquired.is_none(), "nothing needed cloning");
+        assert_eq!(report.run.repos.len(), 1);
+    }
+
+    /// A registered board is something this engagement targets and this chain
+    /// cannot audit. Dropping it silently would leave the recipient sending a
+    /// package that claims to cover an engagement it does not.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_registered_board_is_stated_as_a_gap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = prepared(tmp.path(), &["acme-api"], &["acme-api"]);
+        let mut registry = Registry::default();
+        registry.insert(registry::parse(Some(TargetKind::Board), "jira:ACME").expect("parses"));
+        registry.save(&work).expect("writes");
+
+        let report = run_chain(&work, &Progress::none())
+            .await
+            .expect("the chain runs");
+
+        assert_eq!(report.gaps.len(), 1, "{:?}", report.gaps);
+        assert!(report.gaps[0].contains("jira:ACME"), "{:?}", report.gaps);
+        assert_ne!(
+            Outcome::Audit(report).exit_code(),
+            0,
+            "an unaudited target must not exit zero even when the sweep was clean"
+        );
+    }
+
+    /// Resumable by construction: every phase is re-entrant, so a second run
+    /// carries the first one's work over rather than repeating it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn re_running_the_chain_resumes_rather_than_re_collecting() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = prepared(tmp.path(), &["acme-api"], &["acme-api"]);
+
+        let first = run_chain(&work, &Progress::none())
+            .await
+            .expect("the first run");
+        assert_eq!(first.run.resumed().count(), 0);
+
+        let second = run_chain(&work, &Progress::none())
+            .await
+            .expect("the second run");
+        assert_eq!(second.run.resumed().count(), 1, "{:?}", second.run);
+        assert!(second.run.repos[0].result.succeeded());
+        assert!(second.package.path.is_file());
+    }
+
+    /// Closure condition 3 of #5824: the display does not fall silent partway
+    /// through. Every phase that runs announces itself, including the packaging
+    /// that used to happen with no output at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn progress_covers_every_phase() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = prepared(tmp.path(), &["acme-api"], &["acme-api"]);
+        let (recorder, progress) = Recorder::new();
+
+        run_chain(&work, &progress).await.expect("the chain runs");
+
+        let operations: Vec<Operation> = recorder
+            .updates()
+            .into_iter()
+            .filter_map(|u| match u {
+                ProgressUpdate::OperationStarted { operation, .. } => Some(operation),
+                _ => None,
+            })
+            .collect();
+        assert!(operations.contains(&Operation::Sweep), "{operations:?}");
+        assert!(operations.contains(&Operation::Package), "{operations:?}");
+    }
+
+    /// The chain is reachable the way every other capability is — through
+    /// `Session::execute`, with no private path of its own (#5502).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_chain_runs_through_the_one_dispatch_every_front_end_uses() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = prepared(tmp.path(), &["acme-api"], &["acme-api"]);
+        let config_path = tmp.path().join("engagement.toml");
+        std::fs::write(&config_path, CONFIG).expect("write config");
+        let session = Session::new(work.clone()).with_config_path(&config_path);
+
+        let outcome = session
+            .execute(crate::session::Command::Audit(ChainOptions::default()))
+            .await
+            .expect("the chain runs through execute");
+        let Outcome::Audit(report) = &outcome else {
+            panic!("Audit must yield an Audit outcome: {outcome:?}");
+        };
+        assert!(report.package.path.is_file());
+        assert_eq!(outcome.exit_code(), 0);
+    }
+
+    /// The failure a chained repository produces still reads as that
+    /// repository's, not as "the audit failed" — requirement 2 of #5824 is about
+    /// the target as much as the phase.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_repository_is_named_in_the_report_that_comes_back() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = prepared(tmp.path(), &["acme-api", "acme-web"], &["00-acme-api"]);
+
+        let report = run_chain(&work, &Progress::none())
+            .await
+            .expect("the chain runs");
+
+        let failed = report.run.failures().next().expect("one repository failed");
+        assert_eq!(failed.repo.name, "acme-web");
+        let RepoResult::Failed { reason } = &failed.result else {
+            panic!("a failure must carry a reason");
+        };
+        assert!(
+            reason.contains(&failed.log.display().to_string()),
+            "the reason must point at this repository's own log: {reason}"
+        );
+    }
+}

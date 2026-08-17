@@ -829,6 +829,65 @@ mod cli_tests {
         );
     }
 
+    /// #5824: a chained run that printed only its last phase would hide the two
+    /// places an engagement most often comes up short — a repository that could
+    /// not be cloned, and a registered target the chain cannot audit at all.
+    /// Both must survive into the text even when the package assembled fine.
+    #[test]
+    fn a_chained_run_names_every_phase() {
+        use crate::chain::ChainReport;
+        use crate::run::{RepoRun, RunReport, SelectedRepo};
+
+        let report = ChainReport {
+            installed: Some(vec![InstalledTool {
+                crate_name: "tga".to_owned(),
+                version: "2.9.4".to_owned(),
+                binary: PathBuf::from("/work/tools/tga"),
+            }]),
+            acquired: Some(CloneReport {
+                repos: vec![ClonedRepo {
+                    name_with_owner: "acme/web".to_owned(),
+                    path: PathBuf::from("/work/repos/acme/web"),
+                    state: CloneState::Failed("no such repository".to_owned()),
+                    bytes: 0,
+                    bytes_complete: true,
+                }],
+                total_bytes: 0,
+                total_bytes_complete: true,
+                gaps: vec!["acme/web was not audited — the clone failed".to_owned()],
+            }),
+            run: RunReport::of(vec![RepoRun {
+                repo: SelectedRepo {
+                    name: "acme-api".to_owned(),
+                    path: PathBuf::from("repos/acme-api"),
+                },
+                output: PathBuf::from("/work/out/00-acme-api"),
+                log: PathBuf::from("/work/logs/00-acme-api.log"),
+                gaps: Vec::new(),
+                resumed: false,
+                result: RepoResult::Succeeded,
+            }]),
+            package: ReturnPackage {
+                path: PathBuf::from("/work/audit-return-package.zip"),
+                files: Vec::new(),
+                total_bytes: 0,
+                packaged_bytes: 0,
+                excluded: Vec::new(),
+            },
+            gaps: vec!["jira:ACME was not audited".to_owned()],
+        };
+
+        let text = render(&Outcome::Audit(report));
+        assert!(text.contains("Installed 1 tool: tga 2.9.4"), "{text}");
+        assert!(
+            text.contains("acme/web"),
+            "the clone phase is missing: {text}"
+        );
+        assert!(text.contains("ok      acme-api"), "{text}");
+        assert!(text.contains("Not audited: jira:ACME"), "{text}");
+        assert!(text.contains("Send this file back"), "{text}");
+    }
+
     /// The save-dialog equivalent: the recipient names where the file lands.
     #[test]
     fn the_package_destination_is_choosable_from_the_command_line() {
