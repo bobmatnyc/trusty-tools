@@ -2090,3 +2090,220 @@ async fn get_context_budget_unknown_session_errors() {
     let err = registry.get_context_budget("nope").unwrap_err();
     assert_eq!(err.code, -32007);
 }
+
+// ── issue #3948: incremental per-session working-context floor ────────────────
+
+/// Build one authoritative cadence measurement at `working_context_pct`.
+fn floor_measurement(working_context_pct: u8) -> crate::agent_loop::ContextBudgetSnapshot {
+    crate::agent_loop::ContextBudgetSnapshot {
+        context_window: 200_000,
+        overhead_tokens: 200_000 * usize::from(100 - working_context_pct) / 100,
+        overhead_cap_tokens: 80_000,
+        working_context_pct,
+        overhead_pct: 100 - working_context_pct,
+        within_budget: working_context_pct >= 60,
+        fired: false,
+        rounds: 0,
+    }
+}
+
+/// Issue #3948: every authoritative cadence measurement contributes exactly
+/// one sample, and the lowest percentage is retained after a later turn
+/// recovers.
+/// Test: this test.
+#[tokio::test]
+async fn context_floor_tracks_every_measurement() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    for pct in [90, 48, 75] {
+        registry
+            .record_context_budget(&session.id, &floor_measurement(pct))
+            .unwrap();
+    }
+
+    let events::ContextBudgetQuery::Recorded(snapshot) =
+        registry.get_context_budget(&session.id).unwrap()
+    else {
+        panic!("expected a recorded context budget");
+    };
+    assert_eq!(snapshot.working_context_pct, 75, "latest turn still wins");
+    assert_eq!(snapshot.working_context_pct_low_water_mark, Some(48));
+    assert_eq!(snapshot.working_context_pct_sample_count, 3);
+}
+
+/// Issue #3948: one session's floor cannot be moved by another session's
+/// measurements in the same registry.
+/// Test: this test.
+#[tokio::test]
+async fn context_floor_is_session_scoped() {
+    let registry = SessionRegistry::new();
+    let first = registry.create(
+        "first".to_string(),
+        None,
+        crate::binding::ProjectBinding::None,
+    );
+    let second = registry.create(
+        "second".to_string(),
+        None,
+        crate::binding::ProjectBinding::None,
+    );
+
+    registry
+        .record_context_budget(&first.id, &floor_measurement(90))
+        .unwrap();
+    registry
+        .record_context_budget(&second.id, &floor_measurement(12))
+        .unwrap();
+
+    let events::ContextBudgetQuery::Recorded(snapshot) =
+        registry.get_context_budget(&first.id).unwrap()
+    else {
+        panic!("expected a recorded context budget");
+    };
+    assert_eq!(snapshot.working_context_pct_low_water_mark, Some(90));
+    assert_eq!(snapshot.working_context_pct_sample_count, 1);
+}
+
+/// Issue #3948: the sample counter is telemetry and must saturate rather
+/// than wrap in a long-lived session.
+/// Test: this test.
+#[test]
+fn context_floor_saturates_sample_count() {
+    let mut floor = super::super::registry_context_floor::ContextFloorState {
+        low_water_mark: Some(60),
+        sample_count: usize::MAX,
+    };
+
+    floor.record(48);
+
+    assert_eq!(floor.low_water_mark, Some(48));
+    assert_eq!(floor.sample_count, usize::MAX);
+}
+
+/// Issue #3948: prove the live query performs no `compression.jsonl` open,
+/// rather than only proving malformed contents do not change its answer.
+///
+/// A FIFO blocks a read-only `File::open` until a writer connects, so the
+/// query must return while this FIFO has no writer. The timeout branch
+/// connects a non-blocking writer to release a blocked reader before
+/// reporting the violation; that timeout is the contract under test, not a
+/// wait for eventual consistency.
+/// Test: this test.
+#[cfg(unix)]
+#[tokio::test]
+async fn context_budget_query_does_not_open_compression_log() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::mpsc;
+
+    let dir = crate::agent_loop::telemetry::test_temp_dir("context-floor-no-open");
+    let path = CString::new(dir.join("compression.jsonl").as_os_str().as_bytes()).unwrap();
+    // SAFETY: `path` is a valid, NUL-terminated path owned for this call.
+    let created = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(
+        created,
+        0,
+        "mkfifo failed: {}",
+        std::io::Error::last_os_error()
+    );
+
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    registry
+        .record_context_budget(&session.id, &floor_measurement(73))
+        .unwrap();
+
+    let query = crate::agent_loop::telemetry::with_data_dir_env(&dir, || {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let worker_registry = Arc::clone(&registry);
+        let session_id = session.id.clone();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(worker_registry.get_context_budget(&session_id));
+        });
+
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(result) => {
+                worker.join().expect("budget query worker panicked");
+                result
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Never let cleanup block on the FIFO itself. If the query
+                // opened a reader this non-blocking writer connects and
+                // releases it; if it did not, `open` returns `ENXIO` and the
+                // detached worker cannot stall the test process.
+                let writer = unsafe {
+                    libc::open(
+                        path.as_ptr(),
+                        libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                    )
+                };
+                if writer >= 0 {
+                    let payload = b"{not-json}\n";
+                    // SAFETY: `writer` is an open FIFO descriptor and the
+                    // payload pointer is valid for `payload.len()` bytes.
+                    unsafe {
+                        libc::write(writer, payload.as_ptr().cast(), payload.len());
+                        libc::close(writer);
+                    }
+                    worker.join().expect("budget query worker panicked");
+                }
+                panic!("get_context_budget opened compression.jsonl");
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                worker.join().expect("budget query worker panicked");
+                panic!("budget query worker disconnected without a result");
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let events::ContextBudgetQuery::Recorded(snapshot) = query else {
+        panic!("expected a recorded context budget");
+    };
+    assert_eq!(snapshot.working_context_pct_low_water_mark, Some(73));
+    assert_eq!(snapshot.working_context_pct_sample_count, 1);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Issue #3948: a daemon restart drops the whole session, so the live floor
+/// cannot silently reset to a wrong value — the RPC reports
+/// `session_not_found`, and the durable JSONL still carries that session's
+/// history for offline analysis.
+/// Test: this test.
+#[tokio::test]
+async fn context_floor_after_restart_is_absent_not_wrong() {
+    let dir = crate::agent_loop::telemetry::test_temp_dir("context-floor-restart");
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    registry
+        .record_context_budget(&session.id, &floor_measurement(48))
+        .unwrap();
+    crate::agent_loop::telemetry::record_cadence_event(
+        &dir,
+        Some(session.id.clone()),
+        100_000,
+        104_000,
+        200_000,
+        5,
+        4,
+    );
+
+    // The restart: nothing in-memory carries over.
+    let restarted = SessionRegistry::new();
+    let err = restarted.get_context_budget(&session.id).unwrap_err();
+    assert_eq!(
+        err.code, -32007,
+        "the session itself is gone, not its floor"
+    );
+
+    assert_eq!(
+        crate::agent_loop::telemetry::session_working_context_floor(&dir, &session.id),
+        (Some(48), 1),
+        "the durable log remains the offline history source across a restart"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

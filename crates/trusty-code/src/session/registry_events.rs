@@ -226,15 +226,23 @@ impl SessionRegistry {
     /// (the actual RPC query path — called far less often, once per client
     /// poll) overwrites this field with a fresh read before returning, so no
     /// caller ever observes the placeholder.
+    /// (#3948) The session's working-context floor takes the opposite route:
+    /// it is folded in HERE, under the same lock that stores the snapshot,
+    /// because a `min` over one `u8` costs nothing per turn while the query
+    /// path's alternative — rescanning the multi-session
+    /// `compression.jsonl` — grows with the machine's whole compression
+    /// history.
     /// Test: `registry_tests::record_context_budget_publishes_event`,
-    /// `registry_tests::record_context_budget_caches_snapshot_for_late_query`.
+    /// `registry_tests::record_context_budget_caches_snapshot_for_late_query`,
+    /// `registry_tests::context_floor_tracks_every_measurement`,
+    /// `registry_tests::context_floor_is_session_scoped`.
     pub fn record_context_budget(
         &self,
         id: &str,
         measurement: &crate::agent_loop::ContextBudgetSnapshot,
     ) -> Result<(), RpcError> {
         self.ensure_exists(id)?;
-        let snapshot = ContextBudgetSnapshot {
+        let mut snapshot = ContextBudgetSnapshot {
             context_window_tokens: measurement.context_window,
             overhead_tokens: measurement.overhead_tokens,
             overhead_cap_tokens: measurement.overhead_cap_tokens,
@@ -247,8 +255,8 @@ impl SessionRegistry {
             // `get_context_budget` reads this field back out, and it always
             // overwrites it first.
             lifetime_compaction_alarm_count: 0,
-            // (#3912) Same placeholder contract as the field above —
-            // `get_context_budget` overwrites both before returning.
+            // (#3948) Overwritten from this entry's retained floor under the
+            // registry lock below, before the snapshot is stored.
             working_context_pct_low_water_mark: None,
             working_context_pct_sample_count: 0,
             // (#3911) Same placeholder contract as
@@ -258,6 +266,9 @@ impl SessionRegistry {
         {
             let mut sessions = self.lock();
             if let Some(entry) = sessions.get_mut(id) {
+                entry.context_floor.record(measurement.working_context_pct);
+                snapshot.working_context_pct_low_water_mark = entry.context_floor.low_water_mark;
+                snapshot.working_context_pct_sample_count = entry.context_floor.sample_count;
                 entry.context_budget = Some(snapshot);
             }
         }
@@ -302,31 +313,42 @@ impl SessionRegistry {
     /// once per query, not once per turn per session. This is also why the
     /// count reflects fires from ANY session on this machine, not just this
     /// one: it is derived from a shared log, not a per-session cache.
-    /// (#3912) `working_context_pct_low_water_mark`/
-    /// `working_context_pct_sample_count` are likewise read fresh here, from
-    /// the SAME durable log filtered to THIS session — the fix for the
-    /// load-realistic soak's finding that the cached snapshot above
-    /// (`working_context_pct`) can read 98-99% while this session's real
-    /// floor (durably recorded) was 48-60%.
+    /// (#3948) `working_context_pct_low_water_mark`/
+    /// `working_context_pct_sample_count` are read from the state
+    /// [`Self::record_context_budget`] retains per session, NOT from
+    /// `compression.jsonl`. This query used to call
+    /// `telemetry::session_working_context_floor`, which reopens and reparses
+    /// the machine-wide compression log on every poll; that function is
+    /// unchanged and remains the offline-history reader, but no live query
+    /// path calls it. The two answers are not identical, and the difference
+    /// is deliberate: the live floor samples EVERY cadence tick, while the
+    /// log only carries a percentage for turns where compaction work
+    /// happened (`rounds > 0`) plus threshold-compaction fires, which
+    /// `record_context_budget` never sees. So the live floor is over a
+    /// per-turn superset of this session's cadence measurements, and
+    /// `working_context_pct_sample_count` counts cadence measurements rather
+    /// than durable rows.
     /// Test: `registry_tests::record_context_budget_caches_snapshot_for_late_query`,
     /// `protocol_budget::tests::get_context_budget_never_recorded_session_returns_never_recorded`,
     /// `registry_tests::get_context_budget_unknown_session_errors`,
     /// `protocol_budget::tests::get_context_budget_reflects_lifetime_compaction_alarm_count`,
-    /// `protocol_budget::tests::get_context_budget_reflects_working_context_floor`.
+    /// `protocol_budget::tests::get_context_budget_reflects_working_context_floor`,
+    /// `registry_tests::context_budget_query_does_not_open_compression_log`,
+    /// `registry_tests::context_floor_after_restart_is_absent_not_wrong`.
     pub fn get_context_budget(&self, id: &str) -> Result<ContextBudgetQuery, RpcError> {
         self.ensure_exists(id)?;
-        Ok(self
-            .lock()
-            .get(id)
-            .and_then(|e| e.context_budget)
+        let cached = self.lock().get(id).and_then(|entry| {
+            entry.context_budget.map(|mut snapshot| {
+                snapshot.working_context_pct_low_water_mark = entry.context_floor.low_water_mark;
+                snapshot.working_context_pct_sample_count = entry.context_floor.sample_count;
+                snapshot
+            })
+        });
+        Ok(cached
             .map(|mut snapshot| {
                 let data_dir = crate::agent_loop::telemetry::default_data_dir();
                 snapshot.lifetime_compaction_alarm_count =
                     crate::agent_loop::telemetry::lifetime_compaction_alarm_count(&data_dir);
-                let (low_water_mark, sample_count) =
-                    crate::agent_loop::telemetry::session_working_context_floor(&data_dir, id);
-                snapshot.working_context_pct_low_water_mark = low_water_mark;
-                snapshot.working_context_pct_sample_count = sample_count;
                 snapshot.lifetime_cadence_floor_breach_count =
                     crate::agent_loop::telemetry::lifetime_cadence_floor_breach_count(&data_dir);
                 ContextBudgetQuery::Recorded(snapshot)
