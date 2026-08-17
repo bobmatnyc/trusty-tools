@@ -15,9 +15,14 @@
 //!   README states what is written where (#5494).
 //!
 //! What: [`WorkDir`], a pure path calculator — it computes the layout without
-//! touching disk, and [`WorkDir::create`] is the one method that does I/O.
+//! touching disk, and [`WorkDir::create`] is the one method on it that does I/O.
 //! [`WorkDir::resolve`] takes the environment as an argument rather than reading
 //! it, so resolution order is testable without mutating process state.
+//!
+//! [`write_atomically`] is the module's one free function, and the one writer
+//! for every state file under the root: `state/selected-repos.toml`
+//! (`crate::run`) and `state/audit-targets.toml` (`crate::registry`) both go
+//! through it, so the temp-file-then-rename discipline is decided once (#5822).
 //! Test: `super::layout_tests`.
 //!
 //! ## Open questions, recorded rather than resolved (#5502)
@@ -208,6 +213,57 @@ impl WorkDir {
         }
         Ok(())
     }
+}
+
+/// Write a state file so no reader can ever observe a partial one.
+///
+/// Why: `crate::run::SELECTION_FILE` states this obligation on whoever writes
+/// it — a producer that crashes mid-write leaves syntactically valid TOML
+/// holding a PREFIX of the entries, which reads as a smaller-but-complete
+/// document. #5822 adds a second such file (`crate::registry`), so the
+/// discipline moved here rather than being restated per producer.
+/// What: creates the parent directory, writes to a uniquely-named temporary
+/// file beside the target, and renames it into place. The rename is atomic; the
+/// unique suffix is what lets two writers race without either reading the
+/// other's half-written file. A failed rename removes the temporary file.
+/// Test: `crate::run::run_tests::racing_writers_never_leave_a_torn_selection`,
+/// `crate::registry::registry_tests::a_registry_round_trips_both_kinds`.
+///
+/// This makes ONE write untearable. It does not make a load-mutate-save
+/// indivisible — [`crate::registry::register`] takes a lock for that (#5822).
+///
+/// # Errors
+///
+/// [`AuditError::WorkDir`] naming the directory, the temporary file, or the
+/// target, depending on which step failed.
+pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<(), AuditError> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|source| AuditError::WorkDir {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temp = path.with_file_name(format!("{file_name}.{}.tmp", writer_tag()));
+    std::fs::write(&temp, text).map_err(|source| AuditError::WorkDir {
+        path: temp.clone(),
+        source,
+    })?;
+    std::fs::rename(&temp, path).map_err(|source| {
+        let _ = std::fs::remove_file(&temp);
+        AuditError::WorkDir {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+/// A suffix no two concurrent writers share: process, plus thread within it.
+fn writer_tag() -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    format!("{}-{}", std::process::id(), hasher.finish())
 }
 
 #[cfg(test)]

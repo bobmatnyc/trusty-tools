@@ -29,8 +29,10 @@ use crate::error::AuditError;
 use crate::manifest::{AuditManifest, RepositoryEntry};
 use crate::package::{self, ReturnPackage};
 use crate::progress::{Progress, ProgressSink};
+use crate::registry::{self, Registration, Registry, Removal, TargetKind, TargetList};
 use crate::run::{self, RunReport};
 use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
+use crate::validate;
 use crate::workdir::{Area, WorkDir};
 
 /// Everything `trusty-audit` can be asked to do.
@@ -66,6 +68,25 @@ pub enum Command {
         repos: Vec<String>,
         /// How to clone.
         options: CloneOptions,
+    },
+    /// Register one audit target, after proving it can be read (#5822).
+    ///
+    /// Carries its argument for the same reason [`Command::CloneRepos`] does:
+    /// what to register is the operator's input, not derivable from the
+    /// session's state. `kind` is the verb they used, so `add repo jira:ACME`
+    /// is a refusal rather than a board.
+    AddTarget {
+        /// Which verb asked — `repo` or `board`.
+        kind: TargetKind,
+        /// The spec, unparsed. [`registry::parse`] owns what it may be.
+        spec: String,
+    },
+    /// List the registered audit targets (#5822).
+    ListTargets,
+    /// Drop one registered target (#5822). Accepts either spec shape.
+    RemoveTarget {
+        /// `owner/name` or `provider:key`.
+        spec: String,
     },
     /// Run `tga audit` over the selected repositories (#5555).
     Run,
@@ -166,6 +187,13 @@ pub enum Outcome {
     Discovered(Vec<DiscoveredRepo>),
     /// From [`Command::CloneRepos`].
     Cloned(CloneReport),
+    /// From [`Command::AddTarget`] — what is registered, and whether this call
+    /// is what registered it.
+    Registered(Registration),
+    /// From [`Command::ListTargets`].
+    Targets(TargetList),
+    /// From [`Command::RemoveTarget`].
+    Removed(Removal),
     /// From [`Command::Run`] — per-repository results and the sweep's verdict.
     ///
     /// A non-[`RunStatus::AllSucceeded`](crate::run::RunStatus::AllSucceeded)
@@ -230,6 +258,8 @@ pub struct Session {
     manifest_path: PathBuf,
     config_path: PathBuf,
     auto_install: bool,
+    /// Which `gh` invocations a repository registration runs (#5822).
+    repo_probe: validate::RepoProbe,
     /// Where live progress goes while a long capability runs (#5823).
     ///
     /// A field rather than a parameter on [`Session::execute`] because progress
@@ -257,8 +287,26 @@ impl Session {
             manifest_path,
             config_path,
             auto_install: true,
+            repo_probe: validate::RepoProbe::real(),
             progress: Progress::none(),
         }
+    }
+
+    /// Point the repository check at a different pair of `gh` invocations.
+    ///
+    /// Why: #5822 — the repository arm's fail-closed guarantee ("a refused
+    /// registration writes no file") was provable only by an `#[ignore]`d test
+    /// needing network and an authenticated `gh`. `#[cfg(test)]` because it is
+    /// the injection seam for that proof and nothing else: it does not exist in
+    /// a shipped build, so `Session::execute` remains the only door a front end
+    /// gets and no capability can hide behind it.
+    /// What: replaces the [`validate::RepoProbe`] `add` runs.
+    /// Test: `super::session_tests::a_refused_repository_registration_writes_nothing`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_repo_probe(mut self, probe: validate::RepoProbe) -> Self {
+        self.repo_probe = probe;
+        self
     }
 
     /// Render this session's progress through `sink` (#5823).
@@ -372,9 +420,116 @@ impl Session {
                     .await
                     .map(Outcome::Cloned)
             }
+            // #5822: registration validates before it persists, so every one of
+            // these three reads or writes only `state/audit-targets.toml`.
+            Command::AddTarget { kind, spec } => {
+                self.add_target(kind, &spec).await.map(Outcome::Registered)
+            }
+            Command::ListTargets => self.list_targets().map(Outcome::Targets),
+            Command::RemoveTarget { spec } => self.remove_target(&spec).await.map(Outcome::Removed),
             Command::Run => self.run().await.map(Outcome::Run),
             Command::Package { destination } => self.package(destination).map(Outcome::Package),
         }
+    }
+
+    /// Register one target, additively, after proving it can be read.
+    ///
+    /// Why: #5822. The order is the whole behaviour — parse, then read the
+    /// existing set, then validate, and only then write. A target that fails
+    /// validation is never persisted, and the targets already registered are
+    /// never rewritten, so a refusal costs the operator nothing.
+    ///
+    /// A target that is already registered returns early WITHOUT re-validating.
+    /// Idempotent means no-op: re-running `add` over a set to make sure it is
+    /// complete must not start failing over a network blip on an entry that
+    /// already passed.
+    /// What: [`registry::parse`] owns the spec, [`validate::validate`] owns the
+    /// access check, and [`registry::register`] owns the write — including the
+    /// lock that stops two concurrent `add` runs discarding each other's target.
+    /// Test: `super::session_tests::a_rejected_target_is_not_persisted`,
+    /// `super::session_tests::re_adding_a_registered_target_changes_nothing`,
+    /// `crate::registry::registry_tests::concurrent_registrations_keep_every_target`.
+    async fn add_target(&self, kind: TargetKind, spec: &str) -> Result<Registration, AuditError> {
+        let target = registry::parse(Some(kind), spec)?;
+        self.work.create()?;
+        if Registry::load(&self.work)?.contains(&target) {
+            return Ok(Registration {
+                target,
+                already_registered: true,
+            });
+        }
+        // Absent rather than required: a repository target needs no config at
+        // all, and a board target's refusal names the field to set (#5822).
+        let config = EngagementConfig::load_if_present(&self.config_path)?;
+        // #5822: validation runs OUTSIDE the registry's lock — it reaches the
+        // network under a 30s ceiling, and holding the lock across that would
+        // stall every other `add` in this working directory behind one
+        // unreachable site. `register` re-reads the file, so the append is
+        // decided against the snapshot current at write time.
+        validate::validate(&target, config.as_ref(), self.repo_probe).await?;
+        let inserted = self
+            .under_registry_lock({
+                let target = target.clone();
+                move |work| registry::register(work, &target)
+            })
+            .await?;
+        Ok(Registration {
+            target,
+            // A concurrent writer that won the race registered the same target
+            // first; from this call's side that is the idempotent no-op.
+            already_registered: !inserted,
+        })
+    }
+
+    /// Run one registry critical section off the async runtime's thread.
+    ///
+    /// Why: [`trusty_common::file_lock::with_exclusive_lock`] blocks until the
+    /// lock is free, and its own contract says an async caller must run it
+    /// where blocking is safe (#5822).
+    /// What: `spawn_blocking`. A panic escaping the section arrives as a
+    /// `JoinError` and becomes [`AuditError::RegistryLock`], so a failed
+    /// critical section can never read as a completed one.
+    /// Test: `super::session_tests::removing_operates_on_the_same_registry`.
+    async fn under_registry_lock<T, F>(&self, f: F) -> Result<T, AuditError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&WorkDir) -> Result<T, AuditError> + Send + 'static,
+    {
+        let work = self.work.clone();
+        tokio::task::spawn_blocking(move || f(&work))
+            .await
+            .map_err(|source| AuditError::RegistryLock {
+                path: Registry::path(&self.work),
+                source: std::io::Error::other(source),
+            })?
+    }
+
+    /// What is registered, plus the selection file the sweep still reads.
+    ///
+    /// See [`registry::legacy_selection`] for why both are reported.
+    fn list_targets(&self) -> Result<TargetList, AuditError> {
+        Ok(TargetList {
+            targets: Registry::load(&self.work)?.targets().to_vec(),
+            legacy_selection: registry::legacy_selection(&self.work)?,
+        })
+    }
+
+    /// Drop one target. Removing one that is not registered writes nothing.
+    ///
+    /// Under the same lock `add` takes (#5822): a removal is the same
+    /// load-mutate-save, so an unserialised one discards a concurrent add.
+    async fn remove_target(&self, spec: &str) -> Result<Removal, AuditError> {
+        let target = registry::parse(None, spec)?;
+        let was_registered = self
+            .under_registry_lock({
+                let target = target.clone();
+                move |work| registry::deregister(work, &target)
+            })
+            .await?;
+        Ok(Removal {
+            target,
+            was_registered,
+        })
     }
 
     /// Assemble the deliverable from what the last sweep left behind.
@@ -943,6 +1098,283 @@ trusty-review = "0.0.0-never-published"
             matches!(err, AuditError::ToolsNotInstalled { .. }),
             "expected the sweep's own preflight, got {err:?}"
         );
+    }
+
+    /// An engagement config with no board credentials, so a board registration
+    /// refuses at the credential check without reaching the network.
+    const CONFIG_WITHOUT_BOARDS: &str = r#"
+openrouter_key = "sk-or-v1-not-a-real-key"
+instructions = "Assess the last 52 weeks."
+
+[tools]
+tga = "2.9.4"
+trusty-search = "0.47.0"
+trusty-analyze = "0.9.2"
+trusty-review = "0.15.1"
+"#;
+
+    fn registry_of(session: &Session) -> Vec<String> {
+        Registry::load(session.work_dir())
+            .expect("the registry reads")
+            .targets()
+            .iter()
+            .map(crate::registry::Target::id)
+            .collect()
+    }
+
+    /// #5822's central guarantee: validation runs BEFORE the write, so a target
+    /// that cannot be checked leaves no file behind at all.
+    #[tokio::test]
+    async fn a_rejected_target_is_not_persisted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS);
+
+        let err = session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Board,
+                spec: "jira:ACME".to_owned(),
+            })
+            .await
+            .expect_err("no jira credential, no registration");
+        assert!(
+            matches!(err, AuditError::BoardCredentialMissing { .. }),
+            "{err:?}"
+        );
+        assert!(
+            !Registry::path(session.work_dir()).exists(),
+            "a refused registration wrote a registry file"
+        );
+    }
+
+    /// The REPOSITORY arm of the same guarantee, deterministically (#5822).
+    /// `a_rejected_target_is_not_persisted` covers the board arm; the repo arm's
+    /// only refusal coverage was `validate`'s `#[ignore]`d live test, so a
+    /// default `cargo test -p trusty-audit` never proved that a refused
+    /// repository leaves no file behind.
+    #[tokio::test]
+    async fn a_refused_repository_registration_writes_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path()).with_repo_probe(validate::RepoProbe::unusable());
+
+        let err = session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: "acme/api".to_owned(),
+            })
+            .await
+            .expect_err("a gh that cannot answer must not register a repository");
+        assert!(matches!(err, AuditError::RepoUnreachable { .. }), "{err:?}");
+        assert!(
+            !Registry::path(session.work_dir()).exists(),
+            "a refused repository registration wrote a registry file"
+        );
+    }
+
+    /// The message names the field to set — the recipient is not the author of
+    /// this config and cannot infer it.
+    #[tokio::test]
+    async fn a_board_without_a_credential_names_the_config_field() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS);
+
+        let err = session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Board,
+                spec: "linear:ENG".to_owned(),
+            })
+            .await
+            .expect_err("no linear credential");
+        let rendered = err.to_string();
+        assert!(rendered.contains("boards.linear"), "{rendered}");
+        assert!(rendered.contains("nothing was registered"), "{rendered}");
+    }
+
+    /// A malformed spec is refused before anything is read or written.
+    #[tokio::test]
+    async fn a_spec_that_is_not_a_target_is_refused_before_any_write() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path());
+
+        let err = session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: "../etc/passwd".to_owned(),
+            })
+            .await
+            .expect_err("a traversing name must not register");
+        assert!(matches!(err, AuditError::InvalidRepoName { .. }), "{err:?}");
+        assert!(!Registry::path(session.work_dir()).exists());
+    }
+
+    /// Registration is additive and idempotent, and a repeat does not
+    /// re-validate — which is why this passes with no credential configured.
+    #[tokio::test]
+    async fn re_adding_a_registered_target_changes_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS);
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+
+        // Seed directly: the add path would need the network to get this far.
+        let mut registry = Registry::default();
+        registry
+            .insert(crate::registry::parse(Some(TargetKind::Board), "jira:ACME").expect("parses"));
+        registry.save(session.work_dir()).expect("writes");
+
+        let Outcome::Registered(again) = session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Board,
+                spec: "JIRA:acme".to_owned(),
+            })
+            .await
+            .expect("a repeat must not re-validate")
+        else {
+            panic!("AddTarget must yield a Registered outcome");
+        };
+        assert!(again.already_registered);
+        assert_eq!(registry_of(&session), vec!["jira:ACME"]);
+    }
+
+    /// Adding one target never disturbs the ones already registered.
+    #[tokio::test]
+    async fn registration_is_additive() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS);
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+
+        let mut registry = Registry::default();
+        registry.insert(crate::registry::parse(None, "acme/api").expect("parses"));
+        registry.insert(crate::registry::parse(None, "jira:ACME").expect("parses"));
+        registry.save(session.work_dir()).expect("writes");
+
+        // A refused add leaves both entries exactly as they were.
+        session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Board,
+                spec: "linear:ENG".to_owned(),
+            })
+            .await
+            .expect_err("no linear credential");
+        assert_eq!(registry_of(&session), vec!["acme/api", "jira:ACME"]);
+    }
+
+    /// The credential lives in the engagement config and nowhere else: the
+    /// registry's schema has no field one could be written into.
+    #[tokio::test]
+    async fn no_credential_reaches_the_registry_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = format!(
+            "{CONFIG_WITHOUT_BOARDS}\n[boards.jira]\nurl = \"https://acme.atlassian.net\"\n\
+             email = \"auditor@acme.example\"\ntoken = \"jira-token-secret\"\n\
+             \n[boards.linear]\napi_key = \"lin_api_secret\"\n"
+        );
+        let session = session_with_config(tmp.path(), &config);
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+
+        let mut registry = Registry::default();
+        registry.insert(crate::registry::parse(None, "jira:ACME").expect("parses"));
+        registry.insert(crate::registry::parse(None, "linear:ENG").expect("parses"));
+        registry.save(session.work_dir()).expect("writes");
+
+        let text = std::fs::read_to_string(Registry::path(session.work_dir())).expect("read");
+        assert!(!text.contains("jira-token-secret"), "{text}");
+        assert!(!text.contains("lin_api_secret"), "{text}");
+        assert!(!text.contains("auditor@acme.example"), "{text}");
+        assert!(
+            text.contains("jira:ACME") || text.contains("ACME"),
+            "{text}"
+        );
+    }
+
+    /// Removing a registered target writes; removing an unregistered one does
+    /// not, and neither is a failure.
+    #[tokio::test]
+    async fn removing_operates_on_the_same_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path());
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+        let mut registry = Registry::default();
+        registry.insert(crate::registry::parse(None, "acme/api").expect("parses"));
+        registry.insert(crate::registry::parse(None, "acme/web").expect("parses"));
+        registry.save(session.work_dir()).expect("writes");
+
+        let Outcome::Removed(gone) = session
+            .execute(Command::RemoveTarget {
+                spec: "acme/api".to_owned(),
+            })
+            .await
+            .expect("removes")
+        else {
+            panic!("RemoveTarget must yield a Removed outcome");
+        };
+        assert!(gone.was_registered);
+        assert_eq!(registry_of(&session), vec!["acme/web"]);
+
+        let Outcome::Removed(absent) = session
+            .execute(Command::RemoveTarget {
+                spec: "jira:ACME".to_owned(),
+            })
+            .await
+            .expect("removing something unregistered is not a failure")
+        else {
+            panic!("RemoveTarget must yield a Removed outcome");
+        };
+        assert!(!absent.was_registered);
+        assert_eq!(registry_of(&session), vec!["acme/web"]);
+    }
+
+    /// `targets` reads the same registry `add` and `remove` write, and names
+    /// the selection file the sweep still reads (#5822).
+    #[tokio::test]
+    async fn listing_reports_the_registry_and_the_sweeps_own_selection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path());
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+
+        let Outcome::Targets(empty) = session
+            .execute(Command::ListTargets)
+            .await
+            .expect("an empty registry is not a failure")
+        else {
+            panic!("ListTargets must yield a Targets outcome");
+        };
+        assert!(empty.targets.is_empty());
+        assert!(empty.legacy_selection.is_none());
+
+        let mut registry = Registry::default();
+        registry.insert(crate::registry::parse(None, "acme/api").expect("parses"));
+        registry.save(session.work_dir()).expect("writes");
+        run::save_selection(
+            session.work_dir(),
+            &[run::SelectedRepo {
+                name: "acme/api".to_owned(),
+                path: PathBuf::from("repos/acme/api"),
+            }],
+        )
+        .expect("writes");
+
+        let Outcome::Targets(list) = session.execute(Command::ListTargets).await.expect("reads")
+        else {
+            panic!("ListTargets must yield a Targets outcome");
+        };
+        assert_eq!(list.targets.len(), 1);
+        let (path, count) = list.legacy_selection.expect("the selection is named");
+        assert_eq!(path, run::selection_path(session.work_dir()));
+        assert_eq!(count, 1);
     }
 
     /// The whole path against the real release host: a version that cannot

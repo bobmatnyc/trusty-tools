@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::clone::{CloneOptions, CloneState};
+use crate::registry::TargetKind;
 use crate::run::{RepoResult, RunStatus};
 use crate::session::{Command, NextStep, Outcome};
 
@@ -97,6 +98,20 @@ pub enum Verb {
         #[arg(long, value_name = "GB")]
         budget_gb: Option<u64>,
     },
+    /// Register an audit target, after checking it can be read.
+    Add {
+        /// What to register.
+        #[command(subcommand)]
+        target: AddTarget,
+    },
+    /// List the registered audit targets.
+    Targets,
+    /// Remove a registered audit target.
+    Remove {
+        /// The target, as owner/name or provider:key.
+        #[arg(value_name = "TARGET")]
+        target: String,
+    },
     /// Run the audit sweep over the selected repositories.
     Run,
     /// Assemble the unencrypted deliverable zip to send back.
@@ -108,6 +123,28 @@ pub enum Verb {
         /// this client writes outside the working directory.
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
+    },
+}
+
+/// What `taudit add` was asked to register.
+///
+/// Why: two verbs rather than one that guesses from the spelling. The operator
+/// has already said which kind they mean, and carrying that through is what
+/// makes `add repo jira:ACME` a refusal instead of a silently-registered board
+/// (#5822).
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum AddTarget {
+    /// A GitHub repository, checked with your `gh` credential.
+    Repo {
+        /// The repository, as owner/name.
+        #[arg(value_name = "OWNER/NAME")]
+        name: String,
+    },
+    /// A JIRA project or Linear team, checked with the configured credential.
+    Board {
+        /// The board, as jira:PROJECT-KEY or linear:TEAM-KEY.
+        #[arg(value_name = "PROVIDER:KEY")]
+        id: String,
     },
 }
 
@@ -151,6 +188,24 @@ impl Cli {
                         None => CloneOptions::default().budget_bytes,
                     },
                 },
+            },
+            // #5822: the verb decides the kind; `registry::parse` decides
+            // whether the spec is usable, because `to_command` cannot fail.
+            Some(Verb::Add {
+                target: AddTarget::Repo { name },
+            }) => Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: name.clone(),
+            },
+            Some(Verb::Add {
+                target: AddTarget::Board { id },
+            }) => Command::AddTarget {
+                kind: TargetKind::Board,
+                spec: id.clone(),
+            },
+            Some(Verb::Targets) => Command::ListTargets,
+            Some(Verb::Remove { target }) => Command::RemoveTarget {
+                spec: target.clone(),
             },
             Some(Verb::Run) => Command::Run,
             Some(Verb::Package { out }) => Command::Package {
@@ -400,6 +455,58 @@ pub fn render(outcome: &Outcome) -> String {
             }
             out
         }
+        // #5822: an idempotent re-add and a fresh registration are different
+        // facts, and an operator re-running `add` over a list needs to see
+        // which one happened rather than the same line twice.
+        Outcome::Registered(registration) => {
+            let verb = if registration.already_registered {
+                "already registered"
+            } else {
+                "registered"
+            };
+            format!(
+                "{verb}: {:<8} {}\n",
+                describe_kind(registration.target.kind()),
+                registration.target
+            )
+        }
+        Outcome::Targets(list) => {
+            let mut out = if list.targets.is_empty() {
+                "No targets registered yet — `trusty-audit add repo <owner>/<name>`.\n".to_string()
+            } else {
+                let mut out = format!(
+                    "{} registered:\n",
+                    count_of(list.targets.len(), "target", "targets")
+                );
+                for target in &list.targets {
+                    out.push_str(&format!(
+                        "  {:<8} {}\n",
+                        describe_kind(target.kind()),
+                        target
+                    ));
+                }
+                out
+            };
+            // The registry supersedes the selection file as the record of what
+            // this engagement targets, and the sweep still reads that file as
+            // the record of what is on disk. Printing only one of the two would
+            // read as though the other had been lost.
+            if let Some((path, count)) = &list.legacy_selection {
+                out.push_str(&format!(
+                    "\n{} on disk from a previous `clone`, which the sweep reads from {}.\n",
+                    count_of(*count, "repository", "repositories"),
+                    path.display()
+                ));
+            }
+            out
+        }
+        Outcome::Removed(removal) => {
+            if removal.was_registered {
+                format!("removed: {}\n", removal.target)
+            } else {
+                format!("{} was not registered — nothing changed.\n", removal.target)
+            }
+        }
         // #5499 closure condition 3: the recipient has to be able to find the
         // file. The path is the first and last line, and everything between is
         // what they can check before sending it.
@@ -445,6 +552,14 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// The column label for one target kind.
+fn describe_kind(kind: TargetKind) -> &'static str {
+    match kind {
+        TargetKind::Repo => "repo",
+        TargetKind::Board => "board",
+    }
+}
+
 /// `"1 repository"` / `"3 repositories"` — this text goes to the recipient.
 fn count_of(n: usize, singular: &str, plural: &str) -> String {
     format!("{n} {}", if n == 1 { singular } else { plural })
@@ -476,6 +591,7 @@ mod cli_tests {
     use crate::discover::DiscoveredRepo;
     use crate::manifest::AuditManifest;
     use crate::package::{PackagedFile, ReturnPackage};
+    use crate::registry::Target;
     use crate::session::EXIT_INCOMPLETE;
     use crate::session::{Session, WorkDirReport};
     use crate::tools::{InstalledTool, RequiredTool, ToolStatus};
@@ -496,6 +612,16 @@ mod cli_tests {
             Command::Repos => vec!["taudit", "repos"],
             Command::DiscoverRepos => vec!["taudit", "discover"],
             Command::CloneRepos { .. } => vec!["taudit", "clone", "acme/api"],
+            Command::AddTarget {
+                kind: TargetKind::Repo,
+                ..
+            } => vec!["taudit", "add", "repo", "acme/api"],
+            Command::AddTarget {
+                kind: TargetKind::Board,
+                ..
+            } => vec!["taudit", "add", "board", "jira:ACME"],
+            Command::ListTargets => vec!["taudit", "targets"],
+            Command::RemoveTarget { .. } => vec!["taudit", "remove", "acme/api"],
             Command::Run => vec!["taudit", "run"],
             Command::Package { .. } => vec!["taudit", "package"],
         }
@@ -517,6 +643,18 @@ mod cli_tests {
             Command::CloneRepos {
                 repos: vec!["acme/api".to_owned()],
                 options: CloneOptions::default(),
+            },
+            Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: "acme/api".to_owned(),
+            },
+            Command::AddTarget {
+                kind: TargetKind::Board,
+                spec: "jira:ACME".to_owned(),
+            },
+            Command::ListTargets,
+            Command::RemoveTarget {
+                spec: "acme/api".to_owned(),
             },
             Command::Run,
             Command::Package { destination: None },
@@ -926,6 +1064,105 @@ mod cli_tests {
             Command::Package {
                 destination: Some(PathBuf::from("/Users/x/Desktop/return.zip"))
             }
+        );
+    }
+
+    fn repo_target(name: &str) -> Target {
+        Target::Repo {
+            name_with_owner: name.to_owned(),
+        }
+    }
+
+    fn jira_target(key: &str) -> Target {
+        Target::Board {
+            provider: crate::registry::BoardProvider::Jira,
+            key: key.to_owned(),
+        }
+    }
+
+    /// The verb is what decides the kind, so a board spec typed after `repo`
+    /// reaches the library as a repo request and is refused there (#5822).
+    #[test]
+    fn the_add_verb_carries_the_kind_the_operator_typed() {
+        assert_eq!(
+            Cli::try_parse_from(["taudit", "add", "board", "linear:ENG"])
+                .expect("parses")
+                .to_command(),
+            Command::AddTarget {
+                kind: TargetKind::Board,
+                spec: "linear:ENG".to_owned(),
+            }
+        );
+        assert_eq!(
+            Cli::try_parse_from(["taudit", "add", "repo", "jira:ACME"])
+                .expect("parses")
+                .to_command(),
+            Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: "jira:ACME".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn adding_nothing_is_a_parse_error_rather_than_a_no_op_run() {
+        assert!(Cli::try_parse_from(["taudit", "add"]).is_err());
+        assert!(Cli::try_parse_from(["taudit", "add", "repo"]).is_err());
+        assert!(Cli::try_parse_from(["taudit", "remove"]).is_err());
+    }
+
+    /// An idempotent re-add must not read like a fresh registration.
+    #[test]
+    fn rendering_distinguishes_a_new_registration_from_a_repeat() {
+        let fresh = render(&Outcome::Registered(crate::registry::Registration {
+            target: repo_target("acme/api"),
+            already_registered: false,
+        }));
+        assert!(fresh.starts_with("registered:"), "{fresh}");
+        assert!(fresh.contains("acme/api"), "{fresh}");
+
+        let repeat = render(&Outcome::Registered(crate::registry::Registration {
+            target: jira_target("ACME"),
+            already_registered: true,
+        }));
+        assert!(repeat.starts_with("already registered:"), "{repeat}");
+        assert!(repeat.contains("jira:ACME"), "{repeat}");
+    }
+
+    /// The registry and the sweep's selection file are two records, and the
+    /// listing has to say so rather than leave one of them looking lost.
+    #[test]
+    fn rendering_a_target_list_names_both_records() {
+        let empty = render(&Outcome::Targets(crate::registry::TargetList {
+            targets: Vec::new(),
+            legacy_selection: None,
+        }));
+        assert!(empty.contains("No targets registered yet"), "{empty}");
+
+        let text = render(&Outcome::Targets(crate::registry::TargetList {
+            targets: vec![repo_target("acme/api"), jira_target("ACME")],
+            legacy_selection: Some((PathBuf::from("/w/state/selected-repos.toml"), 3)),
+        }));
+        assert!(text.contains("2 targets registered"), "{text}");
+        assert!(text.contains("repo     acme/api"), "{text}");
+        assert!(text.contains("board    jira:ACME"), "{text}");
+        assert!(text.contains("3 repositories on disk"), "{text}");
+        assert!(text.contains("selected-repos.toml"), "{text}");
+    }
+
+    #[test]
+    fn removing_something_unregistered_says_nothing_changed() {
+        let text = render(&Outcome::Removed(crate::registry::Removal {
+            target: repo_target("acme/web"),
+            was_registered: false,
+        }));
+        assert!(text.contains("was not registered"), "{text}");
+        assert_eq!(
+            render(&Outcome::Removed(crate::registry::Removal {
+                target: repo_target("acme/web"),
+                was_registered: true,
+            })),
+            "removed: acme/web\n"
         );
     }
 

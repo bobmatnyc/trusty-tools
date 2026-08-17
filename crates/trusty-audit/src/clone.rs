@@ -213,7 +213,11 @@ fn staging(work: &WorkDir, name_with_owner: &str) -> Result<PathBuf, AuditError>
 }
 
 /// Split and validate `owner/name`, the one place the charset is decided.
-fn split_name(name_with_owner: &str) -> Result<(&str, &str), AuditError> {
+///
+/// `pub(crate)` since #5822: registering a repository target validates the same
+/// identity before persisting it, and a second charset decision there would let
+/// `taudit add repo` accept a name `taudit clone` then refuses.
+pub(crate) fn split_name(name_with_owner: &str) -> Result<(&str, &str), AuditError> {
     let reject = || AuditError::InvalidRepoName {
         name: name_with_owner.to_string(),
     };
