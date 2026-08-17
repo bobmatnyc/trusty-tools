@@ -86,7 +86,7 @@ pub fn line_for(event: &ProgressEvent) -> String {
 /// What: inactive when the parent did not ask — [`StageRelay::bus`] is then
 /// `None`, every emit inside the sweep is a no-op, and no task is spawned.
 /// Test: `super::tests::relay_is_off_unless_the_parent_asks`,
-/// `super::tests::relay_writes_every_event_it_is_given`.
+/// `super::tests::relay_flushes_what_was_queued_before_it_stopped`.
 #[derive(Debug)]
 pub struct StageRelay {
     bus: Option<ProgressBus>,
@@ -148,7 +148,7 @@ impl StageRelay {
     /// What: sets the stop flag and awaits the task, which drains once more
     /// before returning. A task that panicked is ignored: progress is
     /// cosmetic and must not fail the run that produced it.
-    /// Test: `super::tests::relay_writes_every_event_it_is_given`.
+    /// Test: `super::tests::relay_flushes_what_was_queued_before_it_stopped`.
     pub async fn finish(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(task) = self.task.take() {
