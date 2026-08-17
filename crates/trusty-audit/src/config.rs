@@ -436,6 +436,67 @@ impl EngagementConfig {
     }
 }
 
+/// The TOML key holding the OpenRouter credential.
+///
+/// Named once so [`generate`] and the schema cannot drift apart.
+pub const OPENROUTER_KEY_FIELD: &str = "openrouter_key";
+
+/// Render an engagement config carrying `key`, from `template`.
+///
+/// Why: the INBOUND package (#5825) ships a generated `engagement.toml` with the
+/// credential in it, and that is deliberately hard to write. [`SecretKey`] has
+/// no `Serialize`, so no derive can produce this file and no future output
+/// artifact can produce it by accident. This is the one narrow path that does,
+/// and it lives here — beside the type whose invariant it steps around — so
+/// `git grep expose` finds it next to the crate's other two plaintext sites
+/// rather than buried in a packaging module.
+///
+/// Direction is the whole justification, and nothing here weakens the other
+/// direction. The inbound config travels TO the recipient and must carry the
+/// key; the outbound return package travels BACK and must not, which
+/// [`crate::package`]'s per-member scan and [`crate::error::AuditError::CredentialInPackage`]
+/// enforce unchanged. No `Serialize` impl is added, so the outbound path still
+/// cannot write a [`SecretKey`] even by accident. The two directions are two
+/// functions in two modules producing two types, not one function with a flag.
+///
+/// What: parses `template` as a TOML table, replaces [`OPENROUTER_KEY_FIELD`],
+/// and re-renders. Everything else survives verbatim — the pins, the board
+/// credentials, keys a newer generator added — so this is a substitution rather
+/// than a schema this function has to keep in step with. The result is parsed
+/// back through [`EngagementConfig::from_toml`], so a template that would
+/// produce an unloadable config fails HERE and not on the recipient's machine.
+///
+/// #5478 (the engagement-config generator) is unimplemented; when it lands it
+/// calls this rather than growing a second way to write the file.
+/// Test: `config_tests::the_generated_config_carries_the_supplied_key`,
+/// `config_tests::generating_a_config_that_would_not_load_fails_here`,
+/// `config_tests::generating_preserves_every_other_field`.
+///
+/// # Errors
+///
+/// [`AuditError::Parse`] when `template` is not TOML, or when the substituted
+/// result is not a loadable engagement config; [`AuditError::Render`] when the
+/// table cannot be re-serialized.
+pub fn generate(template: &str, key: &SecretKey, path: &Path) -> Result<String, AuditError> {
+    let mut table: toml::Table = toml::from_str(template).map_err(|source| AuditError::Parse {
+        path: path.to_path_buf(),
+        what: "engagement config template",
+        source: Box::new(source),
+    })?;
+    // #5825: the ONE site that writes the plaintext credential into a generated
+    // file. See this function's docs for why it is not a `Serialize` impl.
+    table.insert(
+        OPENROUTER_KEY_FIELD.to_owned(),
+        toml::Value::String(key.expose().to_owned()),
+    );
+    let rendered = toml::to_string_pretty(&table).map_err(|source| AuditError::Render {
+        what: "engagement config",
+        source: Box::new(source),
+    })?;
+    EngagementConfig::from_toml(&rendered, path)?;
+    Ok(rendered)
+}
+
 #[cfg(test)]
 mod config_tests {
     use super::*;
@@ -462,6 +523,82 @@ trusty-review = "0.15.1"
         assert_eq!(cfg.tools.tga.version(), "2.9.4");
         assert_eq!(cfg.tools.trusty_analyze.version(), "0.9.2");
         assert_eq!(cfg.tools.trusty_review.version(), "0.15.1");
+    }
+
+    #[test]
+    fn the_generated_config_carries_the_supplied_key() {
+        let key = SecretKey::new("sk-or-v1-per-engagement");
+        let text = generate(SAMPLE, &key, Path::new("engagement.toml")).expect("generates");
+
+        let loaded = EngagementConfig::from_toml(&text, Path::new("engagement.toml"))
+            .expect("the generated file loads on the recipient's machine");
+        assert_eq!(loaded.openrouter_key.expose(), "sk-or-v1-per-engagement");
+        assert!(!text.contains("sk-or-v1-not-a-real-key"), "{text}");
+    }
+
+    /// The substitution is one field wide: pins, labels, board credentials and
+    /// anything a newer generator added all survive verbatim.
+    #[test]
+    fn generating_preserves_every_other_field() {
+        // The scalars go BEFORE `[tools]`: appending them after a table header
+        // would nest them inside it. `generate` re-emits them in the order TOML
+        // requires regardless, which is why the round trip below is safe.
+        let source = format!(
+            "engagement = \"2026-Q3\"\nfuture_field = 7\n{SAMPLE}\
+             \n[models]\nreviewer = \"anthropic/claude-opus-4.8\"\n\
+             \n[boards.linear]\napi_key = \"lin_api_secret\"\n"
+        );
+        let text = generate(
+            &source,
+            &SecretKey::new("sk-or-v1-new"),
+            Path::new("engagement.toml"),
+        )
+        .expect("generates");
+
+        let loaded =
+            EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("loads");
+        assert_eq!(loaded.client.as_deref(), Some("Acme"));
+        assert_eq!(loaded.engagement.as_deref(), Some("2026-Q3"));
+        assert_eq!(loaded.tools.trusty_review.version(), "0.15.1");
+        assert_eq!(
+            loaded.models.reviewer.as_deref(),
+            Some("anthropic/claude-opus-4.8")
+        );
+        assert_eq!(
+            loaded
+                .boards
+                .linear
+                .as_ref()
+                .expect("linear survives")
+                .api_key
+                .expose(),
+            "lin_api_secret"
+        );
+        assert!(text.contains("future_field"), "{text}");
+    }
+
+    /// The generated file is validated HERE, so a template that would produce
+    /// an unloadable config never reaches a recipient's machine.
+    #[test]
+    fn generating_a_config_that_would_not_load_fails_here() {
+        // Pins two of the four required tools.
+        let broken = "instructions = \"x\"\n\n[tools]\ntga = \"2.9.4\"\n";
+        let error = generate(
+            broken,
+            &SecretKey::new("sk-or-v1-new"),
+            Path::new("engagement.toml"),
+        )
+        .expect_err("an unloadable config is not a deliverable");
+        assert!(matches!(error, AuditError::Parse { .. }), "{error}");
+
+        let not_toml = "this is not = = toml";
+        let error = generate(
+            not_toml,
+            &SecretKey::new("sk-or-v1-new"),
+            Path::new("engagement.toml"),
+        )
+        .expect_err("a template that is not TOML is refused");
+        assert!(matches!(error, AuditError::Parse { .. }), "{error}");
     }
 
     /// A model rename must be fixable in the engagement file, and a config that

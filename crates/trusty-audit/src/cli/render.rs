@@ -13,6 +13,7 @@
 
 use crate::chain::ChainReport;
 use crate::clone::CloneState;
+use crate::distribute::InstallPackage;
 use crate::registry::TargetKind;
 use crate::run::{RepoResult, RunStatus};
 use crate::session::{NextStep, Outcome};
@@ -223,7 +224,44 @@ pub fn render(outcome: &Outcome) -> String {
         // that renders it on its own, because a chained clone must not read
         // differently from a `taudit clone`.
         Outcome::Audit(report) => render_chain(report),
+        Outcome::Distributed(package) => render_install_package(package),
     }
+}
+
+/// The inbound install package, and the credential it carries.
+///
+/// Why: #5825. The auditor sends this file to a client, so the two things they
+/// cannot check without opening it — which platform it will run on, and which
+/// key it shipped — are stated here. Reading the key out of the zip to check it
+/// would mean reading a credential, so the line names the SOURCE, never the
+/// value.
+/// What: the path, the file count and size, the platform, one line per entry,
+/// and where the key came from.
+/// Test: `super::cli_tests::rendering_an_install_package_names_the_key_source`.
+fn render_install_package(package: &InstallPackage) -> String {
+    let mut out = format!("Install package: {}\n", package.path.display());
+    out.push_str(&format!(
+        "  {} in {}, for {}\n",
+        count_of(package.files.len(), "file", "files"),
+        human_bytes(package.packaged_bytes),
+        package.platform
+    ));
+    for file in &package.files {
+        out.push_str(&format!(
+            "  {:>10}  {}\n",
+            human_bytes(file.bytes),
+            file.entry
+        ));
+    }
+    // #5825: which key shipped is the one thing about this package the
+    // operator cannot check by opening it without reading a credential.
+    out.push_str(if package.key_from_environment {
+        "  credential: from OPENROUTER_API_KEY\n"
+    } else {
+        "  credential: from the template config\n"
+    });
+    out.push_str(&format!("\nSend this file: {}\n", package.path.display()));
+    out
 }
 
 /// The one-shot chain, phase by phase.

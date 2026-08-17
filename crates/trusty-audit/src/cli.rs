@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand};
 
 use crate::chain::ChainOptions;
 use crate::clone::CloneOptions;
+use crate::distribute::DistributeOptions;
 use crate::registry::TargetKind;
 use crate::run::RunOptions;
 use crate::session::{Command, Outcome};
@@ -158,6 +159,28 @@ pub enum Verb {
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
+    /// Build the install package to send a client (auditor-side).
+    ///
+    /// Writes one zip holding this binary, a launcher, an engagement.toml
+    /// carrying the OpenRouter key, and a README. The key comes from
+    /// OPENROUTER_API_KEY when it is set, and from --config otherwise — there is
+    /// deliberately no flag for it, because argv is visible to every process on
+    /// this machine and lands in your shell history.
+    ///
+    /// Refuses rather than overwriting a package that is already there.
+    Distribute {
+        /// Directory to write the package into (default: ~/duetto/audit).
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+
+        /// The taudit binary to ship (default: the one running).
+        ///
+        /// The default is right whenever you are packaging for a machine like
+        /// this one. Name a path to ship a binary built for the client's
+        /// platform instead.
+        #[arg(long, value_name = "FILE")]
+        binary: Option<PathBuf>,
+    },
 }
 
 /// What `taudit add` was asked to register.
@@ -254,6 +277,12 @@ impl Cli {
                 fresh: *fresh,
                 destination: out.clone(),
             }),
+            // #5825: the inbound package. A separate variant from `Package`
+            // because the two travel opposite ways — see `crate::distribute`.
+            Some(Verb::Distribute { out, binary }) => Command::Distribute(DistributeOptions {
+                output_dir: out.clone(),
+                binary: binary.clone(),
+            }),
         }
     }
 }
@@ -287,6 +316,7 @@ mod cli_tests {
     use super::*;
     use crate::clone::{CloneReport, CloneState, ClonedRepo};
     use crate::discover::DiscoveredRepo;
+    use crate::distribute::InstallPackage;
     use crate::manifest::AuditManifest;
     use crate::package::{PackagedFile, ReturnPackage};
     use crate::registry::Target;
@@ -324,6 +354,7 @@ mod cli_tests {
             Command::Run(_) => vec!["taudit", "run"],
             Command::Package { .. } => vec!["taudit", "package"],
             Command::Audit(_) => vec!["taudit", "audit"],
+            Command::Distribute(_) => vec!["taudit", "distribute"],
         }
     }
 
@@ -359,6 +390,7 @@ mod cli_tests {
             Command::Run(RunOptions::default()),
             Command::Package { destination: None },
             Command::Audit(ChainOptions::default()),
+            Command::Distribute(DistributeOptions::default()),
         ]
     }
 
@@ -802,6 +834,40 @@ mod cli_tests {
         assert!(text.contains("unencrypted"), "{text}");
         assert!(text.contains("extract/00-acme-api.db"), "{text}");
         assert!(text.contains("3.0 MiB"), "{text}");
+    }
+
+    /// #5825: the auditor cannot tell which key a built package carries without
+    /// reading a credential out of the zip, so the rendered text has to name the
+    /// SOURCE. Both sources render, and neither renders the value.
+    #[test]
+    fn rendering_an_install_package_names_the_key_source() {
+        let package = |key_from_environment: bool| InstallPackage {
+            path: PathBuf::from("/home/auditor/duetto/audit/trusty-audit-install.zip"),
+            files: vec![PackagedFile {
+                entry: "taudit".to_owned(),
+                source: None,
+                bytes: 12 * 1024 * 1024,
+            }],
+            total_bytes: 12 * 1024 * 1024,
+            packaged_bytes: 5 * 1024 * 1024,
+            platform: "macos-aarch64".to_owned(),
+            key_from_environment,
+        };
+
+        let from_env = render(&Outcome::Distributed(package(true)));
+        assert!(from_env.contains("Install package:"), "{from_env}");
+        assert!(from_env.contains("macos-aarch64"), "{from_env}");
+        assert!(from_env.contains("taudit"), "{from_env}");
+        assert!(
+            from_env.contains("credential: from OPENROUTER_API_KEY"),
+            "{from_env}"
+        );
+
+        let from_template = render(&Outcome::Distributed(package(false)));
+        assert!(
+            from_template.contains("credential: from the template config"),
+            "{from_template}"
+        );
     }
 
     /// A package covering four of five repositories is still worth sending and
