@@ -305,17 +305,13 @@ pub fn assemble(
         },
         progress,
     );
-    match &result {
-        Ok(_) => progress.operation_finished(Operation::Distribute, 4, 4),
-        Err(e) => {
-            progress.unit_finished(
-                Operation::Distribute,
-                BINARY_NAME,
-                UnitOutcome::Failed(e.to_string()),
-            );
-            progress.operation_finished(Operation::Distribute, 0, 4);
-        }
-    }
+    // #5825: the failing MEMBER is announced by the site that failed, inside
+    // `fill_archive`, because only that site knows which one it was. This used
+    // to report `BINARY_NAME` for every failure, so a README that could not be
+    // written surfaced as "taudit failed". A failure with no member in flight —
+    // creating the directory, finishing the archive, the rename — belongs to no
+    // unit and names none.
+    progress.operation_finished(Operation::Distribute, if result.is_ok() { 4 } else { 0 }, 4);
     let (files, packaged_bytes) = result?;
 
     Ok(InstallPackage {
@@ -384,10 +380,29 @@ fn write_archive(
     Ok((files, packaged_bytes))
 }
 
-type Archive = zip::ZipWriter<std::io::BufWriter<std::fs::File>>;
+/// Announce that `unit` is the member that failed, then hand the error back.
+///
+/// Why: #5825. [`assemble`] cannot name the failing member — by the time an
+/// error reaches it, which member was in flight is gone. So the site that fails
+/// says so, mirroring the [`UnitOutcome::Succeeded`] call that sits beside it.
+/// Test: `super::distribute_tests::a_failure_writing_a_member_names_that_member`,
+/// `super::distribute_tests::a_binary_that_cannot_be_read_names_the_binary`.
+fn failed_unit(progress: &Progress, unit: &str, error: AuditError) -> AuditError {
+    progress.unit_finished(
+        Operation::Distribute,
+        unit,
+        UnitOutcome::Failed(error.to_string()),
+    );
+    error
+}
 
 /// Write one zip entry's header.
-fn start(zip: &mut Archive, entry: &str, mode: u32, at: &Path) -> Result<(), AuditError> {
+fn start<W: std::io::Write + std::io::Seek>(
+    zip: &mut zip::ZipWriter<W>,
+    entry: &str,
+    mode: u32,
+    at: &Path,
+) -> Result<(), AuditError> {
     let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(mode);
@@ -413,12 +428,41 @@ fn fill_archive(
         path: temporary.to_path_buf(),
         source,
     })?;
-    let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
+    write_members(
+        std::io::BufWriter::new(file),
+        temporary,
+        binary,
+        members,
+        progress,
+    )
+}
+
+/// [`fill_archive`], with the archive's destination as an argument.
+///
+/// Why: #5825 — every per-member failure this writes a `Failed` for is an I/O
+/// error, and ENOSPC on the third member is not something a test can arrange
+/// through the filesystem. Taking the sink makes the mid-archive arm provable
+/// with a writer that fails on cue, the same shape as
+/// [`crate::run`]'s `sweep_with_env` taking the environment rather than
+/// reading it.
+/// Test: `super::distribute_tests::a_failure_writing_a_member_names_that_member`.
+fn write_members<W>(
+    sink: W,
+    temporary: &Path,
+    binary: &Path,
+    members: Members,
+    progress: &Progress,
+) -> Result<Vec<PackagedFile>, AuditError>
+where
+    W: std::io::Write + std::io::Seek,
+{
+    let mut zip = zip::ZipWriter::new(sink);
     let mut files = Vec::with_capacity(4);
 
     progress.unit_started(Operation::Distribute, BINARY_NAME, 1, 4);
     let entry = entry_path(BINARY_NAME);
-    let bytes = copy_binary(&mut zip, &entry, binary, temporary)?;
+    let bytes = copy_binary(&mut zip, &entry, binary, temporary)
+        .map_err(|e| failed_unit(progress, BINARY_NAME, e))?;
     files.push(PackagedFile {
         entry,
         source: Some(binary.to_path_buf()),
@@ -438,12 +482,17 @@ fn fill_archive(
     {
         progress.unit_started(Operation::Distribute, name, index + 2, 4);
         let entry = entry_path(name);
-        start(&mut zip, &entry, mode, temporary)?;
-        zip.write_all(text.as_bytes())
-            .map_err(|source| AuditError::Distribute {
-                path: temporary.to_path_buf(),
-                source,
-            })?;
+        start(&mut zip, &entry, mode, temporary).map_err(|e| failed_unit(progress, name, e))?;
+        zip.write_all(text.as_bytes()).map_err(|source| {
+            failed_unit(
+                progress,
+                name,
+                AuditError::Distribute {
+                    path: temporary.to_path_buf(),
+                    source,
+                },
+            )
+        })?;
         files.push(PackagedFile {
             entry,
             source: None,
@@ -468,8 +517,8 @@ fn entry_path(name: &str) -> String {
 ///
 /// Streamed rather than read whole: a debug-profile `taudit` runs to hundreds of
 /// megabytes, and holding it in memory to write it out again buys nothing.
-fn copy_binary(
-    zip: &mut Archive,
+fn copy_binary<W: std::io::Write + std::io::Seek>(
+    zip: &mut zip::ZipWriter<W>,
     entry: &str,
     source: &Path,
     temporary: &Path,
@@ -607,6 +656,7 @@ fn render_readme(config: &EngagementConfig, platform: &str, explicit_binary: boo
 #[cfg(test)]
 mod distribute_tests {
     use super::*;
+    use crate::progress::{ProgressUpdate, Recorder};
 
     const TEMPLATE: &str = r#"
 openrouter_key = "sk-or-v1-template-key"
@@ -698,6 +748,62 @@ trusty-review = "0.16.0"
         let mut text = String::new();
         member.read_to_string(&mut text).expect("member is text");
         text
+    }
+
+    /// Every unit the recorder saw finish, as `(member, "ok" | "failed")`.
+    fn unit_verdicts(recorder: &Recorder) -> Vec<(String, &'static str)> {
+        recorder
+            .updates()
+            .into_iter()
+            .filter_map(|u| match u {
+                ProgressUpdate::UnitFinished {
+                    target, outcome, ..
+                } => Some((target, outcome.label())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How the operation as a whole was reported to have ended.
+    fn operation_verdict(recorder: &Recorder) -> Option<(usize, usize)> {
+        recorder.updates().into_iter().find_map(|u| match u {
+            ProgressUpdate::OperationFinished {
+                succeeded, total, ..
+            } => Some((succeeded, total)),
+            _ => None,
+        })
+    }
+
+    /// A writer that refuses the moment `marker` appears in the bytes it is
+    /// handed.
+    ///
+    /// Why: every per-member failure inside [`write_members`] is an I/O error,
+    /// and ENOSPC on the third member is not something a filesystem fixture can
+    /// arrange. A zip's local file header carries the member's name in
+    /// plaintext, so refusing on that name puts the failure precisely inside
+    /// that member and nowhere else.
+    struct FailAtMember {
+        written: std::io::Cursor<Vec<u8>>,
+        marker: Vec<u8>,
+    }
+
+    impl std::io::Write for FailAtMember {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.windows(self.marker.len()).any(|w| w == self.marker) {
+                return Err(std::io::Error::other("no space left on device"));
+            }
+            self.written.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.written.flush()
+        }
+    }
+
+    impl std::io::Seek for FailAtMember {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.written.seek(to)
+        }
     }
 
     /// Every entry name in a written package, in order.
@@ -903,6 +1009,78 @@ trusty-review = "0.16.0"
             "a refused assembly left {:?} behind",
             fixture.out_entries()
         );
+    }
+
+    /// #5825: a failure mid-archive names the member that failed.
+    ///
+    /// The handler in [`assemble`] used to report [`BINARY_NAME`] for every
+    /// failure, so a README that could not be written surfaced to the operator
+    /// as "taudit failed" — pointing at the one member that had already
+    /// succeeded. Restoring that handler makes the last row of this assertion
+    /// read `("taudit", "failed")` while `taudit` is also still `ok`.
+    #[test]
+    fn a_failure_writing_a_member_names_that_member() {
+        let fixture = Fixture::new(TEMPLATE);
+        let (recorder, progress) = Recorder::new();
+
+        let error = write_members(
+            FailAtMember {
+                written: std::io::Cursor::new(Vec::new()),
+                marker: entry_path(README_NAME).into_bytes(),
+            },
+            &fixture.out.join("trusty-audit-install.zip.part"),
+            &fixture.binary,
+            Members {
+                config: "openrouter_key = \"sk-or-v1-x\"\n".to_owned(),
+                launcher: "#!/bin/sh\n".to_owned(),
+                readme: "# Audit client\n".to_owned(),
+            },
+            &progress,
+        )
+        .expect_err("the writer refused the README");
+        assert!(matches!(error, AuditError::Distribute { .. }), "{error}");
+
+        assert_eq!(
+            unit_verdicts(&recorder),
+            vec![
+                (BINARY_NAME.to_owned(), "ok"),
+                (LAUNCHER_NAME.to_owned(), "ok"),
+                (EngagementConfig::FILE_NAME.to_owned(), "ok"),
+                (README_NAME.to_owned(), "failed"),
+            ],
+        );
+    }
+
+    /// #5825: the binary's own failure still names the binary.
+    ///
+    /// The member the old handler always named is also a member that really can
+    /// fail, so naming it correctly is what makes the README case above a
+    /// distinction rather than a rename. The operation is reported as `0 of 4`
+    /// either way — a refused assembly produces no package, whichever member
+    /// stopped it.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_that_cannot_be_read_names_the_binary() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = Fixture::new(TEMPLATE);
+        std::fs::set_permissions(&fixture.binary, std::fs::Permissions::from_mode(0o000))
+            .expect("make the binary unreadable");
+        // Root reads a 0o000 file regardless. See
+        // `a_binary_that_cannot_be_read_leaves_no_partial_package`.
+        if std::fs::File::open(&fixture.binary).is_ok() {
+            return;
+        }
+        let (recorder, progress) = Recorder::new();
+
+        super::assemble(&fixture.template, &fixture.options(), None, &progress)
+            .expect_err("an unreadable binary cannot be packaged");
+
+        assert_eq!(
+            unit_verdicts(&recorder),
+            vec![(BINARY_NAME.to_owned(), "failed")],
+        );
+        assert_eq!(operation_verdict(&recorder), Some((0, 4)));
     }
 
     #[test]
