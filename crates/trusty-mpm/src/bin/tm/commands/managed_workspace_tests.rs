@@ -43,7 +43,7 @@ use trusty_mpm::daemon::managed_routes::inproject;
 use trusty_mpm::project::{Project, ProjectRegistry};
 use trusty_mpm::session_manager::ManagedSessionId;
 
-use super::{ManagedWorkspace, provision_for_fallback, provision_for_launch};
+use super::{LaunchDir, ManagedWorkspace, provision_for_fallback, provision_for_launch};
 
 /// RAII override of `TRUSTY_MPM_REPOS_ROOT`, restored on drop (incl. unwind).
 ///
@@ -223,9 +223,16 @@ async fn provision_for_launch_ignores_a_registered_worktree_true_project() {
     let live = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
 
-    let workspace = provision_for_launch(origin, &base, live.path(), false, &session_id)
-        .await
-        .unwrap();
+    let workspace = provision_for_launch(
+        origin,
+        &base,
+        live.path(),
+        false,
+        LaunchDir::OperatorCwd,
+        &session_id,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         workspace,
@@ -281,12 +288,19 @@ async fn provision_for_launch_without_a_request_uses_the_main_checkout() {
     init_git_repo(&base);
     let session_id = ManagedSessionId::new();
 
-    let workspace = provision_for_launch(origin, &base, &base, false, &session_id)
-        .await
-        .expect(
-            "no worktree request must not attempt a clone at all — a clone error \
+    let workspace = provision_for_launch(
+        origin,
+        &base,
+        &base,
+        false,
+        LaunchDir::OperatorCwd,
+        &session_id,
+    )
+    .await
+    .expect(
+        "no worktree request must not attempt a clone at all — a clone error \
              here means the request was never consulted",
-        );
+    );
 
     assert_eq!(
         workspace,
@@ -326,9 +340,16 @@ async fn provision_for_launch_redirects_an_unmanaged_launch_to_the_managed_check
     init_git_repo(unmanaged.path());
     let session_id = ManagedSessionId::new();
 
-    let workspace = provision_for_launch(origin, &base, unmanaged.path(), false, &session_id)
-        .await
-        .expect("the managed checkout already exists, so the redirect reuses it");
+    let workspace = provision_for_launch(
+        origin,
+        &base,
+        unmanaged.path(),
+        false,
+        LaunchDir::OperatorCwd,
+        &session_id,
+    )
+    .await
+    .expect("the managed checkout already exists, so the redirect reuses it");
 
     assert_eq!(
         workspace,
@@ -369,9 +390,16 @@ async fn provision_for_launch_explicit_request_creates_worktree() {
     let live = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
 
-    let workspace = provision_for_launch(origin, &base, live.path(), true, &session_id)
-        .await
-        .unwrap();
+    let workspace = provision_for_launch(
+        origin,
+        &base,
+        live.path(),
+        true,
+        LaunchDir::OperatorCwd,
+        &session_id,
+    )
+    .await
+    .unwrap();
 
     let expected = expected_worktree(&base, &session_id);
     assert_eq!(
@@ -422,9 +450,16 @@ async fn provision_for_launch_from_subdirectory_targets_repo_root() {
     std::fs::create_dir_all(&subdir).unwrap();
     let session_id = ManagedSessionId::new();
 
-    let workspace = provision_for_launch(origin, &base, &subdir, false, &session_id)
-        .await
-        .expect("no worktree request must not attempt a clone at all");
+    let workspace = provision_for_launch(
+        origin,
+        &base,
+        &subdir,
+        false,
+        LaunchDir::OperatorCwd,
+        &session_id,
+    )
+    .await
+    .expect("no worktree request must not attempt a clone at all");
 
     assert_eq!(
         workspace,
@@ -445,6 +480,57 @@ async fn provision_for_launch_from_subdirectory_targets_repo_root() {
         !expected_worktree(&base, &session_id).exists(),
         "no worktree may be created without an explicit request"
     );
+}
+
+/// A caller that already resolved placement keeps it — no redirect, no clone
+/// (#5836).
+///
+/// Why: the redirect above is right for an operator's cwd and wrong for every
+/// other caller. The guided fallback and `tm run` hand `launch()` a directory
+/// they resolved themselves; re-resolving it moved the session somewhere else
+/// and, when the managed checkout did not exist yet, started a clone the caller
+/// had already decided against.
+/// What: passes a directory that is NOT the managed checkout together with
+/// `LaunchDir::CallerResolved`, against a base path that does not exist and an
+/// unresolvable `.invalid` origin — so a clone attempt is both visible (the base
+/// dir appears) and fatal (it fails). Asserts the passed directory comes back
+/// and nothing was provisioned.
+/// Test: itself. RED at 34da769f — `resolve_placement_at` ran, `ensure_base_clone`
+/// tried to clone `.invalid`, and the call returned `Err`.
+#[tokio::test]
+async fn provision_for_launch_keeps_a_caller_resolved_placement() {
+    let origin = "https://github.invalid/fixture-owner/resolved-repo";
+
+    let repos_root = tempfile::tempdir().unwrap();
+    let base = repos_root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("fixture-owner")
+        .join("resolved-repo");
+    // Deliberately NOT created: a redirect would have to clone it.
+    let resolved = tempfile::tempdir().unwrap();
+    let resolved_root = resolved.path().canonicalize().unwrap();
+    init_git_repo(&resolved_root);
+    let session_id = ManagedSessionId::new();
+
+    let workspace = provision_for_launch(
+        origin,
+        &base,
+        &resolved_root,
+        false,
+        LaunchDir::CallerResolved,
+        &session_id,
+    )
+    .await
+    .expect("a caller-resolved placement must not attempt a clone at all");
+
+    assert_eq!(
+        workspace,
+        ManagedWorkspace::MainCheckout(resolved_root.clone()),
+        "the caller's placement must survive `provision_for_launch`"
+    );
+    assert_nothing_provisioned(&base);
 }
 
 // ── Path (b): the daemon-unreachable bare-`tm` fallback ─────────────────────
