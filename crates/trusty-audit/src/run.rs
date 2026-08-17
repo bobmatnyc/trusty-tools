@@ -65,7 +65,7 @@ use crate::config::{EngagementConfig, ToolPins};
 use crate::error::AuditError;
 use crate::inference;
 use crate::progress::{Operation, Progress, StageEvent, StageState, UnitOutcome};
-use crate::relay::tee_and_relay;
+use crate::relay::{Scrubber, tee_and_relay};
 use crate::tools::{self, RequiredTool};
 use crate::workdir::{Area, WorkDir};
 
@@ -463,6 +463,10 @@ where
     // every repository, so failing per-repo would just repeat one misconfiguration.
     let inference = inference::inference_env(config, operator)?;
     let selected = load_selection(work)?;
+    // #5869: materialized once for the whole sweep — resolving reads
+    // `.env.local` and opens the secure store, which is not a per-child cost,
+    // let alone a per-line one.
+    let scrubber = child_output_scrubber(config);
     // #5494: decided once, against the whole selection, so a repository's fate
     // does not depend on a record another repository's child rewrote meanwhile.
     let plan = checkpoint::plan(work, &selected, options.fresh)?;
@@ -484,6 +488,7 @@ where
                 announce_recollection(&repo.name, &why, progress);
                 run_one(
                     work, config, &binaries, &inference, index, repo, budget, progress, total,
+                    &scrubber,
                 )
                 .await?
             }
@@ -502,6 +507,30 @@ where
     );
     checkpoint::write_progress(work, &RunProgress::finished(&report))?;
     Ok(report)
+}
+
+/// Every credential this process can name, for stripping out of a child's log.
+///
+/// Why: #5869. The `tga audit` child is handed the engagement's OpenRouter key
+/// and spawns `trusty-review` with it, so any of them can echo it into the log —
+/// and the log is both what a human opens to diagnose a failure and what the
+/// planned guided-help path would excerpt into a prompt body sent to OpenRouter.
+/// The needle set is deliberately WIDER than the one key this crate hands over:
+/// a `gh` token embedded in a git remote URL is a different credential from a
+/// different source, and scrubbing only what we passed would miss it.
+/// What: the registry-wide resolved set from
+/// [`trusty_common::credentials::resolved_secret_values`] — the shared entry
+/// point, so a credential added there is scrubbed without this changing — plus
+/// the engagement key, which comes from the config file rather than the
+/// environment and so is not in that set.
+///
+/// This removes only values this process already holds; see [`crate::relay`]
+/// for what that leaves behind.
+/// Test: `super::run_tests::a_child_that_echoes_the_key_does_not_leave_it_in_the_log`.
+fn child_output_scrubber(config: &EngagementConfig) -> Scrubber {
+    let mut secrets = trusty_common::credentials::resolved_secret_values();
+    secrets.push(config.openrouter_key.expose().to_owned());
+    Scrubber::over(secrets)
 }
 
 /// The entries whose fate this run has settled, in selection order.
@@ -566,6 +595,7 @@ async fn run_one(
     budget: std::time::Duration,
     progress: &Progress,
     total: usize,
+    scrubber: &Scrubber,
 ) -> Result<RepoRun, AuditError> {
     let stem = stem(index, &repo.name);
     let output = work.path(Area::Output).join(&stem);
@@ -588,6 +618,7 @@ async fn run_one(
                 budget,
                 progress,
                 &repo.name,
+                scrubber,
             )
             .await?
             {
@@ -711,6 +742,11 @@ pub const PER_REPO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// progress lines the child writes on stderr additionally reach `progress`. The
 /// log is unchanged as a record; what changed is that it is no longer the only
 /// place the output goes.
+///
+/// #5869: `scrubber` filters both streams on the way to the log, because the
+/// credential this function puts in the child's environment can come back out
+/// of it — a provider's 401 body, a `git` remote URL in a clone failure. See
+/// [`crate::relay`] for what that filtering can and cannot promise.
 #[allow(clippy::too_many_arguments)]
 async fn spawn_tga(
     binaries: &PinnedBinaries,
@@ -723,6 +759,7 @@ async fn spawn_tga(
     budget: std::time::Duration,
     progress: &Progress,
     target: &str,
+    scrubber: &Scrubber,
 ) -> Result<RepoResult, AuditError> {
     let file = std::fs::File::create(log).map_err(|source| AuditError::WorkDir {
         path: log.to_path_buf(),
@@ -787,6 +824,7 @@ async fn spawn_tga(
             tokio::fs::File::from_std(file),
             progress.clone(),
             target.to_owned(),
+            scrubber.clone(),
         )));
     }
     if let Some(stream) = child.stderr.take() {
@@ -795,6 +833,7 @@ async fn spawn_tga(
             tokio::fs::File::from_std(errors),
             progress.clone(),
             target.to_owned(),
+            scrubber.clone(),
         )));
     }
 
