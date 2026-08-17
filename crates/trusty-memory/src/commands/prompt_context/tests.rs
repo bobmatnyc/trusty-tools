@@ -84,8 +84,11 @@ fn filter_drawers_by_deny_tags_handles_edge_cases() {
 /// Why (issue #134): KG triples should only surface when one of their
 /// endpoints actually appears in the user's prompt; otherwise the
 /// injection just dumps random graph noise.
-/// What: build a small set of triples; query a prompt that mentions
-/// only one subject; assert exactly the matching triple comes back.
+/// What: build a small set of hot-predicate triples; query a prompt that
+/// mentions only one subject; assert exactly the matching triple comes back.
+/// #5819 changed the fixture's predicates from `is-a` to hot ones so this test
+/// keeps covering the *overlap* rule rather than silently passing because the
+/// predicate gate rejected everything.
 /// Test: itself.
 #[test]
 fn select_relevant_triples_filters_by_prompt_overlap() {
@@ -98,12 +101,12 @@ fn select_relevant_triples_filters_by_prompt_overlap() {
         },
         RawTriple {
             subject: "python".into(),
-            predicate: "is-a".into(),
+            predicate: "is_fact".into(),
             object: "language".into(),
         },
         RawTriple {
             subject: "rust".into(),
-            predicate: "is-a".into(),
+            predicate: "is_fact".into(),
             object: "language".into(),
         },
     ];
@@ -114,6 +117,87 @@ fn select_relevant_triples_filters_by_prompt_overlap() {
     // Empty / no-overlap prompt → no triples.
     let none = select_relevant_triples(&triples, "weather forecast next week", 5);
     assert!(none.is_empty());
+}
+
+/// Why (#5819, ADR-0028 D7): the selector judged only whether a triple's
+/// endpoints appeared in the prompt, never whether the triple asserted
+/// knowledge. Storage plumbing reached the model under a "Relevant KG facts"
+/// heading — the three shapes below are verbatim from real injected output.
+/// What: builds one triple of each observed noise shape plus one genuine hot
+/// triple, uses a prompt that overlaps ALL of them so the overlap rule cannot
+/// be what excludes anything, and asserts only the hot triple survives.
+/// Test: itself. Fails against the pre-#5819 selector, which returns all four.
+#[test]
+fn select_relevant_triples_drops_structural_predicates() {
+    use filter::{select_relevant_triples, RawTriple};
+    let triples = vec![
+        RawTriple {
+            subject: "tag:worktree".into(),
+            predicate: "tags".into(),
+            object: "drawer:58141829-0918-4198-a274-307c49b5a671".into(),
+        },
+        RawTriple {
+            subject: "room:General".into(),
+            predicate: "contains".into(),
+            object: "drawer:3887130b-2630-429f-a440-979acea9edb5".into(),
+        },
+        RawTriple {
+            subject: "topic:12fbc5c8f19b4c32bb4641d2e42c0b93ca385086".into(),
+            predicate: "mentioned-in".into(),
+            object: "drawer:3887130b-2630-429f-a440-979acea9edb5".into(),
+        },
+        RawTriple {
+            subject: "worktree".into(),
+            predicate: "has_convention".into(),
+            object: "one worktree per reviewable PR outcome".into(),
+        },
+    ];
+    // Every subject or object above overlaps at least one word here.
+    let prompt = "worktree general topic 12fbc5c8f19b4c32bb4641d2e42c0b93ca385086 drawer";
+    let chosen = select_relevant_triples(&triples, prompt, 20);
+    assert_eq!(
+        chosen.len(),
+        1,
+        "only the has_convention triple asserts knowledge; got: {chosen:?}"
+    );
+    assert_eq!(chosen[0].predicate, "has_convention");
+}
+
+/// Why (#5819): the specific line the owner cited —
+/// `tag:creator:client=trusty-memory-mcp **tags** drawer:58141829-…` — is
+/// write-path provenance rendered to the model as a fact. This pins that exact
+/// shape rather than the general rule, so a future change that reintroduces
+/// structural predicates for some other reason still cannot reintroduce this
+/// one silently.
+/// What: composes the three `creator:*` triple shapes stamped on every drawer
+/// and asserts none is selected, with a prompt that overlaps them.
+/// Test: itself. Fails against the pre-#5819 selector.
+#[test]
+fn select_relevant_triples_drops_creator_provenance_triples() {
+    use filter::{select_relevant_triples, RawTriple};
+    let drawer = "drawer:58141829-0918-4198-a274-307c49b5a671";
+    let triples: Vec<RawTriple> = [
+        "tag:creator:client=trusty-memory-mcp",
+        "tag:creator:source=mcp",
+        "tag:creator:version=0.23.1",
+        "tag:creator:cwd=/users/bob/duetto/cto",
+    ]
+    .iter()
+    .map(|s| RawTriple {
+        subject: (*s).into(),
+        predicate: "tags".into(),
+        object: drawer.into(),
+    })
+    .collect();
+    let chosen = select_relevant_triples(
+        &triples,
+        "who was the creator client mcp version cwd for this drawer",
+        20,
+    );
+    assert!(
+        chosen.is_empty(),
+        "creator provenance is never a KG fact; got: {chosen:?}"
+    );
 }
 
 /// Why: the injection has a hard 4 KB byte ceiling so a runaway palace
@@ -294,34 +378,423 @@ fn compose_injection_announces_withheld_drawers() {
     );
 }
 
-/// Why (issue #5037, requirement 4 — the case the ruling calls out): returning
-/// zero drawers where five noisy ones used to appear is correct, but only if it
-/// is visible. Silence must be distinguishable from nothing-existed.
+/// Why (#5819, superseding #5037 requirement 4 for the total-silence case):
+/// #5037 announced an all-withheld recall so the reader could tell it apart
+/// from an empty palace. That sentence rendered on every prompt with no good
+/// match — most prompts — and spent ~200 bytes per turn to report having
+/// nothing to say. The owner's ruling is that emitting nothing costs nothing.
+/// This test is the inversion of `compose_injection_announces_total_silence`,
+/// which it replaces: the same two inputs, the opposite expectation.
 /// What: composes with zero kept and five withheld, then with zero of both.
-/// Asserts the first announces itself and the second stays silent — an empty
-/// palace has nothing to announce.
-/// Test: itself.
+/// Asserts BOTH render as an empty injection, and that no fragment of the
+/// retired notice survives anywhere.
+/// Test: itself. Fails against the pre-#5819 composer, which returns ~200
+/// bytes for the first case.
 #[test]
-fn compose_injection_announces_total_silence() {
+fn compose_injection_is_silent_when_everything_was_withheld() {
     use format::compose_injection;
     let silenced = compose_injection(None, &[], 5, &[], Some("alpha"));
     assert!(
-        !silenced.is_empty(),
-        "an all-withheld recall must not render as an empty injection"
-    );
-    assert!(
-        silenced.contains("cleared the relevance floor") && silenced.contains('5'),
-        "total silence must be announced with its count; got:\n{silenced}"
-    );
-    assert!(
-        silenced.contains("Nothing is missing from the palace"),
-        "the notice must distinguish withheld from absent; got:\n{silenced}"
+        silenced.is_empty(),
+        "an all-withheld recall must emit nothing at all; got {} bytes:\n{silenced}",
+        silenced.len()
     );
 
     let nothing_existed = compose_injection(None, &[], 0, &[], Some("alpha"));
     assert!(
         nothing_existed.is_empty(),
-        "zero candidates is not a withheld recall; got:\n{nothing_existed}"
+        "zero candidates must emit nothing; got:\n{nothing_existed}"
+    );
+
+    // The retired wording must not reappear behind some other branch.
+    for probe in [
+        compose_injection(None, &[], 1, &[], Some("alpha")),
+        compose_injection(None, &[], 99, &[], None),
+    ] {
+        assert!(
+            !probe.contains("cleared the relevance floor"),
+            "the total-silence notice is retired; got:\n{probe}"
+        );
+    }
+}
+
+/// Why (#5819, ADR-0028 D7): the KG section had no length control beyond the
+/// triple count, and a triple's rendered width is unbounded. D7 allocates it
+/// 256 bytes.
+/// What: hands the composer ten hot triples whose rendered lines total well
+/// past the cap, and asserts the emitted section stays inside it while still
+/// carrying at least one fact.
+/// Test: itself. Fails against the pre-#5819 composer, which renders all ten.
+#[test]
+fn compose_injection_caps_kg_section_bytes() {
+    use filter::RawTriple;
+    use format::{compose_injection, KG_SECTION_BYTE_CAP};
+    let triples: Vec<RawTriple> = (0..10)
+        .map(|i| RawTriple {
+            subject: format!("subject-with-a-long-name-{i}"),
+            predicate: "has_convention".into(),
+            object: format!("an object string long enough to matter, number {i}"),
+        })
+        .collect();
+    let out = compose_injection(None, &[], 0, &triples, Some("alpha"));
+    assert!(
+        out.len() <= KG_SECTION_BYTE_CAP,
+        "KG section must stay within {KG_SECTION_BYTE_CAP} bytes, got {}:\n{out}",
+        out.len()
+    );
+    assert!(
+        out.contains("subject-with-a-long-name-0"),
+        "the cap must trim the tail, not suppress the section; got:\n{out}"
+    );
+}
+
+/// Why (#5819): a drawer tagged `creator:cwd=/Users/bob/Duetto/cto` — a note
+/// about a different repository — was recalled into `trusty-tools` sessions
+/// turn after turn. The drawer lives in this palace, so palace resolution
+/// cannot exclude it; its own provenance tag is the only signal.
+/// What: three drawers — one from another repo, one untagged, one from a
+/// subdirectory of the session root — filtered against a session root. Asserts
+/// only the foreign one is dropped.
+/// Test: itself. Fails against the pre-#5819 pipeline, which has no such
+/// filter and returns all three.
+#[test]
+fn project_scope_drops_foreign_cwd_drawer() {
+    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    let mk = |name: &str, tags: Vec<String>| RecalledDrawer {
+        content: name.to_string(),
+        tags,
+        layer: Some(2),
+        score: Some(0.7),
+    };
+    let drawers = vec![
+        mk(
+            "duetto",
+            vec!["creator:cwd=/Users/bob/Duetto/cto".to_string()],
+        ),
+        mk("untagged", vec!["worktree".to_string()]),
+        mk(
+            "in-tree",
+            vec!["creator:cwd=/users/bob/proj/trusty-tools/crates/trusty-memory".to_string()],
+        ),
+    ];
+    let out = filter_drawers_by_project_scope(drawers, Some("/users/bob/proj/trusty-tools"));
+    let names: Vec<&str> = out.kept.iter().map(|d| d.content.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["untagged", "in-tree"],
+        "only the other repository's drawer may be dropped"
+    );
+    assert_eq!(out.dropped, 1, "the drop must be counted, not silent");
+}
+
+/// Run one git command inside `dir` and fail the test with git's own stderr.
+///
+/// Why (#5819): the fixtures below need repositories git will actually answer
+/// for, and a silently-failing `git init` would leave a fixture that proves the
+/// opposite of what its test claims.
+/// What: runs `git -C <dir> <args>` with identity and signing pinned per
+/// invocation so the runner's global config cannot fail the commit, then
+/// asserts a zero exit.
+/// Test: used by `session_project_root_resolves_a_worktree_to_its_main_checkout`
+/// and `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`.
+fn git_in(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .expect("git must be on PATH for these fixtures");
+    assert!(
+        out.status.success(),
+        "git {args:?} in {} failed: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Create a git repository at `dir` carrying one empty commit.
+///
+/// Why: `git worktree add` needs a HEAD, and `rev-parse --show-toplevel` needs
+/// a real repository — a hand-made `.git` directory answers neither.
+/// What: creates `dir`, runs `git init`, and commits `--allow-empty`.
+/// Test: used by `session_project_root_resolves_a_worktree_to_its_main_checkout`
+/// and `project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate`.
+fn init_test_repo(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).expect("mkdir repo");
+    git_in(dir, &["init", "-q"]);
+    git_in(dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+}
+
+/// Why (#5819): the session root feeding the project-scope filter is resolved
+/// from the stdin `cwd`, and a dispatched agent's cwd is almost always a
+/// worktree. `git rev-parse --show-toplevel` answers a linked worktree with the
+/// worktree itself, which would make every drawer written from the main checkout
+/// look foreign — the filter would delete more real content than the leak it
+/// exists to stop. `--git-common-dir` is the probe that does not have that
+/// property, and this asserts the resolver uses it.
+/// What: creates a real repository, adds a real `git worktree` under
+/// `.claude/worktrees/`, asserts git wrote the `.git` FILE that makes the
+/// worktree its own toplevel, and asserts the resolved root is the checkout
+/// anyway.
+/// Test: itself. Fails against any resolver keyed on `--show-toplevel` or on
+/// `find_project_root`'s marker walk, both of which stop at the worktree.
+#[test]
+fn session_project_root_resolves_a_worktree_to_its_main_checkout() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("trusty-tools");
+    init_test_repo(&root);
+    let worktree = root.join(".claude/worktrees/agent-abc123");
+    git_in(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-abc123",
+            &worktree.to_string_lossy(),
+        ],
+    );
+    // Production takes this path: git marks a linked worktree with a `.git`
+    // FILE, and answers `--show-toplevel` from inside it with the worktree.
+    assert!(
+        worktree.join(".git").is_file(),
+        "fixture must reproduce git's linked-worktree `.git` file"
+    );
+
+    let payload = serde_json::json!({ "cwd": worktree.to_string_lossy() }).to_string();
+    let resolved = resolve_session_project_root(&payload).expect("root resolves");
+
+    let expected = filter::normalise_project_path(
+        &std::fs::canonicalize(&root)
+            .expect("canonicalize root")
+            .to_string_lossy(),
+    );
+    assert_eq!(
+        resolved, expected,
+        "a worktree cwd must resolve to the checkout that owns it"
+    );
+}
+
+/// Why (#5819): the filter's own contract is that it fails OPEN, and it did the
+/// opposite in the commonest shape there is. The session root came from a marker
+/// walk that counts `Cargo.toml` and stops at the first hit, so a session
+/// working inside `crates/trusty-memory` resolved its root to that crate while
+/// `cwd_palace_slug_at` resolved the palace to the workspace. Recall then ran
+/// against the right palace and this filter discarded every drawer written from
+/// the repo root or a sibling crate — no count, no log line.
+/// What: builds a real repository laid out as a Cargo workspace, resolves the
+/// session root from a payload whose `cwd` is the crate directory, and asserts a
+/// repo-root writer and a sibling-crate writer both survive while a genuinely
+/// foreign repository is still dropped. The drawer cwds are the uncanonicalised
+/// temp paths, so this also covers the symlink rescue — macOS hands out
+/// `/var/folders/…` for a `/private/var/folders/…` tree.
+/// Test: itself. Fails against `0f24dbe65`, where both in-tree writers are
+/// dropped.
+#[test]
+fn project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate() {
+    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("trusty-tools");
+    init_test_repo(&repo);
+    let crate_dir = repo.join("crates/trusty-memory");
+    let sibling_crate = repo.join("crates/trusty-search");
+    let foreign = tmp.path().join("some-other-repo");
+    for d in [&crate_dir, &sibling_crate, &foreign] {
+        std::fs::create_dir_all(d).expect("mkdir");
+    }
+    // The marker that used to truncate the session root to the crate.
+    std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").expect("workspace manifest");
+    std::fs::write(crate_dir.join("Cargo.toml"), "[package]\n").expect("crate manifest");
+
+    let payload = serde_json::json!({ "cwd": crate_dir.to_string_lossy() }).to_string();
+    let root = resolve_session_project_root(&payload).expect("session root resolves");
+
+    let mk = |dir: &std::path::Path| {
+        let cwd = dir.to_string_lossy().to_string();
+        RecalledDrawer {
+            content: cwd.clone(),
+            tags: vec![format!("creator:cwd={cwd}")],
+            layer: Some(2),
+            score: Some(0.7),
+        }
+    };
+    let out = filter_drawers_by_project_scope(
+        vec![mk(&repo), mk(&sibling_crate), mk(&foreign)],
+        Some(&root),
+    );
+    let names: Vec<&str> = out.kept.iter().map(|d| d.content.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            repo.to_string_lossy().as_ref(),
+            sibling_crate.to_string_lossy().as_ref()
+        ],
+        "a session inside one crate must keep the repo root and its sibling crates; \
+         session root resolved to {root}"
+    );
+}
+
+/// Why (#5819): the containment test is a path test, not a string prefix — a
+/// sibling checkout named `trusty-tools-fork` must not read as inside
+/// `trusty-tools`. The filter must also fail open on the three inputs it cannot
+/// judge: no session root, no `creator:cwd` tag, an empty one.
+/// What: asserts a worktree writer, a nested-subdirectory writer, and a writer
+/// recorded with a trailing slash and mixed case all survive; that the
+/// name-prefix sibling does not; and that each fail-open input keeps its drawer.
+/// Test: itself. The worktree writer here is kept by plain containment — it sits
+/// under the root. Worktree identity on the SESSION side is
+/// `session_project_root_resolves_a_worktree_to_its_main_checkout`.
+#[test]
+fn project_scope_keeps_in_tree_writers_and_drops_prefix_siblings() {
+    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    let root = "/users/bob/proj/trusty-tools";
+    let mk = |cwd: &str| RecalledDrawer {
+        content: cwd.to_string(),
+        tags: vec![format!("creator:cwd={cwd}")],
+        layer: Some(2),
+        score: Some(0.7),
+    };
+    let worktree = format!("{root}/.claude/worktrees/agent-abc123");
+    let nested = format!("{root}/crates/trusty-memory/src");
+    let shouty = "/Users/Bob/Proj/Trusty-Tools/crates/";
+    let sibling = "/users/bob/proj/trusty-tools-fork";
+
+    let out = filter_drawers_by_project_scope(
+        vec![mk(&worktree), mk(&nested), mk(shouty), mk(sibling)],
+        Some(root),
+    );
+    let names: Vec<&str> = out.kept.iter().map(|d| d.content.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![worktree.as_str(), nested.as_str(), shouty],
+        "worktrees, subdirectories, and case/slash variants are this project; \
+         a name-prefix sibling is not"
+    );
+
+    // The three fail-open inputs.
+    let untagged = RecalledDrawer {
+        content: "untagged".into(),
+        tags: vec!["worktree".into()],
+        layer: Some(2),
+        score: Some(0.7),
+    };
+    let empty_cwd = mk("   ");
+    let open = filter_drawers_by_project_scope(vec![untagged, empty_cwd], Some(root));
+    assert_eq!(
+        open.kept.len(),
+        2,
+        "a drawer with no recorded cwd, or an empty one, is unjudgeable and stays"
+    );
+    assert_eq!(open.dropped, 0);
+    let no_root = filter_drawers_by_project_scope(vec![mk(sibling)], None);
+    assert_eq!(
+        no_root.kept.len(),
+        1,
+        "an unresolvable session root disables the filter rather than dropping content"
+    );
+    assert_eq!(
+        no_root.dropped, 0,
+        "the disabled filter must report a zero drop, not an unreported one"
+    );
+}
+
+/// Why (#5819): two fail-closed defects shipped through this filter unnoticed
+/// because it dropped drawers silently. The relevance floor beside it has always
+/// reported `withheld`; the operator had no equivalent number here, so recall
+/// degrading to only the untagged drawers looked like an empty palace.
+/// What: filters four drawers against a root two of them sit outside, and
+/// asserts both halves of the pair — a drop count with no denominator does not
+/// say whether the drop is expected.
+/// Test: itself. Fails against `0ac9e1f4`, where the filter returns a bare
+/// `Vec` and no count exists to assert.
+#[test]
+fn project_scope_counts_what_it_drops() {
+    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    let root = "/users/bob/proj/trusty-tools";
+    let mk = |cwd: &str| RecalledDrawer {
+        content: cwd.to_string(),
+        tags: vec![format!("creator:cwd={cwd}")],
+        layer: Some(2),
+        score: Some(0.7),
+    };
+    let out = filter_drawers_by_project_scope(
+        vec![
+            mk(root),
+            mk("/users/bob/proj/trusty-tools/crates/trusty-memory"),
+            mk("/users/bob/duetto/cto"),
+            mk("/users/bob/proj/some-other-repo"),
+        ],
+        Some(root),
+    );
+    assert_eq!((out.kept.len(), out.dropped), (2, 2));
+}
+
+/// Why (#5819): inside a submodule — or any repo created with
+/// `--separate-git-dir` — `git rev-parse --git-common-dir` is
+/// `<outer>/.git/modules/<name>`, so the parent the resolver used to trust is
+/// `<outer>/.git/modules`. That is not a working tree, so no drawer's recorded
+/// cwd can sit inside it: every provenance-tagged drawer failed the containment
+/// test, then canonicalised successfully (the internals directory exists) and
+/// failed it again, and was dropped. Untagged drawers survived, so recall
+/// degraded instead of emptying.
+/// What: builds the `.git`-file structure a submodule produces, resolves the
+/// session root from a payload whose `cwd` is the child checkout, asserts the
+/// resolver declines rather than naming the internals directory, and asserts a
+/// drawer recorded inside that child is KEPT.
+/// Test: itself. Fails against `0ac9e1f4`, where the root resolves to
+/// `<outer>/.git/modules` and the drawer is dropped.
+#[test]
+fn session_project_root_is_none_inside_a_separate_git_dir_child() {
+    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outer = tmp.path().join("outer");
+    let child = outer.join("sub");
+    std::fs::create_dir_all(&child).expect("mkdir child");
+    init_test_repo(&outer);
+    let modules = outer.join(".git/modules");
+    std::fs::create_dir_all(&modules).expect("mkdir modules");
+    git_in(
+        &child,
+        &[
+            "init",
+            "-q",
+            &format!("--separate-git-dir={}", modules.join("sub").display()),
+            ".",
+        ],
+    );
+    assert!(
+        child.join(".git").is_file(),
+        "fixture must reproduce the `.git` FILE a submodule checkout carries"
+    );
+
+    let payload = serde_json::json!({ "cwd": child.to_string_lossy() }).to_string();
+    let resolved = resolve_session_project_root(&payload);
+    assert_eq!(
+        resolved, None,
+        "a root that is not a working tree must disable the filter, not become it"
+    );
+
+    let cwd = child.to_string_lossy().to_string();
+    let drawer = RecalledDrawer {
+        content: cwd.clone(),
+        tags: vec![format!("creator:cwd={cwd}")],
+        layer: Some(2),
+        score: Some(0.7),
+    };
+    let out = filter_drawers_by_project_scope(vec![drawer], resolved.as_deref());
+    assert_eq!(
+        (out.kept.len(), out.dropped),
+        (1, 0),
+        "a drawer written inside the child checkout is this project's own"
     );
 }
 
@@ -534,9 +1007,11 @@ async fn prompt_context_recalls_palace_drawers() {
     let elapsed_ms = start.elapsed().as_millis();
     eprintln!("prompt_context_recalls_palace_drawers latency: {elapsed_ms}ms");
 
-    assert_ne!(
-        body, EMPTY_PLACEHOLDER,
-        "populated palace must return real content, not the placeholder"
+    // #5819: an empty body is now legal, so a `!=` against the placeholder no
+    // longer proves recall worked. Assert real content instead.
+    assert!(
+        !body.is_empty() && body != EMPTY_PLACEHOLDER,
+        "populated palace must return real content; got:\n{body}"
     );
     // The injection must mention the rust drawer's content (proves
     // recall actually targeted the resolved palace and surfaced
@@ -644,20 +1119,23 @@ async fn prompt_context_header_names_the_alias_target() {
     addr_handle.shutdown().await;
 }
 
-/// Why (issue #5037, end to end): the unit tests above pin the floor over
-/// synthetic scores. This one proves the whole chain — real embedder, real HTTP
-/// recall, real `score` on the wire, real filter — turns an off-topic prompt
-/// into zero injected drawers plus a visible withheld notice, which is the
-/// behaviour the probe found missing ("what is the capital of France" returned
-/// five drawers at 0.15, rendered as if they matched).
+/// Why (issue #5037 end to end, outcome inverted by #5819): the unit tests
+/// above pin the floor over synthetic scores. This one proves the whole chain —
+/// real embedder, real HTTP recall, real `score` on the wire, real filter —
+/// turns an off-topic prompt into zero injected bytes. #5037 required a visible
+/// withheld notice here; #5819 requires silence, because that notice rendered
+/// on every prompt nothing answered and spent tokens to report having nothing
+/// to say. The probe query is unchanged ("what is the capital of France", which
+/// returned five drawers at 0.15 rendered as if they matched).
 /// What: populates a palace with three Rust/Python/KG drawers, then submits a
-/// prompt about none of them. Asserts no drawer content reaches the injection,
-/// and that the block says results were withheld rather than going silent.
-/// Test: itself.
+/// prompt about none of them. Asserts no drawer content reaches the injection
+/// and that the body is empty.
+/// Test: itself. Fails against the pre-#5819 handler, which emits the
+/// "cleared the relevance floor" paragraph.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
 #[cfg(feature = "axum-server")]
 #[tokio::test]
-async fn prompt_context_off_topic_prompt_withholds_and_says_so() {
+async fn prompt_context_off_topic_prompt_injects_nothing() {
     let _guard = crate::commands::env_test_lock().lock().await;
     unsafe {
         std::env::remove_var(ENV_MIN_SCORE);
@@ -710,22 +1188,27 @@ async fn prompt_context_off_topic_prompt_withholds_and_says_so() {
             "off-topic prompt must not inject `{leaked}`; got:\n{body}"
         );
     }
+    // #5819: this asserted `body.contains("relevance floor")`. Going silent is
+    // now the required outcome, and this is the end-to-end proof of it — the
+    // whole path, through a real daemon and a real populated palace, emits
+    // zero bytes for a prompt nothing answers.
     assert!(
-        body.contains("relevance floor"),
-        "a withheld recall must announce itself, not go silent; got:\n{body}"
+        body.is_empty(),
+        "an off-topic prompt must inject nothing at all; got {} bytes:\n{body}",
+        body.len()
     );
 
     addr_handle.shutdown().await;
 }
 
-/// Why (issue #134, negative case): when the resolved palace has no
-/// drawers AND no global hot facts have been asserted, the hook must
-/// still emit a safe placeholder so downstream consumers see byte-
-/// identical behaviour to the pre-fix daemon. Don't regress the empty
-/// case while fixing the populated one.
+/// Why (issue #134, negative case; contract inverted by #5819): when the
+/// resolved palace has no drawers AND no global hot facts have been asserted,
+/// the hook must emit nothing. It used to emit `EMPTY_PLACEHOLDER`, which
+/// spent bytes on every firing to report an absence.
 /// What: spin up the same daemon shape but skip the drawer-population
-/// step; assert the body equals [`EMPTY_PLACEHOLDER`].
-/// Test: itself.
+/// step; assert the body is empty.
+/// Test: itself. Fails against the pre-#5819 handler, which returns
+/// `"No prompt facts stored yet."`.
 /// Note (issue #226): gated on `axum-server`; spawns the HTTP daemon.
 #[cfg(feature = "axum-server")]
 #[tokio::test]
@@ -741,9 +1224,13 @@ async fn prompt_context_empty_palace_falls_back_to_global() {
     })
     .to_string();
     let body = build_injection_body(&payload).await;
-    assert_eq!(
-        body, EMPTY_PLACEHOLDER,
-        "empty palace + empty prompt-facts must fall back to the placeholder"
+    // #5819: this used to assert `EMPTY_PLACEHOLDER`. An empty palace now
+    // injects nothing at all — the placeholder spent 27 bytes per firing to
+    // say so, on a hook that fires on every prompt of every session.
+    assert!(
+        body.is_empty(),
+        "empty palace + empty prompt-facts must inject nothing; got {} bytes:\n{body}",
+        body.len()
     );
 
     addr_handle.shutdown().await;
@@ -1506,8 +1993,10 @@ async fn prompt_context_injection_has_no_provenance_tags() {
     .to_string();
     let body = build_injection_body(&payload).await;
 
-    assert_ne!(
-        body, EMPTY_PLACEHOLDER,
+    // #5819: `assert_ne!(body, EMPTY_PLACEHOLDER)` passed vacuously once an
+    // empty body became legal, so this now asserts real content.
+    assert!(
+        !body.is_empty() && body != EMPTY_PLACEHOLDER,
         "fixture must actually recall something for this test to mean anything"
     );
     assert!(
