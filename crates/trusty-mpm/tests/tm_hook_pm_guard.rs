@@ -46,6 +46,13 @@ fn isolated_home() -> tempfile::TempDir {
 
 /// Spawn `tm hook --pm-guard` with the given stdin JSON and optional extra env,
 /// returning stdout as a string. Asserts a clean `exit 0` (fail-open contract).
+///
+/// It sets NO working directory, so the child inherits the test binary's, and a
+/// payload carrying no `cwd` field lets that decide every rule keyed on
+/// `hook_cwd` (`pm_guard.rs`) — a main checkout in CI, a linked worktree on a
+/// developer machine. Never use this for a dispatch-tool payload or any other
+/// cwd-sensitive rule; reach for [`run_pm_guard_outside_a_checkout`] or
+/// [`run_pm_guard_at`], which pin the directory. See #5708.
 fn run_pm_guard(stdin_json: &str, extra_env: &[(&str, &str)]) -> String {
     let bin = env!("CARGO_BIN_EXE_tm");
     let mut command = Command::new(bin);
@@ -259,15 +266,16 @@ fn pm_guard_allows_read_tool() {
 
 #[test]
 fn pm_guard_allows_git_status_and_task() {
-    let git = run_pm_guard(
+    // #5708: pinned outside any checkout because the `Task` arm is a dispatch —
+    // in a main checkout ADR-0048 denies it for want of an `isolation` field,
+    // which is its own rule's business and asserted separately.
+    let git = run_pm_guard_outside_a_checkout(
         r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}"#,
-        &[],
     );
     assert_eq!(git.trim(), "", "git status must be allowed");
 
-    let task = run_pm_guard(
+    let task = run_pm_guard_outside_a_checkout(
         r#"{"hook_event_name":"PreToolUse","tool_name":"Task","tool_input":{"subagent_type":"rust-engineer","prompt":"do it"}}"#,
-        &[],
     );
     assert_eq!(task.trim(), "", "Task must be allowed");
 }
@@ -755,15 +763,20 @@ fn pm_guard_denies_task_dispatch_from_mpm_subagent_env() {
 
 #[test]
 fn pm_guard_allows_agent_dispatch_from_pm() {
-    // The load-bearing arm: the PM carries neither marker, so its dispatches
-    // must pass silently. A regression here halts every delegation in the
-    // system, which is strictly worse than the fan-out this guard prevents.
+    // The arm every delegation depends on: the PM carries neither marker, so
+    // its dispatches must pass silently. A regression here halts every
+    // delegation in the system, which is strictly worse than the fan-out this
+    // guard prevents.
+    //
+    // #5708: pinned outside any checkout so this asserts the FAN-OUT rule
+    // alone. In a main checkout ADR-0048 rewrites the same payload to add
+    // `isolation`, which is a different rule with its own tests.
     for tool in ["Agent", "Task"] {
         let payload = format!(
             r#"{{"hook_event_name":"PreToolUse","tool_name":"{tool}","tool_input":{{"subagent_type":"rust-engineer","prompt":"go"}}}}"#
         );
         assert_eq!(
-            run_pm_guard(&payload, &[]).trim(),
+            run_pm_guard_outside_a_checkout(&payload).trim(),
             "",
             "the PM's own {tool} dispatch must be allowed"
         );
@@ -775,12 +788,17 @@ fn pm_guard_fanout_fails_open_on_indeterminate_caller() {
     // An empty-string `agent_id` and a payload with no marker at all are both
     // INDETERMINATE. Indeterminate must ALLOW (#4784): a false deny against
     // the PM halts orchestration; a false allow reproduces prior behaviour.
+    //
+    // #5708: pinned outside any checkout because these payloads carry no
+    // `subagent_type` and are therefore also UNTYPED dispatches, which ADR-0048
+    // deliberately isolates in a main checkout rather than failing open. The two
+    // rules disagree by design; this one is asserted where only it can fire.
     for payload in [
         r#"{"hook_event_name":"PreToolUse","agent_id":"","tool_name":"Agent","tool_input":{"prompt":"go"}}"#,
         r#"{"hook_event_name":"PreToolUse","agent_type":"rust-engineer","tool_name":"Agent","tool_input":{"prompt":"go"}}"#,
     ] {
         assert_eq!(
-            run_pm_guard(payload, &[]).trim(),
+            run_pm_guard_outside_a_checkout(payload).trim(),
             "",
             "an indeterminate caller context must fail OPEN: {payload}"
         );
@@ -844,6 +862,27 @@ fn pm_guard_subagent_keeps_its_working_tool_surface() {
 /// What: as [`run_pm_guard`], plus an explicit `--url` and `current_dir`.
 fn run_pm_guard_at(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String {
     run_pm_guard_at_with_env(stdin_json, url, cwd, &[])
+}
+
+/// Spawn `tm hook --pm-guard` standing in a directory that is no git checkout.
+///
+/// Why (#5708): [`run_pm_guard`] inherits the runner's working directory, and
+/// the ADR-0048 worktree grant fires only in a main checkout. Three tests
+/// asserting a silent allow therefore passed from a worktree and failed from
+/// CI's `actions/checkout` clone — one denied, two got an `updatedInput`
+/// rewrite — off the same binary at the same commit. Pinning a directory that
+/// is no checkout makes the verdict the payload's rather than the runner's.
+/// What: [`run_pm_guard_at`] against the same unreachable daemon URL
+/// [`run_pm_guard`] fixes, in a fresh empty tempdir — no `.git` entry of either
+/// shape, so `is_main_checkout` answers false wherever the suite runs. For
+/// payloads whose rule is cwd-INSENSITIVE by intent only; an assertion ABOUT a
+/// tree belongs in [`run_pm_guard_at`] with a fixture naming the tree it wants.
+/// Test: `pm_guard_allows_git_status_and_task`,
+/// `pm_guard_allows_agent_dispatch_from_pm`,
+/// `pm_guard_fanout_fails_open_on_indeterminate_caller`.
+fn run_pm_guard_outside_a_checkout(stdin_json: &str) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    run_pm_guard_at(stdin_json, "http://127.0.0.1:1", dir.path())
 }
 
 /// [`run_pm_guard_at`] returning STDERR instead of stdout.
