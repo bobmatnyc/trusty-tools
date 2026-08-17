@@ -138,24 +138,38 @@ git add forgotten_file.py
 git commit --amend --no-edit
 ```
 
-### Stashing Work
+### Stashing Work — avoid it when worktrees are in play
+
+🔴 **The stash stack is repo-global, not per-worktree.** Every worktree of a
+repo shares one stack, so if anything else is working in a sibling worktree, a
+blind `git stash pop` can restore THEIR entry and drop yours — and `pop` exits 0
+either way, so nothing warns you.
+
+For a temporary clean tree — a baseline check, a bisect, comparing against
+`origin/main` — provision a throwaway worktree instead of stashing:
 
 ```bash
-# Save current work temporarily
-git stash
+git worktree add /tmp/baseline-$$ origin/main
+# … run the check there …
+git worktree remove /tmp/baseline-$$
+```
 
-# List stashes
+If you are the only writer and still want a stash, label it and pop it by ref —
+never bare `git stash` followed by a blind `pop`:
+
+```bash
+# Save current work under a name you can recognize
+git stash push -u -m "WIP: authentication feature"
+
+# ALWAYS list first — confirm which ref is yours
 git stash list
 
-# Apply most recent stash
-git stash pop
-
-# Apply specific stash
-git stash apply stash@{0}
-
-# Create named stash
-git stash save "WIP: authentication feature"
+# Apply the specific ref you just confirmed, not "the most recent"
+git stash apply 'stash@{0}'
 ```
+
+Then verify the restored files are the ones you stashed before dropping the
+entry.
 
 ### Cherry-Picking Commits
 

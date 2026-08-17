@@ -364,7 +364,8 @@ cdhash cache and the next exec is SIGKILL'd. The main checkout never needs to be
 involved.
 
 > **Extended discipline rationale, the install-from-worktree commands, and the
-> stash-first fallback:** see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
+> throwaway-worktree recipe that replaced the retired stash-first fallback:**
+> see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
 
 ## Abbreviations & Aliases
 

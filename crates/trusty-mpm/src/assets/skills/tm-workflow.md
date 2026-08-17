@@ -286,9 +286,11 @@ and keeps bundled in that same worktree and PR.
 worktree only once its result is accepted for implementation.
 
 Every subagent dispatch must name the exact worktree path it is confined to, and
-must forbid leaving it into the main checkout, `git reset --hard`,
-`git checkout .`, and `git stash` against main. QA agents get their own worktree
-(e.g. `.claude/worktrees/qa-<ticket-or-pass>`), same as engineering agents.
+must forbid leaving it into the main checkout, `git reset --hard` and
+`git checkout .` against main, and `git stash` ANYWHERE — the stash stack is
+repo-global, so it is the one prohibition that does not narrow to the main
+checkout (#4730). QA agents get their own worktree (e.g.
+`.claude/worktrees/qa-<ticket-or-pass>`), same as engineering agents.
 
 Clean up after merge with `git worktree remove --force <path>` (which deletes the
 worktree directory and never the main checkout), then `git branch -D <branch>`
@@ -296,18 +298,31 @@ and, when the squash-merge did not already do it, `git push origin --delete
 <branch>` — the branch goes last, because until the squash-merge lands it is the
 only durable copy of the workstream.
 
-**Escape hatch — stash first.** If you genuinely must run one command from the
-main checkout, stash, operate, restore:
+🔴 **Never `git stash` — anywhere in the repo, not just against main.** The
+stash stack is repo-global, not per-worktree: every worktree shares one stack,
+so a concurrent agent's `pop` can restore and drop YOUR work, and `pop` reports
+success either way. Three live incidents (#4730) — the most recent restored
+another session's WIP and dropped the popper's own entry, recovered only via
+`git fsck --unreachable`.
+
+**Escape hatch — a throwaway worktree, never a stash.** If you genuinely need a
+clean tree to run one command — a baseline check, a bisect, comparing against
+`origin/main` — provision one instead of disturbing an existing checkout:
 
 ```bash
-git -C /path/to/main-checkout stash push -u -m "pre-op-safety $(date +%s)"
-# … do the op …
-git -C /path/to/main-checkout stash pop
+git worktree add /tmp/baseline-$$ origin/main
+# … run the check there …
+git worktree remove /tmp/baseline-$$
 ```
 
-Surface the stash name in your report if popping fails, so a human can restore
-it manually. This is a narrow exception, not license for routine edits from the
-main checkout.
+This is strictly better than the stash it replaces: it needs no main checkout,
+mutates nothing another session can see, and cannot fail halfway and strand
+someone's work.
+
+If you truly cannot avoid stashing: label it (`git stash push -m "<purpose>"`),
+never `pop` blind — `git stash list` first, pop BY REF — and verify the restored
+files are the ones you stashed. Surface the stash ref in your report either way,
+so a human can recover it manually.
 
 Project-specific worktree hazards (binary-install caveats, code-signing caches,
 and the like) belong in the project's own reference docs, not here.

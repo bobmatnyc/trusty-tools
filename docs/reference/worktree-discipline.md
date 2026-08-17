@@ -8,7 +8,8 @@ work.
 ## Why Worktree Discipline Matters
 
 The monorepo consolidates 20 crates in a single workspace. A single `git stash`
-from the main checkout can bury another session's work. A build from the main
+can bury another session's work from ANY worktree, not just the main checkout —
+the stash stack is repo-global (#4730). A build from the main
 checkout writes to the shared `target/` tree and fills the filesystem with
 build artifacts that interfere with other sessions. A `git reset --hard` from
 the main checkout can permanently lose uncommitted changes that another session
@@ -50,17 +51,24 @@ which keeps the macOS kernel's cdhash cache consistent — see
 bare `cp` over an on-PATH binary SIGKILLs the next exec, and the TCC-grant
 consequences). The main checkout never needs to be involved.
 
-If a command genuinely must run from the main checkout — for example
-`cargo install --path crates/<name> --locked` right after a merge lands —
-stash first, operate, then restore:
+If a command genuinely needs a clean tree — for example
+`cargo install --path crates/<name> --locked` right after a merge lands — use a
+throwaway worktree, **never** `git stash`:
 
 ```bash
-git -C /path/to/main-checkout stash push -u \
-    -m "claude: pre-op-safety $(date +%s)"
-# … do the op …
-git -C /path/to/main-checkout stash pop
+git worktree add /tmp/baseline-$$ origin/main
+cargo install --path /tmp/baseline-$$/crates/<name> --locked
+git worktree remove /tmp/baseline-$$
 ```
 
-Surface the stash name in the report if popping fails, so the change can be
-restored manually. This is the narrow exception the `tm-workflow` worktree
-rules call out — it does not license routine edits from the main checkout.
+🔴 **The stash stack is repo-global, not per-worktree.** This page used to
+recommend stashing the main checkout before such an op, and that advice caused
+three live incidents (#4730): every worktree shares one stack, so a concurrent
+agent's `pop` restores and drops the wrong entry while reporting success. The
+most recent one restored another session's `trusty-search` WIP, dropped the
+popper's own entry, and needed `git fsck --unreachable` to recover the dangling
+object.
+
+The throwaway worktree is strictly better than the stash it replaces: it leaves
+the main checkout untouched, mutates nothing another session can observe, and
+cannot strand someone's work if it fails halfway.

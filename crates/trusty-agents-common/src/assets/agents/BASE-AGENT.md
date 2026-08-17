@@ -100,6 +100,24 @@ completion path for a subagent; only the PM's `SendMessage` resumes you.
   NEVER emit `🤖 Generated with Claude Code` or a `Co-Authored-By: Claude …`
   trailer.
 
+🔴 **Never `git stash` in this repo.** The stash stack is repo-global, not
+per-worktree: every worktree shares one stack, so a concurrent agent's `pop` can
+restore and drop YOUR work, and `pop` reports success either way. Three live
+incidents (#4730).
+
+For a temporary clean tree — a baseline check, a bisect, comparing against
+`origin/main` — create a throwaway worktree instead:
+
+```bash
+git worktree add /tmp/baseline-$$ origin/main
+# … run the check there …
+git worktree remove /tmp/baseline-$$
+```
+
+If you truly cannot avoid stashing: label it (`git stash push -m "<purpose>"`),
+never `pop` blind — `git stash list` first, pop BY REF — and verify the restored
+files are the ones you stashed.
+
 **Changelog.** Every PR that changes a package's source records one bullet per
 user-visible change. A missing entry is a review-gate failure, not optional
 polish — the full gate is in `tm-workflow`.
