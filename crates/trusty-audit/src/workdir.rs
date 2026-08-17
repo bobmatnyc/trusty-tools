@@ -221,13 +221,18 @@ impl WorkDir {
 /// it — a producer that crashes mid-write leaves syntactically valid TOML
 /// holding a PREFIX of the entries, which reads as a smaller-but-complete
 /// document. #5822 adds a second such file (`crate::registry`), so the
-/// discipline moved here rather than being restated per producer.
+/// discipline moved here rather than being restated per producer. #5494 adds a
+/// third, and the one that most needs it: the run checkpoint is written after
+/// every repository precisely so it survives the crash it exists for, and a
+/// torn one would tell the next run a four-hour audit had finished.
 /// What: creates the parent directory, writes to a uniquely-named temporary
 /// file beside the target, and renames it into place. The rename is atomic; the
 /// unique suffix is what lets two writers race without either reading the
 /// other's half-written file. A failed rename removes the temporary file.
 /// Test: `crate::run::run_tests::racing_writers_never_leave_a_torn_selection`,
-/// `crate::registry::registry_tests::a_registry_round_trips_both_kinds`.
+/// `crate::registry::registry_tests::a_registry_round_trips_both_kinds`,
+/// `super::layout_tests::an_atomic_write_leaves_no_temporary_behind`,
+/// `super::layout_tests::an_unpublishable_target_is_an_error_and_leaves_no_temporary`.
 ///
 /// This makes ONE write untearable. It does not make a load-mutate-save
 /// indivisible — [`crate::registry::register`] takes a lock for that (#5822).
@@ -324,6 +329,49 @@ mod layout_tests {
         let before = names.len();
         names.dedup();
         assert_eq!(before, names.len(), "two areas share a directory name");
+    }
+
+    /// The temporary the rename publishes from must never outlive the write —
+    /// a `state/` littered with `.tmp` files is how a reader learns to guess.
+    #[test]
+    fn an_atomic_write_leaves_no_temporary_behind() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("state/run-progress.toml");
+
+        write_atomically(&target, "complete = false\n").expect("first write");
+        write_atomically(&target, "complete = true\n").expect("overwrite");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("reads"),
+            "complete = true\n"
+        );
+        let leftovers: Vec<PathBuf> = std::fs::read_dir(tmp.path().join("state"))
+            .expect("read state")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// A target that cannot be published is an error, never a silent no-op —
+    /// the caller has to be able to refuse over it.
+    #[test]
+    fn an_unpublishable_target_is_an_error_and_leaves_no_temporary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("state/run-progress.toml");
+        // A non-empty directory at the target: the rename cannot replace it.
+        std::fs::create_dir_all(&target).expect("mkdir");
+        std::fs::write(target.join("occupied"), b"x").expect("write");
+
+        let err = write_atomically(&target, "complete = true\n")
+            .expect_err("a directory cannot be replaced by a rename");
+        assert!(matches!(err, AuditError::WorkDir { .. }), "{err:?}");
+        let leftovers: Vec<PathBuf> = std::fs::read_dir(tmp.path().join("state"))
+            .expect("read state")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]

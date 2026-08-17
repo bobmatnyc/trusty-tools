@@ -30,7 +30,7 @@ use crate::manifest::{AuditManifest, RepositoryEntry};
 use crate::package::{self, ReturnPackage};
 use crate::progress::{Progress, ProgressSink};
 use crate::registry::{self, Registration, Registry, Removal, TargetKind, TargetList};
-use crate::run::{self, RunReport};
+use crate::run::{self, RunOptions, RunReport};
 use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
 use crate::validate;
 use crate::workdir::{Area, WorkDir};
@@ -89,7 +89,11 @@ pub enum Command {
         spec: String,
     },
     /// Run `tga audit` over the selected repositories (#5555).
-    Run,
+    ///
+    /// Carries its options because resume is an operator decision, not a
+    /// property of the session: a re-run skips what an earlier one recorded as
+    /// audited, and [`RunOptions::fresh`] is how that is overruled (#5494).
+    Run(RunOptions),
     /// Assemble the unencrypted deliverable to send back (#5499).
     ///
     /// Carries its argument because the recipient chooses where the file lands —
@@ -427,7 +431,7 @@ impl Session {
             }
             Command::ListTargets => self.list_targets().map(Outcome::Targets),
             Command::RemoveTarget { spec } => self.remove_target(&spec).await.map(Outcome::Removed),
-            Command::Run => self.run().await.map(Outcome::Run),
+            Command::Run(options) => self.run(&options).await.map(Outcome::Run),
             Command::Package { destination } => self.package(destination).map(Outcome::Package),
         }
     }
@@ -536,23 +540,41 @@ impl Session {
     ///
     /// Why: #5499. The config is required for the same reason every other
     /// capability requires it — it carries the engagement metadata the package
-    /// states, and the credential the member scan checks against. The progress
-    /// record is the completion signal: `run::sweep` writes it LAST, after every
-    /// child has finished, so its presence means a sweep finished rather than
-    /// one being under way.
+    /// states, and the credential the member scan checks against.
+    ///
+    /// The completion signal is `RunProgress::complete`, not the record's mere
+    /// presence. Since #5494 the record is written after every repository, so a
+    /// sweep that died three repositories into six leaves one behind — and
+    /// packaging that would send a partial engagement as a whole one. An
+    /// incomplete record is refused with the count it holds, because the
+    /// remedy is to re-run and resume, not to start over.
     /// What: loads both, then hands off to [`package::assemble`].
-    /// Test: `super::session_tests::packaging_before_any_sweep_is_refused`.
+    /// Test: `super::session_tests::packaging_before_any_sweep_is_refused`,
+    /// `super::session_tests::packaging_an_unfinished_sweep_is_refused`.
     fn package(&self, destination: Option<PathBuf>) -> Result<ReturnPackage, AuditError> {
         let config = EngagementConfig::load(&self.config_path)?;
-        let report =
+        let progress =
             run::read_progress(&self.work)?.ok_or_else(|| AuditError::NothingToPackage {
                 reason: format!(
                     "no sweep has finished in {} — run `trusty-audit run` first",
                     self.work.root().display()
                 ),
             })?;
+        if !progress.complete {
+            return Err(AuditError::NothingToPackage {
+                reason: format!(
+                    "the last sweep in {} did not finish — {} recorded so far; \
+                     run `trusty-audit run` to resume it",
+                    self.work.root().display(),
+                    match progress.repos.len() {
+                        1 => "1 repository".to_owned(),
+                        n => format!("{n} repositories"),
+                    }
+                ),
+            });
+        }
         let destination = destination.unwrap_or_else(|| package::default_destination(&self.work));
-        package::assemble(&self.work, &config, &report, &destination)
+        package::assemble(&self.work, &config, &progress.report(), &destination)
     }
 
     /// Read the engagement's key and pins, then sweep the selected repositories.
@@ -561,7 +583,7 @@ impl Session {
     /// it: it carries the OpenRouter key `tga audit`'s report render needs, and
     /// an absent config is a refusal rather than a run that will fail an hour in
     /// (#5555).
-    async fn run(&self) -> Result<RunReport, AuditError> {
+    async fn run(&self, options: &RunOptions) -> Result<RunReport, AuditError> {
         let config = EngagementConfig::load(&self.config_path)?;
         // #5797: the sweep's own preflight refuses over a tool that is missing,
         // unverified, or off the pin. Auto-install closes exactly that set
@@ -572,7 +594,7 @@ impl Session {
         if self.auto_install {
             tools::ensure(&self.work, &config.tools, &self.progress).await?;
         }
-        run::sweep(&self.work, &config, &self.progress).await
+        run::sweep(&self.work, &config, options, &self.progress).await
     }
 
     /// Read the engagement's pins, then install exactly those.
@@ -631,8 +653,13 @@ impl Session {
         // guided flow can advance from — without this the flow's final word is
         // "run the sweep", and the recipient is left holding a working directory
         // with no instruction to send anything back.
-        let audited = run::read_progress(&self.work)?
-            .is_some_and(|report| report.repos.iter().any(|r| r.result.succeeded()));
+        //
+        // #5494: FINISHED, not merely recorded. A checkpoint left by a sweep
+        // that died names audited repositories too, and pointing at the return
+        // package there would send a partial engagement instead of resuming.
+        let audited = run::read_progress(&self.work)?.is_some_and(|progress| {
+            progress.complete && progress.repos.iter().any(|r| r.result.succeeded())
+        });
 
         let next = if audited {
             NextStep::ReturnPackage
@@ -691,6 +718,12 @@ path = "/work/repos/acme-api"
 
     fn session_in(dir: &Path) -> Session {
         Session::new(WorkDir::new(dir.join("work")))
+    }
+
+    /// Record a sweep that reached the end of its selection (#5494).
+    fn write_finished_progress(work: &WorkDir, report: &RunReport) {
+        run::checkpoint::write_progress(work, &run::RunProgress::finished(report))
+            .expect("write progress");
     }
 
     fn write_manifest(session: &Session, text: &str) {
@@ -898,6 +931,91 @@ trusty-review = "0.0.0-never-published"
         );
     }
 
+    /// #5494: the checkpoint is written after every repository now, so a record
+    /// EXISTING no longer means a sweep finished. Packaging one that did not
+    /// would send a partial engagement as a whole one — the same fail-open
+    /// shape as packaging before any sweep, reached by a different route. The
+    /// refusal names the resume, because that is the remedy.
+    #[tokio::test]
+    async fn packaging_an_unfinished_sweep_is_refused() {
+        use crate::run::{RepoResult, RepoRun, SelectedRepo};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), UNPUBLISHABLE_CONFIG);
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+        let done = vec![RepoRun {
+            repo: SelectedRepo {
+                name: "acme-api".to_owned(),
+                path: PathBuf::from("repos/acme-api"),
+            },
+            output: session.work_dir().path(Area::Output).join("00-acme-api"),
+            log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
+            gaps: Vec::new(),
+            resumed: false,
+            result: RepoResult::Succeeded,
+        }];
+        run::checkpoint::write_progress(session.work_dir(), &run::RunProgress::checkpoint(&done))
+            .expect("write checkpoint");
+
+        let err = session
+            .execute(Command::Package { destination: None })
+            .await
+            .expect_err("an interrupted sweep is not a deliverable");
+        let AuditError::NothingToPackage { reason } = &err else {
+            panic!("expected NothingToPackage, got {err:?}");
+        };
+        assert!(reason.contains("did not finish"), "{reason}");
+        assert!(reason.contains("1 repository"), "{reason}");
+        assert!(reason.contains("resume"), "{reason}");
+        assert!(
+            !crate::package::default_destination(session.work_dir()).exists(),
+            "a refused package must leave no file"
+        );
+    }
+
+    /// The guided flow reads the same completion signal: a checkpoint from a
+    /// sweep that died must send the operator back to `run` to resume, not on
+    /// to the return package (#5494).
+    #[tokio::test]
+    async fn an_interrupted_sweep_is_not_a_return_package() {
+        use crate::run::{RepoResult, RepoRun, SelectedRepo};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path());
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+        write_manifest(&session, MANIFEST);
+        run::checkpoint::write_progress(
+            session.work_dir(),
+            &run::RunProgress::checkpoint(&[RepoRun {
+                repo: SelectedRepo {
+                    name: "acme-api".to_owned(),
+                    path: PathBuf::from("repos/acme-api"),
+                },
+                output: session.work_dir().path(Area::Output).join("00-acme-api"),
+                log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
+                gaps: Vec::new(),
+                resumed: false,
+                result: RepoResult::Succeeded,
+            }]),
+        )
+        .expect("write checkpoint");
+
+        let Outcome::Guided(status) = session.execute(Command::Guided).await.expect("runs") else {
+            panic!("Guided command must yield a Guided outcome");
+        };
+        assert_ne!(
+            status.next,
+            NextStep::ReturnPackage,
+            "an interrupted sweep must be resumed, not packaged"
+        );
+    }
+
     /// No engagement config means no metadata and no key to scan against, so
     /// packaging refuses for the same reason installing and running do.
     #[tokio::test]
@@ -933,13 +1051,10 @@ trusty-review = "0.0.0-never-published"
             output: session.work_dir().path(Area::Output).join("00-acme-api"),
             log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
             gaps: Vec::new(),
+            resumed: false,
             result: RepoResult::Succeeded,
         }]);
-        std::fs::write(
-            run::progress_path(session.work_dir()),
-            toml::to_string_pretty(&report).expect("render"),
-        )
-        .expect("write progress");
+        write_finished_progress(session.work_dir(), &report);
 
         let Outcome::Guided(status) = session.execute(Command::Guided).await.expect("runs") else {
             panic!("Guided command must yield a Guided outcome");
@@ -1073,7 +1188,7 @@ trusty-review = "0.0.0-never-published"
         let session = session_that_cannot_install(tmp.path());
 
         let err = session
-            .execute(Command::Run)
+            .execute(Command::Run(RunOptions::default()))
             .await
             .expect_err("the sweep must have tried to install");
         assert!(
@@ -1091,7 +1206,7 @@ trusty-review = "0.0.0-never-published"
         let session = session_that_cannot_install(tmp.path()).with_auto_install(false);
 
         let err = session
-            .execute(Command::Run)
+            .execute(Command::Run(RunOptions::default()))
             .await
             .expect_err("no tools, no sweep");
         assert!(
