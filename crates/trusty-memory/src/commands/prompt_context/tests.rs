@@ -606,11 +606,7 @@ async fn prompt_context_header_names_the_alias_target() {
     std::fs::create_dir_all(&aliased_project).expect("aliased project dir");
     crate::project_root::write_project_pin(
         &aliased_project,
-        &crate::project_root::ProjectPin {
-            schema_version: crate::project_root::PIN_SCHEMA_VERSION,
-            palace: derived.to_string(),
-            note: None,
-        },
+        &crate::project_root::ProjectPin::new(derived),
     )
     .expect("write pin for the aliased project");
 
