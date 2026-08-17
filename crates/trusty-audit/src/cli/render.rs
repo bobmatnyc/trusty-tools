@@ -487,7 +487,9 @@ pub(super) fn count_of(n: usize, singular: &str, plural: &str) -> String {
 fn describe_next(next: &NextStep) -> String {
     match next {
         NextStep::SelectRepositories => {
-            "pick the repositories to audit (`trusty-audit repos`)".to_string()
+            // #5884: `repos` LISTS what is already registered; nothing is
+            // registered yet in this state, so the next step is `add`.
+            "register the repositories and boards to audit (`trusty-audit add`)".to_string()
         }
         NextStep::InstallTools(missing) => {
             let names: Vec<&str> = missing.iter().map(|t| t.binary_name()).collect();

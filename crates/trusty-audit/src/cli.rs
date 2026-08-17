@@ -509,7 +509,14 @@ mod cli_tests {
         let session = Session::new(WorkDir::new(tmp.path().join("work")));
         let outcome = session.execute(Command::Guided).await.expect("runs");
         let text = render(&outcome);
-        assert!(text.contains("Next: pick the repositories"), "{text}");
+        // #5884: `repos` LISTS what is already registered; nothing is
+        // registered yet in this state, so the next step names `add`.
+        assert!(
+            text.contains(
+                "Next: register the repositories and boards to audit (`trusty-audit add`)"
+            ),
+            "{text}"
+        );
     }
 
     /// The guided flow coaches breadth at the registration step, naming schema
@@ -523,6 +530,10 @@ mod cli_tests {
         assert!(text.contains("Coverage: "), "{text}");
         assert!(text.contains("database schema or migrations"), "{text}");
         assert!(text.contains("ticketing board"), "{text}");
+        // #5884: the "Next:" line must name the registering path, not the
+        // listing one — `repos` lists what `add` already registered.
+        assert!(text.contains("Next: register"), "{text}");
+        assert!(text.contains("`trusty-audit add`"), "{text}");
     }
 
     /// The `add` help is where an operator reading `--help` decides what counts
