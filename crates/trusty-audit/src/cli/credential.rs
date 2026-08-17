@@ -409,3 +409,351 @@ fn persist(path: &Path, key: &SecretKey) -> Result<(), AuditError> {
     let rendered = crate::config::generate(&template, key, path)?;
     workdir::write_private_atomically(path, &rendered)
 }
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    /// A representative engagement config with no key in it — the shape a
+    /// client receives when the auditor conveys the key out of band (#5825).
+    const BLANK_KEY_CONFIG: &str = r#"
+openrouter_key = ""
+instructions = "Assess the last 52 weeks."
+
+[tools]
+tga = "2.9.4"
+trusty-search = "0.47.0"
+trusty-analyze = "0.9.2"
+trusty-review = "0.15.1"
+"#;
+
+    /// A scripted terminal: answers come from a queue, and everything shown to
+    /// the operator is recorded so a test can assert on it.
+    ///
+    /// This is what makes the retry loop provable. A test binary has no
+    /// controlling terminal, so `DevTty` cannot be exercised at all — but every
+    /// decision the loop makes is above the terminal, not inside it.
+    struct FakeTty {
+        /// Hidden reads, answered front to back.
+        answers: std::collections::VecDeque<io::Result<String>>,
+        /// Every prompt string passed to `read_hidden`, in order.
+        prompts: Vec<String>,
+        /// Every line passed to `say`, in order.
+        shown: Vec<String>,
+    }
+
+    impl FakeTty {
+        fn new<I: IntoIterator<Item = &'static str>>(answers: I) -> Self {
+            Self {
+                answers: answers.into_iter().map(|a| Ok(a.to_owned())).collect(),
+                prompts: Vec::new(),
+                shown: Vec::new(),
+            }
+        }
+
+        /// A terminal whose first read fails outright.
+        fn broken() -> Self {
+            let mut fake = Self::new([]);
+            fake.answers.push_back(Err(io::Error::other("terminal went away")));
+            fake
+        }
+
+        /// Everything this terminal displayed, prompts and guidance together.
+        fn everything_displayed(&self) -> String {
+            format!("{}\n{}", self.prompts.join("\n"), self.shown.join("\n"))
+        }
+
+        /// How many times the key was asked for.
+        fn read_count(&self) -> usize {
+            self.prompts.len()
+        }
+    }
+
+    impl Tty for FakeTty {
+        fn read_hidden(&mut self, prompt: &str) -> io::Result<String> {
+            self.prompts.push(prompt.to_owned());
+            self.answers
+                .pop_front()
+                .unwrap_or_else(|| Err(io::Error::other("the script ran out of answers")))
+        }
+
+        fn say(&mut self, line: &str) -> io::Result<()> {
+            self.shown.push(line.to_owned());
+            Ok(())
+        }
+    }
+
+    fn config_path() -> &'static Path {
+        Path::new("/engagement/engagement.toml")
+    }
+
+    /// The top tier: an exported variable wins over a config that already has a
+    /// perfectly good key, and nothing is asked.
+    #[test]
+    fn the_environment_beats_the_config() {
+        let mut tty = FakeTty::new(["sk-or-v1-typed"]);
+        let resolved = resolve(
+            Some("sk-or-v1-exported".to_owned()),
+            Some(&SecretKey::new("sk-or-v1-configured")),
+            config_path(),
+            Some(&mut tty),
+        )
+        .expect("resolves");
+
+        assert_eq!(resolved.source(), CredentialSource::Environment);
+        assert_eq!(resolved.into_key().expose(), "sk-or-v1-exported");
+        assert_eq!(tty.read_count(), 0, "nothing should have been asked");
+    }
+
+    /// The second tier, when nothing is exported.
+    #[test]
+    fn the_config_is_used_when_nothing_is_exported() {
+        let mut tty = FakeTty::new(["sk-or-v1-typed"]);
+        let resolved = resolve(
+            None,
+            Some(&SecretKey::new("sk-or-v1-configured")),
+            config_path(),
+            Some(&mut tty),
+        )
+        .expect("resolves");
+
+        assert_eq!(resolved.source(), CredentialSource::Config);
+        assert_eq!(resolved.into_key().expose(), "sk-or-v1-configured");
+        assert_eq!(tty.read_count(), 0);
+    }
+
+    /// `OPENROUTER_API_KEY=` is how a shell says "not for this command", and a
+    /// generated config carries `openrouter_key = ""` when the auditor left the
+    /// key out (#5825). Neither is a credential, and neither may win a tier.
+    #[test]
+    fn a_blank_value_at_any_tier_falls_through_to_the_next() {
+        let mut tty = FakeTty::new(["sk-or-v1-typed", "sk-or-v1-typed"]);
+        let resolved = resolve(
+            Some("   ".to_owned()),
+            Some(&SecretKey::new("")),
+            config_path(),
+            Some(&mut tty),
+        )
+        .expect("resolves");
+
+        assert_eq!(
+            resolved.source(),
+            CredentialSource::Prompt,
+            "a blank environment value and a blank config must both fall through"
+        );
+        assert_eq!(resolved.into_key().expose(), "sk-or-v1-typed");
+    }
+
+    /// The whole point of the retype: two entries that disagree are asked for
+    /// again rather than exiting, and the second round is accepted.
+    #[test]
+    fn a_mismatched_retype_asks_again() {
+        let mut tty = FakeTty::new([
+            "sk-or-v1-typo",
+            "sk-or-v1-different",
+            "sk-or-v1-correct",
+            "sk-or-v1-correct",
+        ]);
+        let resolved = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
+            .expect("the second round agrees");
+
+        assert_eq!(resolved.source(), CredentialSource::Prompt);
+        assert_eq!(resolved.into_key().expose(), "sk-or-v1-correct");
+        assert_eq!(tty.read_count(), 4, "two rounds of two reads");
+        assert!(
+            tty.shown.iter().any(|l| l == DID_NOT_MATCH),
+            "the operator must be told why they are being asked again: {:?}",
+            tty.shown
+        );
+    }
+
+    /// A blank entry is refused BEFORE the retype — asking someone to confirm
+    /// nothing is a round trip that cannot succeed. Whitespace-only counts as
+    /// blank: it is the shape a stray paste takes, and a config carrying it
+    /// fails hours later at the report stage rather than here.
+    #[test]
+    fn a_blank_entry_is_refused_and_asks_again() {
+        let mut tty = FakeTty::new(["", "   \t ", "sk-or-v1-real", "sk-or-v1-real"]);
+        let resolved = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
+            .expect("the third round is usable");
+
+        assert_eq!(resolved.into_key().expose(), "sk-or-v1-real");
+        assert_eq!(
+            tty.read_count(),
+            4,
+            "a blank entry must not consume a retype: {:?}",
+            tty.prompts
+        );
+        assert_eq!(
+            tty.shown.iter().filter(|l| *l == WAS_BLANK).count(),
+            2,
+            "both blank entries are called out: {:?}",
+            tty.shown
+        );
+    }
+
+    /// Surrounding whitespace is a paste artefact, not part of the key — and a
+    /// retype that differs only in whitespace must still count as a match.
+    #[test]
+    fn surrounding_whitespace_is_trimmed_from_the_entry() {
+        let mut tty = FakeTty::new(["  sk-or-v1-padded  ", "sk-or-v1-padded\t"]);
+        let resolved = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
+            .expect("resolves");
+
+        assert_eq!(resolved.into_key().expose(), "sk-or-v1-padded");
+    }
+
+    /// Bounded, because a `/dev/tty` that opens and then reports end-of-file
+    /// answers every read with an empty string — an unbounded loop spins on it.
+    #[test]
+    fn a_prompt_that_never_agrees_gives_up() {
+        let mut tty = FakeTty::new(["a", "b", "c", "d", "e", "f"]);
+        let err = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
+            .expect_err("three disagreements is enough");
+
+        assert!(
+            matches!(err, AuditError::CredentialNotEntered { attempts } if attempts == MAX_ATTEMPTS),
+            "{err:?}"
+        );
+        assert_eq!(tty.read_count(), MAX_ATTEMPTS * 2);
+    }
+
+    /// The format check is advisory. OpenRouter can change the shape it mints,
+    /// and refusing over a guess would strand an operator holding a live key.
+    #[test]
+    fn an_unusual_looking_key_is_accepted_with_a_note() {
+        let mut tty = FakeTty::new(["not-the-usual-shape", "not-the-usual-shape"]);
+        let resolved = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
+            .expect("an unusual key is still a key");
+
+        assert_eq!(resolved.into_key().expose(), "not-the-usual-shape");
+        assert!(
+            tty.shown.iter().any(|l| l == UNUSUAL_SHAPE),
+            "the operator should be told: {:?}",
+            tty.shown
+        );
+    }
+
+    /// The `curl … | sh` case. No terminal and no other source must be an
+    /// actionable refusal naming BOTH ways to supply a key — never a hang, and
+    /// never a read of whatever stdin happened to be.
+    #[test]
+    fn without_a_terminal_the_refusal_names_both_sources() {
+        let err = resolve(None, Some(&SecretKey::new("")), config_path(), None)
+            .expect_err("nothing supplies a key and nobody can be asked");
+
+        assert!(
+            matches!(err, AuditError::NoCredentialSource { .. }),
+            "{err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains(ENV_INFERENCE_CREDENTIAL), "{text}");
+        assert!(text.contains("openrouter_key"), "{text}");
+        assert!(text.contains("engagement.toml"), "{text}");
+    }
+
+    /// A terminal that is present but fails is a different problem from an
+    /// operator who cannot type their key, and says so without quoting input.
+    #[test]
+    fn a_terminal_that_fails_is_reported_without_the_entry() {
+        let mut tty = FakeTty::broken();
+        let err = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
+            .expect_err("a broken terminal is an error");
+
+        assert!(
+            matches!(err, AuditError::CredentialPromptFailed { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// The hygiene gate, asserted on the strings: nothing the operator typed
+    /// may appear in a prompt, a guidance line, an error, or a `Debug` render.
+    #[test]
+    fn no_entered_credential_reaches_any_rendered_output() {
+        const SECRET: &str = "sk-or-v1-must-never-be-displayed";
+
+        // A round that mismatches, a round that is blank, then a good one, so
+        // every message the loop can emit is on the record.
+        let mut tty = FakeTty::new([SECRET, "sk-or-v1-mismatch", "", SECRET, SECRET]);
+        let resolved = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
+            .expect("resolves on the third round");
+
+        let displayed = tty.everything_displayed();
+        assert!(
+            !displayed.contains(SECRET),
+            "the terminal displayed the key: {displayed}"
+        );
+        assert!(
+            !displayed.contains("sk-or-v1-mismatch"),
+            "the terminal displayed a rejected entry: {displayed}"
+        );
+
+        // The value survives to the caller even though nothing showed it.
+        let debug = format!("{resolved:?}");
+        assert!(!debug.contains(SECRET), "Debug leaked the key: {debug}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+        assert_eq!(resolved.into_key().expose(), SECRET);
+    }
+
+    /// The source is reportable precisely because the value is not — every
+    /// description names where the key came from and quotes nothing.
+    #[test]
+    fn every_source_description_names_a_source_and_no_value() {
+        for source in [
+            CredentialSource::Environment,
+            CredentialSource::Config,
+            CredentialSource::Prompt,
+        ] {
+            let text = source.describe();
+            assert!(text.starts_with("credential: "), "{text}");
+            assert!(!text.contains("sk-or-v1"), "{text}");
+        }
+    }
+
+    /// A key that was typed is written back, so the recipient is asked once
+    /// rather than on every command — and the file it lands in is owner-only.
+    #[test]
+    fn a_prompted_key_is_persisted_owner_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("engagement.toml");
+        std::fs::write(&path, BLANK_KEY_CONFIG).expect("seed the config");
+
+        persist(&path, &SecretKey::new("sk-or-v1-entered")).expect("persists");
+
+        let reloaded = EngagementConfig::load(&path).expect("the rewritten config still loads");
+        assert_eq!(reloaded.openrouter_key.expose(), "sk-or-v1-entered");
+        // Everything else survives: `generate` substitutes one field.
+        assert_eq!(reloaded.tools.tga.version(), "2.9.4");
+        assert_eq!(reloaded.instructions, "Assess the last 52 weeks.");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+        }
+    }
+
+    /// The production wrapper's cheapest branch, and the one every non-audit
+    /// command takes: no need, no environment read, no config load, no prompt.
+    #[test]
+    fn a_command_that_needs_nothing_resolves_nothing() {
+        let resolved = resolve_for(&Command::WorkDir, Path::new("/nonexistent/engagement.toml"))
+            .expect("no need is not a failure");
+        assert!(resolved.is_none());
+    }
+
+    /// An absent config is `Session::execute`'s refusal to make, and there
+    /// would be nothing to persist into: a file holding only a key is not a
+    /// loadable engagement config.
+    #[test]
+    fn an_absent_config_defers_rather_than_prompting() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let resolved = resolve_for(
+            &Command::Run(crate::run::RunOptions::default()),
+            &tmp.path().join("engagement.toml"),
+        )
+        .expect("an absent config is not this module's error");
+        assert!(resolved.is_none());
+    }
+}
