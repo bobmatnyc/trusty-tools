@@ -204,6 +204,26 @@ pub fn seed_identity_prompt_fact_blocking(memory_url: &str, palace_id: &str) {
     }
 }
 
+/// Resolve the palace the DOC-28 identity fact is seeded under (#5811).
+///
+/// Why: this called the PURE three-level `trusty_common::derive_palace_id`,
+/// which never reads the committed `.trusty-tools/trusty-memory.yaml`. A pinned
+/// project therefore seeded its identity fact under the DERIVED name while every
+/// other surface resolved the pinned one — two names for one project's memory.
+/// Split out of `provision` so the precedence is testable without a live
+/// trusty-memory daemon, which the seed itself needs.
+/// What: `resolve_palace_with_remote` against the freshly cloned workspace —
+/// which carries the pin if the project committed one — supplying the `repo_url`
+/// we already hold rather than re-probing `remote.origin.url`.
+/// Test: `identity_seed_palace_prefers_the_committed_pin_over_the_remote`.
+pub(super) fn identity_seed_palace(
+    workspace_path: &std::path::Path,
+    repo_url: &str,
+) -> Result<String, trusty_common::palace_resolve::PalaceResolveError> {
+    trusty_common::palace_resolve::resolve_palace_with_remote(workspace_path, Some(repo_url))
+        .map(|resolution| resolution.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

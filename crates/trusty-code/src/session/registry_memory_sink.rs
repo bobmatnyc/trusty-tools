@@ -21,7 +21,7 @@
 
 use std::path::Path;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::session::memory_sink::{PalaceCreation, TurnMemorySink, derive_palace_id_for_project};
 
@@ -89,6 +89,16 @@ impl SessionRegistry {
     /// `session:<id>` tag (exactly how #2348's `recall_session` already scopes
     /// its query), so no session-level recall is lost.
     ///
+    /// (#5811) A project root whose palace CANNOT BE RESOLVED gets no sink at
+    /// all. [`derive_palace_id_for_project`] used to answer the shared literal
+    /// `"unknown-project"` on any failure, and a durable root carries
+    /// [`PalaceCreation::Allowed`], so two projects with unresolvable identity
+    /// auto-created and then shared one palace holding both of their real
+    /// prompts and responses. Declining the sink is the structural fix: there is
+    /// no palace to name, so there is nothing to write into. The resolve runs
+    /// BEFORE the temp-root check because an unresolvable identity is
+    /// disqualifying whether or not the root is durable.
+    ///
     /// An ephemeral root still gets a full sink — only the CREATE is withheld.
     /// That distinction is deliberate: the sink is what registers #2348's
     /// `recall_session` tool and what `run_and_record` reuses for its
@@ -108,10 +118,23 @@ impl SessionRegistry {
         project_dir: Option<&Path>,
     ) -> Option<Arc<TurnMemorySink>> {
         let project_dir = project_dir?;
+        // #5811: never let a failed resolution become a shared, auto-creatable
+        // palace id — decline the sink instead.
+        let palace = match derive_palace_id_for_project(project_dir) {
+            Ok(palace) => palace,
+            Err(e) => {
+                warn!(
+                    project_dir = %project_dir.display(),
+                    error = %e,
+                    "turn_recorder: no palace could be resolved for this project — \
+                     turn recording is DISABLED for this session (#5811)"
+                );
+                return None;
+            }
+        };
         let mut sessions = self.lock();
         let entry = sessions.get_mut(id)?;
         if entry.memory_sink.is_none() {
-            let palace = derive_palace_id_for_project(project_dir);
             let base_url = trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
             // #4638: only a durable project root entitles the recorder to bring
             // a new palace into being — a temp root's id is unique per run.

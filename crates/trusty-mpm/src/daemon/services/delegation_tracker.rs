@@ -454,7 +454,8 @@ fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
 /// checkout into an isolated one (ADR-0048 decision 1), but [`on_dispatch`]
 /// observes the ORIGINAL payload, so the record read `isolation: None` — naming
 /// an agent that had just been moved into its own worktree as a live writer in
-/// the shared checkout. Decision 10 then denies `git pull` there on that record,
+/// the shared checkout. Decision 10 then denies a `git merge` or `git rebase`
+/// there on that record,
 /// for the six hours of `RUNNING_STALE_AFTER_SECS`, which blocks the release
 /// flow's fast-forward of the main checkout.
 ///

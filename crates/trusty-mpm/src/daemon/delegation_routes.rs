@@ -158,7 +158,8 @@ pub fn router() -> Router<Arc<DaemonState>> {
 /// one whose record needs correcting: the tracker's `matcher: "*"` hook observes
 /// the ORIGINAL payload and writes `isolation: None`, so every granted writer
 /// stays named as a shared-checkout writer and ADR-0048 decision 10 denies
-/// `git pull` there on a phantom. This route is the second half the grant needs.
+/// a `git merge` or `git rebase` there on a phantom. This route is the second
+/// half the grant needs.
 ///
 /// What: the same scan-and-claim as its sibling, with two differences. The
 /// record is [`crate::daemon::services::delegation_tracker::record_granted_isolation`]

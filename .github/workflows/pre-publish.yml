@@ -445,8 +445,9 @@ jobs:
       - name: Free disk space
         run: bash scripts/ci-free-disk-space.sh
 
+      # #5693: same swallowed-failure defect as ci.yml's copy of this step.
       - name: Create local main branch for git tests
-        run: git fetch origin main:main || true
+        run: bash scripts/ci-create-local-main.sh
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -2004,6 +2004,51 @@ fn pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout() {
 }
 
 #[test]
+fn pm_guard_keeps_an_opted_out_project_in_the_checkout() {
+    // #5814: the project declares `agent_worktree = false`, so the same dispatch
+    // that is granted a worktree above is left in the checkout and told the
+    // workflow that replaces isolation. Read through the real binary because the
+    // config read is a filesystem step the unit tests fake.
+    let (_dir, repo) = main_checkout_fixture();
+    std::fs::write(repo.join(".trusty-mpm.toml"), "agent_worktree = false\n")
+        .expect("write project config");
+    let input = r#"{"subagent_type":"documentation","prompt":"write the memo"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let updated = &value["hookSpecificOutput"]["updatedInput"];
+    assert!(
+        updated.get("isolation").is_none(),
+        "an opted-out project must not be granted a worktree: {stdout}"
+    );
+    let prompt = updated["prompt"].as_str().expect("prompt survives");
+    assert!(prompt.starts_with("write the memo"), "{stdout}");
+    assert!(prompt.contains("agent_worktree = false"), "{stdout}");
+    assert!(prompt.contains("work IN PLACE"), "{stdout}");
+}
+
+#[test]
+fn pm_guard_still_grants_when_the_project_config_is_unreadable() {
+    // #5814's default branch: a config that does not parse leaves ADR-0048's
+    // grant exactly as it was. A project that predates the key behaves today
+    // as it did before it existed — covered by the sibling above, which uses
+    // the same fixture with no config file at all.
+    let (_dir, repo) = main_checkout_fixture();
+    std::fs::write(repo.join(".trusty-mpm.toml"), "agent_worktre = false\n")
+        .expect("write project config");
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"do the thing"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(
+        value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
+        "a config that cannot be parsed must never strip isolation: {stdout}"
+    );
+}
+
+#[test]
 fn pm_guard_denies_a_granted_dispatch_beside_a_live_writer() {
     // #5769 finding 2: the grant used to return BEFORE the #4480 concurrency
     // check, so that verdict stopped being computed for every dispatch made from
@@ -2276,16 +2321,40 @@ fn head_move_payload(command: &str, cwd: &std::path::Path, extra_fields: &str) -
 }
 
 #[test]
-fn pm_guard_denies_a_pull_in_a_shared_main_checkout() {
+fn pm_guard_allows_a_pull_in_a_shared_main_checkout_beside_a_live_writer() {
+    // THE regression test for ADR-0053. This exact payload — a `git pull` in a
+    // main checkout the daemon reports another agent writing in — was DENIED
+    // under ADR-0048 decision 10, and the test that asserted that deny is the
+    // one this replaces. Owner ruling of 2026-08-17: "fetch and pull operations
+    // are permitted. Only direct code editing is not."
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    let (_dir, repo) = main_checkout_fixture();
+    for command in ["git pull", "git pull --ff-only", "git pull --rebase"] {
+        let stdout = run_pm_guard_at(&head_move_payload(command, &repo, ""), &url, &repo);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "`{command}` is permitted in a main checkout (ADR-0053), got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_merge_in_a_shared_main_checkout() {
     // THE regression test (ADR-0048 decision 10). Against pre-fix code this
-    // payload is ALLOWED with no output at all: `git pull` matched no verb
+    // payload is ALLOWED with no output at all: `git merge` matched no verb
     // table in `pm_guard_bash`, the destructive rule stopped at
     // `reset --hard`/`clean -fdx`/`checkout -- <pathspec>`, and nothing routed
     // a Bash call through the writer query. The deny below can only come from
-    // the new classifier plus that query.
+    // the new classifier plus that query. ADR-0053 narrowed decision 10 to
+    // `merge` and `rebase`; this case is unchanged by it.
     let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
     let (_dir, repo) = main_checkout_fixture();
-    let stdout = run_pm_guard_at(&head_move_payload("git pull", &repo, ""), &url, &repo);
+    let stdout = run_pm_guard_at(
+        &head_move_payload("git merge origin/main", &repo, ""),
+        &url,
+        &repo,
+    );
 
     assert_denied(&stdout);
     let parsed: serde_json::Value =
@@ -2312,12 +2381,15 @@ fn pm_guard_denies_a_pull_in_a_shared_main_checkout() {
 #[test]
 fn pm_guard_denies_every_head_moving_verb_in_a_shared_main_checkout() {
     for command in [
-        "git pull --rebase",
         "git merge origin/main",
+        "git merge --no-ff feature/x",
         "git rebase origin/main",
+        "git rebase -i HEAD~3",
         // Composition must not hide the verb behind a benign first segment —
-        // `git fetch && git pull` is the shape this actually arrives in.
-        "git fetch origin && git pull",
+        // `git fetch && git merge` is the shape this actually arrives in, and
+        // since ADR-0053 a permitted `git pull` is a benign first segment too.
+        "git fetch origin && git merge origin/main",
+        "git pull && git rebase origin/main",
     ] {
         let url =
             spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
@@ -2328,7 +2400,7 @@ fn pm_guard_denies_every_head_moving_verb_in_a_shared_main_checkout() {
 }
 
 #[test]
-fn pm_guard_denies_a_pull_from_a_dispatched_agent_in_a_shared_main_checkout() {
+fn pm_guard_denies_a_merge_from_a_dispatched_agent_in_a_shared_main_checkout() {
     // The load-bearing case, and why the rule sits ahead of Guards 1 and 4:
     // ADR-0048 decision 4 binds the PM AND every agent it dispatches, and both
     // automatic markers return ALLOW for exactly that population. Remove either
@@ -2344,7 +2416,7 @@ fn pm_guard_denies_a_pull_from_a_dispatched_agent_in_a_shared_main_checkout() {
             spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
         let (_dir, repo) = main_checkout_fixture();
         let stdout = run_pm_guard_at_with_env(
-            &head_move_payload("git pull", &repo, extra_fields),
+            &head_move_payload("git merge origin/main", &repo, extra_fields),
             &url,
             &repo,
             &env,
@@ -2355,23 +2427,27 @@ fn pm_guard_denies_a_pull_from_a_dispatched_agent_in_a_shared_main_checkout() {
 }
 
 #[test]
-fn pm_guard_allows_a_pull_in_a_main_checkout_nobody_else_is_writing_in() {
+fn pm_guard_allows_a_merge_in_a_main_checkout_nobody_else_is_writing_in() {
     // The false-positive boundary #5356 is the reminder for, and the reason the
     // rule asks the daemon at all instead of denying on the directory alone. A
-    // solo session updating its own checkout is ordinary work.
+    // solo session merging in its own checkout is ordinary work.
     let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
     let (_dir, repo) = main_checkout_fixture();
-    let stdout = run_pm_guard_at(&head_move_payload("git pull", &repo, ""), &url, &repo);
+    let stdout = run_pm_guard_at(
+        &head_move_payload("git merge origin/main", &repo, ""),
+        &url,
+        &repo,
+    );
     assert_eq!(
         stdout.trim(),
         "",
-        "a pull with no other writer in the tree must be allowed, got: {stdout}"
+        "a merge with no other writer in the tree must be allowed, got: {stdout}"
     );
 }
 
 #[test]
-fn pm_guard_allows_a_pull_inside_a_worktree_beside_a_live_writer() {
-    // A worktree's HEAD belongs to the one session that owns it, so a pull
+fn pm_guard_allows_a_head_move_inside_a_worktree_beside_a_live_writer() {
+    // A worktree's HEAD belongs to the one session that owns it, so a merge
     // there races nothing — this is where delegated work happens and it must
     // stay unrestricted. The mock is deliberately never consumed: the
     // classification returns before any daemon call.
@@ -2403,23 +2479,29 @@ fn pm_guard_allows_a_pull_inside_a_worktree_beside_a_live_writer() {
 #[test]
 fn pm_guard_allows_fetch_and_in_progress_control_in_a_shared_main_checkout() {
     // `git fetch` is the remedy the deny offers and ADR-0048 decision 9 says it
-    // needs no enforcement — it writes remote-tracking refs and never HEAD. The
+    // needs no enforcement — it writes remote-tracking refs and never HEAD.
+    // `git pull` joined it under ADR-0053, including through `cd` and `-C`,
+    // which are the two overrides that used to carry a pull into the deny. The
     // `--abort`/`--continue` family resolves an operation that already started;
     // denying those would park a shared checkout mid-rebase and the deny would
     // carry no remedy that works from there.
     let (_dir, repo) = main_checkout_fixture();
     for command in [
-        "git fetch",
-        "git fetch --all --prune",
-        "git rebase --abort",
-        "git rebase --continue",
-        "git merge --abort",
-        "git merge-base main HEAD",
-        "git status --short",
+        "git fetch".to_string(),
+        "git fetch --all --prune".to_string(),
+        "git pull".to_string(),
+        "git pull --ff-only".to_string(),
+        format!("cd {} && git pull", repo.display()),
+        format!("git -C {} pull --ff-only", repo.display()),
+        "git rebase --abort".to_string(),
+        "git rebase --continue".to_string(),
+        "git merge --abort".to_string(),
+        "git merge-base main HEAD".to_string(),
+        "git status --short".to_string(),
     ] {
         let url =
             spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
-        let stdout = run_pm_guard_at(&head_move_payload(command, &repo, ""), &url, &repo);
+        let stdout = run_pm_guard_at(&head_move_payload(&command, &repo, ""), &url, &repo);
         assert_eq!(
             stdout.trim(),
             "",
@@ -2429,7 +2511,7 @@ fn pm_guard_allows_fetch_and_in_progress_control_in_a_shared_main_checkout() {
 }
 
 #[test]
-fn pm_guard_allows_a_pull_when_the_daemon_is_unreachable() {
+fn pm_guard_allows_a_merge_when_the_daemon_is_unreachable() {
     // Declared fail-open branch, and the one that differs from this module's
     // other main-checkout rules: those consult no daemon, so nothing can weaken
     // them. This one decides on the daemon's answer, so a down daemon must
@@ -2437,7 +2519,7 @@ fn pm_guard_allows_a_pull_when_the_daemon_is_unreachable() {
     // http://127.0.0.1:1, where nothing listens.
     let (_dir, repo) = main_checkout_fixture();
     let stdout = run_pm_guard_at(
-        &head_move_payload("git pull", &repo, ""),
+        &head_move_payload("git merge origin/main", &repo, ""),
         "http://127.0.0.1:1",
         &repo,
     );
@@ -2449,7 +2531,7 @@ fn pm_guard_allows_a_pull_when_the_daemon_is_unreachable() {
 }
 
 #[test]
-fn pm_guard_allows_a_pull_when_the_daemon_answer_is_malformed() {
+fn pm_guard_allows_a_merge_when_the_daemon_answer_is_malformed() {
     // Every unusable answer allows: a 5xx, a body that is not JSON, and
     // well-formed JSON of the wrong shape. A false deny here would land on
     // ordinary work with no way for the session to tell why.
@@ -2461,7 +2543,11 @@ fn pm_guard_allows_a_pull_when_the_daemon_answer_is_malformed() {
     ] {
         let url = spawn_writers_mock_with(status_line, body);
         let (_dir, repo) = main_checkout_fixture();
-        let stdout = run_pm_guard_at(&head_move_payload("git pull", &repo, ""), &url, &repo);
+        let stdout = run_pm_guard_at(
+            &head_move_payload("git merge origin/main", &repo, ""),
+            &url,
+            &repo,
+        );
         assert_eq!(
             stdout.trim(),
             "",
@@ -2482,18 +2568,21 @@ fn head_move_query_asks_the_checkout_root_and_the_command_directory() {
     let sub = repo.join("crates/trusty-mpm");
 
     for (command, run_from) in [
-        ("git pull".to_string(), repo.clone()),
+        ("git merge origin/main".to_string(), repo.clone()),
         (
-            format!("cd {} && git pull", repo.display()),
+            format!("cd {} && git merge origin/main", repo.display()),
             outside.path().to_path_buf(),
         ),
         (
-            format!("git -C {} pull", repo.display()),
+            format!("git -C {} merge origin/main", repo.display()),
             outside.path().to_path_buf(),
         ),
         // The bypass this finding is named for: a subdirectory of the checkout
         // shares its HEAD, but keys a path no record was ever written at.
-        (format!("cd {} && git pull", sub.display()), repo.clone()),
+        (
+            format!("cd {} && git merge origin/main", sub.display()),
+            repo.clone(),
+        ),
     ] {
         let command = command.as_str();
         let (url, captured) = spawn_capturing_writers_mock(
@@ -2538,7 +2627,7 @@ fn pm_guard_operator_escape_hatches_still_allow_a_head_move() {
             spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
         let (_dir, repo) = main_checkout_fixture();
         let stdout = run_pm_guard_at_with_env(
-            &head_move_payload("git pull", &repo, ""),
+            &head_move_payload("git merge origin/main", &repo, ""),
             &url,
             &repo,
             &[env],

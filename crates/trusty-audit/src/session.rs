@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::chain::{self, ChainOptions, ChainReport};
 use crate::clone::{self, CloneOptions, CloneReport};
 use crate::config::EngagementConfig;
 use crate::discover::{self, DiscoveredRepo};
@@ -104,6 +105,14 @@ pub enum Command {
         /// Where to write the zip, or `None` for the default inside the work dir.
         destination: Option<PathBuf>,
     },
+    /// Drive the whole engagement in one call: install, materialize the
+    /// registered targets, collect and analyze each one, package (#5824).
+    ///
+    /// This is an ADDITION, not a replacement — the four capabilities it chains
+    /// stay individually invocable, because an operator debugging one phase
+    /// needs to run just that phase. See [`crate::chain`] for the partial-success
+    /// policy and what each phase is.
+    Audit(ChainOptions),
     /// Assemble the install package that goes TO a client (#5825).
     ///
     /// The one capability here the AUDITOR runs rather than the recipient: it
@@ -220,6 +229,13 @@ pub enum Outcome {
     Run(RunReport),
     /// From [`Command::Package`] — the file to send back, and what it omits.
     Package(ReturnPackage),
+    /// From [`Command::Audit`] — what every phase of the chain produced.
+    ///
+    /// Like [`Outcome::Run`], a report carrying failures is an ORDINARY `Ok`:
+    /// the chain finished and some of it did not, and those failures are data
+    /// the front end must show. [`Outcome::exit_code`] is what stops that
+    /// reading as success.
+    Audit(ChainReport),
     /// From [`Command::Distribute`] — the file to send a client, and what it
     /// will run on.
     Distributed(InstallPackage),
@@ -251,12 +267,26 @@ impl Outcome {
     /// re-deriving it.
     /// Test: `crate::cli::cli_tests::a_partial_sweep_does_not_exit_zero`,
     /// `crate::cli::cli_tests::a_run_with_gaps_exits_non_zero`,
-    /// `crate::cli::cli_tests::a_package_that_omits_a_repository_does_not_exit_zero`.
+    /// `crate::cli::cli_tests::a_package_that_omits_a_repository_does_not_exit_zero`,
+    /// `crate::chain::chain_tests::a_partly_failed_chain_packages_and_still_does_not_exit_zero`.
     pub fn exit_code(&self) -> i32 {
         match self {
             Outcome::Run(report) if report.status != run::RunStatus::AllSucceeded => EXIT_PARTIAL,
             Outcome::Cloned(report) if !report.gaps.is_empty() => EXIT_INCOMPLETE,
             Outcome::Package(package) if !package.excluded.is_empty() => EXIT_INCOMPLETE,
+            // #5824: the chain reports the sweep's verdict for the same reason
+            // `run` does — a repository that failed makes this an incomplete
+            // engagement, and `taudit audit && send-it` must not chain onward.
+            Outcome::Audit(report) if report.run.status != run::RunStatus::AllSucceeded => {
+                EXIT_PARTIAL
+            }
+            // A target the chain never attempted (a registered board today) is
+            // not a sweep failure and would otherwise be invisible to `$?`.
+            Outcome::Audit(report)
+                if !report.gaps.is_empty() || !report.package.excluded.is_empty() =>
+            {
+                EXIT_INCOMPLETE
+            }
             _ => 0,
         }
     }
@@ -487,6 +517,9 @@ impl Session {
             Command::RemoveTarget { spec } => self.remove_target(&spec).await.map(Outcome::Removed),
             Command::Run(options) => self.run(&options).await.map(Outcome::Run),
             Command::Package { destination } => self.package(destination).map(Outcome::Package),
+            // #5824: the one-shot chain over the four above. `crate::chain`
+            // calls each of them unchanged, so this and they cannot drift.
+            Command::Audit(options) => self.audit(&options).await.map(Outcome::Audit),
             Command::Distribute(options) => self.distribute(&options).map(Outcome::Distributed),
         }
     }
@@ -603,33 +636,34 @@ impl Session {
     /// packaging that would send a partial engagement as a whole one. An
     /// incomplete record is refused with the count it holds, because the
     /// remedy is to re-run and resume, not to start over.
-    /// What: loads both, then hands off to [`package::assemble`].
+    /// What: loads the config, then hands off to [`package::from_checkpoint`],
+    /// which owns the completion check — #5824 gave it a second caller, and a
+    /// precondition enforced in two places is one that drifts.
     /// Test: `super::session_tests::packaging_before_any_sweep_is_refused`,
     /// `super::session_tests::packaging_an_unfinished_sweep_is_refused`.
     fn package(&self, destination: Option<PathBuf>) -> Result<ReturnPackage, AuditError> {
         let config = EngagementConfig::load(&self.config_path)?;
-        let progress =
-            run::read_progress(&self.work)?.ok_or_else(|| AuditError::NothingToPackage {
-                reason: format!(
-                    "no sweep has finished in {} — run `trusty-audit run` first",
-                    self.work.root().display()
-                ),
-            })?;
-        if !progress.complete {
-            return Err(AuditError::NothingToPackage {
-                reason: format!(
-                    "the last sweep in {} did not finish — {} recorded so far; \
-                     run `trusty-audit run` to resume it",
-                    self.work.root().display(),
-                    match progress.repos.len() {
-                        1 => "1 repository".to_owned(),
-                        n => format!("{n} repositories"),
-                    }
-                ),
-            });
-        }
         let destination = destination.unwrap_or_else(|| package::default_destination(&self.work));
-        package::assemble(&self.work, &config, &progress.report(), &destination)
+        // No unattempted targets: the standalone verb packages whatever the last
+        // sweep recorded and knows nothing about a registry (#5824).
+        package::from_checkpoint(&self.work, &config, &[], &destination)
+    }
+
+    /// Drive the whole engagement in one call (#5824).
+    ///
+    /// The config is loaded here for the same reason [`Session::run`] loads it,
+    /// and `auto_install` is forwarded so `--no-install` means the same thing on
+    /// the chained path as on the four separate ones.
+    async fn audit(&self, options: &ChainOptions) -> Result<ChainReport, AuditError> {
+        let config = EngagementConfig::load(&self.config_path)?;
+        chain::audit(
+            &self.work,
+            &config,
+            options,
+            self.auto_install,
+            &self.progress,
+        )
+        .await
     }
 
     /// Assemble the install package that goes TO a client (#5825).

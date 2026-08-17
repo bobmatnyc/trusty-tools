@@ -34,6 +34,7 @@ use commands::{
     hooks::clean as hooks_clean,
     install::install,
     launch::{connect, launch},
+    managed_workspace::LaunchDir,
     manager::manager,
     memory::memory,
     misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status, validate},
@@ -505,7 +506,9 @@ async fn main() -> anyhow::Result<()> {
             dir,
             style,
             worktree,
-        }) => launch(&client, &url, dir, style, worktree).await,
+            // `--dir` (or the process cwd) is the operator's, not a resolved
+            // placement: ADR-0037's rule applies here and only here (#5836).
+        }) => launch(&client, &url, dir, style, worktree, LaunchDir::OperatorCwd).await,
         Some(Command::Connect { dir }) => connect(&client, &url, dir).await,
         Some(Command::Attach { target, json }) => attach_cmd(&client, &url, &target, json).await,
         Some(Command::Optimizer { action }) => optimizer(&client, &url, action).await,

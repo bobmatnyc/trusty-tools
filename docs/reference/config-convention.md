@@ -70,6 +70,8 @@ trusty-mpm also reads one file **from the project itself**:
 ```toml
 # Do this repo's managed sessions get a per-session git worktree?
 worktree = false
+# Does an agent DISPATCHED in this repo get a worktree of its own? (#5814)
+agent_worktree = false
 # Default model id or tier alias for sessions launched in this project.
 default_model = opus
 ```
@@ -87,7 +89,19 @@ Where a setting appears here, this file is the **top** of its precedence chain:
 | Setting | Precedence, highest first |
 |---|---|
 | `worktree` | `.trusty-mpm.toml` → the `projects.json` registry → built-in `true` |
+| `agent_worktree` | `.trusty-mpm.toml` → built-in `true` |
 | `default_model` | `.trusty-mpm.toml` → `config.yaml`'s `default_model` → `config.toml`'s `[models] default` → built-in `sonnet` |
+
+`worktree` and `agent_worktree` answer different questions and neither implies
+the other. `worktree` decides where a managed SESSION is placed; `agent_worktree`
+decides whether an agent DISPATCHED from a main checkout is given a worktree of
+its own under ADR-0048 decision 1. `agent_worktree` reads no registry layer at
+all — a machine-global record must not decide a project's dispatch workflow.
+Setting `agent_worktree = false` suits a repo with no concurrent writers and no
+build state (a writing or documentation repo): its agents edit in place, commit
+on the checked-out branch, and push. It exempts the worktree grant only. The
+ADR-0044 main-checkout write boundary still denies a source-file edit there, and
+a second concurrent writer in the same checkout is still refused.
 
 `default_model` is a *default*: an explicit `--model`, a per-agent
 `[models.agents]` entry, and an agent's own frontmatter are all more specific and

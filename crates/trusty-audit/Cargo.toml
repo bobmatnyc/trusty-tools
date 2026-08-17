@@ -93,3 +93,8 @@ walkdir = { workspace = true }
 [dev-dependencies]
 # Real directories for the working-directory creation tests.
 tempfile = { workspace = true }
+# #5824: `tests/cli_end_to_end.rs` opens the return package the chain wrote and
+# reads its generated members, because what the recipient receives is the zip
+# rather than the console output that produced it. Already a dependency above,
+# so this costs no extra compilation.
+zip = { workspace = true }

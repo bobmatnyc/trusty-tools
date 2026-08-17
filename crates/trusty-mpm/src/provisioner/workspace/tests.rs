@@ -1180,3 +1180,65 @@ fn ensure_base_checkout_installs_push_guard() {
         );
     }
 }
+
+/// (#5811) The DOC-28 identity seed resolves the COMMITTED PIN, not the slug
+/// derived from the repo URL.
+///
+/// Why: this call site used the pure three-level `derive_palace_id`, which never
+/// reads `.trusty-tools/trusty-memory.yaml`. A pinned project therefore seeded
+/// its identity fact under `<owner>-<repo>` while every other surface — session
+/// launch, catch-up, the turn recorder, the workstream endpoints — resolved the
+/// pinned name. Two names, one project's memory.
+/// What: a workspace carrying a pin naming `trusty-tools`, provisioned from a
+/// remote whose derived slug would be `bobmatnyc-trusty-tools`. Only the pin
+/// being read can tell the two apart.
+/// Test: itself.
+#[test]
+fn identity_seed_palace_prefers_the_committed_pin_over_the_remote() {
+    let _env = EnvGuard::clear_palace_override();
+    let workspace = TempDir::new().expect("tempdir");
+    let pin_dir = workspace.path().join(".trusty-tools");
+    std::fs::create_dir_all(&pin_dir).expect("create .trusty-tools");
+    std::fs::write(
+        pin_dir.join("trusty-memory.yaml"),
+        "schema_version: 1\npalace: trusty-tools\n",
+    )
+    .expect("write pin");
+
+    let got = crate::provisioner::identity_seed::identity_seed_palace(
+        workspace.path(),
+        "git@github.com:bobmatnyc/trusty-tools.git",
+    )
+    .expect("a pinned workspace resolves");
+
+    assert_eq!(
+        got, "trusty-tools",
+        "the identity seed must use the committed pin, not the remote-derived slug"
+    );
+}
+
+/// RAII guard clearing `TRUSTY_MEMORY_PALACE` for one test.
+///
+/// Why: level 1 outranks the pin, so an operator override left set in the
+/// environment would mask exactly what the test above is asserting.
+/// What: snapshots the prior value and restores it on drop.
+struct EnvGuard(Option<String>);
+
+impl EnvGuard {
+    fn clear_palace_override() -> Self {
+        let prior = std::env::var(trusty_common::PALACE_OVERRIDE_ENV).ok();
+        // SAFETY: this is the only test in this file that touches the variable.
+        unsafe { std::env::remove_var(trusty_common::PALACE_OVERRIDE_ENV) };
+        Self(prior)
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: as above.
+        match &self.0 {
+            Some(v) => unsafe { std::env::set_var(trusty_common::PALACE_OVERRIDE_ENV, v) },
+            None => unsafe { std::env::remove_var(trusty_common::PALACE_OVERRIDE_ENV) },
+        }
+    }
+}
