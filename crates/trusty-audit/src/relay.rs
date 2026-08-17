@@ -39,8 +39,8 @@
 //! ## One search space, no invented boundaries
 //!
 //! A needle is removed only if the scrubber sees it whole, so every boundary
-//! this module invents is somewhere a credential can hide in two halves. Two
-//! such boundaries existed and both leaked (#5869 review round):
+//! this module invents is somewhere a credential can hide in two halves. Three
+//! such boundaries existed and all three leaked (#5869 review rounds):
 //!
 //! - The pump used to scrub only the part of its buffer it was about to write,
 //!   so a needle straddling that cut was split, matched neither half, and both
@@ -52,11 +52,19 @@
 //!   being injected INTO it. [`Scrubber::scrub`] now searches the runs
 //!   concatenated — invalid bytes elided — and maps each match back to the
 //!   segment's own byte offsets.
+//! - The fix for the second one invented the third. The hold-back is counted in
+//!   TEXT bytes and was then clamped in RAW bytes, and the two units disagree
+//!   exactly when invalid padding sits inside an arrived prefix: the raw clamp
+//!   moved the cut PAST the text walk's boundary and wrote the prefix out. Any
+//!   bound stated in one unit and applied in the other is this defect again.
 //!
 //! What survives is a hold-back: bytes at the tail of the buffer that the pump
 //! keeps rather than writes, because a needle that has only PARTLY ARRIVED
 //! cannot be matched yet. That is a bound on the stream, not a boundary in the
-//! search space.
+//! search space — and the bound is now enforced without moving the cut. The
+//! hold-back's raw size is capped by dropping invalid padding OUT of it, which
+//! the pump then writes; the text the walk kept is never given up
+//! ([`Scrubber::cut_for`]).
 //!
 //! Test: `super::relay_tests`.
 
@@ -90,12 +98,21 @@ const SEGMENT_LIMIT: usize = 256 * 1024;
 /// longer than this is bounded here and loses only the partly-arrived case,
 /// never the ordinary one.
 ///
-/// It caps the hold-back twice, because the hold-back is counted in two units.
-/// [`Scrubber::held_back`] is a count of TEXT bytes, so that invalid bytes
-/// injected between a needle's characters are retained along with them; this
-/// same value then caps the RAW byte count the tail may reach, so a segment
-/// padded with injected garbage cannot make the pump hold its whole buffer.
-/// Test: `super::relay_tests::an_absurd_needle_cannot_stall_the_pump`.
+/// It bounds the hold-back twice, in the two units the hold-back is counted in.
+/// [`Scrubber::held_back`] is a count of TEXT bytes and is capped here at
+/// construction; the RAW span those text bytes occupy is capped here again,
+/// because invalid bytes injected among them make the span arbitrarily longer.
+///
+/// **The raw cap must never be applied by moving the cut.** It was, until the
+/// #5869 re-verify round: the cut was computed by walking text bytes and then
+/// clamped in raw bytes, so ~4KB of invalid padding inside an arrived prefix
+/// pushed the cut PAST the walk's boundary and wrote that prefix to the log in
+/// the clear — the remainder then arrived without it and matched nothing. The
+/// cap is now honoured by dropping invalid padding out of the hold
+/// ([`Scrubber::cut_for`]), which is bytes the pump writes rather than bytes it
+/// evicts.
+/// Test: `super::relay_tests::an_absurd_needle_cannot_stall_the_pump`,
+/// `super::relay_tests::a_padded_partial_credential_survives_a_four_kilobyte_pad`.
 const MAX_HELD_BACK: usize = 4096;
 
 /// The token [`scrub_secrets`] leaves in a needle's place.
@@ -261,45 +278,120 @@ impl Scrubber {
         out
     }
 
-    /// Where to cut `bytes` so the tail keeps every byte of a needle that has
+    /// How to divide `bytes` so the tail keeps every byte of a needle that has
     /// only partly arrived.
+    ///
+    /// # Postconditions
+    /// Every TEXT byte the walk chose to keep is in [`Cut::carry`], in order.
+    /// No raw-byte bound moves the division past that boundary — a bound that
+    /// binds takes it out of [`Cut::padding`], which the pump WRITES, never out
+    /// of the text the walk kept. `carry` is at most [`MAX_HELD_BACK`] bytes in
+    /// every case, and `head`, `padding` and `carry` together are `bytes`.
     ///
     /// Why: the pump writes what it cuts off, so anything it cuts through is
     /// written in the clear. A partly-arrived needle occupies at most
     /// [`Self::held_back`] bytes of TEXT at the very end of the buffer — but
-    /// invalid bytes injected between its characters make its RAW length longer
+    /// invalid bytes injected between its characters make its RAW span longer
     /// than that, and a raw-byte hold-back would slice its head off. So the walk
     /// counts text bytes and lets the invalid bytes among them ride along.
     /// What: walks the valid-UTF-8 runs backwards until the tail holds
-    /// [`Self::held_back`] bytes of text, then clamps the tail to
-    /// [`MAX_HELD_BACK`] raw bytes and to half the buffer, so garbage padding
-    /// can neither unbound the buffer nor stall the pump.
+    /// [`Self::held_back`] bytes of text. If the raw span of that tail is within
+    /// [`MAX_HELD_BACK`] the tail is carried whole, invalid bytes and all —
+    /// which is what keeps [`Self::redact_spans`] able to remove the ones INSIDE
+    /// the eventual match. Past that span the padding is lifted out and written
+    /// instead: the pump's memory bound is honoured by writing meaningless
+    /// bytes early rather than by evicting credential bytes, and the only cost
+    /// is that in that case those invalid bytes reach the log ahead of the text
+    /// they interrupted rather than being removed with it.
     /// Test: `super::relay_tests::a_credential_straddling_the_flush_cut_is_still_caught`,
     /// `super::relay_tests::an_interrupted_credential_straddling_a_cut_is_removed`,
+    /// `super::relay_tests::a_padded_partial_credential_survives_a_four_kilobyte_pad`,
+    /// `super::relay_tests::the_half_buffer_clamp_cannot_evict_a_partly_arrived_credential`,
+    /// `super::relay_tests::a_credential_at_the_head_of_an_almost_wholly_invalid_segment_is_held`,
     /// `super::relay_tests::a_line_that_never_ends_does_not_grow_without_bound`.
-    fn cut_for(&self, bytes: &[u8]) -> usize {
+    fn cut_for<'a>(&self, bytes: &'a [u8]) -> Cut<'a> {
         if self.held_back == 0 {
-            return bytes.len();
+            return Cut::written_whole(bytes);
         }
         let (_, runs) = utf8_runs(bytes);
-        let mut want = self.held_back;
-        let mut cut = 0usize;
+        let cut = Self::text_cut(&runs, self.held_back);
+        if bytes.len() - cut <= MAX_HELD_BACK {
+            return Cut {
+                head: &bytes[..cut],
+                padding: Vec::new(),
+                carry: Cow::Borrowed(&bytes[cut..]),
+            };
+        }
+        let (padding, carry) = lift_padding(bytes, &runs, cut);
+        Cut {
+            head: &bytes[..cut],
+            padding,
+            carry: Cow::Owned(carry),
+        }
+    }
+
+    /// The offset the last `want` TEXT bytes of a segment start at.
+    ///
+    /// Zero when the segment holds fewer than `want` of them: the whole segment
+    /// is then a candidate arrived prefix, so none of it may be written.
+    fn text_cut(runs: &[Run], want: usize) -> usize {
+        let mut want = want;
         for run in runs.iter().rev() {
             if run.len >= want {
-                cut = run.orig + run.len - want;
-                want = 0;
-                break;
+                return run.orig + run.len - want;
             }
             want -= run.len;
-            cut = run.orig;
         }
-        if want > 0 {
-            // Fewer text bytes in the whole buffer than the hold-back wants.
-            cut = 0;
-        }
-        let hold = (bytes.len() - cut).min(MAX_HELD_BACK).min(bytes.len() / 2);
-        bytes.len() - hold
+        0
     }
+}
+
+/// How one flush divides a scrubbed buffer.
+///
+/// `head`, then `padding`, then `carry` is `bytes` reordered only to the extent
+/// [`Scrubber::cut_for`] documents. The pump writes `head` and `padding` and
+/// keeps `carry` for the next segment.
+struct Cut<'a> {
+    /// Written first, unchanged: the buffer up to the hold-back's start.
+    head: &'a [u8],
+    /// Written after `head`: invalid bytes lifted out of an over-long hold.
+    /// Empty on the ordinary path, where the hold is carried whole.
+    padding: Vec<u8>,
+    /// Kept for the next segment.
+    carry: Cow<'a, [u8]>,
+}
+
+impl<'a> Cut<'a> {
+    /// The whole buffer written, nothing held — a scrubber with no needles.
+    fn written_whole(bytes: &'a [u8]) -> Self {
+        Self {
+            head: bytes,
+            padding: Vec::new(),
+            carry: Cow::Borrowed(&[]),
+        }
+    }
+}
+
+/// Split `bytes[from..]` into its invalid bytes and its text bytes, each in
+/// stream order.
+///
+/// Why: a hold whose raw span outgrew [`MAX_HELD_BACK`] must shrink, and the
+/// invalid bytes in it are the part that can be given up — they are not
+/// credential characters, so writing them leaks nothing, whereas writing the
+/// text among them is exactly the #5869 re-verify CRITICAL.
+/// Test: `super::relay_tests::a_padded_partial_credential_survives_a_four_kilobyte_pad`.
+fn lift_padding(bytes: &[u8], runs: &[Run], from: usize) -> (Vec<u8>, Vec<u8>) {
+    let mut padding = Vec::new();
+    let mut text = Vec::new();
+    let mut at = from;
+    for run in runs.iter().filter(|r| r.orig + r.len > from) {
+        let start = run.orig.max(from);
+        padding.extend_from_slice(&bytes[at..start]);
+        text.extend_from_slice(&bytes[start..run.orig + run.len]);
+        at = run.orig + run.len;
+    }
+    padding.extend_from_slice(&bytes[at..]);
+    (padding, text)
 }
 
 /// One maximal run of valid UTF-8 inside a segment.
@@ -397,9 +489,10 @@ fn utf8_runs(bytes: &[u8]) -> (String, Vec<Run>) {
 /// finished arriving ([`Scrubber::cut_for`]). Scrubbing the emitted part alone,
 /// as this did before the #5869 review, wrote both halves of a straddling
 /// credential verbatim. Early writing is also what keeps a child printing one
-/// endless line from growing this buffer without bound: it peaks at
-/// [`SEGMENT_LIMIT`] plus [`MAX_HELD_BACK`], with one scrubbed copy of that
-/// alive at a time.
+/// endless line from growing this buffer without bound: [`Scrubber::cut_for`]
+/// carries at most [`MAX_HELD_BACK`] bytes forward whatever the encoding, so
+/// the buffer peaks at [`SEGMENT_LIMIT`] plus [`MAX_HELD_BACK`], with one
+/// scrubbed copy of that alive at a time.
 /// Test: `super::relay_tests::every_non_secret_byte_reaches_the_log_and_events_reach_the_sink`,
 /// `super::relay_tests::a_credential_straddling_the_flush_cut_is_still_caught`,
 /// `super::relay_tests::an_interrupted_credential_straddling_a_cut_is_removed`,
@@ -445,9 +538,12 @@ where
             // straddling credential into two unmatched halves.
             let clean = scrubber.scrub(&pending).into_owned();
             let cut = scrubber.cut_for(&clean);
-            emit(&mut log, &progress, &target, &clean[..cut]).await?;
+            emit(&mut log, &progress, &target, cut.head).await?;
+            if !cut.padding.is_empty() {
+                emit(&mut log, &progress, &target, &cut.padding).await?;
+            }
             pending.clear();
-            pending.extend_from_slice(&clean[cut..]);
+            pending.extend_from_slice(&cut.carry);
         }
     }
     log.flush().await
@@ -681,7 +777,7 @@ mod relay_tests {
         let (log, _) = run_bytes(input.as_bytes(), scrubber).await;
         let log = String::from_utf8(log).expect("text");
 
-        assert_no_fragment_of_the_key(&log);
+        assert_no_fragment_of_the_key(log.as_bytes());
         assert!(
             log.contains("[REDACTED] trailing"),
             "the key was not replaced"
@@ -707,7 +803,7 @@ mod relay_tests {
 
         let (log, _) = run_bytes(&input, Scrubber::over(vec![KEY.to_owned()])).await;
 
-        assert_no_fragment_of_the_key(&String::from_utf8_lossy(&log));
+        assert_no_fragment_of_the_key(&log);
         assert_eq!(log, b"before [REDACTED] after\n".to_vec());
     }
 
@@ -747,20 +843,134 @@ mod relay_tests {
         let (log, _) = run_bytes(&input, scrubber).await;
         let log = String::from_utf8(log).expect("only the garbage was invalid, and it went");
 
-        assert_no_fragment_of_the_key(&log);
+        assert_no_fragment_of_the_key(log.as_bytes());
         assert_eq!(log, format!("{filler}[REDACTED] trailing\n"));
     }
 
     /// No run of the key's characters, at any length worth recovering, is in
     /// `log`. A whole-key check alone passes on a leak of all but one character.
-    fn assert_no_fragment_of_the_key(log: &str) {
+    ///
+    /// Searches RAW bytes: a log that carries invalid UTF-8 has no `str` form to
+    /// search, and converting it lossily first is a second unit system in a file
+    /// whose every leak so far came from exactly that.
+    fn assert_no_fragment_of_the_key(log: &[u8]) {
         for len in [8, 16, 24, 32, KEY.len()] {
-            let fragment = &KEY[..len];
+            let fragment = &KEY.as_bytes()[..len];
             assert!(
-                !log.contains(fragment),
-                "a {len}-character fragment of the key reached the log: {fragment}"
+                !log.windows(len).any(|w| w == fragment),
+                "a {len}-character fragment of the key reached the log: {}",
+                &KEY[..len]
             );
         }
+    }
+
+    /// Whether `needle` occurs anywhere in `log`, byte for byte.
+    fn contains_bytes(log: &[u8], needle: &[u8]) -> bool {
+        log.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// The reproduction behind the third #5869 CRITICAL, parameterised by how
+    /// much invalid padding sits inside the arrived prefix.
+    ///
+    /// The key straddles the flush cut with `garbage` invalid bytes injected
+    /// into its arrived prefix, so the prefix's RAW span is
+    /// `garbage + 40` while its TEXT span is 40. Any clamp counted in raw bytes
+    /// moves the cut past the prefix's first text byte and writes it out.
+    async fn assert_a_padded_prefix_survives_the_cut(garbage: usize) {
+        let scrubber = Scrubber::over(vec![KEY.to_owned()]);
+        let (head, rest) = KEY.split_at(20);
+        let (middle, last) = rest.split_at(10);
+        let filler = "x".repeat(SEGMENT_LIMIT - head.len() - garbage - middle.len());
+
+        let mut input: Vec<u8> = format!("{filler}{head}").into_bytes();
+        input.extend(std::iter::repeat_n(0xff_u8, garbage));
+        input.extend_from_slice(format!("{middle}{last} trailing\n").as_bytes());
+        assert!(
+            input.len() > SEGMENT_LIMIT,
+            "the flush path must be reached"
+        );
+        assert!(
+            garbage + head.len() + middle.len() > MAX_HELD_BACK,
+            "the padding must outrun the raw clamp, or this proves nothing"
+        );
+
+        let (log, _) = run_bytes(&input, scrubber).await;
+
+        assert_no_fragment_of_the_key(&log);
+        assert!(
+            contains_bytes(&log, b"[REDACTED] trailing"),
+            "the key was not replaced"
+        );
+    }
+
+    /// Why: #5869 re-verify round, CRITICAL 3. [`Scrubber::cut_for`] walked TEXT
+    /// bytes to find the cut and then clamped the result in RAW bytes. When
+    /// invalid padding inside the arrived prefix pushed its raw span past
+    /// [`MAX_HELD_BACK`], the clamp moved the cut PAST the walk's own boundary
+    /// and wrote the prefix out in the clear; the remainder arrived in a later
+    /// segment without it and matched nothing, so both halves reached the log.
+    /// The trigger is ~4KB of non-UTF-8 near a flush boundary — a binary diff or
+    /// a corrupted pack object from a `git` child, no alignment needed.
+    /// What: 4200 bytes of padding inside the prefix, and nothing of the key
+    /// reaches the log.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn a_padded_partial_credential_survives_a_four_kilobyte_pad() {
+        assert_a_padded_prefix_survives_the_cut(4200).await;
+    }
+
+    /// Why: the same defect at a different split point — the re-verifier's two
+    /// reproductions cut the key in different places, so one size is one data
+    /// point rather than the class.
+    /// What: 10000 bytes of padding inside the prefix, same outcome.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn a_padded_partial_credential_survives_a_ten_kilobyte_pad() {
+        assert_a_padded_prefix_survives_the_cut(10_000).await;
+    }
+
+    /// Why: [`MAX_HELD_BACK`] was not the only raw-byte clamp over a text-byte
+    /// walk — `.min(bytes.len() / 2)` was the second, and it evicts the same
+    /// bytes once the padding is large enough to reach it. A fix aimed only at
+    /// the constant named in the finding leaves this one live.
+    /// What: 200000 bytes of padding, over half a full segment, and the key is
+    /// still removed whole.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn the_half_buffer_clamp_cannot_evict_a_partly_arrived_credential() {
+        assert_a_padded_prefix_survives_the_cut(200_000).await;
+    }
+
+    /// Why: the third place the two units disagreed. When a segment holds FEWER
+    /// text bytes than the hold-back wants, the walk gives up and cuts at zero —
+    /// meaning "keep all of it" — and the raw clamp then turned that into "keep
+    /// the last 4096 bytes", writing a key sitting at the head of a segment that
+    /// is otherwise invalid bytes.
+    /// What: 20 characters of the key, then a segment's worth of invalid bytes,
+    /// then the rest. The head is held across every flush and the key is removed
+    /// whole when its remainder arrives.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn a_credential_at_the_head_of_an_almost_wholly_invalid_segment_is_held() {
+        let scrubber = Scrubber::over(vec![KEY.to_owned()]);
+        let (head, rest) = KEY.split_at(20);
+        let garbage = SEGMENT_LIMIT + MAX_HELD_BACK;
+        assert!(
+            head.len() < scrubber.held_back,
+            "the walk must run out of text before it is satisfied"
+        );
+
+        let mut input: Vec<u8> = head.as_bytes().to_vec();
+        input.extend(std::iter::repeat_n(0xff_u8, garbage));
+        input.extend_from_slice(format!("{rest} trailing\n").as_bytes());
+
+        let (log, _) = run_bytes(&input, scrubber).await;
+
+        assert_no_fragment_of_the_key(&log);
+        assert!(
+            contains_bytes(&log, b"[REDACTED] trailing"),
+            "the key was not replaced"
+        );
     }
 
     /// Why: [`Scrubber::redact_spans`] writes [`REDACTED`] itself, because
@@ -884,7 +1094,16 @@ mod relay_tests {
     }
 
     /// Why: the hold-back must stay far below [`SEGMENT_LIMIT`] or the pump
-    /// re-holds everything it read and stops making progress.
+    /// re-holds everything it read and stops making progress. Two things can
+    /// inflate it, and the #5869 re-verify round closed the second one without
+    /// reopening the first: an absurdly long NEEDLE, capped here at
+    /// construction; and invalid PADDING among a needle's characters, which no
+    /// cap on the needle bounds because it is not part of the needle.
+    /// [`Scrubber::cut_for`] now bounds the padding by writing it out rather
+    /// than by moving the cut, so both vectors stay closed and the carried tail
+    /// is at most [`MAX_HELD_BACK`] bytes however the segment is encoded — the
+    /// claim `the_hold_back_stays_within_its_cap_whatever_the_padding` checks
+    /// directly.
     /// What: an absurdly long needle is capped at [`MAX_HELD_BACK`].
     /// Test: this is the test.
     #[test]
@@ -892,5 +1111,53 @@ mod relay_tests {
         let huge = Scrubber::over(vec!["q".repeat(SEGMENT_LIMIT * 2)]);
         assert_eq!(huge.held_back, MAX_HELD_BACK);
         assert!(huge.held_back < SEGMENT_LIMIT / 2);
+    }
+
+    /// Why: the pump's memory bound is `SEGMENT_LIMIT + MAX_HELD_BACK`, and it
+    /// rests entirely on what [`Scrubber::cut_for`] carries. The tests above
+    /// reach that through the pump; this asserts the bound itself, over the
+    /// segment shapes that inflate a raw hold — padding inside the tail,
+    /// padding at the very end, and a segment with almost no text in it at all.
+    /// What: whatever the encoding, the carry is within the cap, its text is
+    /// within the needle-derived hold-back, and the three pieces reassemble the
+    /// segment's bytes.
+    /// Test: this is the test.
+    #[test]
+    fn the_hold_back_stays_within_its_cap_whatever_the_padding() {
+        let scrubber = Scrubber::over(vec![KEY.to_owned()]);
+        let text = "t".repeat(64);
+        let shapes: Vec<Vec<u8>> = vec![
+            // Padding inside the held tail: the walk keeps text either side.
+            [text.as_bytes(), &vec![0xff; 9000], &text.as_bytes()[..20]].concat(),
+            // Padding after the last text byte.
+            [text.as_bytes(), &vec![0xff; 9000]].concat(),
+            // Almost no text at all: the walk runs out and cuts at zero.
+            [&b"ab"[..], &vec![0xff; 9000]].concat(),
+            // No text at all.
+            vec![0xff; 9000],
+        ];
+
+        for bytes in shapes {
+            let cut = scrubber.cut_for(&bytes);
+            assert!(
+                !cut.padding.is_empty(),
+                "every shape here outruns the cap, so every one must lift padding"
+            );
+            assert!(
+                cut.carry.len() <= MAX_HELD_BACK,
+                "carried {} bytes, cap is {MAX_HELD_BACK}",
+                cut.carry.len()
+            );
+            let carried_text: usize = utf8_runs(&cut.carry).1.iter().map(|r| r.len).sum();
+            assert!(
+                carried_text <= scrubber.held_back,
+                "carried {carried_text} text bytes against a hold-back of {}",
+                scrubber.held_back
+            );
+            let mut whole = cut.head.to_vec();
+            whole.extend_from_slice(&cut.padding);
+            whole.extend_from_slice(&cut.carry);
+            assert_eq!(whole.len(), bytes.len(), "no byte was dropped");
+        }
     }
 }

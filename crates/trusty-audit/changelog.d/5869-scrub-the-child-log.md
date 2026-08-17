@@ -26,3 +26,12 @@ Fixed
   clear. What the pump still holds back at a flush is only a credential that has
   not finished arriving, counted in text bytes so injected garbage rides along
   with it ([#5869](https://github.com/bobmatnyc/trusty-tools/issues/5869))
+- The size cap on that hold-back no longer writes out the credential it exists
+  to keep. The hold-back is measured in text bytes and was capped in raw bytes,
+  so around 4KB of non-UTF-8 output near a flush boundary — a binary diff or a
+  corrupted pack object from a `git` child — pushed the cap past the text it was
+  holding and wrote a partly-arrived key to the log in the clear; the rest of the
+  key then arrived without its start and matched nothing, so both halves landed.
+  The cap is now honoured by writing the invalid padding out of the hold instead,
+  which leaks nothing, and the pump's buffer bound is unchanged at one segment
+  plus the hold-back ([#5869](https://github.com/bobmatnyc/trusty-tools/issues/5869))
