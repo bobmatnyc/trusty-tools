@@ -211,6 +211,66 @@ async fn prune_compaction_keeps_the_slot_when_the_worktree_is_still_on_disk() {
     );
 }
 
+/// A record reactivated after the snapshot keeps its slot (#5897).
+///
+/// Why: `prune_managed` takes ONE `cached_all()` snapshot before its loop and
+/// then tears tmux sessions and git worktrees down inside it, so a tombstone
+/// reached late is compacted long after it was read. `mark_reactivated` revives a
+/// `Decommissioned` record in place, needs no tmux, and can land anywhere in that
+/// window — so the record whose number is about to be handed back can be a LIVE
+/// session by then. Judging that from the snapshot hands a running session's `NUM`
+/// to the next spawn, which is exactly the silent reuse #3034 exists to prevent,
+/// and it is a hazard this release path introduces: before #5897 prune freed no
+/// slot at all. This is the arm that makes the re-read worth its cost —
+/// `workspace_path`, the guard's other input, has no production writer that can
+/// move it under a terminal record.
+///
+/// What: seeds a Decommissioned tombstone, keeps the body the snapshot would have
+/// carried, observes its slot, then reactivates through the real
+/// `mark_reactivated` — the same `Active` record with `workspace_path` untouched
+/// that an operator's in-pane revival writes — and drives the compaction with the
+/// now-stale snapshot. Asserts the number stays held. It renders as a
+/// `-- deleted --` row because the compaction still removes the record; that
+/// second half of the race is not what this guard governs.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_keeps_the_slot_of_a_record_reactivated_after_the_snapshot() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Decommissioned, false).await;
+
+    // The body `prune_managed`'s pre-loop snapshot would carry into the guard.
+    let stale = mgr.get(&id).await.expect("seeded record");
+
+    let before = mgr.numbered_snapshot(&mgr.list().await).await;
+    let slot = before
+        .iter()
+        .find(|s| s.record.as_ref().map(|r| r.id) == Some(id))
+        .expect("tombstone observed")
+        .slot;
+
+    // The window: an operator revives the session between the snapshot and the
+    // compaction. Nothing about `workspace_path` changes — only `state`.
+    mgr.mark_reactivated(&id)
+        .await
+        .expect("reactivate in place");
+
+    let names = super::super::decommission::worktree_dir_names();
+    mgr.compact_and_release_slot(&stale, &names)
+        .await
+        .expect("compaction");
+
+    let after = mgr.numbered_snapshot(&mgr.list().await).await;
+    assert!(
+        after.iter().any(|s| s.slot == slot),
+        "a reactivated session's number must not be handed back for reuse; \
+         still held: {:?}",
+        after.iter().map(|s| s.slot).collect::<Vec<_>>()
+    );
+}
+
 /// A dry-run prune releases nothing (#5897).
 ///
 /// Why: `dry_run` promises that NOTHING is mutated, and the slot registry is

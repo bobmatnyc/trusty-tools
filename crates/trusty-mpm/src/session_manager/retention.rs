@@ -243,9 +243,14 @@ impl RetentionOutcome {
 /// gone, or it is a plain directory with no sentinel — the main-checkout case.
 /// #5897: `pub(super)` rather than module-private because
 /// [`super::prune::PruneOutcome`]'s compaction branch releases the slot behind
-/// the record it removes, and must gate that release on the SAME condition
-/// this sweep does. A second copy of the predicate in `prune.rs` would drift,
-/// and the two paths disagreeing about who may free a slot is what #5897 is.
+/// the record it removes, and must gate that release on the SAME workspace
+/// condition this sweep does. A second copy of the predicate in `prune.rs`
+/// would drift, and the two paths disagreeing about who may free a slot is
+/// what #5897 is. Prune adds one condition this sweep has no need of — that
+/// the record is STILL a tombstone when the slot is freed, which it re-reads
+/// from the store because its own snapshot predates an unbounded teardown
+/// loop. This sweep already re-reads for the same reason, in
+/// [`SessionManager::revalidate_for_eviction`].
 /// Test: `workspace_needs_protection_treats_an_undetermined_path_as_protected`,
 /// `workspace_needs_protection_covers_a_session_worktree`,
 /// `workspace_needs_protection_ignores_a_plain_main_checkout`,

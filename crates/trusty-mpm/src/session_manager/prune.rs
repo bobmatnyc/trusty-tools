@@ -381,6 +381,25 @@ pub(super) fn is_running(record: &SessionRecord, tmux: &dyn ManagedTmuxDriver) -
     tmux.session_exists(&record.tmux_name)
 }
 
+/// Whether a record is a terminal tombstone — the two states prune COMPACTS
+/// rather than tearing down again.
+///
+/// Why: two places ask this question about the same record and must not answer
+/// it differently. [`SessionManager::prune_managed`]'s loop asks it of the
+/// snapshot to pick an action; [`SessionManager::compact_and_release_slot`] asks
+/// it again of the record the store holds at removal time, to decide whether the
+/// number is safe to hand back. Two spellings of one predicate drifting apart is
+/// the shape of #5897 itself.
+/// What: `Decommissioned | Deleted`.
+/// Test: `prune_decommissioned_compacts`, `prune_deleted_compacts`,
+/// `prune_keeps_the_slot_of_a_record_reactivated_after_the_snapshot`.
+fn is_tombstone(record: &SessionRecord) -> bool {
+    matches!(
+        record.state,
+        ManagedSessionState::Decommissioned | ManagedSessionState::Deleted
+    )
+}
+
 /// Whether a record matches a prune `filter` (ignoring the running-state guard).
 ///
 /// Why: keeping the match logic separate from the running-state safety gate keeps
@@ -542,17 +561,18 @@ impl SessionManager {
     /// then per record —
     /// - a non-`Decommissioned` match → [`decommission`](Self::decommission) it
     ///   (kill runtime + remove workspace + tombstone) → [`PruneAction::Decommissioned`];
-    /// - a `Decommissioned` match → [`SessionStore::remove`](crate::session_manager::SessionStore::remove) it from the store
-    ///   (compaction) → [`PruneAction::Removed`], then
-    ///   [`release_compacted_slot`](Self::release_compacted_slot) frees its slot
-    ///   number unless its workspace still looks like a live session worktree
-    ///   (#5897).
+    /// - a `Decommissioned` match →
+    ///   [`compact_and_release_slot`](Self::compact_and_release_slot), which
+    ///   removes it from the store (compaction) → [`PruneAction::Removed`] and
+    ///   frees its slot number unless the record the store held at that moment
+    ///   says otherwise (#5897).
     ///
     /// Slot-release ownership is shared with
     /// [`sweep_terminal_records`](SessionManager::sweep_terminal_records), and both
     /// gate on the same `workspace_needs_protection` predicate — see
-    /// [`release_compacted_slot`](Self::release_compacted_slot) for why an
-    /// unconditional release is the worse outcome.
+    /// [`compact_and_release_slot`](Self::compact_and_release_slot) for why an
+    /// unconditional release is the worse outcome, and why the guard reads the
+    /// record afresh rather than trusting the snapshot this loop iterates.
     ///
     /// When `dry_run` is true NOTHING is mutated — the returned [`PruneOutcome`]
     /// lists what WOULD happen. A per-session failure is logged and skipped (the
@@ -609,10 +629,7 @@ impl SessionManager {
             // Both `Decommissioned` and `Deleted` (`--deleted--`) are terminal
             // tombstones: prune COMPACTS (removes) them rather than re-running a
             // decommission teardown.
-            let is_tombstone = matches!(
-                record.state,
-                ManagedSessionState::Decommissioned | ManagedSessionState::Deleted
-            );
+            let is_tombstone = is_tombstone(&record);
             // Predicted action for the `dry_run` preview, and the default for
             // a real run — overwritten below by the ACTUAL `decommission`
             // result. A dry-run cannot know in advance whether a worktree
@@ -628,16 +645,15 @@ impl SessionManager {
 
             if !dry_run {
                 if is_tombstone {
-                    // Compaction: drop the tombstone from the store entirely.
-                    if let Err(e) = self.store.write().await.remove(&record.id).await {
-                        warn!(id = %record.id, "prune: compaction remove failed: {e}; skipping");
+                    // #5897: compaction drops the tombstone from the store AND
+                    // frees its slot — otherwise `numbered_snapshot` renders it as
+                    // `-- deleted --` forever and `NUM` climbs, the opposite of
+                    // what prune advertises.
+                    let names = names.get_or_insert_with(super::decommission::worktree_dir_names);
+                    if let Err(e) = self.compact_and_release_slot(&record, names).await {
+                        warn!(id = %record.id, "prune: compaction failed: {e}; skipping");
                         continue;
                     }
-                    // #5897: the record is gone, so free its slot too — otherwise
-                    // `numbered_snapshot` renders it as `-- deleted --` forever and
-                    // `NUM` climbs, the opposite of what prune advertises.
-                    let names = names.get_or_insert_with(super::decommission::worktree_dir_names);
-                    self.release_compacted_slot(&record, names).await;
                 } else {
                     match self.decommission(&record.id, caller).await {
                         Ok((tombstone, workspace_removed)) => {
@@ -692,46 +708,73 @@ impl SessionManager {
         })
     }
 
-    /// Free the slot behind a record [`prune_managed`](Self::prune_managed) has
-    /// just compacted out of the store — unless its workspace still needs
-    /// protection (#5897).
+    /// Compact `snapshot` out of the store and free its slot — deciding against
+    /// the record the store holds at that moment, never the snapshot (#5897).
     ///
-    /// Why: [`super::slots::SlotRegistry::release`] had exactly one caller,
-    /// [`SessionManager::sweep_terminal_records`], so compaction removed the
-    /// record and left the registry still holding its number.
+    /// Why (the release): [`super::slots::SlotRegistry::release`] had exactly one
+    /// caller, [`SessionManager::sweep_terminal_records`], so compaction removed
+    /// the record and left the registry still holding its number.
     /// [`SessionManager::numbered_snapshot`] walks the slots the registry HOLDS
     /// and tombstones any whose record has vanished, so a pruned session kept
     /// rendering as a `-- deleted --` row and its number was never reusable —
     /// `NUM` climbed with every prune. The two paths now agree on who owns slot
-    /// release: both do, under the same condition.
+    /// release: both do, under the same conditions.
     ///
-    /// That condition is the point, not caution. `workspace_needs_protection`
-    /// refuses to release while the session's `.worktrees/<uuid>` directory and
-    /// its `.trusty-mpm-worktree` sentinel are still on disk, because something
-    /// may still be standing in that tree. Releasing unconditionally would let a
-    /// newly-spawned session be handed a number whose worktree still exists,
-    /// which is worse than a cosmetic tombstone row, and would weaken #3034's
-    /// no-silent-reuse property. Reusing the predicate rather than restating it
-    /// is what keeps the two paths from drifting apart again.
+    /// Why (the re-read): [`prune_managed`](Self::prune_managed) takes ONE
+    /// `cached_all()` snapshot before its loop, then tears tmux sessions and git
+    /// worktrees down inside that loop, so a tombstone reached late can be judged
+    /// against a body read minutes earlier while any process is free to write the
+    /// store. Retention's sibling re-reads immediately before its own destructive
+    /// step for the same reason ([`SessionManager::revalidate_for_eviction`],
+    /// #1845 item 9).
     ///
-    /// Accepted consequence: a compacted record whose worktree is still on disk
-    /// keeps its `-- deleted --` row. That is correct under this design — the
-    /// record is gone from the store, so the row is a slot the retention sweep
-    /// will free once the worktree goes.
+    /// What the re-read is actually for is `state`, not `workspace_path`.
+    /// [`SessionManager::mark_reactivated`] revives a `Decommissioned` record in
+    /// place, needs no tmux, and can land anywhere in that window — so a record
+    /// targeted as a tombstone can be a LIVE session by the time its number would
+    /// be handed back, which is the silent reuse #3034 exists to prevent, and a
+    /// hazard this path introduces: before #5897 prune freed no slot at all.
+    /// `workspace_path` cannot move under this guard by contrast — its only
+    /// production writers are `set_workspace` (always on an id `spawn_managed`
+    /// minted moments earlier) and `decommission`, which since #4344 blanks it
+    /// only once the directory is already gone, so a stale `Some(gone)` and a
+    /// fresh `None` reach the same verdict through the probe below.
     ///
-    /// What: runs `workspace_needs_protection` over `record.workspace_path` with
-    /// the production `Path::try_exists` probe and the caller-resolved `names`;
-    /// returns without touching the registry when it says protected, otherwise
-    /// takes the slot write lock and calls `release`. Never fails — a record
-    /// holding no slot (never listed, so never observed) releases nothing, which
-    /// is already `release`'s no-op case.
+    /// `workspace_needs_protection` is the other condition, and it is the point
+    /// rather than caution: it refuses to release while the session's
+    /// `.worktrees/<uuid>` directory and its `.trusty-mpm-worktree` sentinel are
+    /// still on disk, because something may still be standing in that tree.
+    /// Reusing retention's predicate rather than restating it is what keeps the
+    /// two paths from drifting apart again.
+    ///
+    /// Accepted consequence: a kept slot leaves a `-- deleted --` row. That is
+    /// correct under this design — the record is gone from the store, so the row
+    /// is a slot the retention sweep frees once the worktree goes.
+    ///
+    /// What: takes the store write lock ONCE, reloads so an out-of-process write
+    /// is visible, reads the record, removes it, and drops the lock — so the body
+    /// judged below is the body that was removed. Then keeps the slot if the
+    /// store no longer held the record at all, no longer held it as a tombstone,
+    /// or `workspace_needs_protection` says its workspace still looks live;
+    /// otherwise releases. A record holding no slot (never listed, so never
+    /// observed) releases nothing — already `release`'s no-op case.
     /// Test: `prune_compaction_releases_the_slot`,
-    /// `prune_compaction_keeps_the_slot_when_the_worktree_is_still_on_disk`.
-    async fn release_compacted_slot(
+    /// `prune_compaction_keeps_the_slot_when_the_worktree_is_still_on_disk`,
+    /// `prune_keeps_the_slot_of_a_record_reactivated_after_the_snapshot`.
+    async fn compact_and_release_slot(
         &self,
-        record: &SessionRecord,
+        snapshot: &SessionRecord,
         names: &trusty_common::workspace_layout::WorktreeDirNames,
-    ) {
+    ) -> Result<(), ManagedError> {
+        let mut store = self.store.write().await;
+        store.reload_if_changed().await?;
+        let current = store.cached_get(&snapshot.id).ok();
+        store.remove(&snapshot.id).await?;
+        drop(store);
+        let Some(record) = current.filter(is_tombstone) else {
+            info!(id = %snapshot.id, "prune: kept the slot — the store holds no tombstone for it");
+            return Ok(());
+        };
         if super::retention::workspace_needs_protection(
             record.workspace_path.as_deref(),
             names,
@@ -742,11 +785,12 @@ impl SessionManager {
                 "prune: compacted the record but kept its slot — its workspace still looks \
                  like a live session worktree"
             );
-            return;
+            return Ok(());
         }
         if let Some(slot) = self.slots.write().await.release(&record.id) {
             info!(id = %record.id, slot, "prune: freed the compacted record's slot");
         }
+        Ok(())
     }
 
     /// Remove a single decommissioned tombstone from the store (#1508).
