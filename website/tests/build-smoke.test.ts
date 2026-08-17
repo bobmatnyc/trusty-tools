@@ -3,7 +3,8 @@ import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { TOOLS } from '../src/lib/tools';
+import { installCommand, TOOLS } from '../src/lib/tools';
+import { RELEASED_FLAGSHIPS } from '../src/lib/site';
 
 /**
  * Why: every other test here reads source files. None of them prove the site
@@ -179,7 +180,7 @@ describe('production build', () => {
 	it('renders real changelog content on /whats-new, not an empty frame', () => {
 		const html = readFileSync(path.join(STATIC, 'whats-new.html'), 'utf8');
 		const text = visibleText(html);
-		for (const tool of TOOLS) {
+		for (const tool of RELEASED_FLAGSHIPS) {
 			const { version, phrase } = newestRelease(tool.name);
 			expect(html, `${tool.name} has no section anchor`).toContain(`id="${tool.name}"`);
 			expect(text, `${tool.name} is missing version ${version}`).toContain(version);
@@ -190,9 +191,9 @@ describe('production build', () => {
 		}
 	});
 
-	it('renders the What’s new strip on every landing-page card, with real items', () => {
+	it('renders the What’s new strip on every RELEASED landing-page card, with real items', () => {
 		const text = visibleText(landingPage);
-		for (const tool of TOOLS) {
+		for (const tool of RELEASED_FLAGSHIPS) {
 			const { version, phrase } = newestRelease(tool.name);
 			expect(landingPage, `${tool.name} card has no All-changes link`).toContain(
 				`href="/whats-new#${tool.name}"`
@@ -249,10 +250,10 @@ describe('production build', () => {
 
 	// Why: the assertion above proves only that a FILE exists. A page whose
 	// component threw during prerender, or one wired to the wrong `Tool` record,
-	// still writes an HTML shell and still passes it — and with six hand-authored
-	// pages, a copy/paste that leaves two routes rendering the same crate is the
-	// realistic failure, not a missing file. Nothing else in this suite reads a
-	// tool page's body.
+	// still writes an HTML shell and still passes it — and across the
+	// hand-authored pages, a copy/paste that leaves two routes rendering the same
+	// crate is the realistic failure, not a missing file. Nothing else in this
+	// suite reads a tool page's body.
 	// What: for each `TOOLS` entry, re-derives what that page must contain from
 	// the same record the page renders from, and pins it to the route's own
 	// artifact — the `<h1>` must name THAT crate, and the unit stamp, tagline,
@@ -266,7 +267,7 @@ describe('production build', () => {
 			expect(heading, `${file} has no <h1>`).not.toBeNull();
 			expect(heading?.[1], `${file} <h1>`).toContain(tool.name);
 
-			for (const copy of [tool.unit, tool.tagline, tool.lede, tool.install]) {
+			for (const copy of [tool.unit, tool.tagline, tool.lede, installCommand(tool)]) {
 				expect(html, `${file} is missing ${JSON.stringify(copy)}`).toContain(copy);
 			}
 			if (tool.docsPath) {
@@ -301,6 +302,19 @@ describe('production build', () => {
 
 		const toolPage = readFileSync(path.join(STATIC, 'tools/trusty-git-analytics.html'), 'utf8');
 		expect(toolPage, 'tool page does not link the audit page').toContain(`href="${AUDIT_ROUTE}"`);
+	});
+
+	/**
+	 * Why: the binary still ships under both `trusty-audit` and `taudit`, and the
+	 * alias is being dropped. `src/lib/tools.test.ts` guards the RECORDS; this
+	 * guards the rendered PAGES, which is where the prose actually lives.
+	 * What: every built tool page's visible text, checked for the alias.
+	 */
+	it('names no retired binary alias in any tool page', () => {
+		for (const name of [...toolPages(), AUDIT_PAGE]) {
+			const text = visibleText(readFileSync(path.join(STATIC, name), 'utf8'));
+			expect(text, `${name} names the taudit alias`).not.toContain('taudit');
+		}
 	});
 
 	it('loads no subresource from a third-party origin', () => {
@@ -355,7 +369,7 @@ describe('production build', () => {
 
 	it('renders real landing-page content, not a shell', () => {
 		expect(landingPage).toContain('trusty-search');
-		expect(landingPage).toContain('Six flagship tools');
+		expect(landingPage).toContain('Seven flagship tools');
 		expect(landingPage).toContain('brew tap bobmatnyc/trusty');
 		for (const tool of TOOLS) {
 			expect(landingPage, tool.slug).toContain(`/tools/${tool.slug}`);

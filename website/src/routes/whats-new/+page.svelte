@@ -6,7 +6,7 @@
 	 * `$lib/changelog` — so `{@html}` is placing markup this build produced from
 	 * six files in this repository, not rendering anything from a request.
 	 *
-	 * What: one section per flagship in `FLAGSHIPS` order, each with
+	 * What: one section per flagship in `RELEASED_FLAGSHIPS` order, each with
 	 * `id="<crate-name>"` so the landing page's "All changes →" lands on it.
 	 * Recent releases carry their items; every older one is listed by version
 	 * and date inside a native `<details>`, which keeps 118 trusty-search

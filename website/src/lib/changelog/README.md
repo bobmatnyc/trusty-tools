@@ -1,7 +1,7 @@
 # The changelog reader
 
 Generates the "What's new" strip on the landing page and the whole `/whats-new`
-page from the six flagship crates' own `CHANGELOG.md` files. Everything here
+page from the released flagship crates' own `CHANGELOG.md` files. Everything here
 runs in Node **at build time**; the published pages are static HTML that reads
 no file and opens no connection.
 
@@ -13,9 +13,12 @@ and organised.** Nothing here writes to, generates, or edits a
 
 ## Scope
 
-Exactly the six crates in `FLAGSHIPS` (`../site.ts`, re-exported from
-`../tools.ts`): `trusty-search`, `trusty-memory`, `trusty-mpm`,
-`trusty-analyze`, `trusty-review`, `trusty-git-analytics`. The other crates'
+Exactly the crates in `RELEASED_FLAGSHIPS` (`../site.ts`, the `FLAGSHIPS`
+entries whose `Tool.released` is true): `trusty-search`, `trusty-memory`,
+`trusty-mpm`, `trusty-analyze`, `trusty-review`, `trusty-git-analytics`.
+`trusty-audit` is a flagship with a page and a card and is deliberately absent:
+it has no release yet, and a section for it would render empty — which is the
+exact state the `CHANGELOG-NO-RELEASES` gate exists to stop. The other crates'
 changelogs are read in the repository by the people who need them; `/whats-new`
 links to `crates/` and stops there.
 
@@ -24,7 +27,7 @@ links to `crates/` and stops there.
 | File        | Responsibility                                                                           |
 | ----------- | ---------------------------------------------------------------------------------------- |
 | `parse.ts`  | One file's markdown → releases. Pure; no I/O, so every failure path is fixturable.       |
-| `site.ts`   | Reads the six files, applies the gates, memoises. The only entry point routes call.      |
+| `site.ts`   | Reads those files, applies the gates, memoises. The only entry point routes call.        |
 | `errors.ts` | The failure vocabulary. Record shape and formatting are shared with `../docs/errors.ts`. |
 
 The remark/rehype pipeline is `../docs/render.ts`. There is deliberately no

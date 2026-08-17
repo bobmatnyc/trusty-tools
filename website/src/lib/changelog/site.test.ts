@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
-import { FLAGSHIPS } from '../site';
+import { RELEASED_FLAGSHIPS } from '../site';
 import { findRepoRoot } from '../docs/repo';
 import { ChangelogBuildError } from './errors';
 import {
@@ -20,8 +20,8 @@ import {
  * each gate is provoked here rather than assumed. The real corpus is exercised
  * too, because the grammar deviations that would break it are in the files and
  * not in any fixture.
- * What: one pass over the six real changelogs, then a temp-repo fixture per
- * gate. Each fixture starts from a WORKING repo and breaks exactly one thing,
+ * What: one pass over the released crates' real changelogs, then a temp-repo
+ * fixture per gate. Each fixture starts from a WORKING repo and breaks exactly one thing,
  * so a green assertion means that one change caused the failure.
  * Test: this file.
  */
@@ -47,7 +47,7 @@ function fixture(overrides: Record<string, string | null> = {}): string {
 		path.join(root, 'docs/public-manifest.tsv')
 	);
 
-	for (const flagship of FLAGSHIPS) {
+	for (const flagship of RELEASED_FLAGSHIPS) {
 		if (overrides[flagship.name] === null) continue;
 		const file = path.join(root, 'crates', flagship.name, 'CHANGELOG.md');
 		mkdirSync(path.dirname(file), { recursive: true });
@@ -76,8 +76,8 @@ describe('the real six-crate corpus', () => {
 		site = buildChangelogSite(REPO_ROOT);
 	});
 
-	it('covers exactly the six flagships, in FLAGSHIPS order', () => {
-		expect(site.crates.map((crate) => crate.name)).toEqual(FLAGSHIPS.map((f) => f.name));
+	it('covers exactly the released flagships, in RELEASED_FLAGSHIPS order', () => {
+		expect(site.crates.map((crate) => crate.name)).toEqual(RELEASED_FLAGSHIPS.map((f) => f.name));
 	});
 
 	it('gives every flagship at least one release with at least one item', () => {
@@ -132,15 +132,22 @@ describe('the real six-crate corpus', () => {
 		expect(hrefs.some((href) => href.includes('/blob/main/docs/specs/'))).toBe(true);
 	});
 
-	it('keeps the other 21 crates out of both surfaces', () => {
+	/**
+	 * trusty-audit is a FLAGSHIP with a page and a card, and still absent here:
+	 * it has no release, so `released` is false and the release-driven surfaces
+	 * skip it. Asserting that explicitly is what keeps a future `released: true`
+	 * from silently landing an empty section.
+	 */
+	it('keeps the unreleased flagship and the other crates out of both surfaces', () => {
 		expect(site.crates.map((c) => c.name)).not.toContain('trusty-common');
+		expect(site.crates.map((c) => c.name)).not.toContain('trusty-audit');
 		expect(site.crates).toHaveLength(6);
 	});
 });
 
 describe('the build gates', () => {
 	it('passes on a repository where every flagship is populated', () => {
-		expect(buildChangelogSite(fixture()).crates).toHaveLength(FLAGSHIPS.length);
+		expect(buildChangelogSite(fixture()).crates).toHaveLength(RELEASED_FLAGSHIPS.length);
 	});
 
 	it('fails when a flagship CHANGELOG.md is missing', () => {
