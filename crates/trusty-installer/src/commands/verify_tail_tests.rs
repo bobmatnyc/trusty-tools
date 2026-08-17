@@ -366,6 +366,56 @@ fn verified_ignores_optional_down_member() {
     );
 }
 
+/// Why (#5806): the same vacuous truth `InstallReport::build` was fixed for,
+/// surviving one file over. `filter(required).all(…)` over zero required rows
+/// is `true`, so `verified` collapsed to `ensure_ok` — `tctl install
+/// trusty-analyze trusty-console` selects two daemons, both OPTIONAL, and
+/// reported VERIFIED with both of them `down`.
+/// What: asserts an all-OPTIONAL daemon selection whose members are `down` /
+/// `not_installed` does NOT verify, and that the same selection all-healthy
+/// still does.
+/// Test: This is the test.
+#[test]
+fn all_optional_daemon_selection_does_not_fail_open() {
+    let both_down = VerifyTailReport::build(
+        true,
+        vec![
+            optional_row("trusty-analyze", health_str::DOWN),
+            optional_row("trusty-console", health_str::NOT_INSTALLED),
+        ],
+    );
+    assert!(
+        !both_down.verified,
+        "a selection with no required member gates on every member it selected"
+    );
+
+    let both_up = VerifyTailReport::build(
+        true,
+        vec![
+            optional_row("trusty-analyze", health_str::HEALTHY),
+            optional_row("trusty-console", health_str::STALE),
+        ],
+    );
+    assert!(
+        both_up.verified,
+        "the fix must not turn a healthy all-optional selection into a failure"
+    );
+}
+
+/// Why (#5806): the case that must NOT change with the gating fix, and the
+/// reason the shared fold stays neutral on emptiness. `run_verify_tail` filters
+/// to `m.daemon`, so `tctl install tga` produces ZERO rows — there is genuinely
+/// no daemon health to gate on, and the install verdict is
+/// `InstallReport::all_ok`'s job. Treating empty as failure here would report
+/// NOT VERIFIED for a perfectly good non-daemon install.
+/// What: asserts a report with no rows tracks `ensure_ok` in both directions.
+/// Test: This is the test.
+#[test]
+fn no_daemon_rows_still_defers_to_ensure_ok() {
+    assert!(VerifyTailReport::build(true, Vec::new()).verified);
+    assert!(!VerifyTailReport::build(false, Vec::new()).verified);
+}
+
 /// Why: `print_human`'s colour path must never panic regardless of the
 /// harness's stdout fd; this just confirms it is callable.
 /// What: calls `use_color`, binds the result.

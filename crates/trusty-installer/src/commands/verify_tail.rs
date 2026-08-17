@@ -175,9 +175,12 @@ pub struct VerifyTailReport {
     pub ensure_ok: bool,
     /// Per-daemon-member verify rows.
     pub members: Vec<VerifyRow>,
-    /// Overall verdict: `ensure_ok` AND every REQUIRED member
-    /// healthy/stale/unknown (never `down`/`not_installed`). An OPTIONAL
-    /// member never fails this (graceful-degrade, demo-critical fix).
+    /// Overall verdict: `ensure_ok` AND every GATING member
+    /// healthy/stale/unknown (never `down`/`not_installed`).
+    ///
+    /// The gating set is the REQUIRED rows when there are any — an OPTIONAL
+    /// member never fails the run then (graceful-degrade, demo-critical fix) —
+    /// and EVERY row when there are none (#5806, see [`VerifyTailReport::build`]).
     pub verified: bool,
 }
 
@@ -198,15 +201,32 @@ impl VerifyTailReport {
     /// being `required: true` — FAILS verification. That is the accepted policy
     /// consequence, not an oversight: the tolerance is for members whose health
     /// genuinely cannot be determined, and mpm's can.
+    /// #5806: the gating set now comes from
+    /// [`crate::commands::stable_set::required_gate`], the same rule
+    /// `InstallReport::build` reads. `filter(required).all(…)` over zero
+    /// required rows is vacuously `true`, so `verified` collapsed to
+    /// `ensure_ok` for any selection whose daemons are all OPTIONAL —
+    /// `tctl install trusty-analyze trusty-console` reported VERIFIED with both
+    /// daemons `down`. Same shape as the `all_ok` fail-open, one file over.
+    ///
+    /// ZERO rows still means `verified = ensure_ok`, and that is not the same
+    /// bug. `run_verify_tail` filters to `m.daemon`, so an empty row list means
+    /// the selection contains no daemon — `tctl install tga` — and there is
+    /// genuinely no health to gate on. A non-daemon's install verdict is
+    /// `InstallReport::all_ok`'s job, and that one does treat empty as failure.
+    ///
     /// Test: `tests::verified_requires_ensure_and_health`,
     /// `tests::verified_tolerates_stale_and_unknown`,
     /// `tests::verified_ignores_optional_down_member`,
-    /// `tests::required_mpm_reporting_down_fails_verification`.
+    /// `tests::required_mpm_reporting_down_fails_verification`,
+    /// `tests::all_optional_daemon_selection_does_not_fail_open`,
+    /// `tests::no_daemon_rows_still_defers_to_ensure_ok`.
     fn build(ensure_ok: bool, members: Vec<VerifyRow>) -> Self {
-        let health_ok = members
-            .iter()
-            .filter(|m| m.required)
-            .all(|m| m.health != health_str::DOWN && m.health != health_str::NOT_INSTALLED);
+        let health_ok = crate::commands::stable_set::required_gate(
+            &members,
+            |m| m.required,
+            |m| m.health != health_str::DOWN && m.health != health_str::NOT_INSTALLED,
+        );
         Self {
             command: "install.verify",
             ensure_ok,
