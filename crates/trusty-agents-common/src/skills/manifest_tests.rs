@@ -25,11 +25,121 @@ fn sample_entry() -> SkillManifestEntry {
 #[test]
 fn skill_manifest_load_missing_returns_empty() {
     // A directory with no manifest file must yield an empty, valid
-    // manifest rather than an error.
+    // manifest rather than an error. #5626 tightened the error arms around
+    // this case; the first-ever deploy must stay a silent success.
     let tmp = TempDir::new().unwrap();
-    let manifest = SkillManifest::load(tmp.path());
+    let manifest = SkillManifest::load(tmp.path()).expect("an absent ledger is not an error");
     assert_eq!(manifest.version, SKILL_MANIFEST_VERSION);
     assert!(manifest.managed.is_empty());
+}
+
+#[test]
+fn skill_manifest_load_malformed_is_an_error() {
+    // #5626: a torn or hand-mangled ledger must NOT read as "nothing is
+    // owned here" — that licenses the deployer to write over every managed
+    // skill and record none of it.
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join(SKILL_MANIFEST_FILE), b"not valid json{{{").unwrap();
+    let err = SkillManifest::load(tmp.path()).expect_err("a malformed ledger must be an error");
+    assert!(
+        matches!(err, ManifestError::Json(_)),
+        "expected a Json error, got {err:?}"
+    );
+}
+
+#[test]
+fn skill_manifest_load_truncated_is_an_error() {
+    // A crash mid-write leaves valid JSON prefix and nothing else. It is the
+    // shape `save_merging` already refuses to merge from (#4881); `load` now
+    // refuses it too (#5626).
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(
+        tmp.path().join(SKILL_MANIFEST_FILE),
+        b"{\"version\":1,\"managed\":{",
+    )
+    .unwrap();
+    assert!(
+        SkillManifest::load(tmp.path()).is_err(),
+        "a truncated ledger must be an error"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn skill_manifest_load_unreadable_is_an_error() {
+    // #5626, ADR-0045: EACCES is the arm the old `Err(_) => Self::default()`
+    // swallowed. The ledger is present and holds an entry; the process simply
+    // cannot read it. Reporting an empty ledger here asserts an absence the
+    // read never established.
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let mut manifest = SkillManifest::default();
+    manifest.managed.insert("tm-doctor".into(), sample_entry());
+    manifest.save(tmp.path()).unwrap();
+
+    let path = tmp.path().join(SKILL_MANIFEST_FILE);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let loaded = SkillManifest::load(tmp.path());
+    // Restore before asserting so a failure still leaves a removable TempDir.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let err = loaded.expect_err("an unreadable ledger must be an error, not an empty one");
+    assert!(
+        matches!(&err, ManifestError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+        "expected a PermissionDenied Io error, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains(SKILL_MANIFEST_FILE),
+        "the error must name the ledger it could not read: {err}"
+    );
+}
+
+#[test]
+fn skill_manifest_deploy_refuses_a_ledger_it_could_not_read() {
+    // #5626: the consumer half, and the sharper of the two outcomes. On the
+    // empty default the deploy did not merely mis-classify — it RAN, skipped
+    // every managed skill as untracked, and then `save_merging` took its
+    // `OverwroteUnreadable` arm and published this run's near-empty ledger over
+    // the unreadable one. The entries it held are then gone for good, and the
+    // files they described are frozen against every future update (#4881's
+    // shape). Post-fix the deploy stops at the load, so the bytes on disk are
+    // untouched and an operator can still repair them.
+    let src = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    std::fs::write(src.path().join("tm-doctor.md"), "v1").unwrap();
+
+    crate::skills::deployer::deploy_skills(src.path(), dest.path()).unwrap();
+    let ledger = dest.path().join(SKILL_MANIFEST_FILE);
+    assert!(
+        SkillManifest::load(dest.path())
+            .unwrap()
+            .is_managed("tm-doctor"),
+        "the first deploy must record the skill"
+    );
+
+    // Corrupt the ledger the way a crash mid-write does, keeping enough of the
+    // document that its loss is visible.
+    let corrupt = "{\"version\":1,\"managed\":{\"tm-doctor\":";
+    std::fs::write(&ledger, corrupt).unwrap();
+    std::fs::write(src.path().join("tm-doctor.md"), "v2").unwrap();
+
+    let result = crate::skills::deployer::deploy_skills(src.path(), dest.path());
+
+    assert!(
+        result.is_err(),
+        "the deploy must refuse rather than act as if nothing is owned"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&ledger).unwrap(),
+        corrupt,
+        "a refused deploy must leave the ledger exactly as it found it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dest.path().join("tm-doctor").join("SKILL.md")).unwrap(),
+        "v1",
+        "a refused deploy writes no skill content either"
+    );
 }
 
 #[test]
@@ -42,7 +152,7 @@ fn skill_manifest_round_trip() {
         .insert("tm-doctor.md".into(), sample_entry());
     manifest.save(tmp.path()).unwrap();
 
-    let loaded = SkillManifest::load(tmp.path());
+    let loaded = SkillManifest::load(tmp.path()).unwrap();
     assert_eq!(loaded, manifest);
     assert!(tmp.path().join(SKILL_MANIFEST_FILE).exists());
 }
@@ -113,7 +223,7 @@ fn skill_manifest_lock_serialises_concurrent_writers() {
             let dir = dir.clone();
             std::thread::spawn(move || {
                 with_skill_manifest_lock::<(), ManifestError, _>(&dir, || {
-                    let mut m = SkillManifest::load(&dir);
+                    let mut m = SkillManifest::load(&dir).unwrap();
                     m.managed.insert(format!("skill-{i}"), sample_entry());
                     std::thread::sleep(std::time::Duration::from_millis(5));
                     m.save(&dir)
@@ -126,7 +236,7 @@ fn skill_manifest_lock_serialises_concurrent_writers() {
         h.join().unwrap();
     }
 
-    let final_manifest = SkillManifest::load(&dir);
+    let final_manifest = SkillManifest::load(&dir).unwrap();
     assert_eq!(
         final_manifest.managed.len(),
         8,
@@ -175,7 +285,7 @@ fn skill_manifest_save_merging_folds_in_a_concurrent_writer() {
         SkillManifestSave::Merged
     );
 
-    let on_disk = SkillManifest::load(dir);
+    let on_disk = SkillManifest::load(dir).unwrap();
     assert!(on_disk.is_managed("ours"), "our own entry must be recorded");
     assert!(
         on_disk.is_managed("from-the-other-writer"),
@@ -210,7 +320,7 @@ fn skill_manifest_save_merging_applies_this_runs_removals() {
         SkillManifestSave::Merged
     );
 
-    let on_disk = SkillManifest::load(dir);
+    let on_disk = SkillManifest::load(dir).unwrap();
     assert!(!on_disk.is_managed("prune-me"), "our removal must apply");
     assert!(on_disk.is_managed("keep"));
     assert!(
@@ -233,16 +343,16 @@ fn skill_manifest_save_merging_writes_when_unchanged() {
         first.save_merging(dir, &base).unwrap(),
         SkillManifestSave::Written
     );
-    assert!(SkillManifest::load(dir).is_managed("tm-doctor"));
+    assert!(SkillManifest::load(dir).unwrap().is_managed("tm-doctor"));
 
-    let base = SkillManifest::load(dir);
+    let base = SkillManifest::load(dir).unwrap();
     let mut second = base.clone();
     second.managed.insert("tm-workflow".into(), sample_entry());
     assert_eq!(
         second.save_merging(dir, &base).unwrap(),
         SkillManifestSave::Written
     );
-    let on_disk = SkillManifest::load(dir);
+    let on_disk = SkillManifest::load(dir).unwrap();
     assert!(on_disk.is_managed("tm-doctor"));
     assert!(on_disk.is_managed("tm-workflow"));
 }
@@ -273,7 +383,7 @@ fn skill_manifest_save_merging_over_a_corrupt_ledger_keeps_the_base() {
         SkillManifestSave::OverwroteUnreadable
     );
 
-    let on_disk = SkillManifest::load(dir);
+    let on_disk = SkillManifest::load(dir).unwrap();
     assert_eq!(
         on_disk.managed.len(),
         10,

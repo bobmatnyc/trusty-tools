@@ -93,7 +93,21 @@ pub(crate) fn unmanaged_report_lines(
     }
     let mut lines = Vec::new();
     for tier in tiers {
-        for skill in unmanaged_bundled_skills(&tier.dir, &bundled) {
+        // #5626: a tier whose ledger could not be read gets a line saying so.
+        // On the empty default it produced a line per MANAGED skill instead,
+        // telling the operator to reconcile files that were already tracked.
+        let found = match unmanaged_bundled_skills(&tier.dir, &bundled) {
+            Ok(found) => found,
+            Err(e) => {
+                lines.push(format!(
+                    "? {} \u{2014} ownership ledger unreadable, so nothing here can be \
+                     classified: {e}",
+                    tier.dir.display()
+                ));
+                continue;
+            }
+        };
+        for skill in found {
             lines.push(format!(
                 "! {} (untracked at {} \u{2014} not managed, not refreshed; \
                  see `tm install --reconcile-skills`)",
@@ -141,7 +155,9 @@ pub(crate) fn reconcile_skills(
         backups.display()
     );
     for tier in &tiers {
-        let found = unmanaged_bundled_skills(&tier.dir, &bundled);
+        // #5626: reconcile WRITES ownership records, so an unreadable ledger
+        // aborts the run rather than adopting every managed skill afresh.
+        let found = unmanaged_bundled_skills(&tier.dir, &bundled)?;
         if found.is_empty() {
             println!(
                 "  {} ({}): nothing unmanaged",
