@@ -5409,22 +5409,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kuzu"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bf1c964fda5f292c796601a4ab221b9643a12935d42a0adbb833a1f332549bf"
-dependencies = [
- "cmake",
- "cxx",
- "cxx-build",
- "num_cpus",
- "rust_decimal",
- "rustversion",
- "time",
- "uuid",
-]
-
-[[package]]
 name = "lab"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8491,16 +8475,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust_decimal"
-version = "1.42.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c5108e3d4d903e21aac27f12ba5377b6b34f9f44b325e4894c7924169d06995"
-dependencies = [
- "arrayvec",
- "num-traits",
-]
-
-[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10288,7 +10262,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "2.19.0"
+version = "3.1.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -10323,6 +10297,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-test",
  "trusty-common",
+ "trusty-progress",
  "uuid",
  "wiremock",
 ]
@@ -11214,7 +11189,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11262,7 +11237,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11325,27 +11300,34 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs 5.0.1",
+ "reqwest 0.12.28",
+ "rpassword",
  "serde",
+ "serde_json",
+ "serde_yaml",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "toml 0.8.23",
+ "trusty-common",
  "trusty-installer",
+ "trusty-progress",
+ "walkdir",
+ "zip 2.4.2",
 ]
 
 [[package]]
-name = "trusty-bm25-daemon"
-version = "0.2.0"
+name = "trusty-audit-ui"
+version = "0.1.0"
 dependencies = [
- "anyhow",
- "clap",
  "serde",
  "serde_json",
+ "tauri",
+ "tauri-build",
  "tempfile",
  "tokio",
- "tracing",
- "tracing-subscriber",
- "trusty-common",
+ "trusty-audit",
 ]
 
 [[package]]
@@ -11414,7 +11396,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.33.1"
+version = "0.35.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11446,7 +11428,6 @@ dependencies = [
  "hnsw_rs",
  "indexmap 2.14.0",
  "keyring",
- "kuzu",
  "libc",
  "lru 0.16.4",
  "ort",
@@ -11555,7 +11536,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd-py"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "fs4 0.8.4",
@@ -11572,7 +11553,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-gworkspace"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -11597,7 +11578,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -11644,7 +11625,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.23.0"
+version = "0.23.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11680,14 +11661,13 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "trusty-bm25-daemon",
  "trusty-common",
  "uuid",
 ]
 
 [[package]]
 name = "trusty-mpm"
-version = "1.3.6"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11760,7 +11740,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-progress"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "indicatif 0.17.11",
  "thiserror 1.0.69",
@@ -11782,7 +11762,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.16.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11817,7 +11797,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.46.0"
+version = "0.47.1"
 dependencies = [
  "anyhow",
  "arc-swap",

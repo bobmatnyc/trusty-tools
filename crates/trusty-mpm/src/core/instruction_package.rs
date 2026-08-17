@@ -42,7 +42,7 @@
 //! deserialization path carries `deny_unknown_fields`, so an unrecognised key is
 //! a named parse error rather than dropped instruction content. The usual
 //! argument against that — an older binary should be able to read a newer
-//! package — does not apply to this format, because [`Self::validate`] gates on
+//! package — does not apply to this format, because `Self::validate` gates on
 //! [`SCHEMA_VERSION`] *before* any field is inspected: a package written against
 //! a later schema is already rejected outright. Lenient field handling could
 //! therefore only matter for a change that added a field while leaving

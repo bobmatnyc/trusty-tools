@@ -67,6 +67,9 @@
 //! `post_index_file_exhausts_retries_and_returns_send_failed` in the `tests`
 //! module below, plus the #2798 saturation test
 //! `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`.
+//!
+//! [`ensure_project_indexed`]: crate::search_index::ensure_project_indexed
+//! [`index_files_best_effort`]: crate::search_index::index_files_best_effort
 
 use std::path::Path;
 
@@ -941,6 +944,30 @@ fn create_index_request_body(index_id: &str, root: &Path, opts: IndexOptions) ->
     })
 }
 
+/// Extract the tree a `POST /indexes` response says the index is registered at,
+/// but ONLY when the daemon reported it did not create anything.
+///
+/// Why: `created: true` means the daemon adopted the root that was just sent, so
+/// there is nothing to cross-check. `created: false` means an entry already
+/// existed, and THAT is the case where the registered tree can differ from the
+/// requested one. Returning `None` for every other shape keeps the caller's
+/// behaviour identical against a daemon too old to report `root_path` — the
+/// check strengthens the verdict where it can and never invents a failure where
+/// it cannot.
+/// What: parses `body` as JSON and returns `root_path` when it is a string and
+/// `created` is exactly `false`. Any parse failure, absent field, or wrong type
+/// yields `None`.
+/// Test: `registered_root_from_response_reads_the_already_exists_root`,
+/// `registered_root_from_response_ignores_a_fresh_create`,
+/// `registered_root_from_response_tolerates_a_daemon_that_omits_it`.
+fn registered_root_from_response(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("created")? != &serde_json::Value::Bool(false) {
+        return None;
+    }
+    value.get("root_path")?.as_str().map(str::to_string)
+}
+
 /// POST `/indexes` to find-or-create `index_id`; failures are logged, never
 /// propagated (issue #1373).
 ///
@@ -966,8 +993,17 @@ fn create_index_request_body(index_id: &str, root: &Path, opts: IndexOptions) ->
 /// review): a non-2xx, a transport error, and a panicked worker thread are all
 /// `NotConfirmed`. They are still logged and swallowed — the return value gives
 /// the caller something honest to report, it does not make the call fallible.
-/// Test: exercised via `ensure_project_indexed_returns_derived_id_when_daemon_down`
-/// (daemon-down path); the live HTTP path is covered by integration use.
+///
+/// A 2xx is no longer sufficient on its own. The daemon answers a find-or-create
+/// for an id it already holds with `200 {created: false}`, and reading only the
+/// status made that indistinguishable from a real create — so a caller whose
+/// tree differed from the registered one was told the registration succeeded and
+/// then had every query answered from the OTHER tree, with no error and no
+/// warning. The response now carries the registered `root_path` and a mismatch
+/// downgrades the verdict to `NotConfirmed`.
+/// Test: `ensure_project_indexed_withholds_id_when_nothing_was_registered`
+/// (daemon-down path), `registered_root_from_response_*` (the body contract),
+/// `create_index_response_for_a_different_tree_is_not_confirmed` (the error arm).
 fn best_effort_create_index(
     base: &str,
     index_id: &str,
@@ -987,16 +1023,38 @@ fn best_effort_create_index(
             .connect_timeout(std::time::Duration::from_millis(750))
             .build()?;
         let resp = client.post(&url).json(&body).send()?;
-        Ok::<reqwest::StatusCode, reqwest::Error>(resp.status())
+        let status = resp.status();
+        // The body is read here, inside the worker, because `resp` cannot cross
+        // the join. An unreadable body is not itself a failure — it degrades to
+        // the pre-existing status-only verdict below.
+        let text = resp.text().unwrap_or_default();
+        Ok::<(reqwest::StatusCode, String), reqwest::Error>((status, text))
     })
     .join();
 
     match result {
-        Ok(Ok(status)) if status.is_success() => {
+        Ok(Ok((status, body))) if status.is_success() => {
+            // The daemon answers a find-or-create for an id it already holds
+            // with `200 {created: false}`. Reading only `status` made that
+            // byte-identical to a real create, so a session whose tree differs
+            // from the registered one was told it had been registered and then
+            // had every query answered from the OTHER tree. Compare the tree the
+            // daemon reports against the one that was asked for.
+            match registered_root_from_response(&body) {
+                Some(registered) if !crate::identifies_same_path(Path::new(&registered), root) => {
+                    tracing::warn!(
+                        "trusty-search index '{index_id}' is registered at {registered}, not at \
+                         the requested {root_display}; withholding confirmation so the caller \
+                         cannot pin an index that searches a different tree"
+                    );
+                    return IndexRegistration::NotConfirmed;
+                }
+                _ => {}
+            }
             tracing::debug!("registered trusty-search index '{index_id}' (root={root_display})");
             IndexRegistration::Confirmed
         }
-        Ok(Ok(status)) => {
+        Ok(Ok((status, _))) => {
             tracing::warn!(
                 "trusty-search index registration for '{index_id}' returned HTTP {status}"
             );
@@ -1040,7 +1098,7 @@ fn best_effort_create_index(
 /// `index_is_fresh_false_when_last_indexed_missing_or_malformed`; the live-HTTP
 /// trigger path is exercised the same way `best_effort_create_index` is
 /// (daemon-down graceful path via
-/// `ensure_project_indexed_returns_derived_id_when_daemon_down`).
+/// `ensure_project_indexed_withholds_id_when_nothing_was_registered`).
 fn best_effort_trigger_reindex(base: &str, index_id: &str) {
     let status_url = format!("{base}/indexes/{index_id}/status");
     let reindex_url = format!("{base}/indexes/{index_id}/reindex");

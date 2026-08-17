@@ -1,6 +1,6 @@
 [package]
 name = "trusty-mpm"
-version = "1.3.6"
+version = "1.4.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -161,6 +161,14 @@ trusty-agents-common = { workspace = true }
 trusty-common = { workspace = true, features = [
     "mcp",
     "cli-help",
+    # #5811: the single palace-resolution entry point. Session launch exports
+    # TRUSTY_MEMORY_PALACE, which outranks the committed pin — so it must be
+    # resolved through the same code that reads that pin.
+    "palace-resolve",
+    # #5475: the workspace's single `gh` entry point (`trusty_common::gh`),
+    # which core::gh_account / gh_account_enforce / workstream_label and
+    # session_manager::worktree_reclaim all route through.
+    "gh-cli",
     "bug-capture",
     "crate-config",
     "console-metrics",
@@ -303,7 +311,9 @@ futures-util = { workspace = true, optional = true }
 
 # ── Platform-specific always-on deps ─────────────────────────────────────────
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["signal"] }
+# `user` (#5784): `getpwuid` for the current uid, the signal that tells a
+# scratch `$HOME` from the operator's real one — see `core::host_state_gate`.
+nix = { version = "0.29", features = ["signal", "user"] }
 
 # ── Dev dependencies ───────────────────────────────────────────────────────────
 [dev-dependencies]

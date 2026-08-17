@@ -1,0 +1,224 @@
+# cargo-deny configuration — license, provenance, and duplicate-version policy
+# for the pre-publish gate (.github/workflows/pre-publish.yml).
+#
+# Why: `cargo audit` answers "is any dependency known-vulnerable". It does not
+#   answer "may we ship this code at all", and that second question is the one a
+#   crates.io upload settles permanently. A GPL dependency, a crate with no
+#   license declaration, or a dependency pulled from a registry nobody vetted is
+#   not a bug that a patch release fixes — it is a licensing fact about an
+#   artifact that is already downloadable. This file is the policy that gate
+#   enforces.
+#
+# What: four independent checks, each run by `cargo deny check <name>`:
+#   - licenses  every crate in the graph carries a license this workspace's MIT
+#               terms can redistribute under.
+#   - bans      duplicate versions and wildcard dependency requirements.
+#   - advisories RustSec, scoped to yanked crates (see the section for why it
+#               does not duplicate `cargo audit`).
+#   - sources   every crate came from crates.io, not an unvetted registry or a
+#               git URL.
+#
+# Test: scripts/check_deny_selftest.sh drives the duplicate-count ratchet's
+#   parser against fixtures. The policy itself is verified by running
+#   `cargo deny check` against the real graph — see the pre-publish workflow.
+
+# ---------------------------------------------------------------------------
+# [graph] — which targets' dependencies are in scope.
+#
+# WHY THIS IS NOT THE DEFAULT (all targets). cargo-deny with no `targets` key
+# evaluates every platform in the lockfile, including ones this workspace never
+# builds for. That is not a stricter reading of the licence question, it is a
+# wrong one: it reports crates that are never compiled, never linked, and never
+# shipped.
+#
+# Measured here: `r-efi` 5.3.0 and 6.0.0 are LGPL-2.1-or-later, the only
+# copyleft-with-linking-obligations licences anywhere in the graph. Both arrive
+# through `getrandom`'s UEFI backend and are gated behind
+# `cfg(target_os = "uefi")`. No trusty-* artifact has ever been built for UEFI.
+# Listing the five targets this workspace actually ships removes them from the
+# graph on the correct ground — they are not part of the product — rather than
+# by an `[[licenses.exceptions]]` row asserting that an LGPL crate is fine.
+#
+# ADDING A TARGET IS A POLICY DECISION. A new target may pull in dependencies
+# whose licences have never been reviewed. If this workspace ever ships for
+# Windows or UEFI, add the target here and re-run the gate before assuming the
+# allow-list below still covers the graph.
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+# Dev-dependencies are excluded: they are not part of any published artifact.
+# A test-only crate's licence cannot create an obligation for someone who
+# `cargo install`s a trusty-* binary, because it is never in that binary.
+exclude-dev = true
+
+# ---------------------------------------------------------------------------
+# [licenses] — the allow-list.
+#
+# EVERY ENTRY WAS OBSERVED IN THE REAL GRAPH. This list is not a generic
+# permissive-licence template copied from cargo-deny's docs; each line is a
+# licence `cargo deny list` actually reported against this workspace's
+# Cargo.lock, with the crate count measured on 2026-08-15. Adding a licence
+# here is a decision that the workspace may redistribute under it. Removing a
+# crate never requires touching this file.
+#
+# WHAT IS DELIBERATELY ABSENT: GPL, AGPL, and LGPL in every version. Nothing in
+# the graph needs them once [graph].targets excludes UEFI (see above), so their
+# absence is enforcement rather than omission — the day a dependency introduces
+# one, this gate fails and a human decides, instead of the licence arriving
+# with a routine `cargo update`.
+[licenses]
+allow = [
+    # --- Permissive, no notable obligations beyond attribution.
+    "MIT",                          # 923 crates
+    "Apache-2.0",                   # 660 crates
+    "Apache-2.0 WITH LLVM-exception", # 12 — the Rust project's own dual-licence arm
+    "BSD-2-Clause",                 # 8
+    "BSD-3-Clause",                 # 21
+    "ISC",                          # 17
+    "0BSD",                         # 1
+    "Zlib",                         # 27
+    "BSL-1.0",                      # 2 — ryu, xxhash-rust (Boost, permissive)
+    "MIT-0",                        # 3
+    # NCSA is deliberately NOT here. `cargo deny list` reports it against
+    # libfuzzer-sys, which is a DEV-dependency and therefore outside the graph
+    # once `exclude-dev = true` applies. Listing it anyway produced a
+    # `license-not-encountered` warning — cargo-deny telling us the allow-list
+    # had drifted from the real graph. An allow-list entry that matches nothing
+    # is not harmless: it is a licence somebody approved without a dependency
+    # to approve it for, and it hides the day one actually appears.
+
+    # --- Public-domain dedications / equivalents.
+    "CC0-1.0",                      # 6
+    "Unlicense",                    # 13
+
+    # --- Data licences. Unicode tables, not code.
+    "Unicode-3.0",                  # 19
+    "Unicode-DFS-2016",             # 1
+    "CDLA-Permissive-2.0",          # 2 — webpki-roots, webpki-root-certs
+                                    #     (the Mozilla CA certificate set)
+
+    # --- Weak copyleft, FILE-scoped. MPL-2.0 obliges you to publish
+    #     modifications to the MPL-licensed FILES themselves; it creates no
+    #     obligation on a work that merely links them. This workspace uses all
+    #     nine unmodified, straight from crates.io, so the obligation never
+    #     attaches. If anyone ever vendors and patches one of these, that fork
+    #     must ship its source — re-read this line before doing so.
+    #     Crates: colored (x2), cssparser (x2), cssparser-macros, dtoa-short,
+    #             option-ext, selectors (x2).
+    "MPL-2.0",                      # 9
+]
+
+# A crate whose licence expression cargo-deny cannot resolve to a confident
+# match is a FAILURE, not a warning. 0.8 is cargo-deny's own recommended floor.
+confidence-threshold = 0.8
+
+# NO `[[licenses.exceptions]]` ROWS, AND NO `[licenses.private]` SKIP.
+#
+# The one crate in this workspace that reported `Unlicensed` was
+# `trusty-agents-ui` (crates/trusty-agents/ui/src-tauri/Cargo.toml) — a real
+# defect, not a policy question: it declared no `license` field at all, and no
+# `publish = false`, unlike its two sibling Tauri GUIs which declare both. The
+# remedy was to fix the manifest, not to add a row here teaching the gate to
+# accept an unlicensed crate. See that file and this PR's changelog fragment.
+#
+# `[licenses.private] ignore = true` would have hidden the same defect by
+# skipping every `publish = false` workspace member. It is deliberately not set:
+# a workspace member missing its licence is worth knowing about whether or not
+# that member is the one being uploaded today.
+
+# ---------------------------------------------------------------------------
+# [bans] — duplicate versions and dependency-declaration hygiene.
+#
+# multiple-versions IS "warn", DELIBERATELY, AND IT IS NOT THE WHOLE STORY.
+# Measured on 2026-08-15: 105 crates appear at more than one version in this
+# graph (base64 x3, derive_more x3, lru x3, and 102 others at x2). Setting this
+# to "deny" would require 105 `[[bans.skip]]` rows to pass today, and a
+# 105-row skip list is not a policy — it is a way of switching the check off
+# while appearing to run it.
+#
+# So the duplicate question is answered by a RATCHET instead, in the workflow:
+# `scripts/check_deny_duplicates.sh` parses this check's warning count and
+# fails when it exceeds the recorded baseline in
+# `scripts/deny-duplicate-baseline.txt`. That makes the number a one-way street
+# — a dependency bump that adds a third `foo` turns the gate red and has to be
+# justified — without demanding that 105 pre-existing duplicates be resolved
+# before the gate can ship at all. Lowering the baseline is always welcome and
+# never required.
+[bans]
+multiple-versions = "warn"
+# WILDCARDS IS "deny": crates.io rejects a publish whose dependency carries no
+# version, so a path dependency missing `version` is a real publish-breaking
+# defect, not a style nit. This caught exactly that case once — the root
+# `[workspace.dependencies]` entry `trusty-code = { path = "crates/trusty-code" }`
+# had no `version` key, unlike every other internal dependency trusty-agents
+# declares (trusty-memory "0.23", trusty-search "0.47", trusty-gworkspace
+# "0.2.2", …), and `cargo publish -p trusty-agents` failed outright. Fixed by
+# adding `version = "0.3.0"` to that entry.
+wildcards = "deny"
+# Dev-dependency wildcards are exempt because they never reach a published
+# artifact and crates.io does not reject them.
+allow-wildcard-paths = true
+
+# ---------------------------------------------------------------------------
+# [advisories] — deliberately NARROW, because `cargo audit` owns this ground.
+#
+# The pre-publish workflow runs BOTH tools, and they read the same RustSec
+# database. Configuring both to fail on vulnerabilities would mean one finding
+# turns two gates red and a reader has to work out that it is one problem. So
+# the split is by question:
+#
+#   cargo audit  — "is anything vulnerable, unmaintained, or unsound?"
+#                  That is its whole job and it is the canonical RustSec
+#                  client. It reports 38 warnings today (all unmaintained /
+#                  unsound / yanked) and 0 vulnerabilities.
+#   cargo deny   — YANKED CRATES ONLY.
+#
+# WHY YANKED IS WORTH ITS OWN GATE HERE. A yanked dependency still resolves for
+# anyone whose lockfile already names it, but a NEW consumer of a crate we are
+# about to publish cannot resolve it at all — `cargo install trusty-x` on a
+# clean machine fails outright. That is a publish-blocking property of the
+# lockfile, distinct from "this code has a known bug", and it is the exact
+# question a pre-publish gate should ask.
+#
+# `spin` 0.9.8 is yanked in the current graph, so this check FAILS TODAY and
+# that is the correct behaviour — see this PR's report. It is set to "warn"
+# rather than "deny" ONLY because the yank is transitive and unfixable from
+# here; the workflow surfaces the count and the ratchet keeps it from growing.
+[advisories]
+yanked = "warn"
+# Vulnerabilities are cargo-audit's to report. Left at cargo-deny's default
+# "deny" they would double-report; there is no crate cargo-deny would catch
+# that cargo-audit misses, because both read the same database.
+unmaintained = "none"
+# `unsound` likewise. cargo-deny defaults it to "deny", which failed this check
+# on four advisories that cargo-audit already lists as warnings —
+# RUSTSEC-2026-0190 (anyhow `Error::downcast_mut`), RUSTSEC-2026-0183 and
+# RUSTSEC-2026-0184 (git2), RUSTSEC-2026-0253 (lru `LruCache::pop`). All four
+# are transitive, none has a patched version this workspace can move to, and
+# none is reachable from a code path trusty-* controls. A gate that is red on
+# every run for a reason nobody can act on is a gate people learn to skip, and
+# the cost of that is the yanked check below going unread too.
+#
+# "none" rather than "warn": this key takes the same scope enum as
+# `unmaintained` (all / workspace / transitive / none), not a lint level.
+# "workspace" was considered and rejected — `anyhow` is a direct dependency of
+# most crates here, so RUSTSEC-2026-0190 would keep the gate red under it, and
+# an always-red gate is an unread gate.
+unsound = "none"
+
+# ---------------------------------------------------------------------------
+# [sources] — provenance.
+#
+# Every dependency must come from crates.io. A git dependency or a private
+# registry in a published crate's graph is either an accident or a supply-chain
+# question, and either way it should stop a release rather than ship in one.
+# crates.io itself rejects git dependencies on publish, so — like the wildcard
+# ban above — this converts a failed upload into a failed gate.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

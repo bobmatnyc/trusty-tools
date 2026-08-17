@@ -23,6 +23,14 @@
 //! Test: `model::tests::*`, `registry::registry_tests::*`,
 //! `protocol::tests::*`; end-to-end over the real daemon in
 //! `tests/session_e2e.rs` and (#2058) `tests/task_e2e.rs`.
+//!
+//! [`model::Session`]: crate::session::model::Session
+//! [`model::SessionStatus`]: crate::session::model::SessionStatus
+//! [`registry::SessionRegistry`]: crate::session::registry::SessionRegistry
+//! [`transcript::TranscriptRecord`]: crate::session::transcript::TranscriptRecord
+//! [`transcript::GoalSlotRecord`]: crate::session::transcript::GoalSlotRecord
+//! [`memory_sink::TurnMemorySink`]: crate::session::memory_sink::TurnMemorySink
+//! [`protocol::register`]: crate::session::protocol::register
 
 pub mod connector;
 pub mod memory_sink;

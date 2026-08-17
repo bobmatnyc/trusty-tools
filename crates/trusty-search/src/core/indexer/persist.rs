@@ -32,7 +32,8 @@ impl CodeIndexer {
     /// Why (issue #85): on graceful shutdown (and incrementally after each
     /// committed batch) we persist the corpus so a restart can rebuild BM25
     /// and the symbol graph without re-parsing the source tree. Pairs with
-    /// [`VectorStore::save_to`] which persists the HNSW vectors.
+    /// [`VectorStore::save_to`](crate::core::store::VectorStore::save_to) which
+    /// persists the HNSW vectors.
     /// What: copies chunks + entities under read locks (releasing them before
     /// the I/O), then writes JSON atomically via tmp + rename. An empty corpus
     /// is still written so the on-disk file accurately reflects state — EXCEPT

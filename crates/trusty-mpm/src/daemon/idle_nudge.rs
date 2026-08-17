@@ -43,7 +43,7 @@ use crate::session_manager::{ManagedSessionState, SessionManager};
 /// this returns `false` and the nudge proceeds; a PM with a running delegation
 /// returns `true` and is left alone.
 /// What: `true` iff any delegation's status
-/// [`is_live`](DelegationStatus::is_live) — i.e. `Queued` or `Running`.
+/// `is_live` — i.e. `Queued` or `Running`.
 /// `Completed`/`Failed`/`Cancelled` are terminal and do not count, and neither
 /// does `Stale`: a delegation the staleness sweep gave up on is no longer
 /// trustworthy evidence of work in flight, and treating it as live is what let a

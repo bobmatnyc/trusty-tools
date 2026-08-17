@@ -62,11 +62,33 @@ impl std::error::Error for AllowlistAddError {}
 /// `AllowlistAddError::Io`.
 /// Test: `handle_allowlist_add` is the primary call site; the `Denied` branch
 /// is exercised when a sensitive path is supplied.
-fn add_to_allowlist_checked(entry: AllowlistEntry) -> std::result::Result<(), AllowlistAddError> {
+fn add_to_allowlist_checked(
+    entry: AllowlistEntry,
+    allow_sensitive_path: bool,
+) -> std::result::Result<(), AllowlistAddError> {
     // Pre-check the denylist so we get a typed Denied variant rather than an
     // anyhow error whose message we'd have to string-match.
-    if let Some(reason) = crate::allowlist::is_denied(&entry.path) {
+    //
+    // #767: `--allow-sensitive-path` relaxes ONLY the ephemeral-prefix rows —
+    // see `is_denied_allowing_sensitive_path`. Without it nothing could approve
+    // a scratch root under `/var/folders`, which left the daemon's own
+    // `allow_sensitive_path` opt-in unreachable by any supported path.
+    let denial = if allow_sensitive_path {
+        crate::allowlist::is_denied_allowing_sensitive_path(&entry.path)
+    } else {
+        crate::allowlist::is_denied(&entry.path)
+    };
+    if let Some(reason) = denial {
         return Err(AllowlistAddError::Denied(reason));
+    }
+    // `add_to_allowlist` re-applies the STRICT denylist, so the relaxed path
+    // writes the config directly rather than routing through it.
+    if allow_sensitive_path {
+        let path = crate::allowlist::AllowlistConfig::default_path();
+        let mut cfg =
+            crate::allowlist::AllowlistConfig::load_from(&path).map_err(AllowlistAddError::Io)?;
+        cfg.upsert(entry);
+        return cfg.save_to(&path).map_err(AllowlistAddError::Io);
     }
     add_to_allowlist(entry, None).map_err(AllowlistAddError::Io)
 }
@@ -83,7 +105,11 @@ fn add_to_allowlist_checked(entry: AllowlistEntry) -> std::result::Result<(), Al
 /// Test: run `trusty-search index add /tmp/my-project` and verify a denial;
 /// run with a safe path and verify the file is updated and a confirmation is
 /// printed.
-pub async fn handle_allowlist_add(path: PathBuf, name: Option<String>) -> Result<()> {
+pub async fn handle_allowlist_add(
+    path: PathBuf,
+    name: Option<String>,
+    allow_sensitive_path: bool,
+) -> Result<()> {
     // Resolve relative paths against CWD so "." or "src" work as expected.
     let absolute = if path.is_absolute() {
         path.clone()
@@ -107,7 +133,7 @@ pub async fn handle_allowlist_add(path: PathBuf, name: Option<String>) -> Result
 
     // `add_to_allowlist_checked` validates against the denylist before writing
     // and returns a typed error (issue #795: replaces string-match heuristic).
-    match add_to_allowlist_checked(entry) {
+    match add_to_allowlist_checked(entry, allow_sensitive_path) {
         Ok(()) => {
             let basename = canonical
                 .file_name()

@@ -30,6 +30,7 @@ instructions = "Assess the last 52 weeks."
 
 [tools]
 tga = "0.0.0-never-published"
+trusty-search = "0.0.0-never-published"
 trusty-analyze = "0.0.0-never-published"
 trusty-review = "0.0.0-never-published"
 "#;

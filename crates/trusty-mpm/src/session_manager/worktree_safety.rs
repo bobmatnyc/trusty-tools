@@ -210,7 +210,7 @@ const TRUSTY_MPM_STATUS_ARGS: &[&str] = &[
 /// to `true`) must never be able to discard uncommitted work. Modelling the
 /// override as its own two-variant enum rather than a `force: bool` keeps it
 /// from being positionally confused with the `dry_run: bool` that already sits
-/// next to it in [`super::prune::SessionManager::prune_orphaned_worktrees`]'s
+/// next to it in [`super::prune::SessionManager::prune_orphaned_worktrees`](crate::session_manager::SessionManager::prune_orphaned_worktrees)'s
 /// signature, where a swapped argument would mean "really delete, and discard
 /// dirty work" instead of "preview".
 /// What: [`Skip`](Self::Skip) (the [`Default`]) refuses to remove a dirty

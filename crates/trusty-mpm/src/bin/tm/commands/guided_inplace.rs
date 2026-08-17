@@ -299,7 +299,7 @@ async fn fetch_managed_session(
 /// unresolved/unknown id still falls through promptly.
 /// Test: `fetch_until_stopped_returns_immediately_when_already_stopped`,
 /// `fetch_until_stopped_gives_up_after_budget_when_never_stopped` (both use a
-/// local one-shot/counting mock, mirroring [`spawn_mock`]'s convention).
+/// local one-shot/counting mock, mirroring `spawn_mock`'s convention).
 async fn fetch_managed_session_until_stopped(
     client: &reqwest::Client,
     url: &str,

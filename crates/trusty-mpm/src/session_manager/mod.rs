@@ -43,6 +43,9 @@ pub mod store_health;
 pub mod store_integrity;
 pub mod task_inject;
 pub mod workspace_guard;
+// #4311: the OS-level "is a process standing in here?" gate — the one removal
+// check that does not read a registry trusty-mpm or git wrote.
+pub(crate) mod worktree_liveness;
 mod worktree_nested;
 pub(crate) mod worktree_ownership;
 // #2919: merged-PR reclamation + the disk accounting `tm doctor` reports.

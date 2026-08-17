@@ -18,10 +18,24 @@
 /// Test: `expand_env_var_placeholder`, `expand_env_var_passthrough`,
 /// `expand_env_var_unset_var`, `expand_env_var_partial_placeholder` below.
 pub fn expand_env_var(raw: &str) -> String {
+    // #5313: read the process env here so the rule below stays pure.
+    expand_env_var_with(raw, |name| std::env::var(name).ok())
+}
+
+/// [`expand_env_var`], with the variable lookup supplied by the caller.
+///
+/// Why (#5313): proving that `${NAME}` resolves to the variable's value used to
+/// require setting that variable process-wide — `unsafe` under the 2024 edition,
+/// and a data race against every other thread `cargo test` runs in parallel.
+/// A caller-supplied lookup makes every case provable without global state.
+/// What: identical to [`expand_env_var`] except that `lookup` replaces the
+/// `std::env::var` call; a `None` lookup result yields the empty string.
+/// Test: the four `expand_env_var_*` tests below.
+fn expand_env_var_with(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
     if raw.starts_with("${") && raw.ends_with('}') && raw.len() > 3 {
         let var = &raw[2..raw.len() - 1];
         if !var.is_empty() {
-            return std::env::var(var).unwrap_or_default();
+            return lookup(var).unwrap_or_default();
         }
     }
     raw.to_string()
@@ -31,43 +45,65 @@ pub fn expand_env_var(raw: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Plain string with no placeholder syntax passes through unchanged.
-    #[test]
-    fn expand_env_var_passthrough() {
-        assert_eq!(expand_env_var("ghp_actualtoken"), "ghp_actualtoken");
-        assert_eq!(expand_env_var(""), "");
-        assert_eq!(expand_env_var("no-special-chars"), "no-special-chars");
+    /// A lookup that resolves exactly one variable name and nothing else.
+    ///
+    /// #5313: replaces the `std::env::set_var` these tests used to call.
+    fn only(name: &'static str, value: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |n| (n == name).then(|| value.to_string())
     }
 
-    /// `${VAR}` whose value is set in the environment resolves to that value.
+    /// A lookup where every variable is unset.
+    fn nothing_set(_: &str) -> Option<String> {
+        None
+    }
+
+    /// Plain string with no placeholder syntax passes through unchanged, and
+    /// the lookup is never consulted.
+    #[test]
+    fn expand_env_var_passthrough() {
+        let boom = |n: &str| panic!("lookup should not run for {n}");
+        assert_eq!(
+            expand_env_var_with("ghp_actualtoken", boom),
+            "ghp_actualtoken"
+        );
+        assert_eq!(expand_env_var_with("", boom), "");
+        assert_eq!(
+            expand_env_var_with("no-special-chars", boom),
+            "no-special-chars"
+        );
+    }
+
+    /// `${VAR}` whose value is set resolves to that value.
     #[test]
     fn expand_env_var_placeholder() {
-        std::env::set_var("TGA_TEST_TOKEN_741", "resolved-value");
-        assert_eq!(expand_env_var("${TGA_TEST_TOKEN_741}"), "resolved-value");
-        std::env::remove_var("TGA_TEST_TOKEN_741");
+        assert_eq!(
+            expand_env_var_with("${GITHUB_TOKEN}", only("GITHUB_TOKEN", "resolved-value")),
+            "resolved-value"
+        );
     }
 
     /// `${VAR}` for an unset variable returns the empty string (not the
     /// literal placeholder), so callers can detect a missing credential.
     #[test]
     fn expand_env_var_unset_var() {
-        std::env::remove_var("TGA_TEST_DEFINITELY_UNSET_741");
         assert_eq!(
-            expand_env_var("${TGA_TEST_DEFINITELY_UNSET_741}"),
+            expand_env_var_with("${GITHUB_TOKEN}", nothing_set),
             "",
             "unset var should expand to empty string, not the literal placeholder"
         );
     }
 
-    /// Strings that look like partial placeholders are passed through as-is.
+    /// Strings that look like partial placeholders are passed through as-is,
+    /// without consulting the lookup.
     #[test]
     fn expand_env_var_partial_placeholder() {
+        let boom = |n: &str| panic!("lookup should not run for {n}");
         // Missing closing brace — no match, returned as-is.
-        assert_eq!(expand_env_var("${NOCLOSE"), "${NOCLOSE");
+        assert_eq!(expand_env_var_with("${NOCLOSE", boom), "${NOCLOSE");
         // Missing opening / dollar.
-        assert_eq!(expand_env_var("VAR}"), "VAR}");
-        assert_eq!(expand_env_var("$VAR"), "$VAR");
+        assert_eq!(expand_env_var_with("VAR}", boom), "VAR}");
+        assert_eq!(expand_env_var_with("$VAR", boom), "$VAR");
         // Empty name `${}` — passes through unchanged.
-        assert_eq!(expand_env_var("${}"), "${}");
+        assert_eq!(expand_env_var_with("${}", boom), "${}");
     }
 }

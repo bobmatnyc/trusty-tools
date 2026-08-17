@@ -16,6 +16,10 @@
 //! Test: `cargo test -p trusty-common --features cli-help` exercises YAML
 //! parsing, top-level vs subcommand rendering, and the suggester's similarity
 //! threshold (positive match + below-threshold rejection).
+//!
+//! [`HelpConfig`]: crate::help::HelpConfig
+//! [`render_help`]: crate::help::render_help
+//! [`suggest`]: crate::help::suggest
 
 use indexmap::IndexMap;
 use serde::Deserialize;

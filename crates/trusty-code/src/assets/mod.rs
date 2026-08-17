@@ -116,6 +116,12 @@
 //! agents' composed `AgentConfig` carries the read-only tool list, and
 //! `documentation`/`research` remain unrestricted. Every skill name is unique
 //! and every skill's frontmatter `name:` matches its table key.
+//!
+//! [`EmbeddedAgent`]: crate::assets::EmbeddedAgent
+//! [`DEFAULT_AGENTS`]: crate::assets::DEFAULT_AGENTS
+//! [`EMBEDDED_TM_AGENT_SOURCES`]: crate::assets::EMBEDDED_TM_AGENT_SOURCES
+//! [`EmbeddedSkill`]: crate::assets::EmbeddedSkill
+//! [`DEFAULT_SKILLS`]: crate::assets::DEFAULT_SKILLS
 
 /// One embedded default agent: either self-contained (tcode's own 3
 /// defaults, no `extends:` chain) or a roster agent whose `extends:` chain is

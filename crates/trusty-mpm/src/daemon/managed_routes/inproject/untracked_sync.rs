@@ -23,7 +23,7 @@
 //! best-effort: a missing source root, an unreadable file, or an oversized file
 //! is `warn!`-logged and skipped — this function NEVER returns an error and
 //! NEVER panics, matching the "sync failure must not fail the spawn" contract
-//! from [`try_inproject_spawn`]'s call site.
+//! from [`try_inproject_spawn`](crate::daemon::managed_routes::inproject::try_inproject_spawn)'s call site.
 //!
 //! 🔴 Best-effort applies to COPYING, never to the exclusion guarantee (#4733).
 //! Until #4733 the exclude-append ran AFTER the copy and a failure was only a
@@ -32,7 +32,7 @@
 //! the operator's `.env` sitting unregistered in a live worktree where a later
 //! `git add -A && git commit` stages it into history. The order is now inverted:
 //! register first, ask `git check-ignore` (git's own authority, mirroring
-//! [`crate::core::session_launch::native_mcp::is_env_local_actually_ignored`])
+//! `crate::core::session_launch::native_mcp::is_env_local_actually_ignored`)
 //! whether each path is genuinely ignored, and copy only what it confirms. A
 //! destination with no repository at all has no history to leak into and is
 //! copied to freely; anything in between refuses.

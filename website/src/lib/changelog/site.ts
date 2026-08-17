@@ -5,10 +5,12 @@
  * `/whats-new` would otherwise each re-read and re-parse 8 400 lines of
  * markdown to reach the same answer.
  *
- * Scope is the SIX FLAGSHIPS and only them (`$lib/site`'s `FLAGSHIPS`). The
- * other crates' changelogs are read in the repository by the people who need
- * them; putting 21 more sections on a marketing page would bury the six that
- * a visitor came for.
+ * Scope is the RELEASED FLAGSHIPS and only them (`$lib/site`'s
+ * `RELEASED_FLAGSHIPS`). The other crates' changelogs are read in the
+ * repository by the people who need them; putting 21 more sections on a
+ * marketing page would bury the six that a visitor came for. A flagship that
+ * has never shipped is excluded by the same rule the NO_RELEASES gate below
+ * enforces — it would have nothing to render.
  *
  * THE GATES. Each of these fails the build rather than rendering an empty
  * section, because an empty "What's New" is indistinguishable from "nothing
@@ -26,14 +28,14 @@
  * This runs in Node at BUILD time only. Its output is prerendered into static
  * HTML, so the published page reads no file and opens no connection.
  *
- * Test: `site.test.ts` — the real six-crate corpus builds clean, and each gate
+ * Test: `site.test.ts` — the real released corpus builds clean, and each gate
  * is provoked from a temp-repo fixture.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { FLAGSHIPS } from '../site';
+import { RELEASED_FLAGSHIPS } from '../site';
 import { GITHUB_REPO, findRepoRoot } from '../docs/repo';
 import { CHANGELOG_CODES, throwIfFailed, type ChangelogFailure } from './errors';
 import { parseChangelog, type ChangelogRelease } from './parse';
@@ -93,7 +95,7 @@ export function buildChangelogSite(repoRootOverride?: string): ChangelogSite {
 	const failures: ChangelogFailure[] = [];
 	const crates: CrateChangelog[] = [];
 
-	for (const flagship of FLAGSHIPS) {
+	for (const flagship of RELEASED_FLAGSHIPS) {
 		const source = `crates/${flagship.name}/CHANGELOG.md`;
 		const markdown = readChangelog(repoRoot, source, failures);
 		if (markdown === undefined) continue;
@@ -110,7 +112,7 @@ export function buildChangelogSite(repoRootOverride?: string): ChangelogSite {
 				file: source,
 				problem: 'parsed to zero release sections, so this crate would render an empty section',
 				remedy:
-					'give the file at least one `## [<version>] — <YYYY-MM-DD>` heading, or take the crate out of `FLAGSHIPS` in website/src/lib/site.ts'
+					'give the file at least one `## [<version>] — <YYYY-MM-DD>` heading, or set `released: false` on the crate in website/src/lib/tools.ts'
 			});
 			continue;
 		}
@@ -158,7 +160,7 @@ function readChangelog(
 			file: source,
 			problem: 'a flagship crate has no readable CHANGELOG.md',
 			remedy:
-				'restore the file, or take the crate out of `FLAGSHIPS` in website/src/lib/site.ts — the What’s New page renders no placeholder for a crate it cannot read'
+				'restore the file, or set `released: false` on the crate in website/src/lib/tools.ts — the What’s New page renders no placeholder for a crate it cannot read'
 		});
 		return undefined;
 	}

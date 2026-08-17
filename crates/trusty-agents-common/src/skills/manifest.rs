@@ -138,18 +138,43 @@ impl Default for SkillManifest {
 }
 
 impl SkillManifest {
-    /// Load the manifest from `target_dir`, defaulting to empty when absent.
+    /// Load the manifest from `target_dir`. Absent means empty; unreadable is an
+    /// error.
     ///
-    /// Why: a first-ever deploy has no manifest; treating a missing file as an
-    /// empty manifest keeps the deployer's logic uniform.
-    /// What: reads `<target_dir>/.trusty-mpm-skills-manifest.json`; a missing or
-    /// unparseable file yields a fresh empty manifest.
-    /// Test: `skill_manifest_load_missing_returns_empty`, `skill_manifest_round_trip`.
-    pub fn load(target_dir: &Path) -> Self {
+    /// Why (#5626, [ADR-0045]): the empty manifest is a positive claim — every
+    /// consumer reads it as "trusty-mpm owns nothing here", which licenses a
+    /// deploy to write over files the ledger existed to protect and licenses a
+    /// retirement to unrecord them. Only a genuinely ABSENT file establishes
+    /// that claim. The previous `Err(_) => Self::default()` also returned it for
+    /// `EACCES` on an unsearchable parent, a stale NFS handle, and a transient
+    /// `EIO` — and `serde_json::from_str(..).unwrap_or_default()` returned it for
+    /// a torn document, which is the very corruption
+    /// [`SkillManifest::save_merging`] refuses to merge from. The sibling
+    /// [`SkillManifest::read_parsed`] already drew this line for `save_merging`
+    /// and its comment named the collapse wrong; this applies the same rule to
+    /// the load every consumer actually calls.
+    ///
+    /// What: reads `<target_dir>/.trusty-mpm-skills-manifest.json`.
+    /// `ErrorKind::NotFound` — a first-ever deploy — yields the empty default and
+    /// no error. Every other I/O failure yields [`ManifestError::Io`] naming the
+    /// path, and a document that does not parse yields [`ManifestError::Json`].
+    /// The caller decides; no caller may substitute an empty ledger for the
+    /// error, since that reinstates this defect one level up.
+    /// Test: `skill_manifest_load_missing_returns_empty`,
+    /// `skill_manifest_load_malformed_is_an_error`,
+    /// `skill_manifest_load_unreadable_is_an_error`, `skill_manifest_round_trip`.
+    ///
+    /// [ADR-0045]: https://github.com/bobmatnyc/trusty-tools/blob/main/docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md
+    pub fn load(target_dir: &Path) -> Result<Self> {
         let path = target_dir.join(SKILL_MANIFEST_FILE);
         match std::fs::read_to_string(&path) {
-            Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Ok(raw) => Ok(serde_json::from_str(&raw)?),
+            // #5626: NotFound is the ONLY failure that proves nothing is owned.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(ManifestError::Io(std::io::Error::new(
+                e.kind(),
+                format!("{path}: {e}", path = path.display()),
+            ))),
         }
     }
 

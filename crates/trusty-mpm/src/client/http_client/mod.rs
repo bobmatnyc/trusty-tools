@@ -7,7 +7,7 @@
 //! What: [`DaemonClient`] holds a base URL plus a shared `reqwest::Client` and
 //! exposes one async method per daemon endpoint the UIs need — session listing
 //! and lifecycle, the event feed, breaker state, the overseer / tmux / config
-//! analyzer views, and the pairing handshake. [`Self::new`] builds that
+//! analyzer views, and the pairing handshake. `Self::new` builds that
 //! `reqwest::Client` with the bounded connect/request timeouts from
 //! [`config`] (issue #2471) so a daemon that accepts a TCP connection but
 //! never answers cannot hang a caller forever — before this fix the TUI's
@@ -703,7 +703,7 @@ impl DaemonClient {
     /// wired; this is the one transport call behind both.
     /// What: `GET /api/v1/doctor`, passing the caller's `project` path so the
     /// daemon can scope the instruction-pipeline probe. Returns the parsed
-    /// [`DoctorReport`]; `Err` on a transport or decode failure.
+    /// [`DoctorReport`](crate::client::DoctorReport); `Err` on a transport or decode failure.
     /// Test: covered by the executor's doctor test.
     pub async fn doctor(
         &self,

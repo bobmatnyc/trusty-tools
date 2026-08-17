@@ -10,10 +10,11 @@
 //! EITHER SIGTERM (unix) OR SIGINT/Ctrl-C (all platforms) fires. On non-unix
 //! platforms only Ctrl-C is watched.
 //!
-//! Test: `cargo test -p trusty-common -- shutdown` runs the compilation smoke
-//! test. Signal delivery itself cannot be triggered inside a unit test without
-//! `raise(SIGTERM)`, which is unsafe; the integration tests in trusty-search
-//! exercise the full axum `with_graceful_shutdown` path.
+//! Test: `cargo test -p trusty-common --features unconditional-only --
+//! shutdown` runs the compilation smoke test. Signal delivery itself cannot be
+//! triggered inside a unit test without `raise(SIGTERM)`, which is unsafe; the
+//! integration tests in trusty-search exercise the full axum
+//! `with_graceful_shutdown` path.
 
 /// Seconds a trusty-* daemon is granted between SIGTERM and SIGKILL (#4393).
 ///
@@ -138,7 +139,8 @@ mod tests {
     /// Why: confirm the module compiles and the public surface is callable.
     /// What: creates a future from `shutdown_signal()` without polling it
     ///   (which would block forever waiting for a real signal).
-    /// Test: `cargo test -p trusty-common -- shutdown::tests`.
+    /// Test: `cargo test -p trusty-common --features unconditional-only --
+    /// shutdown::tests`.
     #[test]
     fn shutdown_signal_is_callable() {
         // Just constructing the future (without awaiting) confirms the function

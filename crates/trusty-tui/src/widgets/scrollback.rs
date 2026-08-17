@@ -39,7 +39,7 @@ use crate::widgets::banner::banner_lines;
 /// collapsing them to one keeps the scrollback dense.
 /// What: operates after wrapping decisions but before pad/scroll math, so
 /// the geometry math sees the post-collapse line count.
-/// Test: [`tests::collapse_blank_lines_drops_consecutive_empty_lines`].
+/// Test: `tests::collapse_blank_lines_drops_consecutive_empty_lines`.
 pub fn collapse_blank_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
     let mut prev_blank = false;
@@ -84,10 +84,10 @@ fn leader_spans(app: &ReplApp, body_color: Option<Color>) -> Vec<Span<'static>> 
 /// What: replicates the banner + chat entry line-building logic; returns the
 /// post-collapse, pre-pad lines. Width-dependent rendering (banner wrapping,
 /// markdown table column sizing) uses `terminal_width`.
-/// Test: [`tests::build_chat_lines_renders_user_and_assistant_entries`],
-/// [`tests::build_chat_lines_renders_fenced_code_block`],
-/// [`tests::build_chat_lines_renders_markdown_table`],
-/// [`tests::build_chat_lines_prepends_banner_when_shown`].
+/// Test: `tests::build_chat_lines_renders_user_and_assistant_entries`,
+/// `tests::build_chat_lines_renders_fenced_code_block`,
+/// `tests::build_chat_lines_renders_markdown_table`,
+/// `tests::build_chat_lines_prepends_banner_when_shown`.
 pub fn build_chat_lines(app: &ReplApp, terminal_width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -265,7 +265,7 @@ pub fn build_chat_lines(app: &ReplApp, terminal_width: usize) -> Vec<Line<'stati
 /// when the conversation is short.
 /// What: returns the post-collapse, pre-pad line count from
 /// [`build_chat_lines`].
-/// Test: [`tests::chat_line_count_is_zero_for_empty_chat_without_banner`].
+/// Test: `tests::chat_line_count_is_zero_for_empty_chat_without_banner`.
 pub fn chat_line_count(app: &ReplApp, terminal_width: usize) -> usize {
     build_chat_lines(app, terminal_width).len()
 }

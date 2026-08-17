@@ -6,9 +6,9 @@
 //! cleanly, mirroring the `session_picker.rs` → `session_picker_render.rs`
 //! precedent.
 //!
-//! What: [`render_session_table`] resolves the color gate once and prints the
-//! header plus one row per session; [`format_ls_row`] and
-//! [`format_tombstone_row`] are the pure row formatters; [`format_state_column`]
+//! What: [`render_session_table`](crate::commands::managed_render::render_session_table) resolves the color gate once and prints the
+//! header plus one row per session; [`format_ls_row`](crate::commands::managed_render::format_ls_row) and
+//! [`format_tombstone_row`](crate::commands::managed_render::format_tombstone_row) are the pure row formatters; [`format_state_column`](crate::commands::managed_render::format_state_column)
 //! and the two small text helpers came across unchanged.
 //!
 //! Color, and why padding had to change with it: `NUM`, `ID`, and `NAME` are
@@ -18,7 +18,7 @@
 //! coincidence. 57 currently listed sessions end in `-01`; one hue across both
 //! columns would assert a correspondence that does not exist. Colored text also
 //! breaks `{:<N}`, which counts an ANSI escape's bytes as width while the
-//! terminal draws none of them — hence [`pad_visible`], which measures the
+//! terminal draws none of them — hence `pad_visible`, which measures the
 //! visible text and appends the padding outside the escape.
 //!
 //! Test: `format_tombstone_row_*`, `format_state_column_*`, `truncate_*`,

@@ -52,16 +52,27 @@ pub const MANIFEST_FILE: &str = ".trusty-mpm-manifest.json";
 /// The outcome of loading the agent manifest.
 ///
 /// Why: callers need to distinguish "no manifest yet" (first deploy, expect
-/// empty) from "manifest is corrupt" (dangerous — silently resetting to empty
-/// would reclassify managed files as user-owned and skip re-deploying them).
+/// empty) from "the ledger's contents could not be established" (dangerous —
+/// silently resetting to empty would reclassify managed files as user-owned and
+/// skip re-deploying them).
 /// What: `Ok(manifest)` when the file is absent or parses cleanly; `Corrupt`
-/// when the file exists but is malformed or truncated.
-/// Test: `manifest_load_corrupt_returns_corrupt`.
+/// when the ledger exists but could not be read as one.
+///
+/// `Corrupt` covers every non-`NotFound` outcome since #5626, not only a
+/// malformed or truncated document: `EACCES` on an unsearchable parent and a
+/// transient `EIO` leave ownership exactly as undetermined as a torn JSON
+/// document does, and the refusals downstream —
+/// [`crate::agents::quarantine::sweep_locked`]'s `CorruptLedger` above all —
+/// are the correct response to both. The variant's payload names the path and
+/// the underlying failure, so an operator still sees which one it was.
+/// Test: `manifest_load_corrupt_returns_corrupt`,
+/// `manifest_load_unreadable_returns_corrupt`.
 #[derive(Debug)]
 pub enum ManifestLoad {
     /// File was absent (first deploy) or parsed cleanly.
     Ok(AgentManifest),
-    /// File exists but is malformed / truncated.
+    /// The ledger exists but could not be read as one — malformed, truncated,
+    /// or unreadable.
     Corrupt(String),
 }
 
@@ -336,16 +347,25 @@ impl AgentManifest {
     /// Load the manifest from `target_dir`, defaulting to empty when absent.
     ///
     /// Why: a first-ever deploy has no manifest; treating a missing file as an
-    /// empty manifest keeps the deployer's logic uniform. A corrupt (malformed /
-    /// truncated) manifest must NOT silently reset to empty — that would cause
+    /// empty manifest keeps the deployer's logic uniform. A ledger that exists
+    /// but cannot be read must NOT silently reset to empty — that would cause
     /// managed files to be reclassified as user-owned and skipped on the next
     /// deploy, producing a silent no-op rather than a re-deploy.
-    /// What: reads `<target_dir>/.trusty-mpm-manifest.json`; if absent returns
-    /// `ManifestLoad::Ok(default)`; if present but malformed returns
-    /// `ManifestLoad::Corrupt` with the parse error; if valid returns
-    /// `ManifestLoad::Ok(parsed)`.
+    ///
+    /// #5626: the `Err(_) => Ok(default)` arm this replaces made that reasoning
+    /// hold for a malformed document only. An `EACCES` on the ledger — or a
+    /// stale handle, or a transient `EIO` — took the benign arm and defeated
+    /// [`crate::agents::quarantine::sweep_locked`]'s `CorruptLedger` refusal
+    /// without a word, at which point a file the real ledger records as
+    /// user-owned reads as untracked and can be renamed to `.md.disabled`.
+    ///
+    /// What: reads `<target_dir>/.trusty-mpm-manifest.json`. `ErrorKind::NotFound`
+    /// alone returns `ManifestLoad::Ok(default)`; a valid document returns
+    /// `ManifestLoad::Ok(parsed)`; a parse failure or any other I/O failure
+    /// returns [`ManifestLoad::Corrupt`] naming the path and the cause.
     /// Test: `manifest_load_missing_returns_empty`,
     ///       `manifest_load_corrupt_returns_corrupt`,
+    ///       `manifest_load_unreadable_returns_corrupt`,
     ///       `manifest_round_trip`.
     pub fn load_checked(target_dir: &Path) -> ManifestLoad {
         let path = target_dir.join(MANIFEST_FILE);
@@ -355,7 +375,9 @@ impl AgentManifest {
                 Err(e) => ManifestLoad::Corrupt(format!("{path}: {e}", path = path.display())),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => ManifestLoad::Ok(Self::default()),
-            Err(_) => ManifestLoad::Ok(Self::default()),
+            // #5626: an unreadable ledger determines nothing, so it takes the
+            // same refusal a torn one does.
+            Err(e) => ManifestLoad::Corrupt(format!("{path}: {e}", path = path.display())),
         }
     }
 
@@ -466,6 +488,37 @@ mod tests {
         assert!(
             matches!(result, ManifestLoad::Corrupt(_)),
             "expected Corrupt for malformed manifest"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn manifest_load_unreadable_returns_corrupt() {
+        // #5626, ADR-0045: the `Err(_) => Ok(default)` arm this replaces gave
+        // EACCES the same benign answer as a missing file, which defeated
+        // `quarantine::sweep_locked`'s CorruptLedger refusal without a word —
+        // a file the real ledger records as UserOwned then reads as Untracked
+        // and can be renamed to `.md.disabled`.
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let mut manifest = AgentManifest::default();
+        manifest
+            .managed
+            .insert("engineer.md".into(), sample_entry());
+        manifest.save(tmp.path()).unwrap();
+
+        let path = tmp.path().join(MANIFEST_FILE);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = AgentManifest::load_checked(tmp.path());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let ManifestLoad::Corrupt(detail) = result else {
+            panic!("expected Corrupt for an unreadable ledger, got {result:?}");
+        };
+        assert!(
+            detail.contains(MANIFEST_FILE),
+            "the detail must name the ledger: {detail}"
         );
     }
 

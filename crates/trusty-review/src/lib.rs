@@ -15,6 +15,12 @@
 //!
 //! Test: each public module carries its own unit tests; see each submodule.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 pub mod config;
 // Why: strict bare-identifier validation shared by the config-resolution
 // layer and the voice/review-template loaders (security fix, issue #2995) —

@@ -456,9 +456,11 @@ pub(super) async fn search_handler(
     // when either (a) the caller explicitly asked for it, or (b) the
     // semantic stage is not yet ready. Doing this here keeps the indexer
     // unaware of the index-handle-level capability surface.
-    let stages_snapshot = { handle.stages.read().await.clone() };
-    let caps = stages_snapshot.search_capabilities();
-    let semantic_ready = caps.contains(&"vector");
+    let mut handle = handle;
+    let mut index_id = index_id;
+    let mut stages_snapshot = { handle.stages.read().await.clone() };
+    // #5069: names the index the caller asked for when a sibling facet answered.
+    let mut routed_from: Option<String> = None;
     // #5068: a caller that PINNED the semantic lane asked a question this index
     // cannot answer. Serving BM25 rows under a 200 answers a different question
     // silently, so refuse with the same shape `search_kg` uses for `skip_kg`.
@@ -468,9 +470,27 @@ pub(super) async fn search_handler(
             handle.skip_vector,
             &stages_snapshot,
         ) {
-            return Err(resp);
+            // #5069: worktree indexes are `skip_vector` (#5060), so run the
+            // caller's declared lane against the facet of the same repo that
+            // holds the vectors before refusing outright.
+            let Some((served_id, served_handle)) =
+                super::facet_route::resolve_semantic_facet(&state, &index_id).await
+            else {
+                return Err(resp);
+            };
+            tracing::info!(
+                requested = %index_id,
+                served_by = %served_id,
+                "search_handler: routed a declared semantic lane to the repo's vector-carrying facet"
+            );
+            routed_from = Some(index_id.0.clone());
+            stages_snapshot = served_handle.stages.read().await.clone();
+            index_id = served_id;
+            handle = served_handle;
         }
     }
+    let caps = stages_snapshot.search_capabilities();
+    let semantic_ready = caps.contains(&"vector");
     if query.stage.is_none() && !semantic_ready {
         // Force lexical lane until the embedder catches up. The caller's
         // request is preserved if they explicitly asked for `mode = all`
@@ -484,7 +504,10 @@ pub(super) async fn search_handler(
     handle.search_pressure.notify_one();
     let started = std::time::Instant::now();
     let indexer = handle.indexer.read().await;
-    let mut results = indexer.search(&query).await.map_err(|_| {
+    // #2203: `search_with_drops`, not `search` — the tally is what lets a
+    // caller tell "3 results because 3 matched" from "3 results because 7 were
+    // dropped". Published as `meta.dropped` below.
+    let (mut results, mut dropped) = indexer.search_with_drops(&query).await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "internal search error" })),
@@ -503,6 +526,10 @@ pub(super) async fn search_handler(
     let before = results.len();
     results.retain(|r| file_is_within_root(&r.file, &root));
     let filtered_out = before.saturating_sub(results.len());
+    // #2203: the fifth drop site. `stale_index_root` already flagged it as a
+    // boolean; the count joins the other four so `meta.dropped` accounts for
+    // every row the pipeline removed.
+    dropped.out_of_root = filtered_out;
     // Issue #3683 code-critic review finding 3 (HIGH): read the degraded
     // flag while the indexer read-guard is still held (it's about to be
     // dropped below) so the response reflects THIS query's lane state, not
@@ -567,7 +594,7 @@ pub(super) async fn search_handler(
         (Some(a), Some(b)) => a != b,
         _ => false,
     };
-    Ok(Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "results": results,
         "intent": format!("{:?}", intent),
         "latency_ms": latency_ms,
@@ -584,6 +611,16 @@ pub(super) async fn search_handler(
             // normal case (no drops); `true` means the operator should run
             // `trusty-search index <path>` to re-register with a fresh root.
             "stale_index_root": filtered_out > 0,
+            // #2203: how many candidates this query retrieved and then
+            // discarded, per drop site. Without it a short `results` array was
+            // indistinguishable from a small match set — `top_k: 10` returning
+            // 3 rows read the same whether 3 matched or 7 were deleted on the
+            // way out, which is how #2203 presented as "search is broken" on an
+            // intact corpus. `unresolved_corpus` is the fault case (the corpus
+            // could not be read); the rest are the requested `mode` /
+            // `exclude_archived` / root scope doing their job.
+            "dropped": dropped,
+            "dropped_total": dropped.total(),
             // Issue #3683 code-critic review finding 3 (HIGH): `true` means
             // this query's lexical lane (BM25 and/or grep-fallback) degraded
             // to empty/partial because the detached corpus rehydrate hadn't
@@ -606,5 +643,21 @@ pub(super) async fn search_handler(
             // handles one contract, not two.
             "vector_disabled_by_config": handle.skip_vector,
         },
-    })))
+    });
+    // #5069: a routed query's results belong to the SERVING facet's tree, which
+    // sits on a different commit than the worktree the caller asked about — so
+    // name both indexes and the root the paths are relative to. Added only when
+    // routing actually happened, so an unrouted response is byte-identical to
+    // what it was before.
+    if let Some(from) = routed_from {
+        if let Some(meta) = body.get_mut("meta").and_then(|m| m.as_object_mut()) {
+            meta.insert("routed_from_index".into(), serde_json::json!(from));
+            meta.insert("served_by_index".into(), serde_json::json!(index_id.0));
+            meta.insert(
+                "served_root_path".into(),
+                serde_json::json!(handle.root_path.display().to_string()),
+            );
+        }
+    }
+    Ok(Json(body))
 }

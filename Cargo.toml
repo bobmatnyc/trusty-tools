@@ -12,7 +12,17 @@
 # as the two other Tauri GUIs — bare builds skip it) and is excluded from the
 # headless CI jobs (WebKit2GTK-dependent); a dedicated `agents-ui` CI job
 # build- and lint-verifies it.
-members = ["crates/*", "crates/trusty-agents/ui/src-tauri"]
+#
+# `crates/trusty-audit/ui/src-tauri` (#5477 phase 1, package `trusty-audit-ui`)
+# is nested the same way and is here for the same reason — the `crates/*` glob
+# reaches one level, not three. It gets the same treatment throughout: absent
+# from `default-members`, `--exclude`d from the headless workspace jobs, and
+# build/lint-verified by a dedicated `audit-ui` CI job.
+members = [
+    "crates/*",
+    "crates/trusty-agents/ui/src-tauri",
+    "crates/trusty-audit/ui/src-tauri",
+]
 resolver = "2"
 # Exclude paths inside copied projects that contain stray manifests we don't
 # want Cargo to treat as workspace members. trusty-agents bundles a `weather_alerter`
@@ -42,7 +52,8 @@ exclude = []
 # that `trusty-agents`' own build.rs populates, so a `--workspace` run that
 # happens to check/build `trusty-agents-ui` before that build script has run
 # panics on the missing path — a real cargo build-order race, not merely a
-# missing-toolchain skip (#3053).
+# missing-toolchain skip (#3053). `trusty-audit-ui` (#5477) is the fourth crate
+# in this category and carries the same `--exclude` for the same two reasons.
 #
 # Maintenance note: Cargo has no "members minus one" glob for
 # `default-members`, so this list must be updated by hand when a new crate
@@ -56,7 +67,6 @@ default-members = [
     "crates/trusty-agents-local",
     "crates/trusty-analyze",
     "crates/trusty-audit",
-    "crates/trusty-bm25-daemon",
     "crates/trusty-channels",
     "crates/trusty-code",
     "crates/trusty-common",
@@ -103,26 +113,34 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──
 # trusty-code: per-project Claude-Code-compatible MPM orchestration harness (#587).
 # First published to crates.io at version 0.1.0.
-trusty-code = { path = "crates/trusty-code" }
+trusty-code = { path = "crates/trusty-code", version = "0.3.0" }
 # trusty-tui: engine-agnostic terminal-UI seam (`TuiEngine` trait + `ReplEvent`)
 # shared by trusty-code's `tcode tui` and trusty-agents' tagent REPL (DOC-50,
 # epic #3411). Not yet published (Slice 1, #3425).
 trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.5.1" }
-trusty-common = { path = "crates/trusty-common", version = "0.33" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.6.0" }
+trusty-common = { path = "crates/trusty-common", version = "0.35" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
-trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.10" }
-# trusty-bm25-daemon: per-palace BM25 lexical-index daemon — referenced by
-# trusty-memory so `cargo install trusty-memory` produces both binaries from
-# one command (mirrors the trusty-embedderd / trusty-search pattern, PR #190).
-trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.2.0" }
+# Why: `default-features = false` HERE, not only on the member entry (mirrors
+#      the trusty-review pattern from #5466). trusty-search's own
+#      `default-features = false` (crates/trusty-search/Cargo.toml) works
+#      today only because that edge is a direct `path` + `version` dependency,
+#      not `workspace = true`. If it were ever converted to inherit from here,
+#      Cargo would silently re-enable trusty-embedderd's default features
+#      (`http-server`, `bundled-ort`) unless this entry states the override
+#      too. No workspace member depends on `trusty-embedderd = { workspace =
+#      true }` today, so this has no effect on current feature resolution.
+trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.11", default-features = false }
+# Why (#5329): the `trusty-bm25-daemon` member and dependency were REMOVED. Its
+# per-palace subprocess never ran in any shipped configuration, and its index is
+# now `trusty_memory::bm25_lane::Bm25Lane`, in-process.
 # tga: trusty-git-analytics — developer productivity analytics, and (since
 # #5468) the sole owner of contributor profiling. No workspace member takes a
 # Cargo edge on it: #5466 removed trusty-review's, and the tga -> trusty-review
 # direction is a PATH lookup, not a manifest edge (#5236, DOC-67 §6). The entry
 # stays so a future in-tree consumer resolves from source rather than crates.io.
-tga = { path = "crates/trusty-git-analytics", version = "2.10" }
+tga = { path = "crates/trusty-git-analytics", version = "3.1.0" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.
@@ -137,7 +155,7 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 #      this line existed. Both consumers name what they need: trusty-analyze's
 #      `review` feature pulls `trusty-review/mcp`; trusty-mpm's dev-dependency
 #      only touches `integrations`, which is unconditional.
-trusty-review = { path = "crates/trusty-review", version = "0.16", default-features = false }
+trusty-review = { path = "crates/trusty-review", version = "0.18", default-features = false }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
@@ -150,7 +168,14 @@ trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
 # trusty-installer: consumed as a LIBRARY by trusty-audit for the pinned,
 # fail-closed prebuilt download entry point (#5491, #5495). trusty-audit is
 # `publish = false`, so this entry exists for in-tree resolution.
-trusty-installer = { path = "crates/trusty-installer", version = "0.8" }
+trusty-installer = { path = "crates/trusty-installer", version = "0.9" }
+# trusty-audit: consumed as a LIBRARY by the auditor client's Tauri shell
+# (`trusty-audit-ui`, #5477 phase 1), which calls `Session::execute` in-process
+# rather than serving HTTP or shelling out to the `taudit` binary — DOC-68 §11
+# fixes the shell as a view over that one API. Both crates are
+# `publish = false`, so there is no `version` to keep in step; the path entry
+# exists purely for in-tree resolution.
+trusty-audit = { path = "crates/trusty-audit" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────
 anyhow = "1"
@@ -318,7 +343,6 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.33"
 tiktoken-rs = "0.5"
 git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }
-kuzu = "0.9"
 
 # Embedded assets (trusty-memory, trusty-agents).
 rust-embed = { version = "8", features = ["include-exclude", "interpolate-folder-path"] }
@@ -425,7 +449,6 @@ quick-xml = "0.41"
 [patch.crates-io]
 trusty-common = { path = "crates/trusty-common" }
 trusty-embedderd = { path = "crates/trusty-embedderd" }
-trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon" }
 trusty-console = { path = "crates/trusty-console" }
 
 [profile.dev]
@@ -434,3 +457,29 @@ opt-level = 0
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+# Build profile for CI's trusty-search daemon smoke test ONLY. Never used for
+# anything that ships.
+#
+# That job builds `-p trusty-search` at full `release` — opt-level 3 plus thin
+# LTO, ~210s median — to start the daemon and assert `/health` returns
+# `status=ok`. The assertion itself takes 0s, and it exercises process startup
+# and HTTP wiring, neither of which is sensitive to optimisation level. Thin
+# LTO across trusty-search's dependency graph (ort/onnxruntime, tree-sitter,
+# usearch, tantivy) is the bulk of that time and buys the check nothing.
+#
+# This IS a deliberate coverage trade, made knowingly by the repo owner: the
+# smoke binary is still optimised, but it is no longer byte-identical to what
+# ships. A release-only regression — one that needs opt-level 3 or cross-crate
+# LTO inlining to appear — would no longer be caught by the smoke test. It was
+# not catching that class of bug reliably at `release` either; it asserts one
+# HTTP field.
+#
+# `inherits = "release"` rather than "dev": `debug_assertions` stays off, so
+# the daemon runs the same code paths as a release build. Only the codegen
+# effort changes.
+[profile.ci-smoke]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = 1

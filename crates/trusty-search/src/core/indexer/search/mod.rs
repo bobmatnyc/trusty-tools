@@ -11,6 +11,7 @@
 //! Test: covered by every `test_search_*`, `test_kg_*`, and intent-routing
 //! test in `indexer::tests`.
 
+pub(crate) mod drops;
 pub(crate) mod kg;
 pub(crate) mod lanes;
 pub(crate) mod materialize;
@@ -35,6 +36,7 @@ use super::{
     is_struct_definition_chunk_type, CodeChunk, CodeIndexer, SearchQuery, HNSW_OVERSAMPLE,
     STRUCT_DEFINITION_BOOST,
 };
+use drops::SearchDrops;
 
 /// Score assigned to grep-fallback hits (issue #75). Intentionally tiny so
 /// fallback rows never out-rank a real BM25/vector hit — they only surface
@@ -142,9 +144,31 @@ impl CodeIndexer {
     /// What: intent classification → lane selection → embed → BM25/HNSW
     /// dispatch → RRF fusion → MMR → KG expansion → score adjustments →
     /// materialisation → archive filter. Returns up to `query.top_k`
-    /// `CodeChunk`s ranked by fused score.
+    /// `CodeChunk`s ranked by fused score, discarding the drop tally — call
+    /// [`Self::search_with_drops`] when the caller needs to distinguish a short
+    /// result set from a small one.
     /// Test: covered by every `test_search_*` integration test.
     pub async fn search(&self, query: &SearchQuery) -> Result<Vec<CodeChunk>> {
+        Ok(self.search_with_drops(query).await?.0)
+    }
+
+    /// [`Self::search`], plus the count of candidates this query retrieved and
+    /// then discarded.
+    ///
+    /// Why: every drop site downstream of fusion shortened `results` with
+    /// nothing to distinguish it from a genuinely small match set, so a total
+    /// outage (an unreadable corpus dropping every id) rendered exactly like
+    /// "nothing matched" — #2203's reported symptom. The tally is what lets a
+    /// caller tell the two apart.
+    /// What: the full pipeline; returns the chunks alongside a [`SearchDrops`]
+    /// tally. `search` is the tally-discarding wrapper.
+    /// Test: `search_handler_meta_reports_rows_dropped_when_the_corpus_has_no_matching_row`
+    /// and `search_handler_meta_reports_rows_dropped_by_the_mode_and_docstring_filters`
+    /// in `service::server::tests_search`.
+    pub async fn search_with_drops(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<(Vec<CodeChunk>, SearchDrops)> {
         self.touch_activity();
         let intent = QueryClassifier::classify_with_domain(&query.text, &self.domain_terms);
         let (alpha, beta, use_kg_first) = intent.weights();
@@ -299,7 +323,10 @@ impl CodeIndexer {
             .await;
 
         // 5) Materialise the top-k IDs into `CodeChunk`s.
-        let mut result = self
+        let mut dropped = SearchDrops::default();
+        // #2203: every drop below is counted so the caller can tell a short
+        // result set from a small one.
+        let (mut result, unresolved) = self
             .materialize_search_results(
                 all,
                 &hnsw_results,
@@ -309,10 +336,17 @@ impl CodeIndexer {
                 query,
             )
             .await;
+        dropped.unresolved_corpus = unresolved;
 
         // 6) Mode-based hard file-type filter + archive downrank.
-        self.apply_archive_downrank(&mut result, &intent, effective_mode, query.exclude_archived);
-        Ok(result)
+        self.apply_archive_downrank(
+            &mut result,
+            &intent,
+            effective_mode,
+            query.exclude_archived,
+            &mut dropped,
+        );
+        Ok((result, dropped))
     }
 
     /// Apply the mode-based file-type filter and the archive score penalty.
@@ -331,16 +365,22 @@ impl CodeIndexer {
     /// even if some other caller/path leaves `mode` at `Code`. (2) runs
     /// `archive::classify` per chunk, multiplies score by the penalty, stamps
     /// `archive_reason`. When `exclude_archived` is `true`, chunks with
-    /// strong archive signals are dropped. Re-sorts by score desc.
+    /// strong archive signals are dropped. Re-sorts by score desc. Each of the
+    /// three `retain`s below records how many rows it deleted into `dropped`,
+    /// which the caller publishes as `meta.dropped` (#2203) — the filters
+    /// are deliberate, but a caller could not previously tell a filtered result
+    /// set from a small one.
     /// Test: `test_archive_downrank_demotes_deprecated_chunks`,
     /// `test_exclude_archived_drops_archive_chunks`, `test_mode_filter_*`,
-    /// `tests_unknown_intent::test_unknown_intent_downranks_docs_instead_of_dropping_them`.
+    /// `tests_unknown_intent::test_unknown_intent_downranks_docs_instead_of_dropping_them`,
+    /// `service::server::tests_search::search_handler_meta_reports_rows_dropped_by_the_mode_and_docstring_filters`.
     fn apply_archive_downrank(
         &self,
         results: &mut Vec<CodeChunk>,
         intent: &QueryIntent,
         mode: super::SearchMode,
         exclude_archived: bool,
+        dropped: &mut SearchDrops,
     ) {
         if results.is_empty() {
             return;
@@ -354,10 +394,14 @@ impl CodeIndexer {
             matches!(intent, QueryIntent::Unknown) && matches!(mode, super::SearchMode::Code);
         if matches!(mode, super::SearchMode::Code) {
             use crate::core::chunker::ChunkType;
+            let before = results.len();
             results.retain(|chunk| !matches!(chunk.chunk_type, ChunkType::Docstring));
+            dropped.docstring_filtered = before - results.len();
         }
         if !soft_downrank_unknown {
+            let before = results.len();
             results.retain(|chunk| docs_penalty::is_allowed_for_mode(&chunk.file, mode));
+            dropped.mode_filtered = before - results.len();
         }
 
         let mut markers = MarkerCache::new();
@@ -382,7 +426,23 @@ impl CodeIndexer {
             }
         }
         if exclude_archived && !archived_ids.is_empty() {
+            let before = results.len();
             results.retain(|chunk| !archived_ids.contains(&chunk.id));
+            dropped.archived = before - results.len();
+        }
+        if dropped.total() > 0 {
+            // Debug, not warn: unlike the unresolved-corpus drop in
+            // `materialize`, these three are the requested `mode` and
+            // `exclude_archived` working as asked. The count is what the caller
+            // needs; a warning per query would be noise.
+            tracing::debug!(
+                index_id = %self.index_id,
+                docstring_filtered = dropped.docstring_filtered,
+                mode_filtered = dropped.mode_filtered,
+                archived = dropped.archived,
+                returned = results.len(),
+                "search: post-fusion filters dropped rows"
+            );
         }
         results.sort_by(|a, b| {
             b.score

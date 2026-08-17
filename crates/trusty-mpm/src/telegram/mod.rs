@@ -13,6 +13,15 @@
 //! holds the pure alert-decision core.
 //! Test: `cargo test -p trusty-mpm-telegram` covers command conversion, alert
 //! formatting, the pure alert-loop core, and result formatting.
+//!
+//! [`CommandExecutor`]: crate::client::CommandExecutor
+//! [`TelegramCommand`]: crate::telegram::commands::TelegramCommand
+//! [`TrustyCommand`]: crate::client::TrustyCommand
+//! [`TelegramFormatter`]: crate::telegram::formatter::TelegramFormatter
+//! [`run`]: crate::telegram::run
+//! [`commands`]: crate::telegram::commands
+//! [`formatter`]: crate::telegram::formatter
+//! [`alerts`]: crate::telegram::alerts
 
 pub mod alerts;
 pub mod commands;

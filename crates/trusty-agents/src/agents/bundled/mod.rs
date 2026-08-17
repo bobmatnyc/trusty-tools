@@ -26,8 +26,10 @@
 //! ([`stamp`]) and, on a hash mismatch, refreshes exactly the bundled files
 //! whose content actually changed — never a user's own non-bundled agent,
 //! and never silently: a bundled file whose ON-DISK content differs from
-//! what is about to be written is archived to a sibling `<file>.stale.bak`
-//! first, so a user who hand-edited a bundled file can recover it.
+//! what is about to be written is archived to a sibling
+//! `<file>.stale.<digest>.bak` first, so a user who hand-edited a bundled
+//! file can recover it — see [`stale_backup_path`] for why the name carries
+//! the content digest and what bounds the resulting set (#4461).
 //!
 //! trusty-mpm solves the identical problem for ITS bundled agents/skills via
 //! `include_str!` + an explicit `install` deploy step
@@ -66,10 +68,10 @@
 //! loop, leaving the stamp read/decide/write outside it — two concurrent
 //! passes could both observe the same stale stamp, both refresh, then race
 //! writing the stamp). Two concurrent passes over the same `target_dir` are
-//! now fully serialized end to end, not just per-file. A `<file>.stale.bak`
-//! is only ever created when one doesn't already exist, so a later pass —
-//! even one recovering from a prior crash — can never clobber a genuine
-//! backup with torn or already-refreshed content.
+//! now fully serialized end to end, not just per-file. A backup path is
+//! derived from the bytes it holds, so a later pass — even one recovering
+//! from a prior crash — writes torn or already-refreshed content to its own
+//! path and can never clobber a genuine backup (#4461).
 //!
 //! Test: see `tests.rs` in this module, plus `stamp`'s and `lock`'s own
 //! tests.
@@ -77,6 +79,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 mod lock;
 mod stamp;
@@ -114,7 +117,7 @@ struct BundledWorkflows;
 /// What: `written` counts brand-new files, `refreshed` counts existing
 /// bundled files whose content was updated to match the current embedded
 /// template, `backed_up` counts how many of those refreshes archived a
-/// differing prior copy to `<file>.stale.bak` first.
+/// differing prior copy to `<file>.stale.<digest>.bak` first.
 /// Test: `deploy_writes_missing_files_only`, `stale_stamp_triggers_refresh`,
 /// `refresh_backs_up_differing_content` (tests.rs).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -199,17 +202,19 @@ fn reprovision_bundled_agents(target_dir: &Path, refresh_stale: bool) -> Result<
 /// present and `refresh_stale` is `false`, skips it untouched; when present
 /// and `refresh_stale` is `true`, compares on-disk bytes to the embedded
 /// bytes — identical content is skipped, differing content is archived to
-/// `<dest>.stale.bak` (`backed_up`) ONLY WHEN that backup doesn't already
-/// exist (so a later pass recovering from an earlier crash can never
-/// clobber a genuine prior backup with torn or already-refreshed content),
-/// THEN overwritten (`refreshed`) via `crate::state_writer::atomic_write`
+/// the content-addressed [`stale_backup_path`] (`backed_up`) and then
+/// overwritten (`refreshed`) via `crate::state_writer::atomic_write`
 /// (tmp-file + rename, so a crash mid-write leaves the original file/backup
-/// intact rather than torn). Only ever touches paths that are part of the
-/// embedded bundle — a user's own non-bundled file at `target_dir` is never
-/// read, backed up, or written.
+/// intact rather than torn). The backup write is skipped only when that
+/// exact path already exists, which — because the path is derived from the
+/// bytes — means those bytes are already archived. Only ever touches paths
+/// that are part of the embedded bundle — a user's own non-bundled file at
+/// `target_dir` is never read, backed up, or written.
 /// Test: `stale_stamp_triggers_refresh`, `refresh_backs_up_differing_content`,
 /// `non_bundled_user_file_untouched_by_refresh`,
-/// `existing_stale_backup_is_never_clobbered` (tests.rs);
+/// `existing_stale_backup_is_never_clobbered`,
+/// `repeated_divergence_is_recoverable_across_reprovisions`,
+/// `pristine_files_are_reprovisioned_without_littering_backups` (tests.rs);
 /// `pass_lock_serializes_concurrent_reprovision_calls` (`lock`'s own tests)
 /// pins the underlying mutual-exclusion primitive.
 fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
@@ -232,7 +237,10 @@ fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
             if current == file.data.as_ref() {
                 continue;
             }
-            let backup = stale_backup_path(&dest);
+            // #4461: the backup name carries the digest of the bytes being
+            // archived, so a second divergence lands beside the first rather
+            // than being skipped as "already backed up".
+            let backup = stale_backup_path(&dest, &current);
             if !backup.exists() {
                 crate::state_writer::atomic_write(&backup, &current).with_context(|| {
                     format!(
@@ -240,6 +248,12 @@ fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
                         backup.display()
                     )
                 })?;
+                tracing::warn!(
+                    file = %dest.display(),
+                    backup = %backup.display(),
+                    "on-disk bundled file differs from the shipped template; \
+                     archived its content before overwriting"
+                );
                 report.backed_up += 1;
             }
             crate::state_writer::atomic_write(&dest, file.data.as_ref())
@@ -255,20 +269,45 @@ fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
     Ok(report)
 }
 
-/// Sibling backup path for a bundled file about to be overwritten (#3556).
+/// Sibling backup path for a bundled file about to be overwritten, named
+/// after the CONTENT being archived (#3556, #4461).
 ///
-/// Why: constraints call for a fixed, non-wall-clock suffix (the environment
-/// this ships in forbids `Date::now()`-style timestamps in library code, and
-/// a fixed name is also simpler to document/find than a rotating one) — a
-/// single generation of backup is enough to recover from an unintentional
-/// refresh; it intentionally overwrites any PRIOR `.stale.bak` rather than
-/// accumulating an unbounded history.
-/// What: appends the literal `.stale.bak` suffix to the full file name
-/// (e.g. `assistant/agent.toml` -> `assistant/agent.toml.stale.bak`).
-/// Test: `refresh_backs_up_differing_content` (tests.rs).
-fn stale_backup_path(dest: &Path) -> PathBuf {
+/// Why: the original fixed `.stale.bak` name gave each file exactly one
+/// backup slot, and the caller wrote it only when that slot was empty — so
+/// the first reprovision preserved a hand-edit and every later one discarded
+/// the user's work silently, because a backup was already sitting there
+/// (#4461). Deriving the name from the archived bytes makes the write both
+/// safe and complete: two different contents can never target the same path,
+/// so no pass can clobber another's backup (the property the fixed name was
+/// protecting), and the same content re-archived resolves to the same path,
+/// so nothing accumulates from repeated no-change passes. A wall-clock
+/// suffix would give the same safety but a new file on every pass; the
+/// digest is what bounds the set.
+///
+/// What bounds the set: one file per DISTINCT content ever overwritten at
+/// this path. Reprovisioning N times over an unchanged file adds nothing —
+/// an unchanged file is never overwritten at all, and re-archiving identical
+/// bytes hits the existing path. The set grows only when the file genuinely
+/// diverges again with content not already archived, so its size is the
+/// number of real divergences, never the number of reprovisions. Nothing
+/// prunes it: every entry is content a human may still need, and an
+/// automatic sweep would be free to delete the exact hand-edit this exists
+/// to preserve.
+///
+/// What: appends `.stale.<digest>.bak` to the full file name, where
+/// `<digest>` is the first 16 hex characters of the SHA-256 of `content`
+/// (e.g. `assistant/agent.toml` -> `assistant/agent.toml.stale.9f2c….bak`).
+/// The `.bak` tail is kept because the agent listers filter on it —
+/// `repl::agent_commands::list_assistant_agents_into` and
+/// `api::server::projects`'s catalog scan both skip `*.bak`, so a backup
+/// never surfaces as a bogus agent.
+/// Test: `refresh_backs_up_differing_content`,
+/// `repeated_divergence_is_recoverable_across_reprovisions`,
+/// `identical_content_reuses_one_backup_path` (tests.rs).
+fn stale_backup_path(dest: &Path, content: &[u8]) -> PathBuf {
+    let digest = format!("{:x}", Sha256::digest(content));
     let mut name = dest.as_os_str().to_os_string();
-    name.push(".stale.bak");
+    name.push(format!(".stale.{}.bak", &digest[..16]));
     PathBuf::from(name)
 }
 
@@ -326,8 +365,9 @@ pub fn ensure_bundled_agents_deployed_in(target_dir: &Path) -> Result<Reprovisio
 /// (#5227 generalisation of `ensure_bundled_agents_deployed_in`).
 ///
 /// Why: agents and workflows need byte-identical deploy semantics — the
-/// pass-level lock, the content-hash staleness check, the `.stale.bak` archive
-/// of a differing on-disk copy. Duplicating that for a second config kind
+/// pass-level lock, the content-hash staleness check, the
+/// `.stale.<digest>.bak` archive of a differing on-disk copy. Duplicating
+/// that for a second config kind
 /// would guarantee the two drift; parameterising over the embed keeps one
 /// implementation. `stamp` and `lock` are already per-`target_dir`, so the two
 /// trees never share a stamp file.

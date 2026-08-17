@@ -1,6 +1,13 @@
 [package]
 name = "trusty-agents-common"
-version = "0.5.1"
+# #5626: minor bump — 0.5.2 is the latest published version on crates.io.
+# The 0.5.3 that was on main was an unpublished doc-only patch bump (no item
+# signature changed). This bump covers #5626's four breaking API changes
+# (SkillManifest::load, unmanaged_bundled_skills,
+# preview_unmanaged_bundled_skills, audit_agent_tier all gained a fallible
+# Result-wrapped return; TierAuditError is a new public type) — for a 0.y.z
+# crate, Cargo's rule makes the MINOR position the breaking position.
+version = "0.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

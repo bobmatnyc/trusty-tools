@@ -72,7 +72,7 @@ fn repair_interval_honours_env_override() {
 async fn repair_sweep_is_a_noop_without_the_lane() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = AppState::new(tmp.path().to_path_buf());
-    assert!(state.bm25_client.is_none());
+    assert!(state.bm25.is_none());
     spawn_repair_sweep(&state);
     mark_dirty(&state, "alpha");
     tokio::time::sleep(Duration::from_millis(50)).await;

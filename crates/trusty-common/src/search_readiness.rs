@@ -27,6 +27,11 @@
 //!
 //! Test: `parse_readiness_*`, `summary_*`, and
 //! `probe_index_readiness_none_when_daemon_down` in the `tests` module below.
+//!
+//! [`parse_readiness`]: crate::search_readiness::parse_readiness
+//! [`IndexReadiness`]: crate::search_readiness::IndexReadiness
+//! [`probe_index_readiness`]: crate::search_readiness::probe_index_readiness
+//! [`log_index_readiness`]: crate::search_readiness::log_index_readiness
 
 use std::path::Path;
 

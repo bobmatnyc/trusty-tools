@@ -519,7 +519,7 @@ pub fn generate_authority_reporting(agents: &[AgentSummary], unreadable: &[PathB
 /// tiers here rather than depending on a launch-mode value it cannot see.
 /// What: returns `<project>/.claude/agents`, then the active managed
 /// `CLAUDE_CONFIG_DIR/agents` (the `CLAUDE_CONFIG_DIR` env var when set,
-/// otherwise [`managed_claude_config_dir`]), then
+/// otherwise [`managed_claude_config_dir`](crate::core::trusty_tools_config::managed_claude_config_dir)), then
 /// `FrameworkPaths::default().claude_agents_dir()`. Paths are returned whether
 /// or not they exist; [`scan_agents`] treats an unreadable directory as empty.
 /// Test: `deployed_agent_dirs_puts_project_tier_first`.

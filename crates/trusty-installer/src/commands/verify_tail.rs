@@ -7,7 +7,7 @@
 //! silently stayed down (the exact "looks installed, actually broken" failure
 //! class #2557 / #2498 exist because of). This module runs immediately after
 //! `install_all` (skipped entirely by `--no-verify`) and its result is folded
-//! into the SAME [`super::install::InstallReport`] so the exit code CI/automation
+//! into the SAME `super::install::InstallReport` so the exit code CI/automation
 //! gates on already reflects it.
 //!
 //! What: [`run_verify_tail`]:
@@ -39,10 +39,10 @@
 //!    defensive-fallback check).
 //! 5. (#3841 belt-and-braces, second layer) A member classified
 //!    [`DownState::NotLoaded`] whose plist is present on disk gets ONE more
-//!    repair attempt here — [`apply_not_loaded_fallback`] calls the exact same
+//!    repair attempt here — `apply_not_loaded_fallback` calls the exact same
 //!    `ServiceEnv::bootstrap_fallback` primitive
 //!    `service_bootstrap::bootstrap_one`'s install-time postcondition uses
-//!    (via [`attempt_verify_fallback`]), and on success re-probes through the
+//!    (via `attempt_verify_fallback`), and on success re-probes through the
 //!    SAME [`poll_until_not_down`]/[`bounded_attempts`] machinery the #2498
 //!    kickstart retry uses (#3849 code-critic MEDIUM 1 fix — a single instant
 //!    re-probe here would race a just-repaired but slow-starting daemon
@@ -67,7 +67,7 @@
 //! [`print_human`] renders the final green/red pass/fail summary — the last
 //! thing the installer prints. Because the health used to build the report is
 //! already the POST-wait value, the exit code CI/automation gates on
-//! ([`super::install::InstallReport`], folded from `verified`) reflects the
+//! (`super::install::InstallReport`, folded from `verified`) reflects the
 //! final state, not the instant-after-kickstart snapshot.
 //!
 //! Test: the pure decision pieces (`needs_kickstart`, `poll_until_not_down`,
@@ -152,7 +152,7 @@ pub struct VerifyRow {
     /// `None` for a healthy/stale/unknown/not_installed member, or a
     /// non-LAUNCHD member.
     pub down_state: Option<DownState>,
-    /// Whether [`attempt_verify_fallback`] was invoked for this member
+    /// Whether `attempt_verify_fallback` was invoked for this member
     /// (#3841 — the verify tail's own second-layer repair for a `NotLoaded`
     /// diagnosis, independent of `service_bootstrap`'s install-time
     /// postcondition).
@@ -162,7 +162,7 @@ pub struct VerifyRow {
 /// The aggregate verify-tail report (#2560).
 ///
 /// Why: `--json` consumers need the ensure + health verdict as one object,
-/// nested inside [`super::install::InstallReport`].
+/// nested inside `super::install::InstallReport`.
 /// What: `ensure_ok` — whether the `.mcp.json` patch and project-setup stages
 /// all succeeded; `members` — per-daemon health rows; `verified` — the overall
 /// verdict this module derives (see [`VerifyTailReport::build`]).
@@ -175,9 +175,12 @@ pub struct VerifyTailReport {
     pub ensure_ok: bool,
     /// Per-daemon-member verify rows.
     pub members: Vec<VerifyRow>,
-    /// Overall verdict: `ensure_ok` AND every REQUIRED member
-    /// healthy/stale/unknown (never `down`/`not_installed`). An OPTIONAL
-    /// member never fails this (graceful-degrade, demo-critical fix).
+    /// Overall verdict: `ensure_ok` AND every GATING member
+    /// healthy/stale/unknown (never `down`/`not_installed`).
+    ///
+    /// The gating set is the REQUIRED rows when there are any — an OPTIONAL
+    /// member never fails the run then (graceful-degrade, demo-critical fix) —
+    /// and EVERY row when there are none (#5806, see [`VerifyTailReport::build`]).
     pub verified: bool,
 }
 
@@ -190,16 +193,40 @@ impl VerifyTailReport {
     /// `down`/`not_installed`` (an OPTIONAL member's health never fails this
     /// — demo-critical fix). A `stale` or `unknown` member does NOT fail
     /// verification — mirrors `stack::health::HealthReport`'s degrade policy
-    /// exactly (an under-the-version-floor daemon is still up; an
-    /// unprobeable process-managed member is not a verified gap).
+    /// exactly (an under-the-version-floor daemon is still up; a member with no
+    /// probeable transport is not a verified gap).
+    ///
+    /// #4925: trusty-mpm is no longer an example of the `unknown` tolerance. It
+    /// is probed over HTTP now, so a stopped mpm arrives here as `down` and — it
+    /// being `required: true` — FAILS verification. That is the accepted policy
+    /// consequence, not an oversight: the tolerance is for members whose health
+    /// genuinely cannot be determined, and mpm's can.
+    /// #5806: the gating set now comes from
+    /// [`crate::commands::stable_set::required_gate`], the same rule
+    /// `InstallReport::build` reads. `filter(required).all(…)` over zero
+    /// required rows is vacuously `true`, so `verified` collapsed to
+    /// `ensure_ok` for any selection whose daemons are all OPTIONAL —
+    /// `tctl install trusty-analyze trusty-console` reported VERIFIED with both
+    /// daemons `down`. Same shape as the `all_ok` fail-open, one file over.
+    ///
+    /// ZERO rows still means `verified = ensure_ok`, and that is not the same
+    /// bug. `run_verify_tail` filters to `m.daemon`, so an empty row list means
+    /// the selection contains no daemon — `tctl install tga` — and there is
+    /// genuinely no health to gate on. A non-daemon's install verdict is
+    /// `InstallReport::all_ok`'s job, and that one does treat empty as failure.
+    ///
     /// Test: `tests::verified_requires_ensure_and_health`,
     /// `tests::verified_tolerates_stale_and_unknown`,
-    /// `tests::verified_ignores_optional_down_member`.
+    /// `tests::verified_ignores_optional_down_member`,
+    /// `tests::required_mpm_reporting_down_fails_verification`,
+    /// `tests::all_optional_daemon_selection_does_not_fail_open`,
+    /// `tests::no_daemon_rows_still_defers_to_ensure_ok`.
     fn build(ensure_ok: bool, members: Vec<VerifyRow>) -> Self {
-        let health_ok = members
-            .iter()
-            .filter(|m| m.required)
-            .all(|m| m.health != health_str::DOWN && m.health != health_str::NOT_INSTALLED);
+        let health_ok = crate::commands::stable_set::required_gate(
+            &members,
+            |m| m.required,
+            |m| m.health != health_str::DOWN && m.health != health_str::NOT_INSTALLED,
+        );
         Self {
             command: "install.verify",
             ensure_ok,
@@ -213,8 +240,17 @@ impl VerifyTailReport {
 ///
 /// Why: only a `down` LAUNCHD daemon is the #2498 failure signature
 /// (`launchctl bootstrap` succeeded, `RunAtLoad` never fired); a `not_installed`
-/// member, an `unknown` process-managed member (trusty-mpm), or a non-launchd
-/// member must never trigger a kickstart attempt.
+/// member, or any non-launchd member, must never trigger a kickstart attempt.
+///
+/// #4925: the `manage == Launchd` half of this predicate is now LOAD-BEARING FOR
+/// A LIVE CODE PATH rather than a hypothetical. `probe_member_health` used to
+/// return `Unprobeable` for trusty-mpm, so no `OwnVerb` member could ever reach
+/// `is_confirmed_down()` and the strategy check was belt-and-braces. mpm is now
+/// probed over HTTP, so a genuinely-stopped mpm DOES produce `Refused`, and this
+/// check is the only thing standing between that and
+/// `launchctl kickstart -k gui/<uid>/com.trusty.mpm` — a label that does not
+/// exist (mpm is process-managed via its own `start`/`stop` verbs; the
+/// `com.trusty.mpm.supervisor` job is a different job). Do not relax it.
 ///
 /// #4246: this predicate was never wrong — `probe_member_health` MANUFACTURED
 /// the `down` it fired on, by shelling out to a `health --json` verb no daemon
@@ -252,7 +288,7 @@ pub fn needs_kickstart(outcome: &ProbeOutcome, manage: ManageStrategy) -> bool {
 /// `tests::verify_one_does_not_kickstart_a_healthy_launchd_daemon` run the REAL
 /// probe against a stubbed healthy daemon and then assert ZERO restarts — the
 /// only shape of test that closes the loop. Mirrors the `ServiceEnv` seam already
-/// in this file (see [`apply_not_loaded_fallback`], tested against
+/// in this file (see `apply_not_loaded_fallback`, tested against
 /// `tests::FakeServiceEnv`).
 /// What: one operation — force-start a member's launchd job — returning whether
 /// it succeeded.

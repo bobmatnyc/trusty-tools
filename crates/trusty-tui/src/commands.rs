@@ -29,7 +29,7 @@
 //!   reaching `handle_input`; confirming a picker item resubmits
 //!   `"{dispatch_command} {selected.id}"`. These DO need engine access, so
 //!   they're free functions a product's async event-loop wiring calls
-//!   (rather than living inside the sync [`crate::app::reduce::apply`]
+//!   (rather than living inside the sync [`crate::app::reduce::apply`](crate::app::apply)
 //!   reducer, which cannot reach a `TuiEngine` — see that module's doc
 //!   comment).
 //! - [`dispatch_forward`] — composes the two into the actual integration
@@ -59,7 +59,7 @@ use crate::model::{CommandDescriptor, CommandRouting, PickerItem, PickerRequest}
 /// What: `name` matches [`route`]'s match arms exactly; `summary` is what
 /// [`render_help`] prints. None of these carry `args_hint` — all four take
 /// no arguments.
-/// Test: [`tests::built_in_commands_names_match_route_recognition`].
+/// Test: `tests::built_in_commands_names_match_route_recognition`.
 pub fn built_in_commands() -> Vec<CommandDescriptor> {
     vec![
         CommandDescriptor {
@@ -141,10 +141,10 @@ fn command_name(line: &str) -> Option<(&str, &str)> {
 /// [`built_in_commands`] both resolve to `Route::Forward` — see that
 /// variant's doc comment for why "unrecognized" and "domain command" are
 /// treated identically.
-/// Test: [`tests::route_recognizes_each_builtin_name`],
-/// [`tests::route_forwards_plain_chat`],
-/// [`tests::route_forwards_unrecognized_slash_command`],
-/// [`tests::route_forwards_engine_domain_command`].
+/// Test: `tests::route_recognizes_each_builtin_name`,
+/// `tests::route_forwards_plain_chat`,
+/// `tests::route_forwards_unrecognized_slash_command`,
+/// `tests::route_forwards_engine_domain_command`.
 pub fn route(line: &str) -> Route {
     match command_name(line) {
         Some(("help", _)) => Route::BuiltIn(BuiltIn::Help),
@@ -165,8 +165,8 @@ pub fn route(line: &str) -> Route {
 /// built-ins first. Pure string formatting — no ratatui dependency, so this
 /// stays usable from both the plain-text scrollback path and a future
 /// richer help widget.
-/// Test: [`tests::render_help_lists_builtins_and_engine_commands`],
-/// [`tests::render_help_includes_args_hint_when_present`].
+/// Test: `tests::render_help_lists_builtins_and_engine_commands`,
+/// `tests::render_help_includes_args_hint_when_present`.
 pub fn render_help(engine_commands: &[CommandDescriptor]) -> String {
     let mut lines = vec!["Available commands:".to_string()];
     for cmd in built_in_commands().iter().chain(engine_commands.iter()) {
@@ -212,9 +212,9 @@ pub enum Forward {
 /// precedent (`crates/trusty-agents/src/repl/bridge.rs`: the picker overlay
 /// only opens for the no-arg form; a supplied argument is assumed to be the
 /// user directly naming their choice).
-/// Test: [`tests::resolve_forward_opens_picker_for_bare_matching_command`],
-/// [`tests::resolve_forward_ignores_picker_when_args_present`],
-/// [`tests::resolve_forward_falls_back_to_engine_when_no_picker_matches`].
+/// Test: `tests::resolve_forward_opens_picker_for_bare_matching_command`,
+/// `tests::resolve_forward_ignores_picker_when_args_present`,
+/// `tests::resolve_forward_falls_back_to_engine_when_no_picker_matches`.
 pub fn resolve_forward(line: &str, engine: &dyn TuiEngine) -> Forward {
     if let Some(name) = bare_command_name(line)
         && let Some(request) = engine.picker(name)
@@ -232,7 +232,7 @@ pub fn resolve_forward(line: &str, engine: &dyn TuiEngine) -> Forward {
 /// `crate::model`, which must stay free of any TUI-driver-shaped API) so
 /// both this module's [`dispatch_forward`]-adjacent flow and a future
 /// picker *widget*'s Enter-key handling share one composition rule.
-/// Test: [`tests::compose_selection_matches_picker_request_contract`].
+/// Test: `tests::compose_selection_matches_picker_request_contract`.
 pub fn compose_selection(request: &PickerRequest, selected: &PickerItem) -> String {
     format!("{} {}", request.dispatch_command, selected.id)
 }
@@ -265,9 +265,9 @@ pub fn compose_selection(request: &PickerRequest, selected: &PickerItem) -> Stri
 /// `TuiEngine::handle_input`'s own contract: `Ok(false)` means quit) —
 /// `busy` is left as `submit_line` set it, since the engine call is the
 /// thing `busy` is meant to track.
-/// Test: [`tests::dispatch_forward_opens_picker_without_calling_engine`],
-/// [`tests::dispatch_forward_calls_engine_when_no_picker_matches`],
-/// [`tests::dispatch_forward_clears_busy_set_by_submit_line_when_opening_picker`].
+/// Test: `tests::dispatch_forward_opens_picker_without_calling_engine`,
+/// `tests::dispatch_forward_calls_engine_when_no_picker_matches`,
+/// `tests::dispatch_forward_clears_busy_set_by_submit_line_when_opening_picker`.
 pub async fn dispatch_forward(
     app: &mut ReplApp,
     line: String,

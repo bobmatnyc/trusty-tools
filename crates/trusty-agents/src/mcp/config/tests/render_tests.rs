@@ -259,7 +259,8 @@ fn default_config_is_valid_toml() {
         .expect("trusty-memory present");
     assert!(mem.enabled, "trusty-memory must ship enabled, not DISABLED");
     assert_eq!(mem.command, "trusty-memory");
-    assert_eq!(mem.args, vec!["serve".to_string(), "--stdio".to_string()]);
+    // #5267: bare `serve` IS MCP stdio for trusty-memory, matching trusty-search.
+    assert_eq!(mem.args, vec!["serve".to_string()]);
     assert!(mem.discover, "trusty-memory should live-discover its tools");
     let search = cfg
         .mcp

@@ -1,0 +1,49 @@
+toolchain: rustc 1.97.1 (selected over ambient 1.94.1; the scratch resolution ignores Cargo.lock)
+INVENTORY trusty-review: 0.15.0 -> 0.16.0 is already a breaking release — no bump can be owed, so this run is advisory: what does it break?
+    Building trusty-review v0.16.0 (current)
+       Built [   1.560s] (current)
+     Parsing trusty-review v0.16.0 (current)
+      Parsed [   0.027s] (current)
+    Building trusty-review v0.15.0 (baseline)
+error: running cargo-doc on crate 'trusty-review' failed with output:
+-----
+ Documenting trusty-review v0.15.0
+error[E0433]: cannot find `profile` in `crate`
+  --> /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-review-0.15.0/src/pipeline/mapreduce/reduce.rs:28:5
+   |
+28 |     profile::synthesizer::jaccard_similarity,
+   |     ^^^^^^^ unresolved import
+   |
+note: found an item that was configured out
+  --> /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-review-0.15.0/src/lib.rs:52:9
+   |
+51 | #[cfg(feature = "profile")]
+   |       ------------------- the item is gated behind the `profile` feature
+52 | pub mod profile;
+   |         ^^^^^^^
+help: a similar path exists
+   |
+28 |     aws_config::profile::synthesizer::jaccard_similarity,
+   |     ++++++++++++
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not document `trusty-review`
+
+-----
+
+error: failed to build rustdoc for crate trusty-review v0.15.0
+note: this is usually due to a compilation error in the crate,
+      and is unlikely to be a bug in cargo-semver-checks
+note: the following command can be used to reproduce the error:
+      cargo new --lib example &&
+          cd example &&
+          echo '[workspace]' >> Cargo.toml &&
+          cargo add trusty-review@=0.15.0 --no-default-features --features http-server,mcp,report &&
+          cargo check &&
+          cargo doc
+
+error: aborting due to failure to build rustdoc for crate trusty-review v0.15.0
+NO INVENTORY trusty-review: cargo semver-checks exited 101 and never completed a check run.
+             The release is still permitted (0.15.0 -> 0.16.0 already carries the break),
+             but WHAT it breaks is unknown. Fix the run above to get the list.
+semver gate: scanned (explicit); 0 crate(s) checked, 0 skipped, 1 inventory NOT computed — OK.

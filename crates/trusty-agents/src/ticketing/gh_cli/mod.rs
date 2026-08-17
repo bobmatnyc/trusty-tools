@@ -21,9 +21,9 @@ mod client_impl;
 #[cfg(test)]
 mod tests;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use serde_json::Value;
-use tokio::process::Command;
+use trusty_common::gh::GhCommand;
 
 use super::types::{Ticket, TicketStatus, UpdateTicketReq};
 
@@ -37,10 +37,8 @@ use super::types::{Ticket, TicketStatus, UpdateTicketReq};
 /// Test: `gh_available_returns_bool` — only asserts no panic; the actual
 /// boolean depends on the test environment.
 pub async fn gh_available() -> bool {
-    match Command::new("gh").args(["auth", "status"]).output().await {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
-    }
+    // #5475: the probe now lives in trusty-common's `gh` entry point.
+    trusty_common::gh::gh_available().await
 }
 
 /// `gh` CLI-backed `TicketingClient`.
@@ -68,21 +66,13 @@ impl GhCliClient {
     /// What: Spawns `gh <args...>`, returns stdout on success or an error
     /// containing stderr on non-zero exit.
     async fn run(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("gh")
-            .args(args)
-            .output()
-            .await
-            .with_context(|| format!("failed to spawn 'gh {}'", args.join(" ")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "gh {} failed (exit {}): {}",
-                args.join(" "),
-                output.status,
-                stderr.trim()
-            );
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        // #5475: spawn + non-zero mapping come from the shared entry point.
+        Ok(GhCommand::new(args).stdout().await?)
+    }
+
+    /// The configured `owner/repo`, if any.
+    pub(super) fn repo(&self) -> Option<&str> {
+        self.repo.as_deref()
     }
 
     /// Run a `gh` command, prepending `--repo <repo>` if configured.

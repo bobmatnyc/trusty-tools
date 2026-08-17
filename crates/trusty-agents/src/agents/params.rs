@@ -234,7 +234,7 @@ pub struct LlmParams {
     /// inheritance for temperature/max_tokens specifically — every other
     /// `[llm]` field keeps the pre-existing inherited-from-base-wholesale
     /// behavior, see `extends::merge_extends`).
-    /// What: Absent in TOML → [`UNSET_TEMPERATURE`] (`NaN`) sentinel, which
+    /// What: Absent in TOML → `UNSET_TEMPERATURE` (`NaN`) sentinel, which
     /// `merge_extends` detects via `.is_nan()` and replaces with the base's
     /// resolved value; never observed by a caller past `by_name`/`by_name_async`.
     /// Test: `agents::extends::tests::extends_llm_child_overrides_temperature_only`,
@@ -242,7 +242,7 @@ pub struct LlmParams {
     #[serde(default = "unset_temperature")]
     pub temperature: f32,
     /// Maximum output tokens. Same UNSET-sentinel treatment as `temperature`
-    /// (see above) — absent in TOML → [`UNSET_MAX_TOKENS`] (`u32::MAX`),
+    /// (see above) — absent in TOML → `UNSET_MAX_TOKENS` (`u32::MAX`),
     /// which is never a realistic declared value (would exceed every
     /// provider's context window), so it is safe as an unambiguous
     /// "not declared" marker.

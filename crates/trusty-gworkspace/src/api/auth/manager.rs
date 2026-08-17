@@ -51,7 +51,7 @@ struct GoogleTokenResponse {
 /// per-profile on every call via [`resolve_client_creds_for_profile`], since
 /// different profiles may be bound to different clients.
 /// What: Holds a `reqwest::Client` and the token endpoint URL (overridable
-/// in tests via [`OAuthManager::with_token_url`] to point at a `wiremock`
+/// in tests via `OAuthManager::with_token_url` to point at a `wiremock`
 /// server instead of Google's real endpoint).
 /// Test: `refresh_uses_per_profile_client_when_present`,
 /// `refresh_falls_back_to_global_client_when_absent`.

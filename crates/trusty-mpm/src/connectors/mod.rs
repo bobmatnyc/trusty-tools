@@ -11,6 +11,8 @@
 //! What: [`tm::TmConnector`] — see that module's docs for the full mapping
 //! from trait methods to daemon routes.
 //! Test: `cargo test -p trusty-mpm connectors::` — see `tm_tests.rs`.
+//!
+//! [`tm::TmConnector`]: crate::connectors::tm::TmConnector
 
 pub mod tm;
 

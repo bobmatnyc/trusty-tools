@@ -135,7 +135,7 @@ use workflow::WorkflowEngine;
 /// bundle content has changed since the last deploy (detected via a
 /// persisted content-hash stamp), refreshes exactly the bundled files whose
 /// content actually differs — archiving any differing on-disk copy to
-/// `<file>.stale.bak` first. A non-bundled file (a user's own agent) is
+/// `<file>.stale.<digest>.bak` first. A non-bundled file (a user's own agent) is
 /// never touched either way. `repair` bypasses the stamp check entirely,
 /// force-refreshing every bundled file unconditionally.
 /// Test: Covered manually; unit-tested via `AgentRegistry::list` and
@@ -230,7 +230,7 @@ fn print_reprovision_report(verb: &str, report: &agents::bundled::ReprovisionRep
     }
     let backup_note = if report.backed_up > 0 {
         format!(
-            ", {} pre-refresh backup(s) saved as *.stale.bak",
+            ", {} pre-refresh backup(s) saved as *.stale.<digest>.bak",
             report.backed_up
         )
     } else {

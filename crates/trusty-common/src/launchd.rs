@@ -14,6 +14,8 @@
 //! Test: `render_plist` output is asserted in unit tests (pure string
 //! generation). `install`/`bootstrap`/`bootout` shell out and are exercised
 //! manually by downstream `setup` commands.
+//!
+//! [`LaunchdConfig`]: crate::launchd::LaunchdConfig
 #![cfg(target_os = "macos")]
 
 use std::path::PathBuf;
@@ -91,8 +93,8 @@ pub struct LaunchdConfig {
     /// `NumberOfFiles` written into both `SoftResourceLimits` and
     /// `HardResourceLimits` plist dicts. `None` suppresses both dicts
     /// (useful for agents that do not open many files). New agents should
-    /// leave this as [`Some(LAUNCHD_FD_LIMIT)`] (the default via
-    /// [`LaunchdConfig::new`]).
+    /// leave this as `Some(LAUNCHD_FD_LIMIT)` (the default via
+    /// `LaunchdConfig::new`).
     pub fd_limit: Option<u32>,
     /// `WorkingDirectory`, when the agent needs one. `None` omits the key.
     ///

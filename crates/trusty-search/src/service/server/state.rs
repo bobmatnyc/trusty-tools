@@ -64,7 +64,15 @@ pub enum DaemonEvent {
 }
 
 /// Shared state injected into every axum handler.
+///
+/// `#[non_exhaustive]` (#767): this struct gains fields regularly — `#767` added
+/// `allowlist_paths`, `#2717` added `registry_path_override` — and each one was a
+/// breaking change purely because an external struct literal could name every
+/// field. Taken here alongside the `allowlist_paths` break that already forces
+/// `0.46.0 → 0.47.0`, so the NEXT field costs nothing. Construct with
+/// [`SearchAppState::new`] plus the `with_*` builders.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct SearchAppState {
     pub registry: IndexRegistry,
     /// Cold index store for lazy warm-boot (issue #993).
@@ -460,7 +468,21 @@ pub struct SearchAppState {
     /// `list_indexes_repo_identity_details_and_filter` construct state with this
     /// override and assert with zero env mutation.
     pub registry_path_override: Option<std::path::PathBuf>,
-    /// Concrete handle to the currently-installed [`SwitchableEmbedder`]
+    /// Which files the #767 opt-in index allowlist is read from.
+    ///
+    /// Why: the allowlist gate refuses any root it does not recognise, so a
+    /// test that registers an index has to be able to say which roots are
+    /// approved WITHOUT writing the developer's real
+    /// `~/.config/trusty-search/allowlist.toml` or their `tm` project registry.
+    /// Injecting through state follows the `registry_path_override` precedent
+    /// (#2717) and keeps the gate free of process-global state.
+    /// What: `AllowlistPaths::default()` in production ⇒ the real XDG allowlist
+    /// and the real project registry. Tests point both at fixtures via
+    /// [`SearchAppState::with_allowlist_paths`].
+    /// Test: every test in `tests_allowlist_gate_767.rs`.
+    pub allowlist_paths: crate::allowlist::AllowlistPaths,
+    /// Concrete handle to the currently-installed
+    /// [`SwitchableEmbedder`](crate::service::embedder_supervisor::SwitchableEmbedder)
     /// (epic #3524 slice 6 — PR 1/5).
     ///
     /// Why: `embedder_slot` only holds the trait-object view

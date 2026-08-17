@@ -368,7 +368,7 @@ async fn embed_call_stalled_reader_times_out() {
 /// removed on timeout), so it is discarded; B receives its own correct
 /// embeddings `[[0.5,0.6],[0.7,0.8]]`. This test PASSES.
 ///
-/// Test: run with `cargo test -p trusty-common
+/// Test: run with `cargo test -p trusty-common --features embedder-client
 ///   reader_task_survives_timeout_and_serves_next_request`.
 #[tokio::test]
 async fn reader_task_survives_timeout_and_serves_next_request() {

@@ -4,6 +4,11 @@
 //! `report`) behind a clap subcommand interface.
 
 #![warn(missing_docs)]
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
 
 use tga::commands;
 

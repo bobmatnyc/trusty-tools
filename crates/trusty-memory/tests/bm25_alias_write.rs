@@ -6,11 +6,11 @@
 //! repair sweep never runs — the drawer is durable in redb and permanently
 //! absent from the index the reader consults.
 //!
-//! What: `#[ignore]`d because it needs the `trusty-bm25-daemon` binary. Run
-//! with `cargo test -p trusty-memory --test bm25_alias_write -- --include-ignored`.
-//! It lives in its own binary because it seeds the process-wide mock embedder
-//! and `shared_embedder_initialized()` is monotonic — a seed here would move
-//! the sibling recall test off the embedder-warming path it depends on.
+//! What: #5329 removed this file's `#[ignore]`, which existed only because the
+//! test needed a built `trusty-bm25-daemon` binary on disk. It still lives in
+//! its own binary because it seeds the process-wide mock embedder and
+//! `shared_embedder_initialized()` is monotonic — a seed here would move the
+//! sibling recall test off the embedder-warming path it depends on.
 //!
 //! Test: this *is* the test file.
 
@@ -19,22 +19,21 @@ mod alias_lane;
 use std::time::Duration;
 
 use serde_json::json;
-use trusty_common::bm25_client::{socket_path_for_palace, Bm25Client};
+use trusty_memory::bm25_lane::Bm25Lane;
 use trusty_memory::tools::dispatch_tool;
 
-/// Poll a palace's own BM25 socket until `query` returns a hit.
+/// Poll a palace's own corpus until `query` returns a hit.
 ///
 /// Why: the live write path is asynchronous by design (#231) — the drawer is
-/// durable in redb before the index request leaves the queue — so the corpus
-/// is eventually, not immediately, consistent.
-/// What: retries the search for up to ~5 s. Returns the matching doc ids, or
-/// an empty vec once the deadline passes (including when the socket never
-/// appears, which is itself the pre-fix symptom).
+/// durable in redb before the index request leaves the queue — so the corpus is
+/// eventually, not immediately, consistent.
+/// What: retries the search for up to ~5 s against the palace the caller names.
+/// Returns the matching doc ids, or an empty vec once the deadline passes —
+/// which is itself the pre-fix symptom, since the write landed somewhere else.
 /// Test: used by the test below.
-async fn poll_corpus_for(palace: &str, query: &str) -> Vec<String> {
-    let client = Bm25Client::new(socket_path_for_palace(palace));
+async fn poll_corpus_for(lane: &Bm25Lane, palace: &str, query: &str) -> Vec<String> {
     for _ in 0..100 {
-        if let Ok(hits) = client.search(query, 10).await {
+        if let Ok(hits) = lane.search(palace, query, 10).await {
             if !hits.is_empty() {
                 return hits.into_iter().map(|h| h.doc_id).collect();
             }
@@ -50,9 +49,7 @@ async fn poll_corpus_for(palace: &str, query: &str) -> Vec<String> {
 /// What: writes through the alias slug and asserts the drawer shows up in the
 /// CANONICAL palace's own corpus, read over that palace's socket by a client
 /// this test builds itself.
-/// Test: this test itself. Against the parent commit the canonical socket never
-/// even appears.
-#[ignore = "requires trusty-bm25-daemon binary on disk; run with --include-ignored"]
+/// Test: this test itself.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_aliased_write_indexes_into_the_resolved_palaces_corpus() {
     // The write path embeds; the mock keeps that off the ONNX model-download
@@ -78,16 +75,19 @@ async fn an_aliased_write_indexes_into_the_resolved_palaces_corpus() {
         .unwrap_or_else(|| panic!("the write was skipped, not stored: {payload}"))
         .to_string();
 
-    let indexed = poll_corpus_for(&fx.canonical, token).await;
+    let lane = fx.state.bm25_lane().expect("the lane is armed");
+    let indexed = poll_corpus_for(lane, &fx.canonical, token).await;
     assert!(
         indexed.contains(&drawer_id),
         "#5036: a write through alias '{}' must be indexed into '{}'s corpus. Got {indexed:?}",
         fx.alias,
         fx.canonical,
     );
+    // The daemon-era form was "no socket exists under the alias name"; the
+    // in-process form is "no index directory was ever created under it".
     assert!(
-        !socket_path_for_palace(&fx.alias).exists(),
-        "#5036: no BM25 daemon may be started for the alias slug on the write path"
+        !fx.state.data_root.join(&fx.alias).join("bm25").exists(),
+        "#5036: no BM25 index may be created for the alias slug on the write path"
     );
 
     fx.shutdown().await;

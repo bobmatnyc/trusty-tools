@@ -6,6 +6,175 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.34.0] — 2026-08-14
+
+### Added
+
+- `search_index::index_drop_stats` (and `IndexDropStats`) report how much
+  incremental index work this process has lost and how long ago
+  ([#2798](https://github.com/bobmatnyc/trusty-tools/issues/2798)), so a
+  saturation episode is readable state rather than only a `warn!` line. The two
+  losses are separate numbers because they need different fixes:
+  `dropped_batches` counts batches the pool refused at submission (none of the
+  batch ran), `truncated_batches` counts batches it accepted and started and
+  then cut short at the 30s budget (part of the batch landed, the rest was
+  abandoned). Reporting only drops would read `0` throughout an episode in which
+  every batch is accepted and then truncated. `0` means that loss has never
+  happened; each `seconds_since_last_*` is `None` until the first one of its
+  kind. trusty-code's `GET /health` publishes all four. `IndexDropStats` is
+  `#[non_exhaustive]`, so the two added fields are not a breaking change.
+- `gh::GhCommand` — the workspace's single entry point for invoking the GitHub
+  CLI ([#5475](https://github.com/bobmatnyc/trusty-tools/issues/5475)), behind
+  the new `gh-cli` feature (implied by `tickets`). It renders `gh <args>` with
+  an optional `--repo`, working directory, and environment overlay/removals,
+  and runs it blocking, on tokio, or hands back the unspawned
+  `std::process::Command` for call sites with their own timeout machinery.
+  Every runner returns the full exit/stdout/stderr triple in `GhOutput` and
+  never decides that a non-zero exit is fatal — `gh pr checks` reports check
+  state through its exit code, so that policy stays at the call site.
+  `GhOutput::ok`, `nonempty_stdout`, `json`, and `gh_available` are the shared
+  policies on top; a missing binary is classified as `GhError::NotInstalled`
+  with the `gh auth login` hint rather than an opaque IO error.
+- `tickets`' GitHub backend resolves its `gh auth token` fallback through that
+  entry point. Behaviour is unchanged, including the post-trim blank-output
+  rejection: `gh auth token` exits non-zero when no account is logged in, but
+  with `GH_TOKEN="   "` it exits ZERO printing whitespace, which a status-only
+  check would pass on as a credential.
+- `PalaceRegistry::open_error_is_absent` answers whether an `open_palace` failure means the palace is genuinely not there. `open_palace` returns `anyhow::Error`, which flattens a missing `palace.json` together with a denied read, a transient `EIO`/`ESTALE`, undecodable metadata, an open-queue timeout, and a redb write-lock conflict — so callers that mapped `Err` to "not found" reported a palace they could not read as one that does not exist. The classification lives next to `open_palace` because that is the only place that knows its failure modes (#5549, ADR-0045).
+- `daemon_guard::DaemonAddrLayout` resolves a daemon's base URL from its
+  on-disk discovery files
+  ([#5670](https://github.com/bobmatnyc/trusty-tools/issues/5670)). The logic
+  was private to trusty-search's CLI, so a crate that has to probe that daemon
+  without depending on it — `tga` — had no way to ask. `resolve_base_url()`
+  prefers the `host:port` address file, proving it reachable over TCP first
+  (#117), falls back to the port-only file, and finally to the layout's default
+  port; the address file is refreshed when the fallback address answers.
+  `DaemonAddrLayout::TRUSTY_SEARCH` is the shipped layout, and
+  `discovery_file_path()` / `port_file_path()` expose the two paths on their
+  own. Behaviour is unchanged from the trusty-search original, including the
+  asymmetric fallback directories: with the isolation env var unset the address
+  file sits under `$HOME` and the port file under the platform data-local dir.
+- `daemon_guard::write_addr_file_atomic` writes a discovery line via
+  tmp-file + fsync + rename, so a reader never observes a torn file. It is the
+  one writer behind both the daemon's own write and the resolver's stale-file
+  refresh.
+- `daemon_guard::spawn_detached(program, args)` spawns any named binary as a detached background process with all stdio null-ed. A guard does not always boot its own binary — `tga audit` has to start `trusty-analyze`, a sibling it resolves by env override or PATH (#5670) — and the alternative was a second copy of the `Command::new(…).stdin(null)…` dance in another crate. `spawn_current_exe` is now that call with `current_exe()` resolved first, so the detached-spawn capability keeps exactly one implementation.
+
+### Fixed
+
+- `search_index::index_files_best_effort` no longer spawns an unbounded number
+  of detached OS threads
+  ([#2798](https://github.com/bobmatnyc/trusty-tools/issues/2798)). Every
+  incremental index batch now goes through one shared pool: at most 4 run
+  concurrently, at most 64 more queue behind them. Against a degraded but
+  reachable trusty-search daemon — where #2785's retry lets a single file take
+  up to ~6.2s — threads used to pile up faster than they drained, with nothing
+  pushing back. At saturation a batch is DROPPED rather than blocked or queued
+  without limit: blocking would stall the agent task the fail-open contract
+  exists to protect. The caller contract is unchanged — still non-blocking,
+  still fail-open.
+- A batch also stops after a 30s budget. A `write_files` call has no size limit,
+  so one large scaffold write is a single job; without the budget it would hold
+  a worker for minutes and the queue would never turn over. The files the batch
+  had not reached when the budget ran out are ABANDONED — nothing records which
+  paths were skipped, so they are never retried from here. They become
+  searchable again only when something unrelated covers them: the next write to
+  the same file, a full reindex, or trusty-search's own file watcher where one
+  is running for that index. The stop is counted as a truncation (see below),
+  not only logged.
+- `claude_config::write_json_atomic` no longer stages through the fixed
+  `<path>.tmp`. Two concurrent writers — `tm launch` and the daemon are the
+  real pair, and no in-process mutex can cover them — both truncated and
+  filled that one file, so whichever renamed first published whatever bytes
+  happened to be in it: the other writer's payload, or half of it. A reader
+  watching the target during an 8-writer storm observed 128 spliced snapshots
+  before the fix and none after. Staging is now `<path>.tmp.<pid>.<seq>`, a
+  name no other live writer can hold (#4077).
+- The backup carried the same defect: two `fs::copy` calls into one
+  `<path>.bak` interleaved into a torn backup, corrupting the recovery artifact
+  at the moment it is needed (1188 spliced snapshots observed pre-fix). It is
+  now staged and published by rename like the target.
+- A write or rename that fails removes its own staging file, so a failed call
+  leaves the target byte-for-byte as it was and drops no litter.
+- A failed staging write now reports `fill staging file <path>` instead of
+  `publish <path> onto <dest>`, which named a rename that was never attempted.
+- Drawer listings no longer let `limit` cut on drawer-UUID order, which hid the newest drawers from `memory_list` ([#4836](https://github.com/bobmatnyc/trusty-tools/issues/4836))
+  - `PalaceHandle::list_drawers` and `list_drawers_in_wing` ranked on `importance` alone before truncating. Rust's sort is stable, so drawers tied on importance kept the drawer table's own order — UUID ascending, as the store iterates it — and `limit` cut on that. Importance is effectively bimodal in a live palace (1.0 for curated facts, 0.5 for everything else), so the tie-break decided almost every listing.
+  - Measured on the `trusty-tools` palace: `memory_list(tag = "pre-authorized", limit = 12)` matched 94 drawers and returned the 12 with the smallest UUIDs. All nine drawers written that day fell outside the window, including the one the caller was looking for, at index 62 of 94.
+  - All four sites now share one comparator, `drawer_listing_order`: `importance` descending, then `created_at` descending, then `id` ascending. Importance stays the primary key, so curated essentials still lead; recency only breaks ties, and the trailing `id` makes the order total so equal drawers cannot swap between calls.
+  - The same fix reaches L1 selection, which is what a prompt actually sees. `PalaceHandle::refresh_l1` and `L1Cache::save_l1_cache` carried the same importance-only sort, and there the sort is a selection, not a display order: both truncate to 15, `open_with_intent` hydrates `l1_drawers` verbatim from the persisted snapshot, and `retrieve_l0_l1` seeds `retrieve_l2` from it. A palace with more than 15 drawers at one importance therefore filled L1 without reference to age, so recent memories could not reach a prompt even when recall ranked them well.
+  - `dedup_gate` in `trusty-memory` is fixed by the same change. It asked `list_drawers` for "recent drawers" to compare against a 10-minute window, and was handed an arbitrary UUID-ordered slice that mostly predated the window, so near-duplicate detection degraded on any palace larger than its scan limit.
+- `OpenIntent::ReadOnlyClient` no longer renames a palace's redb store aside and substitutes an empty database. The #702 incompatible-format recovery — `backup_incompatible_file` then a fresh `Database::create` at the original path — used to run on the first `Database::create` error regardless of intent, so a caller that declared read-only intent could relocate an operator's live store and get back an empty palace. It is now gated on `OpenIntent::Writer`; a read-only-intent open returns an error naming the path, the redb error, and the writer-intent open that can perform the recovery, and leaves the file byte-identical. Writer behaviour is unchanged (#4911).
+- The `KgStoreRedb::open_with_intent` and `open_or_get_cached_db` retry loops no longer spend their backoff window on that refusal. Both retried on any error, because every failure they were written for was a transient lock or TOCTOU race; an incompatible on-disk format never resolves by waiting, so retrying it only delayed the failure by 162 ms and logged the same refusal five times (#4911).
+- `PalaceRegistry::open` no longer drops a palace it cannot hydrate. It still logs a warning and keeps going, so one bad palace does not fail the whole registry open, but the skip is now recorded and readable via the new `PalaceRegistry::unopenable` / `unopenable_reason`. Previously the palace was simply absent from the registry afterwards — indistinguishable from one that never existed, which turned the refusal above into silent invisibility for the palace it was protecting (#4911).
+- New `PalaceRegistry::record_unopenable`, so a host that runs its own hydration walk can file a skip into the same record. `PalaceRegistry::open` is not the path any shipped binary takes — the trusty-memory daemon walks the registry root itself — so without this the record would have stayed empty in production no matter what read it. `register_arc` clears the entry when the palace later opens, so a record cannot outlive its condition (#4911).
+- New `PalaceStore::metadata_present`, the single entry point for "does this palace exist on disk". It answers with `try_exists`, so a stat the caller is DENIED reports an error rather than the `false` that `exists()` returned — the #5549 / ADR-0045 defect, in the direction that loses data, since an open-or-create caller reads `false` as permission to overwrite (#4911).
+- Memory secret scanner: a `/`-bearing base64 blob is no longer exempted as a slash path. Every `/`-separated run of standard base64 is pure alphanumeric, so the charset-only segment test called it a path and let credentials — including a canonical AWS secret access key — store unredacted (#4977).
+- Memory secret scanner: a bare, userinfo-free URL such as a GitHub issue or PR link no longer fails a write. Its path digits used to satisfy the base64 branch's entropy floor; the URL is now decomposed and decided segment by segment, so a URL whose path IS the secret stays blocked (#5513).
+- `catchup::session_finder::parse_filename_timestamp` no longer panics on a
+  session filename stem containing a multi-byte UTF-8 character
+  ([#5294](https://github.com/bobmatnyc/trusty-tools/issues/5294)). Its
+  length guards checked byte length, not char count, so a stem like
+  `"123é456-142030"` could pass the `len() == 15` / `len() == 8` checks while
+  a fixed-byte-offset slice still landed mid-character and panicked. The
+  function now rejects any stem whose date/time parts are not all ASCII
+  digits before slicing.
+- A KG retraction that committed to redb no longer reads back as one that never
+  happened ([#5424](https://github.com/bobmatnyc/trusty-tools/issues/5424)).
+  `retract_triple`, `cascade_delete_by_drawer`, `retract` and `assert` commit
+  before updating the in-memory adjacency; when that second step failed on a
+  poisoned lock they returned a bare `kg adjacency lock poisoned` error, and a
+  retry then read `Ok(0)` from storage — indistinguishable from "that fact was
+  never here", with the opposite remediation. They now return the new
+  `memory_core::store::kg::AdjacencyDesync` error: `CommittedButStale` names
+  the operation and the rows storage already made durable, and every later
+  mutation on the handle stops with `HandleStale` instead of answering a
+  plausible `0`. `KnowledgeGraph::adjacency_desynced()` reports the state, which
+  is sticky for the life of the handle — redb stays authoritative and the
+  adjacency is rebuilt by reopening the palace.
+- `PalaceStore::list_palaces` no longer reports a registry it cannot stat as an empty one ([#5532](https://github.com/bobmatnyc/trusty-tools/issues/5532))
+  - The absence guard used `Path::exists`, which is `fs::metadata(..).is_ok()` and coerces every stat failure — `EACCES` from an unsearchable parent directory, `EIO`, `ELOOP` — to `false`. The function then returned `Ok(vec![])` without reaching `read_dir`, so the error propagation added in #5488 and #5526 never ran and the destructive callers (`purge_palaces`, `rebuild_palaces`, `merge_palaces`) reported a clean zero-palace run over data they never read.
+  - It now uses `try_exists`, which keeps "absent" (`Ok(false)`) distinct from "cannot determine" (`Err`). A data root that does not exist yet — including one whose parents are missing, and a broken symlink — still returns an empty list, so first run is unchanged.
+  - A macOS TCC denial is NOT this trigger: measured against real TCC-protected directories, TCC permits `stat` and denies only enumeration, so `read_dir` was always reached and the #5488/#5526 fixes fire as intended.
+- `PalaceStore::list_palaces` no longer returns a short list and reports success when it cannot classify an entry. A denied stat on a registry child, a `palace.json` it cannot stat, an undecodable `palace.json`, and a directory entry that fails mid-enumeration now propagate an error naming the offending path instead of dropping that palace from the listing. Genuine absence — a subdirectory holding no `palace.json`, a dangling symlink, an entry unlinked mid-walk — still skips silently. The destructive callers (`purge_palaces`, `rebuild_palaces`, `merge_palaces`) already propagate, so they no longer report a clean pass over a palace they never read (#5543).
+- `PalaceStore::load_palace` no longer reports a palace it cannot stat as one that is not there. Its absence guard was `Path::exists`, which is `fs::metadata(..).is_ok()` and so collapses a permission denial into `NotFound` — the one error `list_palaces` treats as benign and skips, so a palace whose permissions changed mid-walk dropped out of the listing the destructive passes act on. A denied or otherwise undeterminable probe now propagates an `Io` error naming `palace.json`; genuine absence still returns `NotFound` and still skips silently (#5549, ADR-0045).
+- `PalaceStore::load_identity` keeps its `exists()` guard and now says why: an unreadable `identity.txt` reads as absent, the consumer falls back to a default prompt, and nothing destructive or enumerating branches on the answer. Marked `// intentional fail-open` per ADR-0045 decision 4 (#5549).
+- `PalaceRegistry::resolve_palace_alias` probed for `palace.json` with `Path::exists()`, so an alias target it was denied to stat read as a target that is not there. The redirect was dropped and `load_palace` then ran against the alias id's own genuinely-absent directory, returning `NotFound` for the wrong palace — which `open_error_is_absent` classifies as absence, so an aliased palace that exists and merely could not be verified still reached the HTTP callers as 404. The probe is now `try_exists`, with only `Ok(false)` counting as absent; an undeterminable target keeps its redirect and `load_palace` classifies the denial one call later (#5592, ADR-0045).
+- `bedrock_region_resolution` no longer fails when `AWS_REGION` is set in the
+  ambient environment
+  ([#5652](https://github.com/bobmatnyc/trusty-tools/issues/5652)). The test
+  asserted that an empty explicit region reaches `us-east-1`, which skips the
+  `TRUSTY_AWS_REGION` and `AWS_REGION` tiers that `resolve_bedrock_region` is
+  documented to consult first. The precedence walk moved into a pure
+  `resolve_region_from(explicit, trusty_env, aws_env)` helper that the test
+  drives directly, so every tier is covered without reading or mutating
+  process-wide env vars. `resolve_bedrock_region`'s behaviour is unchanged.
+
+### Removed
+
+- The `memory-core-kuzu` feature and the `memory_core::store::kuzu` module it
+  gated ([#5695](https://github.com/bobmatnyc/trusty-tools/issues/5695)). No
+  workspace member enabled the feature, so it was reachable only through
+  `--all-features` — the path `cargo-semver-checks` takes — where it forced a
+  cmake source build of `kuzu` and stopped the SemVer gate from running at all.
+  Nothing was lost with it: the feature-gated body was a single `warn!()` behind
+  a `TODO(kuzu)`, `query()` and `recall()` returned an empty vec whether or not
+  the feature was on, and no `use kuzu::` existed anywhere in the tree.
+  `KuzuSource`, `KuzuDatabase`, and the unconditional `discover()` /
+  `default_roots()` scanners go with the module; they had no caller outside the
+  module's own tests and were never re-exported from `store`.
+- The `kuzu` workspace dependency, now that nothing declares it.
+
+### Documentation
+
+- Corrected `#4868` issue citations in `launchd_labels`, `launchd`,
+  `launchd_activate`, and this crate's module index to `#4919` — the actual
+  origin of the launchd-label registry work
+  ([#5449](https://github.com/bobmatnyc/trusty-tools/issues/5449)). `#4868` is
+  an unrelated trusty-search shutdown-flush-budget fix; three genuine
+  backward-references to that real fix (its `ExitTimeOut` plist key) are
+  unchanged.
+
 ## [0.30.0] — 2026-08-10
 
 ### Breaking

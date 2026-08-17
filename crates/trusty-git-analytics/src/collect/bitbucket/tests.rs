@@ -1,7 +1,10 @@
 //! Unit tests for [`super::BitbucketClient`].
 //!
 //! Why: split from `client.rs` to keep that file under the 500-line cap
-//! while keeping the tests adjacent to the code they exercise.
+//! while keeping the tests adjacent to the code they exercise. The declaration
+//! carries `#[path]`, which overrides Rust's default resolution so a `mod
+//! tests;` inside a file module points at this sibling file rather than a
+//! subdirectory.
 //! What: covers JSON deserialisation, PR state mapping, pagination, auth
 //! resolution via [`super::resolve_auth`] with an injected env lookup
 //! (including env-expansion of `app_password` — issue #842 — and the
@@ -424,7 +427,10 @@ fn resolve_auth_rejects_username_without_password() {
     let cfg = auth_config(None, Some("carol"), None);
     match resolve_auth(&cfg, env_map(&[])) {
         Err(CollectError::Config(_)) => {}
-        other => panic!("expected Config error, got {other:?}"),
+        // #5770: the Ok arm is split out so the panic formats only the error —
+        // `{other:?}` over the whole Result would print the resolved credential.
+        Ok(_) => panic!("expected Config error, got Ok(_)"),
+        Err(other) => panic!("expected Config error, got {other:?}"),
     }
 }
 
@@ -552,6 +558,8 @@ fn sample_pr(repository: &str, pr_number: u64, state: PrState, fetched_at: &str)
         merged_at: None,
         commit_shas: "[]".to_string(),
         fetched_at: fetched_at.to_string(),
+        head_ref: None,
+        body_ticket_id: None,
     }
 }
 

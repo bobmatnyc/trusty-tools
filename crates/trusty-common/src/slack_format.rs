@@ -19,6 +19,10 @@
 //! Test: the unit tests in this module cover each helper; trusty-mpm's
 //! `slack::formatter::tests` and trusty-channels' handler tests exercise them
 //! through their re-exports.
+//!
+//! [`mrkdwn_escape`]: crate::slack_format::mrkdwn_escape
+//! [`code_block`]: crate::slack_format::code_block
+//! [`code_inline`]: crate::slack_format::code_inline
 
 /// Escape the three `mrkdwn`-significant characters for a Slack message body.
 ///

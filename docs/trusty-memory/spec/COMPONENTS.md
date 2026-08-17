@@ -138,28 +138,32 @@ ranking with temporal decay. Ingest filter + dedup reject noise before storage.
 
 ---
 
-## 5. BM25 Sidecar Integration — `bm25_supervisor.rs`, `bin/bm25_daemon.rs`
+## 5. BM25 Lexical Lane — `bm25_lane.rs`, `bm25_index.rs`
 
-**Responsibility.** Provide lexical (BM25) recall by bundling and auto-supervising
-the external `trusty-bm25-daemon` so it works out of the box, one process per
-palace.
+**Responsibility.** Provide lexical (BM25) recall in-process, one resident index
+per hot palace.
 
 **Key types/modules.**
-- `bin/bm25_daemon.rs` — bundled `[[bin]]` shim delegating to `trusty_bm25_daemon::run()`.
-- `bm25_supervisor.rs` — `Bm25Supervisor` keyed by palace id; `ensure_running` /
-  `shutdown`; `Mutex<HashMap<String, ChildHandle>>` anti-double-spawn; SIGTERM→SIGKILL
-  via `libc::kill`.
+- `bm25_index.rs` — `PalaceBm25Index`, a `trusty_common::bm25::BM25Index` plus a
+  dirty bit and a JSON snapshot at `<data_root>/<palace>/bm25/bm25_index.json`.
+- `bm25_lane.rs` — `Bm25Lane`, an LRU-bounded map of resident indexes behind one
+  `tokio::sync::Mutex`, plus a background task that coalesces snapshot flushes
+  and enforces a retained-corpus budget.
 
-**Current state.** ✅ Single-install (`cargo install trusty-memory` → three
-binaries, mirrors #190). On first BM25 use for a palace, the supervisor discovers
-the binary, spawns a child with `--palace`/`--data-dir`, polls the socket, and owns
-the child. `TRUSTY_BM25_EXTERNAL=1` opts out for operator-managed daemons.
+**Current state.** ✅ In-process since #5329. `TRUSTY_BM25_DAEMON=1` still gates
+the lane — the variable keeps its daemon-era name so an operator who set it does
+not silently lose lexical recall — but there is no daemon behind it. Bounds:
+`TRUSTY_BM25_MAX_PALACES` (resident indexes, default 3) replaces the live-daemon
+cap of #2845, and `TRUSTY_BM25_TEXT_BUDGET_MB` (default 512) replaces the
+per-child RSS ceiling of #2846 with a figure that is attributable per palace.
 
 **Known gaps.**
-- 🟡 **Unix-only** — the spawn supervisor and daemon protocol are UDS, so there is
-  no Windows path.
+- 🟡 **No process-level fault isolation** — a runaway BM25 index can no longer be
+  SIGKILLed independently of the recall path. The text budget is what bounds that
+  risk now. This is the one thing the collapse cost; #5329 records the trade.
 
 ---
+
 
 ## 6. Knowledge Graph & Facts — `kg_extract.rs`, `bootstrap.rs`, `discovery.rs`, `prompt_facts.rs`, `memory_core/store/kg*.rs`, `community.rs`
 

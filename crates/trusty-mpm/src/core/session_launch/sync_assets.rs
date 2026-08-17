@@ -37,7 +37,7 @@ use crate::core::skill_tiers::deploy_all_skill_tiers;
 /// A failure raised while re-syncing a session's deployed assets.
 ///
 /// Why: the daemon route and the `tm sessions sync-assets` CLI need a typed
-/// surface naming which stage failed, mirroring [`crate::core::update_check::apply::ApplyError`]'s
+/// surface naming which stage failed, mirroring [`crate::core::update_check::apply::ApplyError`](crate::core::update_check::ApplyError)(crate::core::update_check::ApplyError)'s
 /// shape (minus the `Sync`/`Prune` variants, which do not apply here).
 /// What: variants for the agent-deploy and skill-deploy stages.
 /// Test: surfaced indirectly — the happy path is covered by this module's
@@ -58,7 +58,7 @@ pub enum SyncAssetsError {
 ///
 /// Why: the daemon route and CLI both need the deployed/skipped counts to
 /// render an honest "N agents refreshed, M skipped (user-modified)" report.
-/// What: mirrors [`crate::core::update_check::apply::ApplyReport`]'s
+/// What: mirrors [`crate::core::update_check::apply::ApplyReport`](crate::core::update_check::ApplyReport)(crate::core::update_check::ApplyReport)'s
 /// agent/skill fields (no `fetched`/prune fields — sync-assets never syncs the
 /// catalog checkout or prunes deselected files).
 /// Test: `sync_assets_redeploys_new_agent`, `sync_assets_refreshes_stale_skill`.

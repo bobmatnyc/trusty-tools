@@ -95,26 +95,44 @@ incomplete filing, not something to tidy up afterwards.
 **1. Type — exactly one** of `bug`, `enhancement`, `refactor`, `chore`,
 `documentation`, `epic`.
 
-**2. Component/crate — one or more**, naming the crate the defect actually
-lives in: `trusty-memory`, `trusty-search`, `trusty-mpm`, `trusty-installer`,
-`trusty-embedderd`, `daemon`, and so on. Resolve an abbreviation against the
-project's own table rather than guessing — in trusty-tools that is the root
-`CLAUDE.md` section "Abbreviations & Aliases". `trusty-mpm` doubles as the
-umbrella label for anything surfaced through tm-orchestrated dogfooding, so a
-trusty-memory bug found during a tm session carries **both**. The umbrella
-never substitutes for the specific crate label.
+**2. Component/crate — determined from the file path in the finding, not
+from the harness you happen to be running under.** A crate label names the
+crate whose code the defect actually lives in — read the file path(s) the
+finding cites (`crates/trusty-review/src/report/...` → `trusty-review`;
+`scripts/bump-version.sh` → release tooling, not a crate label at all) and
+label the crate that path belongs to: `trusty-memory`, `trusty-search`,
+`trusty-mpm`, `trusty-installer`, `trusty-embedderd`, `daemon`, and so on.
+Resolve an abbreviation against the project's own table rather than
+guessing — in trusty-tools that is the root `CLAUDE.md` section
+"Abbreviations & Aliases". **When no crate label fits the file path, apply
+none** — an unlabeled component field is correct more often than a guessed
+one.
+
+🔴 **There is no second, unnamed label axis for "which session found this."
+`trusty-mpm` never fills one, because none exists.** `trusty-mpm` is a crate
+label and nothing else — it applies ONLY when the finding's own file path is
+under `crates/trusty-mpm/` (or the tm CLI's own release/orchestration
+tooling). The origin of a finding — which session, harness, or agent
+surfaced it — is not a labeling input, under any name, ever. Running inside
+a tm-orchestrated session is not evidence the defect lives in `trusty-mpm`,
+and it is not license to attach `trusty-mpm` as a "provenance" or
+"surfaced-by" marker once you have already decided no crate label fits — that
+decision is final, not a fallback trigger. A defect in
+`crates/trusty-review/...`, or in `.github/workflows/ci.yml`, gets
+`trusty-review` or no crate label at all — never `trusty-mpm` — regardless of
+which session found it or why no crate label applies.
 
 **3. Priority — `P0`–`P3`, only when the issue text itself asserts severity**:
 an explicit "P1" in the title, or language like "data loss", "unrecoverable",
 "silent corruption". Otherwise omit it. A guessed priority is noise someone
 else has to re-triage.
 
-These stack on the trusty-mpm defaults, which already work — `--assignee @me`,
-`--label trusty-mpm`, `--label ws/<session-name>`:
+These stack on the non-crate defaults, which already work — `--assignee @me`,
+`--label ws/<session-name>`:
 
 ```bash
 gh issue create --title "…" --body "…" \
-  --assignee @me --label trusty-mpm --label "ws/$WS_NAME" \
+  --assignee @me --label "ws/$WS_NAME" \
   --label bug --label trusty-memory --label P1
 ```
 
@@ -153,7 +171,7 @@ a `gh`-authenticated repo — this is the common case), use `gh` directly:
 ```bash
 # full label set per "Label at Creation" above — type + component + optional priority
 gh issue create --title "Title" --body "Details" \
-  --assignee @me --label trusty-mpm --label "ws/$WS_NAME" --label bug --label trusty-search
+  --assignee @me --label "ws/$WS_NAME" --label bug --label trusty-search
 gh issue edit 4069 --add-label refactor --add-label trusty-common
 gh issue list --search "search terms" --state all   # search open AND closed FIRST
 gh issue reopen 4069 --comment "Recurred 2026-08-06: …"   # prefer this over a new issue
@@ -277,7 +295,7 @@ Searched: "reconcile" / "WatcherManager" / -p trusty-search — open + closed
 REOPEN #3712 (same root cause recurred; commented)
 COMMENT on open #4409
 NEW REGRESSION #5002 — different failure mode after #3990's verified fix
-CREATED #5001 — bug, trusty-search, trusty-mpm, P1; milestone unset
+CREATED #5001 — bug, trusty-search, P1; milestone unset
 NO TICKET (1 item — fixed in the current PR)
 
 IN-SCOPE (2 items — created as subtasks)

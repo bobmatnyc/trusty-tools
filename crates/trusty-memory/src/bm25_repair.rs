@@ -221,7 +221,7 @@ pub async fn run_repair_pass(state: &AppState) -> (usize, usize) {
 /// sweep.
 /// Test: `repair_sweep_is_a_noop_without_the_lane`.
 pub fn spawn_repair_sweep(state: &AppState) {
-    if state.bm25_client.is_none() {
+    if state.bm25.is_none() {
         tracing::debug!("bm25 repair: lane disabled — no repair sweep");
         return;
     }

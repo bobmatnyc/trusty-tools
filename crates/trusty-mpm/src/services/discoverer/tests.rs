@@ -347,7 +347,9 @@ fn list_returns_all_manifest_services() {
         Box::new(MockVersionRunner { version: None }),
     );
     let list = d.list();
-    assert_eq!(list.len(), 6);
+    // #5329 dropped `trusty-bm25-daemon` from the manifest — BM25 no longer
+    // runs as a separate process, so there is nothing to discover under it.
+    assert_eq!(list.len(), 5);
     let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"trusty-search"));
     assert!(names.contains(&"trusty-memory"));

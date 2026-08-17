@@ -10,6 +10,12 @@
 //! impl itself — the module most callers want).
 //! Test: see each submodule's own docs; the full engine flow against a mock
 //! HTTP daemon lives in `tests/tui_client_engine.rs`.
+//!
+//! [`discovery`]: crate::tui_client::discovery
+//! [`rpc`]: crate::tui_client::rpc
+//! [`sse`]: crate::tui_client::sse
+//! [`error::EngineError`]: crate::tui_client::error::EngineError
+//! [`engine::CodeEngine`]: crate::tui_client::engine::CodeEngine
 
 pub mod discovery;
 pub mod engine;

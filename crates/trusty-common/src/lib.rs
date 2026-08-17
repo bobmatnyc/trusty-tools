@@ -8,8 +8,10 @@
 //! What: pure utility functions — no global state. Each subsystem is a free
 //! function or a small helper struct.
 //!
-//! Test: `cargo test -p trusty-common` covers port walking, data-dir creation,
-//! and the OpenRouter request shape (without hitting the network).
+//! Test: `cargo test -p trusty-common --features unconditional-only` covers
+//! port walking, data-dir creation, and the OpenRouter request shape (without
+//! hitting the network). The `--features` flag is load-bearing — see the
+//! zero-feature test guard below.
 //!
 //! # Test isolation: `TRUSTY_DATA_DIR_OVERRIDE`
 //!
@@ -27,6 +29,56 @@
 //! **This escape hatch is intended for testing only.** Do not set it in
 //! production deployments; rely on the OS-standard data directory instead.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
+// #4901: a feature-less `cargo test -p trusty-common` must not report success
+// over the 25+ modules it never compiled.
+//
+// Why: this crate declares `default = []`. The bare crate-scoped command that
+// CLAUDE.md prescribes as the per-crate check therefore runs 328 of the crate's
+// ~2062 tests and exits 0 — including when a file in `memory_core` does not
+// compile at all, which is how PR #4899 reported a green gate before the
+// correct code existed. CI only reaches those modules through `--workspace`
+// feature unification, so the local green is the one that lies.
+// What: `build.rs` sets `trusty_common_no_features` when Cargo activated no
+// feature at all, and this refuses to build the unit-test target under it. The
+// guard is `cfg(test)`-scoped, so `cargo build`/`cargo check` and all 20
+// consumer crates are untouched; a run that names any feature is a deliberate,
+// visible choice and still builds.
+// Test: the `trusty_common_build_script_ran` guard below covers the one way
+// this could go quiet unnoticed — `build.rs` no longer running. The guard's own
+// behaviour is demonstrated by breaking a `memory_core` file and re-running both
+// command forms (PR for #4901).
+#[cfg(all(test, trusty_common_no_features))]
+compile_error!(
+    "`cargo test -p trusty-common` ran with NO features enabled, and this crate's \
+     `default` feature set is empty. That build compiles none of the feature-gated \
+     modules (memory_core, embedder, uds, sld, symgraph, bm25, migrations, …): it \
+     runs 328 of the crate's ~2062 tests and reports success over the rest — \
+     including over a memory_core file that does not compile (#4901). \
+     Name the gate you actually want: \
+     `--features memory-core,embedder-test-support` for memory_core, \
+     `--features <feature>` for any other gated module, or \
+     `--features unconditional-only` to test just the always-compiled surface."
+);
+
+// #4901: the guard above is only as live as the build script that feeds it.
+// Deleting or short-circuiting `build.rs` would restore the silent green with
+// nothing turning red, so the absence of its unconditional marker is itself a
+// build failure. Checked on every build, not just `cfg(test)` — an inert guard
+// is worth knowing about before someone relies on it.
+#[cfg(not(trusty_common_build_script_ran))]
+compile_error!(
+    "crates/trusty-common/build.rs did not run. It emits the cfgs behind the \
+     #4901 zero-feature test guard, so that guard is now inert and \
+     `cargo test -p trusty-common` can report success again over the 25+ \
+     modules it never compiled."
+);
+
 /// Shared trusty splash art + per-glyph shading (issue #3326).
 ///
 /// Why: `tm`'s launch banner and `trusty-agents`' REPL startup splash must
@@ -35,7 +87,7 @@
 /// What: [`banner::TRUSTY_SPLASH_ART`] (embedded ASCII/block-art text) and
 /// [`banner::shade_bucket`] (glyph → RGB triple). Zero extra dependencies —
 /// pure `&str` + `match`.
-/// Test: `cargo test -p trusty-common -- banner::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only -- banner::tests`.
 pub mod banner;
 
 pub mod chat;
@@ -59,7 +111,8 @@ pub mod codex_config;
 /// a typo a compile error instead of a silent misread.
 /// What: exposes [`ENV_OPENROUTER_API_KEY`](env_vars::ENV_OPENROUTER_API_KEY)
 /// and [`ENV_GITHUB_TOKEN`](env_vars::ENV_GITHUB_TOKEN).
-/// Test: `cargo test -p trusty-common -- env_var_names_are_stable`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// env_var_names_are_stable`.
 pub mod env_vars;
 
 pub mod project_discovery;
@@ -72,7 +125,7 @@ pub mod project_discovery;
 /// daemon responds identically to `launchctl bootout`.
 /// What: exposes [`shutdown_signal`] — an async fn that resolves on SIGTERM
 /// (unix) or SIGINT/Ctrl-C (all platforms), whichever fires first.
-/// Test: `cargo test -p trusty-common -- shutdown`.
+/// Test: `cargo test -p trusty-common --features unconditional-only -- shutdown`.
 pub mod shutdown;
 pub use shutdown::shutdown_signal;
 
@@ -83,8 +136,8 @@ pub use shutdown::shutdown_signal;
 /// its `tracing_subscriber::Layer` live here so every daemon shares one impl.
 /// What: `LogBuffer` (thread-safe capped `VecDeque<String>`) plus
 /// `LogBufferLayer` (the tracing layer that feeds it).
-/// Test: `cargo test -p trusty-common log_buffer` covers capacity eviction,
-/// tail semantics, and layer capture.
+/// Test: `cargo test -p trusty-common --features unconditional-only log_buffer`
+/// covers capacity eviction, tail semantics, and layer capture.
 pub mod log_buffer;
 
 /// Process-wide panic hook that logs the panic payload through `tracing`.
@@ -94,7 +147,7 @@ pub mod log_buffer;
 /// unrecoverable in production.
 /// What: `install_panic_logger` wraps the existing hook, emitting payload,
 /// location, thread, and backtrace as one `tracing::error!` before delegating.
-/// Test: `cargo test -p trusty-common panic_hook`.
+/// Test: `cargo test -p trusty-common --features unconditional-only panic_hook`.
 pub mod panic_hook;
 
 /// Process RSS / CPU sampling and data-directory sizing for daemon health.
@@ -104,7 +157,7 @@ pub mod panic_hook;
 /// across them so it lives here once.
 /// What: `SysMetrics` (per-process RSS + CPU sampler) and `dir_size_bytes`
 /// (recursive directory byte count).
-/// Test: `cargo test -p trusty-common sys_metrics`.
+/// Test: `cargo test -p trusty-common --features unconditional-only sys_metrics`.
 pub mod sys_metrics;
 
 /// Robust executable discovery and daemon `PATH` composition.
@@ -115,7 +168,7 @@ pub mod sys_metrics;
 /// dirs for a generated launchd plist and provides a `PATH`-then-well-known
 /// binary resolver so the daemon spawns survive a minimal inherited `PATH`.
 /// What: `daemon_path_dirs`, `daemon_path_env`, `resolve_binary`.
-/// Test: `cargo test -p trusty-common bin_resolve`.
+/// Test: `cargo test -p trusty-common --features unconditional-only bin_resolve`.
 pub mod bin_resolve;
 
 /// macOS LaunchAgent generation and lifecycle management. macOS-only —
@@ -131,7 +184,7 @@ pub mod launchd;
 /// down when a bootstrap failed.
 /// What: [`launchd::LaunchdConfig::install_and_activate`] and its
 /// [`launchd_activate::Activation`] outcome.
-/// Test: `cargo test -p trusty-common launchd_activate`.
+/// Test: `cargo test -p trusty-common --features unconditional-only launchd_activate`.
 #[cfg(target_os = "macos")]
 pub mod launchd_activate;
 
@@ -143,9 +196,10 @@ pub mod launchd_activate;
 /// while launchd had `com.trusty.search` loaded, activating nothing.
 /// What: [`launchd_labels::SERVICES`] plus the `com.trusty.<stem>` convention
 /// as executable code, and the legacy aliases an upgrade must evict.
-/// Deliberately NOT macOS-gated, unlike [`launchd`], so the drift tests run on
-/// Linux CI too.
-/// Test: `cargo test -p trusty-common launchd_labels`.
+/// Deliberately NOT macOS-gated, unlike `launchd`, so the drift tests run on
+/// Linux CI too. (`launchd` is named here, not linked: it does not exist on
+/// Linux, so a link to it breaks on the very platform this sentence is about.)
+/// Test: `cargo test -p trusty-common --features unconditional-only launchd_labels`.
 pub mod launchd_labels;
 
 /// Authoritative, three-state launchd supervision detection (issue #4469).
@@ -157,7 +211,7 @@ pub mod launchd_labels;
 /// concern — `update::upgrade` merely happens to be its oldest caller.
 /// What: [`supervision::launchd_supervision`] and its three-state
 /// [`supervision::LaunchdSupervision`] answer.
-/// Test: `cargo test -p trusty-common supervision`.
+/// Test: `cargo test -p trusty-common --features unconditional-only supervision`.
 pub mod supervision;
 
 /// Bounded `ETXTBSY` retry for process spawns (issue #5446).
@@ -169,7 +223,7 @@ pub mod supervision;
 /// [`spawn_retry::retry_on_etxtbsy_async`] share one policy function. Ungated —
 /// `tokio` with `process` + `time` is already an unconditional dependency of
 /// this crate, so the async driver adds nothing to the dependency graph.
-/// Test: `cargo test -p trusty-common spawn_retry`.
+/// Test: `cargo test -p trusty-common --features unconditional-only spawn_retry`.
 pub mod spawn_retry;
 
 #[cfg(feature = "axum-server")]
@@ -183,9 +237,9 @@ pub mod server;
 /// imports the same types.
 /// What: Gated behind the `mcp` feature; pulls in no extra dependencies
 /// beyond `serde` / `tokio`, both of which are already required.
-/// Test: `cargo test -p trusty-common --features mcp` runs the module's
-/// own unit tests (envelope round-trips, stdio loop dispatch, OpenRPC
-/// builder shape).
+/// Test: `cargo test -p trusty-common --features mcp` runs the module's own
+/// unit tests (envelope round-trips, stdio loop dispatch, OpenRPC builder
+/// shape).
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
@@ -269,21 +323,12 @@ pub mod bm25;
 #[cfg(feature = "migrations")]
 pub mod migrations;
 
-/// UDS JSON-RPC client for the per-palace `trusty-bm25-daemon` subprocess
-/// (issue #156).
-///
-/// Why: trusty-memory needs a lexical-search lane without holding an
-/// in-process BM25 index. `Bm25Client` delegates to the per-palace daemon
-/// over `$TMPDIR/trusty-bm25-<palace>.sock`, matching the design of
-/// `EmbedClient` and `trusty-embed-daemon` (PR #157).
-/// What: Gated behind the `bm25-client` feature. Pure user of existing
-/// `tokio` / `serde_json` / `anyhow` workspace deps — adds no new
-/// dependencies.
-/// Test: `cargo test -p trusty-common --features bm25-client` covers
-/// request shape and path defaults; end-to-end coverage lives in
-/// `trusty-bm25-daemon/tests/`.
-#[cfg(feature = "bm25-client")]
-pub mod bm25_client;
+// Why (#5329): the `bm25_client` module was REMOVED along with the
+// `trusty-bm25-daemon` subprocess it spoke to. trusty-memory now links the
+// `bm25` module's `BM25Index` directly, the way trusty-search always has, so
+// there is no socket, no wire protocol and no binary to locate. The `uds`
+// module and its `supervisor` submodule are untouched — trusty-console and
+// trusty-agents supervise trusty-review / trusty-analyze through them.
 
 /// Symbol-graph engine (formerly the `trusty-symgraph` crate).
 ///
@@ -314,7 +359,7 @@ pub mod symgraph;
 /// into `trusty-common` (issue #5 phase 2d) so we ship one fewer published
 /// crate.
 /// What: Gated behind the `memory-core` feature because it pulls in heavy
-/// storage deps (`usearch`, `rusqlite`, `r2d2`, `git2`, `kuzu`). Enables
+/// storage deps (`usearch`, `rusqlite`, `r2d2`, `git2`). Enables
 /// the embedder surface automatically (memory-core → embedder).
 /// Test: `cargo test -p trusty-common --features memory-core` exercises
 /// the full surface.
@@ -332,9 +377,9 @@ pub mod memory_core;
 /// (config, models, Backend trait, three concrete backends), `tickets::server`
 /// (MCP dispatch loop + `run_stdio`), and `tickets::tools` (the tool-list
 /// schema). Requires the `mcp` feature for the stdio loop.
-/// Test: `cargo test -p trusty-common --features tickets` runs the module's
-/// own unit tests (dispatch, tool-list counts, config parsing, serde
-/// round-trips). Live backend tests require env-var credentials.
+/// Test: `cargo test -p trusty-common --features tickets` runs the module's own
+/// unit tests (dispatch, tool-list counts, config parsing, serde round-trips).
+/// Live backend tests require env-var credentials.
 #[cfg(feature = "tickets")]
 pub mod tickets;
 
@@ -527,7 +572,7 @@ pub mod inference;
 /// when a port is already occupied.
 /// What: Exposes [`bind_with_auto_port`] which walks forward to the next free
 /// port within `max_attempts`.
-/// Test: `cargo test -p trusty-common -- port::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only -- port::tests`.
 pub mod port;
 
 /// Canonical project-slug derivation (issue #1348).
@@ -539,7 +584,7 @@ pub mod port;
 /// so the two crates cannot silently diverge.
 /// What: Exposes [`slug::slugify_string`], re-exported at the crate root as
 /// [`slugify_string`].
-/// Test: `cargo test -p trusty-common -- slug::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only -- slug::tests`.
 pub mod slug;
 pub use slug::slugify_string;
 
@@ -551,10 +596,13 @@ pub use slug::slugify_string;
 /// another. Centralising the rule here — the crate both already depend on —
 /// keeps them in lockstep without a trusty-mpm → trusty-search dependency edge.
 /// What: Exposes [`index_id::derive_index_id`], [`index_id::resolve_project_root`],
-/// and [`index_id::find_git_root`].
-/// Test: `cargo test -p trusty-common -- index_id::tests`.
+/// [`index_id::find_git_root`], and [`index_id::identifies_same_path`] — the one
+/// implementation of "do these two paths name the same directory tree?" that
+/// both registration guards route through.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// index_id::tests`.
 pub mod index_id;
-pub use index_id::{derive_index_id, find_git_root, resolve_project_root};
+pub use index_id::{derive_index_id, find_git_root, identifies_same_path, resolve_project_root};
 
 /// Project-derived trusty-search index identity — the PARTITIONING key
 /// (epic #4207; supersedes the approach closed as won't-do in #4063).
@@ -573,7 +621,8 @@ pub use index_id::{derive_index_id, find_git_root, resolve_project_root};
 /// [`project_index_id::resolve_operator_identity`]. Derivation only — wired
 /// into no resolution path; registry reconciliation and migration of existing
 /// indexes are separate slices of #4207.
-/// Test: `cargo test -p trusty-common -- project_index_id`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// project_index_id`.
 pub mod project_index_id;
 pub use project_index_id::{ProjectIdentity, derive_project_index_id};
 
@@ -653,11 +702,36 @@ pub mod session_naming;
 /// [`palace_id::owner_repo_from_git_remote`], [`palace_id::parent_dir_slug`],
 /// and the [`palace_id::PALACE_OVERRIDE_ENV`] / [`palace_id::palace_override_from_env`]
 /// env helpers.
-/// Test: `cargo test -p trusty-common -- palace_id::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// palace_id::tests`.
 pub mod palace_id;
 pub use palace_id::{
     PALACE_OVERRIDE_ENV, derive_palace_id, owner_repo_from_git_remote, palace_override_from_env,
     parent_dir_slug, repo_slug_from_git_remote,
+};
+
+/// The single entry point for "which palace does this project use?" (#5811).
+///
+/// Why: [`palace_id::derive_palace_id`] is the PURE core and covers only three
+/// of the four precedence levels — the committed `.trusty-tools/trusty-memory.yaml`
+/// pin needs filesystem I/O, so it lived above the core in ONE caller
+/// (trusty-memory). Every other caller therefore answered the question without
+/// the pin, and trusty-mpm's pin-blind answer became the `TRUSTY_MEMORY_PALACE`
+/// variable exported into managed sessions — the highest-precedence slot. A
+/// derived name outranked the pin it was meant to lose to. This module owns the
+/// whole rule, I/O included, so the split cannot reappear.
+/// What: Gated behind the `palace-resolve` feature. Exposes
+/// [`palace_resolve::resolve_palace`], [`palace_resolve::resolve_palace_with_remote`],
+/// [`palace_resolve::PalaceResolution`], [`palace_resolve::PalaceSource`],
+/// [`palace_resolve::PalaceResolveError`], the pin-file schema, and the shared
+/// `git` probes.
+/// Test: `cargo test -p trusty-common --features palace-resolve -- palace_resolve`.
+#[cfg(feature = "palace-resolve")]
+pub mod palace_resolve;
+#[cfg(feature = "palace-resolve")]
+pub use palace_resolve::{
+    PIN_FILE_REL, PIN_SCHEMA_VERSION, PalaceResolution, PalaceResolveError, PalaceSource,
+    ProjectPin, resolve_palace, resolve_palace_with_remote,
 };
 
 /// Palace-level alias map: redirect one palace name to another (issue #1939).
@@ -667,12 +741,15 @@ pub use palace_id::{
 /// palace does not exist and memory splits in two. A persisted alias map lets the
 /// non-existent `owner-repo` name resolve to the existing bare palace. This is a
 /// PALACE-level redirect, distinct from the in-palace term/KG entity aliases.
-/// What: exposes [`palace_alias::PalaceAliasStore`] (load/register/resolve) plus
+/// What: exposes [`palace_alias::PalaceAliasStore`] (load/register/resolve),
+/// [`palace_alias::alias_target_if_absent`] (the one rule for whether a redirect
+/// fires, shared with the registry), plus
 /// [`palace_alias::default_palace_registry_dir`] and
 /// [`palace_alias::palace_registry_dir_from`] for locating the registry dir. This
 /// module is always compiled (no `memory-core` gate) so trusty-mpm's always-on
 /// session-launch path can register aliases without pulling the storage engine.
-/// Test: `cargo test -p trusty-common -- palace_alias::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// palace_alias::tests`.
 pub mod palace_alias;
 
 /// Shared GitHub `owner/repo` path derivation (issue #1220).
@@ -684,7 +761,8 @@ pub mod palace_alias;
 /// What: Exposes [`github_path::GithubPath`], [`github_path::parse_github_path`]
 /// (pure URL parse), and [`github_path::derive_github_path`] (reads
 /// `remote.origin.url`).
-/// Test: `cargo test -p trusty-common -- github_path::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// github_path::tests`.
 pub mod github_path;
 
 /// The one resolver for trusty-mpm's managed workspace layout (#5203, #5204).
@@ -700,7 +778,8 @@ pub mod github_path;
 /// [`workspace_layout::worktrees_dirname`], their `resolve_*` cores (which take
 /// an already-loaded config value), [`workspace_layout::WorktreeDirNames`] for
 /// scan paths, and [`workspace_layout::WorkspaceLayoutConfig`].
-/// Test: `cargo test -p trusty-common -- workspace_layout::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// workspace_layout::tests`.
 pub mod workspace_layout;
 
 /// Canonical repository identity (DOC-37) — the path-independent join key that
@@ -712,7 +791,8 @@ pub mod workspace_layout;
 /// indexes by repo; it lives here so trusty-search and trusty-mpm derive it
 /// identically.
 /// What: exposes [`repo_identity::RepoIdentity`] (`derive`/`canonical`/`parse`).
-/// Test: `cargo test -p trusty-common -- repo_identity::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// repo_identity::tests`.
 pub mod repo_identity;
 
 /// Shared Slack `mrkdwn` formatting/escaping primitives (epic #2636).
@@ -726,7 +806,8 @@ pub mod repo_identity;
 /// What: exposes [`slack_format::mrkdwn_escape`], [`slack_format::code_block`],
 /// and [`slack_format::code_inline`]. Pure `std` string ops — no dependencies,
 /// no feature gate.
-/// Test: `cargo test -p trusty-common -- slack_format::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// slack_format::tests`.
 pub mod slack_format;
 
 /// Data-directory resolution and filesystem utilities.
@@ -735,7 +816,8 @@ pub mod slack_format;
 /// logic including the macOS `NSFileManager` bypass needed for test isolation.
 /// What: Exposes [`data_dir::resolve_data_dir`], [`data_dir::sanitize_data_root`],
 /// [`data_dir::DATA_DIR_OVERRIDE_ENV`], and [`data_dir::is_dir`].
-/// Test: `cargo test -p trusty-common -- data_dir::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// data_dir::tests`.
 pub mod data_dir;
 
 /// Runtime "am I a `cargo test` process?" detection (issue #4255).
@@ -751,7 +833,8 @@ pub mod data_dir;
 /// What: exposes [`test_harness::running_under_test_harness`] plus the
 /// [`test_harness::FORCE_ENV`] / [`test_harness::ALLOW_PRODUCTION_ENV`]
 /// override names.
-/// Test: `cargo test -p trusty-common -- test_harness::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// test_harness::tests`.
 pub mod test_harness;
 pub use test_harness::running_under_test_harness;
 
@@ -763,7 +846,8 @@ pub use test_harness::running_under_test_harness;
 /// `prune`, `prune-orphans`) lose each other's updates for exactly the same
 /// reason (#5344). Owning the lock here keeps ONE implementation for both.
 /// What: Exposes [`file_lock::with_exclusive_lock`] and [`file_lock::lock_path`].
-/// Test: `cargo test -p trusty-common -- file_lock::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// file_lock::tests`.
 pub mod file_lock;
 
 /// Cross-process locked read-modify-write for whole-file JSON documents.
@@ -776,7 +860,8 @@ pub mod file_lock;
 /// single implementation of that critical section.
 /// What: Exposes [`json_rmw::update`], [`json_rmw::lock_path`], and
 /// [`json_rmw::JsonRmwError`].
-/// Test: `cargo test -p trusty-common -- json_rmw::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// json_rmw::tests`.
 pub mod json_rmw;
 
 /// Shared CLI daemon-guard helper (probe + spinner + spawn).
@@ -788,7 +873,8 @@ pub mod json_rmw;
 /// What: Exposes [`daemon_guard::DaemonGuardConfig`],
 /// [`daemon_guard::probe_once`], [`daemon_guard::spin_until_ready`], and
 /// [`daemon_guard::spawn_current_exe`].
-/// Test: `cargo test -p trusty-common -- daemon_guard::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// daemon_guard::tests`.
 pub mod daemon_guard;
 
 /// Daemon HTTP-address file helpers.
@@ -799,7 +885,8 @@ pub mod daemon_guard;
 /// [`daemon_addr::check_already_running`], and
 /// [`daemon_addr::resolve_daemon_base_url`] (discovery-first `http://` base
 /// URL resolution, issue #2033).
-/// Test: `cargo test -p trusty-common -- daemon_addr::tests`.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// daemon_addr::tests`.
 pub mod daemon_addr;
 
 /// HTTP health-probe helper.
@@ -899,8 +986,23 @@ pub mod catchup;
 /// command-construction layer, no feature gate needed.
 /// What: `TmuxTarget`/`TmuxCommand`/`tmux_argv`, the scrollback-ergonomics
 /// defaults, and the shared `managed_session_commands` ordering guarantee.
-/// Test: `cargo test -p trusty-common -- tmux::`.
+/// Test: `cargo test -p trusty-common --features unconditional-only -- tmux::`.
 pub mod tmux;
+
+/// The workspace's single entry point for invoking the GitHub CLI (#5475).
+///
+/// Why: `gh` was spawned from a dozen independent `Command::new("gh")` sites
+/// across four crates, each re-deriving its own missing-binary,
+/// unauthenticated, non-zero-exit and stderr policy — the exact duplication
+/// the common-entry-point rule forbids, and one more copy was about to land
+/// with #5487 / #5215.
+/// What: gated behind the `gh-cli` feature. Exposes `gh::GhCommand` (builder
+/// + blocking and tokio runners), `gh::GhOutput` (the full exit/stdout/stderr
+/// triple, with the shared policies as combinators), `gh::GhError`, and the
+/// `gh::gh_available` probe.
+/// Test: `cargo test -p trusty-common --features gh-cli -- gh::`.
+#[cfg(feature = "gh-cli")]
+pub mod gh;
 
 // ─── Re-exports preserving the pre-split public API ───────────────────────
 

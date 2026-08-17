@@ -65,7 +65,30 @@ const MIN_SCRUBBABLE_SECRET_CHARS: usize = 8;
 /// `memory_core::filter::looks_like_secret` did for its 20-char floor.
 /// Test: `redact_tests::redact_secret_masks_tail`,
 /// `redact_tests::redact_secret_handles_short_input`,
-/// `redact_tests::redact_secret_short_inputs_table`.
+/// `redact_tests::redact_secret_short_inputs_table`,
+/// `redact_tests::contract_redact_secret_never_echoes_a_short_secret`.
+///
+/// # Code Contract
+/// Preconditions:
+/// - None. Every `&str` is accepted, including the empty string and non-ASCII
+///   input. The caller decides whether the value is secret-shaped; this
+///   function does not gate on length.
+///
+/// Postconditions:
+/// - The result is NON-REVERSIBLE: it never contains more than the first
+///   [`DEFAULT_HEAD_LEN`] characters of `secret`.
+/// - When `secret` is at or under [`DEFAULT_HEAD_LEN`] CHARACTERS, no head is
+///   shown at all (#2475) — showing the head of a short secret discloses the
+///   whole value.
+/// - The reported length is `secret.len()`, a BYTE count, while the head is
+///   taken in CHARACTERS. The two units differ deliberately and the char-wise
+///   `take` is what keeps a multi-byte secret from panicking.
+/// - Total: never panics, for any input.
+///
+/// Invariants:
+/// - Pure: no I/O, no logging, no environment access.
+/// - The output format is depended on by `memory_core::filter`; it is a
+///   compatibility surface, not a cosmetic choice.
 pub fn redact_secret(secret: &str) -> String {
     let byte_len = secret.len();
     if secret.chars().count() <= DEFAULT_HEAD_LEN {
@@ -105,7 +128,30 @@ pub fn redact_secret(secret: &str) -> String {
 /// `scrub_secrets_removes_multiple_distinct_secrets`,
 /// `scrub_secrets_ignores_empty_and_short_values`,
 /// `scrub_secrets_prefers_the_longest_overlapping_secret`,
-/// `scrub_secrets_is_noop_when_nothing_matches`.
+/// `scrub_secrets_is_noop_when_nothing_matches`,
+/// `redact_tests::contract_scrub_secrets_removes_every_qualifying_needle`.
+///
+/// # Code Contract
+/// Preconditions:
+/// - None. `secrets` may be empty and may contain empty or short values; those
+///   are skipped by the guard rather than rejected.
+///
+/// Postconditions:
+/// - For every needle of at least [`MIN_SCRUBBABLE_SECRET_CHARS`] characters,
+///   the result contains NO occurrence of that needle.
+/// - A needle under that length — the empty string included — is left
+///   unapplied, and text that happens to contain it is returned unchanged.
+/// - Overlapping needles are applied longest-first, so a secret that is a
+///   prefix of another cannot leave the longer one's tail behind.
+/// - Returns `text` unchanged when no needle survives the guard or none occurs.
+///
+/// Invariants:
+/// - Pure: no I/O, no environment access, `secrets` is not mutated.
+/// - The result is LOWER-RISK, NOT PROVEN SECRET-FREE. It removes only values
+///   the caller already holds; a secret the process does not know passes
+///   through untouched. This is a bound on what the postconditions above claim,
+///   and it is why scrubbed text is not a licence to route untrusted text into
+///   a sink that could not otherwise hold a secret.
 pub fn scrub_secrets<S: AsRef<str>>(text: &str, secrets: &[S]) -> String {
     let mut needles: Vec<&str> = secrets
         .iter()
@@ -155,6 +201,96 @@ pub fn resolved_secret_values() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Code Contract tests (#5724, ADR-0047) ────────────────────────────────
+
+    /// Why: the non-reversibility postcondition is the whole point of
+    /// [`redact_secret`], and #2475 caught the original implementation
+    /// disclosing a short secret in full. A table over the boundary proves the
+    /// claim rather than one example of it.
+    /// What: for every length up to and past [`DEFAULT_HEAD_LEN`], the output
+    /// never contains more of the secret than the contract permits, and a
+    /// secret at or under the head length contributes no head at all.
+    /// Test: itself.
+    #[test]
+    fn contract_redact_secret_never_echoes_a_short_secret() {
+        for n in 0..=12usize {
+            let secret: String = "abcdefghijkl".chars().take(n).collect();
+            let out = redact_secret(&secret);
+
+            // Postcondition: the byte length is reported.
+            assert!(
+                out.contains(&format!("({} chars)", secret.len())),
+                "n={n}: byte length must be reported, got {out}"
+            );
+
+            if n <= DEFAULT_HEAD_LEN {
+                // Postcondition: no head at all for a short secret (#2475).
+                // Exact equality is the whole claim — the output is the mask
+                // and the byte count, with no character of `secret` in it. A
+                // `!out.contains(&secret)` check would be WRONG here, not
+                // merely redundant: the literal "chars" contains "a", so a
+                // one-character secret "a" trips it against a correct mask.
+                assert_eq!(out, format!("…({} chars)", secret.len()), "n={n}");
+            } else {
+                let head: String = secret.chars().take(DEFAULT_HEAD_LEN).collect();
+                assert!(out.starts_with(&head), "n={n}");
+                // Postcondition: never more than DEFAULT_HEAD_LEN characters.
+                let disclosed: String = secret.chars().take(DEFAULT_HEAD_LEN + 1).collect();
+                assert!(
+                    !out.contains(&disclosed),
+                    "n={n}: disclosed more than the head, got {out}"
+                );
+            }
+        }
+
+        // Totality: multi-byte input must not panic, and the char/byte split in
+        // the contract is what keeps it from doing so.
+        let multi = "héllo-wörld-secret";
+        let out = redact_secret(multi);
+        assert!(out.contains(&format!("({} chars)", multi.len())));
+    }
+
+    /// Why: `scrub_secrets` is a security boundary, and its contract has two
+    /// halves that pull in opposite directions — remove every qualifying
+    /// needle, but leave short ones alone so a placeholder cannot shred an
+    /// unrelated diagnostic. A test of either half alone would let the other
+    /// regress.
+    /// What: qualifying needles are removed everywhere including overlaps;
+    /// sub-threshold needles are left unapplied; text with no match is
+    /// returned unchanged.
+    /// Test: itself.
+    #[test]
+    fn contract_scrub_secrets_removes_every_qualifying_needle() {
+        let long = "sk-abcdefghijklmnop"; // pragma: allowlist secret
+        let prefix = "sk-abcdefgh"; // a prefix of `long`, itself over the floor
+
+        // Postcondition: no occurrence of a qualifying needle survives.
+        let text = format!("first {long} then {long} again");
+        let out = scrub_secrets(&text, &[long]);
+        assert!(!out.contains(long), "every occurrence must go: {out}");
+        assert_eq!(out.matches(REDACTED).count(), 2);
+
+        // Postcondition: longest-first, so the longer secret cannot leave its
+        // tail behind when a prefix of it is also a needle.
+        let out = scrub_secrets(long, &[prefix, long]);
+        assert!(!out.contains(prefix), "prefix leaked: {out}");
+        assert!(
+            !out.contains("ijklmnop"),
+            "tail of the longer secret leaked: {out}"
+        );
+
+        // Postcondition: a needle under MIN_SCRUBBABLE_SECRET_CHARS is skipped,
+        // empty string included — otherwise it would blank the message.
+        let short = "abc";
+        assert!(short.chars().count() < MIN_SCRUBBABLE_SECRET_CHARS);
+        let diagnostic = "connection to abc-host refused";
+        assert_eq!(scrub_secrets(diagnostic, &[short, ""]), diagnostic);
+
+        // Postcondition: unchanged when nothing matches.
+        assert_eq!(scrub_secrets(diagnostic, &[long]), diagnostic);
+        assert_eq!(scrub_secrets(diagnostic, &[] as &[&str]), diagnostic);
+    }
 
     /// Why: pins the exact format `memory_core::filter` depends on.
     /// Test: itself.
@@ -291,7 +427,17 @@ mod tests {
     /// usable as a needle set — never that a particular provider is
     /// configured, which depends on the machine running the test.
     /// Test: itself.
+    ///
+    /// [`resolved_secret_values`] calls `load_env_local_once`, which folds the
+    /// machine's real `.env.local` into the PROCESS environment. Held no lock
+    /// until now, so it raced `credentials::resolver::tests`: firing the loader
+    /// between that test's `remove_var` and its `load_env_from_path` republished
+    /// the real `OPENROUTER_API_KEY`, `dotenvy` then declined to override it,
+    /// and the assertion printed a live key into test output. Join the same
+    /// `dotenv_credential_env` group as every other test that reads or writes a
+    /// credential env var — this test is a WRITER of them, via the loader.
     #[test]
+    #[serial_test::serial(dotenv_credential_env)]
     fn resolved_secret_values_are_scrubbable_by_scrub_secrets() {
         let values = resolved_secret_values();
         assert!(

@@ -6,7 +6,7 @@
 //! rust-engineer" regardless of what kind of file the PM was actually trying
 //! to touch. That is misleading for every non-Rust target — a blocked `.md`
 //! edit routed to rust-engineer, a blocked `.py` edit too. The target path
-//! (already resolved by the caller — [`super::pm_guard::edit_tool_target_path`]
+//! (already resolved by the caller — `super::pm_guard::edit_tool_target_path`
 //! for Edit/Write/MultiEdit/NotebookEdit, or a best-effort extraction from the
 //! Bash command for shell-based edits) is a cheap, reliable signal for which
 //! specialist should actually receive the delegated work.

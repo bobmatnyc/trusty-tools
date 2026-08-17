@@ -526,7 +526,11 @@ pub(crate) fn emit_top_level_alias_notice() {
 /// not in a git repo or the remote URL is not a GitHub URL.
 /// Test: `derive_source_id_from_cwd_returns_none_without_git` (unit).
 fn derive_source_id_from_path(dir: &std::path::Path) -> Option<String> {
-    let url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(dir)?;
+    // #4734: a `--current` filter has nothing to fall back to either way, so an
+    // unreadable remote and an absent one both yield no filter here.
+    let url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(dir)
+        .ok()
+        .flatten()?;
     let gh = trusty_common::github_path::parse_github_path(&url)?;
     Some(format!("{}/{}", gh.owner, gh.repo))
 }
@@ -610,9 +614,9 @@ async fn info_from_managed_store(
 /// the display and the stash must both come from it.
 /// #4832: `fw` is gone — the pipeline no longer reads a framework path, so the
 /// parameter had no remaining use.
-/// What: builds a [`PipelineInput`] and runs [`build_instructions`] to ensure
+/// What: builds a `PipelineInput` and runs `build_instructions` to ensure
 /// `CLAUDE.md` is seeded (the side-effect we still need); resolves the PM prompt
-/// via [`crate::core::instruction_overrides::resolve_pm_prompt`]; writes it to
+/// via `crate::core::instruction_overrides::resolve_pm_prompt`; writes it to
 /// `<project>/.trusty-mpm/last-instructions.md`; returns the resolved prompt text,
 /// the `PipelineOutput` metadata flags, and the stash path.
 /// Test: `compose_session_instructions_display_matches_stash`,

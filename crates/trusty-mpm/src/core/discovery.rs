@@ -65,7 +65,7 @@ use crate::core::paths::FRAMEWORK_DIR_NAME;
 /// never bound. Hoisting the port into a single constant — and deriving every
 /// other default address string from it — makes the bind side and the client
 /// side provably agree from one source of truth.
-/// What: the literal `"127.0.0.1:7880"`, parsed into a [`SocketAddr`] by
+/// What: the literal `"127.0.0.1:7880"`, parsed into a `SocketAddr` by
 /// [`default_daemon_addr`] and embedded into [`DEFAULT_DAEMON_URL`].
 /// Test: `default_url_matches_addr`, `default_addr_parses`.
 pub const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:7880";
@@ -77,7 +77,7 @@ pub const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:7880";
 /// What: `"http://127.0.0.1:7880"` — the `http://` scheme prepended to
 /// [`DEFAULT_DAEMON_ADDR`]. Kept as a `&'static str` literal (rather than a
 /// runtime `format!`) so it remains usable in `const`/`default_value` contexts;
-/// the [`default_url_matches_addr`] test guarantees the two stay in lockstep.
+/// the `default_url_matches_addr` test guarantees the two stay in lockstep.
 /// Test: `default_url_matches_addr`.
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:7880";
 
@@ -101,9 +101,9 @@ pub const DEFAULT_CONSOLE_ADDR: &str = "127.0.0.1:7788";
 /// Test: `resolve_via_gateway_uses_gateway_when_probe_succeeds`.
 pub const GATEWAY_PATH: &str = "/api/mpm";
 
-/// Parse [`DEFAULT_DAEMON_ADDR`] into a [`SocketAddr`].
+/// Parse [`DEFAULT_DAEMON_ADDR`] into a `SocketAddr`.
 ///
-/// Why: the daemon's clap `--addr` argument is typed as [`SocketAddr`]; this
+/// Why: the daemon's clap `--addr` argument is typed as `SocketAddr`; this
 /// helper lets that default be derived from the shared [`DEFAULT_DAEMON_ADDR`]
 /// constant instead of repeating the literal (issue #1268).
 /// What: parses the constant; the parse is infallible for a well-formed

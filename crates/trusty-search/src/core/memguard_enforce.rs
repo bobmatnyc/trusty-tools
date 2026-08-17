@@ -100,7 +100,7 @@ fn read_rss_anon_kb_for_pid(pid: u32) -> Option<u64> {
 /// question. This is also why [`default_enforcement_measure`] resolves to
 /// `Total` on macOS: there, "total" (via `phys_footprint`) already IS the
 /// anon-equivalent measure, so a distinct "anon" mode would just alias it.
-/// What: `None` if `pid == 0`. On Linux, [`read_rss_anon_kb_for_pid`] divided
+/// What: `None` if `pid == 0`. On Linux, `read_rss_anon_kb_for_pid` divided
 /// to MB (truncating). On every other platform, delegates to
 /// [`current_rss_mb_for_pid`] per the rationale above.
 /// Test: `tests::test_anon_rss_for_pid_zero_returns_none`,

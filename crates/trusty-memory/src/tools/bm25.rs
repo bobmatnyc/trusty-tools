@@ -1,81 +1,27 @@
 //! BM25 lexical-lane helpers for the trusty-memory MCP tool surface.
 //!
-//! Why: the optional BM25 lane (issue #156/#193/#231) — per-palace data dir,
-//! supervisor wake-up, the bounded index worker + enqueue path, the optional
-//! search lane, and RRF fusion — is a self-contained concern split out of the
-//! former monolithic `tools.rs` (issue #607).
+//! Why: the optional BM25 lane (issue #156/#193/#231) — the bounded index
+//! worker and enqueue path, the optional search lane, and RRF fusion — is a
+//! self-contained concern split out of the former monolithic `tools.rs`
+//! (issue #607).
 //! What: free functions + the `Bm25IndexRequest` payload + queue-capacity
-//! constant, moved verbatim. Visibility is unchanged from the original.
-//! Test: `bm25_index_queue_drops_when_full` and the daemon integration tests
-//! in `trusty-bm25-daemon/tests/`.
+//! constant. Since #5329 every operation runs against the in-process
+//! [`Bm25Lane`](crate::bm25_lane::Bm25Lane) rather than a per-palace subprocess
+//! reached over a socket.
+//! Test: `bm25_index_queue_drops_when_full`, `bm25_lane_tests.rs`, and
+//! `tests/bm25_alias_recall.rs` / `tests/bm25_alias_write.rs`.
 
+use crate::bm25_lane::BM25Hit;
 use crate::AppState;
 use serde_json::{json, Value};
-use trusty_common::bm25_client::Bm25Client;
 use uuid::Uuid;
 
-/// Per-palace BM25 data directory derived from the daemon's data root.
-///
-/// Why (issue #193): the spawn supervisor must hand the BM25 daemon a
-/// data-dir argument so each palace's BM25 snapshot lives next to its
-/// other palace data (redb, kg.db, embeddings) — not in a shared scratch
-/// directory. The convention is `<data_root>/<palace>/bm25/`, which is
-/// stable across daemon restarts and lets operators inspect the snapshot
-/// file alongside everything else in the palace.
-/// What: appends `<palace>/bm25` to the daemon's `data_root`. Pure path
-/// arithmetic — no I/O. The supervisor itself creates the directory
-/// before spawning the child.
-/// Test: implicitly via the spawn supervisor's integration test.
-pub(crate) fn bm25_data_dir_for_palace(state: &AppState, palace: &str) -> std::path::PathBuf {
-    state.data_root.join(palace).join("bm25")
-}
-
-/// Resolve a BM25 client bound to **this palace's** socket, starting the
-/// daemon if necessary. `None` means "do not use the lexical lane".
-///
-/// Why (#5036): the lane is per-palace everywhere except the client. Each
-/// palace gets its own daemon, its own snapshot, and its own socket
-/// (`socket_path_for_palace`), and `bm25_backfill` indexes each palace through
-/// the socket the supervisor hands back. `AppState::bm25_client`, though, is
-/// built exactly once — `Bm25Client::for_palace(default_palace)` — so every
-/// search and every live index op went to the DEFAULT palace's socket no
-/// matter which palace was being queried. The predecessor of this function
-/// returned a bare `bool` and threw the supervisor's socket away, which is how
-/// the two drifted apart. The consequence is worse than a miss: a search for
-/// palace X reads a corpus the backfill never wrote to (silently empty), while
-/// a write for palace X lands in the default palace's corpus (silently
-/// cross-indexed). Handing back the socket the supervisor actually resolved is
-/// what keeps read, write, and backfill pointed at one index.
-/// What: `None` when the lane is off (`bm25_client` is `None` — the
-/// `TRUSTY_BM25_DAEMON=1` gate) or when the supervisor could not start the
-/// daemon, in which case the caller degrades to vector-only exactly as before.
-/// With no supervisor (`TRUSTY_BM25_EXTERNAL=1`), falls back to the canonical
-/// per-palace socket path, which is the convention an out-of-band operator
-/// follows anyway.
-/// Test: `bm25_alias_recall.rs::an_aliased_recall_reads_the_corpus_the_backfill_wrote`
-/// exercises it against a non-default, aliased palace — the case the old code
-/// got wrong twice over.
-pub(crate) async fn bm25_client_for_palace(state: &AppState, palace: &str) -> Option<Bm25Client> {
-    // The lane gate. The client's own socket is deliberately unused — it is
-    // pinned to the default palace and is only a proxy for "lane enabled".
-    state.bm25_client.as_ref()?;
-    let Some(supervisor) = state.bm25_supervisor.as_ref() else {
-        // No supervisor (TRUSTY_BM25_EXTERNAL=1) — address the palace's
-        // canonical socket, which is where an out-of-band operator puts it.
-        return Some(Bm25Client::for_palace(palace));
-    };
-    let data_dir = bm25_data_dir_for_palace(state, palace);
-    match supervisor.ensure_running(palace, &data_dir).await {
-        Ok(socket) => Some(Bm25Client::new(socket)),
-        Err(e) => {
-            tracing::warn!(
-                palace = %palace,
-                "bm25 supervisor could not start daemon (degrading to vector-only): {e:#}"
-            );
-            None
-        }
-    }
-}
+// Why (#5329): `bm25_data_dir_for_palace` was REMOVED from this module. It
+// existed so the enqueue path could put a `data_dir` on every request for the
+// supervisor to hand the child as `--data-dir`. The lane derives the path from
+// its own data root, so the request no longer carries it and nothing here needs
+// to compute it. The path arithmetic itself lives on in
+// `crate::bm25_lane::data_dir_for_palace`, unchanged.
 
 /// Bounded-queue capacity for the BM25 index worker (issue #231).
 ///
@@ -105,19 +51,15 @@ pub const BM25_INDEX_QUEUE_CAPACITY: usize = 256;
 /// What: a plain owned-data struct. `Clone` is not derived — the worker
 /// consumes each request exactly once.
 /// Test: exercised end-to-end by `bm25_index_queue_drops_when_full` and
-/// the integration tests in `trusty-bm25-daemon/tests/`.
+/// `tests/bm25_alias_write.rs`.
 #[derive(Debug)]
 pub struct Bm25IndexRequest {
-    /// Palace id whose daemon should index the drawer.
+    /// Palace id whose index should hold the drawer.
     pub palace: String,
-    /// Drawer id (stringified) — the daemon uses this as the BM25 doc id.
+    /// Drawer id (stringified) — used as the BM25 doc id.
     pub drawer_id: String,
     /// Drawer text content to index.
     pub content: String,
-    /// On-disk data directory for the palace's BM25 daemon — passed to the
-    /// spawn supervisor's `ensure_running` so the daemon writes its snapshot
-    /// next to the rest of the palace's data.
-    pub data_dir: std::path::PathBuf,
 }
 
 /// Spawn the single long-lived BM25 indexer worker that drains
@@ -130,65 +72,39 @@ pub struct Bm25IndexRequest {
 /// is full, writers `try_send` instead of `send`, and a full queue causes
 /// a logged drop rather than memory growth. The worker exits gracefully
 /// once the last sender clone (held in `AppState`) is dropped.
-/// What: takes ownership of the receiver and the optional BM25 client +
-/// supervisor `Arc`s, then loops on `rx.recv().await`. For each request,
-/// `ensure_running`s the per-palace daemon (logging + skipping on failure)
-/// and calls `index()` on a client bound to THAT palace's socket — the
-/// captured `client` is only the lane's on/off gate (#5036), because it is
-/// pinned to the default palace. Errors are logged at `warn!` and dropped —
-/// BM25 indexing is best-effort and the drawer is durable in redb regardless.
-/// If `client` is `None` (env var not set at startup) the worker still runs
-/// and silently drops every request, which keeps the channel drained — that is
-/// not a coverage gap, because the lane is off.
-/// A request the worker accepts but cannot land (daemon spawn refused, index
-/// call failed) DOES mark the palace in `dirty`, so the repair sweep re-runs
-/// the backfill instead of the gap surviving until the next restart.
-/// Test: indirectly covered by the integration tests in
-/// `trusty-bm25-daemon/tests/`; `bm25_index_queue_drops_when_full` covers the
-/// back-pressure behaviour.
+/// What: takes ownership of the receiver and the optional lane, then loops on
+/// `rx.recv().await`, calling [`Bm25Lane::index`](crate::bm25_lane::Bm25Lane::index)
+/// for each request. #5329 removed the spawn step that used to sit in front of
+/// that call, and with it the "supervisor refused to start a daemon" failure
+/// arm — the only remaining failure is a snapshot the lane cannot load.
+/// Errors are logged at `warn!` and dropped: BM25 indexing is best-effort and
+/// the drawer is durable in redb regardless.
+/// If `lane` is `None` (the gate was unset at startup) the worker still runs
+/// and silently drops every request, which keeps the channel drained — not a
+/// coverage gap, because the lane is off.
+/// A request the worker accepts but cannot land DOES mark the palace in
+/// `dirty`, so the repair sweep re-runs the backfill instead of the gap
+/// surviving until the next restart.
+/// Test: `bm25_index_queue_drops_when_full` covers the back-pressure behaviour;
+/// `tests/bm25_alias_write.rs` drives a real write through to the corpus.
 pub fn spawn_bm25_index_worker(
     mut rx: tokio::sync::mpsc::Receiver<Bm25IndexRequest>,
-    client: Option<std::sync::Arc<trusty_common::bm25_client::Bm25Client>>,
-    supervisor: Option<std::sync::Arc<crate::bm25_supervisor::Bm25Supervisor>>,
+    lane: Option<std::sync::Arc<crate::bm25_lane::Bm25Lane>>,
     dirty: crate::bm25_repair::DirtyPalaces,
 ) {
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
-            // No client means the BM25 lane is disabled — drain the queue
-            // (so senders never block) and silently drop every request.
-            if client.is_none() {
+            // No lane means BM25 is disabled — drain the queue (so senders
+            // never block) and silently drop every request.
+            let Some(lane) = lane.as_ref() else {
                 continue;
-            }
-            // Issue #193: try to start the daemon before the first index
-            // call. If the supervisor returns an error we skip this op;
-            // the daemon will be retried on the next request.
-            // #5036: index through the socket the supervisor resolved for THIS
-            // palace. The captured `client` is pinned to the default palace, so
-            // using it here filed every palace's drawers into one corpus.
-            let per_palace = if let Some(sup) = supervisor.as_ref() {
-                match sup.ensure_running(&req.palace, &req.data_dir).await {
-                    Ok(socket) => Bm25Client::new(socket),
-                    Err(e) => {
-                        // The write did not land. Same reasoning as the dropped
-                        // enqueue: queue the palace so a repair pass re-runs the
-                        // backfill rather than leaving the gap until restart.
-                        dirty.insert(req.palace.clone());
-                        tracing::warn!(
-                            palace = %req.palace,
-                            "bm25 supervisor failed to start daemon for index (non-fatal): {e:#}"
-                        );
-                        continue;
-                    }
-                }
-            } else {
-                Bm25Client::for_palace(&req.palace)
             };
-            if let Err(e) = per_palace.index(&req.drawer_id, &req.content).await {
+            if let Err(e) = lane.index(&req.palace, &req.drawer_id, &req.content).await {
                 dirty.insert(req.palace.clone());
                 tracing::warn!(
                     palace = %req.palace,
                     drawer_id = %req.drawer_id,
-                    "bm25 daemon index failed (non-fatal): {e:#}"
+                    "bm25 index failed (non-fatal): {e:#}"
                 );
             }
         }
@@ -200,16 +116,16 @@ pub fn spawn_bm25_index_worker(
 /// #231; supersedes the per-write `tokio::spawn` from issue #156).
 ///
 /// Why: `memory_remember` / `memory_note` must return as fast as the redb
-/// write completes; the daemon RTT must stay off the response path. Routing
-/// each request through a bounded mpsc channel keeps that property *and*
-/// caps in-flight indexing work — under a sustained burst with a slow daemon
-/// the previous design grew an unbounded task queue, which #231 fixes here.
+/// write completes; indexing must stay off the response path. Routing each
+/// request through a bounded mpsc channel keeps that property *and* caps
+/// in-flight indexing work — the previous design grew an unbounded task queue,
+/// which #231 fixes here.
 /// What: builds a `Bm25IndexRequest` from the caller's data and calls
 /// `try_send` so the caller is never blocked. BOTH failure arms — `Full` and
 /// `Closed` — drop the request and queue the palace for coverage repair; the
 /// drawer is durable in redb either way, and BM25 catches up on the next repair
 /// pass. `Closed` shouldn't happen in practice (the worker holds the receiver
-/// for the daemon's lifetime), but it loses the write exactly as completely as
+/// for the process's lifetime), but it loses the write exactly as completely as
 /// `Full` does, so it is not treated as the lesser case. We never let a BM25
 /// hiccup fail a write.
 /// Test: `bm25_index_queue_drops_when_full`,
@@ -219,7 +135,6 @@ pub(crate) fn bm25_index_enqueue(state: &AppState, palace: &str, drawer_id: Uuid
         palace: palace.to_string(),
         drawer_id: drawer_id.to_string(),
         content: content.to_string(),
-        data_dir: bm25_data_dir_for_palace(state, palace),
     };
     match state.bm25_index_tx.try_send(req) {
         Ok(()) => {}
@@ -252,40 +167,92 @@ pub(crate) fn bm25_index_enqueue(state: &AppState, palace: &str, drawer_id: Uuid
     }
 }
 
+/// Delete a forgotten drawer's document from the palace's BM25 corpus.
+///
+/// Why (#5053): forgetting a drawer removed it from redb and the vector store
+/// and left the lexical lane untouched, so the content stayed matchable by
+/// BM25 for the life of the corpus — a deletion the daemon reported as
+/// complete on one lane while another still held the text. It also kept the
+/// text resident: `PalaceBm25Index` retains every document's full string.
+/// This is the one BM25 op that does NOT go through
+/// [`bm25_index_enqueue`]'s bounded queue. The queue's drop-on-full trade is
+/// defensible for an index because [`crate::bm25_repair`] re-runs the backfill
+/// and the write lands late; backfill is additive, so nothing anywhere
+/// re-attempts a dropped DELETE. Trading a deletion for latency would put the
+/// contract back where this issue found it, and `memory_forget` is a rare,
+/// explicit user action — applying it inline is the right price.
+/// What: `Ok(())` when the lane is off (`bm25` is `None` — the
+/// `TRUSTY_BM25_DAEMON` gate), because a lane that was never armed holds no
+/// corpus to delete from. When the lane IS armed but the delete fails, this
+/// returns `Err` rather than the `None`-shaped shrug
+/// [`bm25_search_optional`] hands its search callers: a delete that did not
+/// apply means the document's fate is unknown, and reporting a deletion we
+/// could not perform is the failure this function exists to prevent.
+/// [`Bm25Lane::delete`](crate::bm25_lane::Bm25Lane::delete) is idempotent, so a
+/// caller retrying a partly-failed forget always completes.
+///
+/// #5329: the delete used to cross a UDS to the per-palace subprocess, which
+/// added "the daemon is unreachable" as a distinct failure. The lane is
+/// in-process now, so the only way to fail is a corpus that cannot be loaded or
+/// persisted — the `Err` arm still exists, and still means the same thing to
+/// the caller.
+///
+/// Limit worth stating: with the lane disabled, a snapshot written by an
+/// earlier armed run keeps the drawer's text on disk under
+/// `<data_root>/<palace>/bm25/`. Reaching it would mean loading a corpus for a
+/// lane the operator turned off; see #5036 / #5186 for the lane-availability
+/// work that owns that case.
+/// Test: `tests/bm25_forget_delete.rs::a_forgotten_drawer_leaves_the_lexical_corpus`
+/// drives it against a real corpus;
+/// `forget_fails_loudly_when_the_lexical_lane_cannot_confirm_the_delete` and
+/// `forget_succeeds_when_the_lexical_lane_is_disabled` pin the two gates.
+pub(crate) async fn bm25_delete_document(
+    state: &AppState,
+    palace: &str,
+    drawer_id: Uuid,
+) -> anyhow::Result<()> {
+    // The lane gate, read the same way `bm25_search_optional` reads it: no lane
+    // means no corpus was ever written for this process to delete from.
+    let Some(lane) = state.bm25.as_ref() else {
+        return Ok(());
+    };
+    let doc_id = drawer_id.to_string();
+    lane.delete(palace, &doc_id).await.map_err(|e| {
+        anyhow::anyhow!(
+            "bm25 delete failed for drawer {doc_id} in palace '{palace}' — \
+             it may still be lexically searchable: {e:#}"
+        )
+    })
+}
+
 /// Optional BM25 search lane used by `memory_recall` (issue #156).
 ///
 /// Why: lets the recall handler join a BM25 future with the vector future
-/// without sprinkling `if state.bm25_client.is_some()` checks across the
-/// call site. Returning `Option<Vec<_>>` makes the "daemon unavailable"
-/// branch explicit at the consumer.
-/// What: returns `None` when the env-var-gated client is absent OR when the
-/// daemon errors (treated as a graceful degradation — the caller falls back
-/// to vector-only results). Otherwise ensures the daemon is running via the
-/// spawn supervisor (issue #193), then returns the BM25 hits the daemon
-/// served. `top_k` is forwarded verbatim.
+/// without sprinkling `if state.bm25.is_some()` checks across the call site.
+/// Returning `Option<Vec<_>>` makes the "lane unavailable" branch explicit at
+/// the consumer.
+/// What: returns `None` when the lane is off OR when the palace's index cannot
+/// be loaded — both degrade to vector-only results. `top_k` is forwarded
+/// verbatim.
 /// #5036: `palace` must be the RESOLVED palace id (`handle.id`), not the slug
 /// the caller asked for — `open_palace` follows aliases, so the two differ for
 /// an aliased palace and the corpus the backfill wrote is the resolved one's.
-/// Test: integration coverage via the daemon's `tests/bm25_daemon.rs` and
-/// `bm25_alias_recall.rs`; the `None` path is covered by
-/// `bm25_client_disabled_by_default`.
+/// Test: `tests/bm25_alias_recall.rs`; the `None` path is covered by
+/// `bm25_lane_disabled_by_default`.
 pub(crate) async fn bm25_search_optional(
     state: &AppState,
     palace: &str,
     query: &str,
     top_k: usize,
-) -> Option<Vec<trusty_common::bm25_client::BM25Hit>> {
-    // Issue #193: spawn the daemon if it isn't already running. On error
-    // we fall through to vector-only behaviour exactly as we did before
-    // #193 when the operator forgot to start the daemon manually.
-    // #5036: and search the socket belonging to `palace`, not the default one.
-    let client = bm25_client_for_palace(state, palace).await?;
-    match client.search(query, top_k).await {
+) -> Option<Vec<BM25Hit>> {
+    // #5036: search the corpus belonging to `palace`, not the default one.
+    let lane = state.bm25.as_ref()?;
+    match lane.search(palace, query, top_k).await {
         Ok(hits) => Some(hits),
         Err(e) => {
             tracing::warn!(
                 palace = %palace,
-                "bm25 daemon search failed (falling back to vector-only): {e:#}"
+                "bm25 search failed (falling back to vector-only): {e:#}"
             );
             None
         }
@@ -304,11 +271,11 @@ pub(crate) async fn bm25_search_optional(
 /// appended with `layer = 4` so the caller knows they came from the lexical
 /// lane (L0/L1/L2/L3 are reserved). The combined list is re-sorted by score
 /// desc and truncated to `top_k`.
-/// Test: integration coverage via the daemon's `tests/bm25_daemon.rs` plus
+/// Test: `tests/bm25_alias_recall.rs` plus
 /// downstream RRF behaviour observed end-to-end.
 pub(crate) fn fuse_bm25_into_recall(
     results: &mut Vec<trusty_common::memory_core::retrieval::RecallResult>,
-    bm25_hits: &[trusty_common::bm25_client::BM25Hit],
+    bm25_hits: &[BM25Hit],
     top_k: usize,
 ) {
     /// RRF damping constant (Cormack et al. 2009). 60 is the literature
@@ -364,7 +331,7 @@ pub(crate) fn fuse_bm25_into_recall(
 /// Test: `bm25_hits_hydrate_from_handle_during_warmup`.
 pub(crate) fn bm25_hits_to_recall_results(
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
-    bm25_hits: &[trusty_common::bm25_client::BM25Hit],
+    bm25_hits: &[BM25Hit],
 ) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
     let drawers = handle.drawers.read();
     bm25_hits

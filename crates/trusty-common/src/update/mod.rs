@@ -16,6 +16,8 @@
 //! `None` — the check is best-effort and must never panic or stall a CLI.
 //!
 //! Test: `cargo test -p trusty-common --features update-check`.
+//!
+//! [`check_throttled`]: crate::update::check_throttled
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -400,6 +402,14 @@ pub async fn check_throttled(crate_name: &str, current_version: &str) -> Option<
 /// What: See each function's own doc comment in `upgrade.rs`.
 /// Test: `cargo test -p trusty-common --features update-check`.
 pub mod upgrade;
+
+/// Cargo ownership guard (#5777): move-aside/restore around `cargo install`
+/// so a downloader-placed, cargo-untracked binary never makes cargo exit 101.
+///
+/// Why: extracted to its own file to keep `upgrade.rs` under the 500-SLOC cap.
+/// What: see `cargo_guard.rs`'s module doc.
+/// Test: `cargo test -p trusty-common --features update-check cargo_guard`.
+pub(crate) mod cargo_guard;
 
 pub use upgrade::{
     is_launchd_supervised, perform_upgrade, perform_upgrade_captured, upgrade_and_restart,

@@ -148,17 +148,13 @@ fn scan_one_root(search_dir: &Path, map: &mut HashMap<String, PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+    use crate::project_root::{write_project_pin, ProjectPin};
     use std::fs;
 
     /// Helper: write a minimal pin file claiming `palace_id` under
     /// `project_dir/.trusty-tools/trusty-memory.yaml`.
     fn write_pin(project_dir: &Path, palace_id: &str) {
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: palace_id.to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new(palace_id.to_string());
         write_project_pin(project_dir, &pin).expect("write_pin test helper");
     }
 

@@ -5,7 +5,7 @@
 //! Each actor runs a `select!` loop over an `mpsc` command inbox and the
 //! backend's `recv()` future; it forwards output to the broadcast channel and
 //! transitions the lifecycle state machine.
-//! What: [`SessionActor`] holds a backend, a command receiver, and a broadcast
+//! What: `SessionActor` holds a backend, a command receiver, and a broadcast
 //! sender. [`ActorCommand`] is the inbox type. [`run_actor`] is the task entry
 //! point. [`SessionActorHandle`] is the registry-visible handle (command sender,
 //! event sender, write-lock flag, and metadata Arc). WI-3 adds critical-observer

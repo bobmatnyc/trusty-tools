@@ -418,7 +418,7 @@ pub use pane::{PANE_DISCLAIM_SUBCOMMAND, disclaim_pane_command};
 /// whether managed panes can actually disclaim — a future macOS that dropped
 /// the SPI would silently degrade the whole fix to a no-op, and that should be
 /// surfaced, not invisible.
-/// What: `true` on macOS when [`macos::resolve_disclaim_fn`] finds the symbol;
+/// What: `true` on macOS when `macos::resolve_disclaim_fn` finds the symbol;
 /// `false` on every non-macOS build (there is no TCC there).
 /// Test: `daemon::doctor`'s `tcc_taint_*` checks fold this into the verdict;
 /// direct coverage lives in the capture/status/piped spawn tests that only

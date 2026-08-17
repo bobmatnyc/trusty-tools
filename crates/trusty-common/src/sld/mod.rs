@@ -30,6 +30,13 @@
 //!
 //! Test: `cargo test -p trusty-common --features sld` runs `mod tests` (grammar,
 //! comment, inline, frontmatter, anchor), no I/O.
+//!
+//! [`grammar`]: crate::sld::grammar
+//! [`comment`]: crate::sld::comment
+//! [`CommentSyntax`]: crate::sld::CommentSyntax
+//! [`inline`]: crate::sld::inline
+//! [`frontmatter`]: crate::sld::frontmatter
+//! [`anchor`]: crate::sld::anchor
 
 pub mod anchor;
 pub mod comment;

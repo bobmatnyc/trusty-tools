@@ -63,7 +63,7 @@ pub struct StoredEvent {
 ///
 /// (#3922 recurrence guard) `#[cfg(test)]`-only: panics if a test reaches
 /// this `$HOME`-reading production path without the CALLING thread holding
-/// `crate::test_env::HOME_LOCK` via [`crate::test_env::lock_home`]. Why:
+/// `crate::test_env::HOME_LOCK` via `crate::test_env::lock_home`. Why:
 /// this function used to be the ONLY seam `EventStore`'s tests had for
 /// isolation, so every test that wanted its own directory had to mutate the
 /// process-global `$HOME` under `HOME_LOCK` — but nothing stopped some

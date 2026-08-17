@@ -317,7 +317,7 @@ fn unsupervised_daemon_error() -> anyhow::Error {
 /// reads `.env.local`, then `.env`, then the environment). When a token is found
 /// the supervised bot loop ([`trusty_mpm::telegram::run_supervised`]) is spawned
 /// on a tokio task pointed at `base_url`, cancellable via the returned
-/// [`CancellationToken`] so graceful shutdown can stop it; when absent a single
+/// `CancellationToken` so graceful shutdown can stop it; when absent a single
 /// warning is logged and the daemon continues. Returns the token (or `None` when
 /// no bot was started) so the caller can cancel it on shutdown.
 /// Test: token resolution is covered by `trusty-mpm-telegram`'s

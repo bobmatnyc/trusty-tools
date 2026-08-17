@@ -61,8 +61,9 @@ async fn reap_orphaned_worktrees_removes_orphan_preserves_live() {
     std::fs::write(
         orphan_wt.join(super::decommission::WORKTREE_SENTINEL_FILE),
         serde_json::to_vec(&super::worktree_ownership::WorktreeSentinel {
-            owner_session_id: ManagedSessionId::new(),
+            owner_session_id: Some(ManagedSessionId::new()),
             created_at: aged,
+            agent: None,
         })
         .expect("serialize aged sentinel"),
     )

@@ -220,12 +220,15 @@ async fn run_managed(
 
     // #5274: `tm run` targets an already-resolved managed checkout, so the
     // session runs there directly; it carries no operator worktree request.
+    // #5836: `ensure_managed_checkout` IS the resolution, so say so rather than
+    // let `provision_for_launch` redo it against a differently-spelled path.
     super::launch::launch(
         client,
         url,
         Some(checkout.base_path.to_string_lossy().into_owned()),
         None,
         false,
+        super::managed_workspace::LaunchDir::CallerResolved,
     )
     .await
 }

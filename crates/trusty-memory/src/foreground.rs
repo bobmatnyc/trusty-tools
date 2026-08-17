@@ -1,9 +1,10 @@
 //! Supervised `serve --foreground` entry point (issue #787).
 //!
-//! Why: extracted from `lib.rs` to keep that file under the 500-line-cap
-//! ratchet budget. All three issue-#787 fixes (lock file ownership, http_addr
-//! guarantee, bind-abort-on-collision) live here so they are easy to find and
-//! test together.
+//! Why: launchd supervisors need loud failure on port collision, not silent
+//! port-walking to 7071+. Extracted from `lib.rs` to keep that file under the
+//! 500-line-cap ratchet budget. All three issue-#787 fixes (lock file
+//! ownership, http_addr guarantee, bind-abort-on-collision) live here so they
+//! are easy to find and test together.
 //! What: exports `bind_foreground_port` (Fix C) and `run_http_foreground`
 //! (Fix A + Fix B + Fix C combined entry point) for use by `main.rs`.
 //! Test: `bind_foreground_port_refuses_collision` (unit, real TCP bind);

@@ -145,7 +145,7 @@ impl ManagedSessionState {
     /// serializes it); this lets them ask the ENUM about terminality (via
     /// [`is_terminal`](Self::is_terminal)) instead of re-hardcoding a token list
     /// that a new terminal variant would silently slip past. The tokens are the
-    /// inverse of [`Display`](Self::fmt)/serde `rename_all = "snake_case"`.
+    /// inverse of `Display`/serde `rename_all = "snake_case"`.
     /// What: `Some(state)` for a recognised token, `None` for anything else.
     /// Test: `from_wire_round_trips_every_variant` in `super::record`'s tests.
     pub fn from_wire(token: &str) -> Option<Self> {
@@ -227,7 +227,7 @@ pub struct SessionRecord {
     /// across daemon restarts and resume cycles.
     ///
     /// `#[serde(default)]` makes records persisted before this field existed
-    /// deserialize to [`RuntimeKind::ClaudeCode`] — the pre-#1203 behavior — so
+    /// deserialize to [`RuntimeKind::ClaudeCode`](crate::runtime::RuntimeKind::ClaudeCode) — the pre-#1203 behavior — so
     /// old sessions resume on Claude Code exactly as before.
     #[serde(default)]
     pub runtime: crate::runtime::RuntimeKind,
@@ -237,7 +237,7 @@ pub struct SessionRecord {
     /// Why (#1508): the store was monotonically append-only and accumulated 239
     /// stale TEST sessions because there was no way to mark a session as
     /// throwaway and no bulk teardown. Tagging a session at creation lets
-    /// [`SessionManager::decommission_all_ephemeral`] and the age-based reaper
+    /// [`SessionManager::decommission_all_ephemeral`](crate::session_manager::SessionManager::decommission_all_ephemeral) and the age-based reaper
     /// target ONLY test sessions — REAL sessions default `false` and so are
     /// unreachable by either automatic path (the core safety invariant).
     ///

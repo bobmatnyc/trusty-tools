@@ -21,9 +21,10 @@
 //! write/exec script construct, balanced quotes) to be allowed. The sibling
 //! [`persistence`] module runs the one ALLOW-list here — the agent-cost stop's
 //! escape hatch (#4837) — and is default-deny in the opposite direction. The
-//! sibling [`main_checkout`] module carries the second rule `pm_guard` calls
+//! sibling [`main_checkout`] module carries the rules `pm_guard` calls
 //! directly, ahead of the subagent exemptions: whole-tree-destructive git
-//! verbs aimed at a project's main checkout (ADR-0037).
+//! verbs aimed at a project's main checkout (ADR-0037), `git commit` there,
+//! and the HEAD-moving `pull`/`merge`/`rebase` (ADR-0048).
 //! Test: `evaluate_bash_command_*`, `split_shell_segments_*`, and
 //! `has_file_write_redirection_*` in this module's `tests` submodule;
 //! `sed_awk::tests` for the sed/awk-specific safety analysis.
@@ -33,7 +34,10 @@ mod persistence;
 mod sed_awk;
 mod shell_lex;
 
-pub(crate) use main_checkout::evaluate_main_checkout_destructive_command;
+pub(crate) use main_checkout::{
+    CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,
+    evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
+};
 pub(crate) use persistence::command_is_persistence_only;
 
 use std::path::{Path, PathBuf};
@@ -528,7 +532,7 @@ const WORKTREE_ADD_FLAGS_WITH_ARG: &[&str] = &["-b", "-B", "--reason"];
 ///
 /// Why: this is the ONE piece of policy that must be called directly from
 /// `pm_guard()` **before** its Guard 4 subagent-exemption early return, NOT
-/// routed through [`evaluate_tool`]/[`evaluate_bash_command`] like every other
+/// routed through [`evaluate_tool`](crate::commands::pm_guard::evaluate_tool)/[`evaluate_bash_command`] like every other
 /// Bash rule in this module. `evaluate_bash_command` is the sole callee of
 /// `evaluate_tool`, which Guard 4 never reaches for a payload carrying a
 /// non-empty `agent_id` — i.e. every native Task/Agent-dispatched subagent,

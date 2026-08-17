@@ -53,7 +53,7 @@ pub enum HomeIssueKind {
     /// #4325: the app tried to create the entry at startup and could not
     /// (read-only filesystem, permission denied, no space, a file sitting where
     /// a directory belongs). Startup continues regardless — see
-    /// [`super::provision`].
+    /// [`super::provision`](mod@crate::assistants::provision).
     NotCreatable,
 }
 

@@ -10,15 +10,12 @@
 //! the daemon comes back on the NEW binary only when the plist's
 //! `ProgramArguments[0]` already points at the directory this upgrade wrote to.
 //! `bootout`/`bootstrap` re-exec whatever path the plist names, and nothing on
-//! this path rewrites it. Today the prebuilt branch writes `~/.local/bin` while
-//! the `cargo install` fallback writes `$CARGO_HOME/bin`, so on a host whose
-//! plist was baked from the other directory the bounce costs a downtime window
-//! and brings the SAME OLD BINARY back — while the report still says
-//! "upgraded to X; restarted". That is a false success report, and it is why
-//! Phase 4's plist regeneration is a prerequisite for the guarantee rather than
-//! a cleanup after it. Phase 3 (single destination) removes the divergence that
-//! makes it reachable; until both land, read "restarted" as exactly that and no
-//! more.
+//! this path rewrites it. Since #5777 (Phase 3) both branches write the ONE
+//! canonical `$CARGO_HOME/bin`, so new plists cannot be baked from a second
+//! directory — but a plist baked from `~/.local/bin` before the flip still
+//! respawns that legacy copy, and only Phase 4's plist regeneration /
+//! migration retires it. Until then, read "restarted" as exactly that and no
+//! more on pre-flip hosts.
 //!
 //! What: Gathers candidates (`update_engine`), runs the pure confirm-then-apply
 //! gate (`decide_apply`), and — only on `Apply` — upgrades each member: prebuilt
@@ -199,16 +196,14 @@ pub fn run(
         return 3;
     }
     if exclude_self {
-        // Exclude both the primary name and the transitional alias binary name
-        // so --exclude-self works regardless of which binary the user invoked.
-        // Also exclude "tctl" by binary name as belt-and-suspenders: trusty-installer
-        // is not in stable_set(), so this guard would only fire if the alias were
-        // ever added to the set — but we want to be explicit about the intent.
-        selected.retain(|m| {
-            m.crate_name != "trusty-installer"
-                && m.binary != "trusty-installer"
-                && m.binary != "tctl"
-        });
+        // #5805: this is the live self-exclusion path. trusty-installer IS in
+        // `stable_set()` now, so a bare `tctl upgrade` replaces the running
+        // binary by default and `--exclude-self` is the operator's opt-out —
+        // where before membership it matched nothing and the flag was dead.
+        // `is_control_plane` reads the shared `bin_resolve` table, so the
+        // `tctl` alias is excluded by the same predicate rather than a second
+        // hand-written name list.
+        selected.retain(|m| !m.is_control_plane());
     }
 
     // Build ONE runtime for the whole command: candidate gathering and applying
@@ -353,17 +348,25 @@ impl UpgradeDetail {
         }
     }
 
-    /// Fold a `shadow_check::detect` result into the detail: `None` (clear)
-    /// stays a plain success; `Some(report)` flips `shadow_ok` to `false`
-    /// and carries the actionable message.
-    fn from_shadow(detail: String, shadow: Option<shadow_check::ShadowReport>) -> Self {
-        match shadow {
-            Some(report) => Self {
-                detail,
-                shadow_ok: false,
-                shadow_detail: report.message(),
-            },
-            None => Self::ok(detail),
+    /// Fold a `shadow_check::detect_all` result into the detail: an empty list
+    /// (clear) stays a plain success; any report flips `shadow_ok` to `false`
+    /// and carries every actionable message.
+    ///
+    /// #5805: takes a LIST because the check now covers every binary the
+    /// member places, not just its health-probe name — `tctl` and `tm` can be
+    /// shadowed while the primary name is clear.
+    fn from_shadows(detail: String, shadows: Vec<shadow_check::ShadowReport>) -> Self {
+        if shadows.is_empty() {
+            return Self::ok(detail);
+        }
+        Self {
+            detail,
+            shadow_ok: false,
+            shadow_detail: shadows
+                .iter()
+                .map(|r| r.message())
+                .collect::<Vec<_>>()
+                .join(" | "),
         }
     }
 }
@@ -487,10 +490,10 @@ async fn upgrade_one(
 ) -> anyhow::Result<UpgradeDetail> {
     use crate::download::{self, Outcome};
 
-    // #4964: fall back to the SHARED `canonical_bin_dir()` rather than an
-    // inline `CARGO_HOME` read (one of five copies of the same rule).
+    // #5777: `default_install_dir()` IS the shared canonical cargo bin dir
+    // now, so the old `.or_else(canonical_bin_dir)` second leg (which this
+    // selector made unreachable) is gone rather than dead.
     let install_dir = download::default_install_dir()
-        .or_else(trusty_common::bin_resolve::canonical_bin_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
 
     let outcome = download::try_install_prebuilt(&c.crate_name, &install_dir).await;
@@ -518,11 +521,16 @@ async fn upgrade_one(
                     "upgraded to {version}; {restarted}"
                 )))
             } else {
-                let shadow =
-                    shadow_check::detect(&c.binary, &bin_path, Some(&version), path_env).await;
-                Ok(UpgradeDetail::from_shadow(
+                let shadows = shadow_check::detect_all(
+                    &trusty_common::bin_resolve::installed_binaries(&c.crate_name),
+                    &bin_path,
+                    Some(&version),
+                    path_env,
+                )
+                .await;
+                Ok(UpgradeDetail::from_shadows(
                     format!("upgraded to {version}"),
-                    shadow,
+                    shadows,
                 ))
             }
         }
@@ -556,16 +564,16 @@ async fn upgrade_one(
                 )))
             } else {
                 let reported_version = super::update_engine::extract_version_from_line(&reported);
-                let shadow = shadow_check::detect(
-                    &c.binary,
+                let shadows = shadow_check::detect_all(
+                    &trusty_common::bin_resolve::installed_binaries(&c.crate_name),
                     &bin_path,
                     reported_version.as_deref(),
                     path_env,
                 )
                 .await;
-                Ok(UpgradeDetail::from_shadow(
+                Ok(UpgradeDetail::from_shadows(
                     format!("upgraded to {}", c.latest),
-                    shadow,
+                    shadows,
                 ))
             }
         }

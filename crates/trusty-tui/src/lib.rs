@@ -18,7 +18,7 @@
 //! strings, no cost formula). **Slice 2** (#3414) adds the terminal layer
 //! this doc comment used to say was missing: the panic-safe
 //! [`TerminalGuard`] ([`terminal`]), the generic-over-`TuiEngine` render/event
-//! loop ([`run`]), and the `crossterm` → [`KeyInput`] translation boundary
+//! loop ([`run`](mod@crate::run)), and the `crossterm` → [`KeyInput`] translation boundary
 //! ([`keys`]). `ratatui`/`crossterm` are now real dependencies of this crate
 //! (0.30/0.29 — see `Cargo.toml`'s comment on why that diverges from the
 //! rest of the workspace's 0.29/0.28 pin during the migration window) but
@@ -50,6 +50,12 @@
 //! - [`SPEC-TTUI-02~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-02~draft) — architecture, the engine-adapter seam.
 //! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — extraction and migration plan.
 //! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 1, 2, and 4 deliverables and acceptance criteria.
+
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod app;
 pub mod commands;

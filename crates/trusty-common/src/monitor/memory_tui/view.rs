@@ -250,7 +250,7 @@ pub struct PalaceListRow {
 ///
 /// Why: the PALACES panel lists every palace with its vector count in aligned
 /// columns; isolating the formatter makes the alignment unit-testable. The
-/// selection marker is no longer baked into the row — the [`List`] widget
+/// selection marker is no longer baked into the row — the `List` widget
 /// handles the highlight via `highlight_symbol` + `highlight_style` so there
 /// is no unstyled gutter between the row text and the panel border.
 /// What: returns `<spinner> <name padded to 10>  <count>v`, where `spinner`

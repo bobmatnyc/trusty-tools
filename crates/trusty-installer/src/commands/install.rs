@@ -9,7 +9,8 @@
 //! What: Resolves the requested members against [`super::stable_set`], installs
 //! each in order via the prebuilt-first strategy: on a Tier-1 platform a prebuilt
 //! tarball is downloaded, SHA-256 verified, and atomically placed into the install
-//! directory (`~/.local/bin` by default). On non-Tier-1 platforms (or when the
+//! directory (since #5777 the canonical `$CARGO_HOME/bin`, falling back to
+//! `~/.cargo/bin`). On non-Tier-1 platforms (or when the
 //! prebuilt download fails) the code falls back to
 //! `trusty_common::update::perform_upgrade_captured` (= `cargo install <crate>
 //! --locked`, stdio captured rather than inherited — #3830), verifying cargo is
@@ -397,14 +398,15 @@ async fn install_all(
     let checklist = LiveChecklist::new(&narr.output(), &names);
 
     // Resolve the install directory once for post-install hooks (Phase 7 & 8).
-    // #4964: the fallback is the SHARED `canonical_bin_dir()`. It used to be an
-    // inline `~/.cargo/bin` join that never read `CARGO_HOME`, so it named a
-    // directory `cargo install` does not write to whenever `CARGO_HOME` was set
-    // — while the sibling fallback in `install_one` (same job, six hundred
-    // lines away) did read it.
-    let install_dir = crate::download::default_install_dir()
-        .or_else(trusty_common::bin_resolve::canonical_bin_dir)
-        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
+    // #5777: `default_install_dir()` IS the shared canonical cargo bin dir,
+    // so the former `.or_else(canonical_bin_dir)` leg is gone rather than
+    // dead. It is `Some` whenever `CARGO_HOME` is set and non-empty (even
+    // with an unresolvable home), so the `/usr/local/bin` fallback is
+    // reachable only with BOTH unset — invariant pinned by
+    // `download::tests::install_dir_is_some_whenever_cargo_home_is_set`.
+    // #5805: via the shared `install_dir_or_fallback`, so this, `install_one`,
+    // and the `--dry-run` preview cannot name three different directories.
+    let install_dir = crate::download::install_dir_or_fallback();
 
     // #3554: the real $PATH, resolved once, used by every member's
     // shadow-detection check below.
@@ -567,25 +569,34 @@ async fn install_all(
                 // the install succeeded on disk, but the operator's shell
                 // would not see it, which is exactly the #3554 "looks
                 // installed, actually isn't live" failure class.
-                let (shadow_ok, shadow_detail) = match shadow_check::detect(
-                    &m.binary,
+                //
+                // #5805: EVERY binary the member places, not just the
+                // health-probe name. `tctl` is the name operators type and the
+                // one `--dry-run` advertises; probing only `trusty-installer`
+                // left a stale `tctl` winning every shell invocation while the
+                // install reported clear.
+                let reports = shadow_check::detect_all(
+                    &m.binaries(),
                     &installed.path,
                     Some(&installed.version),
                     &path_env,
                 )
-                .await
-                {
-                    Some(report) => {
-                        let msg = report.message();
-                        let full = format!("{}: {msg}", m.crate_name);
-                        if live {
-                            checklist.note(&format!("error: {full}"));
-                        } else {
-                            let _ = narr.error(&full);
-                        }
-                        (false, msg)
+                .await;
+                let (shadow_ok, shadow_detail) = if reports.is_empty() {
+                    (true, String::new())
+                } else {
+                    let msg = reports
+                        .iter()
+                        .map(|r| r.message())
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let full = format!("{}: {msg}", m.crate_name);
+                    if live {
+                        checklist.note(&format!("error: {full}"));
+                    } else {
+                        let _ = narr.error(&full);
                     }
-                    None => (true, String::new()),
+                    (false, msg)
                 };
                 checklist.set(&m.crate_name, ComponentState::Installed);
                 outcomes.push(InstallOutcome {
@@ -748,12 +759,19 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 /// the atomic `rename` in `crate::download::fetch` — writing a temp file beside
 /// the destination and renaming over it, so the kernel never sees a
 /// partially-overwritten inode. That property holds in ANY directory; the
-/// destination has nothing to do with it. `~/.local/bin` is the default because
-/// `install.sh` uses it, nothing more.
+/// destination has nothing to do with it. Since #5777 the default is the
+/// canonical `$CARGO_HOME/bin`, the same directory `install.sh` and a
+/// hand-typed `cargo install` write to.
+///
+/// That atomic-rename property is also what makes trusty-installer safe as a
+/// member of its own stable set (#5805): installing it replaces a binary that
+/// may be the running process, and `rename(2)` leaves the running image's open
+/// inode intact. Neither write path ever `cp`s over an on-PATH binary, which is
+/// the macOS cdhash hazard CLAUDE.md warns about.
 ///
 /// What: Resolves the install directory (`crate::download::default_install_dir`,
-/// today `~/.local/bin`; falls back to cargo path via `perform_upgrade_captured`
-/// when prebuilt fails). Calls `crate::download::try_install_prebuilt`; on
+/// since #5777 the canonical `$CARGO_HOME/bin`; falls back to cargo path via
+/// `perform_upgrade_captured` when prebuilt fails). Calls `crate::download::try_install_prebuilt`; on
 /// `Outcome::Fallback` — which fires on ANY prebuilt-download failure (network
 /// blip, 404, rate-limit, SHA mismatch), not just an unsupported platform, so
 /// this path is reachable even on a Tier-1 machine — emits a narration line
@@ -783,13 +801,10 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
     use crate::download::{self, Outcome};
 
-    // Resolve the install directory — currently `~/.local/bin` (the default
-    // `install.sh` uses), falling back to the cargo bin dir when the home
-    // directory cannot be determined (#4964: the shared `canonical_bin_dir()`,
-    // so this fallback and `install_all`'s read `CARGO_HOME` the same way).
-    let install_dir = download::default_install_dir()
-        .or_else(trusty_common::bin_resolve::canonical_bin_dir)
-        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
+    // Resolve the install directory — the canonical cargo bin dir (#5777:
+    // `default_install_dir()` delegates to the shared `canonical_bin_dir()`,
+    // so prebuilt and cargo-fallback branches write ONE directory).
+    let install_dir = download::install_dir_or_fallback();
 
     // #3846 code-critic MEDIUM fix: capture "did a binary already exist" at
     // BOTH candidate destinations before EITHER write path below can run —
@@ -883,8 +898,9 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
 /// Best-effort on-disk size of a just-installed binary (for the component row).
 ///
 /// Why (#4964): this took a bare binary NAME and joined it onto the cargo bin
-/// dir, while `install_one` writes to `install_dir` (`~/.local/bin` on the
-/// prebuilt branch). The two disagreed, so the size column reported a stale
+/// dir, while `install_one` wrote to `install_dir` (`~/.local/bin` on the
+/// prebuilt branch, before #5777 converged the two). The two disagreed, so the
+/// size column reported a stale
 /// copy's bytes — or 0 when no cargo copy existed at all — for the binary that
 /// had just been placed somewhere else. Taking the CONCRETE path
 /// `install_one` reports makes the divergence structurally impossible rather

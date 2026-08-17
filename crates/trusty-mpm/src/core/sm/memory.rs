@@ -18,6 +18,8 @@
 //! Test: `#[path = "memory_tests.rs"] mod tests` — palace idempotency, scoped
 //! remember→recall round-trip, scope isolation, restart survival, and the
 //! "never writes to a non-SM palace" guard.
+//!
+//! [`SmMemory`]: crate::core::sm::memory::SmMemory
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

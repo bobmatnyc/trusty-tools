@@ -97,9 +97,14 @@ impl Runner for SystemRunner {
     /// `start`). What DOES change, and is the point, is that a genuinely healthy
     /// daemon now reads `HealthyVersionOk` and is reported a no-op instead of
     /// being handed a redundant `start` — the same false-`down` class as the
-    /// verify tail's spurious kickstart, one layer up. trusty-mpm keeps its
-    /// pre-#4246 behaviour exactly: `OwnVerb` → `Unprobeable` → `Down` → `start`,
-    /// which is idempotent.
+    /// verify tail's spurious kickstart, one layer up.
+    ///
+    /// #4925 extended that saving to trusty-mpm. It used to keep its pre-#4246
+    /// behaviour exactly — `OwnVerb` → `Unprobeable` → `Down` → a redundant (but
+    /// idempotent) `start` on every `tctl up`, indistinguishable in the logs from
+    /// a real recovery. It is now probed over HTTP like every other daemon, so a
+    /// serving mpm reads `HealthyVersionOk` and `up` reports a no-op instead of
+    /// spawning a process against a daemon already known to be answering.
     fn probe(&self, member: &BootMember) -> MemberHealth {
         let manage = crate::commands::stable_set::manage_strategy_for(&member.binary, true);
         crate::commands::probe::probe_member_health(&member.binary, manage).member_health()

@@ -72,7 +72,27 @@ impl PausedSession {
     /// [`ClaudeMpmSession::source_mtime`](crate::catchup::mpm_session::ClaudeMpmSession::source_mtime).
     /// `None` survives only for a session with no file behind it.
     /// Test: `find_orders_newest_first`,
-    /// `claude_mpm_session_with_no_paused_at_is_dated_by_mtime`.
+    /// `claude_mpm_session_with_no_paused_at_is_dated_by_mtime`,
+    /// `contract_sort_key_none_means_excluded_not_always_included`.
+    ///
+    /// # Code Contract
+    /// Preconditions:
+    /// - None. Every `PausedSession` value is accepted.
+    ///
+    /// Postconditions:
+    /// - `None` means "this session cannot be dated at all", which since #5072
+    ///   means EXCLUDED from a watermark-filtered digest. It does not mean
+    ///   "always included" — that was the reading `is_none_or` encoded, and it
+    ///   inverted a real project's digest.
+    /// - Both variants receive the same file-mtime fallback, so neither arm can
+    ///   be undatable merely because its recorded timestamp is missing or
+    ///   malformed. `None` survives only for a session with no file behind it.
+    ///
+    /// Invariants:
+    /// - Pure with respect to this value: no field is mutated and no file is
+    ///   written. For a fixed filesystem state the result is stable across calls.
+    /// - The ordering it induces is the ONE ordering used for both sorting and
+    ///   watermark membership; the two never diverge.
     pub fn sort_key(&self) -> Option<DateTime<Utc>> {
         match self {
             PausedSession::TrustyMpm { paused_at, .. } => *paused_at,
@@ -215,7 +235,32 @@ pub struct FilteredSessions {
 /// Test: `filter_sessions_since_drops_undatable_session`,
 /// `filter_sessions_since_keeps_everything_without_watermark`,
 /// `filter_sessions_since_reports_dropped_count`,
-/// `generate_catchup_json_excludes_undatable_session_behind_watermark`.
+/// `generate_catchup_json_excludes_undatable_session_behind_watermark`,
+/// `contract_filter_sessions_since_partitions_the_input`.
+///
+/// # Code Contract
+/// Preconditions:
+/// - None. Every `sessions` list and every `watermark` is accepted; an empty
+///   list and a `None` watermark are ordinary inputs, not edge cases.
+///
+/// Postconditions:
+/// - With `watermark == None`, `kept` is `sessions` unchanged in length and
+///   order, and `dropped_undatable == 0`.
+/// - With `watermark == Some(wm)`, `kept` contains exactly those sessions whose
+///   `sort_key()` is `Some(ts)` with `ts > wm`. The comparison is STRICT, so a
+///   session paused exactly at the watermark is excluded.
+/// - `dropped_undatable` counts exactly the sessions whose `sort_key()` is
+///   `None`. Since #5072 an undatable session is WITHHELD, not admitted — the
+///   inverse of the `is_none_or` predicate this replaced.
+/// - `kept` preserves the relative order of the input.
+///
+/// Invariants:
+/// - `kept.len() + dropped_undatable <= sessions.len()`, with the shortfall
+///   being sessions that were datable and did not postdate the watermark.
+/// - No session is both kept and counted as dropped.
+/// - The count is a RECEIPT, not diagnostics: a withheld session falls outside
+///   every future window once the watermark advances, so it must be reportable
+///   in the return value and not only on stderr.
 pub fn filter_sessions_since(
     sessions: Vec<PausedSession>,
     watermark: Option<DateTime<Utc>>,
@@ -287,7 +332,30 @@ pub(crate) fn mtime_utc(path: &Path) -> Option<DateTime<Utc>> {
 /// Test: `latest_snapshot_prefers_session_log`,
 /// `latest_snapshot_refuses_cross_session_fallback`,
 /// `latest_snapshot_requires_a_session_id`,
-/// `latest_snapshot_reads_legacy_flat_snapshot_via_log`.
+/// `latest_snapshot_reads_legacy_flat_snapshot_via_log`,
+/// `contract_latest_snapshot_none_session_id_is_none`.
+///
+/// # Code Contract
+/// Preconditions:
+/// - `session_id` is the ATTRIBUTION of the asking session, not a search hint.
+///   `None` asserts "the caller did not identify itself". It does NOT mean
+///   "any session will do" — that was the pre-#5272 reading, and it is the
+///   precondition that changed under a byte-identical signature.
+/// - `project_dir` need not exist; a missing directory yields `None`, not an
+///   error.
+///
+/// Postconditions:
+/// - Returns `None` whenever `session_id` is `None`, for every `project_dir`,
+///   including one holding snapshots that would have matched before #5272.
+/// - A returned path is always a snapshot the session log attributes to
+///   `session_id`; it is never selected by recency across session boundaries.
+/// - A returned path is `<project_dir>/.trusty-mpm/sessions/` rooted.
+///
+/// Invariants:
+/// - Read-only: no file, directory, or session-log entry is created, modified,
+///   or removed.
+/// - Referentially transparent for a fixed filesystem state — repeated calls
+///   with equal arguments return equal results.
 pub fn latest_trusty_mpm_snapshot(project_dir: &Path, session_id: Option<&str>) -> Option<PathBuf> {
     // #5272: no session id → nothing is attributable to this caller → empty.
     let id = session_id?;

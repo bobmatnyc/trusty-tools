@@ -39,6 +39,12 @@
 //! `EventSource`/`MembershipProvider` pair; `trusty-code`'s own
 //! `sse_tests::fan_out_tags_events_from_bound_sessions_only` and siblings
 //! remain the end-to-end regression guard for the tcode adapter built on top.
+//!
+//! [`SourceEvent`]: crate::transport::SourceEvent
+//! [`EventEnvelope`]: crate::transport::EventEnvelope
+//! [`EventSource`]: crate::transport::EventSource
+//! [`MembershipProvider`]: crate::transport::MembershipProvider
+//! [`aggregate_live`]: crate::transport::aggregate_live
 
 use std::pin::Pin;
 

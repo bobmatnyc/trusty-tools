@@ -46,6 +46,12 @@
 //! ```
 //!
 //! Test: `cargo test -p trusty-common --features bug-capture`.
+//!
+//! [`CapturedError`]: crate::error_capture::CapturedError
+//! [`ErrorStore`]: crate::error_capture::ErrorStore
+//! [`BugCaptureLayer`]: crate::error_capture::BugCaptureLayer
+//! [`bug_capture_layer`]: crate::error_capture::bug_capture_layer
+//! [`TRUSTY_NO_BUG_CAPTURE_ENV`]: crate::error_capture::TRUSTY_NO_BUG_CAPTURE_ENV
 
 pub mod fingerprint;
 pub mod layer;

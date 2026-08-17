@@ -9,7 +9,7 @@
 //! OpenRouter.
 //! What: [`build`] constructs an [`OpenAiCompatAdapter`] for a resolved OpenAI
 //! credential against a given base URL; [`factory`] is the production factory
-//! (real base URL) registered into the [`Configurator`].
+//! (real base URL) registered into the [`Configurator`](crate::inference::Configurator).
 //! Test: inline `tests`; offline round-trip in
 //! `crates/trusty-common/tests/inference_adapters.rs`.
 

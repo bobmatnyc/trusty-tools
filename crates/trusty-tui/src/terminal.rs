@@ -19,7 +19,7 @@
 //! all three; every step swallows its own error since a `Drop` impl cannot
 //! propagate one and a partial restore is still strictly better than none.
 //! The actual OS-level restore calls are routed through the private
-//! [`TerminalOps`] trait so [`tests`] can substitute a recording fake instead
+//! [`TerminalOps`] trait so `tests` can substitute a recording fake instead
 //! of exercising a real TTY — sandboxes and CI routinely have no controlling
 //! terminal at all, and the property under test ("does `Drop` run during
 //! unwind") has nothing to do with whether `disable_raw_mode()` itself would
@@ -75,8 +75,8 @@ impl TerminalOps for CrosstermOps {
 /// effects, so a `TerminalGuard` existing is always proof the terminal was
 /// actually put into raw/alt-screen/mouse-capture mode. `Drop` undoes all
 /// three, ignoring errors (nothing useful can be done while unwinding).
-/// Test: [`tests::drop_restores_on_normal_scope_exit`],
-/// [`tests::drop_restores_on_panic_unwind`].
+/// Test: `tests::drop_restores_on_normal_scope_exit`,
+/// `tests::drop_restores_on_panic_unwind`.
 pub struct TerminalGuard {
     ops: Box<dyn TerminalOps>,
 }
@@ -94,7 +94,7 @@ impl TerminalGuard {
     /// returned (so a failed `enter()` never leaves the terminal half-mutated
     /// for the caller to clean up). On success, builds a
     /// `CrosstermBackend<Stdout>`-backed `Terminal`.
-    /// Test: exercised transitively by [`crate::run`]'s event-loop tests via
+    /// Test: exercised transitively by [`crate::run`](mod@crate::run)'s event-loop tests via
     /// `ratatui::backend::TestBackend`; `enter()` itself needs a real TTY so
     /// it is not unit-tested here (mirrors the precedent in
     /// `crates/trusty-agents/src/repl/tui/run.rs::setup_terminal`, which is
@@ -143,8 +143,8 @@ impl Drop for TerminalGuard {
     /// Why: see [`TerminalGuard`] — runs on both normal return and panic
     /// unwind, which is the entire point of this type existing.
     /// What: delegates to the guard's [`TerminalOps::leave`].
-    /// Test: [`tests::drop_restores_on_normal_scope_exit`],
-    /// [`tests::drop_restores_on_panic_unwind`].
+    /// Test: `tests::drop_restores_on_normal_scope_exit`,
+    /// `tests::drop_restores_on_panic_unwind`.
     fn drop(&mut self) {
         self.ops.leave();
     }

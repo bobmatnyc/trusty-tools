@@ -621,10 +621,16 @@ impl MemoryService {
     /// Why: same dedup story as `create_drawer`. #5231: `DELETE` on a drawer id
     /// that was never stored used to answer `204 No Content`, the same as a
     /// real delete — this now 404s, matching `delete_palace`.
-    /// What: parses the drawer UUID, calls `PalaceHandle::forget`, maps
-    /// [`ForgetOutcome::NotFound`] to `ServiceError::not_found`, and emits
-    /// `DrawerDeleted` only when a drawer was actually removed.
-    /// Test: `delete_drawer_404s_for_an_unknown_drawer_id`.
+    /// What: parses the drawer UUID, calls `PalaceHandle::forget`, deletes the
+    /// drawer's BM25 document, maps `ForgetOutcome::NotFound` to
+    /// `ServiceError::not_found`, and emits `DrawerDeleted` only when a drawer
+    /// was actually removed. #5053: the lexical delete runs on this path for
+    /// the same reason it runs on the MCP one — `HTTP DELETE` and
+    /// `memory_forget` remove the same drawer, and the backfill indexes it
+    /// whichever way it was written, so a lexical copy left here is the same
+    /// stale document.
+    /// Test: `delete_drawer_404s_for_an_unknown_drawer_id`;
+    /// `tests/bm25_forget_delete.rs` covers the deletion contract itself.
     pub async fn delete_drawer(
         &self,
         id: &str,
@@ -638,6 +644,10 @@ impl MemoryService {
             .forget(uuid)
             .await
             .map_err(|e| ServiceError::internal(format!("forget: {e:#}")))?;
+        // #5053: a drawer the user deleted must stop matching lexical queries.
+        crate::tools::bm25::bm25_delete_document(&self.state, handle.id.as_str(), uuid)
+            .await
+            .map_err(|e| ServiceError::internal(format!("{e:#}")))?;
         if !outcome.is_deleted() {
             return Err(ServiceError::not_found(format!(
                 "drawer '{drawer_id}' not found in palace '{id}'"

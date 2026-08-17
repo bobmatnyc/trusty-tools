@@ -16,7 +16,7 @@
 //! `crate::events::SessionEventEnvelope`s (§12.1.5: default 1000, oldest
 //! dropped first), and a map of live attachments (`connection_id` ->
 //! `oneshot::Sender<()>` used by `detach` to stop that connection's
-//! forwarder task). [`Self::record`] is the ONE place that assigns `seq`
+//! forwarder task). `Self::record` is the ONE place that assigns `seq`
 //! (under the same lock that pushes the ring buffer entry), so replay and
 //! every subsequent live event share one gap-free, strictly increasing
 //! sequence — see `crate::events`'s module docs for the full envelope

@@ -13,7 +13,7 @@
 
 use super::*;
 use std::fs;
-use trusty_memory::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+use trusty_memory::project_root::{write_project_pin, ProjectPin};
 
 /// Why: the pin scan inside `spawn_startup_tasks` must populate
 /// `AppState::pin_project_map` so handlers can resolve a palace id to a
@@ -31,15 +31,7 @@ async fn spawn_startup_tasks_populates_pin_map() {
     let search_root = tmp.path().join("Projects");
     let project_dir = search_root.join("my-project");
     fs::create_dir_all(&project_dir).expect("create project dir");
-    write_project_pin(
-        &project_dir,
-        &ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "my-palace".to_string(),
-            note: None,
-        },
-    )
-    .expect("write pin");
+    write_project_pin(&project_dir, &ProjectPin::new("my-palace".to_string())).expect("write pin");
 
     // Override HOME so `default_search_dirs()` points at our temp root.
     // SAFETY: single-threaded test; env var only affects this process.

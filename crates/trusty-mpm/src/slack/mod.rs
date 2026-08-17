@@ -19,6 +19,13 @@
 //! command conversion (`commands`), and result formatting (`formatter`). The live
 //! WebSocket loop is exercised only against a real Slack app (deferred — needs an
 //! installed app; see the PR body).
+//!
+//! [`TrustyCommand`]: crate::client::TrustyCommand
+//! [`CommandResult`]: crate::client::CommandResult
+//! [`SlackFormatter`]: crate::slack::formatter::SlackFormatter
+//! [`run`]: crate::slack::run
+//! [`commands`]: crate::slack::commands
+//! [`formatter`]: crate::slack::formatter
 
 pub mod commands;
 pub mod focus;

@@ -9,7 +9,7 @@
 //! lets any code path emit events without threading the bus through dozens of
 //! function signatures, while SSE subscribers fan out to all browsers.
 //!
-//! #2055 adds [`SessionEventEnvelope`]: every event the `session.attach`
+//! #2055 adds [`SessionEventEnvelope`](crate::events::SessionEventEnvelope): every event the `session.attach`
 //! protocol (#2054) cares about is session-scoped, so the bus now carries the
 //! ENVELOPE (`session_id`, a per-session monotonic `seq`, a UTC timestamp,
 //! and the tagged [`Event`] payload) rather than a bare `Event`. This is the
@@ -34,6 +34,8 @@
 //! round-trips through `subscribe()`, `kind()` is pinned against the serde tag
 //! for every variant, and the relay prefix is stable so the parent stderr
 //! reader can detect and re-publish.
+//!
+//! [`Event`]: crate::events::Event
 
 use std::sync::OnceLock;
 
@@ -547,7 +549,7 @@ pub enum Event {
 
     // -- Persona (workflow) --
     /// #196: emitted once per workflow run when a persona is detected from the
-    /// task text. Lets the UI surface "running in [hacker] mode" before any
+    /// task text. Lets the UI surface "running in \[hacker\] mode" before any
     /// phases execute, so users immediately see why the pipeline shape may
     /// differ from the default.
     PersonaDetected {

@@ -112,8 +112,8 @@ fn segment_spans(seg: &StatuslineSegment) -> Vec<Span<'static>> {
 /// What: joins every segment's spans with [`SEPARATOR`]; an empty segment
 /// list renders an empty `Line` (the statusline row collapses to blank,
 /// never to placeholder text a product didn't ask for).
-/// Test: [`tests::build_statusline_joins_segments_with_separator`],
-/// [`tests::build_statusline_empty_when_no_segments`].
+/// Test: `tests::build_statusline_joins_segments_with_separator`,
+/// `tests::build_statusline_empty_when_no_segments`.
 pub fn build_statusline(app: &ReplApp) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, seg) in app.statusline.iter().enumerate() {

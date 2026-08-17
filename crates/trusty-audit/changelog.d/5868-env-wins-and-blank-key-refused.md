@@ -1,0 +1,5 @@
+Fixed
+
+- `OPENROUTER_API_KEY` now wins over the key in `engagement.toml`. `trusty-audit run` used to hand the config's key to the `tga audit` child unconditionally, so an exported variable was silently ignored ([#5868](https://github.com/bobmatnyc/trusty-tools/issues/5868))
+- A blank `openrouter_key` is refused before the sweep starts rather than an hour into it. A present-but-empty key was not a refusal anywhere downstream: `inference_env` read it as "select nothing" and returned no variables, so the `tga audit` child ran without its `TRUSTY_REVIEW_*` selection and `trusty-review` fell back to a provider nobody chose — surfacing at the report stage as a missing-AWS-credentials failure, or not at all ([#5868](https://github.com/bobmatnyc/trusty-tools/issues/5868))
+- `trusty-audit package` scans the outbound deliverable for the key the sweep actually used. With a key supplied through the environment, the scan checked the config's key instead and would not have caught the real one ([#5868](https://github.com/bobmatnyc/trusty-tools/issues/5868))

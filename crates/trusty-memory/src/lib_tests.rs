@@ -1193,36 +1193,31 @@ async fn emit_persists_mutations_but_skips_status_changed() {
     assert_eq!(count, 2, "only PalaceCreated + DrawerAdded must persist");
 }
 
-/// Why (issue #156): the BM25 lane must be opt-in — existing deployments
-/// that don't set `TRUSTY_BM25_DAEMON=1` must see `bm25_client = None`
-/// and the recall hot path must continue to behave exactly as before.
-/// What: builds an `AppState` with `with_bm25_client_from_env()` while
-/// the env var is unset; asserts the field stays `None`.
+/// Why (issue #156): the BM25 lane must be opt-in — existing deployments that
+/// do not set `TRUSTY_BM25_DAEMON=1` must see `bm25 = None` and the recall hot
+/// path must continue to behave exactly as before.
+/// What: builds an `AppState` with `with_bm25_lane_from_env()` while the env
+/// var is unset; asserts the field stays `None`. #5329 folded the former
+/// `bm25_supervisor` assertion into this one — there is a single field now, so
+/// there is no client/supervisor opt-in parity left to drift.
 /// Test: this test.
 #[tokio::test]
-async fn bm25_client_disabled_by_default() {
-    // Serialise with the sibling `bm25_client_enabled_when_env_set` test
-    // so they don't race on the shared `TRUSTY_BM25_DAEMON` env var.
+async fn bm25_lane_disabled_by_default() {
+    // Serialise with the sibling `bm25_lane_enabled_when_env_set` test so they
+    // do not race on the shared `TRUSTY_BM25_DAEMON` env var.
     let _guard = crate::commands::env_test_lock().lock().await;
-    // SAFETY: this test exercises std::env::remove_var which is unsafe
-    // in 2024 edition because the global env is shared. We restore the
-    // pre-test value at the end so neighbours are unaffected.
+    // SAFETY: this test exercises std::env::remove_var which is unsafe in 2024
+    // edition because the global env is shared. We restore the pre-test value
+    // at the end so neighbours are unaffected.
     let prev = std::env::var("TRUSTY_BM25_DAEMON").ok();
     unsafe {
         std::env::remove_var("TRUSTY_BM25_DAEMON");
     }
     let (state, _tmp) = test_state();
-    let state = state.with_bm25_client_from_env();
+    let state = state.with_bm25_lane_from_env();
     assert!(
-        state.bm25_client.is_none(),
-        "bm25_client must be None when TRUSTY_BM25_DAEMON is unset"
-    );
-    // Issue #193: the spawn supervisor is bound to the same env gate as
-    // the client — opt-out parity matters so we never accidentally
-    // spawn daemons in deployments that explicitly didn't opt in.
-    assert!(
-        state.bm25_supervisor.is_none(),
-        "bm25_supervisor must be None when TRUSTY_BM25_DAEMON is unset"
+        state.bm25.is_none(),
+        "the bm25 lane must be None when TRUSTY_BM25_DAEMON is unset"
     );
     if let Some(v) = prev {
         unsafe {
@@ -1231,30 +1226,32 @@ async fn bm25_client_disabled_by_default() {
     }
 }
 
-/// Why (issue #156): when the operator opts in via `TRUSTY_BM25_DAEMON=1`,
-/// the builder must construct a real `Bm25Client` pointed at the canonical
-/// per-palace socket path. We don't connect — no daemon need be running —
-/// we only assert the client field is populated.
-/// What: sets the env var, runs the builder, asserts `Some(_)`.
+/// Why (issue #156, #5329): when the operator opts in via
+/// `TRUSTY_BM25_DAEMON=1`, the builder must construct a real lane. The gate
+/// keeps its daemon-era name deliberately — an operator who set it before the
+/// collapse must not silently lose the lane.
+/// What: sets the env var, runs the builder, asserts the lane is present and
+/// serving the palace directory layout the daemon used.
 /// Test: this test.
 #[tokio::test]
-async fn bm25_client_enabled_when_env_set() {
+async fn bm25_lane_enabled_when_env_set() {
     let _guard = crate::commands::env_test_lock().lock().await;
     let prev = std::env::var("TRUSTY_BM25_DAEMON").ok();
     unsafe {
         std::env::set_var("TRUSTY_BM25_DAEMON", "1");
     }
     let (state, _tmp) = test_state();
-    let state = state.with_bm25_client_from_env();
-    assert!(
-        state.bm25_client.is_some(),
-        "bm25_client must be Some when TRUSTY_BM25_DAEMON=1"
-    );
-    // Issue #193: opting in to the client must also install the spawn
-    // supervisor so the daemon is auto-started on first use.
-    assert!(
-        state.bm25_supervisor.is_some(),
-        "bm25_supervisor must be Some when TRUSTY_BM25_DAEMON=1"
+    let state = state.with_bm25_lane_from_env();
+    let lane = state
+        .bm25
+        .as_ref()
+        .expect("the bm25 lane must be Some when TRUSTY_BM25_DAEMON=1");
+    // The lane must be rooted at this state's data_root, which is where the
+    // retired daemon wrote its snapshots — otherwise an existing corpus is
+    // invisible and #5329's migration promise is empty.
+    assert_eq!(
+        lane.data_dir_for_palace("some-palace"),
+        state.data_root.join("some-palace").join("bm25"),
     );
     match prev {
         Some(v) => unsafe { std::env::set_var("TRUSTY_BM25_DAEMON", v) },

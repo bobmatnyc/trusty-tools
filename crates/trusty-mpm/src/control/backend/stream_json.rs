@@ -136,7 +136,7 @@ impl StreamJsonBackend {
     /// via [`disclaimed_piped_spawn`] (issue #2997 — disclaims TCC
     /// responsibility on macOS; an unchanged `tokio::process::Command` spawn
     /// elsewhere) and wraps the resulting handles.
-    /// Test: `stream_json_spawn_requires_claude` (integration; #[ignore] if
+    /// Test: `stream_json_spawn_requires_claude` (integration; #\[ignore\] if
     /// claude absent); constructor checked by `stream_json_backend_constructs`;
     /// the no-key-leak invariant is asserted at the command seam by
     /// `build_command_removes_api_key` and the `auth_cost` integration suite;

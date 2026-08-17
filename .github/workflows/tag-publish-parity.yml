@@ -13,6 +13,12 @@
 # this job runs the self-test's fixtures, not the gate.
 #
 # Pure git + shell, no Rust toolchain, so it stays a fast standalone job.
+#
+# It carries a second preflight self-test of the same shape (#5620): CHECK 5's
+# decision, which likewise only runs where a publish runs and is likewise worth
+# nothing if it cannot fail. The workflow name stays as it is — renaming it
+# would rename the required checks — and the jobs are separate so a red one
+# names which decision broke.
 name: Tag/publish parity
 
 on:
@@ -22,6 +28,9 @@ on:
       - "scripts/check-tag-publish-parity.sh"
       - "scripts/check-tag-publish-parity-selftest.sh"
       - "scripts/preflight-publish.sh"
+      - "scripts/preflight-check5-selftest.sh"
+      - "scripts/preflight-check8-selftest.sh"
+      - "scripts/test-data/preflight-check5/**"
       - ".github/workflows/tag-publish-parity.yml"
   pull_request:
     # Explicit activity types, matching line-cap.yml: `edited` catches a
@@ -32,6 +41,9 @@ on:
       - "scripts/check-tag-publish-parity.sh"
       - "scripts/check-tag-publish-parity-selftest.sh"
       - "scripts/preflight-publish.sh"
+      - "scripts/preflight-check5-selftest.sh"
+      - "scripts/preflight-check8-selftest.sh"
+      - "scripts/test-data/preflight-check5/**"
       - ".github/workflows/tag-publish-parity.yml"
 
 concurrency:
@@ -54,3 +66,41 @@ jobs:
 
       - name: Tag/publish parity self-test
         run: bash scripts/check-tag-publish-parity-selftest.sh
+
+  # Same shape, same reason, different check (#5620). CHECK 5's decision — what
+  # preflight concludes from check_semver.sh's output — can only matter where a
+  # publish runs, and its failing branches are the whole product: reading exit 0
+  # as a pass is what let trusty-review 0.16.0 ship with `0 crate(s) checked,
+  # 0 skipped, 1 inventory NOT computed`. So CI runs the fixtures, not the gate.
+  #
+  # Separate job rather than another step, so a red one names which decision
+  # broke. Pure shell over captured output: no cargo, no rustdoc, no network.
+  check5-decision:
+    name: CHECK 5 decision self-test (0 compared must never print PASS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Preflight CHECK 5 decision self-test
+        run: bash scripts/preflight-check5-selftest.sh
+
+  # Third instance of the same shape, third check (#5755). CHECK 8 decides
+  # whether the release gate actually ran against the commit being published,
+  # and it used to key on `head_sha` — which, once #5741 let a dispatch pin an
+  # older commit, stopped naming the commit a run examined. Run 31874835425
+  # gated 020c139d and records `head_sha` 3f39b79f, so a preflight at 3f39b79f
+  # counted it as evidence for a commit it never opened. That is CHECK 6's
+  # failure in a new place, so it gets CHECK 6's treatment: fixtures in CI.
+  #
+  # Separate job rather than another step, so a red one names which decision
+  # broke. Pure shell over captured API output: no gh, no network, no cargo.
+  check8-decision:
+    name: CHECK 8 decision self-test (a run's head_sha is not what it gated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Preflight CHECK 8 decision self-test
+        run: bash scripts/preflight-check8-selftest.sh

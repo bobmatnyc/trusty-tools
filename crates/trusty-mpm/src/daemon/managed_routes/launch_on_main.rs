@@ -111,24 +111,33 @@ pub(super) async fn spawn_managed_on_main(
 
     let mgr = state.session_manager().await;
 
-    // #3455 collision caveat: warn (never refuse) when a second Active
-    // session is already running against this EXACT main checkout — the
-    // caller's reconnect check already ruled out "same repo, some live
-    // session"; reaching here with a collision means `force_new` explicitly
-    // asked for a second session on the identical directory. Naming the
-    // colliding session lets an operator identify which other session shares
-    // the checkout.
+    // #3455: record (never refuse) that a second Active session is launching
+    // against this EXACT main checkout. The caller's reconnect check already
+    // ruled out "same repo, some live session"; reaching here with a
+    // collision means `force_new` explicitly asked for a second session on the
+    // identical directory.
+    //
+    // ADR-0048 downgraded this from `warn!` to `info!`. It was written when
+    // sharing a checkout WAS the hazard — writers had nowhere else to go and
+    // nothing stopped them. Both halves of that are now false: a dispatched
+    // writer is granted its own worktree, and a source write or commit landing
+    // in the main checkout is denied outright, for every session. Two sessions
+    // reading and writing documents in one read-only checkout is the intended
+    // arrangement, not a race to warn about. What stays worth recording is
+    // WHICH other session shares the directory, because that is what an
+    // operator asks first when diagnosing anything here — and a warning nobody
+    // can act on is one an operator learns to skip past.
     {
         let existing = mgr.list().await;
         if let Some(other) = has_concurrent_main_checkout_session(&existing, local_path) {
-            warn!(
+            info!(
                 path = %local_path.display(),
                 colliding_session_id = %other.id,
                 colliding_session_name = %other.tmux_name,
-                "spawn_managed (launch-on-main): a second Active session is launching in \
-                 the SAME main checkout (#3455) — there is no worktree isolating them from \
-                 the colliding session; concurrent git operations or uncommitted-change \
-                 races are possible"
+                "spawn_managed (launch-on-main): a second Active session is launching in the \
+                 SAME main checkout (#3455). Writers are isolated by the ADR-0048 worktree \
+                 grant and the main-checkout write boundary, so this is expected; recorded so \
+                 the sharing session can be identified"
             );
         }
     }

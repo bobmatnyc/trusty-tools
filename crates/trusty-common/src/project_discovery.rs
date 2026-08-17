@@ -10,8 +10,8 @@
 //! What: a [`ClaudeProject`] record plus a [`discover_claude_projects`] walker.
 //! No global state.
 //!
-//! Test: `cargo test -p trusty-common` covers default-search-dir wiring; the
-//! filesystem-walking test is `#[ignore]`.
+//! Test: `cargo test -p trusty-common --features unconditional-only` covers
+//! default-search-dir wiring; the filesystem-walking test is `#[ignore]`.
 
 use std::path::{Path, PathBuf};
 

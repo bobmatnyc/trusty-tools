@@ -67,7 +67,12 @@ fn leaky_finding() -> MetricFinding {
 
 fn leaky_metrics() -> AnalyzeMetrics {
     AnalyzeMetrics {
-        schema_version: "analyze-live-v0".to_string(),
+        // #5747: `declared_metrics_file_findings_are_scrubbed` writes this
+        // struct out as a declared metrics FILE, and `load_metrics` now refuses
+        // a tag whose major it cannot read. `analyze-live-v0` is the live HTTP
+        // path's in-memory tag, which never reaches a file; `v0` is what a
+        // declared artifact carries.
+        schema_version: "v0".to_string(),
         repository: format!("repo-{FAKE_TOKEN}"),
         loc: LocMetrics {
             total: 10,

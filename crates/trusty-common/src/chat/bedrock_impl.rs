@@ -70,18 +70,55 @@ pub const DEFAULT_BEDROCK_REGION: &str = "us-east-1";
 /// Why: allows per-deployment region override without code changes.
 /// What: returns the first non-empty value of `TRUSTY_AWS_REGION` >
 ///       `AWS_REGION` > `"us-east-1"`.
-/// Test: covered by `bedrock_provider_new_uses_region`.
+/// Test: `bedrock_region_resolution`,
+/// `contract_resolve_region_from_precedence_is_total`.
+///
+/// # Code Contract
+/// Preconditions:
+/// - None. `explicit` may be `None`, `Some("")`, or any string; an empty
+///   string at ANY tier is treated as unset rather than as a chosen region.
+///
+/// Postconditions:
+/// - Returns the first non-empty value in the strict order `explicit` >
+///   `TRUSTY_AWS_REGION` > `AWS_REGION` > [`DEFAULT_BEDROCK_REGION`] (#5652).
+/// - Never returns an empty string, because the last tier is a non-empty
+///   constant.
+/// - Total: there is no input for which this fails or panics.
+///
+/// Invariants:
+/// - Reads the environment but never writes it, and never caches — a region
+///   changed between two calls is observed by the second.
+/// - The precedence walk itself is pure; the env read is lifted to the single
+///   call site here so [`resolve_region_from`] stays provable without mutating
+///   process-wide state.
 pub fn resolve_bedrock_region(explicit: Option<&str>) -> String {
-    if let Some(r) = explicit.filter(|s| !s.is_empty()) {
-        return r.to_string();
-    }
-    for var in [ENV_REGION_TRUSTY, ENV_REGION_AWS] {
-        let val = std::env::var(var).unwrap_or_default();
-        if !val.is_empty() {
-            return val;
-        }
-    }
-    DEFAULT_BEDROCK_REGION.to_string()
+    // #5652: read the env once here so the precedence walk itself stays pure
+    // and testable without mutating process-wide env vars.
+    let trusty_env = std::env::var(ENV_REGION_TRUSTY).ok();
+    let aws_env = std::env::var(ENV_REGION_AWS).ok();
+    resolve_region_from(explicit, trusty_env.as_deref(), aws_env.as_deref())
+}
+
+/// Pick the first non-empty region among the four precedence tiers.
+///
+/// Why (#5652): [`resolve_bedrock_region`] reads process-wide env vars, so a
+/// test of its precedence either inherits the ambient `AWS_REGION` or has to
+/// mutate global state and race every other test in the binary. Taking the two
+/// env tiers as arguments makes the ordering provable with neither hazard.
+/// What: returns `explicit` > `trusty_env` > `aws_env` > [`DEFAULT_BEDROCK_REGION`],
+/// treating an empty string at any tier as unset.
+/// Test: `bedrock_region_resolution`.
+fn resolve_region_from(
+    explicit: Option<&str>,
+    trusty_env: Option<&str>,
+    aws_env: Option<&str>,
+) -> String {
+    [explicit, trusty_env, aws_env]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_BEDROCK_REGION)
+        .to_string()
 }
 
 /// AWS Bedrock `ConverseStream` API provider implementing [`ChatProvider`].
@@ -447,25 +484,99 @@ mod tests {
     /// AWS_REGION > default.
     ///
     /// Why: operators use different env vars in different deployment contexts;
-    /// the precedence order must be stable and tested.
-    /// What: checks each resolution path in isolation.
-    /// Test: pure env-var logic, no network.
+    /// the precedence order must be stable and tested. #5652: the previous
+    /// version called `resolve_bedrock_region` directly and asserted that an
+    /// empty explicit region reaches the default — which skips the two env
+    /// tiers and fails outright whenever `AWS_REGION` is set in the ambient
+    /// environment.
+    /// What: drives the pure `resolve_region_from` walk with the env tiers
+    /// passed as arguments, so every case is deterministic and nothing in this
+    /// test binary can race it. The one `resolve_bedrock_region` assertion left
+    /// exercises the tier that is env-independent by construction.
+    /// Test: `bedrock_region_resolution`.
+    ///
+    /// The Code Contract test below (#5724, ADR-0047) proves the same
+    /// precedence exhaustively rather than by example; this one stays as the
+    /// readable statement of the intended order.
+    ///
+    /// Why: the contract on [`super::resolve_bedrock_region`] states the order
+    /// AND totality. A table over every combination of the three tiers proves
+    /// both, with no ambient-environment dependency to race.
+    /// What: for all 3^3 combinations of {absent, empty, set}, the result is the
+    /// first non-empty tier and is never empty.
+    /// Test: itself.
+    #[test]
+    fn contract_resolve_region_from_precedence_is_total() {
+        let tiers = [None, Some(""), Some("R")];
+        for (i, explicit) in tiers.iter().enumerate() {
+            for (j, trusty) in tiers.iter().enumerate() {
+                for (k, aws) in tiers.iter().enumerate() {
+                    // Distinct values per tier so the winner is identifiable.
+                    let e = explicit.map(|s| if s.is_empty() { "" } else { "explicit-r" });
+                    let t = trusty.map(|s| if s.is_empty() { "" } else { "trusty-r" });
+                    let a = aws.map(|s| if s.is_empty() { "" } else { "aws-r" });
+
+                    let got = resolve_region_from(e, t, a);
+
+                    // Postcondition: first non-empty tier wins, in this order.
+                    let want = [e, t, a]
+                        .into_iter()
+                        .flatten()
+                        .find(|s| !s.is_empty())
+                        .unwrap_or(DEFAULT_BEDROCK_REGION);
+                    assert_eq!(got, want, "combination ({i},{j},{k})");
+
+                    // Postcondition: never empty, because the last tier is a
+                    // non-empty constant.
+                    assert!(!got.is_empty(), "combination ({i},{j},{k}) returned empty");
+                }
+            }
+        }
+
+        // Postcondition: the default is the last tier, reached only when every
+        // other tier is unset or empty.
+        assert_eq!(
+            resolve_region_from(Some(""), Some(""), Some("")),
+            DEFAULT_BEDROCK_REGION
+        );
+    }
+
     #[test]
     fn bedrock_region_resolution() {
         assert_eq!(
+            resolve_region_from(Some("eu-west-1"), Some("ap-south-1"), Some("us-west-2")),
+            "eu-west-1",
+            "explicit should win over both env tiers"
+        );
+        assert_eq!(
+            resolve_region_from(Some(""), Some("ap-south-1"), Some("us-west-2")),
+            "ap-south-1",
+            "empty explicit should fall through to TRUSTY_AWS_REGION"
+        );
+        assert_eq!(
+            resolve_region_from(None, None, Some("us-west-2")),
+            "us-west-2",
+            "AWS_REGION should be used when TRUSTY_AWS_REGION is unset"
+        );
+        assert_eq!(
+            resolve_region_from(Some(""), None, None),
+            DEFAULT_BEDROCK_REGION,
+            "empty explicit with no env should reach the default"
+        );
+        assert_eq!(
+            resolve_region_from(None, None, None),
+            DEFAULT_BEDROCK_REGION,
+            "None with no env should reach the default"
+        );
+        assert_eq!(
+            resolve_region_from(Some(""), Some(""), Some("")),
+            DEFAULT_BEDROCK_REGION,
+            "an env var set to the empty string counts as unset"
+        );
+        assert_eq!(
             resolve_bedrock_region(Some("eu-west-1")),
             "eu-west-1",
-            "explicit should win"
-        );
-        assert_eq!(
-            resolve_bedrock_region(Some("")),
-            DEFAULT_BEDROCK_REGION,
-            "empty explicit should fall through to default"
-        );
-        assert_eq!(
-            resolve_bedrock_region(None),
-            DEFAULT_BEDROCK_REGION,
-            "None should return default"
+            "the public wrapper's explicit tier ignores the environment"
         );
     }
 

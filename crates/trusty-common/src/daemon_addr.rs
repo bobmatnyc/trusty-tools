@@ -47,7 +47,29 @@ pub fn write_daemon_addr(app_name: &str, addr: &str) -> Result<()> {
 /// What: reads `{resolve_data_dir(app_name)}/http_addr`, trims surrounding
 /// whitespace, and returns `Some(addr)`. Returns `Ok(None)` iff the file
 /// does not exist; any other I/O error propagates as `Err`.
-/// Test: `daemon_addr_round_trips` and `read_daemon_addr_missing_returns_none`.
+/// Test: `daemon_addr_round_trips`, `read_daemon_addr_missing_returns_none`,
+/// `contract_read_daemon_addr_separates_absent_from_failed`.
+///
+/// # Code Contract
+/// Preconditions:
+/// - None. `app_name` need not name a daemon that has ever run.
+///
+/// Postconditions:
+/// - `Ok(None)` means the address file DOES NOT EXIST, and only that. It never
+///   stands in for a read that failed.
+/// - `Err` means the address is UNKNOWN — a permission denial, a corrupt data
+///   directory, or any other I/O failure. Distinguishing it from `Ok(None)` is
+///   this function's reason to be fallible, and is what lets callers avoid
+///   string-matching on error messages.
+/// - `Ok(Some(s))` returns the file's contents with surrounding whitespace
+///   trimmed. `s` may be empty if the file is empty or blank; this function
+///   does not validate that `s` is a well-formed address.
+///
+/// Invariants:
+/// - Read-only: unlike `check_already_running`, it never deletes a stale file.
+/// - The path it reads is the one `write_daemon_addr` writes and
+///   `remove_daemon_addr` deletes; the three share one layout so a third
+///   trusty-* daemon cannot invent another location.
 pub fn read_daemon_addr(app_name: &str) -> Result<Option<String>> {
     let dir = crate::data_dir::resolve_data_dir(app_name)?;
     let path = dir.join(DAEMON_ADDR_FILENAME);
@@ -136,7 +158,34 @@ pub async fn check_already_running(addr_file: &Path, health_path: &str) -> Optio
 /// rather than guessing a default port.
 /// Test: `resolve_daemon_base_url_adds_scheme`,
 /// `resolve_daemon_base_url_preserves_existing_scheme`,
-/// `resolve_daemon_base_url_none_when_undiscoverable`.
+/// `resolve_daemon_base_url_none_when_undiscoverable`,
+/// `contract_read_daemon_addr_separates_absent_from_failed` (which carries this
+/// function's contract too — see the comment mid-body for why the two share one
+/// env-guarded block).
+///
+/// # Code Contract
+/// Preconditions:
+/// - None. `app_name` need not name a daemon that has ever run.
+///
+/// Postconditions:
+/// - `Some(url)` is returned ONLY from an address the named daemon actually
+///   recorded. No port, host, or scheme is ever guessed — the #2030
+///   discovery-first rule, because a wrong guessed port fails worse than a
+///   clean skip.
+/// - A returned url carries exactly one scheme: the recorded address is
+///   returned as-is when it already starts with `http://` or `https://`, and
+///   prefixed with `http://` otherwise. It is never double-prefixed.
+/// - `None` is returned when the daemon never started, when the address file is
+///   empty or blank, and when it is unreadable. Callers read `None` as "skip,
+///   not discoverable" — it is deliberately NOT distinguishable from an I/O
+///   error here, because every one of those cases has the same correct
+///   response.
+/// - Total: never panics and never returns `Err`; I/O failure collapses to
+///   `None`.
+///
+/// Invariants:
+/// - Read-only, and does not probe the address — a returned url means
+///   "recorded", never "reachable". Use `check_already_running` for liveness.
 pub fn resolve_daemon_base_url(app_name: &str) -> Option<String> {
     match read_daemon_addr(app_name) {
         Ok(Some(addr)) if !addr.trim().is_empty() => Some(
@@ -188,6 +237,78 @@ mod tests {
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         assert_eq!(got.as_deref(), Some("127.0.0.1:12345"));
+    }
+
+    // ── Code Contract tests (#5724, ADR-0047) ────────────────────────────────
+
+    /// Why: `Ok(None)` and `Err` mean different things here, and the whole
+    /// reason this function is fallible is to keep them apart — a caller that
+    /// cannot tell "never started" from "could not read" ends up guessing.
+    /// What: an absent file is `Ok(None)`; a present one is `Ok(Some(trimmed))`.
+    /// It also carries resolve_daemon_base_url's contract; see the comment mid-body.
+    /// Test: itself.
+    #[test]
+    fn contract_read_daemon_addr_separates_absent_from_failed() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile_like_dir();
+        // SAFETY: guarded by ENV_LOCK, the convention this module's other tests
+        // already use for the data-dir override.
+        unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, &dir) };
+
+        // Postcondition: absent file -> Ok(None), never Err, never Some("").
+        assert_eq!(read_daemon_addr("contract-app").unwrap(), None);
+
+        // Postcondition: present file -> Ok(Some(s)) with whitespace trimmed.
+        write_daemon_addr("contract-app", "  127.0.0.1:9999\n").unwrap();
+        assert_eq!(
+            read_daemon_addr("contract-app").unwrap().as_deref(),
+            Some("127.0.0.1:9999")
+        );
+
+        // Postcondition: no validation — a blank file is Some(""), not None.
+        // resolve_daemon_base_url is what collapses that to None.
+        write_daemon_addr("contract-app", "   ").unwrap();
+        assert_eq!(
+            read_daemon_addr("contract-app").unwrap().as_deref(),
+            Some("")
+        );
+
+        // ── resolve_daemon_base_url's contract, in the SAME guarded block ────
+        //
+        // Deliberately not a second #[test]. `DATA_DIR_OVERRIDE_ENV` is
+        // process-wide and `ENV_LOCK` only serialises the tests that take it —
+        // several `credentials::resolver` and `memory_core::dream` tests read
+        // the data dir without it. Each additional env-holding test widens the
+        // window in which those observe an overridden data dir, and two more
+        // was enough to turn that latent race into three reproducible failures
+        // in a full `--lib` run. One block keeps this file's footprint as it
+        // was. Fixing the race properly means putting every data-dir reader
+        // behind the lock, which is not this PR's change.
+
+        // Postcondition: never started -> None. No default port is invented.
+        assert_eq!(resolve_daemon_base_url("contract-url-app"), None);
+
+        // Postcondition: blank recorded address -> None.
+        write_daemon_addr("contract-url-app", "   ").unwrap();
+        assert_eq!(resolve_daemon_base_url("contract-url-app"), None);
+
+        // Postcondition: exactly one scheme is added, never doubled.
+        write_daemon_addr("contract-url-app", "127.0.0.1:8080").unwrap();
+        let got = resolve_daemon_base_url("contract-url-app").unwrap();
+        assert_eq!(got, "http://127.0.0.1:8080");
+        assert_eq!(got.matches("http://").count(), 1);
+
+        // Postcondition: an existing scheme is preserved, not prefixed again.
+        for recorded in ["http://host:1/", "https://host:2/"] {
+            write_daemon_addr("contract-url-app", recorded).unwrap();
+            assert_eq!(
+                resolve_daemon_base_url("contract-url-app").as_deref(),
+                Some(recorded)
+            );
+        }
+
+        unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

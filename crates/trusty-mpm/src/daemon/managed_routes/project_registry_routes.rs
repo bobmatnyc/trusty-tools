@@ -23,6 +23,7 @@
 //! `patch_body_distinguishes_absent_null_and_value`, and the HTTP handler tests
 //! in `tests/project_registry_routes.rs`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
@@ -34,6 +35,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::core::trusty_tools_config::GithubConfig;
 use crate::daemon::state::DaemonState;
 use crate::project::{Project, ProjectStoreError};
 
@@ -42,9 +44,11 @@ use crate::project::{Project, ProjectStoreError};
 /// Why: registering a project from the deterministic CLI (#2115) mirrors the
 /// `project_register` MCP tool's arguments so the two surfaces never drift. Only
 /// `name` and `repo_url` are required; the rest are optional descriptive config.
-/// The per-project `gh`/commit identity binding (#2184) is deliberately absent —
-/// like `project_register`, a re-register PRESERVES any existing binding rather
-/// than wiping it (operators set those via the config path).
+/// A re-register PRESERVES any existing `github`/commit binding rather than
+/// wiping it. `gh_config_dir` (#5851) is the one field that WRITES into that
+/// binding, and only when present: `configured_account_pair` needs
+/// `github.config_dir` and `github.account` set together, and before #5851
+/// neither could be set from `register` at all.
 /// What: the register arguments, all optional beyond `name`/`repo_url`, with
 /// `default_branch` defaulting to `"main"` when omitted.
 /// Test: `register_body_deserializes`, `register_body_minimal`.
@@ -73,6 +77,10 @@ pub struct RegisterProjectBody {
     /// resolved into `GH_TOKEN`/`GH_USER` at spawn time (#3025).
     #[serde(default)]
     pub gh_account: Option<String>,
+    /// Scoped `gh` config home for this project (#5851), merged into
+    /// `github.config_dir` and injected as `GH_CONFIG_DIR` at spawn time.
+    #[serde(default)]
+    pub gh_config_dir: Option<PathBuf>,
     /// "Launch on main" opt-out (#3455): `None`/`Some(true)` → default
     /// worktree isolation; `Some(false)` → sessions run directly in the
     /// resolved local checkout, no worktree.
@@ -169,6 +177,15 @@ pub async fn register_project_registry_route(
 
     let registry = state.project_registry().await;
     let existing = registry.get(&body.name).await.ok();
+    let existing_github = existing.as_ref().and_then(|p| p.github.clone());
+    // #5851: `--gh-config-dir` is the one register-time flag that writes INTO
+    // the `github` binding, so both keys `configured_account_pair` requires can
+    // be set in one command.
+    let github = merge_gh_config_dir(
+        existing_github,
+        body.gh_config_dir.clone(),
+        body.gh_account.as_deref(),
+    );
     let project = Project {
         name: body.name,
         repo_url: body.repo_url,
@@ -189,7 +206,7 @@ pub async fn register_project_registry_route(
         gh_account: body
             .gh_account
             .or_else(|| existing.as_ref().and_then(|p| p.gh_account.clone())),
-        github: existing.as_ref().and_then(|p| p.github.clone()),
+        github,
         commit_name: existing.as_ref().and_then(|p| p.commit_name.clone()),
         commit_email: existing.as_ref().and_then(|p| p.commit_email.clone()),
         // #3455: mirrors the other optional fields' preserve-on-re-register
@@ -208,6 +225,47 @@ pub async fn register_project_registry_route(
             .into_response();
     }
     (StatusCode::CREATED, Json(project)).into_response()
+}
+
+/// Fold a register-time `--gh-config-dir` into a project's `github` binding
+/// (#5851).
+///
+/// Why: `configured_account_pair` needs `github.config_dir` AND
+/// `github.account` together before any per-project `gh` enforcement or
+/// selection happens, and before #5851 neither key had a `register` flag —
+/// they could only be set by hand-editing config. Folding the flag in here
+/// lets `tm projects register <name> --gh-account <login> --gh-config-dir
+/// <dir>` arm both in one command.
+/// What: `None` config dir → the existing binding, untouched (the
+/// preserve-on-re-register contract every other optional field here follows).
+/// `Some(dir)` → the existing binding with `config_dir` replaced, and
+/// `account` filled from `gh_account` only when the binding does not already
+/// name one — an explicitly configured `github.account` is never overwritten
+/// by the coarser `gh_account` flag.
+/// Test: `merge_gh_config_dir_absent_preserves`,
+/// `merge_gh_config_dir_sets_both_keys`,
+/// `merge_gh_config_dir_keeps_existing_account`.
+fn merge_gh_config_dir(
+    existing: Option<GithubConfig>,
+    gh_config_dir: Option<PathBuf>,
+    gh_account: Option<&str>,
+) -> Option<GithubConfig> {
+    let Some(dir) = gh_config_dir else {
+        return existing;
+    };
+    let mut cfg = existing.unwrap_or_default();
+    cfg.config_dir = Some(dir);
+    if cfg
+        .account
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+        && let Some(account) = gh_account.map(str::trim).filter(|s| !s.is_empty())
+    {
+        cfg.account = Some(account.to_string());
+    }
+    Some(cfg)
 }
 
 /// `GET /api/v1/projects/{name}` — fetch one registry-B project by name.
@@ -506,6 +564,8 @@ fn trim_and_reject_blank_tags(tags: Vec<String>, field: &str) -> Result<Vec<Stri
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     /// A full register body deserializes with every field populated.
@@ -519,7 +579,8 @@ mod tests {
             "tags": ["backend", "oss"],
             "stack_hint": "rust",
             "gh_user": "acme-bot",
-            "gh_account": "acme-bot"
+            "gh_account": "acme-bot",
+            "gh_config_dir": "/home/bob/.config/gh-acme"
         });
         let body: RegisterProjectBody = serde_json::from_value(json).unwrap();
         assert_eq!(body.name, "widget");
@@ -531,6 +592,58 @@ mod tests {
         );
         assert_eq!(body.gh_user.as_deref(), Some("acme-bot"));
         assert_eq!(body.gh_account.as_deref(), Some("acme-bot"));
+        assert_eq!(
+            body.gh_config_dir.as_deref(),
+            Some(Path::new("/home/bob/.config/gh-acme"))
+        );
+    }
+
+    /// Why: an absent `--gh-config-dir` must leave an existing `github`
+    /// binding exactly as it was — the preserve-on-re-register contract every
+    /// other optional field on this route follows (#3025 review item 4).
+    /// Test: itself.
+    #[test]
+    fn merge_gh_config_dir_absent_preserves() {
+        let existing = GithubConfig {
+            config_dir: Some(PathBuf::from("/keep/me")),
+            account: Some("keeper".to_string()),
+            ..GithubConfig::default()
+        };
+        let merged = merge_gh_config_dir(Some(existing.clone()), None, Some("other"));
+        assert_eq!(merged, Some(existing));
+        assert_eq!(merge_gh_config_dir(None, None, Some("other")), None);
+    }
+
+    /// Why (#5851): `configured_account_pair` only arms when BOTH
+    /// `github.config_dir` and `github.account` are set, and neither had a
+    /// `register` flag before this change. One command must set both.
+    /// Test: itself.
+    #[test]
+    fn merge_gh_config_dir_sets_both_keys() {
+        let merged = merge_gh_config_dir(None, Some(PathBuf::from("/gh/acme")), Some("acme-bot"))
+            .expect("some");
+        assert_eq!(merged.config_dir.as_deref(), Some(Path::new("/gh/acme")));
+        assert_eq!(merged.account.as_deref(), Some("acme-bot"));
+    }
+
+    /// Why: an explicitly configured `github.account` is the more specific
+    /// statement of intent; the coarser `gh_account` flag must never overwrite
+    /// it, only fill the gap when it is absent or blank.
+    /// Test: itself.
+    #[test]
+    fn merge_gh_config_dir_keeps_existing_account() {
+        let existing = GithubConfig {
+            account: Some("configured".to_string()),
+            ..GithubConfig::default()
+        };
+        let merged = merge_gh_config_dir(
+            Some(existing),
+            Some(PathBuf::from("/gh/acme")),
+            Some("flag-account"),
+        )
+        .expect("some");
+        assert_eq!(merged.account.as_deref(), Some("configured"));
+        assert_eq!(merged.config_dir.as_deref(), Some(Path::new("/gh/acme")));
     }
 
     /// Only `name`/`repo_url` are required; the rest default to absent.

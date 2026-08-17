@@ -7,7 +7,7 @@
 //! them consistent and is the daemon's composition root for dependency
 //! injection into request handlers.
 //! What: [`DaemonState`] holds `DashMap`s keyed by `SessionId`/agent name plus
-//! a bounded ring buffer of recent [`HookEventRecord`]s; methods provide the
+//! a bounded ring buffer of recent [`HookEventRecord`](crate::core::hook::HookEventRecord)s; methods provide the
 //! typed mutations the rest of the daemon needs.
 //! Test: `cargo test -p trusty-mpm-daemon` exercises registration, the hook
 //! ring-buffer bound, and memory-pressure classification.

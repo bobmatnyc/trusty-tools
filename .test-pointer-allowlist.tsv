@@ -181,8 +181,6 @@ crates/trusty-code/src/session/transcript.rs	get_transcript_returns_stored_recor
 crates/trusty-code/src/skills/mod.rs	load_skill_body_io_error
 crates/trusty-code/src/tools/registry.rs	register_panics_on_duplicate_in_debug
 crates/trusty-code/src/tools/registry.rs	register_then_dispatch_succeeds
-crates/trusty-common/src/bm25_client.rs	locate_bm25_daemon_binary_prefers_sibling
-crates/trusty-common/src/bm25_client.rs	request_serialises_as_jsonrpc_2_0
 crates/trusty-common/src/catchup/mpm_registry.rs	default_registry_path_under_home
 crates/trusty-common/src/catchup/mpm_session.rs	roundtrip_partial_json
 crates/trusty-common/src/catchup/session_finder.rs	parse_trusty_mpm_session_extracts_sections
@@ -287,7 +285,6 @@ crates/trusty-memory/src/commands/doctor/mod.rs	doctor_fix_palaces_lists_orphane
 crates/trusty-memory/src/commands/kuzu_migrate.rs	read_entities_returns_expected_count
 crates/trusty-memory/src/commands/kuzu_migrate.rs	read_relations_returns_expected_count
 crates/trusty-memory/src/commands/kuzu_migrate.rs	schema_table_names_are_defined
-crates/trusty-memory/src/commands/serve_stdio_bridge.rs	ensure_daemon_up
 crates/trusty-memory/src/commands/serve_stdio_bridge.rs	value_to_mcp_response_err
 crates/trusty-memory/src/commands/serve_stdio_bridge.rs	value_to_mcp_response_malformed
 crates/trusty-memory/src/commands/serve_stdio_bridge.rs	value_to_mcp_response_ok
@@ -311,11 +308,7 @@ crates/trusty-memory/src/lib.rs	health_endpoint_reports_bound_addr
 crates/trusty-memory/src/lib.rs	sse_stream_receives_palace_created
 crates/trusty-memory/src/messaging/operations.rs	cwd_palace_slug_falls_back_to_basename
 crates/trusty-memory/src/project_root/detection.rs	lazy_write_skipped_for_temp_dir_root
-crates/trusty-memory/src/project_root/detection.rs	project_slug_personal_always_allowed
 crates/trusty-memory/src/project_root/mod.rs	project_slug_personal_always_allowed
-crates/trusty-memory/src/project_root/pin_file.rs	project_slug_from_basename_basic
-crates/trusty-memory/src/project_root/pin_file.rs	write_project_pin_creates_expected_yaml
-crates/trusty-memory/src/project_root/pin_file.rs	write_project_pin_round_trips_through_read
 crates/trusty-memory/src/prompt_facts.rs	gather_hot_triples_skips_non_hot
 crates/trusty-memory/src/prompt_facts.rs	rebuild_prompt_cache_populates_triples_and_formatted
 crates/trusty-memory/src/prompt_facts.rs	rebuild_prompt_cache_reflects_writes
@@ -421,7 +414,6 @@ crates/trusty-mpm/src/control/registry.rs	registry_with_classifier_builds_actor_
 crates/trusty-mpm/src/core/auto_resume.rs	effective_from_env_parses_truthy
 crates/trusty-mpm/src/core/compress.rs	caveman_summary_contains_tool_and_size
 crates/trusty-mpm/src/core/compress.rs	strip_ansi_leaves_plain_text
-crates/trusty-mpm/src/core/deploy_validate/mod.rs	repair_reports_error_when_prepare_session_fails
 crates/trusty-mpm/src/core/manifest/schema.rs	instruction_layers_roundtrip
 crates/trusty-mpm/src/core/manifest/schema.rs	mcp_servers_roundtrip
 crates/trusty-mpm/src/core/manifest/schema.rs	model_tiers_roundtrip
@@ -722,7 +714,6 @@ crates/trusty-review/src/pipeline/verify.rs	verify_one_confirmed
 crates/trusty-review/src/pipeline/verify.rs	verify_one_model_unavailable_emits_signal
 crates/trusty-review/src/pipeline/verify.rs	verify_one_refuted
 crates/trusty-review/src/pipeline/voice_config.rs	build_voice_config_principles_on
-crates/trusty-review/src/profile/reporter.rs	reporter_markdown_output
 crates/trusty-review/src/report/analyze_adapter.rs	http_source_maps_from_mock
 crates/trusty-review/src/report/investigate/mod.rs	investigation_survives_one_truncated_batch_of_three
 crates/trusty-review/src/report/investigate/mod.rs	render_tests

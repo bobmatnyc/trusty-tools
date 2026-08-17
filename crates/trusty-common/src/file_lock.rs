@@ -14,7 +14,8 @@
 //! What: [`with_exclusive_lock`] runs a closure while holding an exclusive
 //! `flock(2)`-style advisory lock on a `<path>.lock` sidecar, releasing it by
 //! RAII on every exit path including a panic. [`lock_path`] names that sidecar.
-//! Test: `cargo test -p trusty-common -- file_lock::tests`.
+//! Test: `cargo test -p trusty-common --features unconditional-only --
+//! file_lock::tests`.
 //!
 //! # Contract
 //!
@@ -31,6 +32,9 @@
 //!   path self-deadlocks: the second acquisition uses a different descriptor.
 //! - **Blocking.** Acquisition blocks the calling thread. Async callers must
 //!   run it on a blocking-safe thread (e.g. `tokio::task::spawn_blocking`).
+//!
+//! [`with_exclusive_lock`]: crate::file_lock::with_exclusive_lock
+//! [`lock_path`]: crate::file_lock::lock_path
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};

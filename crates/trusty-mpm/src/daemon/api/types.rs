@@ -208,6 +208,15 @@ pub struct DiscoverResponse {
     pub discovered: usize,
     /// Friendly tmux names of the newly-registered sessions.
     pub sessions: Vec<String>,
+    /// Why the scan did not run, when it did not (#5784).
+    ///
+    /// Omitted from the JSON when the scan ran, so an existing client sees the
+    /// response shape it always saw; present with the gate's reason when this
+    /// daemon was refused access to the tmux server and the host process
+    /// table. Without it `{discovered: 0, sessions: []}` meant both "nothing
+    /// to adopt" and "not allowed to look".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
 }
 
 /// Response of `POST /pair/reset`.

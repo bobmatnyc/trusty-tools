@@ -61,7 +61,7 @@ pub async fn project_list(state: &Arc<DaemonState>) -> Result<Value, String> {
 /// `default_branch` to `"main"` when omitted); a `None` param for
 /// `stack_hint`/`tags`/`description`/`gh_user`/`gh_account` PRESERVES the
 /// current persisted value rather than clearing it (#3025 review follow-up
-/// item 4 — mirrors [`crate::daemon::managed_routes::project_registry_routes::register_project_registry_route`]'s
+/// item 4 — mirrors [`crate::daemon::managed_routes::project_registry_routes::register_project_registry_route`](crate::daemon::managed_routes::register_project_registry_route)'s
 /// identical fix; see that function's doc for the full rationale and the
 /// deliberate `default_branch` exception). Calls `registry.register` and
 /// returns the persisted record.

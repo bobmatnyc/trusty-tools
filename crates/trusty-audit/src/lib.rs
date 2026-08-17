@@ -25,11 +25,22 @@
 //! | [`config`] | the engagement config that ships TO the recipient — and the key it carries |
 //! | [`manifest`] | reading tga's `manifest.toml` rather than duplicating it |
 //! | [`tools`] | which pinned tools are needed, and the call that installs them |
+//! | [`discover`] | which repositories the recipient's `gh` credential can reach (#5487) |
+//! | [`registry`] | the repositories and boards this engagement targets (#5822) |
+//! | [`validate`] | proving a target can be read, before it is registered (#5822) |
+//! | [`clone`] | getting the selected repositories onto the recipient's disk (#5215) |
+//! | [`run`] | driving the pinned `tga audit` over the selected repositories |
+//! | [`package`] | assembling the unencrypted deliverable that goes back (#5499) |
+//! | [`chain`] | driving all four of those in one call, resumably (#5824) |
+//! | [`distribute`] | assembling the install package that goes to a client (#5825) |
 //!
 //! ## What this milestone is not
 //!
-//! The audit sweep, package assembly, signing and the GUI are later milestones
-//! on #5473/#5477's tree. [`tools::install`] fetches the pinned triple, but it
+//! Content signing (#5481) and the GUI are later milestones on #5473/#5477's
+//! tree. [`package::assemble`] carries everything under `out/` verbatim, so
+//! #5481's signed manifest rides along with no change there. [`run::sweep`] reads
+//! the selection those will write — see [`run::SELECTION_FILE`] for the exact
+//! file and shape. [`tools::install`] fetches the pinned triple, but it
 //! contains no download implementation — it calls `trusty-installer`'s pinned,
 //! fail-closed entry point (#5491, #5495), because a second implementation here
 //! would be a defect under CLAUDE.md's common-entry-point rule.
@@ -42,7 +53,9 @@
 //! **A credential never reaches an output artifact.** The engagement config
 //! carries a spend-capped OpenRouter key; the deliverable that goes back carries
 //! none. [`config::SecretKey`] implements `Deserialize` and not `Serialize`, so
-//! that is a compile error rather than a review catch.
+//! that is a compile error rather than a review catch — and because the
+//! deliverable also carries files OTHER programs wrote, which no type governs,
+//! [`package::assemble`] scans every one of them for the key as it copies it.
 //!
 //! **Nothing runs at a version the engagement did not pin.** The tool triple is
 //! required config with no default, all three install or none do, and the
@@ -50,12 +63,35 @@
 //!
 //! Test: each module carries its own `#[cfg(test)]` tests.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
+// #5824: the one-shot chain over install, materialize, collect and package.
+pub mod chain;
 pub mod cli;
+pub mod clone;
 pub mod config;
+pub mod discover;
+// #5825: the INBOUND package, built on the auditor's machine. `package` is the
+// outbound one built on the recipient's. Two modules, opposite directions,
+// opposite rules about the credential — never one with a flag.
+pub mod distribute;
 pub mod error;
+pub mod inference;
 pub mod manifest;
+pub mod package;
+// #5823: the seam a front end renders live progress through, and the pump that
+// reads a spawned child's stages back out of its output.
+pub mod progress;
+pub mod registry;
+mod relay;
+pub mod run;
 pub mod session;
 pub mod tools;
+pub mod validate;
 pub mod workdir;
 
 pub use error::AuditError;

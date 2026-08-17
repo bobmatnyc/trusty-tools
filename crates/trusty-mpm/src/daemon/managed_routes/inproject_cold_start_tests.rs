@@ -154,6 +154,35 @@ fn existing_checkout_without_an_origin_fails_loud() {
     );
 }
 
+/// FAIL-SAFE, and with the RIGHT reason: a checkout whose remote git cannot
+/// read is `OriginUnreadable`, not `NoOrigin` (#4734).
+///
+/// Why: both refuse, so the pre-#4734 collapse was safe here — but it told the
+/// operator the checkout "has no remote.origin.url" and to remove the
+/// directory, which is wrong advice for a `.git/config` git declined to parse.
+/// What: builds a real checkout, then corrupts `.git/config` so
+/// `git config --get` exits 128, and asserts both the variant and that the
+/// message carries git's own reason.
+/// Test: itself.
+#[test]
+fn existing_checkout_with_an_unreadable_remote_fails_loud() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let base = init_origin(&tmp.path().join("base")).to_path_buf();
+    std::fs::write(base.join(".git/config"), "[remote \"origin\"\n").expect("corrupt config");
+
+    let err = ensure_managed_checkout_at(&base, "https://github.com/acme/widget.git")
+        .expect_err("an unreadable remote must be refused");
+    assert!(
+        matches!(err, ColdStartError::OriginUnreadable { .. }),
+        "expected OriginUnreadable, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("could not be read"),
+        "states the real reason: {msg}"
+    );
+}
+
 /// DECIDED BEHAVIOR: a dirty existing checkout WARNS AND PROCEEDS.
 ///
 /// Why: this reverses an earlier fail-loud decision on this same path. A dirty

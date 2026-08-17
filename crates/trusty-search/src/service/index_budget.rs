@@ -19,6 +19,9 @@
 //! `reindex_budget_is_inclusive_at_the_boundary` in the integration test binary
 //! `crates/trusty-search/tests/index_budget_env.rs` — they set
 //! `TRUSTY_MAX_INDEX_FILES`, so they need their own process (#3769).
+//!
+//! [`IndexBudget`]: crate::service::index_budget::IndexBudget
+//! [`IndexBudget::check`]: crate::service::index_budget::IndexBudget::check
 
 use std::path::PathBuf;
 use std::str::FromStr;

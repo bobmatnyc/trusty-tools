@@ -188,3 +188,36 @@ fn parse_declared_gaps() {
     .expect("parses");
     assert!(none.report.gaps.is_empty(), "absent key defaults to empty");
 }
+
+/// #5405: the ticketing artifact rides on `[report]`, and `metrics` rides on a
+/// repository entry. The fixture declares both, so each must land in its own
+/// field with the other's value untouched — `metrics` is asserted nowhere else
+/// in this file (`parse_local_path_entry` declares the key and never reads it).
+#[test]
+fn parse_ticketing_path() {
+    let m = parse_manifest(
+        "[report]\ntitle = \"T\"\nticketing = \"ticketing.json\"\n\n\
+         [[repositories]]\nname = \"A\"\npath = \"/x\"\nmetrics = \"acme.json\"\n",
+        Path::new("m.toml"),
+    )
+    .expect("parses");
+    assert_eq!(
+        m.report.ticketing,
+        Some(std::path::PathBuf::from("ticketing.json"))
+    );
+    assert_eq!(
+        m.repositories[0].metrics,
+        Some(std::path::PathBuf::from("acme.json")),
+        "a declared metrics file must survive alongside a declared ticketing artifact"
+    );
+
+    let none = parse_manifest(
+        "[report]\ntitle = \"T\"\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        Path::new("m.toml"),
+    )
+    .expect("parses");
+    assert!(
+        none.report.ticketing.is_none(),
+        "absent key defaults to None, which renders the section as unassessed"
+    );
+}

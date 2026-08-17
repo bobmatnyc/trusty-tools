@@ -28,6 +28,28 @@ Why `cargo test --workspace` is absent from rungs 1–3, and the "scope down,
 never scope away" line that constrains picking a lower rung, are stated with the
 ladder itself in [`CLAUDE.md`](../../CLAUDE.md) — not repeated here.
 
+### `-p <crate>` is only a gate when the crate's default features compile the code
+
+Every `-p <crate>` cell above assumes the crate's default feature set compiles
+what you changed. `trusty-common` declares `default = []` and gates 25+ modules,
+so `cargo test -p trusty-common` used to run 328 of the crate's ~2062 tests and
+exit 0 — a green that covered neither `memory_core` nor `uds` nor `sld`, and
+held even when a `memory_core` file did not compile (#4901; PR #4899 shipped on
+that green). Since #4901 that form is a `compile_error!` instead. Substitute
+these wherever a rung says `cargo test -p trusty-common`:
+
+| What you changed | Command |
+|---|---|
+| `memory_core` | `cargo test -p trusty-common --features memory-core,embedder-test-support` |
+| any other gated module | `cargo test -p trusty-common --features <feature>` |
+| only unconditional modules | `cargo test -p trusty-common --features unconditional-only` |
+
+The same shape exists wherever a non-default feature gates real code —
+`trusty-common`'s `codex-config` is enabled by no crate in the workspace, so even
+`cargo clippy --workspace` never compiles it and CI lints it in a dedicated step
+(#5264). Before reading a crate-scoped green as a gate, check whether the module
+you edited is behind a `#[cfg(feature = …)]` the command did not enable.
+
 ## The Three Stages in Cargo Terms
 
 `Skill(skill="tm-workflow")` ("Test Scope Widens by Stage") sets the framework
@@ -96,13 +118,20 @@ places it at the publish boundary; rungs 4–6 are named there only because they
 are the rungs that reach that boundary. A rung-4 PR does not owe a workspace test
 run to merge.
 
-**Branch protection follows from this.** The CI `Rust tests (pre-publish gate)`
-job is a pre-build / pre-publish gate, not a pre-merge one, and it is not among
-`main`'s required status contexts — the authoritative, current list is always
-`gh api repos/bobmatnyc/trusty-tools/branches/main/protection --jq
-'.required_status_checks.contexts'`, not a copy enumerated here. Merges proceed
-with `Rust tests (pre-publish gate)` still pending; a **failing** check blocks
-at every stage.
+**The pipeline follows from this.** The CI `Rust tests (pre-publish gate)` job is
+a pre-build / pre-publish gate, not a pre-merge one, and it is not among `main`'s
+required status contexts — the authoritative, current list is always `gh api
+repos/bobmatnyc/trusty-tools/branches/main/protection --jq
+'.required_status_checks.contexts'`, not a copy enumerated here. It no longer runs
+on pull requests at all: it runs on every push to `main`, and on demand via
+`workflow_dispatch` (Actions → CI → "Run workflow"). `preflight-publish.sh` CHECK 1
+refuses to publish any commit that is not `origin/main`, so the tree that gets
+published is always a tree the shards have run against.
+
+**A failing check still blocks at every stage.** Deferring *when* the workspace
+suite runs changes nothing about what a red one means. On `main` a failure opens
+or updates the `ci-red-main` tracking issue via `ci.yml`'s `notify-main-failure`
+job and fails the run.
 
 🔴 **Scoping down by stage is a claim you must be able to prove**, exactly as
 scoping down by rung is. It is never licence to make a red gate green by

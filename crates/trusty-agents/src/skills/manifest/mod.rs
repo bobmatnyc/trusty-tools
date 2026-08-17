@@ -1,7 +1,7 @@
 //! Skill manifests: the one-skill-per-tool wrapping layer (#3933, DOC-57 §5).
 //!
 //! Why: Owner directive, 2026-07-25 — *"One skill per tool. There can be other
-//! skills without tools, but each [tool] needs an accompanying skill"*, refining
+//! skills without tools, but each \[tool\] needs an accompanying skill"*, refining
 //! the earlier *"gworkspace is a Google Workspace skill, MTA Train Time is that
 //! skill"* naming note. That resolves DOC-57 §12 OQ-2 in favour of **1:1
 //! granularity with human-readable names**, not per-family grouping. Before this

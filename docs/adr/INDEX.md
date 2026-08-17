@@ -1,6 +1,6 @@
 # ADR Index — All Decisions
 
-**Last updated:** 2026-08-11 | **Format version:** 1.1
+**Last updated:** 2026-08-17 | **Format version:** 1.1
 
 This index is the complete, concise vetting surface for workspace ADRs. The ADR
 files remain authoritative for full context, decision text, and consequences.
@@ -18,11 +18,11 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0005](0005-harness-event-bus.md) | Shared harness event bus | Amended by 0019 | A common event envelope and process-global telemetry bus serve all harnesses; ADR-0019 adds durable messaging to that bus. | Workspace |
 | [0006](0006-trusty-controller-naming.md) | `trusty-controller` naming | Superseded by 0013 | The control plane was named `trusty-controller` with binary `tctl`. | Workspace |
 | [0007](0007-tool-contract-versioning-and-verb-model.md) | Tool contract versioning | Accepted | Tool contracts use monotonic integer versions and Base/Extended/Custom verb layers. | Workspace |
-| [0008](0008-project-identity-convention.md) | Project identity convention | Amended by 0012 | Projects use the full-path slug of the nearest Git root; ADR-0012 changes worktree identity only. | Workspace |
+| [0008](0008-project-identity-convention.md) | Project identity convention | Amended by 0012, 0052 | Projects use the full-path slug of the nearest Git root; ADR-0012 changes worktree identity, ADR-0052 nullifies point 4 outright. | Workspace |
 | [0009](0009-external-extractor-kg-ingest-contract.md) | External extractor KG ingest | Accepted | External extractors contribute durable overlay subgraphs to trusty-search. | Workspace |
 | [0010](0010-kg-edge-kind-extensibility.md) | Extensible KG edge kinds | Accepted | The KG has first-class data-flow edges plus a custom escape hatch. | Workspace |
 | [0011](0011-tctl-owns-service-lifecycle.md) | Lifecycle and HTTP ownership | Amended by 0032 | The installer/control plane owns service lifecycle and trusty-console owns the sole HTTP surface. | Workspace |
-| [0012](0012-per-instance-guid-and-marker-file-identity.md) | Per-instance search identity | Accepted | A full-path primary key plus local UUID marker (`config.yaml` or `local.yaml`) identifies each search source instance. | Workspace |
+| [0012](0012-per-instance-guid-and-marker-file-identity.md) | Per-instance search identity | Amended by 0051 | A full-path primary key plus local UUID marker (`config.yaml` or `local.yaml`) identifies each search source instance. | Workspace |
 | [0013](0013-rename-trusty-controller-to-trusty-installer.md) | Rename controller to installer | Accepted | `trusty-controller` becomes `trusty-installer`; `tctl` is transitional. | Workspace |
 | [0014](0014-native-mcp-support.md) | Native MCP support | Amended by 0040, 0041 | Key MCP integrations remain in-workspace Rust services, with packaging and consumer boundaries refined later. | Workspace |
 | [0015](0015-three-product-agent-composition-model.md) | Unified agent composition | Proposed | Three orchestration products share an `.md` plus YAML `extends` format. | Workspace |
@@ -54,9 +54,16 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0041](0041-trusty-okg-native-crate-search-absorbs-okf-indexing.md) | Native trusty-okg with search indexing | Accepted | trusty-okg stays native, trusty-search owns OKF indexing, and an MCP service fronts agent reads. | Workspace |
 | [0042](0042-mcp-configuration-is-static-and-persistent.md) | Static persistent MCP configuration | Accepted | MCP declarations live once in user scope and are not injected into workspaces. | `trusty-mpm`, `trusty-search` |
 | [0043](0043-cargo-bin-policy.md) | Traceable `$CARGO_HOME/bin` provenance | Proposed | Registry installs, prebuilt placements, and user-managed files are classified explicitly; path installs are forbidden. | Workspace |
-| [0044](0044-main-checkout-write-boundary-and-agent-worktree-ownership.md) | Main-checkout write boundary | Accepted | Main-checkout sessions write only docs/config, and the harness—not trusty-mpm—owns agent worktree creation. | `trusty-mpm` |
+| [0044](0044-main-checkout-write-boundary-and-agent-worktree-ownership.md) | Main-checkout write boundary | Amended by 0048 | Main-checkout sessions write only docs/config, and the harness—not trusty-mpm—owns agent worktree creation. | `trusty-mpm` |
 | [0045](0045-distinguish-absent-from-undeterminable-on-destructive-paths.md) | Absent vs undeterminable on destructive paths | Proposed | A probe feeding a destructive, enumerating, or operator-reporting operation propagates every error but `NotFound`. | Workspace |
 | [0046](0046-client-declared-search-modes-replace-the-fused-score.md) | Client-declared search modes | Proposed | The client declares the search mode, RRF fusion and the fused score are removed, and BM25 and KG return as separate paged sets. | `trusty-search` |
+| [0047](0047-code-contracts-as-a-machine-checkable-api-surface.md) | Code Contracts are a machine-checkable API surface | Accepted | Public API contracts are stated in doc comments in a parseable grammar, extracted to a checked-in artifact, diffed across versions, and enforced by tests — the behavioural break class no static differ can see. | `trusty-common` |
+| [0048](0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md) | Dispatched writers get a worktree; the write boundary is enforced | Amended by 0049, 0053 | A dispatched writer in a main checkout is granted harness isolation, source writes and commits there are denied for the PM and every agent, and the shared-writer query is keyed by directory rather than session. | `trusty-mpm` |
+| [0049](0049-docs-commits-are-permitted-in-a-main-checkout.md) | Documents-only commits are permitted in a main checkout | Accepted | The main-checkout commit gate decides on what is STAGED rather than on the verb: documents and configuration may commit there when no other live writer shares the HEAD, any staged source file denies, and DOC-66 §0.5's checkout is scoped to source-restricted rather than read-only. | `trusty-mpm` |
+| [0050](0050-colocated-path-tied-identity-with-delta-indexed-worktree-facets.md) | Colocated, path-tied identity with delta-indexed worktree facets | Amended by 0052 | Index data stays colocated and path-tied, one index per project copy covers its worktrees, BM25/KG split into separate indexes, worktrees are indexed as deltas against the merge-base, and embeddings stay main-only. | `trusty-search` |
+| [0051](0051-palace-id-stays-hyphen-joined-owner-and-project-fields-added.md) | Palace id stays hyphen-joined | Accepted | The `<owner>-<project>` palace id is unchanged; `palace.json` gains optional structured `owner`/`project` fields instead of a new separator. | `trusty-common`, `trusty-memory` |
+| [0052](0052-one-index-per-checkout-worktrees-as-tagged-chunk-rows.md) | One index per checkout; worktrees are tagged chunk rows | Accepted | A durable checkout gets one search index covering all its worktrees; a worktree contributes only its modified files' chunks, tagged with the worktree they came from, deleted when the worktree is deleted, and returned by search results as provenance alongside the file path. | `trusty-search` |
+| [0053](0053-fetch-and-pull-are-permitted-in-a-main-checkout.md) | `git fetch` and `git pull` are permitted in a main checkout | Accepted | ADR-0048 decision 10 is narrowed to `git merge` and `git rebase`: a fetch or a pull in a main checkout is permitted and never reaches the live-writer query, while merge and rebase stay denied beside a live writer and the write boundary is untouched. | `trusty-mpm` |
 
 ## Notes
 

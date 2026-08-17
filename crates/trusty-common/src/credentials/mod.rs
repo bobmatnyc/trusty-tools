@@ -19,8 +19,8 @@
 //! behind the `keyring-store` feature — `keyring_store::KeyringStore`).
 //! [`registry`] is the provider→environment-variable table.
 //! [`resolver::resolve_key`] applies the 3-tier precedence (process env var via
-//! [`registry::env_var_for`] > `.env.local` via [`dotenv`] >
-//! [`resolver::default_store`]). [`redact`] holds the credential-masking
+//! [`registry::env_var_for`] > `.env.local` via `dotenv` >
+//! [`resolver::default_store`]). `redact` holds the credential-masking
 //! implementations: [`redact::redact_secret`] (mask a value you are naming;
 //! also reused by `memory_core::filter`) and [`redact::scrub_secrets`] (remove
 //! values you hold from text you don't control), with
@@ -43,9 +43,31 @@
 //! Test: `cargo test -p trusty-common --features credentials -- credentials::`
 //! and (KeyringStore compile/probe-failure-path only, never a real keychain)
 //! `cargo test -p trusty-common --features keyring-store -- credentials::`.
+//!
+//! [`memory_store::MemoryKeyStore`]: crate::credentials::MemoryKeyStore
+//! [`file_store::FileKeyStore`]: crate::credentials::FileKeyStore
+//! [`registry`]: crate::credentials::registry
+//! [`resolver::resolve_key`]: crate::credentials::resolve_key
+//! [`registry::env_var_for`]: crate::credentials::registry::env_var_for
+//! [`resolver::default_store`]: crate::credentials::default_store
+//! [`redact::redact_secret`]: crate::credentials::redact_secret
+//! [`redact::scrub_secrets`]: crate::credentials::scrub_secrets
+//! [`redact::resolved_secret_values`]: crate::credentials::resolved_secret_values
+//! [`CredentialRef`]: crate::credentials::CredentialRef
+//! [`Secret`]: crate::credentials::Secret
+//! [`authority::resolve`]: crate::credentials::authority::resolve
+//! [`Principal`]: crate::credentials::Principal
+//! [`Scope`]: crate::credentials::Scope
+//! [`CredentialError`]: crate::credentials::CredentialError
+//! [`authority`]: crate::credentials::authority
 
 pub mod authority;
 mod dotenv;
+// #3451: the single shared test-only `EnvVarGuard`, consolidated from three
+// prior copies (this module's `resolver::tests`, `memory_core::dream::tests`,
+// and `memory_core::semantic_consolidation::tests`).
+#[cfg(test)]
+pub(crate) mod env_guard;
 mod error;
 mod file_store;
 mod handle;

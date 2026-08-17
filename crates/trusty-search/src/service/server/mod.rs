@@ -17,6 +17,7 @@ mod contrib_graph;
 // #4087: query-time guard so a corpus-failed index fails loudly instead of
 // answering HTTP 200 with an empty result set.
 mod degraded;
+mod facet_route;
 mod fanout;
 mod files;
 mod health;
@@ -42,6 +43,8 @@ mod typeahead;
 #[cfg(test)]
 mod collision_3993_tests;
 #[cfg(test)]
+mod facet_route_tests;
+#[cfg(test)]
 mod list_repo_identity_tests;
 #[cfg(test)]
 mod test_support;
@@ -53,6 +56,10 @@ mod tests_2336;
 mod tests_2984;
 #[cfg(test)]
 mod tests_3304;
+#[cfg(test)]
+mod tests_allowlist_gate_767;
+#[cfg(test)]
+mod tests_same_id_root_mismatch;
 // #3049: DELETE must quiesce in-flight writers and report what it actually did.
 #[cfg(test)]
 mod tests_3049;
@@ -103,6 +110,9 @@ mod tests_health_switchable;
 mod tests_index;
 #[cfg(test)]
 mod tests_index_config;
+// #2203: a search that drops rows after fusion must report how many and why.
+#[cfg(test)]
+mod tests_dropped_results;
 // #5068 / #5061 / #4787 / #4839: the index-routing + status-reporting cluster.
 #[cfg(test)]
 mod tests_index_routing;

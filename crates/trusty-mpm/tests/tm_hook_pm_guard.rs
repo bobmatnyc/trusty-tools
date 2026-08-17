@@ -843,8 +843,56 @@ fn pm_guard_subagent_keeps_its_working_tool_surface() {
 /// controllable to exercise the DENY arm end to end.
 /// What: as [`run_pm_guard`], plus an explicit `--url` and `current_dir`.
 fn run_pm_guard_at(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String {
+    run_pm_guard_at_with_env(stdin_json, url, cwd, &[])
+}
+
+/// [`run_pm_guard_at`] returning STDERR instead of stdout.
+///
+/// Why (#5769): one guard signal is deliberately not a verdict. When the daemon
+/// answers but records nothing — an older daemon 404ing the granted-worktree
+/// route is the realistic shape — the grant is still emitted, because failing
+/// closed on version skew would block every dispatch from a main checkout. The
+/// only trace is a stderr line, and stdout-only helpers cannot see it, so a
+/// silent regression there would leave every test green.
+/// What: as [`run_pm_guard_at`], but hands back the child's stderr.
+fn run_pm_guard_at_stderr(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String {
     let bin = env!("CARGO_BIN_EXE_tm");
     let mut child = Command::new(bin)
+        .args(["--url", url, "hook", "--pm-guard"])
+        .current_dir(cwd)
+        .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
+        .env_remove("CLAUDE_MPM_SUB_AGENT")
+        .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
+        .env_remove("TM_MANAGED_SESSION_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn `tm hook --pm-guard`");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(stdin_json.as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait");
+    assert!(output.status.success(), "the guard must always exit 0");
+    String::from_utf8(output.stderr).expect("stderr is utf8")
+}
+
+/// [`run_pm_guard_at`] with extra environment, for the rules that must fire
+/// THROUGH an automatic subagent marker (`CLAUDE_MPM_SUB_AGENT`) or yield to an
+/// operator escape hatch. Those cases need the daemon URL as well, which
+/// [`run_pm_guard`] fixes at an unreachable address.
+fn run_pm_guard_at_with_env(
+    stdin_json: &str,
+    url: &str,
+    cwd: &std::path::Path,
+    extra_env: &[(&str, &str)],
+) -> String {
+    let bin = env!("CARGO_BIN_EXE_tm");
+    let mut command = Command::new(bin);
+    command
         .args(["--url", url, "hook", "--pm-guard"])
         .current_dir(cwd)
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
@@ -854,7 +902,11 @@ fn run_pm_guard_at(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String
         .env_remove("TM_MANAGED_SESSION_ID")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in extra_env {
+        command.env(k, v);
+    }
+    let mut child = command
         .spawn()
         .expect("failed to spawn `tm hook --pm-guard`");
     child
@@ -882,15 +934,56 @@ fn run_pm_guard_at(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String
 /// and returns the `http://127.0.0.1:PORT` base URL. The accept loop runs on a
 /// detached thread; the process exits with the test binary.
 fn spawn_writers_mock(body: &'static str) -> String {
+    spawn_capturing_writers_mock(body).0
+}
+
+/// [`spawn_writers_mock`] that also hands back what the guard actually sent.
+///
+/// Why (#5769): a mock answering a canned body regardless of the request cannot
+/// tell a correct query from a broken one. The HEAD-move rule keys its query by
+/// DIRECTORY, and the directory it sends has to be one a delegation record can
+/// carry — nothing pinned that, which is why a `cd`-into-a-subdirectory query
+/// keyed a path no record matches and allowed the move with the guard silently
+/// off. Capturing the body makes the key assertable.
+/// What: as [`spawn_writers_mock`], plus a handle whose `posted_cwd()` blocks
+/// briefly for the request and returns its `payload.cwd`. `None` means no
+/// request arrived, which is itself an assertable outcome.
+fn spawn_capturing_writers_mock(body: &'static str) -> (String, CapturedRequest) {
     use std::io::Read;
     use std::net::TcpListener;
+    use std::sync::mpsc;
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         if let Ok((mut socket, _)) = listener.accept() {
+            // Read until the body is complete: `Content-Length` bounds it, and a
+            // single `read` is not guaranteed to return the whole request.
+            let mut raw = Vec::new();
             let mut buf = [0u8; 4096];
-            let _ = socket.read(&mut buf);
+            loop {
+                match socket.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => raw.extend_from_slice(&buf[..n]),
+                }
+                let text = String::from_utf8_lossy(&raw).to_string();
+                let Some((head, rest)) = text.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        l.strip_prefix("content-length: ")
+                            .or(l.strip_prefix("Content-Length: "))
+                    })
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if rest.len() >= len {
+                    let _ = tx.send(rest.to_string());
+                    break;
+                }
+            }
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -898,7 +991,23 @@ fn spawn_writers_mock(body: &'static str) -> String {
             let _ = socket.write_all(response.as_bytes());
         }
     });
-    url
+    (url, CapturedRequest(rx))
+}
+
+/// The request body one [`spawn_capturing_writers_mock`] received.
+struct CapturedRequest(std::sync::mpsc::Receiver<String>);
+
+impl CapturedRequest {
+    /// The forwarded hook payload the guard sent, or `None` if nothing arrived.
+    fn posted(&self) -> Option<serde_json::Value> {
+        let raw = self
+            .0
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .ok()?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("the guard must POST valid JSON: {e}: {raw}"));
+        Some(parsed["payload"].clone())
+    }
 }
 
 #[test]
@@ -1331,6 +1440,830 @@ fn pm_guard_allows_destructive_git_outside_any_checkout() {
     }
 }
 
+/// A `PreToolUse` payload for any tool, with `tool_input` supplied verbatim.
+///
+/// Why: the main-checkout write boundary and the worktree grant are driven by
+/// `Write`/`Edit` and `Agent` calls, neither of which fits the Bash-shaped
+/// helper above.
+fn tool_payload_at(
+    tool: &str,
+    tool_input: &str,
+    cwd: &std::path::Path,
+    extra_fields: &str,
+) -> String {
+    format!(
+        r#"{{"hook_event_name":"PreToolUse",{extra_fields}"cwd":"{}","tool_name":"{tool}","tool_input":{tool_input}}}"#,
+        cwd.display()
+    )
+}
+
+#[test]
+fn pm_guard_denies_a_source_write_in_a_main_checkout() {
+    // ADR-0044 decision 1, the half that was never built: an ordinary `Write`
+    // to a source file in the shared checkout passed every guard in the
+    // process, and that is the write the reported incident was made of.
+    let (_dir, repo) = main_checkout_fixture();
+    let target = repo.join("crates/trusty-mpm/src/lib.rs");
+    let input = format!(
+        r#"{{"file_path":"{}","content":"fn main() {{}}"}}"#,
+        target.display()
+    );
+    let stdout = run_pm_guard(&tool_payload_at("Write", &input, &repo, ""), &[]);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("ADR-0044"),
+        "the deny must cite the decision it enforces: {stdout}"
+    );
+    assert!(
+        stdout.contains("isolation"),
+        "the deny must say what to do instead: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_dispatched_agents_source_write_in_a_main_checkout() {
+    // ADR-0044 binds "the PM and every agent it dispatches", so this rule must
+    // pierce both automatic subagent markers — Guard 4's `agent_id` payload
+    // field and Guard 1's `CLAUDE_MPM_SUB_AGENT` env var. Both early-return
+    // ALLOW precisely for the population the rule exists to bind, so a version
+    // placed after either would be a no-op for all of it.
+    let (_dir, repo) = main_checkout_fixture();
+    let target = repo.join("crates/trusty-mpm/src/lib.rs");
+    let input = format!(r#"{{"file_path":"{}","content":"x"}}"#, target.display());
+
+    let dispatched = run_pm_guard(
+        &tool_payload_at("Write", &input, &repo, r#""agent_id":"agt_1","#),
+        &[],
+    );
+    assert_denied(&dispatched);
+
+    let nested = run_pm_guard(
+        &tool_payload_at("Write", &input, &repo, ""),
+        &[("CLAUDE_MPM_SUB_AGENT", "1")],
+    );
+    assert_denied(&nested);
+}
+
+#[test]
+fn pm_guard_allows_documents_and_configuration_in_a_main_checkout() {
+    // The other half of ADR-0044, and the half a "read-only checkout" framing
+    // loses: writing projects and configuration maintenance are what a
+    // main-checkout session is FOR, and framework deployment writes `.claude/`
+    // and `TASK.md` on every launch.
+    let (_dir, repo) = main_checkout_fixture();
+    for name in [
+        "README.md",
+        "TASK.md",
+        "Cargo.toml",
+        ".claude/settings.json",
+    ] {
+        let target = repo.join(name);
+        let input = format!(r#"{{"file_path":"{}","content":"x"}}"#, target.display());
+        let stdout = run_pm_guard(&tool_payload_at("Write", &input, &repo, ""), &[]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "{name} is a document or configuration and must stay writable"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_commit_in_a_main_checkout() {
+    // The commit is where a write becomes permanent on a branch another
+    // session is standing on — the step that produced `f1da7bce` landing on a
+    // branch belonging to a different workstream.
+    //
+    // Since ADR-0049 this fixture reaches the deny through the UNKNOWN-index
+    // arm: `main_checkout_fixture` fabricates `.git` as a directory, so `git
+    // diff --cached` cannot run there and no staged set can license the commit.
+    // The documents-only carve-out is exercised against a real repository in
+    // `pm_guard_allows_a_documents_only_commit_in_a_main_checkout`.
+    let (_dir, repo) = main_checkout_fixture();
+    let stdout = run_pm_guard(&bash_payload_at("git commit -m 'wip'", &repo, ""), &[]);
+    assert_denied(&stdout);
+    assert!(stdout.contains("ADR-0044"), "{stdout}");
+
+    // The composition the PM actually types, and a dispatched agent's commit.
+    let chained = run_pm_guard(
+        &bash_payload_at("git add -A && git commit -m 'wip'", &repo, ""),
+        &[],
+    );
+    assert_denied(&chained);
+    let dispatched = run_pm_guard(
+        &bash_payload_at("git commit -m 'wip'", &repo, r#""agent_id":"agt_1","#),
+        &[],
+    );
+    assert_denied(&dispatched);
+
+    // Read-only git is never this rule's business.
+    for command in ["git status --short", "git log --oneline -5", "git add -A"] {
+        let stdout = run_pm_guard(&bash_payload_at(command, &repo, ""), &[]);
+        assert_eq!(stdout.trim(), "", "`{command}` must stay allowed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0049 — a documents-only commit is permitted in a main checkout
+// ---------------------------------------------------------------------------
+//
+// Every case here needs a REAL repository, because the whole rule is what git
+// reports as staged. `main_checkout_fixture`'s fabricated `.git` directory
+// reaches the unknown-index deny and would make each of these pass for the
+// wrong reason.
+
+/// A real git repository that classifies as a project main checkout, plus a
+/// `stage` closure for putting paths in its index.
+///
+/// Returns `None` when `git init` fails, which is the only way this can be
+/// unavailable; the caller skips rather than failing, matching how the rest of
+/// this workspace treats a missing git.
+fn real_main_checkout() -> Option<(tempfile::TempDir, std::path::PathBuf)> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let ok = Command::new("git")
+        .args(["init", "-q", "."])
+        .current_dir(&repo)
+        .status()
+        .ok()?
+        .success();
+    ok.then_some((dir, repo))
+}
+
+/// Write `name` under `repo` and put it in the index.
+fn stage(repo: &std::path::Path, name: &str) {
+    let path = repo.join(name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir");
+    }
+    std::fs::write(&path, "x").expect("write");
+    assert!(
+        Command::new("git")
+            .args(["add", "--", name])
+            .current_dir(repo)
+            .status()
+            .expect("git add")
+            .success(),
+        "git add {name}"
+    );
+}
+
+/// A commit payload carrying the session id the writer query needs.
+fn commit_payload(command: &str, cwd: &std::path::Path, extra_fields: &str) -> String {
+    bash_payload_at(
+        command,
+        cwd,
+        &format!(
+            r#"{extra_fields}"session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_commit","#
+        ),
+    )
+}
+
+#[test]
+fn pm_guard_allows_a_documents_only_commit_in_a_main_checkout() {
+    // THE regression test (ADR-0049 decision 1). Against pre-fix code this
+    // payload is DENIED: `evaluate_main_checkout_commit_command` matched the
+    // verb `commit`, found a main checkout, and returned a reason with no
+    // reference to what was staged. The allow below can only come from the
+    // staged-set classifier.
+    //
+    // ADR-0044 decision 1 already made every one of these files WRITABLE here;
+    // before this change none of them could be landed from where they were
+    // written.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    for name in [
+        "docs/adr/0049-x.md",
+        "CLAUDE.md",
+        "Cargo.toml",
+        ".claude/settings.json",
+        "TASK.md",
+        "Makefile",
+    ] {
+        stage(&repo, name);
+    }
+    let stdout = run_pm_guard(&commit_payload("git commit -m 'docs: x'", &repo, ""), &[]);
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "a documents-only commit in a main checkout must be allowed, got: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_allows_a_dispatched_agents_documents_only_commit() {
+    // The rule sits ahead of Guards 1 and 4, so both automatic subagent
+    // populations reach it. They must reach the ALLOW too — an agent writing a
+    // changelog fragment in the shared checkout is the case this exists for.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "crates/trusty-mpm/changelog.d/5782-x.md");
+    for (extra_fields, env) in [
+        (
+            r#""agent_id":"agent-xyz789","agent_type":"documentation","#,
+            vec![],
+        ),
+        ("", vec![("CLAUDE_MPM_SUB_AGENT", "1")]),
+    ] {
+        let stdout = run_pm_guard_at_with_env(
+            &commit_payload("git commit -m 'docs: x'", &repo, extra_fields),
+            "http://127.0.0.1:1/",
+            &repo,
+            &env,
+        );
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "a dispatched agent's documents-only commit must be allowed, got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_commit_whose_staged_set_contains_source() {
+    // ADR-0049 decisions 1, 2 and 6. Source-only and MIXED are one deny, and
+    // it names the source paths so the remedy is mechanical — naming the
+    // documents too would send the reader unstaging the files that were fine.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/keep.md");
+    stage(&repo, "crates/a/src/lib.rs");
+    stage(&repo, "crates/a/src/other.py");
+
+    let stdout = run_pm_guard(&commit_payload("git commit -m 'wip'", &repo, ""), &[]);
+    assert_denied(&stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(reason.contains("crates/a/src/lib.rs"), "{reason}");
+    assert!(reason.contains("crates/a/src/other.py"), "{reason}");
+    assert!(
+        !reason.contains("docs/keep.md"),
+        "the deny must name only what made the set unsafe: {reason}"
+    );
+    assert!(reason.contains("git restore --staged"), "{reason}");
+    assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+}
+
+#[test]
+fn pm_guard_denies_a_commit_the_staged_set_does_not_describe() {
+    // ADR-0049 decision 5. Each of these commits content the index does not
+    // hold, so a staged set of pure documents cannot license any of them.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/x.md");
+    for command in [
+        "git commit -a -m 'wip'",
+        "git commit -am 'wip'",
+        "git commit --amend --no-edit",
+        "git commit --only docs/x.md -m 'wip'",
+        "git commit -m 'wip' -- docs/x.md",
+    ] {
+        let stdout = run_pm_guard(&commit_payload(command, &repo, ""), &[]);
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("ADR-0049"),
+            "`{command}` must name the carve-out it missed: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_commit_with_nothing_staged() {
+    // An empty index is not evidence of a documents commit — it is `git
+    // commit` about to error, or about to be retried with `-a`. Deny is the
+    // pre-ADR-0049 behaviour and stays.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    let stdout = run_pm_guard(&commit_payload("git commit -m 'wip'", &repo, ""), &[]);
+    assert_denied(&stdout);
+}
+
+#[test]
+fn pm_guard_denies_a_documents_only_commit_beside_a_live_writer() {
+    // ADR-0049 decision 3, and the hazard the owner's ruling does not repeal:
+    // a commit MOVES HEAD, so a documents commit lands on whichever branch the
+    // other session's uncommitted work is sitting on, exactly as a source
+    // commit would. Same directory-keyed query ADR-0048 decision 10 uses.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/x.md");
+    // The CAPTURING mock (#5769 added it for exactly this), so the directory
+    // KEY the query is made on is asserted rather than assumed. A query keyed
+    // on a path no delegation record carries matches nothing and allows, with
+    // the guard silently off — which is the defect #5769 was filed for.
+    let (url, captured) = spawn_capturing_writers_mock(
+        r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#,
+    );
+    let stdout = run_pm_guard_at(
+        &commit_payload("git commit -m 'docs: x'", &repo, ""),
+        &url,
+        &repo,
+    );
+
+    assert_denied(&stdout);
+    let posted = captured.posted().expect("the guard must query the daemon");
+    assert_eq!(
+        posted["cwd"],
+        repo.display().to_string(),
+        "the query must be keyed by the checkout root the recorder stamps"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(reason.contains("ADR-0049"), "{reason}");
+    assert!(
+        reason.contains("rust-engineer"),
+        "the deny must name the writer it protected: {reason}"
+    );
+    assert!(
+        reason.contains("unstaging it will not help"),
+        "the content was never the problem and the text must say so: {reason}"
+    );
+    assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+}
+
+#[test]
+fn pm_guard_keys_a_subdirectory_commit_query_by_the_checkout_root() {
+    // #5788 review, MEDIUM 4. `cd <subdir> && git commit` resolves the
+    // subdirectory, but `tm hook` stamps a delegation record from its own
+    // process directory — the two name one HEAD and need not be the same
+    // string. The root is asked FIRST, which is the same order and the same
+    // reason as the HEAD-move rule (#5769).
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/x.md");
+    let sub = repo.join("docs");
+    let (url, captured) = spawn_capturing_writers_mock(
+        r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#,
+    );
+    let command = format!("cd {} && git commit -m 'docs: x'", sub.display());
+    let stdout = run_pm_guard_at(&commit_payload(&command, &repo, ""), &url, &repo);
+
+    assert_denied(&stdout);
+    let posted = captured.posted().expect("the guard must query the daemon");
+    assert_eq!(
+        posted["cwd"],
+        repo.display().to_string(),
+        "a subdirectory commit must key the query by the checkout root"
+    );
+}
+
+#[test]
+fn pm_guard_allows_a_documents_only_commit_when_nobody_else_is_writing() {
+    // The other side of decision 3, and the common case: a solo session sees
+    // no friction at all. The mock answers an empty roster, which is also what
+    // an unreachable daemon degrades to.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/x.md");
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let stdout = run_pm_guard_at(
+        &commit_payload("git commit -m 'docs: x'", &repo, ""),
+        &url,
+        &repo,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "a documents commit with no other writer must be allowed, got: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_docs_commit_composed_with_another_command() {
+    // #5788 review, CRITICAL 1, demonstrated live against the first cut. The
+    // walker returned on the FIRST commit segment, so a docs-only staged set
+    // licensed every later segment in the same Bash call:
+    //
+    //   git commit -m docs && git add -A && git commit -a -m src   → ALLOWED
+    //   git commit -m docs ; git commit --amend --no-edit          → ALLOWED
+    //
+    // Both were denied before ADR-0049, and the second rewrites the shared
+    // branch's tip. One index read describes at most one commit, and only when
+    // nothing between the read and that commit can restage.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "docs/x.md");
+    std::fs::create_dir_all(repo.join("crates/a/src")).expect("mkdir src");
+    std::fs::write(repo.join("crates/a/src/lib.rs"), "y").expect("write source");
+    for command in [
+        "git commit -m docs && git add -A && git commit -a -m src",
+        "git commit -m docs ; git commit --amend --no-edit",
+        // One commit segment, but `git add` restages after the reading — the
+        // same hole, one segment earlier.
+        "git add -A && git commit -m docs",
+        "git commit -m docs && cargo test",
+    ] {
+        let stdout = run_pm_guard(&commit_payload(command, &repo, ""), &[]);
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("Split the call"),
+            "`{command}` must name the composition as the cause: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_source_commit_read_from_a_subdirectory() {
+    // #5788 review, CRITICAL 2, demonstrated live. `diff.relative=true` in any
+    // config file makes `git diff --cached --name-only` under `-C <subdir>`
+    // report only the paths beneath it, so a staged `.rs` outside the
+    // subdirectory vanished and the gate read the set as documents-only.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    assert!(
+        Command::new("git")
+            .args(["config", "diff.relative", "true"])
+            .current_dir(&repo)
+            .status()
+            .expect("git config")
+            .success()
+    );
+    stage(&repo, "docs/x.md");
+    stage(&repo, "crates/a/src/lib.rs");
+    let sub = repo.join("docs");
+
+    let stdout = run_pm_guard(
+        &commit_payload(
+            &format!("cd {} && git commit -m docs", sub.display()),
+            &repo,
+            "",
+        ),
+        &[],
+    );
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("crates/a/src/lib.rs"),
+        "the source file outside the subdirectory must still be seen: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_commit_that_renames_source_into_a_document() {
+    // #5788 review, HIGH 3, demonstrated live. Rename detection is on by
+    // default and `--name-only` prints only the DESTINATION, so a staged
+    // `git mv crates/a/src/lib.rs docs/lib.md` reported as documents-only for a
+    // commit that deletes a source file from the shared branch. `git mv` is
+    // gated by nothing else — it is not an edit tool and not a destructive verb.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    stage(&repo, "crates/a/src/lib.rs");
+    assert!(
+        Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(&repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
+            .status()
+            .expect("git commit")
+            .success()
+    );
+    std::fs::create_dir_all(repo.join("docs")).expect("mkdir docs");
+    assert!(
+        Command::new("git")
+            .args(["mv", "crates/a/src/lib.rs", "docs/lib.md"])
+            .current_dir(&repo)
+            .status()
+            .expect("git mv")
+            .success()
+    );
+
+    let stdout = run_pm_guard(&commit_payload("git commit -m docs", &repo, ""), &[]);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("crates/a/src/lib.rs"),
+        "the deleted source side of the rename must be named: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_never_gates_git_add_in_a_main_checkout() {
+    // ADR-0049 decision 4, checked against the code rather than assumed:
+    // staging writes the index and moves no ref, so it creates none of the
+    // shared-HEAD hazard the commit and HEAD-move rules exist for. Source
+    // staged is still allowed — the gate is at the commit.
+    let Some((_dir, repo)) = real_main_checkout() else {
+        return;
+    };
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    for command in [
+        "git add -A",
+        "git add -- crates/a/src/lib.rs",
+        "git add .",
+        "git stage docs/x.md",
+    ] {
+        let stdout = run_pm_guard_at(&commit_payload(command, &repo, ""), &url, &repo);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "`{command}` moves no ref and must stay allowed, got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout() {
+    // ADR-0048 Part A: the dispatch is REWRITTEN, not refused — the PM does not
+    // have to re-issue anything, and the rewrite applies whether or not the
+    // model reads a message. The whole original input must survive, because
+    // `updatedInput` replaces the arguments rather than merging into them.
+    let (_dir, repo) = main_checkout_fixture();
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"do the thing","description":"go"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let out = &value["hookSpecificOutput"];
+    assert_eq!(out["hookEventName"], "PreToolUse");
+    assert_eq!(out["updatedInput"]["isolation"], "worktree");
+    assert_eq!(out["updatedInput"]["prompt"], "do the thing");
+    assert_eq!(out["updatedInput"]["subagent_type"], "rust-engineer");
+    assert!(
+        out.get("permissionDecision").is_none(),
+        "a grant changes the arguments and must not touch the permission flow: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_keeps_an_opted_out_project_in_the_checkout() {
+    // #5814: the project declares `agent_worktree = false`, so the same dispatch
+    // that is granted a worktree above is left in the checkout and told the
+    // workflow that replaces isolation. Read through the real binary because the
+    // config read is a filesystem step the unit tests fake.
+    let (_dir, repo) = main_checkout_fixture();
+    std::fs::write(repo.join(".trusty-mpm.toml"), "agent_worktree = false\n")
+        .expect("write project config");
+    let input = r#"{"subagent_type":"documentation","prompt":"write the memo"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let updated = &value["hookSpecificOutput"]["updatedInput"];
+    assert!(
+        updated.get("isolation").is_none(),
+        "an opted-out project must not be granted a worktree: {stdout}"
+    );
+    let prompt = updated["prompt"].as_str().expect("prompt survives");
+    assert!(prompt.starts_with("write the memo"), "{stdout}");
+    assert!(prompt.contains("agent_worktree = false"), "{stdout}");
+    assert!(prompt.contains("work IN PLACE"), "{stdout}");
+}
+
+#[test]
+fn pm_guard_still_grants_when_the_project_config_is_unreadable() {
+    // #5814's default branch: a config that does not parse leaves ADR-0048's
+    // grant exactly as it was. A project that predates the key behaves today
+    // as it did before it existed — covered by the sibling above, which uses
+    // the same fixture with no config file at all.
+    let (_dir, repo) = main_checkout_fixture();
+    std::fs::write(repo.join(".trusty-mpm.toml"), "agent_worktre = false\n")
+        .expect("write project config");
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"do the thing"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(
+        value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
+        "a config that cannot be parsed must never strip isolation: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_a_granted_dispatch_beside_a_live_writer() {
+    // #5769 finding 2: the grant used to return BEFORE the #4480 concurrency
+    // check, so that verdict stopped being computed for every dispatch made from
+    // a main checkout. If the harness does not apply `updatedInput` — which this
+    // binary cannot verify — a second unisolated writer that used to be denied
+    // was simply admitted. The grant is now emitted only after the daemon says
+    // the checkout is free.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"python-engineer","count":1}],"total":1}"#);
+    let (_dir, repo) = main_checkout_fixture();
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"do the thing"}"#;
+    let payload = tool_payload_at(
+        "Agent",
+        input,
+        &repo,
+        r#""session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_grant","#,
+    );
+    let stdout = run_pm_guard_at(&payload, &url, &repo);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("ADR-0048") && stdout.contains("python-engineer"),
+        "the deny must name the rule and the sibling already in the tree: {stdout}"
+    );
+    // It must NOT be #4480's text, whose remedy is the isolation this guard had
+    // already built and then declined to emit.
+    assert!(
+        !stdout.contains("Concurrent shared-worktree dispatch denied"),
+        "the granted path needs its own reason, not the one it contradicts: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_records_the_granted_isolation_it_emits() {
+    // #5769 finding 1: the grant is worth nothing to the daemon unless the
+    // daemon hears about it — the tracker records the ORIGINAL payload, so the
+    // isolation has to be posted separately or every granted writer stays named
+    // as writing in the shared checkout. Two things are asserted: the POST is
+    // made at all, and it carries the `tool_use_id` the record is keyed by
+    // (without it the upsert cannot find the tracker's record and would create a
+    // second, unisolated one).
+    let (url, captured) = spawn_capturing_writers_mock(r#"{"agents":[],"total":0}"#);
+    let (_dir, repo) = main_checkout_fixture();
+    let payload = tool_payload_at(
+        "Agent",
+        r#"{"subagent_type":"rust-engineer","prompt":"x"}"#,
+        &repo,
+        r#""session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_grant","#,
+    );
+    let stdout = run_pm_guard_at(&payload, &url, &repo);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(
+        value["hookSpecificOutput"]["updatedInput"]["isolation"],
+        "worktree"
+    );
+    let posted = captured.posted().expect("the grant must be posted");
+    assert_eq!(
+        posted["cwd"],
+        repo.display().to_string(),
+        "the grant must be recorded against the checkout it was granted in"
+    );
+    assert_eq!(
+        posted["tool_use_id"], "toolu_grant",
+        "without the correlation key the upsert cannot find the tracker's record: {posted}"
+    );
+    assert_eq!(
+        posted["input"]["isolation"], "worktree",
+        "the daemon must be told the isolation that was granted: {posted}"
+    );
+    // The fourth eligibility input, and the one nothing else would catch: if
+    // `build_hook_payload` ever stopped stamping `tool`, the route classifies
+    // the POST ineligible, records nothing, and the whole fix no-ops.
+    assert_eq!(
+        posted["tool"], "Agent",
+        "the route re-derives eligibility from `tool`: {posted}"
+    );
+}
+
+#[test]
+fn pm_guard_warns_when_a_granted_worktree_is_not_recorded() {
+    // #5769: an empty writer list is NOT proof the grant was recorded. A daemon
+    // older than the granted-worktree route 404s it, a malformed body parses to
+    // nothing — and both arrive as the same empty answer the free-checkout case
+    // produces. Reading only the writer list made every one of those a silent
+    // no-op that put the phantom straight back. The guard still GRANTS (failing
+    // closed on version skew would block every dispatch from a main checkout),
+    // so the warning is the whole observable difference.
+    let (_dir, repo) = main_checkout_fixture();
+    let payload = tool_payload_at(
+        "Agent",
+        r#"{"subagent_type":"rust-engineer","prompt":"x"}"#,
+        &repo,
+        r#""session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_grant","#,
+    );
+
+    // Answered, empty, and recorded nothing — the divergence.
+    for body in [
+        r#"{"agents":[],"total":0,"claimed":false}"#,
+        // A daemon too old to send the field at all reads as not-recorded.
+        r#"{"agents":[],"total":0}"#,
+    ] {
+        let url = spawn_writers_mock(body);
+        let stderr = run_pm_guard_at_stderr(&payload, &url, &repo);
+        assert!(
+            stderr.contains("recorded nothing") && stderr.contains("#5769"),
+            "an unrecorded grant must warn, got stderr: {stderr:?}"
+        );
+    }
+
+    // The ordinary case: the daemon recorded it, and the guard stays silent.
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0,"claimed":true}"#);
+    let stderr = run_pm_guard_at_stderr(&payload, &url, &repo);
+    assert!(
+        !stderr.contains("recorded nothing"),
+        "a recorded grant must not warn, got stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn pm_guard_grants_a_worktree_to_an_unknown_agent_in_a_main_checkout() {
+    // The deliberate divergence from #4480's fail-open: a custom or renamed
+    // agent is indeterminate, and in a main checkout indeterminate resolves
+    // toward isolation. This is the agent that kept writing to the shared tree.
+    let (_dir, repo) = main_checkout_fixture();
+    for input in [
+        r#"{"subagent_type":"some-project-custom-agent","prompt":"x"}"#,
+        r#"{"prompt":"an untyped dispatch"}"#,
+    ] {
+        let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+        let value: serde_json::Value =
+            serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+        assert_eq!(
+            value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
+            "{input} must be isolated rather than trusted"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_leaves_read_only_and_isolated_dispatches_alone() {
+    // A worktree per read-only dispatch would re-open #3455's wasted-disk
+    // complaint, and re-granting an already-isolated dispatch would let the
+    // guard silently downgrade `remote` to `worktree`.
+    let (_dir, repo) = main_checkout_fixture();
+    for input in [
+        r#"{"subagent_type":"research","prompt":"x"}"#,
+        r#"{"subagent_type":"code-critic","prompt":"x"}"#,
+        r#"{"subagent_type":"rust-engineer","isolation":"worktree","prompt":"x"}"#,
+        r#"{"subagent_type":"rust-engineer","isolation":"remote","prompt":"x"}"#,
+    ] {
+        let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+        assert_eq!(stdout.trim(), "", "{input} must pass through untouched");
+    }
+}
+
+#[test]
+fn pm_guard_does_not_grant_a_worktree_outside_a_main_checkout() {
+    // Delegated work in a worktree is where work is supposed to happen. If this
+    // fired there it would try to nest a worktree inside a worktree on every
+    // dispatch — and it is the branch that keeps the rule from applying to the
+    // whole machine.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("wt");
+    std::fs::create_dir_all(&worktree).expect("mkdir");
+    std::fs::write(worktree.join(".git"), "gitdir: /elsewhere").expect("write .git");
+
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"x"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &worktree, ""), &[]);
+    assert_eq!(stdout.trim(), "", "a worktree dispatch must be untouched");
+}
+
+#[test]
+fn pm_guard_denies_a_task_dispatch_it_cannot_isolate() {
+    // `Task` carries no `isolation` parameter, so a rewrite would produce a
+    // failed tool call rather than an isolated agent. This is the one case the
+    // grant refuses, and the message has to name the tool that can do it.
+    let (_dir, repo) = main_checkout_fixture();
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"x"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Task", input, &repo, ""), &[]);
+    assert_denied(&stdout);
+    assert!(stdout.contains("Agent"), "{stdout}");
+    assert!(stdout.contains("isolation"), "{stdout}");
+}
+
+#[test]
+fn pm_guard_operator_escape_hatches_still_lift_the_write_boundary() {
+    // The same contract every other rule in this file keeps: an operator who
+    // lifts enforcement gets exactly that. Stated as a test because the write
+    // boundary pierces the two AUTOMATIC subagent markers, and the distinction
+    // between those and the two human escape hatches is the whole reason the
+    // piercing is permitted at all.
+    let (_dir, repo) = main_checkout_fixture();
+    let target = repo.join("crates/trusty-mpm/src/lib.rs");
+    let write = tool_payload_at(
+        "Write",
+        &format!(r#"{{"file_path":"{}","content":"x"}}"#, target.display()),
+        &repo,
+        "",
+    );
+    let commit = bash_payload_at("git commit -m 'wip'", &repo, "");
+    for env in [
+        ("TRUSTY_MPM_DISABLE_HOOKS", "1"),
+        ("TRUSTY_MPM_PM_UNRESTRICTED", "1"),
+    ] {
+        for payload in [&write, &commit] {
+            let stdout = run_pm_guard(payload, &[env]);
+            assert_eq!(
+                stdout.trim(),
+                "",
+                "{} must lift this guard along with every other",
+                env.0
+            );
+        }
+    }
+}
+
 #[test]
 fn pm_guard_denies_main_checkout_destructive_git_with_the_daemon_unreachable() {
     // The fail-open check this rule most had to get right. Every other
@@ -1358,6 +2291,347 @@ fn pm_guard_operator_escape_hatches_still_allow_main_checkout_destructive_git() 
         ("TRUSTY_MPM_PM_UNRESTRICTED", "1"),
     ] {
         let stdout = run_pm_guard(&payload, &[env]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "{} must lift this guard along with every other",
+            env.0
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0048 decision 10 — HEAD-moving git in a shared main checkout
+// ---------------------------------------------------------------------------
+
+/// A Bash payload carrying the session id the daemon query needs.
+///
+/// Why: the HEAD-move rule decides with the daemon, and
+/// `pm_guard_dispatch::live_shared_tree_writers` addresses a session's
+/// delegations — an empty `session_id` fails open before anything is dialled.
+/// Every other Bash rule in this file decides alone and so needs no id.
+fn head_move_payload(command: &str, cwd: &std::path::Path, extra_fields: &str) -> String {
+    bash_payload_at(
+        command,
+        cwd,
+        &format!(
+            r#"{extra_fields}"session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_pull","#
+        ),
+    )
+}
+
+#[test]
+fn pm_guard_allows_a_pull_in_a_shared_main_checkout_beside_a_live_writer() {
+    // THE regression test for ADR-0053. This exact payload — a `git pull` in a
+    // main checkout the daemon reports another agent writing in — was DENIED
+    // under ADR-0048 decision 10, and the test that asserted that deny is the
+    // one this replaces. Owner ruling of 2026-08-17: "fetch and pull operations
+    // are permitted. Only direct code editing is not."
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    let (_dir, repo) = main_checkout_fixture();
+    for command in ["git pull", "git pull --ff-only", "git pull --rebase"] {
+        let stdout = run_pm_guard_at(&head_move_payload(command, &repo, ""), &url, &repo);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "`{command}` is permitted in a main checkout (ADR-0053), got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_merge_in_a_shared_main_checkout() {
+    // THE regression test (ADR-0048 decision 10). Against pre-fix code this
+    // payload is ALLOWED with no output at all: `git merge` matched no verb
+    // table in `pm_guard_bash`, the destructive rule stopped at
+    // `reset --hard`/`clean -fdx`/`checkout -- <pathspec>`, and nothing routed
+    // a Bash call through the writer query. The deny below can only come from
+    // the new classifier plus that query. ADR-0053 narrowed decision 10 to
+    // `merge` and `rebase`; this case is unchanged by it.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    let (_dir, repo) = main_checkout_fixture();
+    let stdout = run_pm_guard_at(
+        &head_move_payload("git merge origin/main", &repo, ""),
+        &url,
+        &repo,
+    );
+
+    assert_denied(&stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(reason.contains("ADR-0048"), "{reason}");
+    assert!(
+        reason.contains("rust-engineer"),
+        "the deny must name the writer it protected: {reason}"
+    );
+    assert!(
+        reason.contains(&repo.display().to_string()),
+        "the deny must name the directory: {reason}"
+    );
+    // ADR-0048 decision 6: a refusal with no remedy is retried worse. Both
+    // remedies must be in the text — `fetch` for the common intent, a worktree
+    // for the merge or rebase itself.
+    assert!(reason.contains("git fetch"), "{reason}");
+    assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+}
+
+#[test]
+fn pm_guard_denies_every_head_moving_verb_in_a_shared_main_checkout() {
+    for command in [
+        "git merge origin/main",
+        "git merge --no-ff feature/x",
+        "git rebase origin/main",
+        "git rebase -i HEAD~3",
+        // Composition must not hide the verb behind a benign first segment —
+        // `git fetch && git merge` is the shape this actually arrives in, and
+        // since ADR-0053 a permitted `git pull` is a benign first segment too.
+        "git fetch origin && git merge origin/main",
+        "git pull && git rebase origin/main",
+    ] {
+        let url =
+            spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+        let (_dir, repo) = main_checkout_fixture();
+        let stdout = run_pm_guard_at(&head_move_payload(command, &repo, ""), &url, &repo);
+        assert_denied(&stdout);
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_merge_from_a_dispatched_agent_in_a_shared_main_checkout() {
+    // The load-bearing case, and why the rule sits ahead of Guards 1 and 4:
+    // ADR-0048 decision 4 binds the PM AND every agent it dispatches, and both
+    // automatic markers return ALLOW for exactly that population. Remove either
+    // piercing and one of these two goes green-to-red.
+    for (extra_fields, env) in [
+        (
+            r#""agent_id":"agent-xyz789","agent_type":"local-ops","#,
+            vec![],
+        ),
+        ("", vec![("CLAUDE_MPM_SUB_AGENT", "1")]),
+    ] {
+        let url =
+            spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+        let (_dir, repo) = main_checkout_fixture();
+        let stdout = run_pm_guard_at_with_env(
+            &head_move_payload("git merge origin/main", &repo, extra_fields),
+            &url,
+            &repo,
+            &env,
+        );
+        assert_denied(&stdout);
+        assert!(stdout.contains("ADR-0048"), "{stdout}");
+    }
+}
+
+#[test]
+fn pm_guard_allows_a_merge_in_a_main_checkout_nobody_else_is_writing_in() {
+    // The false-positive boundary #5356 is the reminder for, and the reason the
+    // rule asks the daemon at all instead of denying on the directory alone. A
+    // solo session merging in its own checkout is ordinary work.
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let (_dir, repo) = main_checkout_fixture();
+    let stdout = run_pm_guard_at(
+        &head_move_payload("git merge origin/main", &repo, ""),
+        &url,
+        &repo,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "a merge with no other writer in the tree must be allowed, got: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_allows_a_head_move_inside_a_worktree_beside_a_live_writer() {
+    // A worktree's HEAD belongs to the one session that owns it, so a merge
+    // there races nothing — this is where delegated work happens and it must
+    // stay unrestricted. The mock is deliberately never consumed: the
+    // classification returns before any daemon call.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let claude_wt = dir.path().join("repo/.claude/worktrees/wt-x");
+    std::fs::create_dir_all(claude_wt.join(".git")).expect("mkdir worktree");
+    let linked_wt = dir.path().join("linked-wt");
+    std::fs::create_dir_all(&linked_wt).expect("mkdir linked");
+    std::fs::write(linked_wt.join(".git"), "gitdir: /repo/.git/worktrees/x").expect("write .git");
+
+    for cwd in [&claude_wt, &linked_wt] {
+        for command in [
+            "git pull",
+            "git merge origin/main",
+            "git rebase origin/main",
+        ] {
+            let stdout = run_pm_guard_at(&head_move_payload(command, cwd, ""), &url, cwd);
+            assert_eq!(
+                stdout.trim(),
+                "",
+                "`{command}` must be allowed in {}, got: {stdout}",
+                cwd.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn pm_guard_allows_fetch_and_in_progress_control_in_a_shared_main_checkout() {
+    // `git fetch` is the remedy the deny offers and ADR-0048 decision 9 says it
+    // needs no enforcement — it writes remote-tracking refs and never HEAD.
+    // `git pull` joined it under ADR-0053, including through `cd` and `-C`,
+    // which are the two overrides that used to carry a pull into the deny. The
+    // `--abort`/`--continue` family resolves an operation that already started;
+    // denying those would park a shared checkout mid-rebase and the deny would
+    // carry no remedy that works from there.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "git fetch".to_string(),
+        "git fetch --all --prune".to_string(),
+        "git pull".to_string(),
+        "git pull --ff-only".to_string(),
+        format!("cd {} && git pull", repo.display()),
+        format!("git -C {} pull --ff-only", repo.display()),
+        "git rebase --abort".to_string(),
+        "git rebase --continue".to_string(),
+        "git merge --abort".to_string(),
+        "git merge-base main HEAD".to_string(),
+        "git status --short".to_string(),
+    ] {
+        let url =
+            spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+        let stdout = run_pm_guard_at(&head_move_payload(&command, &repo, ""), &url, &repo);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "`{command}` must stay allowed even beside a live writer, got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_allows_a_merge_when_the_daemon_is_unreachable() {
+    // Declared fail-open branch, and the one that differs from this module's
+    // other main-checkout rules: those consult no daemon, so nothing can weaken
+    // them. This one decides on the daemon's answer, so a down daemon must
+    // answer "nobody else is here" rather than deny. `--url` points at
+    // http://127.0.0.1:1, where nothing listens.
+    let (_dir, repo) = main_checkout_fixture();
+    let stdout = run_pm_guard_at(
+        &head_move_payload("git merge origin/main", &repo, ""),
+        "http://127.0.0.1:1",
+        &repo,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "an unreachable daemon must fail OPEN, got: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_allows_a_merge_when_the_daemon_answer_is_malformed() {
+    // Every unusable answer allows: a 5xx, a body that is not JSON, and
+    // well-formed JSON of the wrong shape. A false deny here would land on
+    // ordinary work with no way for the session to tell why.
+    for (status_line, body) in [
+        ("500 Internal Server Error", r#"{"agents":[{"agent":"x"}]}"#),
+        ("200 OK", "not json at all"),
+        ("200 OK", r#"{"agents":"rust-engineer"}"#),
+        ("200 OK", r#"{"unexpected":"shape"}"#),
+    ] {
+        let url = spawn_writers_mock_with(status_line, body);
+        let (_dir, repo) = main_checkout_fixture();
+        let stdout = run_pm_guard_at(
+            &head_move_payload("git merge origin/main", &repo, ""),
+            &url,
+            &repo,
+        );
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "a {status_line} / {body} answer must fail OPEN, got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn head_move_query_asks_the_checkout_root_and_the_command_directory() {
+    // #5769 finding 4: nothing pinned WHICH directory the guard sends, so the
+    // query key and the recorder's key were free to disagree — and they did. A
+    // delegation's `cwd` is stamped from `tm hook`'s own process directory, so
+    // the key has to be a directory a record can carry: the checkout root for
+    // every form, including one aimed at a subdirectory.
+    let (_dir, repo) = main_checkout_fixture();
+    let outside = tempfile::tempdir().expect("tempdir");
+    let sub = repo.join("crates/trusty-mpm");
+
+    for (command, run_from) in [
+        ("git merge origin/main".to_string(), repo.clone()),
+        (
+            format!("cd {} && git merge origin/main", repo.display()),
+            outside.path().to_path_buf(),
+        ),
+        (
+            format!("git -C {} merge origin/main", repo.display()),
+            outside.path().to_path_buf(),
+        ),
+        // The bypass this finding is named for: a subdirectory of the checkout
+        // shares its HEAD, but keys a path no record was ever written at.
+        (
+            format!("cd {} && git merge origin/main", sub.display()),
+            repo.clone(),
+        ),
+    ] {
+        let command = command.as_str();
+        let (url, captured) = spawn_capturing_writers_mock(
+            r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#,
+        );
+        let stdout = run_pm_guard_at(&head_move_payload(command, &run_from, ""), &url, &run_from);
+        assert_denied(&stdout);
+        let posted = captured.posted().expect("the guard must query the daemon");
+        assert_eq!(
+            posted["cwd"],
+            repo.display().to_string(),
+            "`{command}` must key the query by the checkout root the recorder stamps"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_a_head_move_carrying_an_in_progress_flag_as_a_value() {
+    // #5769 finding 7: the in-progress carve-out scanned the whole argv tail, so
+    // any command mentioning one of those strings exempted itself. `git merge -m
+    // "--continue" origin/main` is a real merge with a commit message.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    let (_dir, repo) = main_checkout_fixture();
+    let stdout = run_pm_guard_at(
+        &head_move_payload("git merge -m '--continue' origin/main", &repo, ""),
+        &url,
+        &repo,
+    );
+    assert_denied(&stdout);
+}
+
+#[test]
+fn pm_guard_operator_escape_hatches_still_allow_a_head_move() {
+    // The contract every rule in this file keeps: an operator who lifts
+    // enforcement gets exactly that. The two AUTOMATIC subagent markers are
+    // pierced (above); these two human escape hatches are not.
+    for env in [
+        ("TRUSTY_MPM_DISABLE_HOOKS", "1"),
+        ("TRUSTY_MPM_PM_UNRESTRICTED", "1"),
+    ] {
+        let url =
+            spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+        let (_dir, repo) = main_checkout_fixture();
+        let stdout = run_pm_guard_at_with_env(
+            &head_move_payload("git merge origin/main", &repo, ""),
+            &url,
+            &repo,
+            &[env],
+        );
         assert_eq!(
             stdout.trim(),
             "",

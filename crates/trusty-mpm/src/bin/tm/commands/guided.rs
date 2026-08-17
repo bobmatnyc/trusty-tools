@@ -414,7 +414,15 @@ pub(crate) fn derive_project(
 ) -> Option<(String, std::path::PathBuf, std::path::PathBuf)> {
     use trusty_mpm::daemon::managed_routes::inproject;
     let git_root = usable_git_root(cwd)?;
-    let origin_url = inproject::get_origin_url(&git_root).filter(|u| is_github_remote(u))?;
+    // #4734: no project identity without a readable remote — the caller's
+    // `None` arm already refuses to treat the tree as GitHub-backed. Logged
+    // because this `None` disables the whole rich picker path, so a git failure
+    // here is otherwise invisible to the operator.
+    let origin_url = inproject::get_origin_url(&git_root)
+        .inspect_err(|e| tracing::warn!("cannot read git origin remote: {e}"))
+        .ok()
+        .flatten()
+        .filter(|u| is_github_remote(u))?;
     let gh = trusty_common::github_path::parse_github_path(&origin_url)?;
     let source_id = format!("{}/{}", gh.owner, gh.repo);
     let workspace = inproject::base_clone_path(&gh.owner, &gh.repo);
@@ -1084,7 +1092,7 @@ pub(crate) fn untracked_ancestor_message(git_root: &std::path::Path) -> String {
 /// exactly right for a genuinely unmanaged directory — but it says nothing
 /// about whether THIS pane is a managed session's own pane whose daemon
 /// record simply has not settled the Active -> Stopped race yet (the same
-/// race [`super::guided_inplace::fetch_managed_session_until_stopped`] bounds
+/// race `super::guided_inplace::fetch_managed_session_until_stopped` bounds
 /// for `try_inplace_relaunch`'s own gate at the top of `run_guided_default`).
 /// Separating this decision from the I/O (the env lookup, and the retry
 /// itself) keeps it exhaustively unit-testable.
@@ -1229,7 +1237,11 @@ pub(crate) async fn fallback_protected(
     // NOTE: `parse_github_path` accepts *any* remote URL (not just GitHub);
     // we therefore gate on `is_github_remote` (github.com substring) to
     // distinguish GitHub from Gitea/GitLab/bare-SSH remotes.
-    let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&git_root);
+    //
+    // #4734: an unreadable remote stops here rather than joining the no-remote
+    // arm below, which would blame a repository that may be perfectly GitHub-backed.
+    let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&git_root)
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     if let Some(ref raw_url) = origin_url
         && is_github_remote(raw_url)
@@ -1292,5 +1304,15 @@ async fn launch_protected_workspace(
     // #5274: the fallback already provisioned the protected worktree it
     // wants this session to run in, and passes it as `dir`; `launch` must not
     // provision a SECOND one on top, so the worktree request stays `false`.
-    super::launch::launch(client, url, Some(dir), None, false).await
+    // #5836: it must not re-resolve that placement either — doing so redirected
+    // the session into the shared base clone and abandoned this worktree.
+    super::launch::launch(
+        client,
+        url,
+        Some(dir),
+        None,
+        false,
+        super::managed_workspace::LaunchDir::CallerResolved,
+    )
+    .await
 }

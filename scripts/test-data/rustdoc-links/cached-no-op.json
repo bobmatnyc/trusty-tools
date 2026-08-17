@@ -1,0 +1,5 @@
+{"reason":"compiler-artifact","fresh":true,"target":{"name":"trusty_common","kind":["lib"],"src_path":"crates/trusty-common/src/lib.rs"},"filenames":["target/doc/trusty_common/index.html"]}
+{"reason":"compiler-artifact","fresh":true,"target":{"name":"trusty_search","kind":["lib"],"src_path":"crates/trusty-search/src/lib.rs"},"filenames":["target/doc/trusty_search/index.html"]}
+{"reason":"compiler-artifact","fresh":true,"target":{"name":"trusty-installer","kind":["bin"],"src_path":"crates/trusty-installer/src/main.rs"},"filenames":["target/doc/trusty_installer/index.html"]}
+{"reason":"compiler-artifact","fresh":true,"target":{"name":"serde","kind":["lib"],"src_path":"/home/runner/.cargo/registry/src/serde-1.0.0/src/lib.rs"},"filenames":["target/debug/deps/libserde-1111.rmeta"]}
+{"reason":"build-finished","success":true}

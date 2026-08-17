@@ -924,3 +924,65 @@ fn pipeline_author_filter_single_author() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// =========================================================================
+// agentic_pct treatment of AgenticMode::Unknown (issue #5250)
+// =========================================================================
+
+/// Why: `unknown` and `none` are different findings but must land in the same
+/// place in the `agentic_pct` arithmetic, and nothing in `persist.rs` says so
+/// mechanically. This pins the denominator: `unknown` commits are counted in
+/// `net_commits` and in neither numerator, which is what makes `agentic_pct` a
+/// lower bound rather than a claim.
+/// What: one author-week with one commit of each mode, no reverts, so
+/// `net_commits` is 4. Only `agentic_pct == 25.0` satisfies that — 50.0 would
+/// mean `unknown` was bucketed with `full_agentic`, and 33.3 would mean it was
+/// dropped from the denominator.
+/// Test: this test itself.
+#[test]
+fn agentic_pct_keeps_unknown_in_the_denominator() {
+    let db = Database::open_in_memory().expect("open db");
+    let conn = db.connection();
+    let rows = [
+        ("a1", "feat: agentic work", "full_agentic"),
+        ("a2", "feat: ide completion", "ide_assisted"),
+        ("a3", "Merge branch 'topic' into main", "unknown"),
+        ("a4", "feat: hand written", "none"),
+    ];
+    for (sha, msg, mode) in rows {
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, files_changed, insertions, deletions, is_merge, ticketed, \
+                 agentic_mode) \
+             VALUES (?1, 'Dana', 'dana@example.com', '2024-01-15T10:00:00+00:00', ?2, \
+                 'repo-a', 1, 5, 1, 0, 0, ?3)",
+            rusqlite::params![sha, msg, mode],
+        )
+        .expect("insert agentic commit");
+    }
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+    assert_eq!(data.weekly_activity.len(), 1);
+    let wa = &data.weekly_activity[0];
+    assert_eq!(wa.commit_count_net, 4, "no reverts, so net is all four");
+    assert_eq!(wa.agentic_count, 1, "only full_agentic counts as agentic");
+    assert_eq!(wa.ide_assisted_count, 1, "unknown must not inflate this");
+
+    let (net, agentic, ide, pct): (i64, i64, i64, f64) = db
+        .connection()
+        .query_row(
+            "SELECT net_commits, agentic_count, ide_assisted_count, agentic_pct \
+             FROM fact_weekly_engineer WHERE author_email = 'dana@example.com'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .expect("read persisted engineer row");
+    assert_eq!(net, 4);
+    assert_eq!(agentic, 1);
+    assert_eq!(ide, 1);
+    assert!(
+        (pct - 25.0).abs() < 1e-9,
+        "agentic_pct must be 1/4; 50.0 would bucket unknown as agentic and \
+         33.3 would drop it from the denominator. got {pct}"
+    );
+}

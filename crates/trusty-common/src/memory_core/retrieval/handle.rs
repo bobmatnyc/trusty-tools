@@ -471,7 +471,7 @@ impl PalaceHandle {
     }
 
     /// Rebuild the L1 cache: the top `L1_CAP` drawers in
-    /// [`drawer_listing_order`].
+    /// `drawer_listing_order`.
     ///
     /// Why: L1 is the always-on essential context; we keep it pre-sorted so
     /// reads are constant-time. The L1 cap is small enough that a full re-sort
@@ -479,7 +479,7 @@ impl PalaceHandle {
     /// just an ordering — `l1_drawers` feeds `retrieve_l0_l1` and through it
     /// `retrieve_l2`, so an importance-only sort here chose which 15 drawers
     /// reach a prompt without reference to age.
-    /// What: Reads the drawer table, sorts a clone by [`drawer_listing_order`],
+    /// What: Reads the drawer table, sorts a clone by `drawer_listing_order`,
     /// and stores the first `L1_CAP` entries on `self.l1_drawers`.
     /// Test: `l0_l1_always_present` asserts a high-importance drawer makes it
     /// into L1 after `refresh_l1` is called;
@@ -895,7 +895,7 @@ impl PalaceHandle {
     /// Why: CLI `list` and MCP introspection need a uniform read view over the
     /// in-memory drawer table without exposing the lock semantics.
     /// What: Snapshots the drawer table, applies filters, orders by
-    /// [`drawer_listing_order`], and truncates to `limit`.
+    /// `drawer_listing_order`, and truncates to `limit`.
     /// Test: `cli_list_filters_by_room` writes drawers in distinct rooms and
     /// asserts the room filter narrows the list;
     /// `list_drawers_keeps_the_newest_drawer_within_an_importance_tie` covers

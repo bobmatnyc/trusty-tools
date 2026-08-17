@@ -6,6 +6,9 @@
 //! --older-than 7d` CLI) eyeball, diff, and prune sessions without spinning up
 //! the embedded store. Adding it now keeps session_id tagging end-to-end:
 //! every memory carries a session_id; every session_id is recorded here.
+//! Moved to `trusty-agents-common` in Wave 1 (issue #862) alongside the adapter
+//! framework: it is purely `std`/`anyhow`/`chrono`/`serde` with no host-crate
+//! dependencies, which made it a clean extraction.
 //! What: `SessionEntry` records `{id, started_at, workflow, status,
 //! ended_at?}`; `SessionsRegistry` loads from / saves to a single JSON file
 //! with helpers `record_start`, `record_end`, and `list`.

@@ -11,14 +11,14 @@
 //! SM-8 — SM-7 stops at the conversational turn.
 //!
 //! What: [`SessionManagerAgent`] holds the [`SessionManagerConfig`] plus an
-//! optional *runtime* (a [`ProviderRegistry`] for inference, a `data_root` for
+//! optional *runtime* (a [`ProviderRegistry`](crate::core::sm::ProviderRegistry) for inference, a `data_root` for
 //! the per-conversation context engine's state files, and — behind the
-//! `sm-memory` feature — an [`SmMemory`] handle for recall). Two constructors
+//! `sm-memory` feature — an `SmMemory` handle for recall). Two constructors
 //! exist: [`SessionManagerAgent::new`] (inert, config-only — the SM-1 contract,
 //! still a runtime no-op) and [`SessionManagerAgent::with_runtime`] (the daemon
 //! path with inference wired). [`SessionManagerAgent::chat`] (in the [`chat`]
 //! submodule) drives one §7.5 working-prompt turn. The chat turn itself never
-//! constructs a concrete provider — the [`ProviderRegistry`] does — so tests
+//! constructs a concrete provider — the [`ProviderRegistry`](crate::core::sm::ProviderRegistry) does — so tests
 //! inject a mock registry/provider with no network.
 //! Test: `agent_new_is_inert`, `agent_default_is_disabled` (this file);
 //! `agent/chat_tests.rs` covers the composed turn, degraded mode, and recall.

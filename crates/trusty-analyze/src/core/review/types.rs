@@ -36,7 +36,7 @@ pub struct ReviewComplexity {
 /// One detected smell, flattened for the review wire format.
 ///
 /// Why: the review report is consumed by tools/humans that want a flat
-/// `{category, line, severity}` shape rather than the tagged [`CodeSmell`]
+/// `{category, line, severity}` shape rather than the tagged [`CodeSmell`](crate::types::CodeSmell)
 /// enum. This struct is that projection.
 /// What: `category` is a snake_case smell name, `line` is the 1-based line in
 /// the new file where the smell was detected (best-effort), `severity` is

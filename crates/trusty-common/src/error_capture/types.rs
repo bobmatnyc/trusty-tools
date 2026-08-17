@@ -1,7 +1,7 @@
 //! Captured-error record type and serialisation.
 //!
 //! Why: A single canonical struct for every ERROR-level event tapped by
-//!      [`BugCaptureLayer`] lets Phase 2 consume a stable, versioned schema
+//!      [`BugCaptureLayer`](crate::error_capture::BugCaptureLayer) lets Phase 2 consume a stable, versioned schema
 //!      without coupling the layer implementation to the query API.
 //! What: [`CapturedError`] carries timestamp, crate attribution, message,
 //!      code location, OS/arch, and a dedup fingerprint. Fully `serde`-round-

@@ -45,7 +45,7 @@ use crate::core::standalone::hooks::cleanup::{foreign_hook_event_names, tm_hook_
 /// What: returns the deduplicated set of `<dir>/.claude/{settings.json,
 /// settings.local.json}` for `project_dir` plus every `active_workspace_paths`
 /// entry, filtered to files that actually exist.
-fn candidate_settings_files(
+pub(crate) fn candidate_settings_files(
     project_dir: Option<&Path>,
     active_workspace_paths: &[PathBuf],
 ) -> Vec<PathBuf> {
@@ -65,7 +65,7 @@ fn candidate_settings_files(
 }
 
 /// Read and parse one settings file, tolerating a missing or malformed file.
-fn read_settings(path: &Path) -> Option<serde_json::Value> {
+pub(crate) fn read_settings(path: &Path) -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(path).ok()?;
     let val: serde_json::Value = serde_json::from_str(&text).ok()?;
     val.is_object().then_some(val)

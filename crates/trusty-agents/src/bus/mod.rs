@@ -8,7 +8,8 @@
 //! and a `broadcast::Sender<BusEnvelope>`. An `accept_loop` task reads
 //! NDJSON lines from each incoming connection and re-broadcasts them to all
 //! subscribers in the same process. `send_to` connects to a peer's socket
-//! and writes one NDJSON line.
+//! and writes one NDJSON line through `trusty_common::uds`'s shared framing
+//! entry point (#5180) — one way, no reply.
 //! Test: Start a bus, connect a raw UnixStream, write a JSON line, subscribe
 //! and assert the envelope is received.
 
@@ -18,7 +19,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 
@@ -174,23 +175,34 @@ impl MessageBus {
     }
 }
 
+/// Wall-clock ceiling for one bus send.
+///
+/// Why (#5180): before the migration this path had no bound — a peer whose
+/// socket receive buffer was full (an accept loop that stopped draining, a
+/// process stopped under a debugger) blocked the sender's `write_all`
+/// indefinitely, and `send_to` is called from request-handling paths. The
+/// payload is one small envelope to a local socket, so anything that has not
+/// completed in 10 s is not going to.
+/// Test: `send_envelope_to_writes_exactly_one_newline_terminated_frame`.
+const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Dial `target_path` and write one NDJSON-framed envelope to it.
 ///
 /// Why: split out of [`MessageBus::send_to`] so the dial half is reachable from
 /// a test without writing into the real `~/.trusty-agents/sockets/`, which
 /// `socket_path_for` hardcodes.
-/// What: connects, writes `envelope` plus a newline, flushes.
+/// What: #5180 — routes through
+/// [`trusty_common::uds::send_framed_notification`], the shared framing entry
+/// point, which dials (verifying the socket per #5089), writes one
+/// newline-terminated frame, flushes and half-closes. This is a NOTIFICATION,
+/// not a request: [`accept_loop`] re-broadcasts the envelope to in-process
+/// subscribers and never writes a reply, so `send_framed_request` would block
+/// until its timeout and then report a failure for a delivery that succeeded.
 /// Test: `send_envelope_to_delivers_over_a_hardened_socket`,
+/// `send_envelope_to_writes_exactly_one_newline_terminated_frame`,
 /// `send_envelope_to_refuses_a_world_readable_socket`.
 async fn send_envelope_to(target_path: &Path, envelope: &BusEnvelope) -> Result<()> {
-    // #5089: this writes a payload, so the socket's permissions are the only
-    // thing standing between the envelope and a process that planted a socket
-    // at this path. Verify before writing.
-    let mut stream = trusty_common::uds::connect_hardened(target_path).await?;
-    let mut line = serde_json::to_string(envelope)?;
-    line.push('\n');
-    stream.write_all(line.as_bytes()).await?;
-    stream.flush().await?;
+    trusty_common::uds::send_framed_notification(target_path, envelope, SEND_TIMEOUT).await?;
     Ok(())
 }
 
@@ -370,6 +382,47 @@ mod tests {
         let line = reader.await.expect("join");
         let got: BusEnvelope = serde_json::from_str(&line).expect("parse");
         assert_eq!(got.source_project, "sender");
+    }
+
+    /// #5180 wire-shape guard: the bus is NDJSON, so a peer's `lines()` reader
+    /// desynchronises for the rest of the connection if a send ever emits zero
+    /// or two terminators, or prepends a length prefix. Reading `lines()` (as
+    /// the test above does) cannot see that — it normalises the framing away.
+    /// This one asserts the raw bytes.
+    #[tokio::test]
+    async fn send_envelope_to_writes_exactly_one_newline_terminated_frame() {
+        use tokio::io::AsyncReadExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("receiver.sock");
+        let listener = trusty_common::uds::bind_hardened(&sock).expect("bind");
+
+        let reader = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut raw = Vec::new();
+            stream.read_to_end(&mut raw).await.expect("read to eof");
+            raw
+        });
+
+        send_envelope_to(&sock, &envelope()).await.expect("send");
+
+        let raw = reader.await.expect("join");
+        let text = String::from_utf8(raw).expect("utf8");
+        assert!(
+            text.ends_with('\n'),
+            "the frame must be newline-terminated: {text:?}"
+        );
+        assert_eq!(
+            text.matches('\n').count(),
+            1,
+            "exactly one terminator per envelope: {text:?}"
+        );
+        let expected = serde_json::to_string(&envelope()).expect("serialise");
+        assert_eq!(
+            text.trim_end_matches('\n'),
+            expected,
+            "the frame body must be the bare serialised envelope, no prefix"
+        );
     }
 
     /// #5089 step 1a: `send_to` writes a payload, so it must refuse a socket

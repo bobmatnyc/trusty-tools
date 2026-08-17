@@ -101,7 +101,7 @@ impl KnowledgeGraph {
 
     /// Number of directed edges in the in-memory adjacency.
     ///
-    /// Why: Companion to [`node_count`] for dashboards that surface graph
+    /// Why: Companion to `node_count` for dashboards that surface graph
     /// density at a glance. Counted from the adjacency (not the redb
     /// triple table) because parallel edges between the same pair of nodes
     /// collapse into one petgraph edge; the adjacency view is what every
@@ -283,9 +283,17 @@ impl KnowledgeGraph {
     /// What: Delegates to `KgStoreRedb::delete_by_subject` using the canonical
     /// `drawer:<uuid>` subject format (`drawer:<hyphenated-uuid>`), then drops
     /// the corresponding edges from the in-memory adjacency so subsequent graph
-    /// queries see a consistent view without a restart.
-    /// Test: `cascade_delete_removes_triples_for_drawer`.
+    /// queries see a consistent view without a restart. The commit lands before
+    /// the adjacency update, so both steps route through the #5424 contract:
+    /// [`KnowledgeGraph::ensure_adjacency_live`] refuses once the index is
+    /// known stale, and [`KnowledgeGraph::sync_adjacency`] reports the rows the
+    /// cascade already made durable rather than a bare lock error. That matters
+    /// most here because the caller, `PalaceHandle::forget`, only logs the
+    /// failure and carries on.
+    /// Test: `cascade_delete_removes_triples_for_drawer`,
+    /// `cascade_delete_after_poisoned_adjacency_is_distinguishable_from_never_deleted`.
     pub async fn cascade_delete_by_drawer(&self, drawer_id: Uuid) -> Result<usize> {
+        self.ensure_adjacency_live("cascade_delete_by_drawer")?;
         // Canonical subject format used by `kg_extract.rs::drawer_subject`.
         let subject = format!("drawer:{drawer_id}");
         let store = self.store.clone();
@@ -297,16 +305,14 @@ impl KnowledgeGraph {
         // Sync the in-memory adjacency — remove every edge from the drawer's
         // node so the graph view reflects the deletion without a restart.
         if closed > 0 {
-            let mut adj = self
-                .adj
-                .write()
-                .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
-            if let Some(&s_idx) = adj.node_index.get(&subject) {
-                let to_remove: Vec<_> = adj.graph.edges(s_idx).map(|e| e.id()).collect();
-                for eid in to_remove {
-                    adj.graph.remove_edge(eid);
+            self.sync_adjacency("cascade_delete_by_drawer", closed, |adj| {
+                if let Some(&s_idx) = adj.node_index.get(&subject) {
+                    let to_remove: Vec<_> = adj.graph.edges(s_idx).map(|e| e.id()).collect();
+                    for eid in to_remove {
+                        adj.graph.remove_edge(eid);
+                    }
                 }
-            }
+            })?;
         }
         Ok(closed)
     }
@@ -328,7 +334,16 @@ impl KnowledgeGraph {
     /// non-`#[non_exhaustive]` enum, so a new variant would be a breaking change
     /// for a path that is a maintenance sweep, not a hot write. redb serialises
     /// write transactions, so a concurrent batch is ordered, not raced.
-    /// Test: `retract_triple_drops_one_edge_and_keeps_the_siblings`.
+    ///
+    /// The commit is durable before the adjacency update runs, so a failure of
+    /// that second step means the row IS closed and only the derived index
+    /// disagrees (#5424). It returns [`AdjacencyDesync::CommittedButStale`](crate::memory_core::store::kg::AdjacencyDesync::CommittedButStale)
+    /// naming the closed row instead of a bare lock error, and every later
+    /// mutation on the handle returns [`AdjacencyDesync::HandleStale`](crate::memory_core::store::kg::AdjacencyDesync::HandleStale) — a
+    /// retry can no longer read `Ok(0)` and conclude the fact was never there.
+    /// Test: `retract_triple_drops_one_edge_and_keeps_the_siblings`,
+    /// `retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted`,
+    /// `poisoned_adjacency_error_downcasts_with_the_committed_row_count`.
     pub async fn retract_triple(
         &self,
         subject: &str,
@@ -336,6 +351,7 @@ impl KnowledgeGraph {
         object: &str,
     ) -> Result<usize> {
         // #5396: remove one object without collateral loss of its siblings.
+        self.ensure_adjacency_live("retract_triple")?;
         let store = self.store.clone();
         let (s, p, o) = (
             subject.to_string(),
@@ -348,11 +364,9 @@ impl KnowledgeGraph {
             .context("retract_triple spawn_blocking join error")??;
 
         if closed > 0 {
-            let mut adj = self
-                .adj
-                .write()
-                .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
-            adj.remove_edge_to(&s, &p, &o);
+            self.sync_adjacency("retract_triple", closed, |adj| {
+                adj.remove_edge_to(&s, &p, &o);
+            })?;
         }
         Ok(closed)
     }

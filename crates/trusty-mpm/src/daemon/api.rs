@@ -496,7 +496,7 @@ pub async fn list_sessions(
 /// still need a way to read the ring buffer. The push-based feed lives at
 /// `GET /events`; this endpoint preserves the original synchronous-snapshot
 /// contract under a `/poll` suffix for backward compatibility.
-/// What: returns the bounded ring buffer of recent [`HookEventRecord`]s as
+/// What: returns the bounded ring buffer of recent [`HookEventRecord`](crate::core::hook::HookEventRecord)s as
 /// `{ "events": [...] }`.
 /// Test: covered transitively by `hook_relay_ingests_known_event`.
 #[utoipa::path(
@@ -905,6 +905,7 @@ pub async fn discover_sessions(State(state): State<Arc<DaemonState>>) -> Json<Di
     Json(DiscoverResponse {
         discovered: result.adopted,
         sessions: result.sessions,
+        skipped: result.skipped,
     })
 }
 
@@ -943,7 +944,7 @@ pub async fn session_events(
 /// activity without receiving noise from every other concurrent session.
 /// What: subscribes to the broadcast channel and forwards only events whose
 /// serialized JSON contains the session id (matching the
-/// `"session": "<uuid>"` field every [`HookEventRecord`] carries). A 15-second
+/// `"session": "<uuid>"` field every [`HookEventRecord`](crate::core::hook::HookEventRecord) carries). A 15-second
 /// `KeepAlive` ping keeps idle proxies from closing the connection.
 /// Test: `session_events_sse_filters_by_session` posts a hook for one
 /// session and confirms only that session's stream sees it.
@@ -1374,7 +1375,7 @@ pub async fn get_overseer(State(state): State<Arc<DaemonState>>) -> Json<Oversee
 /// TUI's `/chat` command does the same; both want a conversational endpoint
 /// that reuses the overseer's already-resolved OpenRouter credentials.
 /// What: requires a configured LLM overseer (else `503`), runs
-/// [`LlmOverseer::chat`] over the client-supplied history, and returns the
+/// [`LlmOverseer::chat`](crate::daemon::manager::chat) over the client-supplied history, and returns the
 /// assistant reply plus the updated history. The daemon stays stateless about
 /// chat sessions — the caller owns the history.
 /// Test: `llm_chat_without_overseer_is_503`.
@@ -1520,7 +1521,7 @@ pub async fn current_project(
 /// Why: rather than register every repo by hand, the operator wants trusty-mpm
 /// to enumerate the projects Claude Code already knows about and offer them for
 /// one-tap registration (the Telegram `/projects` command consumes this).
-/// What: runs [`ProjectDiscovery::discover`], maps each row to a
+/// What: runs [`ProjectDiscovery::discover`](crate::daemon::discover), maps each row to a
 /// [`DiscoveredProjectInfo`] (path as a string, last-session time as an
 /// ISO-8601 string), and returns them newest-session-first. The discovery
 /// itself never fails — an absent directory yields an empty list.
@@ -1587,7 +1588,7 @@ pub async fn list_tmux_sessions(
 /// Why: the dashboard inspects any session (internal or external) without
 /// attaching to it.
 /// What: runs `TmuxDriver::monitor_session` for the last 100 pane lines and
-/// returns the [`SessionSnapshot`]. A missing session or absent tmux is `404`.
+/// returns the [`SessionSnapshot`](crate::daemon::tmux::SessionSnapshot). A missing session or absent tmux is `404`.
 /// Test: `tmux_snapshot_unknown_session_is_404` (covers the no-tmux path).
 #[utoipa::path(
     get,
@@ -1623,7 +1624,7 @@ pub struct AdoptRequest {
 /// Why: trusty-mpm should watch sessions it did not create; adoption is the
 /// explicit, non-destructive opt-in for that.
 /// What: runs `TmuxDriver::adopt_session` (which captures the session's shape
-/// without modifying it) and returns the [`AdoptedSession`]. A missing session
+/// without modifying it) and returns the [`AdoptedSession`](crate::daemon::tmux::AdoptedSession). A missing session
 /// or absent tmux is `404`.
 /// Test: `adopt_tmux_session_handles_missing`.
 #[utoipa::path(

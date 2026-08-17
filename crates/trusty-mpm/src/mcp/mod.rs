@@ -24,6 +24,11 @@
 //!
 //! Test: `cargo test -p trusty-mpm` exercises the tool catalog, argument
 //! parsing, and dispatch against an in-memory mock backend.
+//!
+//! [`tools::TOOL_CATALOG`]: crate::mcp::tools::TOOL_CATALOG
+//! [`OrchestratorBackend`]: crate::mcp::OrchestratorBackend
+//! [`dispatch`]: crate::mcp::dispatch
+//! [`Request`]: trusty_common::mcp::Request
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -127,14 +132,16 @@ pub trait OrchestratorBackend: Send + Sync {
 
     /// Back `session_new`: spawn a new managed session.
     ///
-    /// Why: the driver skill needs a typed, JSON-native way to create an
-    ///      isolated, provisioned workspace and launch a harness in it — without
-    ///      scraping `tm session new` CLI text (the #842 defect).
-    /// What: provisions a workspace cloned from `repo_url` at `git_ref`, creates
-    ///       the tmux host, launches the selected `runtime` (default claude-code)
-    ///       with `task`, and returns the new session's id / tmux name /
-    ///       workspace path / state / attach command. An unknown `runtime` value
-    ///       is an error string.
+    /// Why: the driver skill needs a typed, JSON-native way to provision a
+    ///      session workspace and launch a harness in it — without scraping
+    ///      `tm session new` CLI text (the #842 defect).
+    /// What: a LOCAL `repo_url` runs the session on that main checkout itself,
+    ///       writing documents and configuration only (ADR-0037, ADR-0044); a
+    ///       remote `repo_url` is cloned into a freshly-provisioned isolated
+    ///       workspace. Either way this creates the tmux host, launches the
+    ///       selected `runtime` (default claude-code) with `task`, and returns
+    ///       the new session's id / tmux name / workspace path / state /
+    ///       attach command. An unknown `runtime` value is an error string.
     /// Test: `dispatch_session_new_tool` (mock) + the daemon-side
     ///       `session_new_spawns_via_manager` integration test.
     async fn session_new(

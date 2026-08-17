@@ -32,6 +32,13 @@
 //! load (found + unknown-name), catalog formatting (empty + populated),
 //! embedded-fallback threshold, and `FsSkillResolver`'s `SkillResolver` trait
 //! conformance.
+//!
+//! [`SkillMetadata`]: crate::skills::SkillMetadata
+//! [`locate_skills_dir`]: crate::skills::locate_skills_dir
+//! [`discover_skill_metadata`]: crate::skills::discover_skill_metadata
+//! [`load_skill_body`]: crate::skills::load_skill_body
+//! [`format_skill_catalog`]: crate::skills::format_skill_catalog
+//! [`FsSkillResolver`]: crate::skills::FsSkillResolver
 
 // `pub(crate)`: also reused by `plugins::agents`/`plugins::skills` (#3539)
 // — both are generic frontmatter helpers, not skill-specific, so a plugin

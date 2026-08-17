@@ -23,199 +23,36 @@
 //!       `ToolResult`'s predicates are covered by
 //!       `tool_result_is_error_distinguishes_variants`.
 
-/// Portable perf value types: `TokenUsage`, `PhaseRecord`, `PerfTotals`, `PerfRecord`.
-///
-/// Why: Moved to trusty-agents-common in Wave 2 (issue #867, refs #830/#832) so
-///      external crates and the runner seam can reference `TokenUsage` (used in
-///      `AgentOutput`) without depending on the full `trusty-agents` binary crate.
-///      `PerfCollector` (stateful, tokio-dependent) stays in `trusty-agents::perf`.
-/// What: The four portable plain-data types for per-phase token counting,
-///       cost tracking, and full run record serialisation.
-/// Test: Unit tests in `perf::tests` plus compile-tested via `trusty-agents`.
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 pub mod perf;
 
-/// AgentRunner DI seam: `HistoryMessage`, `RunContext`, `AgentOutput`, and
-/// the `AgentRunner` async trait.
-///
-/// Why: Moved to trusty-agents-common in Wave 2 (issue #867, refs #830/#832)
-///      so external crates that need to implement or test against `AgentRunner`
-///      can depend on this lightweight crate without pulling in the full
-///      `trusty-agents` binary crate.
-/// What: The runner seam — once `TokenUsage` (perf) is here, the only
-///       remaining dependencies are `std`, `anyhow`, `async-trait`, and
-///       `serde`. `HistoryMessage` is the portable IPC wire form
-///       (`{role, content}` + serde); its `into_typed()` conversion
-///       (requiring `async-openai`) stays in `trusty-agents::session`.
-/// Test: `test_run_with_history_forwards_ctx` in `runner::tests` (bug #122
-///       regression guard); compile-tested via `trusty-agents`.
 pub mod runner;
 
-/// Harness adapter framework: `HarnessAdapter` trait, value types, pattern
-/// helpers, `AdapterRegistry`, and 7 concrete adapters.
-///
-/// Why: Moved to trusty-agents-common in Wave 1 (issue #862) so external
-///      crates that need to implement or enumerate adapters can do so without
-///      depending on the full `trusty-agents` binary crate. Zero internal
-///      `crate::` dependencies confirmed pre-move.
-/// What: Re-exports everything that was under `trusty-agents::adapters`.
-/// Test: All unit tests in the submodules; `cargo test -p trusty-agents-common`
-///       exercises them in-place.
 pub mod adapters;
 
-/// JSON-backed session ledger (`SessionsRegistry` + `SessionEntry`).
-///
-/// Why: Moved to trusty-agents-common in Wave 1 (issue #862) alongside the
-///      adapter framework. The registry is purely `std`/`anyhow`/`chrono`/`serde`
-///      — no host-crate dependencies — making it a clean extraction.
-/// What: `SessionsRegistry` provides `open`, `record_start`, `record_end`,
-///       `list` over a flat `sessions.json` file.
-/// Test: `record_start_appends_entry`, `record_end_updates_status`, etc. in
-///       the `tests` module of `session_registry.rs`.
 pub mod session_registry;
 
-/// Unified harness event envelope, process-global broadcast bus, and filter.
-///
-/// Why: Wave 3 (epic #830, refs #833) unifies real-time event streaming across
-///      the three harnesses (`trusty-agents`, `trusty-mpm`, `trusty-code`) onto
-///      one `HarnessEvent` envelope flowing over a single process-global
-///      broadcast bus. Phase 0 (this module) lands the foundation only — the
-///      types, the bus, the subscription API, and a lightweight `Filter` — with
-///      NO consumers wired yet. Migration of existing emit sites happens in
-///      P1–P4. See ADR-0005.
-/// What: Re-exports `HarnessEvent`, `HarnessPayload`, `HarnessSource`,
-///       `LifecycleEvent`, `Lag`, `Filter`, the `bus`/`subscribe`/`publish`/
-///       `emit`/`recv_with_lag` helpers, and the `EVENT_LINE_PREFIX` relay
-///       constant from the `events::*` submodules.
-/// Test: `events::tests` is the comprehensive suite for this foundation type.
 pub mod events;
 
-/// Canonical harness-understanding instructions shared by all consumers (DOC-21).
-///
-/// Why: Both trusty-mpm's SM prompt and a future t-code overseer need the same
-///      harness mental model — session lifecycle, pane signals, decision protocol,
-///      and per-harness specifics. A single shared source prevents drift.
-/// What: Four structured accessors (`agnostic`, `mpm_session_manager`, `tcode`,
-///       `overseer`) plus a `harness_understanding` convenience that concatenates
-///       all sections. Content is bundled markdown compiled in via `include_str!`.
-/// Test: `harness_doc::tests` exercises every accessor and the full-doc combinator.
 pub mod harness_doc;
 
-/// The shared agent-asset roster: 30 `.md` files embedded once, consumed by
-/// both `trusty-mpm` and `trusty-code`.
-///
-/// Why: both crates shipped byte-identical copies of the same 30 agent prompts,
-///      held in step only by a CI diff that failed after the fact. One physical
-///      file per agent makes drift unrepresentable instead of merely detected.
-/// What: 30 `pub const &str` items (5 `BASE-*` templates + 25 roster agents)
-///       plus `AGENT_ASSETS`, the `(filename, content)` table consumers use to
-///       resolve `extends:` chains by original filename.
-/// Test: `agent_assets::tests` — non-empty content, unique filenames, and every
-///       named const pointer-identical to its table row.
 pub mod agent_assets;
 
-/// Portable tool-output compression: `compress_tool_output(_async)` + filters.
-///
-/// Why: Hoisted from `trusty-agents::compress::tool_output` in issue #1959 so
-///      `trusty-mpm` (and any future consumer) can compress tool output
-///      without a full `trusty-agents` path dependency — needed by the `tm
-///      hook` `PreToolUse` Bash rewrite spike (issue #1956).
-/// What: Dispatch (`compress_tool_output`), the async RTK-then-native wrapper
-///       (`compress_tool_output_async`), and the path-reporting variant
-///       (`compress_tool_output_async_with_path`) used for stats logging.
-/// Test: `cargo test -p trusty-agents-common` exercises `compress::tool_output::tests`
-///       in place; `trusty-agents`'s `llm::tool_loop` tests cover the
-///       re-exported call site.
 pub mod compress;
 
-/// Agent compose/deploy/manifest machinery: `builder`, `manifest`,
-/// `deployer`, and the shared `frontmatter` line parser.
-///
-/// Why: Extracted from `trusty-mpm::core::{agent_builder,agent_manifest,
-///      agent_deployer,frontmatter}` (#2892), mirroring the precedent set by
-///      `ToolExecutor`/`AgentRunner`, so `trusty-code` can eventually consume
-///      the same `extends:`-inheritance composer and ownership-tracked
-///      deployer instead of forking them.
-/// What: `builder::compose_agent` / `builder::source_chain` resolve an
-///      inheritance chain into one flattened Markdown document;
-///      `manifest::AgentManifest` tracks which deployed files a harness owns
-///      via a sha256 checksum ledger; `deployer::deploy_agents(_filtered)`
-///      writes composed agents into a target directory without clobbering
-///      user edits. `trusty-mpm` re-exports every item here from its
-///      `core::agent_builder` / `core::agent_manifest` / `core::agent_deployer`
-///      / `core::frontmatter` modules for source compatibility.
-/// Test: `cargo test -p trusty-agents-common agents::` exercises every
-///      submodule in place.
 pub mod agents;
 
-/// Skill deploy/manifest/tier machinery: `manifest`, `deployer`, `tiers`.
-///
-/// Why: Extracted from `trusty-mpm::core::{skill_deployer,skill_manifest,
-///      skill_tiers}` (#2892, #2818), mirroring the agent compose/deploy/
-///      manifest extraction, so `trusty-code` can eventually consume the same
-///      ownership-tracked skill deployer and tier-precedence resolver instead
-///      of forking them.
-/// What: `manifest::SkillManifest` tracks which deployed skill files a
-///      harness owns via a sha256 checksum ledger (reusing
-///      `agents::manifest::ManifestError`); `deployer::deploy_skills(_filtered)`
-///      writes skill sources into `<dest>/<name>/SKILL.md` without clobbering
-///      user edits; `tiers::plan_skill_tiers` / `deploy_all_skill_tiers`
-///      resolve and deploy the project-custom > user-custom > bundled
-///      precedence. `trusty-mpm` re-exports every item here from its
-///      `core::skill_deployer` / `core::skill_manifest` / `core::skill_tiers`
-///      modules for source compatibility with the existing call sites.
-/// Test: `cargo test -p trusty-agents-common skills::` exercises every
-///      submodule in place.
 pub mod skills;
 
-/// `WorkstreamConnector` trait + value types: the DOC-44 "engineering lead /
-/// virtual twin" architecture's Layer 1 tool-control surface (issue #3007,
-/// twin Phase 1).
-///
-/// Why: DOC-44 requires a unified, tool-agnostic session-control trait both
-/// `trusty-mpm` and `trusty-code` implement, living one level below both so
-/// neither harness crate has to depend on the other. See the module's own
-/// docs for the full DOC-44/DOC-42 naming-correction context.
-/// What: re-exports `WorkstreamConnector`, its request/response types, the
-/// `ConnectorError` failure enum, and `ConnectorTestKit`'s shared
-/// conformance assertions. The concrete tm/tcode implementations live in
-/// their owning crates, not here.
-/// Test: `cargo test -p trusty-agents-common connectors::` exercises every
-/// submodule in place.
 pub mod connectors;
 
-/// Heterogeneous workstream ledger: the DOC-44 "engineering lead / virtual
-/// twin" architecture's Layer 2 persisted state (issue #3008, twin Phase 2).
-///
-/// Why: DOC-44 §8 Phase 2 needs a harness-tagged (`tm`/`tcode`) registry the
-/// eventual lead agent uses to track workstreams across both tools, built
-/// directly on Phase 1's `connectors::BackendParams` tagging. See the
-/// module's own docs for the naming correction (issue title says "DOC-42",
-/// the correct id is DOC-44) and its relationship to `session_registry`
-/// (a different, narrower, already-wired registry — left untouched).
-/// What: `Workstream`/`Harness`/`WorkstreamStatus`/`Priority`/`NewWorkstream`
-/// value types, the JSON-backed `WorkstreamLedger` (create/list/get/query/
-/// update), `LedgerError`, and the `LedgerRecovery` seam
-/// (`JsonFileRecovery` default + `TrustyMemoryRecovery` stub, blocked on
-/// issue #3228).
-/// Test: `cargo test -p trusty-agents-common workstreams::` exercises every
-/// submodule in place.
 pub mod workstreams;
 
-/// Shared multi-client attach/fan-out transport (DOC-48 §5.3.1, AC-7; issue
-/// #3299, epic #3292; twin epic #3052).
-///
-/// Why: extracted from `trusty-code::workstreams::sse` (issue #3297) — DOC-48
-/// §5.3.1 designates the multi-client SSE fan-out algorithm as
-/// harness-agnostic, needed by both tcode workstream observation and a
-/// future `trusty-agents` background-session transport (epic #3052). See the
-/// module's own docs for the trait shapes and why they carry zero
-/// axum/tcode dependency.
-/// What: `EventSource`/`MembershipProvider` traits, `SourceEvent`/
-/// `EventEnvelope` (the AC-7.2 `{session_id, event_type, payload}` wire
-/// shape), and `aggregate_live` (the fan-out combinator). HTTP/SSE framing
-/// stays in each consumer.
-/// Test: `cargo test -p trusty-agents-common transport::` exercises every
-/// submodule in place.
 pub mod transport;
 
 use std::sync::Arc;

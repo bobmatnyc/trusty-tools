@@ -36,9 +36,10 @@ pub mod release;
 use std::path::PathBuf;
 
 use anyhow::Context;
-
-/// Default install directory for prebuilt binaries (mirrors `install.sh`).
-pub const DEFAULT_INSTALL_DIR: &str = "~/.local/bin";
+// #5777: the `DEFAULT_INSTALL_DIR = "~/.local/bin"` const that lived here was
+// deleted with the Phase 3 destination flip — no code read it, and the real
+// default is `default_install_dir()` below (the shared canonical cargo bin
+// dir, which honours `CARGO_HOME` where a literal string cannot).
 
 /// Outcome of a [`try_install_prebuilt`] call.
 ///
@@ -197,7 +198,7 @@ pub fn http_client() -> reqwest::Client {
 /// Test: Exercised by the `#[ignore]`-tagged live integration test.
 async fn install_from_urls(
     client: &reqwest::Client,
-    _crate_name: &str,
+    crate_name: &str,
     _version: &str,
     archive_name: &str,
     tarball_url: &str,
@@ -213,15 +214,21 @@ async fn install_from_urls(
         .await
         .context("downloading and verifying prebuilt tarball")?;
 
-    // Extract all binaries from the archive.
+    // Extract all regular files from the archive (into the temp dir only).
     let extract_dir = tmp_path.join("extracted");
     std::fs::create_dir_all(&extract_dir).context("creating extraction directory")?;
-    let binary_names = fetch::extract_binaries(&tarball, &extract_dir)
+    let extracted = fetch::extract_binaries(&tarball, &extract_dir)
         .context("extracting binaries from tarball")?;
+
+    // #5777: place ONLY the crate's expected binaries. Release tarballs also
+    // ship `LICENSE`/`README.md` (mode 0755), which used to be installed into
+    // the bin dir as if they were binaries.
+    let binary_names = expected_binaries_among(crate_name, &extract_dir, &extracted);
 
     if binary_names.is_empty() {
         return Err(anyhow::anyhow!(
-            "tarball contained no regular files; expected at least one binary"
+            "tarball contained none of {crate_name}'s expected binaries \
+             (found: {extracted:?})"
         ));
     }
 
@@ -232,18 +239,173 @@ async fn install_from_urls(
     Ok(placed)
 }
 
-/// Resolve the default install directory (`~/.local/bin`), or `None` if the home
-/// directory cannot be determined.
+/// Narrow an extracted archive's file list to `crate_name`'s expected binaries.
 ///
-/// Why: Both `install` and `upgrade` need the default install path; this provides
-/// a single resolution rule consistent with `install.sh`.
+/// Why (#5777): `fetch::extract_binaries` returns every regular file in the
+/// tarball, and release tarballs ship `LICENSE`/`README.md` at mode 0755 — an
+/// execute-bit filter cannot tell them from binaries, which is how they ended
+/// up in bin dirs on real installs. An expected-name allowlist can.
+/// What: keeps, in extraction order, the names that appear in the shared
+/// [`trusty_common::bin_resolve::installed_binaries`] set for `crate_name`.
+/// A dropped file that carries the execute bit (checked against its copy in
+/// `extract_dir`) and is not an obvious documentation file is named in a
+/// `tracing::warn!` before being skipped — table drift used to produce a
+/// half-install with no trace at all (#5778 review).
+/// Test: `tests::expected_binaries_among_drops_documentation_files`,
+/// `tests::expected_binaries_among_keeps_multi_binary_sets`,
+/// `tests::drop_warn_fires_only_for_unexpected_executables`.
+fn expected_binaries_among(
+    crate_name: &str,
+    extract_dir: &std::path::Path,
+    extracted: &[String],
+) -> Vec<String> {
+    let expected = trusty_common::bin_resolve::installed_binaries(crate_name);
+    let mut kept: Vec<String> = Vec::new();
+    for name in extracted {
+        if expected.iter().any(|e| e == name) {
+            kept.push(name.clone());
+        } else {
+            warn_dropped_executable(crate_name, name, &extract_dir.join(name));
+        }
+    }
+    warn_unshipped_binaries(crate_name, &expected, &kept);
+    kept
+}
+
+/// Warn about a binary the shared table promises but the tarball did not ship.
 ///
-/// What: Expands `~` via `dirs::home_dir()`.
+/// Why (#5805): the mirror of [`warn_dropped_executable`], and the half that
+/// had no check at all. `--dry-run` now advertises every name from the shared
+/// table — `trusty-installer` AND `tctl` — so an operator is told two files
+/// will be replaced. If the tarball ships only one, `place_binaries` places one
+/// and nothing anywhere says so: the preview over-promised and the install
+/// under-delivered, silently.
 ///
-/// Test: `tests::default_install_dir_resolves` asserts the returned path ends
-/// with `.local/bin`.
+/// Not an error: a release that legitimately drops an alias on some platform
+/// would then fail the whole install rather than place what it has, and the
+/// binary the operator asked for is the one that IS there. The mismatch is a
+/// release-tooling defect, so it is reported where a release-tooling defect can
+/// be seen, at the same level as its mirror.
+///
+/// Test: `tests::unshipped_expected_binary_is_reported`.
+fn warn_unshipped_binaries(crate_name: &str, expected: &[String], kept: &[String]) -> Vec<String> {
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|e| !kept.iter().any(|k| k == *e))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        tracing::warn!(
+            crate_name,
+            missing = ?missing,
+            "the shared installed_binaries table lists binaries this tarball did \
+             not ship; they will NOT be placed even though the install preview \
+             named them (#5805)"
+        );
+    }
+    missing
+}
+
+/// Warn about a dropped tarball entry that looks like a real binary.
+///
+/// Why (#5778): a silently-dropped executable is a half-install in the
+/// making — the fix is a CRATE_BINARIES row, and nobody can add one for a
+/// file they never heard about. Split from [`expected_binaries_among`], with
+/// the fired/not-fired decision returned, so tests can assert it against
+/// real on-disk files — the prior fixtures created no files, so
+/// `has_exec_bit` always saw a metadata `Err` and the warn arm was dead in
+/// every test run (#5778 verifier round).
+/// What: fires (and returns `true`) only for a non-documentation name whose
+/// extracted copy carries the execute bit; returns `false` otherwise.
+/// Test: `tests::drop_warn_fires_only_for_unexpected_executables`.
+fn warn_dropped_executable(crate_name: &str, name: &str, path: &std::path::Path) -> bool {
+    if is_documentation_file(name) || !has_exec_bit(path) {
+        return false;
+    }
+    tracing::warn!(
+        crate_name,
+        file = %name,
+        "tarball shipped an executable not in the shared \
+         installed_binaries table; NOT installing it — if this is a \
+         real binary, add it to trusty-common's CRATE_BINARIES (#5778)"
+    );
+    true
+}
+
+/// Whether `name` is an obvious documentation file release tarballs ship.
+///
+/// Why (#5778): the allowlist drop-warn above must stay silent for the
+/// `LICENSE`/`README.md`/`CHANGELOG.md` files every release tarball carries
+/// at mode 0755 — those are the expected, boring drops.
+/// What: case-insensitive prefix match on LICENSE / README / CHANGELOG.
+/// Test: `tests::documentation_files_are_recognised`.
+fn is_documentation_file(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["LICENSE", "README", "CHANGELOG"]
+        .iter()
+        .any(|prefix| upper.starts_with(prefix))
+}
+
+/// Whether the file at `path` looks runnable — execute bit on Unix, plain
+/// existence elsewhere (no portable execute concept).
+///
+/// Why (#5778): the drop-warn should fire only for files that LOOK like
+/// binaries; a plain data file the table ignores is not a half-install risk.
+/// What: on Unix, any `0o111` bit in the file's mode; a missing or unreadable
+/// file is `false` (nothing to install, nothing to warn about).
+/// Test: `tests::drop_warn_fires_only_for_unexpected_executables` (real
+/// on-disk fixtures with and without the execute bit); also exercised via
+/// the `tests::expected_binaries_among_*` fixtures.
+fn has_exec_bit(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// Resolve the default install directory — the canonical cargo bin dir
+/// (`$CARGO_HOME/bin`, falling back to `~/.cargo/bin`), or `None` if neither
+/// `CARGO_HOME` nor the home directory can be determined.
+///
+/// Why (#5777, Phase 3 of #4964): prebuilt downloads used to land in
+/// `~/.local/bin` while `cargo install` wrote `$CARGO_HOME/bin`, so PATH
+/// order decided which copy ran — the stale-daemon mechanism behind #2386.
+/// Every write path this project controls now converges on the one directory
+/// a hand-typed `cargo install` also writes to.
+///
+/// What: delegates to the shared
+/// [`trusty_common::bin_resolve::canonical_bin_dir`] — pure path arithmetic,
+/// never spawns `cargo`, so a machine with no Rust toolchain still resolves
+/// it. `install.sh` applies the same `${CARGO_HOME:-$HOME/.cargo}/bin` rule.
+///
+/// Test: `tests::default_install_dir_resolves` asserts the returned path is
+/// the canonical cargo bin dir;
+/// `tests::install_dir_is_some_whenever_cargo_home_is_set` pins that this is
+/// `Some` whenever `CARGO_HOME` is set, even with an unresolvable home.
 pub fn default_install_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".local").join("bin"))
+    trusty_common::bin_resolve::canonical_bin_dir()
+}
+
+/// The install destination, with the last-resort fallback applied.
+///
+/// Why (#5805): three call sites wrote
+/// `default_install_dir().unwrap_or_else(|| "/usr/local/bin".into())` by hand —
+/// `install_all`, `install_one`, and now the `--dry-run` preview. A preview
+/// that names a different directory than the install writes to is worse than
+/// no preview, and three copies of one expression is how that drift starts.
+///
+/// What: [`default_install_dir`], falling back to `/usr/local/bin` only when
+/// neither `CARGO_HOME` nor the home directory resolves — an invariant pinned
+/// by `tests::install_dir_is_some_whenever_cargo_home_is_set`.
+///
+/// Test: `tests::install_dir_or_fallback_matches_default_when_resolvable`.
+pub fn install_dir_or_fallback() -> PathBuf {
+    default_install_dir().unwrap_or_else(|| PathBuf::from("/usr/local/bin"))
 }
 
 #[cfg(test)]
@@ -265,19 +427,235 @@ mod tests {
         assert!(!platform::is_tier1_target("wasm32-unknown-unknown"));
     }
 
-    /// Why: The default install dir must end in `.local/bin` so `install.sh` and
-    /// the Rust installer agree on the default location.
-    /// What: Asserts `default_install_dir()` ends with `.local/bin` when a home
-    /// dir is available.
+    /// Why (#5777, Phase 3 of #4964): the default install dir IS the canonical
+    /// cargo bin dir — a `~/.local/bin` default is the two-directory split this
+    /// change closes, so this test FAILS against the pre-flip resolver.
+    /// What: asserts `default_install_dir()` equals the shared
+    /// `canonical_bin_dir()` and never ends in `.local/bin`.
     /// Test: This is the test.
     #[test]
     fn default_install_dir_resolves() {
+        assert_eq!(
+            default_install_dir(),
+            trusty_common::bin_resolve::canonical_bin_dir(),
+            "default install dir must be the shared canonical cargo bin dir (#5777)"
+        );
         if let Some(p) = default_install_dir() {
             assert!(
-                p.ends_with(std::path::Path::new(".local").join("bin")),
-                "unexpected path: {}",
+                !p.ends_with(std::path::Path::new(".local").join("bin")),
+                "~/.local/bin is no longer a write destination (#5777): {}",
                 p.display()
             );
+        }
+    }
+
+    /// Why (#5805): `install_all`, `install_one`, and the `--dry-run` preview
+    /// all need the destination, and three hand-written copies of
+    /// `default_install_dir().unwrap_or_else(…)` is how a preview starts
+    /// naming a directory the install does not write to.
+    /// What: asserts the helper equals [`default_install_dir`] whenever that
+    /// resolves, and only substitutes `/usr/local/bin` when it does not.
+    /// Test: This is the test.
+    #[test]
+    fn install_dir_or_fallback_matches_default_when_resolvable() {
+        match default_install_dir() {
+            Some(p) => assert_eq!(install_dir_or_fallback(), p),
+            None => assert_eq!(
+                install_dir_or_fallback(),
+                PathBuf::from("/usr/local/bin"),
+                "the fallback is reachable only with no CARGO_HOME and no home"
+            ),
+        }
+    }
+
+    /// Why (#5777): mode-0755 `LICENSE`/`README.md` in release tarballs were
+    /// installed into bin dirs as if they were binaries — an exec-bit filter
+    /// cannot exclude them, only an expected-name allowlist can. This test
+    /// FAILS against the pre-#5777 place-everything behaviour (which this
+    /// helper now gates).
+    /// What: extends the crate's OWN expected set — taken live from the
+    /// shared `installed_binaries` table, so a future table edit cannot
+    /// silently change what this test asserts (#5778 review) — with the two
+    /// doc files, all created on disk at mode 0755 so `has_exec_bit` reads
+    /// real metadata (#5778 verifier round — the prior fixture created no
+    /// files), and asserts exactly the doc files are dropped.
+    #[test]
+    fn expected_binaries_among_drops_documentation_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bins = trusty_common::bin_resolve::installed_binaries("trusty-search");
+        let mut extracted = bins.clone();
+        extracted.push("LICENSE".to_owned());
+        extracted.push("README.md".to_owned());
+        for name in &extracted {
+            write_mode(dir.path(), name, 0o755);
+        }
+        assert_eq!(
+            expected_binaries_among("trusty-search", dir.path(), &extracted),
+            bins,
+            "LICENSE/README must be dropped; the crate's own binary set survives (#5777)"
+        );
+    }
+
+    /// Why: the allowlist must not regress alias/multi-binary crates — the
+    /// exact failure mode the shared `installed_binaries` table exists to
+    /// prevent.
+    /// What: `trusty-installer`'s tarball keeps both `trusty-installer` and
+    /// the `tctl` alias; an unknown crate falls back to its own name. All
+    /// fixture files exist on disk at mode 0755 (#5778 verifier round).
+    #[test]
+    fn expected_binaries_among_keeps_multi_binary_sets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let extracted = vec![
+            "trusty-installer".to_owned(),
+            "tctl".to_owned(),
+            "LICENSE".to_owned(),
+        ];
+        for name in extracted
+            .iter()
+            .map(String::as_str)
+            .chain(["tga", "README.md"])
+        {
+            write_mode(dir.path(), name, 0o755);
+        }
+        assert_eq!(
+            expected_binaries_among("trusty-installer", dir.path(), &extracted),
+            vec!["trusty-installer".to_owned(), "tctl".to_owned()]
+        );
+        assert_eq!(
+            expected_binaries_among(
+                "tga",
+                dir.path(),
+                &["tga".to_owned(), "README.md".to_owned()]
+            ),
+            vec!["tga".to_owned()]
+        );
+    }
+
+    /// Why (#5805): `--dry-run` advertises every name from the shared table, so
+    /// a tarball shipping only some of them means the preview over-promised and
+    /// the install under-delivered with nothing said. `place_binaries` cannot
+    /// see it — its input is already the intersection — so the check belongs
+    /// here, where both lists exist.
+    /// What: a tarball with `trusty-installer` but no `tctl` keeps the one it
+    /// shipped and reports `tctl` as unshipped; a complete tarball reports
+    /// nothing.
+    /// Test: This is the test.
+    #[test]
+    fn unshipped_expected_binary_is_reported() {
+        let expected = trusty_common::bin_resolve::installed_binaries("trusty-installer");
+        assert!(
+            expected.contains(&"tctl".to_owned()),
+            "the fixture depends on the table listing both binaries: {expected:?}"
+        );
+
+        let kept = vec!["trusty-installer".to_owned()];
+        assert_eq!(
+            warn_unshipped_binaries("trusty-installer", &expected, &kept),
+            vec!["tctl".to_owned()]
+        );
+        assert!(warn_unshipped_binaries("trusty-installer", &expected, &expected).is_empty());
+    }
+
+    /// Write `dir/<name>` with `mode` so `has_exec_bit` sees real metadata.
+    fn write_mode(dir: &std::path::Path, name: &str, mode: u32) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, name).expect("write fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        path
+    }
+
+    /// Why (#5778 verifier round): the drop-warn tests used to pass a
+    /// directory with no files in it, so `has_exec_bit` always returned
+    /// `false` and the warn arm never ran — they would have passed with the
+    /// exec-bit check replaced by `|| false`. This test creates real files
+    /// and asserts the warn decision fires exactly for an exec-bit
+    /// executable outside the expected set.
+    /// What: a mode-0755 `rogue-tool` fires the warn; a mode-0755 `LICENSE`
+    /// (doc file) and a mode-0644 data file do not; and the full allowlist
+    /// drops the rogue from the kept set while warning about it.
+    #[cfg(unix)]
+    #[test]
+    fn drop_warn_fires_only_for_unexpected_executables() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rogue = write_mode(dir.path(), "rogue-tool", 0o755);
+        let license = write_mode(dir.path(), "LICENSE", 0o755);
+        let data = write_mode(dir.path(), "notes.txt", 0o644);
+
+        assert!(
+            warn_dropped_executable("trusty-search", "rogue-tool", &rogue),
+            "an exec-bit executable outside the expected set must be warned about (#5778)"
+        );
+        assert!(
+            !warn_dropped_executable("trusty-search", "LICENSE", &license),
+            "mode-0755 doc files are the expected, boring drops"
+        );
+        assert!(
+            !warn_dropped_executable("trusty-search", "notes.txt", &data),
+            "a plain data file is not a half-install risk"
+        );
+
+        // Through the full allowlist: the rogue is dropped, never kept.
+        write_mode(dir.path(), "trusty-search", 0o755);
+        assert_eq!(
+            expected_binaries_among(
+                "trusty-search",
+                dir.path(),
+                &["trusty-search".to_owned(), "rogue-tool".to_owned()]
+            ),
+            vec!["trusty-search".to_owned()]
+        );
+    }
+
+    /// Why (#5777, twice-raised trusty-review finding on `install.rs`):
+    /// dropping the `.or_else(canonical_bin_dir)` leg at the install-dir
+    /// selector cannot make a `CARGO_HOME` machine fall through to
+    /// `/usr/local/bin`, because `default_install_dir()` is `Some` whenever
+    /// `CARGO_HOME` is set and non-empty — regardless of home resolvability.
+    /// This pins that invariant so the finding stays refuted.
+    /// What: drives the pure resolver behind `default_install_dir()` with
+    /// `CARGO_HOME` set and NO resolvable home and asserts `Some`
+    /// (`default_install_dir_resolves` above pins the delegation); when the
+    /// live environment has `CARGO_HOME` set, also asserts the real
+    /// `default_install_dir()` agrees. No env mutation — the resolver is
+    /// parameterised precisely so tests stay safe under the parallel harness.
+    #[test]
+    fn install_dir_is_some_whenever_cargo_home_is_set() {
+        assert_eq!(
+            trusty_common::bin_resolve::canonical_bin_dir_from(None, Some("/opt/cargo")),
+            Some(PathBuf::from("/opt/cargo").join("bin")),
+            "CARGO_HOME set with an unresolvable home must still resolve (#5777)"
+        );
+        if std::env::var("CARGO_HOME").is_ok_and(|v| !v.is_empty()) {
+            assert!(
+                default_install_dir().is_some(),
+                "default_install_dir() must be Some while CARGO_HOME is set (#5777)"
+            );
+        }
+    }
+
+    /// Why (#5778): the allowlist drop-warn must stay silent for the doc
+    /// files every tarball ships and remain armed for anything binary-shaped.
+    /// What: LICENSE/README/CHANGELOG variants are recognised in any case and
+    /// with suffixes; binary-like names are not.
+    #[test]
+    fn documentation_files_are_recognised() {
+        for doc in [
+            "LICENSE",
+            "LICENSE-MIT",
+            "README.md",
+            "readme.txt",
+            "CHANGELOG.md",
+        ] {
+            assert!(is_documentation_file(doc), "{doc} is a doc file");
+        }
+        for bin in ["trusty-search", "tctl", "libonnxruntime.so"] {
+            assert!(!is_documentation_file(bin), "{bin} is not a doc file");
         }
     }
 

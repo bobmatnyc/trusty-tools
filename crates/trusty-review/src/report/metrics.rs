@@ -7,9 +7,11 @@
 //! still parses and unmapped template fields fall through to honesty markers.
 //! What: defines [`AnalyzeMetrics`] (LoC totals + per-language breakdown, file /
 //! function counts, complexity distribution buckets, and a top-findings list
-//! with severity) and [`load_metrics`] which parses the JSON from disk.
-//! Test: `metrics.rs` tests cover a full parse, a minimal `{}` parse, and the
-//! derived helpers (`primary_languages`, `total_loc`).
+//! with severity) and [`load_metrics`] which parses the JSON from disk and
+//! refuses a schema major this build does not read (#5747).
+//! Test: `metrics.rs` tests cover a full parse, a minimal `{}` parse, the
+//! derived helpers (`primary_languages`, `total_loc`), and the schema-major
+//! refusal.
 
 use std::path::Path;
 
@@ -27,7 +29,12 @@ use super::error::ReportError;
 /// Test: `metrics.rs::parse_full_metrics`, `parse_minimal_metrics`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AnalyzeMetrics {
-    /// Schema version tag (informational; defaults to empty).
+    /// Schema version tag, e.g. `v0`; empty when the artifact declared none.
+    ///
+    /// #5747: no longer informational — [`load_metrics`] refuses a tag whose
+    /// major it does not read. Empty still loads, because nothing in this
+    /// workspace writes the artifact and the field shipped documented as
+    /// informational.
     #[serde(default)]
     pub schema_version: String,
     /// Repository identifier the metrics describe (informational).
@@ -189,22 +196,68 @@ impl AnalyzeMetrics {
     }
 }
 
+/// The artifact schema major this build reads (#5747).
+///
+/// Why: the file is written by a process this one does not ship with, so the
+/// loader must be able to say "not mine" about a file it can nonetheless
+/// deserialize.
+/// What: `0`, matching the `v0` tag the schema has carried since #2317.
+const SUPPORTED_SCHEMA_MAJOR: u32 = 0;
+
 /// Load and parse a v0 metrics JSON file from disk.
 ///
 /// Why: the report pipeline reads one metrics file per repository when the
 /// manifest declares a `metrics` path; a dedicated loader gives typed errors.
-/// What: reads `path`, parses against [`AnalyzeMetrics`]; I/O and parse errors
-/// map to [`ReportError`].
-/// Test: `metrics.rs::load_roundtrip` writes a temp file and reads it back.
+/// #5747 extends that to a file that reads but is not this schema: every field
+/// defaults, so a renamed key in a later producer's output would otherwise
+/// render as a stated zero in a client-facing due-diligence report.
+/// What: reads `path`, parses against [`AnalyzeMetrics`], then refuses a
+/// declared tag whose [`super::schema::major`] is not
+/// [`SUPPORTED_SCHEMA_MAJOR`]. A newer MINOR of that major loads — the
+/// added-field case `#[serde(default)]` exists for.
+///
+/// An ABSENT tag is read as v0 rather than refused, which is where this
+/// diverges from [`super::ticketing::load_ticketing`]. Nothing in this
+/// workspace writes a metrics artifact — DOC-67 §7 has `tga audit` omit
+/// `RepositoryEntry.metrics` so the live `--analyze` fetch is not blocked — so
+/// the file is hand-authored against a field documented as informational since
+/// #2317. An untagged file is an author who read that documentation, and v0 is
+/// the only schema this artifact has ever had. Refusing one would break working
+/// setups to guard against a rename that cannot have happened yet.
+///
+/// Test: `metrics.rs::{load_roundtrip,
+/// an_artifact_from_an_unknown_schema_major_is_a_named_error,
+/// an_artifact_with_an_uninterpretable_schema_tag_is_a_named_error,
+/// an_artifact_with_a_newer_minor_of_a_known_major_still_parses,
+/// an_untagged_artifact_is_read_as_v0}`.
+///
+/// # Errors
+///
+/// [`ReportError::Io`] when the file cannot be read,
+/// [`ReportError::Metrics`] when it does not parse, and
+/// [`ReportError::MetricsSchema`] when it declares an unreadable major.
 pub fn load_metrics(path: &Path) -> std::result::Result<AnalyzeMetrics, ReportError> {
     let text = std::fs::read_to_string(path).map_err(|source| ReportError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    serde_json::from_str(&text).map_err(|source| ReportError::Metrics {
-        path: path.to_path_buf(),
-        source,
-    })
+    let metrics: AnalyzeMetrics =
+        serde_json::from_str(&text).map_err(|source| ReportError::Metrics {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    // #5747: a declared tag must name a major this build reads; an absent one
+    // predates the tag and is v0. See the doc comment for why they differ.
+    let declared = metrics.schema_version.trim();
+    if !declared.is_empty() && super::schema::major(declared) != Some(SUPPORTED_SCHEMA_MAJOR) {
+        return Err(ReportError::MetricsSchema {
+            path: path.to_path_buf(),
+            found: metrics.schema_version,
+            supported: SUPPORTED_SCHEMA_MAJOR,
+        });
+    }
+    Ok(metrics)
 }
 
 #[cfg(test)]

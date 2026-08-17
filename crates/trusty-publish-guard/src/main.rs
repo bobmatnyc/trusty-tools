@@ -9,6 +9,12 @@
 //! this check fails closed and loud by design; see the module docs in
 //! `lib.rs` for why.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::{Path, PathBuf};

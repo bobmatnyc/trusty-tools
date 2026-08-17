@@ -177,7 +177,11 @@ fn deploy_skills_locked(
 ) -> Result<DeployStats> {
     let mut stats = DeployStats::default();
 
-    let mut manifest = SkillManifest::load(dest);
+    // #5626: an unreadable ledger stops the deploy before a single file is
+    // written. Proceeding on the empty default would classify every managed
+    // skill as user-owned, skip it, and record nothing — the #4881 freeze
+    // reached through a transient read failure instead of a lost update.
+    let mut manifest = SkillManifest::load(dest)?;
     // #4881: the snapshot the compare-and-swap save is checked against.
     let base = manifest.clone();
     let now = chrono::Utc::now().to_rfc3339();

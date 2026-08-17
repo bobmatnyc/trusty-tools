@@ -17,6 +17,8 @@
 //! - [`upgrade_and_restart`] — compose the three above into the full workflow.
 //!
 //! Test: `cargo test -p trusty-common --features update-check`
+//!
+//! [`is_launchd_supervised`]: crate::update::upgrade::is_launchd_supervised
 
 /// How a shelled-out upgrade command's stdout/stderr should be handled.
 ///
@@ -118,6 +120,53 @@ fn cargo_install_cmd(crate_name: &str) -> tokio::process::Command {
     cmd
 }
 
+/// Run `cargo install <crate_name> --locked` under the cargo ownership guard.
+///
+/// Why (#5777): `cargo install` exits 101 on any destination binary Cargo's
+/// `.crates2.json` does not record — exactly what a prebuilt-download install
+/// leaves in `$CARGO_HOME/bin`. Every one of the nine cargo reach points in
+/// the workspace funnels through this function (via [`perform_upgrade`] /
+/// [`perform_upgrade_captured`]), so guarding here covers them all by
+/// construction — including the in-daemon `upgrade` commands and MCP tools
+/// that never consult the downloader.
+///
+/// What: resolves the canonical bin dir and the crate's FULL binary set
+/// ([`crate::bin_resolve::installed_binaries`] — alias and multi-binary
+/// crates like `tctl`/`tm`/`trusty-embedderd`/`tagent` collide on names the
+/// crate name alone would miss), moves each existing destination file aside,
+/// runs cargo, then settles: commit on success (restoring any file cargo's
+/// already-installed skip did not rewrite), restore on failure. A restore
+/// failure is folded into the returned error rather than masking cargo's own
+/// failure.
+///
+/// # Errors
+/// Returns cargo's failure (with any restore failure appended), or the
+/// guard's own move/settle error. In every error case the pre-existing
+/// binaries are either back in place or still on disk under the hidden aside
+/// name the error message names.
+///
+/// Test: guard semantics in `cargo_guard::tests`; the wiring is shared by
+/// [`perform_upgrade`] / [`perform_upgrade_captured`] and exercised by the
+/// ignore-tagged `perform_upgrade_fails_cleanly_on_nonexistent_crate`.
+async fn run_cargo_install(crate_name: &str, mode: UpgradeOutput) -> anyhow::Result<()> {
+    let label = format!("`cargo install {crate_name} --locked`");
+    // #5777: clear cargo-untracked binaries out of the destination first.
+    let guard = match crate::bin_resolve::canonical_bin_dir() {
+        Some(dir) => super::cargo_guard::OwnershipGuard::move_aside(
+            &dir,
+            &crate::bin_resolve::installed_binaries(crate_name),
+        )?,
+        None => super::cargo_guard::OwnershipGuard::inert(),
+    };
+    match run_with_mode(cargo_install_cmd(crate_name), mode, &label).await {
+        Ok(()) => guard.commit(),
+        Err(e) => match guard.restore() {
+            Ok(()) => Err(e),
+            Err(restore_err) => Err(e.context(format!("additionally, {restore_err}"))),
+        },
+    }
+}
+
 /// Run `cargo install <crate_name> --locked` to upgrade the named crate.
 ///
 /// Why: Centralises the upgrade invocation so both trusty-memory and
@@ -141,13 +190,8 @@ fn cargo_install_cmd(crate_name: &str) -> tokio::process::Command {
 /// no real cargo-install in CI); manual validation via `trusty-memory upgrade --yes`.
 pub async fn perform_upgrade(crate_name: &str) -> anyhow::Result<()> {
     tracing::info!(crate_name, "running: cargo install {} --locked", crate_name);
-    let label = format!("`cargo install {crate_name} --locked`");
-    let result = run_with_mode(
-        cargo_install_cmd(crate_name),
-        UpgradeOutput::Inherit,
-        &label,
-    )
-    .await;
+    // #5777: routed through the cargo ownership guard — see run_cargo_install.
+    let result = run_cargo_install(crate_name, UpgradeOutput::Inherit).await;
     if result.is_ok() {
         tracing::info!(crate_name, "cargo install succeeded");
     }
@@ -182,13 +226,8 @@ pub async fn perform_upgrade_captured(crate_name: &str) -> anyhow::Result<()> {
         "running (captured): cargo install {} --locked",
         crate_name
     );
-    let label = format!("`cargo install {crate_name} --locked`");
-    let result = run_with_mode(
-        cargo_install_cmd(crate_name),
-        UpgradeOutput::Capture,
-        &label,
-    )
-    .await;
+    // #5777: routed through the cargo ownership guard — see run_cargo_install.
+    let result = run_cargo_install(crate_name, UpgradeOutput::Capture).await;
     if result.is_ok() {
         tracing::info!(crate_name, "cargo install succeeded");
     }
@@ -206,34 +245,31 @@ pub async fn perform_upgrade_captured(crate_name: &str) -> anyhow::Result<()> {
 /// `dirs::home_dir()` / `std::env::var` directly — keeps it testable without
 /// mutating global process state for the common case.
 ///
-/// What: Returns, in priority order: [`crate::bin_resolve::canonical_bin_dir_from`]
-/// (`<cargo_home>/bin` when `cargo_home` is `Some` and non-empty, else
-/// `<home>/.cargo/bin`); then `<home>/.local/bin` (the prebuilt installer's
-/// default). Entries that require `home` are omitted when `home` is `None`.
+/// What: Returns the single canonical entry,
+/// [`crate::bin_resolve::canonical_bin_dir_from`] (`<cargo_home>/bin` when
+/// `cargo_home` is `Some` and non-empty, else `<home>/.cargo/bin`), or an
+/// empty list when neither input can supply a path.
 ///
-/// #4964: the first entry's rule is no longer restated here — it is the shared
-/// [`crate::bin_resolve::canonical_bin_dir_from`], so this list and every
-/// installer write path resolve the cargo bin dir identically.
+/// #5777 (Phase 3 of #4964): `<home>/.local/bin` is no longer a candidate —
+/// every write path now targets the canonical dir, and keeping the legacy
+/// directory in this list is exactly what let a stale `~/.local/bin` copy
+/// green-light a health gate for a binary the daemon never runs. Legacy
+/// copies on `PATH` are still found by `verify_installed_binary`'s `which`
+/// fallback, so this is a de-prioritisation, not a hard cutoff.
 ///
 /// Test: `candidate_bin_dirs_prefers_cargo_home_override`,
 /// `candidate_bin_dirs_falls_back_to_dot_cargo`,
-/// `candidate_bin_dirs_includes_local_bin`,
+/// `candidate_bin_dirs_returns_single_canonical_entry`,
 /// `candidate_bin_dirs_empty_without_home_or_cargo_home`.
 pub(crate) fn candidate_bin_dirs(
     home: Option<&std::path::Path>,
     cargo_home: Option<&str>,
 ) -> Vec<std::path::PathBuf> {
-    let mut dirs = Vec::new();
-
-    if let Some(canonical) = crate::bin_resolve::canonical_bin_dir_from(home, cargo_home) {
-        dirs.push(canonical);
-    }
-
-    if let Some(home) = home {
-        dirs.push(home.join(".local").join("bin"));
-    }
-
-    dirs
+    // #5777: single entry — the canonical cargo bin dir is the ONLY write
+    // destination, so it is the only install-dir candidate.
+    crate::bin_resolve::canonical_bin_dir_from(home, cargo_home)
+        .into_iter()
+        .collect()
 }
 
 /// Probe the freshly-installed binary with `--version` as a health gate.
@@ -241,22 +277,22 @@ pub(crate) fn candidate_bin_dirs(
 /// Why: Before the daemon self-exits to trigger launchd's KeepAlive respawn,
 /// we must confirm the new binary is not corrupt or incompatible. If the
 /// health gate fails we keep the old binary running and report the failure
-/// clearly — we never exit into a broken binary. The binary may have landed
-/// in `~/.cargo/bin` (cargo-install path), `~/.local/bin` (the prebuilt
-/// installer's default — see `trusty-installer::download::default_install_dir`),
-/// or a custom `$CARGO_HOME/bin`; checking only `~/.cargo/bin` produced false
-/// "not installed" reports for prebuilt installs (issue #1771/#1992).
+/// clearly — we never exit into a broken binary. Since #5777 (Phase 3 of
+/// #4964) every write path — cargo install AND the prebuilt downloader —
+/// targets the canonical `$CARGO_HOME/bin` (falling back to `~/.cargo/bin`),
+/// so that is the one directory checked; a legacy `~/.local/bin` copy is no
+/// longer allowed to satisfy the gate for a binary the daemon never runs.
 ///
-/// What: Checks, in order, `$CARGO_HOME/bin/<binary_name>` (or
-/// `~/.cargo/bin/<binary_name>` when `CARGO_HOME` is unset), then
-/// `~/.local/bin/<binary_name>`, then falls back to PATH via `which`. Spawns
-/// `<bin> --version` with a 10-second timeout; returns `Ok(())` if the
-/// process exits 0. Returns `Err` on failure, timeout, or missing binary.
+/// What: Checks `$CARGO_HOME/bin/<binary_name>` (or
+/// `~/.cargo/bin/<binary_name>` when `CARGO_HOME` is unset), then falls back
+/// to PATH via `which`. Spawns `<bin> --version` with a 10-second timeout;
+/// returns `Ok(())` if the process exits 0. Returns `Err` on failure,
+/// timeout, or missing binary.
 ///
 /// Test: `verify_installed_binary_passes_for_cargo` (ignore-tagged integration);
 /// `verify_installed_binary_fails_for_missing_binary`,
 /// `verify_installed_binary_finds_binary_in_cargo_bin`,
-/// `verify_installed_binary_finds_binary_in_local_bin`,
+/// `verify_installed_binary_ignores_stale_local_bin_copy`,
 /// `verify_installed_binary_finds_binary_via_path`,
 /// `verify_installed_binary_honours_cargo_home_override`.
 pub async fn verify_installed_binary(binary_name: &str) -> anyhow::Result<()> {
@@ -277,7 +313,8 @@ pub async fn verify_installed_binary(binary_name: &str) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("failed to run `which {binary_name}`: {e}"))?;
             if !which_out.status.success() {
                 return Err(anyhow::anyhow!(
-                    "binary `{binary_name}` not found in ~/.cargo/bin, ~/.local/bin, or PATH"
+                    "binary `{binary_name}` not found in the canonical cargo bin dir \
+                     ($CARGO_HOME/bin, falling back to ~/.cargo/bin) or on PATH"
                 ));
             }
             String::from_utf8_lossy(&which_out.stdout).trim().to_owned()

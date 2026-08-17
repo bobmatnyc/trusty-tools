@@ -133,6 +133,7 @@ pub(crate) async fn projects(
             stack_hint,
             gh_user,
             gh_account,
+            gh_config_dir,
         } => {
             registry::register(
                 client,
@@ -146,6 +147,7 @@ pub(crate) async fn projects(
                     stack_hint,
                     gh_user,
                     gh_account,
+                    gh_config_dir,
                 },
             )
             .await

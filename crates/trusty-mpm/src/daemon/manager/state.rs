@@ -3,7 +3,7 @@
 //! Why: DOC-36 §3.1 makes `tm manager` a component INSIDE the existing `tm`
 //! daemon ("daemon as source of truth"), with a `ManagerState` sitting alongside
 //! `DaemonState` — exactly as the L2 proxy focus store does. This is the single
-//! struct every manager route reaches through; owning it on [`DaemonState`]
+//! struct every manager route reaches through; owning it on [`DaemonState`](crate::daemon::DaemonState)
 //! (mirroring `proxy_focus_store`) keeps one source of truth and no global
 //! statics. Phase 1a threads in the portfolio palace handle (§3.4, WI-5); later
 //! phases attach the configured `trusty_common::inference::InferenceAdapter`

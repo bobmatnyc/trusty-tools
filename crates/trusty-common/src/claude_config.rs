@@ -11,9 +11,10 @@
 //! state is [`staging_stamp`]'s counter, which exists so two concurrent writers
 //! cannot pick the same staging filename (#4077).
 //!
-//! Test: `cargo test -p trusty-common` covers `mcp_server_entry` shape,
-//! `merge_hook_entries` idempotency, and `discover_claude_settings` skip-dir
-//! behaviour. Filesystem-touching tests are `#[ignore]`.
+//! Test: `cargo test -p trusty-common --features unconditional-only` covers
+//! `mcp_server_entry` shape, `merge_hook_entries` idempotency, and
+//! `discover_claude_settings` skip-dir behaviour. Filesystem-touching tests are
+//! `#[ignore]`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

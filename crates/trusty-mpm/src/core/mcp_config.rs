@@ -134,7 +134,7 @@ pub const CONDITIONAL_BUILTIN_TRUSTY_SEARCH: &str = "trusty-search";
 /// drops the name from `enabledMcpjsonServers` (Claude Code's own "new MCP
 /// servers found" dialog covers it from there) instead of leaving the name
 /// approved with unverified content behind it. See
-/// [`resolve_conditional_mcp_toggles`] (the single place this toggle is
+/// [`resolve_conditional_mcp_toggles`](crate::core::mcp_session_env::resolve_conditional_mcp_toggles) (the single place this toggle is
 /// re-resolved for trust derivation) and [`managed_mcp_server_names`].
 /// Test: `builtin_mcp_server_split_unions_to_full_set`.
 pub const CONDITIONAL_BUILTIN_MCP_SERVERS: &[&str] = &[
@@ -477,17 +477,17 @@ pub fn managed_mcp_server_names(config: &Value) -> Vec<String> {
 /// **SECURITY — DO NOT use this to derive an auto-approval / trust list
 /// (issue #3926).** `<workspace>/.mcp.json` is git-tracked and travels WITH a
 /// cloned repo, so its key set is content a hostile or compromised repo
-/// controls directly. Until issue #3926, [`crate::core::session_launch::settings::preseed_workspace_trust`]
+/// controls directly. Until issue #3926, `crate::core::session_launch::settings::preseed_workspace_trust`
 /// (the interactive `tm launch` path) derived `enabledMcpjsonServers` from
 /// exactly this function's output — filtered only by a narrow project-scope
 /// exclusion (issue #2739) — which silently pre-approved (and, on first
 /// launch, connected with the operator's credentials) ANY server name a
 /// cloned repo declared. That path now derives from
-/// [`launch_trusted_mcp_names`] instead (provenance the operator/framework
+/// `launch_trusted_mcp_names` instead (provenance the operator/framework
 /// controls, mirroring [`managed_mcp_server_names`]'s already-fixed
 /// derivation for the daemon-managed path, #3918/#3924). This raw reader
 /// remains for non-trust purposes (diagnostics, listing what a workspace
-/// currently declares) — reach for [`launch_trusted_mcp_names`] for any
+/// currently declares) — reach for `launch_trusted_mcp_names` for any
 /// approval decision.
 /// What: reads `<workspace>/.mcp.json`, parses it, and returns the sorted keys
 /// of its `mcpServers` object. A missing, unreadable, malformed, or

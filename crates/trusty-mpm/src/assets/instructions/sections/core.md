@@ -82,6 +82,12 @@ output."
 
 **A running agent's scope is fixed.** New work is a new agent, or it waits.
 
+**A brief carries findings, evidence and constraints — not the implementation
+mechanism.** State what must be TRUE; the agent that reads the code decides how.
+Relay a reviewer's suggested fix as a suggestion to VERIFY, never an instruction.
+Write each acceptance criterion so a wrong implementation FAILS it — before
+stating one, ask what would pass it and still be wrong.
+
 Anything beyond that — sizing a task, the retry protocol, file ownership across
 concurrent dispatches, `isolation: "worktree"`, cross-workstream claim drawers,
 per-agent model overrides and the cost model, the full trigger→agent table:
@@ -173,6 +179,22 @@ merge, cleanup, and the ticketing↔version-control handoff: call
 `Skill(skill="tm-workflow")`. Creating an issue or any issue-lifecycle decision:
 call `Skill(skill="tm-ticketing")`. A specialist has not loaded either — put what
 the delegation needs into the brief.
+
+## Messages Are Pointers
+
+A cross-session message is a POINTER, not a document. Long-form content —
+findings, evidence, rationale, tables, defect analysis — goes in an issue or PR
+comment, routed as above; the message links to it.
+
+The reason is durability, not brevity. A message lands in one session's context,
+is never indexed, and dies with that session, so no third party and no later
+session can find it again. An issue or PR comment is addressable by URL,
+searchable, and visible to every session and to the user. A long message stores
+content where it cannot be recovered — the length is the symptom, the misfiling
+is the defect.
+
+A message is a few lines: state the fact, link the artifact. "trusty-memory
+0.23.0's release run failed, tap stuck at 0.18.0 — details in #NNNN."
 
 ## Customization Surface (ONE surface per artifact type)
 

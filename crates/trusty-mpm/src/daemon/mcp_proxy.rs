@@ -16,7 +16,7 @@
 //! What: four free async functions — `session_proxy_focus`,
 //! `session_proxy_unfocus`, `session_proxy_message`, `session_proxy_summary` —
 //! each taking `&Arc<DaemonState>` plus parsed arguments, calling the matching
-//! [`SessionProxy`] verb, and serialising the outcome via the SAME wire response
+//! [`SessionProxy`](crate::client::SessionProxy) verb, and serialising the outcome via the SAME wire response
 //! types the HTTP routes return (so the JSON shape is identical across
 //! transports). Every proxy outcome is a valid state (never a transport error),
 //! so these always return `Ok(_)`, exactly as the HTTP routes always answer 200.

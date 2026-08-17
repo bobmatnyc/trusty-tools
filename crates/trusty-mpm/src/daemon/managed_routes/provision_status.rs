@@ -169,12 +169,12 @@ fn stage_frame_for_job(v: &Value, job_id: &str) -> Option<(ProvisioningStage, Op
 /// the daemon SSE channel BEFORE spawning anything so no early stage frame is
 /// missed, and spawns an updater task that folds each matching
 /// `provisioning_stage` frame into the registry; (3) spawns the provisioning
-/// task, which runs [`spawn_managed_with_id`], aborts the updater, and records
+/// task, which runs `spawn_managed_with_id`, aborts the updater, and records
 /// the terminal outcome (`finish_ready` with the FINAL record id/name — which
 /// may differ from `session_id` on a reconnect — or `finish_failed`).
 /// Test: `spawn_background_registers_and_polls_ready` (via a stubbed terminal
 /// transition); the live provision path is covered by the existing
-/// `handler_spawn_*` integration tests through [`spawn_managed_with_id`].
+/// `handler_spawn_*` integration tests through `spawn_managed_with_id`.
 pub fn spawn_background(
     state: Arc<DaemonState>,
     session_id: ManagedSessionId,

@@ -258,6 +258,25 @@ pub struct Delegation {
     /// Working directory the dispatch was issued from, when known.
     #[serde(default)]
     pub cwd: Option<std::path::PathBuf>,
+    /// The working tree the subagent is actually running in, when it differs
+    /// from [`Self::cwd`] (#4311).
+    ///
+    /// Why: [`Self::isolation`] records that a worktree was ASKED for; it does
+    /// not say where the harness put one. trusty-mpm creates no agent worktrees
+    /// (ADR-0044 decision 4), so the path is not knowable at dispatch time — and
+    /// without it the tree has no owner, which is what leaves it unreapable
+    /// (ADR-0020's fail-closed rule correctly refuses to remove an owner-unknown
+    /// worktree). This field is the recorded parentage DOC-66 §5 requires: the
+    /// dispatching session and workstream own this delegation, and this
+    /// delegation owns that directory.
+    /// What: the subagent's own `cwd`, learned from a hook event the SUBAGENT
+    /// emitted (its payload carries `agent_id`), and only when it differs from
+    /// the dispatcher's `cwd`. `None` means the subagent shares the dispatcher's
+    /// tree, or has not made a tool call yet — never that a worktree is absent.
+    /// Test: `subagent_tool_call_registers_its_worktree`,
+    /// `subagent_sharing_the_dispatchers_tree_registers_nothing`.
+    #[serde(default)]
+    pub worktree_path: Option<std::path::PathBuf>,
     /// The `isolation` mode the dispatch declared, when it declared one (#4480).
     ///
     /// Why: without this, a delegation record cannot answer the one question
@@ -313,6 +332,7 @@ impl Delegation {
             agent_id: None,
             transcript_path: None,
             cwd: None,
+            worktree_path: None,
             isolation: None,
             started_at: None,
             ended_at: None,
@@ -352,6 +372,7 @@ impl Delegation {
             agent_id: None,
             transcript_path: None,
             cwd: None,
+            worktree_path: None,
             isolation: None,
             started_at: Some(now),
             ended_at: None,

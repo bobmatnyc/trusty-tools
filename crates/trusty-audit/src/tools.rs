@@ -51,6 +51,7 @@ use trusty_installer::download::pinned::{PinnedInstall, PinnedTool};
 
 use crate::config::{ToolPin, ToolPins};
 use crate::error::AuditError;
+use crate::progress::{Operation, Progress, UnitOutcome};
 use crate::workdir::{Area, WorkDir};
 
 /// File under `state/` recording the exact versions that were installed.
@@ -62,6 +63,14 @@ pub const VERSION_RECORD_FILE: &str = "tool-versions.toml";
 pub enum RequiredTool {
     /// The audit sweep itself.
     Tga,
+    /// The search daemon the rest of the stack stands on (#5670).
+    ///
+    /// Why it is a pinned tool rather than a machine prerequisite: `tga audit`
+    /// starts this daemon itself, and on a recipient's clean machine the only
+    /// copy it can start is the one this client installed. Without it here,
+    /// `TRUSTY_SEARCH_BIN` would have nothing to name and the guard would fall
+    /// through to a `PATH` lookup — the one thing an isolated run must not do.
+    TrustySearch,
     /// Static analysis feeding the scorecard.
     TrustyAnalyze,
     /// Report rendering.
@@ -69,9 +78,13 @@ pub enum RequiredTool {
 }
 
 impl RequiredTool {
-    /// Every tool the run needs (#5495).
-    pub const ALL: [RequiredTool; 3] = [
+    /// Every tool the run needs (#5495, #5670).
+    ///
+    /// The order is the prerequisite chain: trusty-search must exist before
+    /// `trusty-analyze` can boot against it, and both before `tga` sweeps.
+    pub const ALL: [RequiredTool; 4] = [
         RequiredTool::Tga,
+        RequiredTool::TrustySearch,
         RequiredTool::TrustyAnalyze,
         RequiredTool::TrustyReview,
     ];
@@ -80,6 +93,7 @@ impl RequiredTool {
     pub fn binary_name(self) -> &'static str {
         match self {
             RequiredTool::Tga => "tga",
+            RequiredTool::TrustySearch => "trusty-search",
             RequiredTool::TrustyAnalyze => "trusty-analyze",
             RequiredTool::TrustyReview => "trusty-review",
         }
@@ -89,6 +103,7 @@ impl RequiredTool {
     pub fn crate_name(self) -> &'static str {
         match self {
             RequiredTool::Tga => "tga",
+            RequiredTool::TrustySearch => "trusty-search",
             RequiredTool::TrustyAnalyze => "trusty-analyze",
             RequiredTool::TrustyReview => "trusty-review",
         }
@@ -101,7 +116,7 @@ impl RequiredTool {
 
     /// This tool's pin, from the engagement config.
     ///
-    /// Why: an exhaustive match, so adding a fourth tool to [`RequiredTool`]
+    /// Why: an exhaustive match, so adding a fifth tool to [`RequiredTool`]
     /// fails to compile until [`ToolPins`] gains a field for it. A lookup by
     /// string key would instead resolve to "absent" at runtime, and absent is
     /// how an unpinned tool gets fetched at whatever version is current.
@@ -110,6 +125,7 @@ impl RequiredTool {
     pub fn pin_in(self, pins: &ToolPins) -> &ToolPin {
         match self {
             RequiredTool::Tga => &pins.tga,
+            RequiredTool::TrustySearch => &pins.trusty_search,
             RequiredTool::TrustyAnalyze => &pins.trusty_analyze,
             RequiredTool::TrustyReview => &pins.trusty_review,
         }
@@ -327,7 +343,11 @@ pub fn verify(
 /// reports the wrong version — [`AuditError::VersionMismatch`] when the returned
 /// set does not match the pins, and [`AuditError::WorkDir`] when the record
 /// cannot be written.
-pub async fn install(work: &WorkDir, pins: &ToolPins) -> Result<Vec<InstalledTool>, AuditError> {
+pub async fn install(
+    work: &WorkDir,
+    pins: &ToolPins,
+    progress: &Progress,
+) -> Result<Vec<InstalledTool>, AuditError> {
     work.create()?;
     let install_dir = work.path(Area::Tools);
     // #5495: workdir.rs left this check to this issue — a symlinked `tools/`
@@ -335,6 +355,13 @@ pub async fn install(work: &WorkDir, pins: &ToolPins) -> Result<Vec<InstalledToo
     ensure_real_directory(&install_dir)?;
 
     let plan = plan(pins);
+    // #5823: the download is a single all-or-none call into `trusty-installer`,
+    // which reports nothing per tool — so this is honest about what it knows.
+    // The operation start is what puts a spinner on screen for the wait; the
+    // per-tool lines come after, from the set that actually landed. Per-tool
+    // progress DURING the download needs a hook in `install_pinned_set` that
+    // does not exist, and inventing one here would mean a second downloader.
+    progress.operation_started(Operation::InstallTools, plan.len());
     let installs = trusty_installer::download::pinned::install_pinned_set(
         &trusty_installer::download::http_client(),
         &plan,
@@ -347,8 +374,96 @@ pub async fn install(work: &WorkDir, pins: &ToolPins) -> Result<Vec<InstalledToo
 
     let reported: Vec<InstalledTool> = installs.iter().map(InstalledTool::from).collect();
     let installed = verify(pins, &reported)?;
+    for (index, tool) in installed.iter().enumerate() {
+        progress.unit_started(
+            Operation::InstallTools,
+            tool.crate_name.as_str(),
+            index + 1,
+            installed.len(),
+        );
+        progress.unit_finished(
+            Operation::InstallTools,
+            tool.crate_name.as_str(),
+            UnitOutcome::Succeeded,
+        );
+    }
+    progress.operation_finished(Operation::InstallTools, installed.len(), plan.len());
     write_record(work, &installed)?;
     Ok(installed)
+}
+
+/// The tools this engagement's pins are not already satisfied by.
+///
+/// Why: the idempotence test for auto-install (#5797). "Already installed" is
+/// not a question about the file alone — `crate::run::pinned_binaries` refuses a
+/// sweep on three conditions, and anything that decides whether to download must
+/// use the same three or the two disagree. A predicate that asked only whether
+/// the file exists would skip the download, and then the sweep would refuse over
+/// the binary it just declined to replace.
+///
+/// The three conditions, and what each one being false means:
+/// - the file is absent — `MISSING` in the `tools` report;
+/// - a file is there but the version record does not name it — `UNVERIFIED`,
+///   a binary this client did not place, whose version nothing may claim. It is
+///   reinstalled rather than kept: an unverifiable copy is exactly the #5454
+///   version-skew input, and `tools/` is this client's own scratch area under
+///   the work-dir root, so replacing it costs the recipient nothing;
+/// - the recorded version is not the pin — the config moved after the install.
+///
+/// What: one [`RequiredTool`] per unsatisfied tool, in [`RequiredTool::ALL`]
+/// order. Empty means a run may proceed and nothing needs downloading.
+/// Test: `super::tool_tests::a_verified_set_at_the_pin_is_satisfied`,
+/// `super::tool_tests::an_unverified_binary_is_unsatisfied`,
+/// `super::tool_tests::a_recorded_version_behind_the_pin_is_unsatisfied`.
+///
+/// # Errors
+///
+/// Whatever [`status`] fails with — an unreadable or malformed version record.
+pub fn unsatisfied(work: &WorkDir, pins: &ToolPins) -> Result<Vec<RequiredTool>, AuditError> {
+    Ok(status(work)?
+        .into_iter()
+        .filter(|s| {
+            let pinned = s.tool.pin_in(pins).version();
+            !(s.installed && s.version.as_deref() == Some(pinned))
+        })
+        .map(|s| s.tool)
+        .collect())
+}
+
+/// Install the pinned set only if it is not already on disk at those versions.
+///
+/// Why: #5797 — the owner's "we should be installing these automatically". The
+/// separate `install` step was the only thing standing between a recipient and a
+/// run, and asking them to read a status table and then retype a command is work
+/// this client can do itself.
+///
+/// Two properties this must not trade away, and does not:
+/// - **Fail-closed is unchanged.** This is a call to [`install`], which is
+///   all-or-none, so an auto-install that cannot resolve every pin installs
+///   nothing and returns [`AuditError::Install`]. The caller propagates it. What
+///   #5454 forbids is a mismatched set running to completion and exiting 0, and
+///   that is a property of the SET, not of who asked for the install.
+/// - **It does not download on every invocation.** [`unsatisfied`] is a
+///   filesystem read of `tools/` and `state/`, and an already-satisfied set
+///   returns `Ok(None)` without constructing an HTTP client.
+///
+/// What: `Ok(None)` when every pin was already satisfied and nothing ran;
+/// `Ok(Some(installed))` naming the set this call placed.
+/// Test: `super::tool_tests::ensure_is_a_no_op_once_the_set_is_satisfied`,
+/// `super::tool_tests::ensure_over_an_unverified_binary_reaches_the_installer`.
+///
+/// # Errors
+///
+/// Everything [`install`] returns, plus [`status`]'s read and parse failures.
+pub async fn ensure(
+    work: &WorkDir,
+    pins: &ToolPins,
+    progress: &Progress,
+) -> Result<Option<Vec<InstalledTool>>, AuditError> {
+    if unsatisfied(work, pins)?.is_empty() {
+        return Ok(None);
+    }
+    install(work, pins, progress).await.map(Some)
 }
 
 /// Refuse an install target that is not a real directory.
@@ -444,6 +559,7 @@ instructions = "Assess the last 52 weeks."
 
 [tools]
 tga = "2.9.4"
+trusty-search = "0.47.0"
 trusty-analyze = "0.9.2"
 trusty-review = "0.15.1"
 "#,
@@ -464,6 +580,7 @@ trusty-review = "0.15.1"
     fn a_matching_set() -> Vec<InstalledTool> {
         vec![
             install_of("tga", "2.9.4"),
+            install_of("trusty-search", "0.47.0"),
             install_of("trusty-analyze", "0.9.2"),
             install_of("trusty-review", "0.15.1"),
         ]
@@ -511,7 +628,7 @@ trusty-review = "0.15.1"
             assert_eq!(pinned.binary, tool.binary_name());
         }
         let versions: Vec<&str> = plan.iter().map(|p| p.version.as_str()).collect();
-        assert_eq!(versions, vec!["2.9.4", "0.9.2", "0.15.1"]);
+        assert_eq!(versions, vec!["2.9.4", "0.47.0", "0.9.2", "0.15.1"]);
         // No digest was pinned, so none is invented.
         assert!(plan.iter().all(|p| p.sha256.is_none()));
     }
@@ -535,7 +652,7 @@ trusty-review = "0.15.1"
                 .iter()
                 .map(|i| i.version.as_str())
                 .collect::<Vec<_>>(),
-            vec!["2.9.4", "0.9.2", "0.15.1"]
+            vec!["2.9.4", "0.47.0", "0.9.2", "0.15.1"]
         );
     }
 
@@ -543,7 +660,7 @@ trusty-review = "0.15.1"
     #[test]
     fn a_version_that_drifts_from_the_pin_is_refused() {
         let mut installs = a_matching_set();
-        installs[2] = install_of("trusty-review", "0.14.0");
+        installs[3] = install_of("trusty-review", "0.14.0");
         let err = verify(&pins(), &installs).expect_err("a drifted version must not verify");
         let AuditError::VersionMismatch {
             tool,
@@ -565,7 +682,7 @@ trusty-review = "0.15.1"
         assert!(matches!(
             err,
             AuditError::VersionMismatch {
-                tool: "trusty-analyze",
+                tool: "trusty-search",
                 ..
             }
         ));
@@ -683,7 +800,7 @@ trusty-review = "0.15.1"
         let work = WorkDir::new(&root);
         std::os::unix::fs::symlink(&elsewhere, work.path(Area::Tools)).expect("symlink");
 
-        let err = install(&work, &pins())
+        let err = install(&work, &pins(), &Progress::none())
             .await
             .expect_err("the guard must fire before the network is touched");
         assert!(matches!(err, AuditError::UnsafeToolsDir { .. }));
@@ -697,6 +814,213 @@ trusty-review = "0.15.1"
         assert!(
             read_record(&work).expect("no record").is_empty(),
             "no record may claim an install that did not happen"
+        );
+    }
+
+    /// Pins naming versions that were never published, so any download attempt
+    /// fails at the release lookup — which is what makes "nothing was
+    /// downloaded" assertable without a network.
+    fn unpublishable_pins() -> ToolPins {
+        crate::config::EngagementConfig::from_toml(
+            r#"
+openrouter_key = "sk-or-v1-not-a-real-key"
+instructions = "Assess the last 52 weeks."
+
+[tools]
+tga = "0.0.0-never-published"
+trusty-search = "0.0.0-never-published"
+trusty-analyze = "0.0.0-never-published"
+trusty-review = "0.0.0-never-published"
+"#,
+            Path::new("engagement.toml"),
+        )
+        .expect("the fixture config parses")
+        .tools
+    }
+
+    /// Stub binaries plus a record claiming `version` for every tool — the
+    /// state a successful install leaves behind.
+    fn place_verified_set(work: &WorkDir, version: &str) {
+        let mut record = String::new();
+        for tool in RequiredTool::ALL {
+            let path = tool.path_in(work);
+            std::fs::write(&path, b"stub").expect("stub binary");
+            record.push_str(&format!(
+                "[[tools]]\ncrate_name = \"{}\"\nversion = \"{version}\"\nbinary = \"{}\"\n",
+                tool.crate_name(),
+                path.display()
+            ));
+        }
+        std::fs::write(record_path(work), record).expect("write record");
+    }
+
+    fn work_in(dir: &Path) -> WorkDir {
+        let work = WorkDir::new(dir.join("work"));
+        work.create().expect("create");
+        work
+    }
+
+    #[test]
+    fn a_verified_set_at_the_pin_is_satisfied() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        place_verified_set(&work, "2.9.4");
+
+        // Only tga is pinned at 2.9.4 in `pins()`, so pin the whole set there.
+        let mut pins = pins();
+        pins.trusty_search = ToolPin::Version("2.9.4".to_owned());
+        pins.trusty_analyze = ToolPin::Version("2.9.4".to_owned());
+        pins.trusty_review = ToolPin::Version("2.9.4".to_owned());
+
+        assert!(
+            unsatisfied(&work, &pins).expect("reads").is_empty(),
+            "a set installed at the pin needs nothing"
+        );
+    }
+
+    /// The `UNVERIFIED` state: a binary is there, nothing recorded it, so its
+    /// version is unknown — and an unknown version is the #5454 skew input.
+    #[test]
+    fn an_unverified_binary_is_unsatisfied() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        for tool in RequiredTool::ALL {
+            std::fs::write(tool.path_in(&work), b"stub").expect("stub binary");
+        }
+
+        let pending = unsatisfied(&work, &pins()).expect("reads");
+        assert_eq!(
+            pending,
+            RequiredTool::ALL.to_vec(),
+            "a present but unrecorded binary must be reinstalled, not kept"
+        );
+        // And `status` still calls it installed — the two answer different
+        // questions, which is exactly why the file check alone is not enough.
+        assert!(status(&work).expect("reads").iter().all(|s| s.installed));
+    }
+
+    /// The `MISSING` majority case, alongside one tool that is fine: the set is
+    /// partly resolved, and a partial set is not a runnable one.
+    #[test]
+    fn a_partly_installed_set_is_unsatisfied_for_the_rest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let path = RequiredTool::Tga.path_in(&work);
+        std::fs::write(&path, b"stub").expect("stub binary");
+        std::fs::write(
+            record_path(&work),
+            format!(
+                "[[tools]]\ncrate_name = \"tga\"\nversion = \"2.9.4\"\nbinary = \"{}\"\n",
+                path.display()
+            ),
+        )
+        .expect("write record");
+
+        let pending = unsatisfied(&work, &pins()).expect("reads");
+        assert_eq!(
+            pending,
+            vec![
+                RequiredTool::TrustySearch,
+                RequiredTool::TrustyAnalyze,
+                RequiredTool::TrustyReview
+            ]
+        );
+    }
+
+    /// Install and run are separate steps, so the config can move between them.
+    #[test]
+    fn a_recorded_version_behind_the_pin_is_unsatisfied() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        place_verified_set(&work, "0.0.1-stale");
+
+        assert_eq!(
+            unsatisfied(&work, &pins()).expect("reads"),
+            RequiredTool::ALL.to_vec(),
+            "a set recorded off the pin must be replaced"
+        );
+    }
+
+    /// Idempotence: a satisfied set reaches no installer. The pins name a
+    /// version that was never published, so a download would fail — `Ok(None)`
+    /// is only reachable by not attempting one.
+    #[tokio::test]
+    async fn ensure_is_a_no_op_once_the_set_is_satisfied() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        place_verified_set(&work, "0.0.0-never-published");
+
+        let placed = ensure(&work, &unpublishable_pins(), &Progress::none())
+            .await
+            .expect("a satisfied set is not reinstalled");
+        assert!(placed.is_none(), "nothing may be downloaded: {placed:?}");
+    }
+
+    /// The other half of idempotence: an unsatisfied set DOES reach the
+    /// installer. Proved without a network by the symlink guard, which
+    /// `install` runs before it builds an HTTP client.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn ensure_over_an_unsatisfied_set_reaches_the_installer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("work");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&root).expect("mkdir root");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
+        let work = WorkDir::new(&root);
+        std::os::unix::fs::symlink(&elsewhere, work.path(Area::Tools)).expect("symlink");
+
+        let err = ensure(&work, &pins(), &Progress::none())
+            .await
+            .expect_err("an empty tools area must not be treated as satisfied");
+        assert!(
+            matches!(err, AuditError::UnsafeToolsDir { .. }),
+            "ensure must reach install's guard, got {err:?}"
+        );
+    }
+
+    /// The `UNVERIFIED` decision (#5797), pinned end to end: a binary that is
+    /// present but that no version record names is REINSTALLED, not kept.
+    /// `an_unverified_binary_is_unsatisfied` proves `unsatisfied` says so; this
+    /// proves `ensure` acts on it, which is the half a later change could drop
+    /// while leaving the predicate — and every other test here — green.
+    ///
+    /// Distinct from `ensure_over_an_unsatisfied_set_reaches_the_installer`,
+    /// where `tools/` is EMPTY: that is the `MISSING` case, and a change that
+    /// skipped present-but-unrecorded binaries would still pass it. Here the
+    /// four binaries exist, so only the missing record makes the set unsatisfied.
+    /// Same no-network proof: the symlink guard runs before `install` builds an
+    /// HTTP client.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn ensure_over_an_unverified_binary_reaches_the_installer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("work");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&root).expect("mkdir root");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
+        let work = WorkDir::new(&root);
+        std::os::unix::fs::symlink(&elsewhere, work.path(Area::Tools)).expect("symlink");
+
+        // Every binary on disk, no version record: the UNVERIFIED state.
+        for tool in RequiredTool::ALL {
+            std::fs::write(tool.path_in(&work), b"stub").expect("stub binary");
+        }
+        assert!(
+            status(&work).expect("reads").iter().all(|s| s.installed),
+            "the set must be on disk, or this tests the MISSING case instead"
+        );
+        assert!(
+            !record_path(&work).exists(),
+            "nothing may have recorded them"
+        );
+
+        let err = ensure(&work, &pins(), &Progress::none())
+            .await
+            .expect_err("an unverifiable binary must be replaced, not kept");
+        assert!(
+            matches!(err, AuditError::UnsafeToolsDir { .. }),
+            "ensure must reach install's guard, got {err:?}"
         );
     }
 

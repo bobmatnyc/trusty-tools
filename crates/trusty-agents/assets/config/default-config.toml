@@ -148,7 +148,7 @@ description = "List recent Granola meetings"
 name = "trusty-memory"
 description = "Trusty memory service — recall/remember/forget over a native MCP-stdio server"
 command = "trusty-memory"
-args = ["serve", "--stdio"]
+args = ["serve"]
 transport = "stdio"
 enabled = true
 discover = true
@@ -237,7 +237,8 @@ scope_enforcement = "deny"
 # `driver = "direct"` (OpenRPC-over-stdio via a `--rpc` flag) but neither
 # binary has ever implemented that mode — genuinely dead config, not merely
 # disabled-by-default. Both binaries DO already implement the generic
-# MCP-stdio protocol (`trusty-memory serve --stdio`, `trusty-search serve`),
+# MCP-stdio protocol (`trusty-memory serve`, `trusty-search serve` — both bare
+# `serve` since #5267 aligned trusty-memory to trusty-search),
 # so they now live as live `[[mcp.services]]` entries above instead of
 # waiting on a driver that will never ship. Do not re-add them here; extend
 # their `[[mcp.services]]` entries instead.

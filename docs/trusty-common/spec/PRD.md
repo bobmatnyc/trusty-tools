@@ -248,9 +248,8 @@ parentheses.
   community/semantic-consolidation/git-history surfaces. Storage migrated off
   SQLite to redb (#43–#47, #56, #57); a process-wide shared `FastEmbedder`
   `OnceCell` (#57) avoids forking model instances.
-- *Sub-features:* `memory-core-kuzu` (read-only kuzu graph), `usearch-migrate`
-  (one-shot `.usearch` drain, #51), `sqlite-kg` (legacy SQLite read path for
-  migration, #47).
+- *Sub-features:* `usearch-migrate` (one-shot `.usearch` drain, #51),
+  `sqlite-kg` (legacy SQLite read path for migration, #47).
 - *Gap:* `sqlite-kg` / `usearch-migrate` are 🟡 transitional and slated for
   removal once all production palaces are upgraded.
 

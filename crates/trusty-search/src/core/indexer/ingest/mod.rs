@@ -491,7 +491,7 @@ impl CodeIndexer {
         self.parse_files_inner(files, true, None).await
     }
 
-    /// Progress-tracked variant of [`parse_and_embed_files`].
+    /// Progress-tracked variant of [`Self::parse_and_embed_files`].
     ///
     /// Why: the reindex orchestrator needs per-wave chunk counts to emit
     /// fine-grained `chunk_progress` SSE events.
@@ -677,7 +677,7 @@ impl CodeIndexer {
     }
 
     /// Count corpus chunks NOT yet embedded (issue #3748 slice A, review
-    /// finding 2) — the real cost [`embed_deferred_chunks`] will pay, as
+    /// finding 2) — the real cost [`Self::embed_deferred_chunks`] will pay, as
     /// opposed to `chunk_count()`'s TOTAL corpus size.
     ///
     /// Why: the deferred-embed catch-up queue (`service::reindex::defer_embed_queue`)

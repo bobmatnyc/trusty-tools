@@ -27,6 +27,8 @@
 //! and keeps 8 files of its own: 4 deliberate forks that add a read-only
 //! `tools:` restriction, and 4 defaults with no counterpart here. Those are
 //! single copies already, so the one-copy rule has nothing to say about them.
+//!
+//! [`AGENT_ASSETS`]: crate::agent_assets::AGENT_ASSETS
 
 /// Root of every trusty-mpm inheritance chain.
 pub const BASE_AGENT: &str = include_str!("assets/agents/BASE-AGENT.md");
@@ -310,6 +312,35 @@ mod tests {
             "AGENT_ASSETS and {AGENT_ASSETS_DIR} disagree — a roster file was \
              added or removed without updating the table, so it would ship \
              embedded by nobody (or be embedded while missing from disk)"
+        );
+    }
+
+    /// A blocked agent must not reach for a more-privileged `gh` credential.
+    /// See #5680 — a `version-control` agent hit a `BEHIND` branch-protection
+    /// block, borrowed the repo owner's token, and force-merged with `--admin`.
+    /// The prohibition ships in two places on purpose: `BASE-AGENT.md` binds
+    /// every composed agent, and `version-control.md` puts it beside the
+    /// `gh auth status` check the acting agent actually read.
+    #[test]
+    fn credential_switching_is_forbidden_in_the_shipped_assets() {
+        for (name, body) in [
+            ("BASE-AGENT.md", BASE_AGENT),
+            ("version-control.md", VERSION_CONTROL),
+        ] {
+            let flat = body.replace('\n', " ");
+            assert!(
+                flat.contains("Never switch") && flat.contains("credential"),
+                "`{name}` must forbid switching to another `gh` \
+                 account/token/credential to obtain a missing permission (#5680)"
+            );
+        }
+
+        // #2842 went the other way — the agent refused an authorized
+        // admin-merge — so the ban above must not swallow that path.
+        assert!(
+            VERSION_CONTROL.contains("When the PM relays operator authorization to merge directly"),
+            "the credential-switching ban must leave the PM-relayed \
+             admin-merge authorization intact (#2842)"
         );
     }
 

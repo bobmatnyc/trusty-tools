@@ -81,18 +81,38 @@ const MAX_RETRIES: u32 = 3;
 ///       > `AWS_REGION` > `"us-east-1"`.
 /// Test: `bedrock_region_resolution`.
 pub fn resolve_bedrock_region(explicit: Option<&str>) -> String {
+    // #5706: read the env here so the precedence walk itself stays pure and
+    // testable without inheriting or mutating the ambient environment.
+    let trusty_env = std::env::var(ENV_REGION_TRUSTY).ok();
+    let aws_env = std::env::var(ENV_REGION_AWS).ok();
+    resolve_region_from(explicit, trusty_env.as_deref(), aws_env.as_deref())
+}
+
+/// Pick the first non-empty region among the four precedence tiers.
+///
+/// Why (#5706): [`resolve_bedrock_region`] reads process-wide env vars, so a
+/// test of its precedence either inherits the developer's `AWS_REGION` or has
+/// to mutate global state and race every other test in the binary. Taking the
+/// two env tiers as arguments makes the ordering provable with neither hazard.
+/// What: returns `explicit` > `trusty_env` > `aws_env` > [`DEFAULT_REGION`].
+/// An empty `explicit` counts as unset; an env tier is trimmed first, so a
+/// whitespace-only value counts as unset too.
+/// Test: `bedrock_region_resolution`.
+fn resolve_region_from(
+    explicit: Option<&str>,
+    trusty_env: Option<&str>,
+    aws_env: Option<&str>,
+) -> String {
     if let Some(r) = explicit.filter(|s| !s.is_empty()) {
         return r.to_string();
     }
-    for var in [ENV_REGION_TRUSTY, ENV_REGION_AWS] {
-        if let Ok(val) = std::env::var(var) {
-            let val = val.trim().to_string();
-            if !val.is_empty() {
-                return val;
-            }
-        }
-    }
-    DEFAULT_REGION.to_string()
+    [trusty_env, aws_env]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_REGION)
+        .to_string()
 }
 
 // ─── Model id validation ──────────────────────────────────────────────────────

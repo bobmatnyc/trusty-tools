@@ -17,7 +17,8 @@
 //! possibly-stale copy), applies the caller's mutation, and publishes the result
 //! atomically — unique temp file, `fsync`, `rename`, `fsync` of the parent
 //! directory — before releasing the lock.
-//! Test: `cargo test -p trusty-common -- json_rmw::tests`.
+//! Test: `cargo test -p trusty-common --features unconditional-only --
+//! json_rmw::tests`.
 //!
 //! # Atomicity contract
 //!

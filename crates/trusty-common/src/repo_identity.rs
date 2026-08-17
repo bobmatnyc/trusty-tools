@@ -22,9 +22,15 @@
 //! [`RepoIdentity::derive`] is the only I/O entry point (two best-effort git
 //! shell-outs). Pure functions, no global state.
 //!
-//! Test: `cargo test -p trusty-common -- repo_identity::tests` covers canonical
-//! round-tripping, both derive variants (github remote + remoteless content
-//! hash via a real temp repo), and the outside-a-repo `None` fallback.
+//! Test: `cargo test -p trusty-common --features unconditional-only --
+//! repo_identity::tests` covers canonical round-tripping, both derive variants
+//! (github remote + remoteless content hash via a real temp repo), and the
+//! outside-a-repo `None` fallback.
+//!
+//! [`RepoIdentity`]: crate::repo_identity::RepoIdentity
+//! [`RepoIdentity::canonical`]: crate::repo_identity::RepoIdentity::canonical
+//! [`RepoIdentity::parse`]: crate::repo_identity::RepoIdentity::parse
+//! [`RepoIdentity::derive`]: crate::repo_identity::RepoIdentity::derive
 
 use std::path::Path;
 use std::process::Command;

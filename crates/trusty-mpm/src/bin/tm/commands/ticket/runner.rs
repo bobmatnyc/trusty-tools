@@ -86,7 +86,7 @@ pub(crate) trait CommandRunner {
 /// parent process — so the binding does not mutate the operator's global gh
 /// state and cannot leak across unrelated invocations.
 /// What: holds an ordered list of `(name, value)` env overrides. The unit-style
-/// `RealCommandRunner::default()` / [`RealCommandRunner::new`] carry NO overrides
+/// `RealCommandRunner::default()` / `RealCommandRunner::new` carry NO overrides
 /// (ambient identity, pre-#1265 behaviour); [`RealCommandRunner::with_env`]
 /// binds a resolved set. `run` spawns the program via
 /// `std::process::Command::output` with the overrides applied, capturing both
@@ -103,7 +103,7 @@ pub(crate) struct RealCommandRunner {
 impl RealCommandRunner {
     /// Construct a runner that applies `env` overrides to every spawned child.
     ///
-    /// Why: the #1265 entry points resolve the active project's [`GhEnv`] once
+    /// Why: the #1265 entry points resolve the active project's `GhEnv` once
     /// and bind it here so every `gh` call in that command uses the same
     /// identity.
     /// What: stores the `(name, value)` pairs; `run` calls `Command::env` for

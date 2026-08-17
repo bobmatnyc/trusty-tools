@@ -426,19 +426,11 @@ pub fn resolve_persisted_env(
 #[path = "service_unit_truthy_bool_tests.rs"]
 mod tests;
 
-/// Tests for the launchd-unit half of this module — see
-/// `service_unit_launchd_tests.rs`.
-///
-/// Gated to macOS for the same reason the code under test is — see the module
-/// docs. The logic is pure string handling, so these would run anywhere; the
-/// items they exercise simply do not exist on other targets.
 #[cfg(test)]
 #[cfg(target_os = "macos")]
 #[path = "service_unit_launchd_tests.rs"]
 mod launchd_unit_tests;
 
-/// End-to-end clap tests for [`parse_truthy_bool`] — see
-/// `service_unit_cli_tests.rs`.
 #[cfg(test)]
 #[path = "service_unit_cli_tests.rs"]
 mod cli_tests;

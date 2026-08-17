@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 /// **Variant order is load-bearing**: the derived `Ord` is ascending ceremony,
 /// so `a.max(b)` is "the higher ceremony of the two" and every escalation in
 /// this module is a `max`. Reordering these variants silently inverts the
-/// safety property; [`ceremony_order_is_ascending`] fails if anyone does.
+/// safety property; `ceremony_order_is_ascending` fails if anyone does.
 /// Test: `ceremony_order_is_ascending`, `styles_round_trip_lowercase`,
 /// `an_unknown_style_string_is_a_deserialization_error`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

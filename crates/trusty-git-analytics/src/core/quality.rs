@@ -70,7 +70,7 @@ const BAND: f64 = 0.20;
 /// is handled once, here).
 /// What: holds the per-bucket commit total and the revert / bugfix / ticketed
 /// sub-counts.
-/// Test: [`tests`] below exercise every combination.
+/// Test: `tests` below exercise every combination.
 #[derive(Debug, Clone, Copy)]
 pub struct QualityInputs {
     /// Total commits in the bucket (the denominator for every rate).
@@ -92,8 +92,8 @@ pub struct QualityInputs {
 /// commits** there is no signal, so the neutral midpoint `0.75` is returned
 /// (no reverts/bugfixes observed, no ticket linkage observed) — this avoids
 /// punishing an empty bucket with a `0` score it did not earn.
-/// Test: [`tests::all_good_scores_one`], [`tests::all_reverts_and_bugfixes`],
-/// [`tests::zero_commits_is_neutral`], and the bucketing tests.
+/// Test: `tests::all_good_scores_one`, `tests::all_reverts_and_bugfixes`,
+/// `tests::zero_commits_is_neutral`, and the bucketing tests.
 pub fn quality_score(inputs: QualityInputs) -> f64 {
     if inputs.commits == 0 {
         // No commits ⇒ no negative signal and no positive signal. Mirror the
@@ -116,7 +116,7 @@ pub fn quality_score(inputs: QualityInputs) -> f64 {
 /// `quality_tshirt` exactly like `effort_tshirt` (both are 1–5 strings).
 /// What: 5 even 0.20-wide bands; `5` is the best. Scores below `0` clamp to
 /// `1`, above `1` clamp to `5`.
-/// Test: [`tests::bucketing_band_edges`].
+/// Test: `tests::bucketing_band_edges`.
 pub fn size_for_quality_score(score: f64) -> u8 {
     let s = score.clamp(0.0, 1.0);
     if s <= BAND {
@@ -139,7 +139,7 @@ pub fn size_for_quality_score(score: f64) -> u8 {
 /// from drifting apart.
 /// What: returns `(score, tshirt)` where `tshirt` is the string `"1".."5"`
 /// (string form so the column joins like `effort_tshirt`).
-/// Test: [`tests::score_and_tshirt_pairs`].
+/// Test: `tests::score_and_tshirt_pairs`.
 pub fn score_and_tshirt(inputs: QualityInputs) -> (f64, String) {
     let score = quality_score(inputs);
     let tshirt = size_for_quality_score(score).to_string();

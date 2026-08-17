@@ -21,7 +21,7 @@
 //! A server-supplied `Retry-After` **is** honoured, capped, in preference to
 //! the exponential schedule. (Round 1 of this PR claimed the header was
 //! unreachable because `error_for_status()` consumes the response; that was
-//! wrong — see [`super::http::decode`], which reads the headers while the
+//! wrong — see `super::http::decode`, which reads the headers while the
 //! response is still in hand, and classifies 429/503 as
 //! [`CollectError::Throttled`].)
 //!

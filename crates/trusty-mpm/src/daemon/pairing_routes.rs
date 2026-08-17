@@ -18,6 +18,10 @@
 //! Test: `pair_request_returns_code` and `pair_confirm_rejects_bad_code` in
 //! `super::api_tests` drive the handlers; `router_registers_the_pairing_verbs`
 //! below pins that all four stay registered after the move.
+//!
+//! [`super::services::PairingService`]: crate::daemon::services::PairingService
+//! [`super::pairing_store`]: crate::daemon::pairing_store
+//! [`super::managed_routes::reconcile::worktree_routes`]: crate::daemon::managed_routes::reconcile::worktree_routes
 
 use std::sync::Arc;
 

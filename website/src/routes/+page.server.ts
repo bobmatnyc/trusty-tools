@@ -4,10 +4,11 @@
  * time. Reading it here rather than in the component keeps the page a pure
  * render, and keeps the only filesystem access on the prerender path.
  *
- * What: the newest release of each flagship, flattened to at most three lines.
- * A crate whose changelog is missing, unparseable, or empty stops the build in
- * `$lib/changelog/site` — nothing here substitutes a placeholder, so a page
- * that renders at all has six populated strips.
+ * What: the newest release of each RELEASED flagship, flattened to at most
+ * three lines. A crate whose changelog is missing, unparseable, or empty stops
+ * the build in `$lib/changelog/site` — nothing here substitutes a placeholder,
+ * so every strip a page renders is populated. A flagship with no release yet
+ * (`Tool.released`) produces no strip at all, and its card omits the block.
  *
  * Test: `src/lib/changelog/site.test.ts` (`the landing-page strip`).
  */

@@ -1,6 +1,6 @@
 //! Concrete inference provider adapters (issue #2403, epic #2400 Wave 1).
 //!
-//! Why: the #2402 foundation shipped the [`InferenceAdapter`] trait, the
+//! Why: the #2402 foundation shipped the [`InferenceAdapter`](crate::inference::InferenceAdapter) trait, the
 //! capability registry, and the [`crate::inference::Configurator`] seam but left
 //! the construction step to a test-only [`crate::inference::test_support::ScriptedAdapter`].
 //! This module realises the seam: a shared OpenAI-compatible HTTP core plus one

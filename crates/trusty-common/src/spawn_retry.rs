@@ -30,6 +30,9 @@
 //! driver: which outcomes re-invoke the attempt, and how many times. The other
 //! half — that a started child's failures never carry errno 26 — is an OS
 //! property, asserted in the docs and unprovable here.
+//!
+//! [`retry_on_etxtbsy`]: crate::spawn_retry::retry_on_etxtbsy
+//! [`retry_on_etxtbsy_async`]: crate::spawn_retry::retry_on_etxtbsy_async
 
 use std::io;
 use std::time::Duration;
@@ -103,7 +106,34 @@ fn step<T>(result: io::Result<T>, attempt: u32) -> Step<T> {
 /// Test: `returns_first_success`, `recovers_after_two_busy_attempts`,
 /// `gives_up_after_max_attempts`, `does_not_retry_other_errors`,
 /// `retries_only_after_an_etxtbsy_outcome` (the driver half; the errno half is
-/// an OS property a unit test cannot provoke).
+/// an OS property a unit test cannot provoke),
+/// `contract_retry_invokes_attempt_at_most_max_attempts_times`.
+///
+/// # Code Contract
+/// Preconditions:
+/// - `attempt` performs AT MOST ONE spawn per invocation and is safe to call
+///   again after an `ExecutableFileBusy` error. The type system does not
+///   enforce this; see the section above for why the errno classification, not
+///   the signature, is what makes it hold.
+/// - `attempt` must not itself manufacture an `ExecutableFileBusy` from a
+///   non-exec failure, or it would drive a retry of work that already ran.
+///
+/// Postconditions:
+/// - Returns the outcome of the LAST invocation of `attempt`, whatever it is.
+/// - `attempt` is invoked at least once, and at most
+///   [`ETXTBSY_MAX_ATTEMPTS`] times.
+/// - A retry happens if and only if the previous outcome was
+///   `Err(ErrorKind::ExecutableFileBusy)` AND attempts remain. Every other
+///   outcome — success or any other error — is returned immediately, with no
+///   further invocation and no trailing sleep.
+/// - The final `ExecutableFileBusy` error is returned rather than swallowed, so
+///   exhausting the budget is distinguishable from succeeding.
+///
+/// Invariants:
+/// - Back-off doubles from [`ETXTBSY_BACKOFF_MS`] per retry and saturates
+///   rather than overflowing if the attempt ceiling is ever raised.
+/// - This function blocks the calling thread during back-off. Async callers
+///   must use [`retry_on_etxtbsy_async`], which applies an identical policy.
 pub fn retry_on_etxtbsy<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     let mut n = 0;
     loop {
@@ -129,7 +159,27 @@ pub fn retry_on_etxtbsy<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Re
 /// [`retry_on_etxtbsy`] applies, and rests on the same errno classification.
 /// Test: `async_returns_first_success`, `async_recovers_after_two_busy_attempts`,
 /// `async_gives_up_after_max_attempts`, `async_does_not_retry_other_errors`,
-/// `async_retries_only_after_an_etxtbsy_outcome`.
+/// `async_retries_only_after_an_etxtbsy_outcome`,
+/// `contract_async_retry_matches_the_blocking_policy`.
+///
+/// # Code Contract
+/// Preconditions:
+/// - Identical to [`retry_on_etxtbsy`]: `attempt` performs at most one spawn
+///   per invocation and is safe to re-invoke after `ExecutableFileBusy`.
+/// - `attempt` stays SYNCHRONOUS. Only the back-off is async, because
+///   `tokio::process::Command::spawn` is itself a sync call returning
+///   `io::Result<Child>`.
+/// - Must be polled inside a tokio runtime, since back-off sleeps on it.
+///
+/// Postconditions:
+/// - Every postcondition of [`retry_on_etxtbsy`] holds verbatim: same
+///   invocation bounds, same retry-if-and-only-if condition, same returned
+///   outcome, same final-error propagation. The two share one `step` driver so
+///   the policies cannot drift apart.
+///
+/// Invariants:
+/// - Yields to the runtime during back-off instead of blocking a worker thread.
+///   That is the ONLY difference from the blocking twin.
 pub async fn retry_on_etxtbsy_async<T>(
     mut attempt: impl FnMut() -> io::Result<T>,
 ) -> io::Result<T> {
@@ -219,6 +269,90 @@ mod tests {
     #[test]
     fn raw_os_error_26_is_executable_file_busy() {
         assert_eq!(busy().kind(), io::ErrorKind::ExecutableFileBusy);
+    }
+
+    // ── Code Contract tests (#5724, ADR-0047) ────────────────────────────────
+
+    /// Why: the contract's invocation bound is what makes
+    /// `retry_on_etxtbsy(|| cmd.output())` safe — a closure that both spawns
+    /// and waits must not be re-driven more than the policy allows. Counting
+    /// invocations proves the bound directly, where the existing tests prove
+    /// individual outcomes.
+    /// What: a permanently-busy attempt is invoked exactly
+    /// [`ETXTBSY_MAX_ATTEMPTS`] times and the final `ETXTBSY` is returned, not
+    /// swallowed; every non-ETXTBSY outcome is invoked exactly once.
+    /// Test: itself.
+    #[test]
+    fn contract_retry_invokes_attempt_at_most_max_attempts_times() {
+        // Postcondition: at most ETXTBSY_MAX_ATTEMPTS invocations, and the
+        // final ExecutableFileBusy is returned rather than swallowed.
+        let calls = Cell::new(0u32);
+        let err = retry_on_etxtbsy(|| {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(busy())
+        })
+        .unwrap_err();
+        assert_eq!(calls.get(), ETXTBSY_MAX_ATTEMPTS);
+        assert_eq!(err.kind(), io::ErrorKind::ExecutableFileBusy);
+
+        // Postcondition: invoked at least once, and success returns immediately.
+        let calls = Cell::new(0u32);
+        let ok = retry_on_etxtbsy(|| {
+            calls.set(calls.get() + 1);
+            Ok(7)
+        })
+        .unwrap();
+        assert_eq!((calls.get(), ok), (1, 7));
+
+        // Postcondition: a retry happens IF AND ONLY IF the outcome was
+        // ExecutableFileBusy. Any other error returns after one invocation.
+        let calls = Cell::new(0u32);
+        let err = retry_on_etxtbsy(|| {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+        assert_eq!(calls.get(), 1, "a non-ETXTBSY error must never be retried");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    /// Why: the async twin's contract claims EVERY postcondition of the
+    /// blocking one holds verbatim. That claim is only worth stating if it is
+    /// checked — the two would otherwise drift the moment one gained a special
+    /// case.
+    /// What: runs the same three scenarios as the blocking contract test and
+    /// asserts identical invocation counts and outcomes.
+    /// Test: itself.
+    #[tokio::test]
+    async fn contract_async_retry_matches_the_blocking_policy() {
+        let calls = Cell::new(0u32);
+        let err = retry_on_etxtbsy_async(|| {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(busy())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(calls.get(), ETXTBSY_MAX_ATTEMPTS);
+        assert_eq!(err.kind(), io::ErrorKind::ExecutableFileBusy);
+
+        let calls = Cell::new(0u32);
+        let ok = retry_on_etxtbsy_async(|| {
+            calls.set(calls.get() + 1);
+            Ok(7)
+        })
+        .await
+        .unwrap();
+        assert_eq!((calls.get(), ok), (1, 7));
+
+        let calls = Cell::new(0u32);
+        let err = retry_on_etxtbsy_async(|| {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]

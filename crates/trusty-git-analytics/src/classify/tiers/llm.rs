@@ -90,6 +90,8 @@ Example: {\"category\": \"bugfix\", \"subcategory\": \"null-check\", \
 \"confidence\": 0.9, \"complexity\": 2}";
 
 /// Tier-4 LLM-fallback classifier.
+// #5770: no `Debug` derive, deliberately — `api_key` holds the resolved
+// OpenRouter key, so adding one reopens the leak this struct is downstream of.
 pub struct LlmClassifier {
     client: Client,
     pub(crate) model: String,

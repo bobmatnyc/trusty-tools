@@ -1104,6 +1104,21 @@ fn index_options_builders_match_field_construction() {
 fn one_shot_daemon(
     status_line: &'static str,
 ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    one_shot_daemon_with_body(status_line, String::new())
+}
+
+/// [`one_shot_daemon`], but answering with a JSON `body`.
+///
+/// Why: the same-id-different-tree arm turns on what the daemon SAYS, not on its
+/// status — `200 {created: false, root_path: …}` is the whole point — so the
+/// error arm cannot be reached with the empty-body form above. Same harness, one
+/// more thing it can say.
+/// What: as [`one_shot_daemon`], with an accurate `content-length` for `body`.
+/// Test: used by `create_index_response_for_a_different_tree_is_not_confirmed`.
+fn one_shot_daemon_with_body(
+    status_line: &'static str,
+    body: String,
+) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake daemon");
     let addr = listener.local_addr().expect("fake daemon local_addr");
     let handle = std::thread::spawn(move || {
@@ -1115,7 +1130,11 @@ fn one_shot_daemon(
         let mut buf = [0u8; 4096];
         let _ = stream.read(&mut buf);
         let _ = stream.write_all(
-            format!("{status_line}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").as_bytes(),
+            format!(
+                "{status_line}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
         );
         let _ = stream.flush();
     });
@@ -1235,4 +1254,125 @@ fn create_rejected_by_the_daemon_withholds_the_pinnable_id() {
         "the derived id stays available for logging and GC — it is the PIN that \
          is withheld, not the id"
     );
+}
+
+// ── Same id, different tree: the find-or-create fail-open ─────────────────────
+
+/// Why: `created: true` means the daemon adopted the root just sent, so there is
+/// nothing to cross-check. `created: false` is the one answer where the
+/// registered tree can differ from the requested one, so it is the only one that
+/// carries a root worth reading.
+/// Test: itself.
+#[test]
+fn registered_root_from_response_reads_the_already_exists_root() {
+    let body = r#"{"id":"api","created":false,"reason":"already exists","root_path":"/srv/other"}"#;
+    assert_eq!(
+        registered_root_from_response(body),
+        Some("/srv/other".to_string())
+    );
+}
+
+/// Why: a fresh create needs no cross-check — the daemon took the root it was
+/// handed.
+/// Test: itself.
+#[test]
+fn registered_root_from_response_ignores_a_fresh_create() {
+    let body = r#"{"id":"api","created":true,"root_path":"/srv/api"}"#;
+    assert_eq!(registered_root_from_response(body), None);
+}
+
+/// Why: a daemon too old to report `root_path` must leave the verdict exactly as
+/// it was. This check may only strengthen a conclusion it can actually reach —
+/// it must never manufacture a failure out of a field that is simply absent, or
+/// panic on a malformed one.
+/// Test: itself.
+#[test]
+fn registered_root_from_response_tolerates_a_daemon_that_omits_it() {
+    assert_eq!(
+        registered_root_from_response(r#"{"id":"api","created":false}"#),
+        None
+    );
+    assert_eq!(registered_root_from_response("not json at all"), None);
+    assert_eq!(registered_root_from_response(""), None);
+    assert_eq!(
+        registered_root_from_response(r#"{"created":false,"root_path":42}"#),
+        None,
+        "a non-string root_path must yield None, not a panic"
+    );
+}
+
+/// Regression for the find-or-create fail-open: a `200 {created: false}` naming
+/// a DIFFERENT tree is not a registration.
+///
+/// Why: this is the silent-wrong-answer bug. `best_effort_create_index` read
+/// only `resp.status()`, so the daemon's "I already have that id, pointed
+/// somewhere else" was byte-identical to "I created what you asked for". The
+/// caller pinned the id and every later query was answered from the OTHER
+/// checkout, with no error and no warning. A 2xx that did not do what was asked
+/// must not read as confirmation.
+/// What: stands up a fake daemon answering `200` with a `root_path` that is a
+/// real, existing directory OTHER than the one requested, so the comparison runs
+/// on `(dev, ino)` rather than falling back to string equality.
+/// Test: itself.
+#[test]
+fn create_index_response_for_a_different_tree_is_not_confirmed() {
+    let requested = scratch_dir("mismatch-requested");
+    let registered = scratch_dir("mismatch-registered");
+    fs::create_dir_all(&requested).unwrap();
+    fs::create_dir_all(&registered).unwrap();
+
+    let (addr, server) = one_shot_daemon_with_body(
+        "HTTP/1.1 200 OK",
+        format!(
+            r#"{{"id":"api","created":false,"reason":"already exists","root_path":"{}"}}"#,
+            registered.display()
+        ),
+    );
+
+    let outcome = best_effort_create_index(
+        &format!("http://{addr}"),
+        "api",
+        &requested,
+        IndexOptions::default(),
+    );
+    let _ = server.join();
+
+    assert_eq!(
+        outcome,
+        IndexRegistration::NotConfirmed,
+        "a 200 naming a different tree must not confirm the registration"
+    );
+
+    let _ = fs::remove_dir_all(&requested);
+    let _ = fs::remove_dir_all(&registered);
+}
+
+/// Why: the ordinary case. Every relaunch in the SAME checkout gets
+/// `created: false`, and that IS success — the guard must not turn the common
+/// path into a failure.
+/// Test: itself.
+#[test]
+fn create_index_response_for_the_same_tree_is_confirmed() {
+    let root = scratch_dir("mismatch-same-tree");
+    fs::create_dir_all(&root).unwrap();
+
+    let (addr, server) = one_shot_daemon_with_body(
+        "HTTP/1.1 200 OK",
+        format!(
+            r#"{{"id":"api","created":false,"reason":"already exists","root_path":"{}"}}"#,
+            root.display()
+        ),
+    );
+
+    let outcome = best_effort_create_index(
+        &format!("http://{addr}"),
+        "api",
+        &root,
+        IndexOptions::default(),
+    );
+    let _ = server.join();
+
+    assert_eq!(outcome, IndexRegistration::Confirmed);
+
+    let _ = fs::remove_dir_all(&root);
 }

@@ -1710,23 +1710,12 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
         .current_dir(live_dir.path())
         .status();
 
-    // ── Point REPOS_ROOT at our temp dir (RAII: restore on scope exit) ───────
-    let repos_root_key = trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV;
-    let prev_repos_root = std::env::var(repos_root_key).ok();
-    unsafe { std::env::set_var(repos_root_key, repos_root.path()) };
+    let _repos_root_env = ReposRootEnv::set(repos_root.path());
 
     let client = reqwest::Client::new();
     let _result =
         crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", live_dir.path())
             .await;
-
-    // Restore env var immediately (before assertions that might panic).
-    unsafe {
-        match prev_repos_root {
-            Some(ref v) => std::env::set_var(repos_root_key, v),
-            None => std::env::remove_var(repos_root_key),
-        }
-    }
 
     // ── Acceptance criteria (#1724 success path) ─────────────────────────────
     // Live checkout must be untouched.
@@ -1761,6 +1750,162 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
         !sessions.is_empty(),
         "#1724 #1803: at least one per-session worktree must be present under .worktrees/, \
          proving launch(Some(worktree)) was invoked rather than launch(None)"
+    );
+}
+
+/// The guided fallback prepares the session IN the worktree it provisioned,
+/// not in the shared base clone (#5836 critic HIGH).
+///
+/// Why: `guided_fallback_redirect_success_worktree_not_live_checkout` above
+/// asserts only that a worktree EXISTS under `<base>/.worktrees`, and
+/// `provision_for_fallback` creates that worktree before `launch()` runs — so
+/// that test passes whether the session then runs in the worktree or somewhere
+/// else entirely. It stayed green while `provision_for_launch`'s managed-checkout
+/// redirect discarded the worktree and collapsed the placement onto `<base>`,
+/// which puts two concurrent daemon-unreachable sessions in one tree.
+/// What: same fixture as the test above, then asserts on the DIRECTORY the
+/// session was prepared in — `prepare_isolated_session` deploys `.claude/` into
+/// the placement `launch()` resolved, so the worktree must carry it and the base
+/// clone must not.
+/// Test: this is the test. RED at 34da769f: `.claude` appeared in `<base>`.
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone() {
+    let origin = "https://github.com/test-owner-5836/test-repo-5836.git";
+    let repos_root = tempfile::tempdir().unwrap();
+    // Canonical because `find_git_root` resolves the macOS `/var` symlink and
+    // the placement rule compares paths by plain equality (ADR-0037).
+    let repos_root_path = repos_root.path().canonicalize().unwrap();
+    // Must match `parse_github_path(origin)`.
+    let base = repos_root_path
+        .join("test-owner-5836")
+        .join("test-repo-5836");
+    fallback_git_repo(&base);
+    // The base clone carries the origin its worktrees inherit — without it
+    // `launch()` stops at "no git origin remote found" and never reaches
+    // placement at all.
+    fallback_git_remote(&base, origin);
+
+    let live_dir = tempfile::tempdir().unwrap();
+    fallback_git_repo(live_dir.path());
+    fallback_git_remote(live_dir.path(), origin);
+
+    let _repos_root_env = ReposRootEnv::set(&repos_root_path);
+
+    let client = reqwest::Client::new();
+    let _result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", live_dir.path())
+            .await;
+
+    // Exactly one worktree, and it is the directory the session must run in.
+    let worktrees_dir = base.join(".worktrees");
+    let mut sessions: Vec<std::path::PathBuf> = std::fs::read_dir(&worktrees_dir)
+        .expect(".worktrees must be listable — the fallback provisions it")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    sessions.sort();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "the fallback provisions exactly one per-session worktree, found {sessions:?}"
+    );
+    let worktree = &sessions[0];
+
+    assert!(
+        !base.join(".claude").exists(),
+        "the shared base clone must NOT become the session directory — the \
+         fallback already resolved placement to {}",
+        worktree.display()
+    );
+    assert!(
+        !base.join("CLAUDE.md").exists(),
+        "the shared base clone must NOT be deployed into: {}",
+        base.join("CLAUDE.md").display()
+    );
+    assert!(
+        worktree.join(".claude").is_dir(),
+        "the session must be prepared in the worktree the fallback provisioned: {} \
+         has no .claude",
+        worktree.display()
+    );
+}
+
+/// A git repository with one empty commit at `path`, created or asserted.
+///
+/// Why: `git worktree add` needs a HEAD commit, and a fixture that cannot be
+/// built is a test failure rather than a skip — the older fallback tests above
+/// return early when git is missing, which hides a broken fixture as a pass.
+/// What: `git init` + identity + `commit --allow-empty`, asserting each step.
+/// Test: used by `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`.
+fn fallback_git_repo(path: &std::path::Path) {
+    std::fs::create_dir_all(path).unwrap();
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+        assert!(
+            status.success(),
+            "git {args:?} failed in {}",
+            path.display()
+        );
+    };
+    run(&["init"]);
+    run(&["config", "user.email", "ci@test.invalid"]);
+    run(&["config", "user.name", "CI"]);
+    run(&["commit", "--allow-empty", "-m", "init"]);
+}
+
+/// RAII override of `TRUSTY_MPM_REPOS_ROOT`, restored on drop (unwind included).
+///
+/// Why: the two fallback tests here each open-coded a set + two-arm restore, and
+/// each restored BEFORE its assertions so a panicking assertion could not leak
+/// the variable — six process-global writes to work around a problem `Drop`
+/// does not have. One guard covers both and shrinks this file's
+/// `ENV_MUTATION_BUDGET` row rather than growing it.
+/// What: sets the var on construction, restores the previous value (or removes
+/// it) on drop. Callers MUST be `#[serial_test::serial]` — the variable is
+/// process-global.
+/// Test: used by the two `guided_fallback_*` tests above.
+struct ReposRootEnv {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl ReposRootEnv {
+    fn set(path: &std::path::Path) -> Self {
+        let key = trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV;
+        let prev = std::env::var_os(key);
+        // SAFETY: every caller is `#[serial_test::serial]`, so no other test
+        // thread races this set/restore.
+        unsafe { std::env::set_var(key, path) };
+        Self { prev }
+    }
+}
+
+impl Drop for ReposRootEnv {
+    fn drop(&mut self) {
+        let key = trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV;
+        // SAFETY: see `set`.
+        match self.prev.take() {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+}
+
+/// Point `path`'s `origin` remote at `url`.
+fn fallback_git_remote(path: &std::path::Path, url: &str) {
+    let status = std::process::Command::new("git")
+        .args(["remote", "add", "origin", url])
+        .current_dir(path)
+        .status()
+        .expect("git remote add must spawn");
+    assert!(
+        status.success(),
+        "git remote add failed in {}",
+        path.display()
     );
 }
 

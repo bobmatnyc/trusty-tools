@@ -34,12 +34,12 @@ use super::state::load_catchup_state;
 /// Why: an MCP tool caller needs typed fields it can branch on (e.g. "does this
 /// session have a tmux window to realign to?") rather than parsing a rendered
 /// digest back apart. This is the structured sibling of
-/// [`session_finder::render_session`] (private) — same source fields, JSON
+/// `session_finder::render_session` (private) — same source fields, JSON
 /// shape instead of markdown.
 /// What: `format` is `"trusty-mpm"` or `"claude-mpm"`; the remaining fields are
 /// populated from whichever [`PausedSession`] variant produced them. A
 /// `claude-mpm` (legacy) session has no on-disk single-file `source_file` (its
-/// loader discards the path — see [`mpm_session::load_all_claude_mpm_sessions`]),
+/// loader discards the path — see [`mpm_session::load_all_claude_mpm_sessions`](crate::catchup::mpm_session::load_all_claude_mpm_sessions)),
 /// so that field is `None` for that variant; its `in_progress`/`next_steps`
 /// are best-effort folds of `todos`+`task_list` / `open_questions`.
 ///
@@ -158,10 +158,10 @@ fn paused_session_to_json(session: &PausedSession) -> PausedSessionJson {
 /// A recent memory-palace drawer, trimmed to the fields the catch-up JSON
 /// output surfaces.
 ///
-/// Why: [`palace::DrawerSummary`] also carries `created_at`, which the digest
+/// Why: [`palace::DrawerSummary`](crate::catchup::palace::DrawerSummary) also carries `created_at`, which the digest
 /// doesn't need once drawers are already newest-first; keeping the tool output
 /// to `title`/`tags` matches the documented `session_context_catchup` schema.
-/// What: a two-field projection of [`palace::DrawerSummary`].
+/// What: a two-field projection of [`palace::DrawerSummary`](crate::catchup::palace::DrawerSummary).
 /// Test: covered by `generate_catchup_json_returns_structured_fields`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecentMemoryJson {
@@ -178,7 +178,7 @@ pub struct RecentMemoryJson {
 /// [`super::generate_catchup_context`]'s markdown string, built from the exact
 /// same three sources so both surfaces stay in lockstep.
 /// What: `sessions` (structured paused-session records), `recent_commits`
-/// (unchanged [`git::CommitSummary`] values), and `recent_memory` (title+tags
+/// (unchanged [`git::CommitSummary`](crate::catchup::git::CommitSummary) values), and `recent_memory` (title+tags
 /// drawer projections). Callers (the MCP daemon backend) layer
 /// `resolved_snapshot` and `watermark_advanced` on top, since those depend on
 /// an explicit `session_id` this function does not take.
@@ -198,7 +198,7 @@ pub struct CatchupJson {
     /// and were withheld. The watermark advances either way, so without this
     /// count a withheld session is invisible to the caller forever and there is
     /// nothing to tell them to re-run with `full` (#5072).
-    /// What: [`session_finder::FilteredSessions::dropped_undatable`]; always 0
+    /// What: [`session_finder::FilteredSessions::dropped_undatable`](crate::catchup::session_finder::FilteredSessions::dropped_undatable); always 0
     /// when `full` is set, since a full catch-up applies no watermark.
     /// Test: `generate_catchup_json_reports_undatable_drop_count`.
     pub undatable_sessions_dropped: usize,
@@ -262,12 +262,25 @@ fn sessions_payload(filtered: FilteredSessions) -> (Vec<PausedSessionJson>, usiz
 /// Test: `generate_catchup_json_returns_structured_fields`,
 /// `generate_catchup_json_respects_watermark`.
 pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
-    let palace_id = derive_palace_id_for(&opts.project_dir);
+    // #5811: an unresolvable palace used to become the shared literal
+    // `"unknown-project"`, so this read a watermark another project had written
+    // and reported "nothing new" for activity that was genuinely new. With no
+    // palace: apply NO watermark (nothing is suppressed) and skip the drawer
+    // source, which has no palace to query.
+    let palace_id = match derive_palace_id_for(&opts.project_dir) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            eprintln!(
+                "catchup: warning: palace resolution failed ({e}); \
+                 reporting full history and omitting recent memory"
+            );
+            None
+        }
+    };
 
-    let watermark: Option<DateTime<Utc>> = if opts.full {
-        None
-    } else {
-        load_catchup_state(&palace_id).map(|s| s.last_catchup_at)
+    let watermark: Option<DateTime<Utc>> = match (opts.full, palace_id.as_deref()) {
+        (false, Some(id)) => load_catchup_state(id).map(|s| s.last_catchup_at),
+        _ => None,
     };
 
     // #5072: shared fail-closed predicate — see `filter_sessions_since`.
@@ -288,14 +301,10 @@ pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
         Vec::new()
     };
 
-    let recent_memory = if opts.include_palace {
-        match fetch_recent_palace_drawers(
-            &opts.memory_url,
-            &palace_id,
-            opts.drawer_limit,
-            watermark,
-        )
-        .await
+    let recent_memory = if let (true, Some(palace_id)) = (opts.include_palace, palace_id.as_deref())
+    {
+        match fetch_recent_palace_drawers(&opts.memory_url, palace_id, opts.drawer_limit, watermark)
+            .await
         {
             Some(drawers) => drawers
                 .iter()
@@ -414,7 +423,7 @@ mod tests {
         init_git_repo(&tmp);
 
         // A far-future watermark should exclude every commit/session.
-        let palace_id = derive_palace_id_for(tmp.path());
+        let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
         let state = CatchupState {
             last_catchup_at: "2099-01-01T00:00:00Z".parse().unwrap(),
             palace_id: palace_id.clone(),
@@ -476,7 +485,7 @@ mod tests {
         )
         .unwrap();
 
-        let palace_id = derive_palace_id_for(tmp.path());
+        let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
         save_catchup_state(
             &palace_id,
             &CatchupState {
@@ -535,7 +544,7 @@ mod tests {
         )
         .unwrap();
 
-        let palace_id = derive_palace_id_for(tmp.path());
+        let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
         save_catchup_state(
             &palace_id,
             &CatchupState {

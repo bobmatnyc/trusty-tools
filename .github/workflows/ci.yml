@@ -7,9 +7,18 @@
 #              or to the job, so required checks always report.
 #   fmt      – cargo fmt --all --check (stable)
 #   clippy   – cargo clippy --workspace --all-targets -D warnings (stable, SKIP_UI_BUILD=1)
-#   test     – cargo test --workspace (stable, SKIP_UI_BUILD=1, full clone for git tests)
+#   test-shard – cargo nextest run --workspace, split 8 ways (stable,
+#              SKIP_UI_BUILD=1, full clone for git tests). PUSH TO MAIN AND
+#              workflow_dispatch ONLY — it does not run on pull requests; see
+#              that job's `if:` for why and for how to run it on a branch.
+#   test-doc – cargo test --doc, on its own runner (nextest has no doctest
+#              harness, so the shards cannot run them). Same trigger scope as
+#              test-shard.
+#   test     – roll-up over the shards AND test-doc; inherits the same trigger
+#              scope
 #   msrv     – cargo check --workspace (toolchain 1.94, SKIP_UI_BUILD=1)
 #   agents-ui – cargo clippy -p trusty-agents-ui (stable, WebKit2GTK-enabled runner)
+#   audit-ui – cargo clippy + test -p trusty-audit-ui (same runner shape, #5477)
 #   embedder-cuda-check – cargo check -p trusty-common --features embedder-cuda
 #                         (issue #3508: compile-check the deadlock-safety
 #                         invariant test that is otherwise never compiled)
@@ -20,15 +29,16 @@
 #                         goes red (post-merge breakage was detected but never
 #                         alerted)
 #
-# trusty-mpm-gui, trusty-code-gui, and trusty-agents-ui are excluded from the
-# headless workspace jobs (clippy/test/msrv): all three are Tauri desktop apps
+# trusty-mpm-gui, trusty-code-gui, trusty-agents-ui and trusty-audit-ui are
+# excluded from the headless workspace jobs (clippy/test/msrv): all four are Tauri desktop apps
 # (publish = false) that require WebKit2GTK on Linux (~100 MB apt chain) which
 # the headless runners do not install. Exclude them via
-# --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui
+# --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui
 # on every workspace-wide cargo invocation.
 #
-# UNLIKE the two other GUIs, trusty-agents-ui gets a DEDICATED `agents-ui` job
-# (#3053) that installs the WebKit2GTK toolchain and runs
+# UNLIKE trusty-mpm-gui and trusty-code-gui, trusty-agents-ui gets a DEDICATED
+# `agents-ui` job (#3053) — and trusty-audit-ui an `audit-ui` job (#5477) built
+# on the same shape — that installs the WebKit2GTK toolchain and runs
 # `cargo clippy -p trusty-agents-ui --all-targets -- -D warnings`, so the crate
 # is genuinely build- and lint-verified in CI rather than merely excluded. That
 # job stubs a minimal `crates/trusty-agents/ui/dist/index.html` (gitignored)
@@ -104,6 +114,13 @@ on:
     # (also non-default) covers a draft being marked ready.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+  # On-demand run of the whole workflow, including the `test-shard` matrix that
+  # no longer runs on `pull_request` (see that job's `if:`). Without this there
+  # is no way at all to get the workspace suite to run against a branch before
+  # it merges, and "deferred to main" would mean "unreachable until merged".
+  # `github.event.before` is empty on a dispatch, so the `changes` job's push
+  # arm falls through to its fail-closed default and the full suite runs.
+  workflow_dispatch:
 
 # PULL REQUESTS: one run per PR ref — a new push supersedes the previous run,
 # which is what saves the CI minutes this key was added for.
@@ -153,7 +170,7 @@ jobs:
   #   gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   #     --jq '.required_status_checks.contexts'
   # "Rust tests (pre-publish gate)" (the `test` aggregate below) is NOT
-  # currently required — see #5407. GitHub does
+  # required, and does not run on pull requests at all. GitHub does
   # not create check runs for a workflow its path/branch filters skipped, so a
   # required context would sit pending forever and a docs-only PR would become
   # unmergeable instead of fast — the trap #4468 calls out and the one
@@ -361,7 +378,7 @@ jobs:
 
       - name: cargo clippy --workspace --all-targets -- -D warnings
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
+        run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui -- -D warnings
 
       # `codex-config` is enabled by no crate in the workspace, so the
       # `--workspace` run above never pulls `codex_config` in via feature
@@ -432,7 +449,7 @@ jobs:
   # config files pulled by fastembed are also captured.
   # --------------------------------------------------------------------------
   test-shard:
-    name: Rust tests (pre-publish gate) — shard ${{ matrix.shard }} of 4
+    name: Rust tests (pre-publish gate) — shard ${{ matrix.shard }} of 8
     needs: [changes]
     # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
     # GitHub reports a skipped required check as PASSING — reintroducing the
@@ -440,7 +457,34 @@ jobs:
     # implicit success() so the job still runs; `docs_only` then resolves to
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
-    if: ${{ !cancelled() }}
+    #
+    # NOT ON PULL REQUESTS. This matrix runs ~9.6 minutes per leg — roughly
+    # 3x the entire required-check set, which settles in ~4 minutes — while
+    # gating nothing: it is not a required context and `docs/reference/
+    # test-ladder-baseline.md` already places `cargo test --workspace` at the
+    # publish boundary rather than at merge. Every merge to `main` still runs
+    # it in full, and `preflight-publish.sh` CHECK 1 refuses to publish any
+    # commit that is not `origin/main`, so the tree that gets published is
+    # always a tree this matrix has run against. A tag trigger would re-run the
+    # same suite over the same tree.
+    #
+    # SKIPPED, NOT STEP-GATED. The `docs_only` pattern used elsewhere in this
+    # file keeps the job running and no-ops its steps, which reports SUCCESS —
+    # correct for a REQUIRED check that must always report, and wrong here,
+    # because a green "Rust tests (pre-publish gate)" on a PR that ran no test
+    # is the fail-open shape #5407 closed. Skipping is the honest signal: the
+    # PR check list says the gate did not run. That is only safe because this
+    # job is not required; the reasoning in the `changes` job comment above
+    # (a `paths:`-filtered required check hangs forever) is untouched, and no
+    # required job gains a filter here.
+    #
+    # WHAT A PR STILL PROVES. `Clippy` is required and runs
+    # `--workspace --all-targets`, so every test target still COMPILES on every
+    # PR. What moves to `main` is test EXECUTION, not compilation.
+    #
+    # TO RUN IT ON A BRANCH: Actions → CI → "Run workflow" against that branch
+    # (the `workflow_dispatch` trigger at the top of this file).
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -450,7 +494,13 @@ jobs:
       # other three shards stay green is what localises it.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        # 4 -> 8 (see the `--partition` comment on the nextest step). The
+        # per-shard build is ~496s and is NOT shardable — only the ~653s of
+        # test execution splits — so the leg time is build + total/N: at N=4
+        # that is ~496+163=~11-13.5m, at N=8 ~496+82=~9.6m. Runner minutes are
+        # unlimited on a public repo and no queueing was observed, so the extra
+        # four legs are paid in a resource this repo does not ration.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       # Point fastembed (and hf-hub) at a stable, writable path so the
       # actions/cache key can target it precisely. This env var is honoured
@@ -483,10 +533,12 @@ jobs:
       # #3668 was a real disk-exhaustion incident in this job, on a target/
       # tree fed by onnxruntime/ort, ~a dozen tree-sitter grammars,
       # aws-sdk-bedrock and usearch. The script fires the reclamation on
-      # measured headroom instead of unconditionally; the .rcgu.o sweep below,
-      # not this step, is what actually remedied #3668. Every shard still does
-      # the full workspace build, so the disk pressure this guards against is
-      # unchanged by sharding.
+      # measured headroom instead of unconditionally. #3668 is now held off by
+      # CARGO_PROFILE_TEST_DEBUG=line-tables-only (see this job's `env:`) plus
+      # this step; the `.rcgu.o` sweep that used to follow the build phase was
+      # deleted once its own logging showed it reclaimed nothing. Every shard
+      # still does the full workspace build, so the disk pressure this guards
+      # against is unchanged by sharding.
       - name: Free disk space
         if: needs.changes.outputs.docs_only != 'true'
         run: bash scripts/ci-free-disk-space.sh
@@ -495,9 +547,12 @@ jobs:
       # local branch list includes "main". GitHub Actions PR checkouts only create
       # a local branch for the PR head; "main" is only a remote ref unless we
       # explicitly create a local tracking branch for it.
+      # #5693: `git fetch origin main:main || true` gave a GitHub 500 and the
+      # expected push-to-main refusal the same exit 128, so a real failure ran on
+      # with no local `main` and surfaced as an unrelated trusty-agents test.
       - name: Create local main branch for git tests
         if: needs.changes.outputs.docs_only != 'true'
-        run: git fetch origin main:main || true
+        run: bash scripts/ci-create-local-main.sh
 
       - name: Install stable toolchain
         if: needs.changes.outputs.docs_only != 'true'
@@ -523,10 +578,11 @@ jobs:
             | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
           cargo nextest --version
 
-      # ONE cache shared by all four shards. Every shard runs the same
+      # ONE cache shared by every shard. Every shard runs the same
       # `--workspace` build and differs only in which tests it executes, so the
-      # target/ trees are identical and four separate caches would be four
-      # copies of the same bytes against a quota that is already blown.
+      # target/ trees are identical and a cache per shard would be N copies of
+      # the same bytes against a quota that is already blown. This is also why
+      # widening the matrix costs no additional cache storage.
       #
       # `save-if` restricted to main is deliberate and is a FIX, not a
       # restriction (see the PR that introduced sharding). GitHub scopes a
@@ -890,20 +946,17 @@ jobs:
       # fingerprint and forced a ~91s recompile — measured in #4402.)
       - name: cargo test --workspace --no-run (build phase)
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-run
+        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --no-run
 
-      # Sweep intermediate per-codegen-unit object files (#3668): once a
-      # test binary is linked, its .rcgu.o inputs are dead weight — cargo
-      # never reclaims them itself, and they made up ~18 GB of the runner's
-      # disk exhaustion. Verified locally that deleting them does not cause
-      # a subsequent `cargo test` invocation to relink (cargo's fingerprint
-      # tracking does not depend on these surviving).
-      - name: Sweep intermediate .rcgu.o codegen objects
-        if: needs.changes.outputs.docs_only != 'true'
-        run: |
-          echo "Before sweep:"; du -sh target/debug 2>/dev/null || true
-          find target/debug/deps -name '*.rcgu.o' -delete
-          echo "After sweep:"; du -sh target/debug 2>/dev/null || true
+      # The `.rcgu.o` sweep that used to sit here (#3668) was deleted as dead
+      # code. It found nothing left to delete: `CARGO_PROFILE_TEST_DEBUG=
+      # line-tables-only` (set in this job's `env:` above) plus
+      # CARGO_INCREMENTAL=0 already leave no intermediate codegen objects
+      # behind. Its own logging proved it on every run — run 31852921362,
+      # shard 1 printed `Before sweep: 45G` and `After sweep: 45G`, byte-for-
+      # byte identical, in 0.16s. The disk headroom #3668 needed now comes
+      # from that debug-level setting and `scripts/ci-free-disk-space.sh`,
+      # neither of which this step contributed to.
 
       # cargo-nextest instead of `cargo test`, for two reasons measured on this
       # repo:
@@ -932,12 +985,12 @@ jobs:
       # stopped at the first failing BINARY, so a PR breaking two crates needed
       # two CI rounds to discover that.
       #
-      # The divisor is `strategy.job-total`, not a literal 4. nextest only
-      # rejects a partition whose numerator exceeds its denominator, so a
+      # The divisor is `strategy.job-total`, not a literal shard count. nextest
+      # only rejects a partition whose numerator exceeds its denominator, so a
       # hand-written divisor left stale after the matrix changed would silently
-      # stop running a quarter of the suite with every shard green. Deriving it
-      # from the matrix makes `shard: [1, 2, 3, 4]` the only place the count
-      # exists.
+      # stop running part of the suite with every shard green. Deriving it from
+      # the matrix makes the `shard:` list the only place the count exists —
+      # which is what let the 4 -> 8 widening be a one-line change.
       #
       # `hash:N/M` rather than `count:N/M`: hash assigns a test to a partition
       # from its name, so a given test lands in the same shard on every run and
@@ -949,21 +1002,15 @@ jobs:
       - name: cargo nextest run
         if: needs.changes.outputs.docs_only != 'true'
         run: |
-          cargo nextest run --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-fail-fast \
+          cargo nextest run --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --no-fail-fast \
             --partition hash:${{ matrix.shard }}/${{ strategy.job-total }} \
             -E 'not test(=update::tests::cache_fresh_returns_some_when_newer)'
 
-      # nextest cannot run doctests — it has no doctest harness at all (see
-      # nextest issue #16). Skipping this step would silently drop every
-      # doctest from CI, so `cargo test --doc` runs them separately.
-      #
-      # Shard 1 only: `--partition` splits the tests nextest owns, and doctests
-      # are not among them, so running this in all four shards would run the
-      # same doctests four times rather than a quarter of them each. There are
-      # ~7 across the workspace; this is here for coverage, not for speed.
-      - name: cargo test --doc
-        if: needs.changes.outputs.docs_only != 'true' && matrix.shard == 1
-        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --doc
+      # The `cargo test --doc` step that used to run here (shard 1 only) is now
+      # the `test-doc` job below. It cost shard 1 ~68s that no other leg paid,
+      # and the matrix finishes when its SLOWEST leg finishes — so a serial 68s
+      # on one leg was 68s on the whole matrix. Same doctests, own runner, in
+      # parallel. `test` still gates on it, so nothing is verified less.
 
       # trusty-common's cache_fresh_returns_some_when_newer needs CI unset
       # (see check_throttled in crates/trusty-common/src/update/mod.rs: it
@@ -996,6 +1043,79 @@ jobs:
         run: cargo test -p trusty-common --lib --features codex-config codex_config
 
   # --------------------------------------------------------------------------
+  # test-doc: the workspace doctests, on their own runner.
+  #
+  # nextest cannot run doctests — it has no doctest harness at all (see nextest
+  # issue #16) — so `cargo test --doc` has to run them separately. It used to
+  # be a `matrix.shard == 1` step inside `test-shard`, where it cost that one
+  # leg ~68s serially. A matrix finishes when its slowest leg finishes, so a
+  # cost carried by a single leg is a cost carried by the whole matrix: shard 1
+  # ran 13.31m against shard 3's 11.74m. Here it runs concurrently instead.
+  #
+  # It is NOT shardable and must not be: `--partition` splits the tests nextest
+  # owns and doctests are not among them, so every leg would run all ~7
+  # doctests rather than a share each. One job is the correct shape.
+  #
+  # `test` gates on this job as well as on the matrix, so a failing doctest
+  # still turns "Rust tests (pre-publish gate)" red exactly as before.
+  # --------------------------------------------------------------------------
+  test-doc:
+    name: Rust doctests (pre-publish gate)
+    needs: [changes]
+    # Identical to `test-shard`'s condition — see the reasoning there. The two
+    # must stay in lockstep: `test` requires BOTH, so a divergence would make
+    # the roll-up unsatisfiable on whichever trigger they disagree about.
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Must match `test-shard`'s value exactly, for two reasons. rust-cache
+      # hashes every env var whose name starts with CARGO into its cache key,
+      # so a different value here would miss the `test` cache entirely and
+      # rebuild the 864-crate graph from scratch. Cargo's own fingerprint would
+      # then disagree with the restored tree as well. See #3668 for why the
+      # shard job sets it.
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space
+        if: needs.changes.outputs.docs_only != 'true'
+        run: bash scripts/ci-free-disk-space.sh
+
+      - name: Install stable toolchain
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev
+
+      # Shares `test-shard`'s cache rather than minting its own: the doctest
+      # build resolves the same fingerprint as that job's `cargo test --no-run`
+      # build phase, so the restored target/ tree is directly reusable.
+      #
+      # `save-if: false` — restore only. `test-shard` is the sole writer of
+      # this key. Two jobs racing to save one key leaves the loser logging a
+      # 409, and a second copy of a 1.28 GB entry is exactly the quota waste
+      # the `save-if` guards elsewhere in this file exist to prevent.
+      - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: false
+
+      - name: cargo test --doc
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --doc
+
+  # --------------------------------------------------------------------------
   # test: the aggregate gate over the sharded suite above.
   #
   # This job exists to give the shard matrix ONE roll-up row instead of N,
@@ -1003,9 +1123,18 @@ jobs:
   # requires touching anything downstream of this job. It runs no cargo
   # command itself; it only checks that every `test-shard` leg succeeded.
   #
-  # It is NOT currently a required branch-protection context (see the
-  # `changes` job comment above for the live list) — it exists so a roll-up
-  # context is available to become required later without a workflow change.
+  # It is NOT a required branch-protection context (see the `changes` job
+  # comment above for the live list), and it can no longer become one by
+  # editing branch protection alone: it inherits `test-shard`'s
+  # `github.event_name != 'pull_request'` condition, so on a PR it is skipped
+  # rather than green. Making it required would need that condition dropped
+  # here and in `test-shard` first — i.e. reverting the deferral, which is the
+  # honest way to undo it.
+  #
+  # The condition must match `test-shard`'s exactly. Without it this job would
+  # run on PRs, read the skipped matrix as `needs.test-shard.result` ==
+  # 'skipped', and fail the "must equal success" check below on every single
+  # pull request.
   #
   # `needs.test-shard.result` is the AGGREGATE of the matrix: it is 'success'
   # only when every leg succeeded, and 'failure' / 'cancelled' / 'skipped'
@@ -1016,22 +1145,34 @@ jobs:
   # --------------------------------------------------------------------------
   test:
     name: Rust tests (pre-publish gate)
-    needs: [changes, test-shard]
-    if: ${{ !cancelled() }}
+    needs: [changes, test-shard, test-doc]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every test shard to have succeeded
         env:
           SHARDS_RESULT: ${{ needs.test-shard.result }}
+          DOC_RESULT: ${{ needs.test-doc.result }}
         run: |
           set -euo pipefail
           echo "test-shard matrix aggregate result: ${SHARDS_RESULT}"
+          echo "test-doc result: ${DOC_RESULT}"
+          failed=0
           if [ "${SHARDS_RESULT}" != "success" ]; then
-            echo "::error::Rust tests (pre-publish gate) is red: the test-shard matrix reported '${SHARDS_RESULT}'. Open the individual 'Rust tests (pre-publish gate) — shard N of 4' jobs — nextest names the owning crate for every failing test."
+            echo "::error::Rust tests (pre-publish gate) is red: the test-shard matrix reported '${SHARDS_RESULT}'. Open the individual 'Rust tests (pre-publish gate) — shard N of 8' jobs — nextest names the owning crate for every failing test."
+            failed=1
+          fi
+          # Checked with the same "must equal success" polarity as the matrix,
+          # and for the same reason: a skipped job must fail closed here.
+          if [ "${DOC_RESULT}" != "success" ]; then
+            echo "::error::Rust tests (pre-publish gate) is red: 'Rust doctests (pre-publish gate)' reported '${DOC_RESULT}'."
+            failed=1
+          fi
+          if [ "${failed}" -ne 0 ]; then
             exit 1
           fi
-          echo "every test shard succeeded"
+          echo "every test shard and the doctest job succeeded"
 
   # --------------------------------------------------------------------------
   # msrv: verify the workspace compiles on the effective MSRV.
@@ -1093,7 +1234,7 @@ jobs:
 
       - name: cargo check --workspace
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo check --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui
+        run: cargo check --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui
 
   # --------------------------------------------------------------------------
   # agents-ui: build- and lint-verify the trusty-agents Tauri desktop app
@@ -1173,6 +1314,87 @@ jobs:
       - name: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings
+
+  # --------------------------------------------------------------------------
+  # audit-ui: build- and lint-verify the auditor client's Tauri desktop shell
+  # (crates/trusty-audit/ui/src-tauri, package `trusty-audit-ui`). Issue #5477.
+  #
+  # Same shape and same reasons as `agents-ui` directly above: the crate is
+  # excluded from the headless workspace jobs because Tauri links WebKit2GTK on
+  # Linux, so this job installs that toolchain and genuinely compiles and lints
+  # it. `tauri::generate_context!()` embeds `frontendDist` ("../dist") at
+  # compile time and hard-errors when it is absent; `dist/` is a gitignored
+  # build artefact, so a placeholder index.html is stubbed before clippy. That
+  # compile- and lint-verifies the Rust side without pulling node/pnpm into CI.
+  #
+  # Unlike agents-ui this job also RUNS the crate's tests: they are pure
+  # mapping tests over `Session::execute`'s output with no window involved, so
+  # they cost seconds and are what keeps the Rust↔TypeScript wire shape from
+  # drifting.
+  # --------------------------------------------------------------------------
+  audit-ui:
+    name: trusty-audit-ui clippy
+    needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING. `!cancelled()`
+    # overrides the implicit success() so a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install stable toolchain with clippy
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install Tauri system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: audit-ui
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Stub the frontendDist so tauri::generate_context!() can embed it.
+      # SKIP_UI_BUILD=1 below stops build.rs looking for pnpm.
+      - name: Stub frontend dist for generate_context!
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          mkdir -p crates/trusty-audit/ui/dist
+          printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-audit</title></head><body></body></html>\n' \
+            > crates/trusty-audit/ui/dist/index.html
+
+      - name: cargo clippy -p trusty-audit-ui --all-targets -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SKIP_UI_BUILD: "1"
+        run: cargo clippy -p trusty-audit-ui --all-targets -- -D warnings
+
+      - name: cargo test -p trusty-audit-ui
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SKIP_UI_BUILD: "1"
+        run: cargo test -p trusty-audit-ui
 
   # --------------------------------------------------------------------------
   # embedder-cuda-check: compile-check the `embedder-cuda` feature (issue
@@ -1360,6 +1582,14 @@ jobs:
           - name: trusty-analyze
             dir: crates/trusty-analyze/ui
             command: pnpm run build
+          # #5477 phase 1. No test suite yet — the shell has one view and its
+          # only logic (the Rust↔TypeScript wire shape) is asserted on the Rust
+          # side by `guided_serialises_to_the_shape_the_window_reads`. `build`
+          # proves the bundle Tauri embeds still compiles; `check` is
+          # svelte-check over the same sources.
+          - name: trusty-audit
+            dir: crates/trusty-audit/ui
+            command: pnpm run build && pnpm run check
     steps:
       - uses: actions/checkout@v5
 
@@ -1388,8 +1618,9 @@ jobs:
         run: ${{ matrix.command }}
 
   # --------------------------------------------------------------------------
-  # search-daemon-smoke: build the trusty-search release binary and verify
-  # that the HTTP daemon starts and answers /health with status=ok.
+  # search-daemon-smoke: build the trusty-search binary under the `ci-smoke`
+  # profile and verify that the HTTP daemon starts and answers /health with
+  # status=ok.
   #
   # Design notes (issue #952):
   #
@@ -1478,9 +1709,23 @@ jobs:
 
       # SKIP_UI_BUILD=1 is already set globally via env: at the workflow level.
       # The committed ui-dist/ bundle is used as-is; pnpm is not required.
-      - name: Build trusty-search release binary
+      #
+      # `--profile ci-smoke`, not `--release`: this job builds trusty-search
+      # only to start it and assert `/health` returns `status=ok`. The
+      # ci-smoke profile drops thin LTO and opt-level 3 (see the profile's
+      # comment in the root Cargo.toml, which records the coverage trade this
+      # makes). Named profiles are stable since Cargo 1.57; this job pins
+      # `dtolnay/rust-toolchain@stable`.
+      #
+      # Artefacts land in `target/ci-smoke/`, which rust-cache handles without
+      # extra configuration: its cleanup identifies a profile directory by the
+      # presence of `deps`/`.fingerprint`/`build` rather than by a hardcoded
+      # debug/release list, and it caches the whole `target/` tree. No
+      # `cache-directories` entry is needed (contrast semver-checks.yml, where
+      # `target/semver-checks/` is not a cargo profile directory at all).
+      - name: Build trusty-search ci-smoke binary
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo build --release -p trusty-search
+        run: cargo build --profile ci-smoke -p trusty-search
 
       - name: Start trusty-search daemon (background)
         if: needs.changes.outputs.docs_only != 'true'
@@ -1496,7 +1741,7 @@ jobs:
           TRUSTY_SKIP_RAM_CHECK: "1"
         run: |
           mkdir -p /tmp/ts-smoke
-          ./target/release/trusty-search start \
+          ./target/ci-smoke/trusty-search start \
             --foreground \
             --port 7999 \
             --data-dir /tmp/ts-smoke \
@@ -1608,6 +1853,7 @@ jobs:
         test,
         msrv,
         agents-ui,
+        audit-ui,
         embedder-cuda-check,
         ui-checks,
         search-daemon-smoke,
@@ -1628,6 +1874,7 @@ jobs:
             test=${{ needs.test.result }}
             msrv=${{ needs.msrv.result }}
             agents-ui=${{ needs['agents-ui'].result }}
+            audit-ui=${{ needs['audit-ui'].result }}
             embedder-cuda-check=${{ needs.changes.outputs.embedder_cuda_relevant != 'false' && needs['embedder-cuda-check'].result || 'success' }}
             ui-checks=${{ needs['ui-checks'].result }}
             search-daemon-smoke=${{ needs['search-daemon-smoke'].result }}

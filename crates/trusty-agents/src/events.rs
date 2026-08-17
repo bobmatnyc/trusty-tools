@@ -187,7 +187,7 @@ pub enum Event {
 
     // -- Persona (workflow) --
     /// #196: emitted once per workflow run when a persona is detected from the
-    /// task text. Lets the UI surface "running in [hacker] mode" before any
+    /// task text. Lets the UI surface "running in \[hacker\] mode" before any
     /// phases execute, so users immediately see why the pipeline shape may
     /// differ from the default.
     PersonaDetected {

@@ -3,12 +3,12 @@
 //! Why: split out of `bm25_backfill.rs` so the production module stays under
 //! the 500-SLOC cap, the same way `worker_liveness_tests.rs` is. Wired back in
 //! via `#[path] mod tests;`.
-//! What: covers the fail-open statuses (lane off, daemon absent, wedged
-//! daemon), the coverage predicate, and the drawer-extraction filter. Every
-//! test here calls the production function it names — a test that restates the
-//! logic inline passes against a deleted implementation, which is how three of
-//! these came to prove nothing. The lossless-under-saturation property needs a
-//! real daemon and lives in `tests/bm25_backfill_e2e.rs`.
+//! What: covers the fail-open statuses (lane off, index unopenable), the
+//! coverage predicate, and the drawer-extraction filter. Every test here calls
+//! the production function it names — a test that restates the logic inline
+//! passes against a deleted implementation, which is how three of these came to
+//! prove nothing. The lossless-under-saturation property lives in
+//! `tests/bm25_backfill_e2e.rs`.
 //! Test: this *is* the test file.
 
 use super::*;
@@ -19,16 +19,16 @@ use uuid::Uuid;
 /// that a caller has to catch, and not a silent success that makes an
 /// unindexed palace look covered.
 /// What: calls `backfill_state_palace` against an `AppState` with no BM25
-/// client. The lane check precedes every use of the handle, so a bare in-memory
+/// lane. The lane check precedes every use of the handle, so a bare in-memory
 /// handle is enough to reach it — the point is that the REAL function is what
 /// produces the status, not a report built by hand.
 /// Test: this test itself.
 #[tokio::test]
-async fn backfill_state_palace_is_disabled_without_a_client() {
+async fn backfill_state_palace_is_disabled_without_a_lane() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = AppState::new(tmp.path().to_path_buf());
     assert!(
-        state.bm25_client.is_none(),
+        state.bm25.is_none(),
         "the lane must still be off by default — this PR does not flip it"
     );
 
@@ -75,78 +75,60 @@ fn test_handle(
     handle
 }
 
-/// Why (fail-open, daemon absent): pointing the feeder at a socket nothing is
-/// listening on must produce `DaemonUnavailable` promptly. The two failures
-/// this rules out are a propagated error (which would fail a caller's request)
-/// and a hang (which would hold a startup task open).
-/// What: a tempdir path with no listener; asserts the status and that the call
-/// returned well inside the per-op timeout rather than waiting it out.
+/// Why (fail-open, index unopenable): the feeder must report a palace whose
+/// index cannot be opened rather than propagating an error into a caller's
+/// request path or hanging.
+///
+/// #5329 replaced the two tests that used to live here —
+/// `backfill_reports_daemon_unavailable_when_socket_is_dead` and
+/// `backfill_gives_up_on_a_socket_that_never_answers`. Both described a peer
+/// process: a socket with no listener, and one that accepts but never replies.
+/// Neither is reachable in-process. The failure with the same consequence for a
+/// caller is a snapshot directory that cannot be created or read.
+/// What: plants a FILE where the palace's `bm25` DIRECTORY belongs, so
+/// `create_dir_all` cannot succeed, then asserts the status, the absent
+/// coverage claim, and that the call returned promptly.
 /// Test: this test itself.
 #[tokio::test]
-async fn backfill_reports_daemon_unavailable_when_socket_is_dead() {
+async fn backfill_reports_index_unavailable_when_the_snapshot_cannot_be_opened() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let socket = tmp.path().join("nothing-here.sock");
+    let lane = crate::bm25_lane::Bm25Lane::with_limits(tmp.path().to_path_buf(), 3, None);
+    std::fs::create_dir_all(tmp.path().join("ghost")).expect("palace dir");
+    std::fs::write(
+        tmp.path().join("ghost").join("bm25"),
+        b"a file where the index directory belongs",
+    )
+    .expect("block the index dir");
+
     let docs = PalaceDocs::from_pairs(vec![("d1".to_string(), "alpha beta".to_string())]);
-
     let started = std::time::Instant::now();
-    let report = backfill_palace(&socket, "ghost", docs, false).await;
+    let report = backfill_palace(&lane, "ghost", docs, false).await;
 
-    assert_eq!(report.status, BackfillStatus::DaemonUnavailable);
+    assert_eq!(report.status, BackfillStatus::IndexUnavailable);
     assert_eq!(report.indexed, 0);
     assert_eq!(report.drawers_total, 1);
-    assert_eq!(report.missing_after, None);
+    assert_eq!(
+        report.missing_after, None,
+        "a coverage question that could not be asked must never read as covered"
+    );
     assert!(!report.fully_indexed());
     assert!(
-        started.elapsed() < OP_TIMEOUT,
-        "a refused connection must fail fast, not wait out the {OP_TIMEOUT:?} deadline"
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "an unopenable index must fail fast, not spend the palace budget"
     );
-}
-
-/// Why (fail-open, wedged daemon): a socket that accepts but never answers is
-/// the case a plain `read_line` would hang on forever. The per-op timeout is
-/// the only thing standing between that and a stalled sweep, so it needs a
-/// test that actually produces the condition.
-/// What: binds a listener that accepts connections and then does nothing, and
-/// asserts the pre-flight coverage probe gives up and reports the daemon
-/// unavailable.
-/// Test: this test itself.
-#[tokio::test]
-async fn backfill_gives_up_on_a_socket_that_never_answers() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let socket = tmp.path().join("silent.sock");
-    // #5099: bind the way the real daemon does — the client verifies the
-    // directory and socket modes before connecting.
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind silent listener");
-    // Accept and hold, never reply.
-    let accepted = tokio::spawn(async move {
-        let mut held = Vec::new();
-        while let Ok((stream, _)) = listener.accept().await {
-            held.push(stream);
-        }
-    });
-
-    let docs = PalaceDocs::from_pairs(vec![("d1".to_string(), "alpha".to_string())]);
-    let report = backfill_palace(&socket, "silent", docs, false).await;
-    assert_eq!(
-        report.status,
-        BackfillStatus::DaemonUnavailable,
-        "a wedged daemon must be reported, not waited on forever"
-    );
-    assert!(!report.fully_indexed());
-
-    accepted.abort();
+    lane.shutdown().await;
 }
 
 /// Why (fail-open, empty palace): a palace with nothing indexable is fully
 /// indexed by definition — there is no id that could be missing. It is the one
-/// case where coverage is established without asking the daemon, and it must
-/// not require a daemon to be reachable.
+/// case where coverage is established without asking the index anything, and it
+/// must not require the index to be loadable.
 /// Test: this test itself.
 #[tokio::test]
 async fn empty_palace_is_already_indexed() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let socket = tmp.path().join("unused.sock");
-    let report = backfill_palace(&socket, "empty", PalaceDocs::default(), false).await;
+    let lane = crate::bm25_lane::Bm25Lane::with_limits(tmp.path().to_path_buf(), 3, None);
+    let report = backfill_palace(&lane, "empty", PalaceDocs::default(), false).await;
     assert_eq!(report.status, BackfillStatus::AlreadyIndexed);
     assert!(report.fully_indexed());
     assert_eq!(report.missing_after, Some(0));
@@ -160,12 +142,12 @@ async fn empty_palace_is_already_indexed() {
 #[tokio::test]
 async fn a_palace_of_only_blank_drawers_is_covered_and_counted() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let socket = tmp.path().join("unused.sock");
+    let lane = crate::bm25_lane::Bm25Lane::with_limits(tmp.path().to_path_buf(), 3, None);
     let docs = PalaceDocs {
         docs: Vec::new(),
         skipped_empty: 3,
     };
-    let report = backfill_palace(&socket, "blanks", docs, false).await;
+    let report = backfill_palace(&lane, "blanks", docs, false).await;
     assert!(report.fully_indexed());
     assert_eq!(report.drawers_total, 3, "the palace holds three drawers");
     assert_eq!(report.skipped_empty, 3);
@@ -223,7 +205,7 @@ fn fully_indexed_requires_a_verified_empty_missing_set() {
         BackfillStatus::AlreadyIndexed,
         BackfillStatus::Completed,
         BackfillStatus::Partial,
-        BackfillStatus::DaemonUnavailable,
+        BackfillStatus::IndexUnavailable,
         BackfillStatus::Disabled,
     ] {
         let unverified = BackfillReport {
@@ -246,7 +228,7 @@ fn fully_indexed_requires_a_verified_empty_missing_set() {
 fn short_circuit_reports_are_never_covered() {
     for status in [
         BackfillStatus::Disabled,
-        BackfillStatus::DaemonUnavailable,
+        BackfillStatus::IndexUnavailable,
         BackfillStatus::Partial,
     ] {
         let r = BackfillReport::short_circuit("p", status, 7);
@@ -353,126 +335,44 @@ fn startup_backfill_respects_the_opt_out() {
     }
 }
 
-/// Spawn a stub daemon that answers every frame with `reply`, counting frames.
+/// Why: the coverage probe's two outcomes are two different situations, and
+/// only one of them may skip work. Collapsing "the index could not be opened"
+/// into "covered" is the fail-open this whole module exists to remove.
 ///
-/// Why: the coverage probe's three outcomes and its chunking both need a
-/// controllable peer. A real daemon cannot be made to answer `-32601`, and a
-/// test that constructs the `Coverage` value by hand would restate the
-/// classification instead of exercising it.
-/// What: binds `socket`, and for every newline-delimited request writes
-/// `reply(seen)` back. Returns the shared request counter and the task handle.
-/// Test: used by the two tests below.
-fn stub_daemon(
-    socket: std::path::PathBuf,
-    reply: fn(usize) -> String,
-) -> (
-    std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    tokio::task::JoinHandle<()>,
-) {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counter = std::sync::Arc::clone(&seen);
-    // #5099: bind the way the real daemon does — the client verifies the
-    // directory and socket modes before connecting.
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind stub daemon");
-    let handle = tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let counter = std::sync::Arc::clone(&counter);
-            tokio::spawn(async move {
-                let (read_half, mut write_half) = stream.into_split();
-                let mut reader = BufReader::new(read_half);
-                let mut line = String::new();
-                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-                    let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let out = format!("{}\n", reply(n));
-                    if write_half.write_all(out.as_bytes()).await.is_err() {
-                        break;
-                    }
-                    line.clear();
-                }
-            });
-        }
-    });
-    (seen, handle)
-}
-
-/// Why: the three ways a coverage probe can end are three different operator
-/// situations, and only one of them may skip work. Collapsing "the daemon is
-/// too old to answer" into "the daemon is gone" sends an operator hunting a
-/// dead socket that is in fact serving; collapsing either into "covered" is
-/// the fail-open this whole module exists to remove.
-/// What: drives the real `probe_coverage` against stub daemons answering a
-/// clean result, a `-32601`, and an internal error.
+/// #5329 retired this test's predecessor,
+/// `coverage_probe_classifies_the_three_failure_modes`, along with the
+/// `stub_daemon` harness it shared — a UDS listener replying with hand-written
+/// JSON-RPC frames. Two of the three modes it classified were wire states: a
+/// `-32601` from a daemon predating `missing_docs`, and a `-32603` from one
+/// serving but broken. Neither is reachable in-process. It also retired
+/// `coverage_probe_chunks_large_id_sets`, which existed solely to stop a
+/// 1311-id request becoming one ~50 KB newline-framed frame.
+/// What: drives the real `probe_coverage` against a healthy index and against a
+/// palace whose index directory is blocked by a file.
 /// Test: this test itself.
 #[tokio::test]
-async fn coverage_probe_classifies_the_three_failure_modes() {
+async fn coverage_probe_classifies_an_unreadable_index_as_unreachable() {
     let tmp = tempfile::tempdir().expect("tempdir");
+    let lane = crate::bm25_lane::Bm25Lane::with_limits(tmp.path().to_path_buf(), 3, None);
     let ids = vec!["a".to_string(), "b".to_string()];
 
-    let ok = tmp.path().join("ok.sock");
-    let (_n, h) = stub_daemon(ok.clone(), |_| {
-        r#"{"jsonrpc":"2.0","result":{"missing":["b"],"checked":2},"id":1}"#.to_string()
-    });
-    let client = Bm25Client::new(ok);
+    lane.index("ok", "a", "alpha").await.expect("seed");
     assert_eq!(
-        probe_coverage(&client, "p", &ids).await,
-        Coverage::Missing(1)
+        probe_coverage(&lane, "ok", &ids).await,
+        Coverage::Missing(1),
+        "a healthy index answers by identity: `a` is present, `b` is not"
     );
-    h.abort();
 
-    let old = tmp.path().join("old.sock");
-    let (_n, h) = stub_daemon(old.clone(), |_| {
-        r#"{"jsonrpc":"2.0","error":{"code":-32601,"message":"unknown method: missing_docs"},"id":1}"#
-            .to_string()
-    });
-    let client = Bm25Client::new(old);
+    std::fs::create_dir_all(tmp.path().join("broken")).expect("palace dir");
+    std::fs::write(tmp.path().join("broken").join("bm25"), b"not a directory")
+        .expect("block the index dir");
     assert_eq!(
-        probe_coverage(&client, "p", &ids).await,
-        Coverage::Unsupported,
-        "a daemon that predates the op must be reported as such, never as covered"
+        probe_coverage(&lane, "broken", &ids).await,
+        Coverage::Unreachable,
+        "an index that cannot be opened must never report a missing set"
     );
-    h.abort();
 
-    let broken = tmp.path().join("broken.sock");
-    let (_n, h) = stub_daemon(broken.clone(), |_| {
-        r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"index poisoned"},"id":1}"#.to_string()
-    });
-    let client = Bm25Client::new(broken);
-    assert_eq!(
-        probe_coverage(&client, "p", &ids).await,
-        Coverage::Unreachable
-    );
-    h.abort();
-}
-
-/// Why: the wire framing is one JSON line per request, so an unchunked probe
-/// over the largest palace on this host would build a single ~50 KB frame.
-/// Chunking must not change the answer — the missing counts have to sum.
-/// What: 600 ids against a chunk size of 256 must produce exactly three
-/// requests, and the per-chunk missing sets must add up.
-/// Test: this test itself.
-#[tokio::test]
-async fn coverage_probe_chunks_large_id_sets() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let socket = tmp.path().join("chunked.sock");
-    // Each chunk reports exactly one missing doc, so three chunks sum to three.
-    let (seen, h) = stub_daemon(socket.clone(), |_| {
-        r#"{"jsonrpc":"2.0","result":{"missing":["x"],"checked":1},"id":1}"#.to_string()
-    });
-    let ids: Vec<String> = (0..600).map(|i| format!("d{i}")).collect();
-    let client = Bm25Client::new(socket);
-
-    assert_eq!(
-        probe_coverage(&client, "p", &ids).await,
-        Coverage::Missing(3),
-        "the missing sets of every chunk must sum"
-    );
-    assert_eq!(
-        seen.load(std::sync::atomic::Ordering::SeqCst),
-        3,
-        "600 ids at a chunk size of {COVERAGE_CHUNK} must be three requests"
-    );
-    h.abort();
+    lane.shutdown().await;
 }
 
 /// Create `count` palaces on disk under the state's data root, each holding one

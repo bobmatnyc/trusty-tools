@@ -159,7 +159,7 @@ const STALE_DAEMON_MARKER_KEY: &str = "__stale_daemon_detected__";
 /// lockout.
 const STALE_DAEMON_TTL_SECS: i64 = 60 * 60;
 
-/// Result of one [`auto_prune_dead_records`] / [`auto_prune_dead_records_at`]
+/// Result of one `auto_prune_dead_records` / [`auto_prune_dead_records_at`]
 /// call.
 ///
 /// Why: the caller (`fetch_live_sessions`) needs three independent numbers to
@@ -236,7 +236,7 @@ pub(crate) struct PrunedListing {
 /// the seam at every layer without growing an eighth positional parameter on
 /// `session_ls_at`.
 /// What: [`PruneContext::production`] resolves both for real use;
-/// [`PruneContext::hermetic`] takes explicit values for tests.
+/// `PruneContext::hermetic` takes explicit values for tests.
 pub(crate) struct PruneContext {
     /// Where the two-sightings confirmation marker lives.
     pub(crate) marker_path: PathBuf,

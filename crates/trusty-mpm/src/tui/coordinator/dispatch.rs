@@ -7,7 +7,7 @@
 //! as a `send` versus falling back to a hint/echo — is pure logic with no IO, so
 //! it lives here as a unit-testable function the async run loop calls before it
 //! ever touches the daemon (DOC-13 §9). The terminal/IO half (await the executor,
-//! append the result) stays in [`super::mod`].
+//! append the result) stays in `super::mod`.
 //! What: [`route`] takes the submitted line and the focused session's routing
 //! target and returns a [`Dispatch`] — either a [`TrustyCommand`] to execute, a
 //! one-line hint to show, or an `Echo` (plain chat with no focused session, which

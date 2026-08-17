@@ -234,9 +234,14 @@ pub(crate) fn command_legend(launch_slot: Option<u32>) -> Vec<String> {
         None => vec![row("[Enter]".to_string(), "launch new session")],
         Some(slot) => vec![row(format!("[{slot}]"), "launch new session")],
     };
+    // #5773: the isolation request rides on this row rather than a row of its
+    // own. A key of `[n <name> --worktree]` is wider than MENU_KEY_WIDTH and
+    // would ragged the whole column, and the flag is a modifier of this action
+    // rather than a second action.
     lines.push(row(
         "[n <name>]".to_string(),
-        "launch new session as tm-<name>-NN (e.g. n auth-refactor)",
+        "launch new session as tm-<name>-NN (e.g. n auth-refactor; \
+         add --worktree to run it in its own worktree)",
     ));
     if launch_slot.is_some() {
         lines.push(row("[d<N>]".to_string(), "delete session N (e.g. d1)"));
@@ -257,8 +262,8 @@ pub(crate) fn command_legend(launch_slot: Option<u32>) -> Vec<String> {
 
 /// Build the restart-confirmation hint shared by both #2148 restart prompts.
 ///
-/// Why: those two prompts read as a yes/no question ("[Enter] does NOT restart
-/// — type [1] to confirm the restart") while naming no refusal key. `n` is the
+/// Why: those two prompts read as a yes/no question ("\[Enter\] does NOT restart
+/// — type \[1\] to confirm the restart") while naming no refusal key. `n` is the
 /// universal "no", and since #4965 it is also the launch-new alias — so an
 /// operator declining a restart with `n` got a real cloned, spawned, attached
 /// session instead of a decline. The grammar is correct and stays; the prompts

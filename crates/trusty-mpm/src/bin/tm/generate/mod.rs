@@ -11,7 +11,7 @@
 //! markdown, so `--check` (the CI drift gate) and the write path share
 //! exactly the same generation logic and can never disagree about what
 //! "up to date" means.
-//! What: [`generate`] builds the full [`GeneratedSet`] (7 files); [`write`]
+//! What: [`generate`] builds the full [`GeneratedSet`] (7 files); [`write`](crate::generate::write)
 //! writes it to `crates/trusty-mpm/src/assets/skills/`; [`diff`] compares it
 //! against the committed copies without writing; [`run_capabilities`] is the
 //! `tm generate capabilities[--check]` CLI entry point.
@@ -43,7 +43,7 @@ pub(crate) type GeneratedSet = BTreeMap<&'static str, String>;
 /// `src/assets/skills/`.
 ///
 /// Why: a single function is the one place that knows the full generated
-/// file set — the entry point plus six references files — so [`write`] and
+/// file set — the entry point plus six references files — so [`write`](crate::generate::write) and
 /// [`diff`] share it and can never disagree about which files exist.
 /// What: returns 7 entries: `tm-capabilities.md` (the entry file) plus
 /// `tm-capabilities/references/{cli,mcp-tools,agents,skills,doctor,framework}.md`.
@@ -104,7 +104,7 @@ pub(crate) fn write(set: &GeneratedSet, root: &Path) -> anyhow::Result<()> {
 /// Why: the `--check` path (the CI drift gate) must never write — it only
 /// reports what would change, so a stale committed file fails the build
 /// instead of silently self-healing in CI. `root` is injected for the same
-/// temp-dir-testability reason as [`write`].
+/// temp-dir-testability reason as [`write`](crate::generate::write).
 /// What: returns the list of mismatched/missing relative paths, each
 /// annotated with why it drifted; an empty vec means every generated file
 /// matches its committed copy exactly (byte-for-byte).
@@ -132,7 +132,7 @@ pub(crate) fn diff(set: &GeneratedSet, root: &Path) -> Vec<String> {
 /// file count. With `check`, diffs instead of writing and returns an error
 /// (non-zero exit) listing every drifted file when the set is not clean.
 /// Test: exercised end-to-end by `scripts/check_capabilities.sh` against the
-/// committed output; unit coverage is per-submodule + [`diff`]/[`write`].
+/// committed output; unit coverage is per-submodule + [`diff`]/[`write`](crate::generate::write).
 pub(crate) fn run_capabilities(check: bool) -> anyhow::Result<()> {
     let set = generate();
     let root = skills_asset_dir();
