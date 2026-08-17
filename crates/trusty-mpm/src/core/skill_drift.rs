@@ -321,9 +321,17 @@ pub fn key_stem(manifest_key: &str) -> &str {
 /// Test: `skill_drift_tests.rs`.
 pub fn audit_deployed_skills(reference: &SkillReference, dest_dir: &Path) -> TierAudit {
     let manifest_path = dest_dir.join(SKILL_MANIFEST_FILE);
+    // #5626: the parsed document is CARRIED to the findings loop rather than
+    // re-read there. The old second read went through `SkillManifest::load`,
+    // whose empty-on-any-error default would have reported "no managed skills"
+    // for a ledger this probe had just classified `Present`.
+    let mut parsed: Option<SkillManifest> = None;
     let state = match std::fs::read_to_string(&manifest_path) {
         Ok(raw) => match serde_json::from_str::<SkillManifest>(&raw) {
-            Ok(_) => ManifestState::Present,
+            Ok(m) => {
+                parsed = Some(m);
+                ManifestState::Present
+            }
             Err(e) => ManifestState::Unreadable(format!(
                 "{} is not valid JSON: {e}",
                 manifest_path.display()
@@ -358,14 +366,13 @@ pub fn audit_deployed_skills(reference: &SkillReference, dest_dir: &Path) -> Tie
         )),
     };
 
-    if state != ManifestState::Present {
+    let Some(manifest) = parsed.filter(|_| state == ManifestState::Present) else {
         return TierAudit {
             manifest: state,
             findings: Vec::new(),
         };
-    }
+    };
 
-    let manifest = SkillManifest::load(dest_dir);
     let mut findings: Vec<SkillDriftFinding> = manifest
         .managed
         .keys()

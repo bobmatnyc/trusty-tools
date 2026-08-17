@@ -123,7 +123,11 @@ pub struct ReturnPackage {
     pub total_bytes: u64,
     /// Size of the zip on disk.
     pub packaged_bytes: u64,
-    /// One line per repository the package does not cover, and why.
+    /// One line per target the package does not cover, and why.
+    ///
+    /// The sweep's own failures, plus whatever the caller passed as
+    /// `unattempted` — a repository that never cloned reaches the sweep's
+    /// records nowhere, so it can only arrive that way (#5824).
     pub excluded: Vec<String>,
 }
 
@@ -134,6 +138,7 @@ pub struct ReturnPackage {
 /// redacted copy, so there is no field for the credential to be carried in and
 /// no `skip_serializing` a later edit could remove.
 /// What: scalars first, then the two table arrays — TOML requires that order.
+/// `not_attempted` is a plain string array, so it sits with the scalars.
 #[derive(Debug, Serialize)]
 struct PackageMetadata {
     generated_by: String,
@@ -142,6 +147,16 @@ struct PackageMetadata {
     instructions: String,
     repositories_audited: usize,
     repositories_excluded: usize,
+    /// Targets that never reached the sweep, so `repositories` cannot list them
+    /// and `repositories_excluded` cannot count them (#5824).
+    ///
+    /// A repository that failed to clone and a registered board are both here.
+    /// Kept separate from `repositories_excluded` rather than folded into it,
+    /// because a board is not a repository and counting one as an excluded
+    /// repository would overstate what the sweep was asked to do. Always
+    /// emitted, so an empty array is a positive claim of full coverage rather
+    /// than an absent key a reader has to interpret.
+    not_attempted: Vec<String>,
     tools: Vec<ToolVersion>,
     repositories: Vec<PackagedRepo>,
 }
@@ -194,10 +209,61 @@ struct PackagedRepo {
 /// `extract/`,
 /// [`AuditError::CredentialInPackage`] when a member carries the engagement key,
 /// and [`AuditError::Package`] for any read, write, or rename failure.
+/// Assemble from the sweep's own record, refusing one that did not finish.
+///
+/// Why: #5824 gave packaging a second caller. The completion check used to live
+/// in `Session::package`, so the chain would either have had to duplicate it or
+/// to skip it by passing the report it already held in memory — and skipping it
+/// is how a sweep that died three repositories into six gets sent as a whole
+/// engagement. One function, both callers, one precondition.
+///
+/// The completion signal is [`crate::run::RunProgress::complete`], not the
+/// record's mere presence: since #5494 the record is written after every
+/// repository, so an unfinished sweep leaves one behind.
+/// What: reads `state/run-progress.toml`, requires it to be complete, and hands
+/// its report to [`assemble`].
+/// Test: `crate::session::session_tests::packaging_before_any_sweep_is_refused`,
+/// `crate::session::session_tests::packaging_an_unfinished_sweep_is_refused`,
+/// `crate::chain::chain_tests::the_chain_installs_collects_and_packages`.
+///
+/// # Errors
+///
+/// [`AuditError::NothingToPackage`] when no sweep has finished here, and
+/// whatever [`assemble`] fails with.
+pub fn from_checkpoint(
+    work: &WorkDir,
+    config: &EngagementConfig,
+    unattempted: &[String],
+    destination: &Path,
+) -> Result<ReturnPackage, AuditError> {
+    let progress =
+        crate::run::read_progress(work)?.ok_or_else(|| AuditError::NothingToPackage {
+            reason: format!(
+                "no sweep has finished in {} — run `trusty-audit run` first",
+                work.root().display()
+            ),
+        })?;
+    if !progress.complete {
+        return Err(AuditError::NothingToPackage {
+            reason: format!(
+                "the last sweep in {} did not finish — {} recorded so far; \
+                 run `trusty-audit run` to resume it",
+                work.root().display(),
+                match progress.repos.len() {
+                    1 => "1 repository".to_owned(),
+                    n => format!("{n} repositories"),
+                }
+            ),
+        });
+    }
+    assemble(work, config, &progress.report(), unattempted, destination)
+}
+
 pub fn assemble(
     work: &WorkDir,
     config: &EngagementConfig,
     report: &RunReport,
+    unattempted: &[String],
     destination: &Path,
 ) -> Result<ReturnPackage, AuditError> {
     let audited: Vec<&RepoRun> = report
@@ -226,8 +292,10 @@ pub fn assemble(
     }
     collected.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let excluded = exclusions(report);
-    let metadata = render_metadata(work, config, report, &audited)?;
+    // #5824: the sweep's own failures, then the targets that never reached it.
+    let mut excluded = exclusions(report);
+    excluded.extend(unattempted.iter().cloned());
+    let metadata = render_metadata(work, config, report, &audited, unattempted)?;
     let readme = render_readme(config, &audited, &excluded);
 
     write_archive(destination, config, readme, metadata, collected, excluded)
@@ -409,6 +477,7 @@ fn render_metadata(
     config: &EngagementConfig,
     report: &RunReport,
     audited: &[&RepoRun],
+    unattempted: &[String],
 ) -> Result<String, AuditError> {
     let tools = tools::read_record(work)?
         .into_iter()
@@ -437,6 +506,7 @@ fn render_metadata(
         instructions: config.instructions.clone(),
         repositories_audited: audited.len(),
         repositories_excluded: report.repos.len() - audited.len(),
+        not_attempted: unattempted.to_vec(),
         tools,
         repositories,
     };
@@ -797,7 +867,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        let package = assemble(&work, &config(), &report, &destination).expect("assembles");
+        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
 
         assert_eq!(package.path, destination);
         assert!(destination.is_file(), "the zip was not written");
@@ -824,7 +894,7 @@ trusty-review = "0.15.1"
         install_record(&work);
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
-        assemble(&work, &config(), &report, &destination).expect("assembles");
+        assemble(&work, &config(), &report, &[], &destination).expect("assembles");
 
         // `by_index` succeeding with no password IS the unencrypted property:
         // the zip crate returns `UnsupportedArchive` for an encrypted entry.
@@ -861,7 +931,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination)
             .expect_err("a package carrying the key must not be produced");
         assert!(
             matches!(err, AuditError::CredentialInPackage { .. }),
@@ -905,7 +975,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination)
             .expect_err("a symlink must not be followed into the package");
         assert!(
             matches!(err, AuditError::UnsafePackageEntry { .. }),
@@ -930,7 +1000,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination)
             .expect_err("a hardlink must not carry outside content into the package");
         let AuditError::UnsafePackageEntry { kind, .. } = &err else {
             panic!("expected UnsafePackageEntry, got {err:?}");
@@ -962,7 +1032,7 @@ trusty-review = "0.15.1"
         .expect("hard link");
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination)
             .expect_err("a hardlink under extract/ must be refused too");
         let AuditError::UnsafePackageEntry { kind, .. } = &err else {
             panic!("expected UnsafePackageEntry, got {err:?}");
@@ -993,7 +1063,7 @@ trusty-review = "0.15.1"
             assert_eq!(links, 1, "{} has {links} links", path.display());
         }
         let report = RunReport::of(vec![run]);
-        assemble(&work, &config(), &report, &default_destination(&work))
+        assemble(&work, &config(), &report, &[], &default_destination(&work))
             .expect("ordinary output must still package");
     }
 
@@ -1006,7 +1076,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![failed(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination)
             .expect_err("no audited repository means no package");
         assert!(
             matches!(err, AuditError::NothingToPackage { .. }),
@@ -1028,7 +1098,7 @@ trusty-review = "0.15.1"
         ]);
         let destination = default_destination(&work);
 
-        let package = assemble(&work, &config(), &report, &destination).expect("assembles");
+        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
         assert_eq!(package.excluded.len(), 1);
         assert!(
             package.excluded[0].contains("acme-web"),
@@ -1075,7 +1145,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = tmp.path().join("Desktop/return.zip");
 
-        let package = assemble(&work, &config(), &report, &destination).expect("assembles");
+        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
         assert_eq!(package.path, destination);
         assert!(destination.is_file());
         assert!(!destination.starts_with(work.root()));
@@ -1098,7 +1168,7 @@ trusty-review = "0.15.1"
         std::fs::write(work.path(Area::Extract).join("09-other.db"), b"other").expect("write");
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &destination).expect("assembles");
+        assemble(&work, &config(), &report, &[], &destination).expect("assembles");
         let names = entries(&destination);
         assert!(
             names.contains(&"extract/00-acme-api.db".to_owned()),

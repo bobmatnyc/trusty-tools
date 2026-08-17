@@ -17,11 +17,13 @@
 //! nearest `.git` root (fallback: the start dir itself), and
 //! [`derive_index_id`] turns a project root into its index id (the path
 //! basename, preserved verbatim for backward-compatibility with already-indexed
-//! projects). No global state; pure functions.
+//! projects). [`identifies_same_path`] answers "do these two paths name the same
+//! directory tree?" for every registration guard that has to compare one. No
+//! global state; pure functions.
 //!
 //! Test: `cargo test -p trusty-common --features unconditional-only --
-//! index_id::tests` covers basename derivation, the git-root walk, and the
-//! no-marker fallback.
+//! index_id::tests` covers basename derivation, the git-root walk, the
+//! no-marker fallback, and same-tree identity across case variants.
 
 use std::path::{Path, PathBuf};
 
@@ -102,6 +104,56 @@ pub fn derive_index_id(project_root: &Path) -> String {
         .into_owned()
 }
 
+/// Decide whether `a` and `b` name the same on-disk directory tree.
+///
+/// Why: a trusty-search index identifies a searchable DIRECTORY TREE, so every
+/// registration guard has to answer "is this the tree I already have?" — and on
+/// macOS APFS (case-insensitive, case-preserving) the obvious answer is wrong.
+/// `canonicalize` preserves the case each path was spelled with rather than
+/// normalising it, so `/Users/bob/Duetto/CTO` and `/Users/bob/Duetto/cto`
+/// canonicalize to two different strings over ONE inode and string equality
+/// misses the match entirely. Two guards need this same answer — trusty-search's
+/// `find_root_path_collision` (same tree, different id) and trusty-common's
+/// `best_effort_create_index` (same id, different tree) — so per this
+/// workspace's common-entry-point rule it is one implementation here, not two.
+/// Filesystem-only by construction: no git remote, no repo identity, so a
+/// non-git tree (trusty-agents indexes an OKF store this way) compares exactly
+/// like a checkout.
+/// What: compares `(dev, ino)` from `std::fs::metadata` when BOTH paths exist,
+/// which also catches symlink aliases, bind mounts and hard-linked directories.
+/// When either path cannot be stat'd — it was deleted, a volume was unmounted,
+/// or the target is not unix — falls back to plain `Path` equality. That
+/// fallback is deliberately the weaker pre-existing behaviour rather than a
+/// refusal: a caller comparing against a root that has since vanished should
+/// still get an answer, and the dominant case (both trees present) never
+/// reaches it.
+/// Test: `same_path_spelled_two_ways_is_the_same_tree` (macOS-gated),
+/// `distinct_trees_are_not_the_same`, `missing_paths_fall_back_to_equality`.
+pub fn identifies_same_path(a: &Path, b: &Path) -> bool {
+    match same_filesystem_entry(a, b) {
+        Some(same) => same,
+        None => a == b,
+    }
+}
+
+/// Compare `a` and `b` by `(dev, ino)`, or `None` when either cannot be stat'd.
+///
+/// Why/What/Test: see [`identifies_same_path`], the only caller.
+#[cfg(unix)]
+fn same_filesystem_entry(a: &Path, b: &Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let meta_a = std::fs::metadata(a).ok()?;
+    let meta_b = std::fs::metadata(b).ok()?;
+    Some(meta_a.dev() == meta_b.dev() && meta_a.ino() == meta_b.ino())
+}
+
+/// Non-unix targets have no wired-up `(dev, ino)` equivalent, so
+/// [`identifies_same_path`] always falls back to path equality there.
+#[cfg(not(unix))]
+fn same_filesystem_entry(_a: &Path, _b: &Path) -> Option<bool> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +229,67 @@ mod tests {
         assert_eq!(find_git_root(&nested), Some(tmp.clone()));
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// macOS APFS is case-insensitive but case-preserving, so `canonicalize`
+    /// returns the spelling it was GIVEN — two cases of one directory produce
+    /// two unequal strings over one inode. This is the exact pair that made a
+    /// string-equality guard useless; `identifies_same_path` must see through it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn same_path_spelled_two_ways_is_the_same_tree() {
+        let tmp = scratch_dir("Case-Variant");
+        fs::create_dir_all(&tmp).unwrap();
+
+        let name = tmp.file_name().unwrap().to_str().unwrap();
+        let flipped: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_uppercase() {
+                    c.to_ascii_lowercase()
+                } else {
+                    c.to_ascii_uppercase()
+                }
+            })
+            .collect();
+        let variant = tmp.with_file_name(flipped);
+
+        assert_ne!(variant, tmp, "the two spellings must differ as strings");
+        assert!(
+            identifies_same_path(&tmp, &variant),
+            "{} and {} are one inode and must compare equal",
+            tmp.display(),
+            variant.display()
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Two genuinely different trees must not be conflated — the guard has to
+    /// stay usable, not just safe.
+    #[test]
+    fn distinct_trees_are_not_the_same() {
+        let a = scratch_dir("distinct-a");
+        let b = scratch_dir("distinct-b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+
+        assert!(!identifies_same_path(&a, &b));
+
+        let _ = fs::remove_dir_all(&a);
+        let _ = fs::remove_dir_all(&b);
+    }
+
+    /// When a path cannot be stat'd (deleted root, unmounted volume) there is no
+    /// `(dev, ino)` to compare, so the answer degrades to path equality rather
+    /// than to a refusal.
+    #[test]
+    fn missing_paths_fall_back_to_equality() {
+        let gone = scratch_dir("never-created");
+        let other = scratch_dir("also-never-created");
+
+        assert!(identifies_same_path(&gone, &gone));
+        assert!(!identifies_same_path(&gone, &other));
     }
 
     #[test]

@@ -22,6 +22,7 @@
 
 use std::path::Path;
 
+use crate::core::agent_manifest::Result as ManifestResult;
 use crate::core::skill_deployer::{is_skill_file, skill_stem};
 use crate::core::skill_manifest::SkillManifest;
 
@@ -42,18 +43,22 @@ use crate::core::skill_manifest::SkillManifest;
 /// from the manifest (never deployed, or user-owned) are ignored — those are a
 /// different probe's concern. Read failures on an individual source file skip
 /// that file rather than aborting.
+///
+/// Fallible since #5626: an empty ledger short-circuits to "nothing is stale",
+/// which is right for a tier never deployed to and wrong for one whose ledger
+/// could not be read — the caller then warns about no drift it never looked for.
 /// Test: `stale_skills_flags_changed_source`, `stale_skills_empty_when_fresh`,
 /// `stale_skills_ignores_unmanaged`, `stale_skills_missing_source_is_empty`.
-pub fn stale_skills(source_dir: &Path, dest_dir: &Path) -> Vec<String> {
-    let manifest = SkillManifest::load(dest_dir);
+pub fn stale_skills(source_dir: &Path, dest_dir: &Path) -> ManifestResult<Vec<String>> {
+    let manifest = SkillManifest::load(dest_dir)?;
     if manifest.managed.is_empty() {
         // Nothing has been deployed here yet — there is no prior deploy to be
         // stale relative to. Skip the directory read entirely.
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let Ok(entries) = std::fs::read_dir(source_dir) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let mut stale: Vec<String> = Vec::new();
@@ -82,7 +87,7 @@ pub fn stale_skills(source_dir: &Path, dest_dir: &Path) -> Vec<String> {
         }
     }
     stale.sort_unstable();
-    stale
+    Ok(stale)
 }
 
 #[cfg(test)]
@@ -105,7 +110,7 @@ mod tests {
     fn stale_skills_empty_when_fresh() {
         // A skill just deployed from an unchanged source is not stale.
         let (src, dest) = deploy_one("---\nname: tm-doctor\n---\n\nv1\n");
-        assert!(stale_skills(src.path(), dest.path()).is_empty());
+        assert!(stale_skills(src.path(), dest.path()).unwrap().is_empty());
     }
 
     #[test]
@@ -119,7 +124,7 @@ mod tests {
             "---\nname: tm-doctor\n---\n\nv2 with new attribution footer\n",
         )
         .unwrap();
-        let stale = stale_skills(src.path(), dest.path());
+        let stale = stale_skills(src.path(), dest.path()).unwrap();
         assert_eq!(stale, vec!["tm-doctor".to_string()]);
     }
 
@@ -135,7 +140,7 @@ mod tests {
             "---\nname: brand-new\n---\n\nnever deployed\n",
         )
         .unwrap();
-        let stale = stale_skills(src.path(), dest.path());
+        let stale = stale_skills(src.path(), dest.path()).unwrap();
         assert!(!stale.contains(&"brand-new".to_string()));
         assert!(stale.is_empty());
     }
@@ -145,7 +150,7 @@ mod tests {
         // A missing source directory yields no staleness (nothing to compare),
         // never an error.
         let dest = TempDir::new().unwrap();
-        let stale = stale_skills(Path::new("/nonexistent/skill/source"), dest.path());
+        let stale = stale_skills(Path::new("/nonexistent/skill/source"), dest.path()).unwrap();
         assert!(stale.is_empty());
     }
 
@@ -156,6 +161,6 @@ mod tests {
         let src = TempDir::new().unwrap();
         let dest = TempDir::new().unwrap();
         fs::write(src.path().join("tm-doctor.md"), "body").unwrap();
-        assert!(stale_skills(src.path(), dest.path()).is_empty());
+        assert!(stale_skills(src.path(), dest.path()).unwrap().is_empty());
     }
 }

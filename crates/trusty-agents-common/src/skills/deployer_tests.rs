@@ -49,7 +49,7 @@ fn deploy_new_skill() {
     let doctor = fs::read_to_string(tgt.path().join("tm-doctor").join("SKILL.md")).unwrap();
     assert!(doctor.contains("Diagnostic skill."));
 
-    let manifest = SkillManifest::load(tgt.path());
+    let manifest = SkillManifest::load(tgt.path()).unwrap();
     assert!(manifest.is_managed("tm-doctor"));
 }
 
@@ -421,7 +421,9 @@ fn deploy_blocks_while_the_skill_ledger_lock_is_held() {
         .expect("deploy must complete once the lock is released");
     assert_eq!(stats.deployed.len(), 2);
     assert!(
-        SkillManifest::load(tgt.path()).is_managed("tm-doctor"),
+        SkillManifest::load(tgt.path())
+            .unwrap()
+            .is_managed("tm-doctor"),
         "the released deploy must have recorded its entries"
     );
 }
@@ -445,7 +447,7 @@ fn a_racing_writer_freezes_nothing_on_either_side() {
 
     // A first, uncontended deploy. This is the `base` an in-flight deploy loads.
     deploy_skills(src.path(), tgt.path()).unwrap();
-    let base = SkillManifest::load(tgt.path());
+    let base = SkillManifest::load(tgt.path()).unwrap();
 
     // A writer that does NOT take the ledger lock — an older installed `tm`
     // during a rollout — publishes its own entry after our base was loaded.
@@ -496,7 +498,7 @@ fn a_racing_writer_freezes_nothing_on_either_side() {
 
     // Nothing is frozen on the RACER's side either: a blind save would have
     // dropped its entry, leaving its file untracked and skipped from then on.
-    let final_manifest = SkillManifest::load(tgt.path());
+    let final_manifest = SkillManifest::load(tgt.path()).unwrap();
     assert!(
         final_manifest.is_managed("racing-writer-skill"),
         "the racing writer's entry must survive, or ITS file freezes instead"
@@ -532,7 +534,7 @@ fn deploy_records_files_written_before_a_mid_loop_failure() {
     let written = tgt.path().join("aaa-skill").join("SKILL.md");
     assert!(written.exists(), "aaa-skill was written before the failure");
     // ...and the ledger records it, so it is not orphaned.
-    let manifest = SkillManifest::load(tgt.path());
+    let manifest = SkillManifest::load(tgt.path()).unwrap();
     assert!(
         manifest.is_managed("aaa-skill"),
         "a file written before the failure must still be recorded"
@@ -611,7 +613,7 @@ fn deploy_directory_skill_records_every_file_in_the_manifest() {
 
     deploy_skills(src.path(), tgt.path()).unwrap();
 
-    let manifest = SkillManifest::load(tgt.path());
+    let manifest = SkillManifest::load(tgt.path()).unwrap();
     for key in [
         "duetto-design-system",
         "duetto-design-system/metadata.json",
@@ -663,7 +665,7 @@ fn deploy_flat_skill_still_works_alongside_a_directory_skill() {
             .join("cli.md")
             .is_file()
     );
-    let manifest = SkillManifest::load(tgt.path());
+    let manifest = SkillManifest::load(tgt.path()).unwrap();
     assert!(manifest.is_managed("tm-doctor/references/cli.md"));
 }
 

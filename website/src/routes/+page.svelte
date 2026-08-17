@@ -86,7 +86,13 @@
 	</p>
 	<div class="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
 		{#each FLAGSHIPS as flagship (flagship.name)}
-			<article class="card flex flex-col">
+			<!-- `min-w-0`: same grid-item rule as the install cards below — a grid
+			     item's automatic minimum size is its content's min-content width.
+			     The what's-new strip carries changelog prose whose min-content ran
+			     to 367px, widening the card to 417px inside a 343px column and
+			     scrolling the page sideways at 375px. #5200 surfaced this once the
+			     suite actually ran; related to #5255, which named the 320px case. -->
+			<article class="card flex min-w-0 flex-col">
 				<p class="eyebrow">{flagship.unit}</p>
 				<h3 class="mt-2 break-words font-display text-xl font-semibold">
 					<a

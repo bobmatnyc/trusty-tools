@@ -51,6 +51,19 @@
 //! back when the registry has nothing, which is the from-disk reconstruction
 //! ADR-0023 point 4 requires of an ownership record.
 //!
+//! # Two triggers, because one was not enough (#4311 follow-up)
+//!
+//! [`spawn_on_stop`] was the only caller of [`reap_worktree`], so the reap ran
+//! exactly once per agent and only when a `SubagentStop` actually arrived. Every
+//! other exit route — the harness session exiting or restarting under an
+//! in-flight agent, an interrupt, a `tm hook` POST that lost its 2 s budget —
+//! reached it never, and `prune_orphaned_worktrees` skips a `SentinelOwner::Agent`
+//! tree by design, so nothing else could reclaim it either. [`spawn_on_session_end`]
+//! is the second trigger: a session's end is proof its agents exited, and it
+//! runs the same gates against the same store.
+//!
+//! Stated gap: an agent interrupted inside a session that keeps running still
+//! reaches neither trigger, and its tree waits for that session to end.
 //! Test: the `#[cfg(test)]` suite in `agent_worktree_reap_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -58,12 +71,13 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::core::agent::DelegationId;
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::worktree_liveness::process_holding;
 use crate::session_manager::worktree_ownership::{
-    SentinelOwner, find_agent_worktree, read_sentinel_owner,
+    AgentWorktreeOwner, SentinelOwner, find_agent_worktree, read_sentinel_owner,
 };
 use crate::session_manager::worktree_safety::{DirtyWorktreePolicy, dirt_blocks_removal};
 
@@ -91,6 +105,25 @@ impl ReapOutcome {
             _ => None,
         }
     }
+}
+
+/// What one `SessionEnd` sweep did, split by [`ReapOutcome`].
+///
+/// Why `already_gone` is its own counter: the summary used to fold it into
+/// "reclaimed" via a `_ =>` arm, which reported a sweep that removed nothing as
+/// having reclaimed every candidate. `AlreadyGone` means the harness got there
+/// first, so counting it as work this sweep did overstates the only number an
+/// operator reads to judge whether the reap is doing anything.
+/// Test: `session_end_keeps_a_worktree_that_holds_unsaved_work`,
+/// `session_end_spares_another_sessions_agent`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SweepSummary {
+    /// `git worktree remove --force` succeeded.
+    pub removed: usize,
+    /// Nothing was at the path when the sweep reached it.
+    pub already_gone: usize,
+    /// A gate refused, and the directory is still there.
+    pub kept: usize,
 }
 
 /// Is `path` a leaf of a harness agent-worktree store — `…/.claude/worktrees/<name>`?
@@ -316,6 +349,23 @@ async fn paths_in_use(state: &Arc<DaemonState>, self_agent_id: &str) -> Vec<Path
     out
 }
 
+/// The harness agent-worktree store a hook payload's `cwd` names, or `None`.
+///
+/// Why a named function rather than three lines inlined twice: it is the ONLY
+/// thing standing between a payload that carries no `cwd` and a sweep over a
+/// store resolved from somewhere else. Both callers must refuse identically, and
+/// a test can assert the refusal directly instead of inferring it from a
+/// directory that happens to survive.
+/// What: `cwd` → [`harness_root_for`](crate::core::harness_root::harness_root_for)
+/// → `<root>/.claude/worktrees`, the flat store ADR-0036 defines. `None` for a
+/// payload with no `cwd`, a non-string `cwd`, or a `cwd` outside any repository.
+/// Test: `session_end_without_a_cwd_resolves_no_store`.
+fn store_for(payload: &Value) -> Option<PathBuf> {
+    let cwd = payload.get("cwd").and_then(Value::as_str)?;
+    let root = crate::core::harness_root::harness_root_for(Path::new(cwd))?;
+    Some(root.join(".claude").join("worktrees"))
+}
+
 /// Recover an agent's worktree path from on-disk sentinels alone (#4311).
 ///
 /// Why: the delegation map is a `DashMap` built empty at every daemon boot with
@@ -337,9 +387,7 @@ async fn paths_in_use(state: &Arc<DaemonState>, self_agent_id: &str) -> Vec<Path
 /// Test: `stop_reaps_a_worktree_the_registry_lost_to_a_restart`,
 /// `stop_ignores_a_sentinel_naming_a_different_agent`.
 fn rebuild_from_disk(payload: &Value, agent_id: &str) -> Option<PathBuf> {
-    let cwd = payload.get("cwd").and_then(Value::as_str)?;
-    let root = crate::core::harness_root::harness_root_for(Path::new(cwd))?;
-    let found = find_agent_worktree(&root.join(".claude").join("worktrees"), agent_id)?;
+    let found = find_agent_worktree(&store_for(payload)?, agent_id)?;
     tracing::info!(
         agent_id,
         worktree = %found.display(),
@@ -366,6 +414,14 @@ fn rebuild_from_disk(payload: &Value, agent_id: &str) -> Option<PathBuf> {
 /// is the one mistake this module must never make. Such a record keeps its
 /// `worktree_path`, which is what makes the tree visible to `tm doctor` and the
 /// reconcile report instead of invisible as it is today. Stated gap.
+/// # The returned handle
+///
+/// `None` means no reap was even attempted — the event was not a stop, the
+/// payload named no agent, or neither the registry nor the disk knew a worktree
+/// for it. `Some` is the detached task, and awaiting it yields the one
+/// [`ReapOutcome`]. Production callers ignore it; a test awaits it, which is
+/// what lets a negative assertion run AFTER the decision instead of racing a
+/// fixed sleep against it.
 /// Test: `spawn_on_stop_ignores_a_non_stop_event`,
 /// `spawn_on_stop_ignores_a_payload_without_an_agent_id`.
 pub fn spawn_on_stop(
@@ -373,58 +429,207 @@ pub fn spawn_on_stop(
     session: SessionId,
     event: HookEvent,
     payload: &Value,
-) {
+) -> Option<tokio::task::JoinHandle<ReapOutcome>> {
     if !matches!(
         event,
         HookEvent::SubagentStop | HookEvent::SubagentStopFailure
     ) {
-        return;
+        return None;
     }
-    let Some(agent_id) = payload
+    let agent_id = payload
         .get("agent_id")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
-    else {
-        return;
-    };
+        .map(str::to_string)?;
     let registered = state
         .delegations_for(session)
         .into_iter()
         .find(|d| d.agent_id.as_deref() == Some(agent_id.as_str()))
         .and_then(|d| d.worktree_path.clone().map(|p| (Some(d.id), p)));
-    let Some((id, path)) =
-        registered.or_else(|| rebuild_from_disk(payload, &agent_id).map(|p| (None, p)))
-    else {
-        return;
-    };
+    let (id, path) =
+        registered.or_else(|| rebuild_from_disk(payload, &agent_id).map(|p| (None, p)))?;
 
     let state = Arc::clone(state);
-    tokio::spawn(async move {
-        let in_use = paths_in_use(&state, &agent_id).await;
-        let removal_path = path.clone();
-        let reap_agent_id = agent_id.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
-            reap_worktree(&removal_path, &reap_agent_id, &in_use)
-        })
-        .await
-        .unwrap_or_else(|e| ReapOutcome::Refused(format!("reap task panicked: {e}")));
-        match &outcome {
-            ReapOutcome::Removed | ReapOutcome::AlreadyGone => {
-                // `None` when the path came from disk rather than the registry
-                // — there is no in-memory record left to clear.
-                if let Some(id) = id {
-                    state.mutate_delegation(id, |d| d.worktree_path = None);
-                }
-            }
-            ReapOutcome::Refused(reason) => {
-                tracing::info!(
-                    path = %path.display(),
-                    "agent-worktree reap: keeping this worktree — {reason} (#4311)"
-                );
+    Some(tokio::spawn(async move {
+        reap_and_record(&state, &agent_id, path, id).await
+    }))
+}
+
+/// Run the reap for one agent's worktree and record what happened (#4311).
+///
+/// Why a shared body: [`spawn_on_stop`] and [`spawn_on_session_end`] are two
+/// TRIGGERS for one decision. Two copies of the gate call, the registry
+/// clear and the refusal log would eventually disagree about what a reap does,
+/// and the trigger is the only thing that legitimately differs between them.
+/// What: resolves this agent's `in_use` set, runs [`reap_worktree`] on a
+/// blocking thread (it shells out to git and `lsof`), clears the delegation's
+/// `worktree_path` on a removal so nothing reads a path that no longer exists,
+/// and reports a refusal.
+///
+/// `id` is `None` when the path came from disk rather than the registry — there
+/// is no in-memory record to clear.
+///
+/// The refusal is `warn!` and not `info!` (#4311 follow-up): a refusal is the
+/// ONLY notice anyone gets that a tree was kept, and nothing retries it. On this
+/// machine 7 worktrees were refused as holding unsaved work, logged once at
+/// `info!`, and left on disk indefinitely with nothing surfacing them. A
+/// refusal is a tree that now needs a human, so it is logged as one.
+/// Test: `session_end_keeps_a_worktree_that_holds_unsaved_work`,
+/// `reap_removes_a_clean_pushed_worktree`.
+async fn reap_and_record(
+    state: &Arc<DaemonState>,
+    agent_id: &str,
+    path: PathBuf,
+    id: Option<DelegationId>,
+) -> ReapOutcome {
+    let in_use = paths_in_use(state, agent_id).await;
+    let removal_path = path.clone();
+    let reap_agent_id = agent_id.to_string();
+    let outcome =
+        tokio::task::spawn_blocking(move || reap_worktree(&removal_path, &reap_agent_id, &in_use))
+            .await
+            .unwrap_or_else(|e| ReapOutcome::Refused(format!("reap task panicked: {e}")));
+    match &outcome {
+        ReapOutcome::Removed | ReapOutcome::AlreadyGone => {
+            if let Some(id) = id {
+                state.mutate_delegation(id, |d| d.worktree_path = None);
             }
         }
-    });
+        ReapOutcome::Refused(reason) => {
+            tracing::warn!(
+                agent_id,
+                path = %path.display(),
+                "agent-worktree reap: keeping this worktree — {reason} (#4311)"
+            );
+        }
+    }
+    outcome
+}
+
+/// Every worktree in `store` whose sentinel names `session` as its parent.
+///
+/// Why the sentinel and not the delegation registry: the registry is a `DashMap`
+/// built empty at every boot, so after a restart it knows none of the trees this
+/// sweep exists to reclaim. The sentinel is the durable record ADR-0023 point 4
+/// requires, and `parent_session_id` is the field DOC-66 §5 defines as an agent
+/// worktree's parentage.
+/// What: reads each immediate child of `store` and keeps those whose sentinel is
+/// [`SentinelOwner::Agent`] with a matching `parent_session_id`. An unreadable
+/// store yields nothing, which reclaims nothing.
+/// Test: `session_end_spares_another_sessions_agent`,
+/// `session_end_reaps_every_agent_of_the_ending_session`.
+fn agent_worktrees_of(store: &Path, session: SessionId) -> Vec<(PathBuf, AgentWorktreeOwner)> {
+    let Ok(entries) = std::fs::read_dir(store) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            match read_sentinel_owner(&path) {
+                SentinelOwner::Agent(owner, _) if owner.parent_session_id == session => {
+                    Some((path, owner))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Reap the worktrees of every agent the session that just ended dispatched
+/// (#4311 follow-up).
+///
+/// Why: [`spawn_on_stop`] was the reap's ONLY trigger, and it fires only on a
+/// `SubagentStop` the daemon actually receives. An agent that ends any other way
+/// — the harness session it runs inside exits or restarts under it, a user
+/// interrupt, a `tm hook` POST that loses its 2 s budget — emits no stop, so the
+/// reap never ran and nothing recorded that it had not. `prune_orphaned_worktrees`
+/// skips `SentinelOwner::Agent` by design, so nothing else would ever reclaim
+/// the tree: the leak was permanent and, for this class, entirely silent. In
+/// this machine's daemon log, 54 registered agent worktrees produced 30
+/// removals; 17 of the 24 survivors carry no reap decision of any kind.
+///
+/// A leaked worktree is not only disk. The harness reassigns a stale worktree to
+/// a later agent along with the branch the previous one left checked out, which
+/// is how an unrelated commit reached an open PR's branch on 2026-08-17. That
+/// makes prompt reclamation a correctness property, not housekeeping.
+/// What: on `SessionEnd`, resolves the harness worktree store with [`store_for`]
+/// — the same resolution [`rebuild_from_disk`] uses — then runs the UNCHANGED
+/// [`reap_worktree`] gate stack against every directory whose sentinel names
+/// this session as its parent, and reports the split as a [`SweepSummary`].
+///
+/// # Why a `SessionEnd` is proof its agents exited
+///
+/// A subagent runs inside its parent Claude Code session's process and cannot
+/// outlive it. `SessionEnd` is Claude Code self-reporting that this conversation
+/// ended — the same signal #4337 already treats as unambiguous when it clears a
+/// stale `claude_session_id`. That is the strength of proof `SubagentStop`
+/// carries, applied to every child at once, so no gate is weakened to use it: a
+/// candidate still has to pass the sentinel, in-use, git-registry, dirt and
+/// process-liveness gates, and a tree holding unsaved work is still kept.
+///
+/// # The returned handle
+///
+/// `None` means no sweep ran: the event was not a `SessionEnd`, the payload
+/// resolved no store ([`store_for`]), or no directory in that store names this
+/// session. `Some` is the detached task, and awaiting it yields the
+/// [`SweepSummary`] after EVERY candidate has been decided.
+///
+/// That await is the completion signal the tests use. A negative test — "this
+/// tree must survive" — sampled the filesystem after a fixed 750 ms, and one
+/// `lsof` alone costs 0.56-0.67 s on an idle machine before the dirt gate and
+/// the removal even run. So the assertion fired while a real removal was still
+/// in flight and passed against a gate stack that had been deleted. Awaiting the
+/// handle removes the window rather than widening it.
+/// Test: `session_end_reaps_a_worktree_whose_agent_never_stopped`,
+/// `session_end_reaps_every_agent_of_the_ending_session`,
+/// `session_end_keeps_a_worktree_that_holds_unsaved_work`,
+/// `session_end_spares_another_sessions_agent`,
+/// `session_end_without_a_cwd_reaps_nothing`,
+/// `session_end_without_a_cwd_resolves_no_store`.
+pub fn spawn_on_session_end(
+    state: &Arc<DaemonState>,
+    session: SessionId,
+    event: HookEvent,
+    payload: &Value,
+) -> Option<tokio::task::JoinHandle<SweepSummary>> {
+    if event != HookEvent::SessionEnd {
+        return None;
+    }
+    let candidates = agent_worktrees_of(&store_for(payload)?, session);
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let state = Arc::clone(state);
+    Some(tokio::spawn(async move {
+        let mut summary = SweepSummary::default();
+        for (path, owner) in candidates {
+            // Each candidate resolves its OWN `in_use` set, which excludes its
+            // own delegation. These agents never reported a stop, so their
+            // records are still live and a set computed once would name every
+            // candidate as in use — the sweep would then reclaim nothing.
+            match reap_and_record(&state, &owner.agent_id, path, Some(owner.delegation_id)).await {
+                ReapOutcome::Removed => summary.removed += 1,
+                ReapOutcome::AlreadyGone => summary.already_gone += 1,
+                ReapOutcome::Refused(_) => summary.kept += 1,
+            }
+        }
+        let SweepSummary {
+            removed,
+            already_gone,
+            kept,
+        } = summary;
+        tracing::info!(
+            session = %session.0,
+            removed,
+            already_gone,
+            kept,
+            "agent-worktree reap: this session ended — removed {removed} of its agents' \
+             worktrees, found {already_gone} already gone and kept {kept} (#4311)"
+        );
+        summary
+    }))
 }
 
 #[cfg(test)]

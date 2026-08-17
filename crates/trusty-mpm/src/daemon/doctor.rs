@@ -109,7 +109,9 @@ use doctor_gh_account::check_gh_account;
 // Split out to keep this file under the 500-SLOC production cap (issue #2940
 // — the tm hook contamination / foreign claude-mpm hook conflict probe).
 #[path = "doctor_hooks_hygiene.rs"]
-mod doctor_hooks_hygiene;
+// #5274/ADR-0037: `pub(crate)` so the launch path can reuse this probe's own
+// file enumeration and parsing instead of growing a second detector.
+pub(crate) mod doctor_hooks_hygiene;
 use doctor_hooks_hygiene::check_hooks_hygiene;
 
 // Split out to keep this file under the 500-SLOC production cap (issue #2997 —

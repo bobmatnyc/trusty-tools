@@ -79,9 +79,39 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use thiserror::Error;
+
 use crate::agents::deployer::is_agent_file;
 use crate::agents::manifest::{AgentManifest, ManifestLoad};
 use crate::agents::metadata::agent_metadata_from_str;
+
+/// Why [`audit_agent_tier`] could not answer for a directory.
+///
+/// Why (#5626, [ADR-0045]): the scan's empty vec is what `tm doctor` renders as
+/// `no tm-owned agent files outside the canonical tier … (scanned: <dir>)` — a
+/// positive claim about a directory. `let Ok(entries) = read_dir(dir) else {
+/// return Vec::new() }` produced that same claim for a directory the process
+/// could not enumerate, so the probe asserted a scan it never performed. A
+/// separate value is what lets the consumer say "undetermined" instead.
+/// What: one variant. The directory being ABSENT is not an error — an
+/// unprovisioned tier holds nothing, which is a real answer — so only a
+/// non-`NotFound` `read_dir` failure lands here.
+/// Test: `audit_unscannable_dir_is_an_error`, `audit_missing_dir_is_empty`.
+///
+/// [ADR-0045]: https://github.com/bobmatnyc/trusty-tools/blob/main/docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md
+#[derive(Debug, Error)]
+pub enum TierAuditError {
+    /// The tier directory exists (or its state is unknown) but could not be
+    /// enumerated.
+    #[error("cannot scan agent tier {path}: {source}")]
+    Unscannable {
+        /// The directory the scan was asked for.
+        path: PathBuf,
+        /// The underlying `read_dir` failure.
+        #[source]
+        source: std::io::Error,
+    },
+}
 
 /// What this directory's ownership ledger says about one file.
 ///
@@ -285,28 +315,48 @@ pub fn classify_tier_resident(
 /// this directory's ownership manifest for [`ownership_of`], classifies with
 /// [`classify_tier_resident`], and returns the
 /// non-[`TierResidentClass::Custom`] results sorted by name for stable output.
-/// A missing/unreadable `dir` returns an empty vec. A CORRUPT manifest degrades
-/// to [`TierOwnership::Untracked`] for every file rather than failing: shadowing
-/// is established by the roster alone, so the load-bearing signal survives.
-/// Note the asymmetry that makes that safe — an unreadable ledger can only
-/// LOSE the user-owned exemption, so #4448 must re-read the ledger under its
-/// own write lock before moving anything; this read-only probe does not hold
-/// one. Never call this on the canonical deploy directory — every file there
-/// would classify as tm-owned, correctly and uselessly.
+/// An ABSENT `dir` returns an empty vec — an unprovisioned tier holds nothing.
+/// A `dir` that exists but cannot be enumerated returns
+/// [`TierAuditError::Unscannable`] (#5626): the empty vec is what the consumer
+/// renders as "scanned, found nothing", and a scan that failed has established
+/// no such thing.
+///
+/// A CORRUPT or unreadable manifest degrades to [`TierOwnership::Untracked`] for
+/// every file rather than failing: shadowing is established by the roster alone,
+/// so the load-bearing signal survives. Note the asymmetry that makes that safe
+/// — an unreadable ledger can only LOSE the user-owned exemption, so the result
+/// can only over-report, never under-report; #4448 must re-read the ledger under
+/// its own write lock before moving anything, and this read-only probe does not
+/// hold one. Never call this on the canonical deploy directory — every file
+/// there would classify as tm-owned, correctly and uselessly.
 /// Test: `audit_reports_a_shadowing_stub`, `audit_ignores_a_custom_agent`,
 /// `audit_ignores_a_user_owned_entry_on_a_bundled_name`,
 /// `audit_reports_a_stranded_framework_entry`, `audit_missing_dir_is_empty`,
-/// `audit_tolerates_a_corrupt_manifest`,
+/// `audit_unscannable_dir_is_an_error`, `audit_tolerates_a_corrupt_manifest`,
 /// `audit_flags_a_renamed_file_that_declares_a_bundled_name`,
 /// `audit_ignores_a_bundled_filename_that_declares_a_custom_name`.
-pub fn audit_agent_tier(dir: &Path, bundled: &BTreeSet<String>) -> Vec<MisplacedAgent> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+pub fn audit_agent_tier(
+    dir: &Path,
+    bundled: &BTreeSet<String>,
+) -> Result<Vec<MisplacedAgent>, TierAuditError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // #5626: an absent tier is a real answer; anything else is not.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(TierAuditError::Unscannable {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
     };
     let manifest = match AgentManifest::load_checked(dir) {
         ManifestLoad::Ok(m) => m,
-        // Corrupt ledger: keep the roster-based half of the verdict rather than
-        // reporting nothing. See the doc comment.
+        // intentional fail-open (ADR-0045 §4): an undetermined ledger can only
+        // widen this read-only report, never narrow it — it loses the user-owned
+        // exemption and nothing else. Refusing instead would drop the
+        // roster-based shadowing verdict, which needs no ledger at all. The
+        // mover (#4448) re-reads under its own lock and refuses there.
         ManifestLoad::Corrupt(_) => AgentManifest::default(),
     };
 
@@ -328,7 +378,7 @@ pub fn audit_agent_tier(dir: &Path, bundled: &BTreeSet<String>) -> Vec<Misplaced
         })
         .collect();
     found.sort_by(|a, b| a.name.cmp(&b.name));
-    found
+    Ok(found)
 }
 
 #[cfg(test)]

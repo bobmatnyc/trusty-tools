@@ -312,7 +312,11 @@ fn retire_orphans_locked(
     dest: &Path,
     live: &BTreeSet<String>,
 ) -> ManifestResult<Vec<RetiredSkill>> {
-    let mut manifest = SkillManifest::load(dest);
+    // #5626: retirement deletes files and drops ledger entries. On the empty
+    // default an unreadable ledger yields no candidates, which is harmless —
+    // but it also publishes a merged ledger built from that default, so the
+    // refusal is the correct answer rather than a lucky one.
+    let mut manifest = SkillManifest::load(dest)?;
     let base = manifest.clone();
 
     // #5224: candidates are STEMS, never raw ledger keys. A key like

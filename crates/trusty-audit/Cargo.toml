@@ -36,6 +36,11 @@ path = "src/main.rs"
 [dependencies]
 # Binary/CLI error handling (CLAUDE.md: anyhow for binaries, thiserror for libs).
 anyhow = { workspace = true }
+# #5825: expanding the `~` in the inbound package's default output directory
+# (`~/duetto/audit`) without shelling out. The workspace's existing home-dir
+# resolver — `trusty-common` reaches for the same crate in six places — so this
+# is the shared answer rather than a second one.
+dirs = { workspace = true }
 # Argument parsing. The parser lives in the LIBRARY (`cli.rs`) so every CLI
 # invocation is unit-testable without spawning the binary.
 clap = { workspace = true }
@@ -88,3 +93,8 @@ walkdir = { workspace = true }
 [dev-dependencies]
 # Real directories for the working-directory creation tests.
 tempfile = { workspace = true }
+# #5824: `tests/cli_end_to_end.rs` opens the return package the chain wrote and
+# reads its generated members, because what the recipient receives is the zip
+# rather than the console output that produced it. Already a dependency above,
+# so this costs no extra compilation.
+zip = { workspace = true }

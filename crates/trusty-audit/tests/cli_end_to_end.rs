@@ -164,9 +164,99 @@ impl Engagement {
         self.taudit(&["run"])
     }
 
+    /// The one-shot chain: install, materialize, collect, package (#5824).
+    fn audit(&self) -> (String, String, Option<i32>) {
+        self.taudit(&["audit"])
+    }
+
     fn selection(&self) -> String {
         std::fs::read_to_string(self.work.join("state/selected-repos.toml")).unwrap_or_default()
     }
+
+    /// Register repository targets the way `taudit add repo` would.
+    ///
+    /// Written directly rather than driven through `add`, because `add`
+    /// validates each target with `gh repo view` and the stub `gh` answers only
+    /// `repo clone`. What this test needs from the registry is that the
+    /// materialize phase READS it, which is the same whichever writer filled it.
+    fn register_repos(&self, repos: &[&str]) {
+        let mut document = format!("count = {}\n", repos.len());
+        for name_with_owner in repos {
+            document.push_str(&format!(
+                "\n[[targets]]\nkind = \"repo\"\nname_with_owner = \"{name_with_owner}\"\n"
+            ));
+        }
+        std::fs::write(self.work.join("state/audit-targets.toml"), document).expect("registry");
+    }
+
+    /// One generated member of the return package, as the recipient reads it.
+    fn package_entry(&self, entry: &str) -> String {
+        let path = self.work.join("audit-return-package.zip");
+        let file =
+            std::fs::File::open(&path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+        let mut archive = zip::ZipArchive::new(file).expect("a readable zip");
+        let mut member = archive.by_name(entry).expect("entry present");
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut member, &mut text).expect("read entry");
+        text
+    }
+}
+
+/// The defect #5852's review found: a registered repository that never cloned
+/// vanished from the engagement and the command reported success.
+///
+/// The clone failure is recorded only on `CloneReport::gaps`. `record_selection`
+/// keeps unusable checkouts out of the selection, so the sweep never sees the
+/// repository, `RunStatus` is `AllSucceeded`, and `package::exclusions` — which
+/// derives entirely from the sweep's failures — never learns it existed. Before
+/// the fix this exits 0 with a package whose README reads "Every repository the
+/// sweep was asked to audit is in this package."
+///
+/// Both halves matter and neither substitutes for the other: the exit status is
+/// what stops `taudit audit && send-it`, and the package's own README and
+/// metadata are what a third party opening the zip has instead of this console.
+#[test]
+fn a_registered_repository_that_never_cloned_is_named_in_the_package() {
+    let e = Engagement::new();
+    e.stub_gh(Some("gone"));
+    e.install_stubs(&Engagement::manifest_writer(None));
+    e.register_repos(&["acme/api", "acme/gone"]);
+
+    let (stdout, stderr, code) = e.audit();
+
+    // 2 is EXIT_INCOMPLETE, and pinning it proves WHICH arm of
+    // `Outcome::exit_code` fired. The sweep audited every repository it was
+    // given, so the partial-sweep arm (1) cannot have run: the only thing left
+    // to make this non-zero is the materialize-phase gap.
+    assert_eq!(
+        code,
+        Some(2),
+        "a registered repository that never cloned must not exit zero\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stdout.contains("Audited 1 repository"), "{stdout}");
+
+    // Each section states the fact it owns, and no section repeats another's
+    // sentence: the acquisition failed it, and the package does not include it.
+    assert!(stdout.contains("Gap: acme/gone"), "{stdout}");
+    assert!(stdout.contains("Not included: acme/gone"), "{stdout}");
+    assert!(
+        !stdout.contains("Not audited: acme/gone"),
+        "the chain roll-up repeated the acquisition section verbatim:\n{stdout}"
+    );
+
+    let readme = e.package_entry("README.md");
+    assert!(
+        readme.contains("acme/gone"),
+        "the package README must name the repository it does not cover:\n{readme}"
+    );
+    assert!(readme.contains("Not in this package"), "{readme}");
+
+    let metadata = e.package_entry("package.toml");
+    assert!(
+        metadata.contains("acme/gone"),
+        "package.toml must name the repository it does not cover:\n{metadata}"
+    );
 }
 
 /// #5556 closure conditions 1 and 2: one CLI-driven sequence selects SEVERAL

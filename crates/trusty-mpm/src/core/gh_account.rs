@@ -39,8 +39,10 @@
 //! `git_identity::resolve_for_config_enforced`, the two real production call
 //! sites this enforcement previously never reached.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::core::trusty_tools_config::GithubConfig;
 
 /// Bound for the `gh auth status` probe `tm doctor` runs (#5032).
 ///
@@ -388,19 +390,25 @@ pub use enforce::{
     ensure_gh_account_in_dir,
 };
 
-// ── #3025: spawn-time GH_TOKEN minting for a pinned `gh_account` ───────────
+// ── Spawn-time gh identity selection for a project (#3025, #5851) ──────────
 //
 // Distinct from the #2081 mechanism above: `ensure_gh_account_for_project`
 // requires an already-isolated `GH_CONFIG_DIR` and only ever corrects the
-// "active" pointer INSIDE it. The functions below need no such isolation —
-// `gh auth token -u <account>` reads a specific already-logged-in account's
-// credential directly, with no "active account" mutation at all, so it is
-// safe to call unconditionally at every session spawn/relaunch and inject
-// the result as `GH_TOKEN`/`GH_USER` into that ONE session's environment,
+// "active" pointer INSIDE it. The functions below run at every session
+// spawn/relaunch and inject overrides into that ONE session's environment,
 // leaving every other concurrently-running session's `gh` identity
 // untouched. This also fulfils the `resolve_gh_account_env` reference in
 // [`crate::core::trusty_tools_config::ProjectConfig::gh_user`]'s doc
 // comment, left dangling since #2081 landed.
+//
+// #5851 changed WHICH mechanism selects the account. `gh auth token -u
+// <account>` was the original selector, but on a keyring-backed host that
+// flag does not discriminate: `-u bobmatnyc` and `-u bob-duetto` return the
+// identical value, so the credential a session got followed the global
+// active account rather than the project's. A project that configures
+// `github.config_dir` is now pinned with `GH_CONFIG_DIR` instead, which does
+// discriminate; `gh_token_via_cli` remains only for a project that has no
+// `config_dir` to pin to.
 
 /// Env var this module injects for the resolved `GH_TOKEN` (#3025).
 pub const GH_TOKEN_ENV_VAR: &str = "GH_TOKEN";
@@ -410,12 +418,17 @@ pub const GH_TOKEN_ENV_VAR: &str = "GH_TOKEN";
 pub const GH_USER_ENV_VAR: &str = "GH_USER";
 
 /// Mint a `GH_TOKEN` for `account` via `gh auth token -u <account>` — the
-/// production resolver [`resolve_gh_account_env`] uses (#3025).
+/// FALLBACK selector, used only for a project with no `github.config_dir`
+/// (#3025, demoted by #5851).
 ///
-/// Why: `gh auth token -u <login>` reads an already-logged-in account's
-/// credential straight from the keyring/`hosts.yml` with NO "active
-/// account" side effect, unlike `gh auth switch` — safe to call from
-/// concurrently-spawning sessions pinned to different accounts.
+/// Why: `gh auth token -u <login>` has no "active account" side effect,
+/// unlike `gh auth switch`, so it is safe to call from concurrently-spawning
+/// sessions. It is nonetheless a WEAK selector: measured on gh 2.89.0 against
+/// a keyring-backed credential store, `-u bobmatnyc` and `-u bob-duetto`
+/// return the identical value, so the token follows the global active
+/// account rather than the one named (#5851). A project that pins
+/// `github.config_dir` never reaches this function; one that does not still
+/// gets the pre-#5851 behaviour rather than nothing.
 /// What: bounded by [`GH_ENFORCE_TIMEOUT`]; returns the trimmed stdout token
 /// on a zero exit with non-empty output, else an `Err` describing why (`gh`
 /// missing, account not logged in, empty output, or a timeout) — never
@@ -424,6 +437,8 @@ pub const GH_USER_ENV_VAR: &str = "GH_USER";
 /// fake-resolver tests (no live `gh` needed); this thin subprocess wrapper
 /// has no pure branch of its own left to unit test.
 pub fn gh_token_via_cli(account: &str) -> Result<String, String> {
+    // #5851: `-u` does not discriminate on a keyring-backed machine — this is
+    // the fallback for a project with no `config_dir`, not the selector.
     let owned = account.to_string();
     run_bounded(GH_ENFORCE_TIMEOUT, move || {
         // #5475: the non-zero and empty-output arms are the entry point's
@@ -443,40 +458,172 @@ pub fn gh_token_via_cli(account: &str) -> Result<String, String> {
     })
 }
 
-/// Resolve `GH_TOKEN`/`GH_USER` spawn-env overrides for a pinned
-/// `gh_account`, given an injectable token resolver (#3025) — the pure,
+/// The spawn-env overrides resolved for one project, plus any diagnostic the
+/// caller must surface (#5851).
+///
+/// Why: a project can pin a `GH_CONFIG_DIR` that holds no credential. That is
+/// a real misconfiguration, but suppressing the override because of it would
+/// hand the session back to the machine-global `gh` account — the exact
+/// wrong-identity outcome #5851 fixes. Carrying the vars and the diagnostic in
+/// one value lets the caller warn loudly while the session still fails CLOSED
+/// (`gh` exits 4 inside an empty config dir) rather than open.
+/// What: `vars` is the ordered `(name, value)` list to inject; `warning` is
+/// `Some(msg)` only when the resolved selection is usable but suspect. An
+/// `Err` from [`resolve_gh_account_env_with`] is the separate "nothing could
+/// be resolved" outcome — it carries no vars at all.
+/// Test: `config_dir_without_credential_still_pins_and_warns`,
+/// `config_dir_with_credential_has_no_warning`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GhSpawnEnv {
+    /// Ordered `(name, value)` overrides to inject into the spawned session.
+    pub vars: Vec<(String, String)>,
+    /// A non-fatal diagnostic the caller logs at warn level; `vars` still applies.
+    pub warning: Option<String>,
+}
+
+/// Whether `dir` carries a github.com credential of its own (#5851).
+///
+/// Why: `GH_CONFIG_DIR` pointed at a directory with no `hosts.yml` makes every
+/// authenticated `gh` call exit 4 ("To get started with GitHub CLI, please run:
+/// gh auth login"), measured against an empty scratch dir on gh 2.89.0. Detecting
+/// that at spawn time turns a mid-session auth failure into one actionable
+/// warning naming the directory.
+/// What: reads `<dir>/hosts.yml` and reuses
+/// [`parse_gh_account_status_from_hosts_yml`]; false for a missing/unreadable/
+/// unparseable file or one naming no github.com account. This proves the dir
+/// NAMES an account, not that the credential resolves to it — that stronger
+/// assertion is #5849's.
+/// Test: `config_dir_without_credential_still_pins_and_warns`,
+/// `config_dir_with_credential_has_no_warning`.
+fn config_dir_has_credential(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("hosts.yml"))
+        .ok()
+        .and_then(|text| parse_gh_account_status_from_hosts_yml(&text))
+        .is_some_and(|status| !status.logged_in.is_empty())
+}
+
+/// Build the scoped-`GH_CONFIG_DIR` overrides for a project pinned to `dir`.
+///
+/// Why: `GH_CONFIG_DIR` is the one selector that actually discriminates
+/// between logged-in accounts (#5851), and the `config_dir > token_env >
+/// account` precedence that turns a binding into env vars is already written
+/// once in [`crate::core::gh_identity::resolve_gh_env`] — this routes through
+/// it rather than restating it.
+/// What: returns `GH_CONFIG_DIR=<dir>` (plus `GH_USER=<account>`, informational
+/// only, when an account is pinned) and NO `GH_TOKEN`: an env token outranks
+/// the scoped config in `gh`'s own resolution order, so emitting both would
+/// leave the config dir decorative. `warning` is set when `dir` holds no
+/// credential.
+/// Test: `config_dir_is_selected_over_a_minted_token`,
+/// `config_dir_without_credential_still_pins_and_warns`.
+fn scoped_config_dir_env(dir: &Path, account: Option<&str>) -> GhSpawnEnv {
+    // #5851: reuse gh_identity's precedence chain — one implementation.
+    let cfg = GithubConfig {
+        config_dir: Some(dir.to_path_buf()),
+        account: account.map(str::to_string),
+        ..GithubConfig::default()
+    };
+    match crate::core::gh_identity::resolve_gh_env(Some(&cfg)) {
+        Ok(env) => {
+            let mut vars = env.vars().to_vec();
+            if let Some(account) = account {
+                vars.push((GH_USER_ENV_VAR.to_string(), account.to_string()));
+            }
+            let warning =
+                (!config_dir_has_credential(dir)).then(|| no_credential_warning(dir, account));
+            GhSpawnEnv { vars, warning }
+        }
+        // Unreachable in practice: `resolve_gh_env` only errors on the
+        // account-ONLY case and `config_dir` is always `Some` here. Reported
+        // rather than swallowed, so it can never become a silent fail-open.
+        Err(e) => GhSpawnEnv {
+            vars: Vec::new(),
+            warning: Some(format!(
+                "cannot pin this session to gh config dir {}: {e}",
+                dir.display()
+            )),
+        },
+    }
+}
+
+/// The warning for a pinned config dir that holds no credential (#5851).
+///
+/// Why: `gh`'s own exit-4 message tells the operator to run `gh auth login`,
+/// which writes to the SHARED store and fixes nothing here. The message has to
+/// name the directory and scope the login command to it.
+/// What: one sentence of cause, one of remedy, and an explicit statement that
+/// `tm` does not fall back to the machine-global account.
+/// Test: `config_dir_without_credential_still_pins_and_warns`.
+fn no_credential_warning(dir: &Path, account: Option<&str>) -> String {
+    let dir = dir.display();
+    let who = account.unwrap_or("the pinned account");
+    format!(
+        "gh config dir {dir} holds no github.com credential ({dir}/hosts.yml is missing or \
+         names no account), so every `gh` call in this session will fail with exit 4. Run \
+         `GH_CONFIG_DIR={dir} gh auth login` to authenticate as {who} inside it. tm does not \
+         fall back to the machine-global gh account here — that fallback is the wrong-identity \
+         defect #5851 fixes."
+    )
+}
+
+/// Resolve the spawn-env overrides for a project's pinned `gh` identity, given
+/// an injectable token resolver (#3025, reworked by #5851) — the pure,
 /// hermetically testable core every call site shares.
 ///
-/// Why: separating "which account, if any" from "how a token is minted for
-/// it" lets tests exercise every outcome (unset, success, failure) with a
-/// fake `resolve_token` closure, matching this codebase's established
-/// trait-seam convention (`GitBackend`, `ManagedTmuxDriver`) for I/O that
-/// cannot run hermetically in CI.
-/// What: `gh_account` unset or blank → `None` (nothing to inject, no
-/// regression). `Some(account)` → `Some(Ok(vars))` with `GH_TOKEN` then
-/// `GH_USER` (in that order) when `resolve_token(account)` succeeds;
-/// `Some(Err(msg))` when it fails — the caller logs `msg` as a warning and
-/// proceeds WITHOUT injecting anything (issue #3025's documented failure
-/// mode: spawn must never be blocked by a resolution failure).
+/// Why: separating "which identity, if any" from "how a token is minted" lets
+/// tests exercise every outcome with a fake `resolve_token` closure, matching
+/// this codebase's trait-seam convention (`GitBackend`, `ManagedTmuxDriver`)
+/// for I/O that cannot run hermetically in CI. #5851 added the `config_dir`
+/// arm because `gh auth token -u <account>` does not select an account on a
+/// keyring-backed host, so the token arm alone let a correctly-pinned project
+/// run as whoever was globally active.
+/// What: both inputs unset or blank → `None` (nothing to inject, no
+/// regression). `config_dir` set → `Some(Ok(env))` carrying `GH_CONFIG_DIR`
+/// and NEVER `GH_TOKEN`, with `resolve_token` not called at all; an env token
+/// outranks the scoped config in `gh`'s resolution order, so emitting both
+/// would leave the config dir decorative. `config_dir` unset but `gh_account`
+/// set → the pre-#5851 path: `Some(Ok(env))` with `GH_TOKEN` then `GH_USER`
+/// on success, `Some(Err(msg))` on failure — the caller logs `msg` and
+/// proceeds WITHOUT injecting anything (#3025's documented failure mode:
+/// spawn must never be blocked by a resolution failure).
 /// Test: `resolve_gh_account_env_with_unset_is_none`,
 /// `resolve_gh_account_env_with_blank_is_none`,
 /// `resolve_gh_account_env_with_success_returns_token_and_user`,
-/// `resolve_gh_account_env_with_failure_returns_err`.
+/// `resolve_gh_account_env_with_failure_returns_err`,
+/// `config_dir_is_selected_over_a_minted_token`,
+/// `config_dir_without_credential_still_pins_and_warns`.
 pub fn resolve_gh_account_env_with(
     gh_account: Option<&str>,
+    config_dir: Option<&Path>,
     resolve_token: impl FnOnce(&str) -> Result<String, String>,
-) -> Option<Result<Vec<(String, String)>, String>> {
-    let account = gh_account.map(str::trim).filter(|s| !s.is_empty())?;
-    Some(resolve_token(account).map(|token| {
-        vec![
+) -> Option<Result<GhSpawnEnv, String>> {
+    let account = gh_account.map(str::trim).filter(|s| !s.is_empty());
+    // Trimmed the same way `gh_identity::resolve_gh_env` trims it, so a
+    // whitespace-only `config_dir` is "unset" here and there alike.
+    let dir = config_dir
+        .map(|d| d.to_string_lossy().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+
+    // #5851: a scoped config dir SELECTS the account and `gh auth token -u`
+    // does not, so the token path is skipped entirely rather than layered on.
+    if let Some(dir) = dir {
+        return Some(Ok(scoped_config_dir_env(&dir, account)));
+    }
+
+    let account = account?;
+    Some(resolve_token(account).map(|token| GhSpawnEnv {
+        vars: vec![
             (GH_TOKEN_ENV_VAR.to_string(), token),
             (GH_USER_ENV_VAR.to_string(), account.to_string()),
-        ]
+        ],
+        warning: None,
     }))
 }
 
-/// Production entry point: resolve `GH_TOKEN`/`GH_USER` for `gh_account` via
-/// the real `gh auth token -u <account>` CLI (#3025).
+/// Production entry point: resolve a project's spawn-env `gh` overrides,
+/// minting a token via the real `gh auth token -u <account>` CLI only when no
+/// `config_dir` is pinned (#3025, #5851).
 ///
 /// Why: the one call every spawn/relaunch site uses, so none of them has to
 /// name [`gh_token_via_cli`] as a resolver argument itself.
@@ -484,8 +631,9 @@ pub fn resolve_gh_account_env_with(
 /// Test: covered via `resolve_gh_account_env_with`'s fake-resolver tests.
 pub fn resolve_gh_account_env(
     gh_account: Option<&str>,
-) -> Option<Result<Vec<(String, String)>, String>> {
-    resolve_gh_account_env_with(gh_account, gh_token_via_cli)
+    config_dir: Option<&Path>,
+) -> Option<Result<GhSpawnEnv, String>> {
+    resolve_gh_account_env_with(gh_account, config_dir, gh_token_via_cli)
 }
 
 /// Resolve `GH_TOKEN`/`GH_USER` for the project owning workspace `cwd`,
@@ -545,45 +693,90 @@ pub async fn resolve_gh_account_env_for_registry(
         return Vec::new();
     };
 
-    let Some(gh_account) = find_pinned_gh_account(registry, &origin).await else {
+    let Some(pinned) = find_pinned_gh_identity(registry, &origin).await else {
         return Vec::new();
     };
 
     let cwd_for_log = cwd.to_path_buf();
-    tokio::task::spawn_blocking(move || match resolve_gh_account_env(Some(&gh_account)) {
-        None => Vec::new(),
-        Some(Ok(vars)) => vars,
-        Some(Err(msg)) => {
-            tracing::warn!(
-                cwd = %cwd_for_log.display(),
-                "gh_account token resolution failed; spawning without GH_TOKEN: {msg}"
-            );
-            Vec::new()
+    tokio::task::spawn_blocking(move || {
+        match resolve_gh_account_env(pinned.account.as_deref(), pinned.config_dir.as_deref()) {
+            None => Vec::new(),
+            Some(Ok(env)) => {
+                // #5851: the vars still apply — a pinned-but-empty config dir
+                // must fail closed, never fall back to the global account.
+                if let Some(warning) = env.warning {
+                    tracing::warn!(cwd = %cwd_for_log.display(), "{warning}");
+                }
+                env.vars
+            }
+            Some(Err(msg)) => {
+                tracing::warn!(
+                    cwd = %cwd_for_log.display(),
+                    "gh_account token resolution failed; spawning without GH_TOKEN: {msg}"
+                );
+                Vec::new()
+            }
         }
     })
     .await
     .unwrap_or_default()
 }
 
-/// Look up the pinned `gh_account` for the first registered project whose
+/// A project's pinned `gh` identity as persisted on its registry record
+/// (#5851).
+///
+/// Why: selection needs BOTH keys. `config_dir` is the one that actually
+/// discriminates between logged-in accounts; `account` names who is expected
+/// inside it (and is the only input the pre-#5851 token fallback has). Reading
+/// them in one registry pass keeps the two from drifting apart at the call
+/// site.
+/// What: `account` is `Project::gh_account`; `config_dir` is
+/// `Project::github.config_dir`. Either may be `None` independently.
+/// Test: `find_pinned_gh_identity_reads_config_dir`,
+/// `resolve_gh_account_env_for_registry_picks_up_registered_gh_account`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PinnedGhIdentity {
+    /// `Project::gh_account` — the login this project's sessions run as.
+    pub account: Option<String>,
+    /// `Project::github.config_dir` — the scoped `gh` config home to pin to.
+    pub config_dir: Option<PathBuf>,
+}
+
+/// Look up the pinned `gh` identity for the first registered project whose
 /// `repo_url` matches `origin` — the pure(ish), registry-backed matching
 /// step [`resolve_gh_account_env_for_registry`] delegates to, isolated so it
 /// is directly testable against a real (temp-dir-backed) `ProjectRegistry`
 /// fixture without needing a real git repository or a live `gh` subprocess
 /// (#3025 review follow-up item 1: this is the exact step that proves the
 /// registry — not the static config — is consulted).
+///
+/// #5851 widened it from `gh_account` alone to the `(account, config_dir)`
+/// pair: returning only the account is what forced the caller down the
+/// non-discriminating `gh auth token -u` path.
+/// What: `None` when no project matches, or when the matched project pins
+/// NEITHER key (nothing to inject, no regression).
 /// Test: `resolve_gh_account_env_for_registry_picks_up_registered_gh_account`,
 /// `resolve_gh_account_env_for_registry_no_match_is_none`,
-/// `resolve_gh_account_env_for_registry_registered_without_gh_account_is_none`.
-async fn find_pinned_gh_account(
+/// `resolve_gh_account_env_for_registry_registered_without_gh_account_is_none`,
+/// `find_pinned_gh_identity_reads_config_dir`.
+async fn find_pinned_gh_identity(
     registry: &crate::project::ProjectRegistry,
     origin: &str,
-) -> Option<String> {
+) -> Option<PinnedGhIdentity> {
     let projects = registry.list().await.ok()?;
-    projects
+    let project = projects
         .iter()
-        .find(|p| crate::project::record::repo_url_matches(&p.repo_url, origin))
-        .and_then(|p| p.gh_account.clone())
+        .find(|p| crate::project::record::repo_url_matches(&p.repo_url, origin))?;
+    // #5851: `github.config_dir` already exists on the record and is persisted;
+    // it was simply never read here.
+    let pinned = PinnedGhIdentity {
+        account: project.gh_account.clone(),
+        config_dir: project
+            .github
+            .as_ref()
+            .and_then(|cfg| cfg.config_dir.clone()),
+    };
+    (pinned != PinnedGhIdentity::default()).then_some(pinned)
 }
 
 #[cfg(test)]

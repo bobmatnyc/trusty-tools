@@ -31,6 +31,7 @@ use super::deployment_check::ensure_deployment_complete;
 #[cfg(test)]
 use super::deployment_check::{carrier_reachable, warn_if_no_persona_carrier};
 use super::inproject::try_inproject_spawn;
+use super::managed_checkout::deny_worktree_fallback;
 use super::resume_error::ResumeManagedError;
 use crate::core::git_identity::resolve_for_config_enforced;
 use crate::daemon::state::DaemonState;
@@ -362,10 +363,17 @@ fn spawn_task_injection(state: Arc<DaemonState>, record: SessionRecord, inject_f
 /// that resolved name (`inproject::create_session_worktree`) and dispatches to
 /// `spawn_managed_inproject`, threading the resolved name through so
 /// `create_with_id` never re-derives it (issue #2032 — a session's tmux name
-/// is derived in exactly ONE place). Any failure in detection, name
-/// resolution, or worktree creation falls through to `spawn_managed_local`. A
-/// remote repo URL (the common case) falls straight through to
-/// `spawn_managed_cloned`.
+/// is derived in exactly ONE place). A failure in detection, name resolution,
+/// or worktree creation is an ERROR when this launch asked for a worktree and
+/// falls through to `spawn_managed_local` only when it did not — see
+/// [`super::managed_checkout::deny_worktree_fallback`]. A remote repo URL (the
+/// common case) falls straight through to `spawn_managed_cloned`.
+///
+/// The no-worktree branch runs in the MANAGED checkout
+/// (`<workspace-root>/<owner>/<repo>`), not in the launch directory:
+/// [`super::managed_checkout::resolve_placement`] compares the two and
+/// provisions the managed checkout when the launch came from anywhere else. The
+/// launch directory is never written to.
 /// Test: exercised transitively by the same tests that covered the inline
 /// version before extraction (HTTP spawn tests, MCP session tests); the
 /// stage-emission behaviour added by #1919 is covered by
@@ -415,9 +423,9 @@ async fn spawn_managed_routed(
             if !params.worktree {
                 info!(
                     id = %session_id,
-                    path = %local_path.display(),
+                    launch_dir = %local_path.display(),
                     "spawn_managed: no explicit worktree request (#5274); \
-                     launching the session in the main checkout"
+                     launching the session in the managed checkout"
                 );
                 // Same reconnect pre-flight the worktree branch runs below
                 // (#1707 + `force_new` opt-out, #2450): a live session for
@@ -440,12 +448,18 @@ async fn spawn_managed_routed(
                         return Ok(live);
                     }
                 }
+                // ADR-0037: "the project's main checkout" is the MANAGED
+                // checkout, not wherever the operator typed `tm`. Resolved
+                // after the reconnect check so a reconnect never provisions.
+                let placement =
+                    super::managed_checkout::resolve_placement(local_path, &gh, &origin_url)?;
+                super::foreign_harness::warn_for_launch(local_path, &placement);
                 return super::launch_on_main::spawn_managed_on_main(
                     state,
                     &session_id,
                     &params,
                     runtime,
-                    local_path,
+                    &placement,
                     &gh.owner,
                     &gh.repo,
                 )
@@ -507,23 +521,16 @@ async fn spawn_managed_routed(
                         )
                         .await;
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            id = %session_id,
-                            "in-project spawn: {e}; falling back to local-path spawn"
-                        );
-                    }
+                    // ADR-0037: an explicit worktree request that cannot be
+                    // honoured is an error, never a quiet different placement.
+                    Err(e) => deny_worktree_fallback(&session_id, params.worktree, &e)?,
                 }
             }
             Ok(None) => {
                 // Not a git repo with a GitHub remote — use local-path fast path.
             }
-            Err(e) => {
-                tracing::warn!(
-                    id = %session_id,
-                    "in-project spawn failed: {e}; falling back to local-path spawn"
-                );
-            }
+            // Same rule as the reservation arm above: see `deny_worktree_fallback`.
+            Err(e) => deny_worktree_fallback(&session_id, params.worktree, &e)?,
         }
         return spawn_managed_local(state, &session_id, &params, runtime).await;
     }

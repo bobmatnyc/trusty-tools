@@ -36,6 +36,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::agents::manifest::Result;
 use crate::skills::manifest::SkillManifest;
 
 /// The entry-point filename Claude Code discovers a skill directory by.
@@ -107,22 +108,30 @@ impl UnmanagedBundledSkill {
 /// past a skill's own `references/`), keeps those that (1) contain a
 /// [`SKILL_ENTRY_POINT`], (2) have a stem `bundled` contains, and (3) are NOT
 /// managed by `dest`'s [`SkillManifest`], and returns them sorted by stem.
-/// A missing or unreadable `dest` yields an empty vec — an unprovisioned tier
-/// is not a finding. An EMPTY `bundled` set likewise yields nothing: callers
+/// A missing `dest` yields an empty vec — an unprovisioned tier is not a
+/// finding. An EMPTY `bundled` set likewise yields nothing: callers
 /// must treat that as "cannot classify by name", never as "nothing is
 /// bundled", since the latter reading would condemn every skill at once.
+///
+/// Fallible since #5626: the ownership filter is the whole predicate, so a
+/// ledger that could not be read has no answer to give. On the empty default
+/// every managed skill reported as unmanaged, and
+/// [`crate::skills::reconcile::adopt_unmanaged_bundled_skills`] — this
+/// function's other consumer — then re-stamps each one against its current
+/// bytes, discarding the checksum that recorded the operator's edit.
 /// Test: `unmanaged_finds_a_bundled_named_untracked_skill`,
 /// `unmanaged_ignores_a_managed_skill`, `unmanaged_ignores_an_operator_skill`,
-/// `unmanaged_missing_dest_is_empty`, `unmanaged_lists_reference_files`.
+/// `unmanaged_missing_dest_is_empty`, `unmanaged_lists_reference_files`,
+/// `unmanaged_unreadable_ledger_is_an_error`.
 pub fn unmanaged_bundled_skills(
     dest: &Path,
     bundled: &BTreeSet<String>,
-) -> Vec<UnmanagedBundledSkill> {
-    let manifest = SkillManifest::load(dest);
-    bundled_skill_dirs(dest, bundled)
+) -> Result<Vec<UnmanagedBundledSkill>> {
+    let manifest = SkillManifest::load(dest)?;
+    Ok(bundled_skill_dirs(dest, bundled)
         .into_iter()
         .filter(|skill| !manifest.is_managed(&skill.stem))
-        .collect()
+        .collect())
 }
 
 /// Every bundled-named skill directory at `dest`, managed or not.

@@ -411,42 +411,65 @@ pub(crate) fn find_root_path_collision(
 /// Decide whether `a` and `b` name the same on-disk root (issue #2519).
 ///
 /// Why: see `find_root_path_collision`'s doc for the case-insensitive
-/// filesystem hazard this closes.
-/// What: prefers `(dev, ino)` identity via `same_filesystem_entry` when both
-/// paths exist; falls back to canonicalized-`PathBuf` equality otherwise.
-/// Test: covered transitively by `find_root_path_collision`'s test list.
-fn identifies_same_root(a: &std::path::Path, b: &std::path::Path) -> bool {
-    match same_filesystem_entry(a, b) {
-        Some(same) => same,
-        None => a == b,
-    }
+/// filesystem hazard this closes. The `(dev, ino)` comparison itself now lives
+/// in `trusty_common::index_id::identifies_same_path`, because the mirror guard
+/// — trusty-common's `best_effort_create_index`, catching same-id-different-tree
+/// — needs the identical answer, and a second copy of a rule this subtle is how
+/// the two silently drift apart.
+/// What: delegates to that shared entry point.
+/// Test: covered transitively by `find_root_path_collision`'s test list; the
+/// primitive's own coverage is `index_id::tests` in trusty-common.
+pub(crate) fn identifies_same_root(a: &std::path::Path, b: &std::path::Path) -> bool {
+    trusty_common::index_id::identifies_same_path(a, b)
 }
 
-/// Compare `a` and `b` by `(dev, ino)`, returning `None` when either path's
-/// metadata cannot be read (does not exist, permission denied, etc.) so the
-/// caller can fall back to string equality.
+/// Build a `409 Conflict` for a `POST /indexes` that reused a registered id
+/// while naming a DIFFERENT directory tree.
 ///
-/// Why: `stat(2)`-level identity is the only reliable way to tell whether two
-/// path strings name the same file on a case-insensitive-but-case-preserving
-/// filesystem (macOS APFS default) — canonicalize() preserves the case each
-/// path was spelled with, it does not normalize case, so two differently-cased
-/// spellings of the same directory canonicalize to two different strings.
-/// What: unix-only (`dev`/`ino` via `std::os::unix::fs::MetadataExt`); no
-/// portable equivalent is wired up for non-unix targets, so this always
-/// returns `None` there and callers fall back to path equality.
-/// Test: `create_index_rejects_case_variant_of_registered_root` (macOS-gated)
-/// in `tests_2336.rs`.
-#[cfg(unix)]
-fn same_filesystem_entry(a: &std::path::Path, b: &std::path::Path) -> Option<bool> {
-    use std::os::unix::fs::MetadataExt;
-    let meta_a = std::fs::metadata(a).ok()?;
-    let meta_b = std::fs::metadata(b).ok()?;
-    Some(meta_a.dev() == meta_b.dev() && meta_a.ino() == meta_b.ino())
-}
-
-#[cfg(not(unix))]
-fn same_filesystem_entry(_a: &std::path::Path, _b: &std::path::Path) -> Option<bool> {
-    None
+/// Why: this is the mirror of `root_path_collision_response`, and until now the
+/// two were asymmetric. Same tree under a new id was refused and hardened three
+/// times (#2336, #2519, #3993); same id over a new tree was ACCEPTED with
+/// `200 {created: false}` and the previously-registered tree went on answering
+/// every query. Nothing told the caller — `best_effort_create_index` read only
+/// the status — so a session opening in one checkout was served results from a
+/// different one, reported as correct. An index identifies a directory tree, so
+/// a request naming a tree the daemon does not have under that id has not been
+/// satisfied, and saying so is the whole fix.
+/// What: `409 { error, index_id, registered_root_path, requested_root_path }`.
+/// Both roots are named because the caller cannot otherwise tell which of its
+/// checkouts it just collided with.
+/// Test: `create_index_same_id_different_root_is_refused`,
+/// `create_index_same_id_same_root_still_reports_already_exists`,
+/// `create_index_same_id_different_root_still_reaps_a_cold_entry` in
+/// `tests_same_id_root_mismatch.rs`.
+pub(super) fn root_path_mismatch_response(
+    index_id: &IndexId,
+    registered: &std::path::Path,
+    requested: &std::path::Path,
+) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": format!(
+                "index '{}' is registered at {:?}; it cannot be re-registered at {:?} \
+                 because one index identifies one directory tree. Use the relocate \
+                 endpoint to move it, or register the other tree under a distinct id",
+                index_id,
+                registered.display(),
+                requested.display(),
+            ),
+            "index_id": index_id.0,
+            // #5827: `json!` on a non-literal expands to `to_value(..).unwrap()`,
+            // and serde's `Serialize for Path` ERRORS on a non-UTF-8 path — so
+            // serializing a raw `&Path` here panics the handler for a canonical
+            // root reached through a symlink to a non-UTF-8 target, which
+            // `validate_root_path` does not reject. The lossy form is what the
+            // sibling builders above and in `indexes_relocate.rs` already use.
+            "registered_root_path": registered.display().to_string(),
+            "requested_root_path": requested.display().to_string(),
+        })),
+    )
+        .into_response()
 }
 
 /// Build a `409 Conflict` response naming the index that already owns
@@ -457,7 +480,7 @@ fn same_filesystem_entry(_a: &std::path::Path, _b: &std::path::Path) -> Option<b
 /// distinct root — a bare 409 with no context forces the operator to
 /// cross-reference `GET /indexes?details=true` by hand.
 /// What: `409 { "error": "...", "existing_id": "..." }`.
-/// Test: see `find_root_path_collision` test list above.
+/// Test: see `find_root_path_collision`'s test list above.
 pub(super) fn root_path_collision_response(
     existing_id: &IndexId,
     root_path: &std::path::Path,

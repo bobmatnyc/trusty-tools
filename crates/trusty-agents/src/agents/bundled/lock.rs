@@ -5,11 +5,14 @@
 //! sequence unguarded, and `delegate_to_agent` routinely spawns a fresh
 //! `tagent` subprocess per delegation — so multiple processes can enter the
 //! stale-stamp refresh path concurrently right after a binary upgrade.
-//! Without mutual exclusion across the ENTIRE pass (not just per file), one
-//! process's crash mid-write (or a genuinely torn on-disk file left by an
-//! earlier interrupted pass) can be picked up by a second pass and archived
-//! OVER a prior process's still-good `.stale.bak`, destroying the one
-//! recovery copy a hand-edit depended on. `crates/trusty-agents/src/
+//! Without mutual exclusion across the ENTIRE pass (not just per file), a
+//! second pass can observe a half-finished one — a torn on-disk file left by
+//! an earlier interrupted pass, or a stamp that does not yet match what is
+//! actually on disk — and act on it. Since #4461 a backup path is derived
+//! from the bytes it holds, so that torn content lands in its own file
+//! rather than over a prior pass's still-good backup; the lock is what keeps
+//! the stamp read-decide-write in one critical section with the refresh
+//! loop. `crates/trusty-agents/src/
 //! state_writer.rs` already solves the identical class of problem (fs4
 //! advisory lock + tmp-file + rename) for state files at PER-FILE
 //! granularity; this reuses the same `fs4` primitive but at PASS granularity

@@ -476,6 +476,43 @@ assert_eq "this classifier does not"                   "true" \
   "$(pointer_inputs_of '.test-pointer-allowlist.tsv')"
 
 # ---------------------------------------------------------------------------
+# detect-semver-gate-inputs.sh (#5501)
+#
+# The second trigger for the SemVer gate's self-tests. The first one —
+# detect-version-bumps.sh, whose "source changed, no version bump" case below
+# says "" — is the reason it exists: a gate-fix PR changes the gate and bumps
+# nothing, so keying the self-tests on the bump stood them down on exactly the
+# diff they were needed for.
+# ---------------------------------------------------------------------------
+gate_inputs_of() {
+  printf '%s' "$1" | bash scripts/detect-semver-gate-inputs.sh 2>/dev/null |
+    sed -n 's/^semver_gate_inputs_changed=//p'
+}
+
+echo
+echo "detect-semver-gate-inputs:"
+assert_eq "the workflow wiring"       "true"  "$(gate_inputs_of '.github/workflows/semver-checks.yml')"
+assert_eq "the gate itself"           "true"  "$(gate_inputs_of 'scripts/check_semver.sh')"
+assert_eq "the gate's self-test"      "true"  "$(gate_inputs_of 'scripts/check_semver_selftest.sh')"
+assert_eq "the type differ"           "true"  "$(gate_inputs_of 'scripts/check_semver_types.sh')"
+assert_eq "the type differ's tests"   "true"  "$(gate_inputs_of 'scripts/check_semver_types_selftest.sh')"
+assert_eq "the rustdoc walk it imports" "true" "$(gate_inputs_of 'scripts/lib/rustdoc_walk.py')"
+assert_eq "crate selection"           "true"  "$(gate_inputs_of 'scripts/detect-version-bumps.sh')"
+assert_eq "this classifier"           "true"  "$(gate_inputs_of 'scripts/detect-semver-gate-inputs.sh')"
+assert_eq "the crate exclusions"      "true"  "$(gate_inputs_of 'scripts/semver-checks-crate-exclusions.tsv')"
+assert_eq "the feature exclusions"    "true"  "$(gate_inputs_of 'scripts/semver-checks-feature-exclusions.tsv')"
+assert_eq "a replayed tool capture"   "true"  "$(gate_inputs_of 'scripts/test-data/semver-gate/clean.out')"
+assert_eq "a rustdoc JSON fixture"    "true"  "$(gate_inputs_of 'scripts/test-data/semver-types/baseline.json')"
+assert_eq "crate source"              "false" "$(gate_inputs_of 'crates/trusty-common/src/lib.rs')"
+assert_eq "a manifest"                "false" "$(gate_inputs_of 'crates/trusty-common/Cargo.toml')"
+assert_eq "documentation"             "false" "$(gate_inputs_of 'docs/reference/semver-gate.md')"
+assert_eq "an unrelated workflow"     "false" "$(gate_inputs_of '.github/workflows/ci.yml')"
+assert_eq "an unrelated gate script"  "false" "$(gate_inputs_of 'scripts/check_line_cap.sh')"
+assert_eq "mixed source + machinery"  "true"  "$(gate_inputs_of 'crates/trusty-common/src/lib.rs
+scripts/check_semver.sh')"
+assert_eq "empty diff (fail closed)"  "true"  "$(gate_inputs_of '')"
+
+# ---------------------------------------------------------------------------
 # detect-version-bumps.sh (#5311)
 # ---------------------------------------------------------------------------
 # Under STUB_DIR so the EXIT trap set above still cleans it up — a second
@@ -630,16 +667,26 @@ assert_eq "no gate in semver-checks branches on the activity type" "0" \
   "$(grep -c 'github\.event\.action' <<<"$(sed -n '/^jobs:/,$p' .github/workflows/semver-checks.yml)" || true)"
 # The expensive half of the SemVer gate stays behind the diff verdict — this is
 # what keeps #5149's "not 20 minutes on every PR" true while the context reports.
-# #5440 added a sixth guarded step (libdbus install, needed for trusty-common's
-# keyring-store feature): Install stable toolchain, Install system dependencies
-# (libdbus for keyring-store), Install cargo-semver-checks (pinned prebuilt),
-# Cache cargo artifacts, SemVer gate selftest, Enforce public-API SemVer against
-# crates.io. The seventh is the type-differ selftest, which is cheap — it reads
-# two committed rustdoc JSON documents — but its --crate cases need
-# `cargo metadata`, and the toolchain step above is itself gated. All seven
-# belong behind have_work: none has a reason to run when nothing is released.
-assert_eq "semver-checks gates its costly steps on there being work" "7" \
-  "$(grep -c "if: steps.crate.outputs.have_work == 'true'" .github/workflows/semver-checks.yml || true)"
+# Four steps have no reason to run when nothing is released: Install system
+# dependencies (libdbus for keyring-store, #5440), Install cargo-semver-checks
+# (pinned prebuilt), Cache cargo artifacts, Enforce public-API SemVer against
+# crates.io.
+#
+# ANCHORED ON `$` (#5501). Unanchored, this assertion is a substring match that
+# the widened `have_work == 'true' || …` condition below also satisfies, so it
+# would have kept counting 7 and reported green over the exact regression it is
+# here to catch.
+assert_eq "semver-checks gates its costly steps on there being work" "4" \
+  "$(grep -cE "if: steps\.crate\.outputs\.have_work == 'true'$" .github/workflows/semver-checks.yml || true)"
+# #5501: the three CHEAP steps run on either trigger — a declared bump, or a
+# change to the gate's own machinery. Gating them on the bump alone skipped the
+# self-tests on every PR that changed the gate, which is every gate-fix PR (PR
+# #5496 is the observed case). The three: Install stable toolchain (both
+# self-tests need a `cargo` on PATH), SemVer gate selftest, Type-differ selftest.
+assert_eq "semver-checks runs its self-tests when the gate itself changed" "3" \
+  "$(grep -c "have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'" .github/workflows/semver-checks.yml || true)"
+assert_eq "semver-checks classifies its own machinery from the diff" "1" \
+  "$(grep -c 'bash scripts/detect-semver-gate-inputs.sh' .github/workflows/semver-checks.yml || true)"
 
 echo
 if [ "${FAILURES}" -gt 0 ]; then

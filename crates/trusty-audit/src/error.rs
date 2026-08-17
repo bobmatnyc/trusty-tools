@@ -360,6 +360,97 @@ pub enum AuditError {
         source: std::io::Error,
     },
 
+    /// A generated file could not be serialized.
+    ///
+    /// Why: [`crate::config::generate`] re-renders a TOML table, and a render
+    /// that fails must not produce a config the recipient would run against
+    /// (#5825). Separate from [`AuditError::Parse`], which is about reading.
+    /// What: names what was being written. Never quotes the content, because
+    /// the content is the config carrying the credential.
+    /// Test: `crate::config::config_tests::generating_a_config_that_would_not_load_fails_here`
+    /// covers the neighbouring refusal; this arm has no reachable trigger for
+    /// a `toml::Table` and exists so one cannot be swallowed.
+    #[error("cannot render {what}: {source}")]
+    Render {
+        /// What was being written, e.g. `"engagement config"`.
+        what: &'static str,
+        /// The underlying serialization failure. Boxed for the same reason
+        /// [`AuditError::Parse`]'s is.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// An input the inbound install package cannot be assembled without.
+    ///
+    /// Why: #5825's packaging step is the classic fail-open — a missing binary
+    /// or an unreadable template that produces a zip anyway ships a deliverable
+    /// that cannot run, and the operator finds out from the client. Every input
+    /// is checked before a byte is written, and a refusal leaves nothing behind.
+    /// What: names which input and where it was looked for.
+    /// Test: `crate::distribute::distribute_tests::a_missing_binary_is_refused_and_leaves_no_file`,
+    /// `crate::distribute::distribute_tests::a_missing_template_is_refused_and_leaves_no_file`.
+    #[error("cannot build the install package: no {what} at {path}")]
+    MissingPackageInput {
+        /// Which input, e.g. `"taudit binary"`.
+        what: &'static str,
+        /// Where it was looked for.
+        path: PathBuf,
+    },
+
+    /// No OpenRouter key to write into the generated engagement config.
+    ///
+    /// Why: the inbound package's whole purpose is that the recipient can run
+    /// the audit without supplying anything of ours, and a config with a blank
+    /// key produces a package that installs, launches, and then fails at the
+    /// first inference call (#5825). Refusing at packaging time is where the
+    /// operator can still fix it.
+    /// What: names the environment variable to set and the template that could
+    /// have carried one instead. The key itself is never quoted, and neither is
+    /// a blank one — there is nothing to quote.
+    /// Test: `crate::distribute::distribute_tests::a_blank_credential_is_refused_and_leaves_no_file`.
+    #[error(
+        "cannot build the install package: no OpenRouter key. Set {env}, or put one in the \
+         template config at {template}"
+    )]
+    MissingCredential {
+        /// The environment variable that supplies it.
+        env: &'static str,
+        /// The template config that could carry one instead.
+        template: PathBuf,
+    },
+
+    /// The install package's destination is already taken.
+    ///
+    /// Why: #5825 — an operator regenerating a package must not destroy the one
+    /// they already sent. Versioning the name instead would leave two files a
+    /// hand could pick the wrong one of; a refusal puts the decision at the
+    /// moment the mistake would happen, and `rm` is the explicit act that says
+    /// the old package no longer matters.
+    /// What: names the file and what to do about it.
+    /// Test: `crate::distribute::distribute_tests::an_existing_package_is_never_overwritten`.
+    #[error(
+        "{path} already exists. This client never overwrites a package that may already have \
+         been sent — remove it, or choose another --out"
+    )]
+    PackageExists {
+        /// The destination that is already taken.
+        path: PathBuf,
+    },
+
+    /// The install package could not be read, written, or renamed into place.
+    ///
+    /// Deliberately a different variant from [`AuditError::Package`]: the two
+    /// travel in opposite directions and their messages must not be confusable
+    /// in an operator's terminal (#5825).
+    #[error("install package {path}: {source}")]
+    Distribute {
+        /// The path that failed.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// A registration spec is not a target this client will register.
     ///
     /// Why: #5822. `taudit add` writes the spec into a file the sweep later
@@ -473,6 +564,66 @@ pub enum AuditError {
         /// Why the critical section could not be entered or completed.
         #[source]
         source: std::io::Error,
+    },
+
+    /// The one-shot audit stopped, and this is the phase it stopped in.
+    ///
+    /// Why: #5824 chains four fallible phases, and an operator who sees it stop
+    /// must know which one. Reporting every phase's failure as "the audit
+    /// failed" makes them re-derive the stage before they can act — "cannot read
+    /// the registry" and "`tga audit` exited with code 2" have nothing in common
+    /// as next steps.
+    /// What: the phase, plus the underlying refusal, which names the target and
+    /// the reason. `source` is boxed because nesting one `AuditError` inside
+    /// another unboxed would grow every `Result` in the crate past
+    /// `clippy::result_large_err`.
+    /// Test: `crate::chain::chain_tests::a_sweep_that_audited_nothing_stops_before_packaging`.
+    #[error("the audit stopped in the {phase} phase — {source}")]
+    ChainStopped {
+        /// Which link of the chain refused.
+        phase: crate::chain::Phase,
+        /// What it refused with.
+        #[source]
+        source: Box<AuditError>,
+    },
+
+    /// The sweep ran and audited no repository at all.
+    ///
+    /// Why: #5824's fail-open guard. The chain continues past a repository that
+    /// failed, because five audits are worth having when the sixth did not work.
+    /// A sweep in which EVERY repository failed is not that case: packaging it
+    /// would hand the recipient a zip of two generated files that looks like a
+    /// finished engagement. [`AuditError::NothingToPackage`] is the same refusal
+    /// one stage later, from `crate::package`; this one exists so the chain
+    /// attributes it to the phase that actually failed.
+    /// What: how many repositories were attempted. The per-repository reasons
+    /// are in `state/run-progress.toml` and in each repository's log.
+    /// Test: `crate::chain::chain_tests::a_sweep_that_audited_nothing_stops_before_packaging`.
+    #[error(
+        "no repository was audited ({attempted} attempted) — nothing was packaged; see the \
+         per-repository failures above, and `trusty-audit package` if you want the partial \
+         output anyway"
+    )]
+    NothingAudited {
+        /// How many repositories the sweep attempted.
+        attempted: usize,
+    },
+
+    /// The chain was asked to audit an engagement that targets nothing.
+    ///
+    /// Why: #5824. `NoRepositoriesSelected` names a file the operator has never
+    /// heard of and does not write, so on the one-shot path it is the wrong
+    /// message — the remedy is to register a target, not to go and edit
+    /// `state/selected-repos.toml`.
+    /// What: names the working directory and the command that fixes it.
+    /// Test: `crate::chain::chain_tests::an_engagement_with_nothing_to_audit_stops_in_materialize`.
+    #[error(
+        "nothing to audit in {root} — no repository is registered and no earlier clone left a \
+         selection; register one with `trusty-audit add repo <owner>/<name>`"
+    )]
+    NothingRegistered {
+        /// The working directory that targets nothing.
+        root: PathBuf,
     },
 
     /// A capability this scaffold declares but does not yet implement.
