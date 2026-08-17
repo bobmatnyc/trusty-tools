@@ -1,10 +1,10 @@
 #!/bin/sh
-# install.sh — self-downloading macOS installer for `taudit` (crate trusty-audit).
+# install.sh — self-downloading macOS installer for `trusty-audit`.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/crates/trusty-audit/install.sh | sh
 #
-# Why (#5870): the owner's requirement is "enter a URL, taudit installs AND
+# Why (#5870): the owner's requirement is "enter a URL, trusty-audit installs AND
 #   runs". Before this, the only delivery path was `trusty-audit distribute`
 #   (#5825) — an operator builds a zip and emails it. That does not survive
 #   contact with a client site: the recipient has no Rust toolchain, no
@@ -13,30 +13,41 @@
 # What: detects the platform, resolves a release, downloads the tarball and its
 #   published `.sha256` sidecar, verifies the digest, extracts to a temp dir,
 #   proves the binary reports the version that was asked for, installs it with
-#   an atomic rename, checks the machine can reach the inference provider, and
-#   launches it.
+#   an atomic rename, and launches it. Everything past that point — provider
+#   reachability, the credential, the collection tools — is trusty-audit's own.
 #
-# Test: `crates/trusty-audit/tests/install_script.rs` drives the failure arms
-#   (non-Darwin uname, Intel uname, checksum mismatch, missing asset,
-#   idempotent re-run) against a local fixture tree; `sh -n` and `shellcheck
-#   --shell=sh` gate syntax and lint in CI.
+# Test: `scripts/check_trusty_audit_install_selftest.sh` drives every arm against
+#   stubbed `curl`/`uname` with no network — non-Darwin uname, Intel uname,
+#   checksum mismatch, failed download, happy path, and idempotent re-run.
+#   `sh -n` and `shellcheck --shell=sh` gate syntax and lint. All three run in
+#   `.github/workflows/trusty-audit-install.yml`.
 #
-# ── The two-tier dependency check, and why the split is deliberate ───────────
-# This script checks ONLY what is needed to REACH the inference stage:
+# ── This is a BOOTSTRAP. trusty-audit is the installer. ─────────────────────
+# trusty-audit is an installer/collector/auditor: `src/tools.rs` already
+# installs its own pinned tooling (`tga`, `trusty-search`, `trusty-analyze`,
+# `trusty-review`) through `trusty_installer::download::pinned::
+# install_pinned_set`, then collects, then audits. This script's ONLY job is
+# getting the `trusty-audit` binary onto the machine and launching it.
 #
-#   1. the host is a supported platform,
-#   2. the tools this script itself needs exist,
-#   3. the downloaded binary actually executes and reports its version,
-#   4. the machine can open a connection to the inference provider.
+# So the checks here are deliberately few, and each one gates whether the
+# binary can run AT ALL — which is the only thing a shell script is better
+# placed to answer than the binary is:
 #
-# It deliberately does NOT check the COLLECTION dependencies — `gh`, JIRA,
-# Linear. Those are checked later, at the inference/wizard stage, because that
-# is where the operator says which repository and which ticketing system this
-# engagement uses. Checking for `gh` here would be premature (the operator may
-# be auditing a GitLab estate), and checking JIRA credentials here is
-# meaningless before anyone has named a JIRA instance. `crates/trusty-audit/
-# src/discover.rs` is where the `gh` dependency actually becomes real; the
-# wizard that owns that tier is a separate change.
+#   1. the host is a supported macOS architecture (a binary for another
+#      platform cannot be exec'd, so nothing downstream could report this),
+#   2. the tools THIS SCRIPT uses to do its own job exist,
+#   3. the download matched its published checksum,
+#   4. the downloaded binary actually executes and reports a version.
+#
+# Everything else is trusty-audit's to check, at the point it needs it: whether the
+# inference provider is reachable, whether the credential works, and later the
+# COLLECTION dependencies (`gh`, JIRA, Linear) at the point the operator names
+# a repository and a ticketing system. Re-implementing any of those here would
+# be a second implementation of logic the binary already owns in Rust — with
+# real error types, its own tests, and sharing with the TUI and Tauri front
+# ends — which CLAUDE.md's common-entry-point rule treats as a defect.
+# `crates/trusty-audit/src/discover.rs` is where the `gh` dependency actually
+# becomes real.
 #
 # ── Deliberate omission of `pipefail` ────────────────────────────────────────
 # `set -o pipefail` is NOT POSIX and this script is invoked as `curl … | sh`,
@@ -45,10 +56,9 @@
 # is run on its own and its status checked directly. `set -eu` is set.
 #
 # Environment variables:
-#   TAUDIT_VERSION            Pin an exact version (e.g. "0.1.0"). Default: latest.
-#   TAUDIT_INSTALL_DIR        Install dir. Default: ${CARGO_HOME:-$HOME/.cargo}/bin
-#   TAUDIT_NO_LAUNCH          Set to 1 to install without launching.
-#   TAUDIT_SKIP_NETWORK_CHECK Set to 1 to skip the provider reachability probe.
+#   TRUSTY_AUDIT_VERSION            Pin an exact version (e.g. "0.1.0"). Default: latest.
+#   TRUSTY_AUDIT_INSTALL_DIR        Install dir. Default: ${CARGO_HOME:-$HOME/.cargo}/bin
+#   TRUSTY_AUDIT_NO_LAUNCH          Set to 1 to install without launching.
 #   GITHUB_TOKEN / GH_TOKEN   Optional. Raises the GitHub API rate limit from
 #                             60/hr (unauthenticated, easily exhausted behind a
 #                             shared/NAT'd IP) to 5000/hr. Never required.
@@ -65,8 +75,8 @@ set -eu
 # ---------------------------------------------------------------------------
 REPO="bobmatnyc/trusty-tools"
 CRATE="trusty-audit"
-PRIMARY_BIN="taudit"
-ALIAS_BIN="trusty-audit"
+PRIMARY_BIN="trusty-audit"
+ALIAS_BIN="taudit"
 TAG_PREFIX="${CRATE}-v"
 
 API_RELEASES_URL="https://api.github.com/repos/${REPO}/releases"
@@ -87,17 +97,11 @@ TARGET="aarch64-apple-darwin"
 # path arithmetic and the script writes the binary there itself.
 DEFAULT_INSTALL_DIR="${CARGO_HOME:-${HOME}/.cargo}/bin"
 
-# The inference provider this client talks to. `crates/trusty-audit/src/
-# inference.rs` (PROVIDER_OPENROUTER) selects it and `run.rs` passes the
-# credential to children as OPENROUTER_API_KEY.
-PROVIDER_PROBE_URL="https://openrouter.ai/api/v1/models"
-
 # Network timeouts, in seconds. Every network call names its own timeout in the
 # failure message so an operator behind a slow proxy knows what was waited on.
 CONNECT_TIMEOUT=10
 API_MAX_TIME=30
 DOWNLOAD_MAX_TIME=300
-PROBE_MAX_TIME=20
 
 # Populated by main; declared here so the cleanup trap can never reference an
 # unset variable under `set -u`.
@@ -178,7 +182,7 @@ check_platform() {
 
     if [ "${os}" != "Darwin" ]; then
         die "Unsupported operating system: ${os} (this installer supports macOS only).
-taudit ships as a macOS binary; there is no ${os} asset to download.
+trusty-audit ships as a macOS binary; there is no ${os} asset to download.
 What to do: run this on a Mac, or build from source with
   cargo install --path crates/${CRATE} --locked"
     fi
@@ -202,9 +206,9 @@ What to do: run this on an Apple Silicon Mac, or build from source with
 # "whatever happens to be there" path that reports success either way.
 # ---------------------------------------------------------------------------
 resolve_version() {
-    if [ -n "${TAUDIT_VERSION:-}" ]; then
-        VERSION="${TAUDIT_VERSION}"
-        step "Using pinned version ${VERSION} (TAUDIT_VERSION)"
+    if [ -n "${TRUSTY_AUDIT_VERSION:-}" ]; then
+        VERSION="${TRUSTY_AUDIT_VERSION}"
+        step "Using pinned version ${VERSION} (TRUSTY_AUDIT_VERSION)"
         return 0
     fi
 
@@ -233,7 +237,7 @@ Timeouts used: ${CONNECT_TIMEOUT}s to connect, ${API_MAX_TIME}s total.
 URL: ${API_RELEASES_URL}
 What to do: check network/proxy access to api.github.com. If you are rate
 limited (60 requests/hour unauthenticated), set GITHUB_TOKEN and re-run, or
-pin a version with TAUDIT_VERSION=<x.y.z> to skip this lookup entirely."
+pin a version with TRUSTY_AUDIT_VERSION=<x.y.z> to skip this lookup entirely."
     fi
 
     # Extract the highest-sorting `trusty-audit-v*` tag. grep/sed only — no jq
@@ -417,20 +421,20 @@ Nothing has been installed."
 # is atomic, so a second run can no-op or replace but never half-install.
 # ---------------------------------------------------------------------------
 install_binaries() {
-    INSTALL_DIR="${TAUDIT_INSTALL_DIR:-${DEFAULT_INSTALL_DIR}}"
+    INSTALL_DIR="${TRUSTY_AUDIT_INSTALL_DIR:-${DEFAULT_INSTALL_DIR}}"
 
     step "Installing to ${INSTALL_DIR}"
     if ! mkdir -p "${INSTALL_DIR}"; then
         die "Could not create the install directory: ${INSTALL_DIR}
 What to do: choose a writable location with
-  TAUDIT_INSTALL_DIR=\$HOME/bin
+  TRUSTY_AUDIT_INSTALL_DIR=\$HOME/bin
 and re-run. Nothing has been installed."
     fi
     if [ ! -w "${INSTALL_DIR}" ]; then
         die "Install directory is not writable: ${INSTALL_DIR}
 This installer never uses sudo and will not write outside a directory you own.
 What to do: choose a writable location with
-  TAUDIT_INSTALL_DIR=\$HOME/bin
+  TRUSTY_AUDIT_INSTALL_DIR=\$HOME/bin
 and re-run. Nothing has been installed."
     fi
 
@@ -467,7 +471,7 @@ What to do: check permissions on ${INSTALL_DIR} and re-run."
 # PATH check.
 #
 # Why: installing into a directory the operator's shell does not search is a
-# silent failure — the binary is present and `taudit` still says "command not
+# silent failure — the binary is present and `trusty-audit` still says "command not
 # found". Naming the exact line to add is the difference between actionable and
 # not.
 # ---------------------------------------------------------------------------
@@ -498,55 +502,6 @@ check_path() {
 }
 
 # ---------------------------------------------------------------------------
-# Installer-tier dependency check — provider reachability.
-#
-# Why this is HERE and not in taudit's first-run path: this asks a
-# MACHINE-level question — can this host open a TLS connection to the inference
-# provider at all, or does a corporate proxy or firewall block it? That is a
-# property of the site the operator is standing in, and it is worth knowing in
-# the first thirty seconds rather than twenty minutes into an engagement. The
-# CREDENTIAL is a different question — engagement-level, not machine-level —
-# and it belongs to taudit's own first-run path (#5868), which prompts on
-# /dev/tty. This script never sees, prompts for, or stores a key.
-#
-# No key is needed for this probe: an unauthenticated GET of the models
-# endpoint answers the reachability question on its own.
-# ---------------------------------------------------------------------------
-check_provider_reachable() {
-    if [ "${TAUDIT_SKIP_NETWORK_CHECK:-0}" = "1" ]; then
-        step "Skipping provider reachability probe (TAUDIT_SKIP_NETWORK_CHECK=1)"
-        return 0
-    fi
-
-    step "Checking the inference provider is reachable"
-    set +e
-    curl -fsS -o /dev/null \
-        --connect-timeout "${CONNECT_TIMEOUT}" --max-time "${PROBE_MAX_TIME}" \
-        "${PROVIDER_PROBE_URL}"
-    probe_status=$?
-    set -e
-
-    if [ "${probe_status}" -ne 0 ]; then
-        printf '\n' >&2
-        say "ERROR: cannot reach the inference provider (curl exit ${probe_status})."
-        say "  URL:      ${PROVIDER_PROBE_URL}"
-        say "  Timeouts: ${CONNECT_TIMEOUT}s to connect, ${PROBE_MAX_TIME}s total."
-        say ""
-        say "  ${PRIMARY_BIN} IS installed at ${INSTALLED_BIN} and runs — only the network"
-        say "  path to the provider failed, so an audit would stall at the inference"
-        say "  stage rather than fail here."
-        say ""
-        say "  What to do: this is almost always an outbound firewall or proxy rule."
-        say "  Allow https://openrouter.ai, or set HTTPS_PROXY, then run:"
-        say "      ${PRIMARY_BIN}"
-        say ""
-        say "  To install without this check: TAUDIT_SKIP_NETWORK_CHECK=1"
-        exit 1
-    fi
-    ok "openrouter.ai reachable"
-}
-
-# ---------------------------------------------------------------------------
 # Launch.
 #
 # Why: the requirement is "installs AND runs". Under `curl … | sh` the script's
@@ -557,13 +512,13 @@ check_provider_reachable() {
 # non-interactive shell) there is nothing to attach, so the command is printed
 # instead of launching something that would immediately fail on input.
 #
-# taudit owns its own credential prompt (#5868) — this script does not collect,
+# trusty-audit owns its own credential prompt (#5868) — this script does not collect,
 # pass, or store a key.
 # ---------------------------------------------------------------------------
 launch() {
-    if [ "${TAUDIT_NO_LAUNCH:-0}" = "1" ]; then
+    if [ "${TRUSTY_AUDIT_NO_LAUNCH:-0}" = "1" ]; then
         say ""
-        say "Installed. Not launching (TAUDIT_NO_LAUNCH=1). Start it with:"
+        say "Installed. Not launching (TRUSTY_AUDIT_NO_LAUNCH=1). Start it with:"
         say "    ${PRIMARY_BIN}"
         return 0
     fi
@@ -578,7 +533,7 @@ launch() {
         say ""
         step "Launching ${PRIMARY_BIN}"
         say ""
-        # `exec` replaces this shell so taudit owns the terminal directly and
+        # `exec` replaces this shell so trusty-audit owns the terminal directly and
         # its exit status becomes the installer's.
         exec "${INSTALLED_BIN}" </dev/tty
     fi
@@ -595,7 +550,7 @@ launch() {
 # ---------------------------------------------------------------------------
 main() {
     say ""
-    say "taudit installer — ${REPO}"
+    say "trusty-audit installer — ${REPO}"
     say ""
 
     require_host_tools
@@ -608,7 +563,6 @@ main() {
     extract_and_prove
     install_binaries
     check_path
-    check_provider_reachable
     launch
 }
 
