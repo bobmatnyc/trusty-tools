@@ -229,8 +229,10 @@ async fn provision_for_launch_ignores_a_registered_worktree_true_project() {
 
     assert_eq!(
         workspace,
-        ManagedWorkspace::MainCheckout(live.path().to_path_buf()),
-        "#5274 row 1: a `worktree: true` project must not relocate the session"
+        ManagedWorkspace::MainCheckout(base.clone()),
+        "#5274 row 1: a `worktree: true` project must not relocate the session \
+         into a WORKTREE; ADR-0037 (2026-08-17): the main checkout it runs in is \
+         the managed one, not the unmanaged directory `tm` was typed in"
     );
     assert!(
         !expected_worktree(&base, &session_id).exists(),
@@ -248,9 +250,15 @@ async fn provision_for_launch_ignores_a_registered_worktree_true_project() {
 /// weaker reading ("the flag still decides, we just changed its default")
 /// indistinguishable from the real one. This row also keeps #4300's original
 /// acceptance intact: an opted-out project gets neither a clone nor a worktree.
-/// What: registers `worktree: false`, passes no request, and asserts both the
-/// main-checkout outcome and that the caller-supplied base-clone path is
-/// untouched — no directory, no `.git`, no `.worktrees`.
+/// What: registers `worktree: false`, launches FROM the managed checkout with no
+/// request, and asserts the session stays there with no worktree created.
+///
+/// ADR-0037 (2026-08-17): the launch directory here IS the managed checkout, so
+/// this is the equality half of the placement rule — nothing is provisioned and
+/// nothing is cloned. The paths are canonicalised because
+/// `provision_for_launch` resolves the launch root through `git rev-parse
+/// --show-toplevel`, which resolves the macOS `/var` → `/private/var` symlink;
+/// the comparison itself is a plain equality, by owner ruling.
 /// Test: itself. Green before and after by construction; it goes RED the moment
 /// `provision_for_launch` provisions unconditionally, which is the mistake it
 /// exists to catch.
@@ -264,11 +272,16 @@ async fn provision_for_launch_without_a_request_uses_the_main_checkout() {
     .await;
 
     let repos_root = tempfile::tempdir().unwrap();
-    let base = repos_root.path().join("fixture-owner").join("optout-repo");
-    let live = tempfile::tempdir().unwrap();
+    let base = repos_root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("fixture-owner")
+        .join("optout-repo");
+    init_git_repo(&base);
     let session_id = ManagedSessionId::new();
 
-    let workspace = provision_for_launch(origin, &base, live.path(), false, &session_id)
+    let workspace = provision_for_launch(origin, &base, &base, false, &session_id)
         .await
         .expect(
             "no worktree request must not attempt a clone at all — a clone error \
@@ -277,13 +290,55 @@ async fn provision_for_launch_without_a_request_uses_the_main_checkout() {
 
     assert_eq!(
         workspace,
-        ManagedWorkspace::MainCheckout(live.path().to_path_buf()),
-        "#5274 row 2: a session with no worktree request runs in its own checkout"
+        ManagedWorkspace::MainCheckout(base.clone()),
+        "#5274 row 2: a session with no worktree request runs in the managed checkout"
     );
-    assert_nothing_provisioned(&base);
     assert!(
         !expected_worktree(&base, &session_id).exists(),
         "#4300: the per-session worktree must NOT exist"
+    );
+}
+
+/// A launch from an UNMANAGED clone switches to the managed checkout, and the
+/// unmanaged clone is not written to (ADR-0037, 2026-08-17 clarification).
+///
+/// Why: this is the CLI half of the defect. `provision_for_launch` ran the
+/// session at `find_git_root(cwd)`, so `tm launch` from the operator's own clone
+/// stayed there — no managed checkout was provisioned, and the session inherited
+/// whatever configuration that tree carried. The daemon's `spawn_managed_routed`
+/// had the identical bug; both now route through one rule
+/// (`managed_checkout::resolve_placement_at`) so the CLI and the daemon cannot
+/// resolve "the project's main checkout" two different ways.
+/// What: a real git repo at the managed path (so the redirect reuses it rather
+/// than cloning `.invalid`), a separate unmanaged clone as `cwd`, no request.
+/// Asserts the placement is the MANAGED path and that the unmanaged clone gained
+/// no `.claude` deployment.
+/// Test: itself. RED before this change — it returned the unmanaged directory.
+#[tokio::test]
+async fn provision_for_launch_redirects_an_unmanaged_launch_to_the_managed_checkout() {
+    let origin = "https://github.invalid/fixture-owner/optout-repo";
+
+    let repos_root = tempfile::tempdir().unwrap();
+    let base = repos_root.path().join("fixture-owner").join("optout-repo");
+    init_git_repo(&base);
+
+    let unmanaged = tempfile::tempdir().unwrap();
+    init_git_repo(unmanaged.path());
+    let session_id = ManagedSessionId::new();
+
+    let workspace = provision_for_launch(origin, &base, unmanaged.path(), false, &session_id)
+        .await
+        .expect("the managed checkout already exists, so the redirect reuses it");
+
+    assert_eq!(
+        workspace,
+        ManagedWorkspace::MainCheckout(base.clone()),
+        "an unmanaged launch directory must switch to the managed checkout"
+    );
+    assert!(
+        !unmanaged.path().join(".claude").exists(),
+        "the unmanaged launch directory must never be written to: {}",
+        unmanaged.path().display()
     );
 }
 
@@ -342,26 +397,29 @@ async fn provision_for_launch_explicit_request_creates_worktree() {
 /// resolution and the consequence of getting it wrong went from two projects to
 /// all of them. The daemon-unreachable fallback already resolved the root via
 /// `classify_cwd_project`; this pins that `tm launch` agrees.
-/// What: builds a REAL git repo (so `git rev-parse --show-toplevel` has a root
-/// to find), calls `provision_for_launch` with a nested subdirectory as `cwd`,
-/// and asserts the returned workspace is the canonical repo root and explicitly
-/// NOT the subdirectory.
+/// What: builds a REAL git repo AT THE MANAGED PATH (so `git rev-parse
+/// --show-toplevel` has a root to find and the placement rule's equality branch
+/// applies), calls `provision_for_launch` with a nested subdirectory as `cwd`,
+/// and asserts the returned workspace is the repo root and explicitly NOT the
+/// subdirectory.
 /// Test: itself. RED if `provision_for_launch` passes `cwd` through.
 #[tokio::test]
 async fn provision_for_launch_from_subdirectory_targets_repo_root() {
     let origin = "https://github.invalid/fixture-owner/optout-repo.git";
 
+    // The managed checkout IS the launch tree here, so the subject stays root
+    // resolution rather than the redirect (covered by its own test above).
+    // Canonical because `find_git_root` resolves the macOS `/var` symlink.
     let repos_root = tempfile::tempdir().unwrap();
-    let base = repos_root.path().join("fixture-owner").join("optout-repo");
-
-    // A real git working tree, with a nested subdirectory to launch from.
-    let live = tempfile::tempdir().unwrap();
-    init_git_repo(live.path());
-    let subdir = live.path().join("crates").join("inner");
+    let base = repos_root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("fixture-owner")
+        .join("optout-repo");
+    init_git_repo(&base);
+    let subdir = base.join("crates").join("inner");
     std::fs::create_dir_all(&subdir).unwrap();
-    // `git rev-parse --show-toplevel` canonicalises symlinks (macOS `/var` →
-    // `/private/var`), so the expectation must be canonical too.
-    let repo_root = live.path().canonicalize().unwrap();
     let session_id = ManagedSessionId::new();
 
     let workspace = provision_for_launch(origin, &base, &subdir, false, &session_id)
@@ -370,7 +428,7 @@ async fn provision_for_launch_from_subdirectory_targets_repo_root() {
 
     assert_eq!(
         workspace,
-        ManagedWorkspace::MainCheckout(repo_root.clone()),
+        ManagedWorkspace::MainCheckout(base.clone()),
         "`tm launch` from a subdirectory must target the repo ROOT"
     );
     assert_ne!(
@@ -383,7 +441,10 @@ async fn provision_for_launch_from_subdirectory_targets_repo_root() {
         "nothing may be provisioned inside the subdirectory: {}",
         subdir.display()
     );
-    assert_nothing_provisioned(&base);
+    assert!(
+        !expected_worktree(&base, &session_id).exists(),
+        "no worktree may be created without an explicit request"
+    );
 }
 
 // ── Path (b): the daemon-unreachable bare-`tm` fallback ─────────────────────

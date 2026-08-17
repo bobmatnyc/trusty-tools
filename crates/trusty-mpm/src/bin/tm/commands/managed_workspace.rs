@@ -97,9 +97,13 @@ impl ManagedWorkspace {
 /// than re-reading the registry here) guarantees the notice each caller
 /// printed describes the action actually taken.
 /// What: `isolate == false` returns [`ManagedWorkspace::MainCheckout`] having
-/// touched nothing on disk; otherwise ensures the base clone and adds a
-/// UUID-named per-session worktree. Errors are the raw `inproject` strings so
-/// each caller can wrap them with its own remediation text.
+/// touched nothing on disk. `main_checkout` is the placement the CALLER already
+/// resolved — `provision_for_launch` routes it through
+/// `managed_checkout::resolve_placement_at` (ADR-0037's 2026-08-17 terminology
+/// clarification), `provision_for_fallback` deliberately does not. With
+/// `isolate` it ensures the base clone and adds a UUID-named per-session
+/// worktree. Errors are the raw `inproject` strings so each caller can wrap them
+/// with its own remediation text.
 /// Test: `managed_workspace_tests.rs`.
 async fn provision(
     isolate: bool,
@@ -109,6 +113,11 @@ async fn provision(
     session_id: &ManagedSessionId,
 ) -> Result<ManagedWorkspace, String> {
     if !isolate {
+        // `main_checkout` is already the placement the CALLER resolved:
+        // `provision_for_launch` routes it through
+        // `managed_checkout::resolve_placement_at` (ADR-0037's 2026-08-17
+        // clarification), while `provision_for_fallback` deliberately does not —
+        // see that function's doc.
         tracing::info!(
             origin = %origin_url,
             path = %main_checkout.display(),
@@ -169,20 +178,47 @@ pub(crate) async fn provision_for_launch(
     worktree_requested: bool,
     session_id: &ManagedSessionId,
 ) -> anyhow::Result<ManagedWorkspace> {
-    let main_checkout = super::guided::find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let launch_root = super::guided::find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    // ADR-0037 (2026-08-17 clarification): "the project's main checkout" is the
+    // MANAGED checkout `<workspace-root>/<owner>/<repo>` — already in hand as
+    // `base_path` — not the repo root of wherever `tm` was typed. Shared with the
+    // daemon's `spawn_managed_routed` through one function so the CLI and the
+    // daemon cannot resolve the same phrase two different ways. Only reached on
+    // the no-worktree branch; `--worktree` provisions from `base_path` already.
     if worktree_requested {
         eprintln!(
             "note: uncommitted local changes are not carried into the managed clone. \
              Use `tm connect` if you need to work from the live checkout."
         );
         eprintln!("provisioning managed workspace...");
+    } else if launch_root != base_path {
+        // Name the switch on the terminal BEFORE it happens, so the operator is
+        // never surprised about which tree the session opened in — and so a
+        // first-run clone is announced rather than looking like a hang.
+        eprintln!(
+            "tm: {} is not the managed checkout — launching in {} instead \
+             (provisioning it if absent); your checkout is not modified",
+            launch_root.display(),
+            base_path.display()
+        );
     } else {
         eprintln!(
-            "tm: launching in {} (no managed clone, no worktree) — \
+            "tm: launching in {} (no worktree) — \
              pass `--worktree` to provision an isolated one instead",
-            main_checkout.display()
+            base_path.display()
         );
     }
+
+    let main_checkout = if worktree_requested {
+        launch_root
+    } else {
+        trusty_mpm::daemon::managed_routes::managed_checkout::resolve_placement_at(
+            &launch_root,
+            base_path,
+            origin_url,
+        )
+        .map_err(|e| anyhow::anyhow!("failed to provision managed workspace: {e}"))?
+    };
 
     provision(
         worktree_requested,
