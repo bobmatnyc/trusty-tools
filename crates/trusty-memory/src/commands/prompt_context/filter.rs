@@ -248,8 +248,10 @@ pub(super) fn select_relevant_triples(
 /// absent `session_root`, unparseable path — because dropping a drawer the
 /// filter cannot judge would lose real knowledge to a heuristic.
 /// Test: `project_scope_drops_foreign_cwd_drawer`,
-/// `project_scope_keeps_untagged_and_in_tree_drawers`,
-/// `project_scope_keeps_worktree_and_subdirectory_writers`.
+/// `project_scope_keeps_worktree_and_subdirectory_writers`. The first asserts
+/// both halves against one mixed fixture — the foreign drawer dropped, the
+/// untagged and in-tree ones kept; the second covers worktree normalisation and
+/// the fail-open paths.
 // #5817: cross-project leakage, read-side mitigation only — the write that put
 // the drawer in this palace is the actual defect.
 pub(super) fn filter_drawers_by_project_scope(
