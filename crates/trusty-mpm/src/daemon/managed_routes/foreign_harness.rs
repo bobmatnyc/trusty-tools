@@ -21,7 +21,7 @@
 //! rule for the doctor surface). This module logs and returns; it has no
 //! mutating path and must not grow one.
 //!
-//! Test: `foreign_harness_tests`.
+//! Test: `foreign_harness_tests.rs`.
 
 use std::path::{Path, PathBuf};
 

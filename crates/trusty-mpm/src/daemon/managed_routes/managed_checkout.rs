@@ -19,7 +19,7 @@
 //! rule: a placement the operator asked for explicitly is never quietly traded
 //! for a different one.
 //!
-//! Test: `managed_checkout_tests`.
+//! Test: `managed_checkout_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
