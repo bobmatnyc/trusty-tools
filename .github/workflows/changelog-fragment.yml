@@ -73,6 +73,17 @@ jobs:
       - name: Stale-base selftest (must refuse a pinned base.sha)
         run: bash scripts/check_changelog_base_selftest.sh
 
+      # Crate-attribution selftest (#4576): the gate selected nested crate
+      # source with a `case` glob whose `*` spans `/`, then extracted the crate
+      # with a sed that spans exactly one directory level — so a nested path was
+      # selected and silently DROPPED, and the gate printed "no crate source
+      # changed … — OK" over a whole shipped source tree (PR #5796). This
+      # re-proves that nested source is attributed, that an unattributable path
+      # fails rather than vanishing, and that build.rs / tests/ / benches/ /
+      # testdata/ / dist bundles / Cargo.toml still need no fragment.
+      - name: Crate-attribution selftest (must not drop nested crate source)
+        run: bash scripts/check_changelog_attribution_selftest.sh
+
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
       # `base.sha` snapshot. checkout leaves refs/remotes/origin/<base> at
       # whatever it fetched; re-fetching pins it to the live tip so the merge
