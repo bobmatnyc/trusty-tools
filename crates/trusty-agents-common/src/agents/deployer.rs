@@ -232,10 +232,12 @@ fn deploy_agents_locked(
     // managed files as user-owned and silently skip the entire deploy.
     let mut manifest = match AgentManifest::load_checked(target_dir) {
         ManifestLoad::Ok(m) => m,
-        ManifestLoad::Corrupt(detail) => {
+        // #5626: same refusal for a read that failed — resetting to empty
+        // reclassifies every managed file as user-owned either way.
+        ManifestLoad::Corrupt(detail) | ManifestLoad::Unreadable(detail) => {
             return Err(AgentBuildError::FrontmatterParse(format!(
-                "agent manifest is corrupt and cannot be safely loaded; \
-                 run `tm repair deploy` to recover. Detail: {detail}"
+                "agent ownership ledger could not be established and the deploy cannot \
+                 safely proceed; run `tm repair deploy` to recover. Detail: {detail}"
             )));
         }
     };
@@ -535,9 +537,13 @@ fn retract_locked(
 
     let mut manifest = match AgentManifest::load_checked(target_dir) {
         ManifestLoad::Ok(m) => m,
-        ManifestLoad::Corrupt(detail) => {
+        // #5626: an unreadable ledger refuses like a corrupt one — retraction
+        // DELETES files, and the ownership record that says which ones is
+        // exactly what this run failed to obtain.
+        ManifestLoad::Corrupt(detail) | ManifestLoad::Unreadable(detail) => {
             return Err(AgentBuildError::FrontmatterParse(format!(
-                "agent manifest is corrupt; refusing to retract any file on the strength \
+                "agent ownership ledger could not be established; refusing to retract any \
+                 file on the strength \
                  of an unreadable ownership ledger. `tm repair deploy` cannot fix this — \
                  it only repairs the user-tier deploy, not this workspace's ledger. \
                  Delete `.claude/agents/.trusty-mpm-manifest.json` in this workspace by \

@@ -276,6 +276,49 @@ pub fn classify_tier_resident(
     TierResidentClass::Custom
 }
 
+/// The result of scanning one non-canonical agent tier.
+///
+/// Why (#5626, [ADR-0045]): [`audit_agent_tier`] used to answer with a bare
+/// `Vec`, so "scanned it, found nothing" and "could not scan it" were the same
+/// empty value. `tm doctor`'s `asset_tier` probe turned that into
+/// `CheckStatus::Ok` reading `no tm-owned agent files … (scanned: <dir>)` — a
+/// clean bill of health naming a directory it never opened, over the one defect
+/// (#4408) whose defining property was that no check could fail.
+/// What: [`Scanned`](Self::Scanned) carries the findings, possibly empty;
+/// [`Unscannable`](Self::Unscannable) carries the reason the directory could
+/// not be listed. A directory that does not exist is `Scanned(vec![])` —
+/// [ADR-0045] keeps `NotFound` benign, and an unprovisioned tier is not a
+/// finding.
+/// Test: `audit_missing_dir_is_empty`, `audit_unreadable_dir_is_unscannable`.
+///
+/// [ADR-0045]: ../../../../docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TierScanResult {
+    /// The directory was listed. The vec holds every tm-owned file in it.
+    Scanned(Vec<MisplacedAgent>),
+    /// The directory could not be listed; the string says why. Nothing is
+    /// known about what it holds.
+    Unscannable(String),
+}
+
+impl TierScanResult {
+    /// The tm-owned files found, or none when the tier could not be scanned.
+    ///
+    /// Why: consumers that only render the file list should not re-match the
+    /// enum; the scan FAILURE is a separate question they answer separately.
+    /// What: the slice for [`Scanned`](Self::Scanned), empty for
+    /// [`Unscannable`](Self::Unscannable) — never read an empty return here as
+    /// "the tier is clean".
+    /// Test: `audit_unreadable_dir_is_unscannable`.
+    pub fn found(&self) -> &[MisplacedAgent] {
+        match self {
+            Self::Scanned(found) => found,
+            Self::Unscannable(_) => &[],
+        }
+    }
+}
+
 /// Scan one non-canonical agent tier and return the tm-owned files in it.
 ///
 /// Why: the shared scan both consumers run, so "what doctor flags" and "what
@@ -285,8 +328,11 @@ pub fn classify_tier_resident(
 /// this directory's ownership manifest for [`ownership_of`], classifies with
 /// [`classify_tier_resident`], and returns the
 /// non-[`TierResidentClass::Custom`] results sorted by name for stable output.
-/// A missing/unreadable `dir` returns an empty vec. A CORRUPT manifest degrades
-/// to [`TierOwnership::Untracked`] for every file rather than failing: shadowing
+/// A missing `dir` is [`TierScanResult::Scanned`] with nothing in it; a `dir`
+/// that exists but cannot be listed is [`TierScanResult::Unscannable`] (#5626)
+/// — the two were one value until then, and the difference is the whole
+/// verdict. A CORRUPT OR UNREADABLE manifest degrades to
+/// [`TierOwnership::Untracked`] for every file rather than failing: shadowing
 /// is established by the roster alone, so the load-bearing signal survives.
 /// Note the asymmetry that makes that safe — an unreadable ledger can only
 /// LOSE the user-owned exemption, so #4448 must re-read the ledger under its
@@ -297,17 +343,27 @@ pub fn classify_tier_resident(
 /// `audit_ignores_a_user_owned_entry_on_a_bundled_name`,
 /// `audit_reports_a_stranded_framework_entry`, `audit_missing_dir_is_empty`,
 /// `audit_tolerates_a_corrupt_manifest`,
+/// `audit_unreadable_dir_is_unscannable`,
 /// `audit_flags_a_renamed_file_that_declares_a_bundled_name`,
 /// `audit_ignores_a_bundled_filename_that_declares_a_custom_name`.
-pub fn audit_agent_tier(dir: &Path, bundled: &BTreeSet<String>) -> Vec<MisplacedAgent> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+pub fn audit_agent_tier(dir: &Path, bundled: &BTreeSet<String>) -> TierScanResult {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // #5626: absent is a clean tier; unlistable is not a tier we can speak
+        // for, and reporting it as clean is what asserted a scan that failed.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return TierScanResult::Scanned(Vec::new());
+        }
+        Err(e) => {
+            return TierScanResult::Unscannable(format!("{dir}: {e}", dir = dir.display()));
+        }
     };
     let manifest = match AgentManifest::load_checked(dir) {
         ManifestLoad::Ok(m) => m,
-        // Corrupt ledger: keep the roster-based half of the verdict rather than
-        // reporting nothing. See the doc comment.
-        ManifestLoad::Corrupt(_) => AgentManifest::default(),
+        // Ledger not established: keep the roster-based half of the verdict
+        // rather than reporting nothing. See the doc comment — the directory
+        // listing above is what makes that half trustworthy.
+        _ => AgentManifest::default(),
     };
 
     let mut found: Vec<MisplacedAgent> = entries
@@ -328,7 +384,7 @@ pub fn audit_agent_tier(dir: &Path, bundled: &BTreeSet<String>) -> Vec<Misplaced
         })
         .collect();
     found.sort_by(|a, b| a.name.cmp(&b.name));
-    found
+    TierScanResult::Scanned(found)
 }
 
 #[cfg(test)]

@@ -245,7 +245,10 @@ pub fn list_project_custom_stems(dest: &Path) -> Result<BTreeSet<String>> {
     if !dest.is_dir() {
         return Ok(stems);
     }
-    let manifest = SkillManifest::load(dest);
+    // #5626: an unreadable ledger would classify every managed skill as
+    // project-custom, and the planner drops project-custom stems from the
+    // bundled deploy — the #4605 permanent stall, tier-wide.
+    let manifest = SkillManifest::load_checked(dest)?;
     for entry in std::fs::read_dir(dest)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {

@@ -33,7 +33,7 @@ fn unmanaged_finds_a_bundled_named_untracked_skill() {
     let dest = TempDir::new().unwrap();
     stage_untracked(dest.path(), "tm-workflow", "stale body");
 
-    let found = unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"]));
+    let found = unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"]).unwrap();
     assert_eq!(found.len(), 1, "expected one finding, got {found:?}");
     assert_eq!(found[0].stem, "tm-workflow");
     assert_eq!(found[0].dir, dest.path().join("tm-workflow"));
@@ -51,7 +51,7 @@ fn unmanaged_ignores_a_managed_skill() {
     fs::write(source.path().join("tm-workflow.md"), "v1").unwrap();
     deploy_skills(source.path(), dest.path()).unwrap();
 
-    assert!(unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"])).is_empty());
+    assert!(unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"])).unwrap().is_empty());
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn unmanaged_ignores_an_operator_skill() {
     let dest = TempDir::new().unwrap();
     stage_untracked(dest.path(), "my-own-skill", "mine");
 
-    assert!(unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"])).is_empty());
+    assert!(unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"])).unwrap().is_empty());
 }
 
 #[test]
@@ -72,14 +72,14 @@ fn unmanaged_empty_roster_reports_nothing() {
     let dest = TempDir::new().unwrap();
     stage_untracked(dest.path(), "tm-workflow", "stale body");
 
-    assert!(unmanaged_bundled_skills(dest.path(), &BTreeSet::new()).is_empty());
+    assert!(unmanaged_bundled_skills(dest.path(), &BTreeSet::new()).unwrap().is_empty());
 }
 
 #[test]
 fn unmanaged_missing_dest_is_empty() {
     // An unprovisioned tier is not a finding, and never an error.
     assert!(
-        unmanaged_bundled_skills(Path::new("/nonexistent/skills"), &roster(&["tm"])).is_empty()
+        unmanaged_bundled_skills(Path::new("/nonexistent/skills"), &roster(&["tm"])).unwrap().is_empty()
     );
 }
 
@@ -89,7 +89,7 @@ fn unmanaged_ignores_a_directory_without_an_entry_point() {
     let dest = TempDir::new().unwrap();
     fs::create_dir_all(dest.path().join("tm-workflow").join("references")).unwrap();
 
-    assert!(unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"])).is_empty());
+    assert!(unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"])).unwrap().is_empty());
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn unmanaged_lists_reference_files() {
     fs::write(refs.join("a.md"), "a").unwrap();
     fs::write(refs.join("notes.txt"), "ignored").unwrap();
 
-    let found = unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"]));
+    let found = unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"]).unwrap();
     assert_eq!(
         found[0].files,
         vec![
@@ -125,7 +125,7 @@ fn manifest_keys_match_the_deployer_key_shape() {
     fs::create_dir_all(&refs).unwrap();
     fs::write(refs.join("a.md"), "a").unwrap();
 
-    let found = unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"]));
+    let found = unmanaged_bundled_skills(dest.path(), &roster(&["tm-workflow"]).unwrap();
     assert_eq!(
         found[0].manifest_keys(),
         vec![
@@ -157,7 +157,7 @@ fn bundled_skill_dirs_includes_a_managed_skill() {
     let roster: BTreeSet<String> = ["tm-workflow".to_string()].into_iter().collect();
 
     assert!(
-        unmanaged_bundled_skills(dest.path(), &roster).is_empty(),
+        unmanaged_bundled_skills(dest.path(), &roster).unwrap().is_empty(),
         "a managed skill is not an unmanaged finding"
     );
     let all = bundled_skill_dirs(dest.path(), &roster);

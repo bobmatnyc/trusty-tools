@@ -138,19 +138,41 @@ impl Default for SkillManifest {
 }
 
 impl SkillManifest {
-    /// Load the manifest from `target_dir`, defaulting to empty when absent.
+    /// Load the manifest from `target_dir`, defaulting to empty only when it is
+    /// genuinely ABSENT.
     ///
-    /// Why: a first-ever deploy has no manifest; treating a missing file as an
-    /// empty manifest keeps the deployer's logic uniform.
-    /// What: reads `<target_dir>/.trusty-mpm-skills-manifest.json`; a missing or
-    /// unparseable file yields a fresh empty manifest.
-    /// Test: `skill_manifest_load_missing_returns_empty`, `skill_manifest_round_trip`.
-    pub fn load(target_dir: &Path) -> Self {
-        let path = target_dir.join(SKILL_MANIFEST_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
+    /// Why (#5626, [ADR-0045]): the previous `load` answered a missing file, an
+    /// unparseable one, and an EACCES/ESTALE/EIO read failure with the same
+    /// empty manifest. Every consumer reads empty as "this tier manages
+    /// nothing", so one unreadable ledger reclassifies every managed skill as
+    /// user-owned: `deployer::deploy_one_file` then skips those files and
+    /// records nothing for them, which is the #4881 freeze reached through a
+    /// read failure instead of a lost update. The distinction already existed
+    /// one method away in [`Self::read_parsed`], added for
+    /// [`Self::save_merging`]; this routes `load` through the same helper rather
+    /// than keeping a third reading of the same file.
+    /// What: `Ok(default)` when the file does not exist (a first-ever deploy —
+    /// [ADR-0045] keeps `NotFound` benign); `Ok(parsed)` when it reads;
+    /// `Err(Io)` when it exists but does not parse, naming `tm repair deploy`,
+    /// which is the rule `agents::deployer` already applies to a corrupt agent
+    /// ledger; `Err` for any other I/O failure.
+    /// Test: `skill_manifest_load_missing_returns_empty`,
+    /// `skill_manifest_load_propagates_an_unreadable_ledger`,
+    /// `skill_manifest_load_rejects_a_corrupt_ledger`, `skill_manifest_round_trip`.
+    ///
+    /// [ADR-0045]: ../../../../docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md
+    pub fn load_checked(target_dir: &Path) -> Result<Self> {
+        // #5626: `read_parsed` already separates absent from unparseable and
+        // propagates every other I/O error; only the None arm is decided here.
+        Self::read_parsed(target_dir)?.ok_or_else(|| {
+            ManifestError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{} is not valid JSON; run `tm repair deploy` to recover",
+                    target_dir.join(SKILL_MANIFEST_FILE).display()
+                ),
+            ))
+        })
     }
 
     /// Persist the manifest to `<target_dir>/.trusty-mpm-skills-manifest.json`
@@ -242,12 +264,12 @@ impl SkillManifest {
 
     /// Read the on-disk manifest, distinguishing "absent" from "unparseable".
     ///
-    /// Why (#4881 review): [`SkillManifest::load`] collapses both into the empty
-    /// default, which is right for a first-ever deploy and wrong for corruption
-    /// — a merge that starts from "empty" because it could not read the file
-    /// publishes a ledger missing everything the file held. Only
-    /// [`SkillManifest::save_merging`] needs the distinction, so this stays
-    /// private rather than adding a second public load API.
+    /// Why (#4881 review): a merge that starts from "empty" because it could
+    /// not read the file publishes a ledger missing everything the file held.
+    /// [`SkillManifest::load_checked`] reads through this same helper since
+    /// #5626, so the three states are separated once for both callers; it stays
+    /// private because the `Ok(None)` shape is the merge's vocabulary, not a
+    /// load API's.
     /// What: `Ok(Some(default))` when the file is absent (nothing was ever
     /// deployed here), `Ok(Some(parsed))` when it reads, `Ok(None)` when it
     /// exists but does not parse. A non-`NotFound` I/O error propagates.

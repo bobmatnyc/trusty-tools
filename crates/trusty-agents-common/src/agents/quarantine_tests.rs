@@ -840,6 +840,53 @@ fn a_sweep_destroys_no_content() {
     }
 }
 
+/// #5626 (ADR-0045). A ledger the sweep could not READ must reach the same
+/// refusal a corrupt one does.
+///
+/// `CorruptLedger` exists so nothing moves "on the strength of an unreadable
+/// ledger, because the operator-owned exemption lives in it". Before the fix
+/// only a parse failure reached it: an EACCES took `load_checked`'s catch-all
+/// `Err(_)` arm to `Ok(default)`, the operator's user-owned entry read as
+/// untracked, and this sweep renamed their file to `qa.md.disabled`.
+#[test]
+#[cfg(unix)]
+fn quarantine_refuses_when_the_ledger_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Restore the mode on drop so a panic cannot leave `TempDir` unable to
+    /// clean up.
+    struct ModeGuard(PathBuf);
+    impl Drop for ModeGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o644));
+        }
+    }
+
+    let f = Fixture::new();
+    let content = tm_agent("qa");
+    let original = f.write("qa.md", &content);
+    // The operator owns this file, and only the ledger says so.
+    f.ledger("qa.md", &content, Origin::User);
+
+    // A readable ledger already preserves it — establishes the fixture is real.
+    let healthy = f.sweep(&roster(&["qa"])).expect("sweep");
+    assert!(healthy.moved.is_empty(), "report: {healthy:?}");
+
+    let ledger = f.tier.join(MANIFEST_FILE);
+    let _guard = ModeGuard(ledger.clone());
+    std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o000)).expect("chmod ledger");
+
+    let err = f
+        .sweep(&roster(&["qa"]))
+        .expect_err("an unreadable ledger must refuse the whole sweep");
+    assert!(
+        matches!(err, QuarantineError::CorruptLedger(_)),
+        "expected CorruptLedger, got {err:?}"
+    );
+    assert!(original.exists(), "the operator's file must still be there");
+    assert!(!f.tier.join("qa.md.disabled").exists());
+}
+
 /// Every regular file under `root`, recursively. Test-only.
 fn walk(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();

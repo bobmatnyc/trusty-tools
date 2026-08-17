@@ -54,15 +54,29 @@ pub const MANIFEST_FILE: &str = ".trusty-mpm-manifest.json";
 /// Why: callers need to distinguish "no manifest yet" (first deploy, expect
 /// empty) from "manifest is corrupt" (dangerous — silently resetting to empty
 /// would reclassify managed files as user-owned and skip re-deploying them).
+/// [`Unreadable`](Self::Unreadable) is the third state (#5626, [ADR-0045]): a
+/// read that FAILED establishes nothing at all, and folding it into
+/// [`Ok`](Self::Ok) was the same reclassification arriving through EACCES
+/// instead of through a truncated write.
 /// What: `Ok(manifest)` when the file is absent or parses cleanly; `Corrupt`
-/// when the file exists but is malformed or truncated.
-/// Test: `manifest_load_corrupt_returns_corrupt`.
+/// when the file exists but is malformed or truncated; `Unreadable` when the
+/// read itself failed for any reason other than `NotFound`. Both non-`Ok`
+/// variants carry a caller-renderable detail string and mean the ledger has not
+/// been established — every consumer must treat them alike.
+/// `#[non_exhaustive]` so a future state is added without breaking consumers.
+/// Test: `manifest_load_corrupt_returns_corrupt`,
+/// `manifest_load_unreadable_is_not_ok`.
+///
+/// [ADR-0045]: ../../../../docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ManifestLoad {
     /// File was absent (first deploy) or parsed cleanly.
     Ok(AgentManifest),
     /// File exists but is malformed / truncated.
     Corrupt(String),
+    /// The file could not be read, so nothing is known about what it holds.
+    Unreadable(String),
 }
 
 /// Scratch path for one [`atomic_write`] attempt — unique per writer, per
@@ -342,10 +356,12 @@ impl AgentManifest {
     /// deploy, producing a silent no-op rather than a re-deploy.
     /// What: reads `<target_dir>/.trusty-mpm-manifest.json`; if absent returns
     /// `ManifestLoad::Ok(default)`; if present but malformed returns
-    /// `ManifestLoad::Corrupt` with the parse error; if valid returns
-    /// `ManifestLoad::Ok(parsed)`.
+    /// `ManifestLoad::Corrupt` with the parse error; if the read itself fails
+    /// for any other reason returns `ManifestLoad::Unreadable` with the I/O
+    /// error; if valid returns `ManifestLoad::Ok(parsed)`.
     /// Test: `manifest_load_missing_returns_empty`,
     ///       `manifest_load_corrupt_returns_corrupt`,
+    ///       `manifest_load_unreadable_is_not_ok`,
     ///       `manifest_round_trip`.
     pub fn load_checked(target_dir: &Path) -> ManifestLoad {
         let path = target_dir.join(MANIFEST_FILE);
@@ -355,7 +371,10 @@ impl AgentManifest {
                 Err(e) => ManifestLoad::Corrupt(format!("{path}: {e}", path = path.display())),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => ManifestLoad::Ok(Self::default()),
-            Err(_) => ManifestLoad::Ok(Self::default()),
+            // #5626: an EACCES/ESTALE/EIO read establishes nothing, and the
+            // empty default it used to return reclassified every managed file
+            // as user-owned — the exact outcome `ManifestLoad` exists to stop.
+            Err(e) => ManifestLoad::Unreadable(format!("{path}: {e}", path = path.display())),
         }
     }
 
@@ -363,15 +382,28 @@ impl AgentManifest {
     ///
     /// Why: preserves the pre-existing call sites that can tolerate a silent
     /// empty-on-corruption fallback (e.g. the deployer, which calls
-    /// `load_checked` itself when it cares about the distinction).
+    /// `load_checked` itself when it cares about the distinction). Every caller
+    /// whose decision MOVES, DELETES, or OVERWRITES a file calls `load_checked`
+    /// instead — an empty ledger reclassifies managed files as user-owned, and
+    /// #5626 is the record of what that costs on such a path.
     /// What: delegates to `load_checked`; returns the manifest on `Ok`, an
-    /// empty default on `Corrupt` (with no side-effects — callers that need
-    /// to react to corruption should use `load_checked`).
+    /// empty default when the ledger was not established, logging why.
     /// Test: `manifest_load_missing_returns_empty`, `manifest_round_trip`.
     pub fn load(target_dir: &Path) -> Self {
         match Self::load_checked(target_dir) {
             ManifestLoad::Ok(m) => m,
-            ManifestLoad::Corrupt(_) => Self::default(),
+            // intentional fail-open: the staleness and scaffold reporters that
+            // still call this have no error channel, and over-reporting a
+            // refresh as needed is their safe direction. #5626 left the shim
+            // unchanged and moved the destructive callers off it instead.
+            ManifestLoad::Corrupt(detail) | ManifestLoad::Unreadable(detail) => {
+                tracing::error!(
+                    detail,
+                    "agent ownership ledger could not be established; treating this \
+                     directory as unmanaged for a read-only report"
+                );
+                Self::default()
+            }
         }
     }
 

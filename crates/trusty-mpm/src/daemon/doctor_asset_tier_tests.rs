@@ -313,6 +313,62 @@ fn verdict_names_the_files_and_both_tiers() {
     }
 }
 
+/// #5626 (ADR-0045). A tier the probe could not read must not be reported as
+/// scanned and clean.
+///
+/// `audit_agent_tier` returned the same empty vec for "scanned, found nothing"
+/// and "could not scan", so before the fix this asserted `CheckStatus::Ok` with
+/// the message `no tm-owned agent files outside the canonical tier … (scanned:
+/// <dir>)` — over a directory holding a shadowing stub the probe never opened.
+#[test]
+#[cfg(unix)]
+fn unreadable_project_tier_is_not_reported_clean() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Restore the mode on drop so `TempDir` can still clean up after a panic.
+    struct ModeGuard(PathBuf);
+    impl Drop for ModeGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    place_agent(
+        &project,
+        "rust-engineer.md",
+        "---\nname: rust-engineer\n---\n",
+    );
+
+    let tier = project.join(".claude").join("agents");
+    let _guard = ModeGuard(tier.clone());
+    std::fs::set_permissions(&tier, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let paths = hermetic_paths(&home);
+    let check = check_asset_tier(&paths, Some(&project), &home);
+
+    assert_ne!(
+        check.status,
+        CheckStatus::Ok,
+        "a tier that could not be scanned is not a clean tier: {}",
+        check.message
+    );
+    assert!(
+        !check.message.contains("(scanned:"),
+        "the verdict must not claim a scan that failed: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains(&tier.display().to_string()),
+        "the operator needs the path: {}",
+        check.message
+    );
+}
+
 #[test]
 fn verdict_summarises_a_long_list() {
     // Six offenders must not produce a six-name wall; the count survives.

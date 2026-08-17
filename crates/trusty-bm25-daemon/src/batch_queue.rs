@@ -15,8 +15,14 @@
 //! channel round-trip (~microseconds) plus the score computation; that is
 //! invisible at typical palace sizes (hundreds to low thousands of drawers).
 //!
+//! A write's ack is the daemon's statement that the write is ON DISK, so the
+//! worker holds each per-op reply until the flush that covers it succeeds
+//! (#5627). That costs a write up to one coalescing window of latency and buys
+//! the guarantee an acked write is not lost by a crash or a supervisor reap.
+//!
 //! Test: `batch_queue_persists_indexed_doc`, `batch_queue_search_finds_match`,
-//! `batch_queue_delete_removes_doc`, `batch_queue_rebuild_clears_index`.
+//! `batch_queue_delete_removes_doc`, `batch_queue_rebuild_clears_index`,
+//! `batch_queue_index_ack_fails_when_the_flush_fails`.
 
 use std::time::Duration;
 
@@ -142,8 +148,14 @@ impl BatchQueue {
     /// Why: callers (the JSON-RPC dispatch) need a per-request future so
     /// they can return a typed response when the write lands.
     /// What: sends a `Op::Index` on the channel, awaits the worker's
-    /// oneshot reply. Returns `true` when the doc was inserted/updated.
-    /// Test: `batch_queue_persists_indexed_doc`.
+    /// oneshot reply. Returns `true` when the doc was inserted/updated AND the
+    /// snapshot covering it reached disk — the reply is released by that flush,
+    /// so it lands at the end of the write window rather than on the in-memory
+    /// mutation (#5627). An `Err` means the write may not have survived; the
+    /// document is in the live index either way, so a search sees it and a
+    /// restart may not.
+    /// Test: `batch_queue_persists_indexed_doc`,
+    /// `batch_queue_index_ack_fails_when_the_flush_fails`.
     pub async fn index_doc(&self, doc_id: String, text: String) -> Result<bool> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -164,7 +176,9 @@ impl BatchQueue {
     /// Why: same motivation as [`Self::index_doc`] — reserved for the dream
     /// subprocess, but exposed on the queue so the dispatch code is uniform.
     /// What: sends a `Op::Delete` on the channel. Returns `true` iff the id
-    /// was present beforehand.
+    /// was present beforehand. Carries the same durability contract as
+    /// [`Self::index_doc`] (#5627): the reply waits for the flush that covers
+    /// the batch.
     /// Test: `batch_queue_delete_removes_doc`.
     pub async fn delete(&self, doc_id: String) -> Result<bool> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -343,7 +357,8 @@ async fn batch_worker(mut rx: mpsc::Receiver<Op>, mut index: PalaceBm25Index, co
                 continue;
             }
             Op::Flush { reply } => {
-                let _ = reply.send(flush_now(&mut index));
+                // Cold path: no batch is open, so there are no held acks.
+                let _ = reply.send(flush_now(&mut index, Vec::new()));
                 continue;
             }
             Op::MissingDocs { doc_ids, reply } => {
@@ -364,7 +379,9 @@ async fn batch_worker(mut rx: mpsc::Receiver<Op>, mut index: PalaceBm25Index, co
 
         // We have a write op — enter batching mode.
         let mut write_count: usize = 0;
-        apply_write_op(&mut index, writes_started_with);
+        // #5627: every write's ack rides here until the flush that covers it.
+        let mut pending: Vec<PendingAck> = Vec::new();
+        pending.extend(apply_write_op(&mut index, writes_started_with));
         write_count += 1;
 
         let deadline = sleep(config.write_window);
@@ -404,14 +421,20 @@ async fn batch_worker(mut rx: mpsc::Receiver<Op>, mut index: PalaceBm25Index, co
                         // the caller is usually a shutdown or reap path that
                         // must not lose the window's writes. The outer loop
                         // still flushes at the window's end; `flush` is a
-                        // no-op once the dirty bit is clear.
-                        let _ = reply.send(flush_now(&mut index));
+                        // no-op once the dirty bit is clear. #5627: this flush
+                        // covers the batch so far, so it releases those acks.
+                        let held = std::mem::take(&mut pending);
+                        let _ = reply.send(flush_now(&mut index, held));
                     }
                     Some(Op::Rebuild { reply }) => {
                         // Honour the rebuild atomically. Flush the pending
                         // write batch first so the new empty state is the
                         // last thing on disk.
                         let flush_pre = index.flush();
+                        // #5627: the rebuild is about to drop this batch from
+                        // memory, so its acks are decided by THIS flush and
+                        // nothing later can rescue them.
+                        release_acks(std::mem::take(&mut pending), &flush_pre);
                         if let Err(e) = flush_pre {
                             // Surface the flush error to whoever issued the
                             // rebuild — they care about durability.
@@ -432,14 +455,18 @@ async fn batch_worker(mut rx: mpsc::Receiver<Op>, mut index: PalaceBm25Index, co
                         break;
                     }
                     Some(write_op @ (Op::Index { .. } | Op::Delete { .. })) => {
-                        apply_write_op(&mut index, write_op);
+                        pending.extend(apply_write_op(&mut index, write_op));
                         write_count += 1;
                     }
                     None => {
                         // Channel closed mid-batch — flush below and exit.
-                        if let Err(e) = index.flush() {
+                        let flushed = index.flush();
+                        if let Err(e) = &flushed {
                             tracing::warn!("BM25 snapshot flush at shutdown failed: {e:#}");
                         }
+                        // #5627: a caller still awaiting its ack when the queue
+                        // shuts down hears the truth, not a dropped channel.
+                        release_acks(std::mem::take(&mut pending), &flushed);
                         return;
                     }
                 }
@@ -452,9 +479,13 @@ async fn batch_worker(mut rx: mpsc::Receiver<Op>, mut index: PalaceBm25Index, co
                 doc_count = index.doc_count(),
                 "bm25 write batch flushing snapshot"
             );
-            if let Err(e) = index.flush() {
+            let flushed = index.flush();
+            if let Err(e) = &flushed {
                 tracing::error!("BM25 snapshot flush failed: {e:#}");
             }
+            // #5627: the acks this batch held are true only now, and only if
+            // the flush above succeeded.
+            release_acks(std::mem::take(&mut pending), &flushed);
         }
     }
 }
@@ -473,28 +504,76 @@ fn stats_of(index: &PalaceBm25Index) -> StatsResult {
     }
 }
 
-/// Flush the snapshot and report the resulting document count.
+/// Flush the snapshot, release the acks it covers, and report the count.
 ///
 /// Why: the worker answers `Op::Flush` from two places and both must report
 /// the same thing — the count that is now ON DISK, so a caller can treat a
-/// successful flush as durability and not merely as "the call returned".
-/// What: `index.flush()` then `doc_count()`. A clean index flushes nothing and
-/// still reports its count.
-/// Test: `batch_queue_flush_persists_within_the_write_window`.
-fn flush_now(index: &mut PalaceBm25Index) -> Result<usize> {
-    index.flush()?;
+/// successful flush as durability and not merely as "the call returned". Since
+/// #5627 the same flush also decides the fate of every write ack held behind
+/// it, and that pairing lives here so a second call site cannot flush without
+/// answering the writers it just made durable.
+/// What: `index.flush()`, then [`release_acks`] over `pending` (empty on the
+/// cold path, where no batch is open), then `doc_count()`. A clean index
+/// flushes nothing and still reports its count.
+/// Test: `batch_queue_flush_persists_within_the_write_window`,
+/// `batch_queue_index_ack_fails_when_the_flush_fails`.
+fn flush_now(index: &mut PalaceBm25Index, pending: Vec<PendingAck>) -> Result<usize> {
+    let flushed = index.flush();
+    release_acks(pending, &flushed);
+    flushed?;
     Ok(index.doc_count())
 }
 
-/// Apply one write op to the index, forwarding the typed reply.
+/// One applied write's ack, held until the flush that makes it durable.
 ///
-/// Why: factored out so the worker loop reads top-to-bottom and the per-op
-/// reply shape stays in one place.
-/// What: handles `Index` (returns `true` on success) and `Delete` (returns
-/// the prior-presence bool). The receiver awaiting the oneshot may have been
-/// cancelled (client disconnect); ignore that case so the worker keeps
-/// draining the rest of the batch.
-fn apply_write_op(index: &mut PalaceBm25Index, op: Op) {
+/// Why (#5627): the value a write op reports is known the moment the in-memory
+/// index is mutated, but it is not TRUE until the snapshot is on disk. Holding
+/// the sender rather than the answer is what lets the flush decide which of the
+/// two the caller hears.
+/// What: the caller's oneshot and the answer to send if the flush succeeds.
+/// Test: `batch_queue_index_ack_fails_when_the_flush_fails`.
+struct PendingAck {
+    reply: oneshot::Sender<Result<bool>>,
+    value: bool,
+}
+
+/// Release a batch's held acks once its durability is known.
+///
+/// Why (#5627): the acks and the flush are one statement — "these writes are on
+/// disk" — so both outcomes are delivered from the same place rather than each
+/// call site re-deriving what a failed flush means. `anyhow::Error` is not
+/// `Clone`, so the failure is rendered once and every caller in the batch is
+/// told the same thing.
+/// What: sends each held value on success, or an error naming the flush failure
+/// on `Err`. A receiver that hung up (client disconnect) is ignored, as before.
+/// Test: `batch_queue_index_ack_fails_when_the_flush_fails`.
+fn release_acks(pending: Vec<PendingAck>, flushed: &Result<()>) {
+    let failure = flushed
+        .as_ref()
+        .err()
+        .map(|e| format!("BM25 snapshot flush failed, so this write is not durable: {e:#}"));
+    for ack in pending {
+        let _ = match &failure {
+            None => ack.reply.send(Ok(ack.value)),
+            Some(msg) => ack.reply.send(Err(anyhow!("{msg}"))),
+        };
+    }
+}
+
+/// Apply one write op to the index, returning the ack the flush will release.
+///
+/// Why (#5627): sending the ack here — on the in-memory mutation — told every
+/// caller in the batch that its write had landed before the snapshot flush that
+/// would persist it had run, and a failed flush was `tracing::error!` and
+/// nothing else. A crash or ungraceful restart then lost writes the daemon had
+/// definitively acked. The reply now travels back to the worker, which releases
+/// it through [`release_acks`] once the covering flush has succeeded.
+/// What: handles `Index` (reports `true`) and `Delete` (reports the
+/// prior-presence bool), and returns the held ack. `None` for a non-write op,
+/// which the caller guarantees never reaches here.
+/// Test: `batch_queue_index_ack_fails_when_the_flush_fails`,
+/// `batch_queue_persists_indexed_doc`, `batch_queue_delete_removes_doc`.
+fn apply_write_op(index: &mut PalaceBm25Index, op: Op) -> Option<PendingAck> {
     match op {
         Op::Index {
             doc_id,
@@ -502,11 +581,14 @@ fn apply_write_op(index: &mut PalaceBm25Index, op: Op) {
             reply,
         } => {
             index.index_doc(&doc_id, &text);
-            let _ = reply.send(Ok(true));
+            Some(PendingAck { reply, value: true })
         }
         Op::Delete { doc_id, reply } => {
             let was_present = index.delete_doc(&doc_id);
-            let _ = reply.send(Ok(was_present));
+            Some(PendingAck {
+                reply,
+                value: was_present,
+            })
         }
         // Caller guarantees only write ops reach here; treat anything else
         // as a programmer error in this module.
@@ -516,6 +598,7 @@ fn apply_write_op(index: &mut PalaceBm25Index, op: Op) {
         | Op::Flush { .. }
         | Op::MissingDocs { .. } => {
             tracing::error!("apply_write_op called with non-write op — this is a bug");
+            None
         }
     }
 }
@@ -688,6 +771,49 @@ mod tests {
 
         let raw = std::fs::read_to_string(&snapshot).expect("snapshot must exist after flush");
         assert!(raw.contains("phoenix rising"), "got: {raw}");
+    }
+
+    /// Why (#5627, ADR-0045 framing): the ack is the daemon's only statement
+    /// that a write landed. Before the fix `apply_write_op` sent it on the
+    /// in-memory mutation, so a failing end-of-batch flush was `tracing::error!`
+    /// and nothing else — every caller in that batch had already been told
+    /// `Ok(true)` about bytes that never reached disk.
+    /// What: makes the palace directory read-only so `flush` fails at its tmp
+    /// write, then asserts the write op reports that failure. Pre-fix this
+    /// returned `Ok(true)`.
+    /// Test: this test itself.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn batch_queue_index_ack_fails_when_the_flush_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        /// Restore the mode on drop so `TempDir` can still clean up.
+        struct ModeGuard(std::path::PathBuf);
+        impl Drop for ModeGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index = PalaceBm25Index::load_or_create(dir.path()).expect("load palace index");
+        let snapshot = index.snapshot_path().to_path_buf();
+        let q = BatchQueue::new(index, BatchConfig::default());
+
+        let _guard = ModeGuard(dir.path().to_path_buf());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))
+            .expect("chmod palace dir");
+
+        let acked = q.index_doc("d1".into(), "phoenix rising".into()).await;
+
+        assert!(
+            acked.is_err(),
+            "a write may not be acked when the flush that would persist it failed"
+        );
+        assert!(
+            !snapshot.exists(),
+            "precondition: the failed flush left nothing on disk"
+        );
     }
 
     #[tokio::test]

@@ -93,19 +93,23 @@ const RECEIPT_FILE: &str = "RECEIPT.md";
 /// Why: these are the conditions under which acting at all would be reckless,
 /// as distinct from a per-file refusal (which is a [`SkipReason`], not an
 /// error). Every variant means NOTHING was touched.
-/// What: [`CorruptLedger`](Self::CorruptLedger) — the ownership ledger is
-/// unreadable, so the operator-owned exemption cannot be honoured;
+/// What: [`CorruptLedger`](Self::CorruptLedger) — the ownership ledger did not
+/// parse, or could not be read at all (#5626), so the operator-owned exemption
+/// cannot be honoured;
 /// [`EmptyRoster`](Self::EmptyRoster) — the bundled roster resolved empty, which
 /// would make every file classify as custom (a silent no-op that hides a broken
 /// install); [`Manifest`](Self::Manifest) — the ledger lock could not be taken.
 /// Test: `quarantine_refuses_on_a_corrupt_ledger`,
+/// `quarantine_refuses_when_the_ledger_cannot_be_read`,
 /// `quarantine_refuses_an_empty_roster`.
 #[derive(Debug, thiserror::Error)]
 pub enum QuarantineError {
-    /// The ownership ledger could not be read. Nothing was moved.
+    /// The ownership ledger was not established — corrupt, or unreadable.
+    /// Nothing was moved.
     #[error(
-        "agent ownership ledger is corrupt; refusing to move any file on the strength of an \
-         unreadable ledger, because the operator-owned exemption lives in it. Detail: {0}"
+        "agent ownership ledger could not be established; refusing to move any file on the \
+         strength of a ledger this run never read, because the operator-owned exemption lives \
+         in it. Detail: {0}"
     )]
     CorruptLedger(String),
     /// The bundled roster is empty. Nothing was moved.
@@ -193,7 +197,13 @@ fn sweep_locked(
 ) -> Result<QuarantineReport, QuarantineError> {
     let manifest = match AgentManifest::load_checked(tier_dir) {
         ManifestLoad::Ok(m) => m,
-        ManifestLoad::Corrupt(detail) => return Err(QuarantineError::CorruptLedger(detail)),
+        // #5626: an unreadable ledger refuses exactly like a corrupt one — the
+        // user-owned exemption it holds is the reason nothing may move, and a
+        // read that failed is no more evidence of a file's owner than a parse
+        // that failed.
+        ManifestLoad::Corrupt(detail) | ManifestLoad::Unreadable(detail) => {
+            return Err(QuarantineError::CorruptLedger(detail));
+        }
     };
     let vcs = VcsIndex::probe(tier_dir);
     let backup_dir = backup_root.join(run_id);

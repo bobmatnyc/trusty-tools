@@ -36,6 +36,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::agents::manifest::Result;
 use crate::skills::manifest::SkillManifest;
 
 /// The entry-point filename Claude Code discovers a skill directory by.
@@ -110,19 +111,23 @@ impl UnmanagedBundledSkill {
 /// A missing or unreadable `dest` yields an empty vec — an unprovisioned tier
 /// is not a finding. An EMPTY `bundled` set likewise yields nothing: callers
 /// must treat that as "cannot classify by name", never as "nothing is
-/// bundled", since the latter reading would condemn every skill at once.
+/// bundled", since the latter reading would condemn every skill at once. A
+/// LEDGER that cannot be read is an `Err` (#5626): "untracked" is a claim about
+/// what the ledger says, and an unreadable ledger says nothing — reporting
+/// every bundled skill in the tier as unmanaged is the same false positive at
+/// the scale of the whole tier.
 /// Test: `unmanaged_finds_a_bundled_named_untracked_skill`,
 /// `unmanaged_ignores_a_managed_skill`, `unmanaged_ignores_an_operator_skill`,
 /// `unmanaged_missing_dest_is_empty`, `unmanaged_lists_reference_files`.
 pub fn unmanaged_bundled_skills(
     dest: &Path,
     bundled: &BTreeSet<String>,
-) -> Vec<UnmanagedBundledSkill> {
-    let manifest = SkillManifest::load(dest);
-    bundled_skill_dirs(dest, bundled)
+) -> Result<Vec<UnmanagedBundledSkill>> {
+    let manifest = SkillManifest::load_checked(dest)?;
+    Ok(bundled_skill_dirs(dest, bundled)
         .into_iter()
         .filter(|skill| !manifest.is_managed(&skill.stem))
-        .collect()
+        .collect())
 }
 
 /// Every bundled-named skill directory at `dest`, managed or not.

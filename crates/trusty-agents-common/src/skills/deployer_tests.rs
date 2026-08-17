@@ -49,7 +49,7 @@ fn deploy_new_skill() {
     let doctor = fs::read_to_string(tgt.path().join("tm-doctor").join("SKILL.md")).unwrap();
     assert!(doctor.contains("Diagnostic skill."));
 
-    let manifest = SkillManifest::load(tgt.path());
+    let manifest = SkillManifest::load_checked(tgt.path()).unwrap();
     assert!(manifest.is_managed("tm-doctor"));
 }
 
@@ -421,7 +421,7 @@ fn deploy_blocks_while_the_skill_ledger_lock_is_held() {
         .expect("deploy must complete once the lock is released");
     assert_eq!(stats.deployed.len(), 2);
     assert!(
-        SkillManifest::load(tgt.path()).is_managed("tm-doctor"),
+        SkillManifest::load_checked(tgt.path()).unwrap().is_managed("tm-doctor"),
         "the released deploy must have recorded its entries"
     );
 }
@@ -445,7 +445,7 @@ fn a_racing_writer_freezes_nothing_on_either_side() {
 
     // A first, uncontended deploy. This is the `base` an in-flight deploy loads.
     deploy_skills(src.path(), tgt.path()).unwrap();
-    let base = SkillManifest::load(tgt.path());
+    let base = SkillManifest::load_checked(tgt.path()).unwrap();
 
     // A writer that does NOT take the ledger lock — an older installed `tm`
     // during a rollout — publishes its own entry after our base was loaded.
@@ -496,7 +496,7 @@ fn a_racing_writer_freezes_nothing_on_either_side() {
 
     // Nothing is frozen on the RACER's side either: a blind save would have
     // dropped its entry, leaving its file untracked and skipped from then on.
-    let final_manifest = SkillManifest::load(tgt.path());
+    let final_manifest = SkillManifest::load_checked(tgt.path()).unwrap();
     assert!(
         final_manifest.is_managed("racing-writer-skill"),
         "the racing writer's entry must survive, or ITS file freezes instead"
@@ -532,7 +532,7 @@ fn deploy_records_files_written_before_a_mid_loop_failure() {
     let written = tgt.path().join("aaa-skill").join("SKILL.md");
     assert!(written.exists(), "aaa-skill was written before the failure");
     // ...and the ledger records it, so it is not orphaned.
-    let manifest = SkillManifest::load(tgt.path());
+    let manifest = SkillManifest::load_checked(tgt.path()).unwrap();
     assert!(
         manifest.is_managed("aaa-skill"),
         "a file written before the failure must still be recorded"
@@ -611,7 +611,7 @@ fn deploy_directory_skill_records_every_file_in_the_manifest() {
 
     deploy_skills(src.path(), tgt.path()).unwrap();
 
-    let manifest = SkillManifest::load(tgt.path());
+    let manifest = SkillManifest::load_checked(tgt.path()).unwrap();
     for key in [
         "duetto-design-system",
         "duetto-design-system/metadata.json",
@@ -663,7 +663,7 @@ fn deploy_flat_skill_still_works_alongside_a_directory_skill() {
             .join("cli.md")
             .is_file()
     );
-    let manifest = SkillManifest::load(tgt.path());
+    let manifest = SkillManifest::load_checked(tgt.path()).unwrap();
     assert!(manifest.is_managed("tm-doctor/references/cli.md"));
 }
 
@@ -748,5 +748,57 @@ fn deploy_directory_skill_preserves_a_user_edited_reference() {
             .deployed
             .contains(&"duetto-design-system/references/index.md".to_string()),
         "{stats:?}"
+    );
+}
+
+/// #5626 (ADR-0045). A ledger the deploy could not READ must stop the deploy,
+/// not read as "this tier manages nothing".
+///
+/// The empty default reclassifies every managed skill as user-owned, and the
+/// files this run writes land with no ledger entry behind them — bytes newer
+/// than any recorded checksum, which `deploy_one_file` reads as a hand-edit and
+/// skips from then on. Before the fix the last assertion below found `SKILL.md`
+/// on disk: the deploy wrote it on the strength of a ledger it never read.
+#[test]
+#[cfg(unix)]
+fn deploy_refuses_when_the_skill_ledger_cannot_be_read() {
+    use crate::skills::manifest::{SKILL_MANIFEST_FILE, SkillManifestEntry};
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Restore the mode on drop so a panic cannot leave `TempDir` unable to
+    /// clean up.
+    struct ModeGuard(std::path::PathBuf);
+    impl Drop for ModeGuard {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o644));
+        }
+    }
+
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+
+    // A tier that HAS a ledger: tm-doctor was deployed here once and its file
+    // has since been removed, so this deploy is about to write it again.
+    let mut seeded = SkillManifest::default();
+    seeded.managed.insert(
+        "tm-doctor".to_string(),
+        SkillManifestEntry {
+            checksum: checksum("whatever"),
+            deployed_at: "2026-08-12T00:00:00Z".to_string(),
+        },
+    );
+    seeded.save(tgt.path()).unwrap();
+
+    let ledger = tgt.path().join(SKILL_MANIFEST_FILE);
+    let _guard = ModeGuard(ledger.clone());
+    fs::set_permissions(&ledger, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let err = deploy_skills(src.path(), tgt.path())
+        .expect_err("an unreadable ledger must fail the deploy, not empty it");
+    assert!(matches!(err, ManifestError::Io(_)), "{err:?}");
+    assert!(
+        !tgt.path().join("tm-doctor").join("SKILL.md").exists(),
+        "nothing may be written on the strength of a ledger that could not be read"
     );
 }

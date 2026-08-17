@@ -177,7 +177,10 @@ fn deploy_skills_locked(
 ) -> Result<DeployStats> {
     let mut stats = DeployStats::default();
 
-    let mut manifest = SkillManifest::load(dest);
+    // #5626: a ledger that could not be READ must stop the deploy — the empty
+    // default reclassifies every managed skill as user-owned, and the files this
+    // run writes then carry no ledger entry, which is the #4881 freeze.
+    let mut manifest = SkillManifest::load_checked(dest)?;
     // #4881: the snapshot the compare-and-swap save is checked against.
     let base = manifest.clone();
     let now = chrono::Utc::now().to_rfc3339();

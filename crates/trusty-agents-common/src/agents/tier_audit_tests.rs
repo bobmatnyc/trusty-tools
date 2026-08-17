@@ -16,6 +16,18 @@ use std::collections::BTreeSet;
 use super::*;
 use crate::agents::manifest::{AgentManifest, ManifestEntry, Origin, checksum};
 
+/// The findings of a scan that must have SUCCEEDED.
+///
+/// #5626: every case below asserts about what a real scan saw, so an
+/// `Unscannable` here is a broken fixture, never an empty result — which is
+/// exactly the conflation `TierScanResult` exists to end.
+fn audit_scanned(dir: &std::path::Path, bundled: &BTreeSet<String>) -> Vec<MisplacedAgent> {
+    match audit_agent_tier(dir, bundled) {
+        TierScanResult::Scanned(found) => found,
+        TierScanResult::Unscannable(why) => panic!("fixture is not scannable: {why}"),
+    }
+}
+
 /// Build a name set from string literals.
 fn roster(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|s| (*s).to_owned()).collect()
@@ -214,7 +226,7 @@ fn audit_reports_a_shadowing_stub() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("rust-engineer.md"), doc("rust-engineer")).unwrap();
 
-    let found = audit_agent_tier(tmp.path(), &roster(&["rust-engineer"]));
+    let found = audit_scanned(tmp.path(), &roster(&["rust-engineer"]));
     assert_eq!(found.len(), 1, "found: {found:?}");
     assert_eq!(found[0].name, "rust-engineer");
     assert_eq!(found[0].class, TierResidentClass::ShadowsBundled);
@@ -228,7 +240,7 @@ fn audit_flags_a_renamed_file_that_declares_a_bundled_name() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("helper.md"), doc("rust-engineer")).unwrap();
 
-    let found = audit_agent_tier(tmp.path(), &roster(&["rust-engineer"]));
+    let found = audit_scanned(tmp.path(), &roster(&["rust-engineer"]));
     assert_eq!(found.len(), 1, "found: {found:?}");
     assert_eq!(found[0].name, "rust-engineer");
     assert_eq!(found[0].path, tmp.path().join("helper.md"));
@@ -241,7 +253,7 @@ fn audit_ignores_a_bundled_filename_that_declares_a_custom_name() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("rust-engineer.md"), doc("acme-custom")).unwrap();
 
-    assert!(audit_agent_tier(tmp.path(), &roster(&["rust-engineer"])).is_empty());
+    assert!(audit_scanned(tmp.path(), &roster(&["rust-engineer"])).is_empty());
 }
 
 #[test]
@@ -252,7 +264,7 @@ fn audit_ignores_a_custom_agent() {
     std::fs::write(tmp.path().join("acme-internal.md"), doc("acme-internal")).unwrap();
     std::fs::write(tmp.path().join("qa.md"), doc("qa")).unwrap();
 
-    let found = audit_agent_tier(tmp.path(), &roster(&["qa"]));
+    let found = audit_scanned(tmp.path(), &roster(&["qa"]));
     assert_eq!(found.len(), 1, "found: {found:?}");
     assert_eq!(found[0].name, "qa");
 }
@@ -266,7 +278,7 @@ fn audit_ignores_a_user_owned_entry_on_a_bundled_name() {
     std::fs::write(tmp.path().join("qa.md"), doc("qa")).unwrap();
     track(tmp.path(), "qa.md", Origin::User);
 
-    assert!(audit_agent_tier(tmp.path(), &roster(&["qa"])).is_empty());
+    assert!(audit_scanned(tmp.path(), &roster(&["qa"])).is_empty());
 }
 
 #[test]
@@ -277,7 +289,7 @@ fn audit_reports_a_stranded_framework_entry() {
     std::fs::write(tmp.path().join("legacy-agent.md"), doc("legacy-agent")).unwrap();
     track(tmp.path(), "legacy-agent.md", Origin::Bundled);
 
-    let found = audit_agent_tier(tmp.path(), &roster(&["qa"]));
+    let found = audit_scanned(tmp.path(), &roster(&["qa"]));
     assert_eq!(found.len(), 1, "found: {found:?}");
     assert_eq!(found[0].class, TierResidentClass::StrandedFrameworkOwned);
 }
@@ -289,13 +301,57 @@ fn audit_ignores_a_user_owned_manifest_entry() {
     std::fs::write(tmp.path().join("mine.md"), doc("mine")).unwrap();
     track(tmp.path(), "mine.md", Origin::User);
 
-    assert!(audit_agent_tier(tmp.path(), &roster(&["qa"])).is_empty());
+    assert!(audit_scanned(tmp.path(), &roster(&["qa"])).is_empty());
 }
 
 #[test]
 fn audit_missing_dir_is_empty() {
+    // ADR-0045 §3: NotFound stays benign. An unprovisioned tier is genuinely
+    // empty, and making that an error would fail every project without one.
     let tmp = tempfile::tempdir().unwrap();
-    assert!(audit_agent_tier(&tmp.path().join("nope"), &roster(&["qa"])).is_empty());
+    assert!(audit_scanned(&tmp.path().join("nope"), &roster(&["qa"])).is_empty());
+}
+
+/// #5626 (ADR-0045). A directory that exists but cannot be LISTED is not an
+/// empty directory.
+///
+/// Before the fix `read_dir`'s error took the same `return Vec::new()` as a
+/// clean scan, and `tm doctor`'s `asset_tier` probe printed
+/// `no tm-owned agent files … (scanned: <dir>)` over a shadowing stub it never
+/// saw.
+#[test]
+#[cfg(unix)]
+fn audit_unreadable_dir_is_unscannable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Restore the mode on drop so `TempDir` can still clean up after a panic.
+    struct ModeGuard(std::path::PathBuf);
+    impl Drop for ModeGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let tier = tmp.path().join("agents");
+    std::fs::create_dir(&tier).unwrap();
+    std::fs::write(tier.join("qa.md"), doc("qa")).unwrap();
+
+    // Readable, the shadowing file is found — establishes the fixture is real.
+    assert_eq!(audit_scanned(&tier, &roster(&["qa"])).len(), 1);
+
+    let _guard = ModeGuard(tier.clone());
+    std::fs::set_permissions(&tier, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let scan = audit_agent_tier(&tier, &roster(&["qa"]));
+    assert!(
+        matches!(scan, TierScanResult::Unscannable(_)),
+        "expected Unscannable, got {scan:?}"
+    );
+    assert!(
+        scan.found().is_empty(),
+        "an unscannable tier yields no findings — and no clean bill either"
+    );
 }
 
 #[test]
@@ -310,7 +366,7 @@ fn audit_tolerates_a_corrupt_manifest() {
     )
     .unwrap();
 
-    let found = audit_agent_tier(tmp.path(), &roster(&["qa"]));
+    let found = audit_scanned(tmp.path(), &roster(&["qa"]));
     assert_eq!(found.len(), 1, "found: {found:?}");
     assert_eq!(found[0].class, TierResidentClass::ShadowsBundled);
 }
@@ -323,7 +379,7 @@ fn audit_is_sorted_by_name() {
         std::fs::write(tmp.path().join(format!("{name}.md")), doc(name)).unwrap();
     }
 
-    let found = audit_agent_tier(tmp.path(), &roster(&["qa", "engineer", "rust-engineer"]));
+    let found = audit_scanned(tmp.path(), &roster(&["qa", "engineer", "rust-engineer"]));
     let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, vec!["engineer", "qa", "rust-engineer"]);
 }

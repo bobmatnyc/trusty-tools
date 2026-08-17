@@ -27,7 +27,7 @@ fn skill_manifest_load_missing_returns_empty() {
     // A directory with no manifest file must yield an empty, valid
     // manifest rather than an error.
     let tmp = TempDir::new().unwrap();
-    let manifest = SkillManifest::load(tmp.path());
+    let manifest = SkillManifest::load_checked(tmp.path()).unwrap();
     assert_eq!(manifest.version, SKILL_MANIFEST_VERSION);
     assert!(manifest.managed.is_empty());
 }
@@ -42,7 +42,7 @@ fn skill_manifest_round_trip() {
         .insert("tm-doctor.md".into(), sample_entry());
     manifest.save(tmp.path()).unwrap();
 
-    let loaded = SkillManifest::load(tmp.path());
+    let loaded = SkillManifest::load_checked(tmp.path()).unwrap();
     assert_eq!(loaded, manifest);
     assert!(tmp.path().join(SKILL_MANIFEST_FILE).exists());
 }
@@ -113,7 +113,7 @@ fn skill_manifest_lock_serialises_concurrent_writers() {
             let dir = dir.clone();
             std::thread::spawn(move || {
                 with_skill_manifest_lock::<(), ManifestError, _>(&dir, || {
-                    let mut m = SkillManifest::load(&dir);
+                    let mut m = SkillManifest::load_checked(&dir).unwrap();
                     m.managed.insert(format!("skill-{i}"), sample_entry());
                     std::thread::sleep(std::time::Duration::from_millis(5));
                     m.save(&dir)
@@ -126,7 +126,7 @@ fn skill_manifest_lock_serialises_concurrent_writers() {
         h.join().unwrap();
     }
 
-    let final_manifest = SkillManifest::load(&dir);
+    let final_manifest = SkillManifest::load_checked(&dir).unwrap();
     assert_eq!(
         final_manifest.managed.len(),
         8,
@@ -175,7 +175,7 @@ fn skill_manifest_save_merging_folds_in_a_concurrent_writer() {
         SkillManifestSave::Merged
     );
 
-    let on_disk = SkillManifest::load(dir);
+    let on_disk = SkillManifest::load_checked(dir).unwrap();
     assert!(on_disk.is_managed("ours"), "our own entry must be recorded");
     assert!(
         on_disk.is_managed("from-the-other-writer"),
@@ -210,7 +210,7 @@ fn skill_manifest_save_merging_applies_this_runs_removals() {
         SkillManifestSave::Merged
     );
 
-    let on_disk = SkillManifest::load(dir);
+    let on_disk = SkillManifest::load_checked(dir).unwrap();
     assert!(!on_disk.is_managed("prune-me"), "our removal must apply");
     assert!(on_disk.is_managed("keep"));
     assert!(
@@ -233,16 +233,16 @@ fn skill_manifest_save_merging_writes_when_unchanged() {
         first.save_merging(dir, &base).unwrap(),
         SkillManifestSave::Written
     );
-    assert!(SkillManifest::load(dir).is_managed("tm-doctor"));
+    assert!(SkillManifest::load_checked(dir).unwrap().is_managed("tm-doctor"));
 
-    let base = SkillManifest::load(dir);
+    let base = SkillManifest::load_checked(dir).unwrap();
     let mut second = base.clone();
     second.managed.insert("tm-workflow".into(), sample_entry());
     assert_eq!(
         second.save_merging(dir, &base).unwrap(),
         SkillManifestSave::Written
     );
-    let on_disk = SkillManifest::load(dir);
+    let on_disk = SkillManifest::load_checked(dir).unwrap();
     assert!(on_disk.is_managed("tm-doctor"));
     assert!(on_disk.is_managed("tm-workflow"));
 }
@@ -273,7 +273,7 @@ fn skill_manifest_save_merging_over_a_corrupt_ledger_keeps_the_base() {
         SkillManifestSave::OverwroteUnreadable
     );
 
-    let on_disk = SkillManifest::load(dir);
+    let on_disk = SkillManifest::load_checked(dir).unwrap();
     assert_eq!(
         on_disk.managed.len(),
         10,
