@@ -182,7 +182,7 @@ lru = "0.16"
 #      CTO DB tools became reachable declaratively via the `cto-db` Python
 #      skill. This `install_plugins` mechanism remains available for any
 #      future private launcher.
-trusty-agents-common = { path = "../trusty-agents-common", version = "0.5.3" }
+trusty-agents-common = { path = "../trusty-agents-common", version = "0.6.0" }
 
 # [patch.crates-io] moved to workspace root Cargo.toml (Cargo requires
 # [patch] tables to live in the workspace root; see #460 for context).
