@@ -21,14 +21,13 @@
 //! greppable [`Secret::expose`].
 //!
 //! Relationship to [`crate::inference::types::SecretString`]: that type came
-//! first (#2402) and renders a four-character head preview via
-//! [`super::redact_secret`], which does **not** satisfy `C-8.2`'s "contains no
-//! substring of the wrapped value". It also derives `Clone` and `PartialEq`,
-//! which `Secret` deliberately does not, so it cannot simply become an alias.
+//! first (#2402) and rendered a four-character head preview via
+//! [`super::redact_secret`] until #4632 fixed it; it now renders its own
+//! constant and meets `C-8.2` too. What still separates the two is the rest of
+//! the list above — `SecretString` derives `Clone` and `PartialEq`, which
+//! `Secret` deliberately does not, so it cannot become an alias.
 //! [`SecretString::into_secret`](crate::inference::types::SecretString::into_secret)
-//! converts one to the other; collapsing the two is deliberately left to a
-//! follow-up because it requires changing an existing test that pins the older
-//! type's leakier `Debug` shape.
+//! converts one to the other; collapsing the two is left to a follow-up.
 //!
 //! Test: `tests::debug_and_display_are_value_independent`,
 //! `tests::rendering_contains_no_substring_of_the_value`,

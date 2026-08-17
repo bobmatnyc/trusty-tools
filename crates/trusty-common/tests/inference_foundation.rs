@@ -155,7 +155,9 @@ fn provider_for_two_stage_resolution() {
 }
 
 /// Why: a resolved key must never leak through `Debug` — the redacting
-/// `SecretString` guards the whole `ResolvedProvider`.
+/// `SecretString` guards the whole `ResolvedProvider`. #4632: the head is part
+/// of the key, so this asserts on the first four characters as well as on the
+/// distinctive middle; the old assertion passed while `Debug` printed `sk-o`.
 #[test]
 #[serial(dotenv_credential_env)]
 fn resolved_provider_debug_is_redacted() {
@@ -167,6 +169,10 @@ fn resolved_provider_debug_is_redacted() {
     assert!(
         !dumped.contains("verysecret"),
         "key leaked in Debug: {dumped}"
+    );
+    assert!(
+        !dumped.contains("sk-o"),
+        "key head leaked in Debug: {dumped}"
     );
 }
 
