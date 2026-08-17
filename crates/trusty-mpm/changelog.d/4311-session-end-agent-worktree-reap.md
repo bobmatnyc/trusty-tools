@@ -1,10 +1,4 @@
 Fixed
-
-A dispatched agent's worktree is now reclaimed when the session that dispatched
-it ends, not only when its `SubagentStop` arrives. `SubagentStop` was the reap's
-only trigger, so an agent killed by a session exit or restart, an interrupt, or a
-dropped hook POST left its worktree registered and owner-known — and the orphan
-sweep skips agent-owned trees by design, so nothing else ever reclaimed it. A
-refusal is now logged at `warn!` and each session end reports how many trees it
-reclaimed and how many it kept, so a leak the gates decline to clear is visible
-instead of silent.
+- A dispatched agent's worktree is now reclaimed when the session that dispatched it ends, not only when its `SubagentStop` arrives. `SubagentStop` was the reap's only trigger, so an agent killed by a session exit or restart, an interrupt, or a dropped hook POST left its worktree registered and owner-known — and the orphan sweep skips agent-owned trees by design, so nothing else ever reclaimed it.
+- A reap that keeps a worktree is now logged at `warn!` rather than `info!`. The refusal is the only notice anyone gets that a tree needs a human, and nothing retries it.
+- A session-end sweep now reports how many trees it removed, how many were already gone, and how many it kept. It reported two numbers before, counting a tree the harness had already reclaimed as one this sweep removed — which overstated the only number an operator reads to judge whether the reap is doing anything.

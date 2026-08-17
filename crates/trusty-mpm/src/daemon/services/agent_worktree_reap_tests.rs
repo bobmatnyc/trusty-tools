@@ -283,12 +283,13 @@ fn hermetic() -> (
 #[tokio::test]
 async fn spawn_on_stop_ignores_a_non_stop_event() {
     let (state, _dir, session) = hermetic();
-    super::spawn_on_stop(
+    let started = super::spawn_on_stop(
         &state,
         session,
         HookEvent::PreToolUse,
         &serde_json::json!({ "agent_id": "a1", "cwd": "/nowhere" }),
     );
+    assert!(started.is_none(), "a non-stop event must start no reap");
     assert!(state.delegations_for(session).is_empty());
 }
 
@@ -301,19 +302,21 @@ async fn spawn_on_stop_ignores_a_non_stop_event() {
 #[tokio::test]
 async fn spawn_on_stop_ignores_a_payload_without_an_agent_id() {
     let (state, _dir, session) = hermetic();
-    super::spawn_on_stop(
+    let missing = super::spawn_on_stop(
         &state,
         session,
         HookEvent::SubagentStop,
         &serde_json::json!({ "cwd": "/nowhere" }),
     );
     // An empty-string id is equally indeterminate, not a match.
-    super::spawn_on_stop(
+    let empty = super::spawn_on_stop(
         &state,
         session,
         HookEvent::SubagentStop,
         &serde_json::json!({ "agent_id": "", "cwd": "/nowhere" }),
     );
+    assert!(missing.is_none(), "no agent_id must start no reap");
+    assert!(empty.is_none(), "an empty agent_id must start no reap");
     assert!(state.delegations_for(session).is_empty());
 }
 
@@ -414,14 +417,17 @@ async fn stop_reaps_a_worktree_the_registry_lost_to_a_restart() {
         "this fixture must hold no registration — that is what a restarted daemon looks like"
     );
 
-    super::spawn_on_stop(
+    let outcome = super::spawn_on_stop(
         &state,
         session,
         HookEvent::SubagentStop,
         &serde_json::json!({ "agent_id": "a601", "cwd": fx.repo.to_string_lossy() }),
-    );
-    await_gone(&wt).await;
+    )
+    .expect("the sentinel names a601, so a reap must start")
+    .await
+    .expect("the reap task must not panic");
 
+    assert_eq!(outcome, ReapOutcome::Removed);
     assert!(
         !wt.exists(),
         "the sentinel is the whole ownership record here; the reap must act on it"
@@ -441,15 +447,20 @@ async fn stop_ignores_a_sentinel_naming_a_different_agent() {
     std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
     GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
 
-    super::spawn_on_stop(
+    let started = super::spawn_on_stop(
         &state,
         session,
         HookEvent::SubagentStop,
         &serde_json::json!({ "agent_id": "a702", "cwd": fx.repo.to_string_lossy() }),
     );
-    // Give a wrong implementation the same window the correct one gets.
-    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
 
+    // The same defect as the sweep's: a fixed sleep here sampled the filesystem
+    // at 750 ms while an `lsof`-gated removal lands at 1-3 s, so a wrong
+    // implementation looked correct. The absence of a task is the exact signal.
+    assert!(
+        started.is_none(),
+        "no sentinel names a702, so no reap task may start"
+    );
     assert!(
         wt.exists(),
         "another agent's worktree must never be reaped by this stop"
@@ -552,6 +563,9 @@ async fn session_end_reaps_every_agent_of_the_ending_session() {
 /// still refuse. A `SessionEnd` proves the agent exited; it proves nothing about
 /// whether its work was saved, and an uncommitted edit is the one thing this
 /// module must never destroy.
+///
+/// Delete gate 5 (`dirt_blocks_removal`) from `reap_worktree` and this goes red:
+/// the summary reports `removed: 1, kept: 0` and the directory is gone.
 #[tokio::test]
 async fn session_end_keeps_a_worktree_that_holds_unsaved_work() {
     let (state, _dir, session) = hermetic();
@@ -559,14 +573,23 @@ async fn session_end_keeps_a_worktree_that_holds_unsaved_work() {
     let wt = harness_worktree_under(&fx, "agent-dirty-at-exit", "a803", session);
     std::fs::write(wt.join("README.md"), "edited, never committed\n").expect("write edit");
 
-    deliver(
+    let swept = settle(super::spawn_on_session_end(
         &state,
         session,
         HookEvent::SessionEnd,
-        serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
-    );
-    await_settled().await;
+        &serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
+    ))
+    .await;
 
+    assert_eq!(
+        swept,
+        Some(super::SweepSummary {
+            removed: 0,
+            already_gone: 0,
+            kept: 1,
+        }),
+        "the dirt gate must keep this tree, and the summary must count it as kept"
+    );
     assert!(wt.exists(), "an uncommitted edit must survive its session");
 }
 
@@ -575,27 +598,56 @@ async fn session_end_keeps_a_worktree_that_holds_unsaved_work() {
 /// Why: the sweep's key is the sentinel's `parent_session_id`. Two PMs run
 /// against one project store on this machine, so a sweep keyed on the store
 /// alone would reclaim a live peer's tree the moment either session ended.
+///
+/// The control tree carries its weight: without it the ending session owns no
+/// candidate, the sweep never starts, and "the peer survived" would be true of
+/// an implementation that does nothing at all. With it the sweep provably runs
+/// and provably removes something, so the peer's survival is the filter doing
+/// its job. Delete `owner.parent_session_id == session` from
+/// `agent_worktrees_of` and this goes red: `removed` is 2 and the peer is gone.
 #[tokio::test]
 async fn session_end_spares_another_sessions_agent() {
     let (state, _dir, session) = hermetic();
     let other = crate::core::session::SessionId(uuid::Uuid::new_v4());
     let fx = GitWorktreeFixture::new();
-    let wt = harness_worktree_under(&fx, "agent-peer", "a804", other);
-    std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
-    GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+    let peer = harness_worktree_under(&fx, "agent-peer", "a804", other);
+    std::fs::write(peer.join("work.txt"), "done\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&peer, "agent work");
+    let control = harness_worktree_under(&fx, "agent-mine", "a808", session);
+    std::fs::write(control.join("work.txt"), "done\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&control, "agent work");
 
-    deliver(
+    let swept = settle(super::spawn_on_session_end(
         &state,
         session,
         HookEvent::SessionEnd,
-        serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
-    );
-    await_settled().await;
+        &serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
+    ))
+    .await;
 
-    assert!(wt.exists(), "a peer session's agent worktree must survive");
+    assert_eq!(
+        swept,
+        Some(super::SweepSummary {
+            removed: 1,
+            already_gone: 0,
+            kept: 0,
+        }),
+        "only the ending session's own tree is a candidate"
+    );
+    assert!(
+        !control.exists(),
+        "the control must be gone, or this test proves nothing about the sweep having run"
+    );
+    assert!(
+        peer.exists(),
+        "a peer session's agent worktree must survive"
+    );
 }
 
 /// A `SessionEnd` with no `cwd` resolves no store and reclaims nothing.
+///
+/// Delete the `cwd` guard from `store_for` and this goes red at the `None`:
+/// a store resolves, so the sweep starts.
 #[tokio::test]
 async fn session_end_without_a_cwd_reaps_nothing() {
     let (state, _dir, session) = hermetic();
@@ -604,27 +656,69 @@ async fn session_end_without_a_cwd_reaps_nothing() {
     std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
     GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
 
-    deliver(
+    let swept = settle(super::spawn_on_session_end(
         &state,
         session,
         HookEvent::SessionEnd,
-        serde_json::json!({}),
-    );
-    await_settled().await;
+        &serde_json::json!({}),
+    ))
+    .await;
 
+    assert_eq!(swept, None, "an unresolvable store must start no sweep");
     assert!(wt.exists(), "an unresolvable store must reclaim nothing");
 }
 
-/// Give a detached reap task the same window a correct one gets, so a negative
-/// assertion is not merely racing it.
-async fn await_settled() {
-    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+/// The `cwd` guard itself, asserted on the resolution rather than on a survivor.
+///
+/// Why both this and the test above: delete the guard and the natural fallback
+/// is the process's own directory, which resolves to the REAL harness store on
+/// this machine. That store holds no sentinel naming a random test session, so
+/// the sweep finds no candidate and the survivor test above still passes — while
+/// the daemon has in fact read the live worktree store off a payload that named
+/// no directory at all. Only the resolution catches that.
+#[test]
+fn session_end_without_a_cwd_resolves_no_store() {
+    assert_eq!(
+        super::store_for(&serde_json::json!({})),
+        None,
+        "a payload with no cwd must resolve no store"
+    );
+    assert_eq!(
+        super::store_for(&serde_json::json!({ "cwd": 7 })),
+        None,
+        "a non-string cwd is not a path"
+    );
+}
+
+/// Await the sweep itself, so a negative assertion runs AFTER the decision.
+///
+/// Why this replaced a fixed 750 ms sleep: that window was unreachable. Gate 6
+/// (`process_holding`) shells out to `lsof`, measured at 0.56-0.67 s on an idle
+/// machine, and it runs after a `git rev-parse` and the dirt gate's several git
+/// subprocesses and before the `git worktree remove` itself. A real removal
+/// lands at roughly 1-3 s idle and later under load, so every "this tree must
+/// survive" assertion sampled the filesystem while the removal was still in
+/// flight — and passed with the gate it existed to protect deleted. Awaiting the
+/// sweep's own handle removes the window instead of widening it.
+///
+/// `None` is not a failure: it is [`super::spawn_on_session_end`] reporting that
+/// no sweep ran at all, which for two of the tests below is the whole point.
+async fn settle(
+    handle: Option<tokio::task::JoinHandle<super::SweepSummary>>,
+) -> Option<super::SweepSummary> {
+    match handle {
+        Some(h) => Some(h.await.expect("the sweep task must not panic")),
+        None => None,
+    }
 }
 
 /// Poll until `path` is gone, or fail with what is still there.
 ///
-/// Why: `spawn_on_stop` detaches the removal onto a task, so the assertion has
-/// to wait on the condition rather than on a fixed sleep.
+/// Why: the two tests that still use this go through `HookService::process`,
+/// which drops the sweep's handle — that is the point, since the defect was that
+/// the pipeline reached no reap at all. With no handle to await, a POSITIVE
+/// assertion has to poll the condition. The negative tests do have a handle and
+/// await it instead; polling cannot prove a removal that must never happen.
 ///
 /// The budget is 60 s and not the 10 s it started at. One reap shells out to
 /// `git status`, `git worktree remove` and a system-wide `lsof` that costs about

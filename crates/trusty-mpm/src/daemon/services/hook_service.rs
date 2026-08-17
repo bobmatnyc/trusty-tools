@@ -263,12 +263,14 @@ impl HookService {
         // no-ops for every event other than `SubagentStop`. Like 1b it spawns a
         // detached task off this synchronous method — the reap runs git — and
         // like 1b it cannot change the verdict below.
-        crate::daemon::services::agent_worktree_reap::spawn_on_stop(
+        // The returned `JoinHandle` is the tests' completion signal; nothing on
+        // this hot path may await it, so it is dropped and the task detaches.
+        drop(crate::daemon::services::agent_worktree_reap::spawn_on_stop(
             &self.state,
             session,
             event,
             &payload,
-        );
+        ));
 
         // 1e (#4311 follow-up): the SECOND trigger. `SubagentStop` was the only
         // one, so an agent killed by its session exiting or restarting emitted
@@ -276,11 +278,13 @@ impl HookService {
         // agent-owned trees by design. A `SessionEnd` proves every agent that
         // session dispatched has exited, so it reclaims them through the same
         // gate stack. Detached like 1b and 1d, and cannot change the verdict.
-        crate::daemon::services::agent_worktree_reap::spawn_on_session_end(
-            &self.state,
-            session,
-            event,
-            &payload,
+        drop(
+            crate::daemon::services::agent_worktree_reap::spawn_on_session_end(
+                &self.state,
+                session,
+                event,
+                &payload,
+            ),
         );
 
         // 2. PostToolUse: compress tool output before it enters the ring buffer.
