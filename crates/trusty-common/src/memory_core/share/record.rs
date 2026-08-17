@@ -28,16 +28,26 @@ pub const SHARE_FORMAT_VERSION: u32 = 1;
 /// One exported memory: its content-addressed identity plus the metadata an
 /// importer needs to place it.
 ///
-/// Why no embedding vector: `trusty-agents`' `ExportRecord` carries one, on the
-/// reasoning that the receiver can insert without a model load. This format
-/// deliberately does not, for three reasons. A 384-dimension `f32` array
-/// serializes to roughly 4–6 KB of JSON, an order of magnitude larger than the
-/// body it describes, which makes a committed file's diff unreadable and its
-/// history heavy. The receiving machine's embedder, dimension, or model revision
-/// need not match the sender's, so an imported vector can be silently wrong in a
-/// way no assertion here could catch. And re-embedding on import is cheap
-/// against a shared process-wide embedder that is already warm. The vector is a
-/// derived index, not the fact.
+/// 🔴 MEMORIES ONLY — no derived data, by owner decision. No embedding vector,
+/// no HNSW/usearch index state, no BM25 data. Anything rebuildable from the
+/// bodies stays out, and stays out as an ABSENT FIELD rather than an optional
+/// empty one: an empty field invites a later change to populate it without
+/// re-opening this decision.
+///
+/// Why: an embedding is a lossy but real encoding of its source text, and these
+/// files are committed to a PUBLIC repository. Excluding derived data makes what
+/// gets published exactly the memory bodies we already intend to publish, with no
+/// second channel carrying the same content in a form nobody inspects.
+/// `trusty-agents`' `ExportRecord` does carry a vector, on the reasoning that the
+/// receiver can insert without a model load; that trade is refused here. Three
+/// supporting reasons: a 384-dimension `f32` array serializes to roughly 4–6 KB of
+/// JSON, an order of magnitude larger than the body it describes, which makes a
+/// committed file's diff unreadable and its history heavy; the receiving machine's
+/// embedder, dimension, or model revision need not match the sender's, so an
+/// imported vector can be silently wrong in a way no assertion here could catch;
+/// and re-embedding on import is cheap against a warm process-wide embedder. The
+/// accepted cost is that import depends on the embedder — see
+/// [`super::import::import_palace_records`] for how that failure is handled.
 ///
 /// Why no author, machine, or session field: the palace has none to export.
 /// `Palace`, `Wing`, `Room`, and `Drawer` carry no provenance of any kind; the

@@ -160,19 +160,52 @@ The room travels as the LABEL, not the `room_id`. Room ids are UUIDv5 over
 the same label, and the label survives arriving at a palace that has never seen
 that room.
 
-**No embedding vector**, unlike `trusty-agents`' `ExportRecord`. Three reasons: a
-384-dimension `f32` array serializes to roughly 4–6 KB of JSON, an order of
-magnitude larger than the body it describes, which makes a committed file's diff
-unreadable and its history heavy; the receiving machine's embedder, dimension, or
-model revision need not match the sender's, so an imported vector can be silently
-wrong in a way no assertion could catch; and re-embedding on import is cheap
-against a warm process-wide embedder. The vector is a derived index, not the fact.
+### 🔴 Memories only — no derived data. Owner decision, not a trade to re-open.
 
-The lossiness argument cuts the other way from what one might expect: an
-embedding IS a lossy encoding of its source text, so it would leak content — but
-the body is in plaintext on the same line, so the vector adds no disclosure the
-file does not already make. That is an argument about the file as a whole, which
-is Decision 8's territory.
+**The export carries memory bodies and their metadata. Nothing else.** No
+embedding vector, no HNSW/usearch index state, no BM25 data. If it can be rebuilt
+from the bodies, it does not go in the file. `trusty-agents`' `ExportRecord` does
+carry a vector, on the reasoning that the receiver can insert without a model
+load; that trade is refused here.
+
+The reason is disclosure surface, not size. An embedding is a lossy but real
+encoding of its source text, and PR 2 commits these files to a **public**
+repository. Excluding derived data makes what gets published exactly the memory
+bodies we already intend to publish, with no second channel carrying the same
+content in a form nobody inspects.
+
+Three supporting reasons, none of them the decisive one: a 384-dimension `f32`
+array serializes to roughly 4–6 KB of JSON, an order of magnitude larger than the
+body it describes, which makes a committed file's diff unreadable and its history
+heavy; the receiving machine's embedder, dimension, or model revision need not
+match the sender's, so an imported vector can be silently wrong in a way no
+assertion could catch; and re-embedding on import is cheap against a warm
+process-wide embedder.
+
+**Absent field, not an empty one.** `SharedMemoryRecord` has no `embedding` field
+at all. An optional-and-empty field invites a later change to populate it as an
+optimization without re-opening this decision.
+
+**Two consequences, handled rather than worked around.**
+
+*Import depends on the embedder, and fails closed.* Import is now the only place
+an imported memory's vector can come from. `share::import::insert_new` embeds
+BEFORE the durable write and aborts the whole insert on failure: the record is
+counted `Skipped` and nothing is written — no drawer row, no in-memory entry. An
+import that wrote the drawer and let the embed fail would leave a memory that is
+durable and permanently unfindable, which is the failure #4906 spent a lane
+removing from the write path. A slow import is the accepted cost; a silently
+unsearchable one is not. The deferred-embed lane is deliberately not reached for —
+it exists so an interactive write need not block on a cold model, and an import
+has no user waiting on it.
+
+*Re-embedding is not guaranteed deterministic across machines.* Two machines
+running different embedder versions, models, or dimensions will produce different
+vectors for the same body. This does not affect identity — identity is the content
+hash, and the hash never touches a vector — so the palaces still converge on the
+same set of memories. What can differ is search BEHAVIOUR: the same query may rank
+the same converged memory differently on each machine. That is a known property of
+this decision, not a defect in it.
 
 ## The four properties, and where they are proven
 

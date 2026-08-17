@@ -324,6 +324,20 @@ async fn merge_into_existing(
 
 /// Write a record the palace has never seen as a new drawer.
 ///
+/// 🔴 The embed runs BEFORE the durable write, and its failure aborts the whole
+/// insert. That ordering is the contract, not an accident. The export carries no
+/// embedding vector by owner decision (see [`super::record::SharedMemoryRecord`]),
+/// so import is the only place this memory's vector can come from. If the embedder
+/// is unavailable, cold past its timeout, or errors, the record is counted
+/// [`ImportOutcome::Skipped`] and NOTHING is written — no drawer row, no in-memory
+/// entry. An import that wrote the drawer and let the embed fail would leave a
+/// memory that is durable and permanently unfindable, which is the failure mode
+/// #4906 spent a whole lane removing from the write path. A slow import is the
+/// accepted cost of excluding vectors; a silently unsearchable one is not. The
+/// deferred-embed lane is deliberately NOT reached for here: it exists so an
+/// interactive write need not block on a cold model, and an import has no user
+/// waiting on it.
+///
 /// Why it does not route through `PalaceHandle::remember_with_options`: that path
 /// stamps `created_at = now` and re-runs the quality filter. Both are wrong here.
 /// The timestamp is the imported fact's own, and it is what the earliest-wins
