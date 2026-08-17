@@ -64,14 +64,14 @@
 //! stable `id` before the cap-truncated BM25 upsert loop, so which subset of
 //! an over-cap corpus is lexically searchable converges on the SAME set
 //! every rehydrate (see [`spawn_detached_rehydrate`] and
-//! [`crate::core::bm25::Bm25Index::upsert_document_reporting`]), instead of
+//! [`crate::core::bm25::CodeBm25Index::upsert_document_reporting`]), instead of
 //! silently shifting with redb's B-tree iteration order.
 //!
 //! ### Two hazards found in code-critic review (issue #3683), both fixed here
 //!
 //! 1. **Panic-safe gate clearing.** The first version of this module cleared
 //!    the in-flight gate via an ordinary trailing statement after the
-//!    commit phases. A panic anywhere in those phases (a `Bm25Index` bug, an
+//!    commit phases. A panic anywhere in those phases (a `CodeBm25Index` bug, an
 //!    allocation failure, `metrics` macro panic, etc.) would unwind the
 //!    detached task WITHOUT ever reaching that statement — tokio catches the
 //!    panic at the task boundary (so the daemon doesn't crash), but
@@ -184,7 +184,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tokio::sync::Notify;
 
-use crate::core::bm25::Bm25Index;
+use crate::core::bm25::CodeBm25Index;
 use crate::core::chunker::RawChunk;
 use crate::core::corpus::CorpusStore;
 use crate::core::entity::RawEntity;
@@ -406,7 +406,8 @@ impl CodeIndexer {
             return 0;
         }
         let evicted = bm25.len();
-        *bm25 = Bm25Index::new();
+        // #5828: reconstruct the trusty-search wrapper, not the shared scorer.
+        *bm25 = CodeBm25Index::new();
         drop(bm25);
 
         let mut entities = self.entities.write().await;
@@ -614,7 +615,7 @@ impl CodeIndexer {
     /// `spawn_blocking`, sorts the chunks by their stable `id` (issue #3684 —
     /// makes which subset survives the BM25 cap deterministic across
     /// rehydrate cycles), then commits BM25 (via
-    /// `Bm25Index::upsert_document_reporting`, logging a per-rebuild
+    /// `CodeBm25Index::upsert_document_reporting`, logging a per-rebuild
     /// dropped-count instead of `upsert_document`'s process-wide log-once
     /// latch), the chunk map, and the entity map — in that order, mirroring
     /// `persist::load_chunks_from_redb`'s phase ordering (BM25 published

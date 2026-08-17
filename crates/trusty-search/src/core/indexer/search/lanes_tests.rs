@@ -29,7 +29,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::core::bm25::Bm25Index;
+use crate::core::bm25::CodeBm25Index;
 use crate::core::corpus::CorpusStore;
 use crate::core::indexer::CodeIndexer;
 
@@ -93,7 +93,7 @@ async fn bm25_search_survives_reclaim_race_between_ensure_and_read() {
     // evicted, exactly as `CodeIndexer::reclaim_memory_now` does, while still
     // holding the lock the blocked search is waiting on.
     let mut guard = write_guard;
-    *guard = Bm25Index::new();
+    *guard = CodeBm25Index::new();
     idx.bm25_entities_evicted.store(true, Ordering::Relaxed);
     drop(guard);
 
