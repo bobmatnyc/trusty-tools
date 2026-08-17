@@ -141,7 +141,7 @@ export const INSTALL_OPTIONS: InstallOption[] = [
 	}
 ];
 
-/** The seven crates `tctl install` manages, from `stable_set.rs`. */
+/** The eight crates `tctl install` manages, in `stable_set.rs` order. */
 export const STABLE_SET = [
 	'trusty-search',
 	'trusty-memory',
@@ -149,7 +149,9 @@ export const STABLE_SET = [
 	'trusty-review',
 	'tga',
 	'trusty-console',
-	'trusty-mpm'
+	'trusty-mpm',
+	// #5805: the control plane installs itself, and is last in the Rust order.
+	'trusty-installer'
 ];
 
 /**
