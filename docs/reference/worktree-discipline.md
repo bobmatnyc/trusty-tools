@@ -98,15 +98,18 @@ baked into a binary installed from there. The `git status --porcelain` check
 above is what catches that; running it costs one command.
 
 If the checkout you need to install from is not clean and you cannot switch to
-one that is, stash first, operate, then restore:
+one that is, provision a throwaway worktree off `origin/main` and install from
+there:
 
 ```bash
-git -C /path/to/checkout stash push -u \
-    -m "claude: pre-op-safety $(date +%s)"
-# … confirm `git status --porcelain` is now empty, then install …
-git -C /path/to/checkout stash pop
+git worktree add .claude/worktrees/baseline-$$ origin/main
+cargo install --path .claude/worktrees/baseline-$$/crates/<name> --locked
+git worktree remove .claude/worktrees/baseline-$$
 ```
 
-Surface the stash name in the report if popping fails, so the change can be
-restored manually. This is the narrow exception the `tm-workflow` worktree
-rules call out — it does not license routine edits from the main checkout.
+This reaches the clean tree the install needs without disturbing the dirty
+checkout at all: nothing another session can observe changes, and a failure
+partway through leaves that session's uncommitted work exactly where it was.
+The old form of this recipe stashed the dirty checkout instead, which meant an
+interrupted run left the work in a stash entry someone had to find and restore
+by hand (#4730).
