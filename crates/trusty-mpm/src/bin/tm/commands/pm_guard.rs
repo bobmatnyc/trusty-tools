@@ -113,14 +113,15 @@
 //! **Main-checkout HEAD move (ADR-0048 decision 10):** a fourth rule sits with
 //! those three and ahead of the same two exemptions.
 //! [`crate::commands::pm_guard_bash::main_checkout_head_move`] classifies
-//! `git pull`, `git merge` and `git rebase` aimed at a main checkout, and the
+//! `git merge` and `git rebase` aimed at a main checkout, and the
 //! call site then asks
 //! [`crate::commands::pm_guard_dispatch::live_shared_tree_writers`] — the
 //! daemon's directory-keyed writer query, the same one the #4480 dispatch guard
 //! decides on — who else is writing there. The deny fires only when both halves
-//! are positively answered, so a solo session's `git pull` in its own checkout
-//! is untouched and an unreachable daemon allows. `git fetch` is never
-//! classified at all (decision 9), and the deny names it as the first remedy.
+//! are positively answered, so a solo session's `git merge` in its own checkout
+//! is untouched and an unreachable daemon allows. `git fetch` and `git pull`
+//! are never classified at all (decision 9, ADR-0053), and the deny names both
+//! as the first remedy.
 //! **Worktree grant for dispatched writers (ADR-0048):** enforcement alone
 //! would block all work, because a dispatched writer in a main checkout had
 //! nowhere else to write —
@@ -416,8 +417,9 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             }
             None => {}
         }
-        // ABSOLUTE guard (ADR-0048 decision 10) — the same placement and the
-        // same reason as the three above. `git pull`, `merge` and `rebase` move
+        // ABSOLUTE guard (ADR-0048 decision 10, narrowed by ADR-0053) — the
+        // same placement and the same reason as the three above. `git merge`
+        // and `git rebase` move
         // the shared HEAD under whoever else is standing on it. Unlike its
         // neighbours the verb alone is not the whole decision: the directory
         // must be a main checkout AND the daemon must report another live
@@ -494,8 +496,10 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // <branch>` both known not to backstop it. And the daemon's `matcher: "*"`
     // tracker recorded this dispatch from the ORIGINAL payload, so a writer the
     // grant had just moved into its own worktree stayed named as writing in the
-    // shared checkout, and decision 10's HEAD-move rule below denied `git pull`
-    // there for the six hours of `RUNNING_STALE_AFTER_SECS`.
+    // shared checkout, and decision 10's HEAD-move rule below denied a HEAD
+    // move there for the six hours of `RUNNING_STALE_AFTER_SECS`. (The command
+    // that hit it was `git pull`, which ADR-0053 has since permitted; `merge`
+    // and `rebase` still reach that record.)
     //
     // `evaluate_granted_worktree` closes both in one daemon call: it asks who
     // holds this checkout and, on an empty answer, records the granted isolation

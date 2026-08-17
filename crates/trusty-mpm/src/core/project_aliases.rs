@@ -567,7 +567,7 @@ mod tests {
         // #5769: a delegation record is stamped with the directory `tm hook`
         // ran in, and two directories inside one checkout share one HEAD. A
         // subdirectory must therefore resolve to the SAME key as the root, or a
-        // `cd crates/foo && git pull` keys a directory no record can match.
+        // `cd crates/foo && git merge` keys a directory no record can match.
         let dir = TempDir::new().expect("tmpdir");
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
