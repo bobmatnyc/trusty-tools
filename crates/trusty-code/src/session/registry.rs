@@ -129,6 +129,11 @@ struct SessionEntry {
     /// sub-agent loop never emits one), so `session.get_context_budget` can
     /// distinguish "never recorded" from an all-zero snapshot.
     context_budget: Option<ContextBudgetSnapshot>,
+    /// (issue #3948) This session's retained working-context low-water mark
+    /// and sample count, folded in by every `record_context_budget` call.
+    /// Kept beside `context_budget` rather than inside it so the latest
+    /// point-in-time snapshot stays a pure last-writer-wins value.
+    context_floor: super::registry_context_floor::ContextFloorState,
     /// (DOC-39 §5.4) Live per-agent roster, in first-seen order — the
     /// AUTHORITATIVE state `session.get_agents` reads (see
     /// `session::registry::agents`'s module docs). Updated by [`Self::record`]
@@ -342,6 +347,7 @@ impl SessionRegistry {
                     memory_outcomes: Default::default(),
                     readiness: None,
                     context_budget: None,
+                    context_floor: super::registry_context_floor::ContextFloorState::default(),
                     agents: Vec::new(),
                     search_audit: VecDeque::new(),
                 },
