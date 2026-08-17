@@ -1,0 +1,3 @@
+Fixed
+
+- The BM25 lane no longer loses a palace's writes when the eviction flush fails. Both eviction sites removed the index from the LRU first and only then flushed it, logging a failure and dropping the owned index at the end of the arm — so an unwritable snapshot directory took the palace's unflushed documents with it, invisibly beyond one `warn!` line. Eviction now flushes in place and removes an index only once its snapshot is on disk; a palace that cannot be persisted stays resident and the next-coldest is evicted instead. When nothing can be flushed, the budget sweep stays over budget and retries on the next tick, and a cold load fails rather than buying its slot with another palace's writes ([#5887](https://github.com/bobmatnyc/trusty-tools/issues/5887))

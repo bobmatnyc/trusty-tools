@@ -394,9 +394,17 @@ impl Bm25Lane {
     /// blocks a runtime thread, only other lane operations, and only for as long
     /// as one snapshot read. `f` is always pure in-memory work, and the index is
     /// never handed out, so no caller can mutate one the LRU has evicted.
+    ///
+    /// Room for the loaded index is made by [`evict_coldest_flushed`], never by
+    /// `LruCache::push`: `push` hands back a victim it has ALREADY removed, so a
+    /// failed flush there had nothing left to keep and dropped the victim's
+    /// unflushed documents (#5887). When no resident palace can be persisted the
+    /// load FAILS instead — the caller loses this operation, which is recoverable,
+    /// rather than another palace losing a write, which is not.
     /// Test: `a_concurrent_fanout_never_exceeds_the_cap`,
     /// `concurrent_callers_for_one_palace_share_one_index`,
-    /// `a_cold_load_failure_propagates`.
+    /// `a_cold_load_failure_propagates`,
+    /// `a_cold_load_refuses_to_evict_an_unflushable_victim`.
     async fn with_index<R>(
         &self,
         palace: &str,
@@ -414,13 +422,17 @@ impl Bm25Lane {
             .with_context(|| format!("load bm25 snapshot for palace {palace}"))?;
 
         self.loaded.fetch_add(1, Ordering::Relaxed);
-        if let Some((victim, mut idx)) = resident.push(palace.to_string(), loaded) {
-            // `push` evicts only when full, and never the key just inserted.
+        if resident.len() >= self.max_resident {
+            let (victim, _) = evict_coldest_flushed(&mut resident).with_context(|| {
+                format!(
+                    "no resident bm25 palace could be flushed, so palace {palace} \
+                     cannot be made room for without losing another palace's writes"
+                )
+            })?;
             self.evicted.fetch_add(1, Ordering::Relaxed);
-            if let Err(e) = idx.flush() {
-                tracing::warn!(palace = %victim, "bm25 snapshot flush on eviction failed: {e:#}");
-            }
+            tracing::debug!(palace = %victim, "bm25 lane evicted a palace to make room");
         }
+        resident.put(palace.to_string(), loaded);
         let idx = resident
             .get_mut(palace)
             .context("bm25 index vanished from the LRU immediately after insertion")?;
@@ -433,11 +445,20 @@ impl Bm25Lane {
     /// in-process equivalent for. It runs on the flush tick rather than on the
     /// write path because summing the retained text is O(documents), which does
     /// not belong in a per-drawer write.
-    /// What: no-op when enforcement is off or the total fits. Otherwise pops LRU
-    /// victims — flushing each first, so eviction can never lose a write — and
-    /// stops at one resident index, because evicting the last one would just make
-    /// the next operation reload it.
-    /// Test: `over_budget_evicts_the_coldest`.
+    /// What: no-op when enforcement is off or the total fits. Otherwise evicts
+    /// via [`evict_coldest_flushed`], which removes an index only once its
+    /// snapshot is on disk, and stops at one resident index, because evicting the
+    /// last one would just make the next operation reload it.
+    ///
+    /// When no resident snapshot can be written the lane STAYS OVER BUDGET rather
+    /// than dropping an unflushed write (#5887). That is the deliberate trade
+    /// under memory pressure: exceeding a memory budget is visible, bounded by
+    /// the retained text of the palaces that cannot be persisted, and retried on
+    /// every tick, so it clears itself the moment the snapshot becomes writable.
+    /// A dropped write is silent and permanent. Palaces that CAN be flushed are
+    /// still evicted, so one unwritable palace does not disable enforcement.
+    /// Test: `over_budget_evicts_the_coldest`,
+    /// `the_budget_keeps_a_palace_whose_snapshot_cannot_be_flushed`.
     async fn enforce_text_budget(&self) {
         let Some(budget) = self.text_budget_bytes else {
             return;
@@ -445,14 +466,18 @@ impl Bm25Lane {
         let mut resident = self.resident.lock().await;
         let mut total: u64 = resident.iter().map(|(_, idx)| idx.total_text_bytes()).sum();
         while total > budget && resident.len() > 1 {
-            let Some((victim, mut idx)) = resident.pop_lru() else {
-                break;
+            let Some((victim, freed)) = evict_coldest_flushed(&mut resident) else {
+                tracing::warn!(
+                    budget_bytes = budget,
+                    total_bytes = total,
+                    "bm25 lane is over its retained-text budget and no resident snapshot \
+                     could be flushed — staying over budget rather than dropping an \
+                     unflushed write; retrying on the next tick"
+                );
+                return;
             };
-            total = total.saturating_sub(idx.total_text_bytes());
+            total = total.saturating_sub(freed);
             self.evicted.fetch_add(1, Ordering::Relaxed);
-            if let Err(e) = idx.flush() {
-                tracing::warn!(palace = %victim, "bm25 snapshot flush on eviction failed: {e:#}");
-            }
             tracing::info!(
                 palace = %victim,
                 budget_bytes = budget,
@@ -460,6 +485,49 @@ impl Bm25Lane {
             );
         }
     }
+}
+
+/// Evict the coldest palace whose snapshot flush succeeds.
+///
+/// Why (#5887): both eviction sites used to remove an index from the LRU FIRST
+/// and only then flush it, logging any failure. The flushed value was owned and
+/// dropped at the end of the arm, so an unwritable snapshot took the index's
+/// unflushed documents with it — precisely the loss the flush exists to prevent,
+/// and invisible beyond one `warn!` line. `PalaceBm25Index::flush` keeps the
+/// dirty bit set on failure so the next tick retries, but a dropped index has no
+/// next tick.
+/// What: walks residents coldest-first and flushes each in place with `peek_mut`,
+/// which does not disturb LRU order, until one succeeds; that one is removed and
+/// returned with the retained-text bytes it frees. A palace whose flush fails
+/// stays resident and the next-coldest is tried. `None` means nothing could be
+/// persisted, and the caller must not drop an index anyway.
+/// Test: `the_budget_keeps_a_palace_whose_snapshot_cannot_be_flushed`,
+/// `a_cold_load_refuses_to_evict_an_unflushable_victim`.
+fn evict_coldest_flushed(
+    resident: &mut LruCache<String, PalaceBm25Index>,
+) -> Option<(String, u64)> {
+    // `iter` is most-recently-used first, so `rev` is coldest-first. Collected
+    // up front because the flush below needs `&mut` access to the cache.
+    let coldest_first: Vec<String> = resident.iter().rev().map(|(k, _)| k.clone()).collect();
+    for key in coldest_first {
+        let Some(idx) = resident.peek_mut(&key) else {
+            continue;
+        };
+        if let Err(e) = idx.flush() {
+            tracing::warn!(
+                palace = %key,
+                "bm25 snapshot flush failed — keeping the index resident rather than \
+                 dropping its unflushed writes: {e:#}"
+            );
+            continue;
+        }
+        let freed = idx.total_text_bytes();
+        // The `None` arm is unreachable: `peek_mut` just resolved this key, and
+        // the caller holds the lane lock across both calls.
+        resident.pop(&key)?;
+        return Some((key, freed));
+    }
+    None
 }
 
 /// Background loop: coalesce snapshot flushes and enforce the memory budget.
