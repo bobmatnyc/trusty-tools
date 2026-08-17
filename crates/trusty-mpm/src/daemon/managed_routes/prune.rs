@@ -209,6 +209,13 @@ pub async fn prune_worktrees_route(
                 // CURRENT set, not one snapshotted before a survey that takes
                 // minutes. `None` (the store could not be read) refuses.
                 let mgr_for_probe = state.session_manager().await.clone();
+                // #5661: the sweep's other gates read SESSION records, and a
+                // dispatched agent has none — which is how this path deleted
+                // three live agents' worktrees. The delegation registry is the
+                // only place an agent's liveness is resolved from real
+                // `SubagentStop` signals, so it is read here and handed to the
+                // classifier as a probe rather than as a captured list.
+                let state_for_agents = Arc::clone(&state);
                 match tokio::task::spawn_blocking(move || {
                     let in_use_now = move || -> Option<Vec<std::path::PathBuf>> {
                         // `None` means "could not be determined", which REFUSES
@@ -231,7 +238,13 @@ pub async fn prune_worktrees_route(
                                 .collect(),
                         )
                     };
-                    reclaim_merged_pr_worktrees(&root, &in_use_now, mode)
+                    let agent_state = move |owner: &crate::session_manager::worktree_ownership::AgentWorktreeOwner| {
+                        crate::daemon::services::agent_worktree_reap::delegation_state_for_agent(
+                            &state_for_agents,
+                            &owner.agent_id,
+                        )
+                    };
+                    reclaim_merged_pr_worktrees(&root, &in_use_now, &agent_state, mode)
                 })
                 .await
                 {
