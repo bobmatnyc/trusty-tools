@@ -28,6 +28,7 @@ use crate::discover::{self, DiscoveredRepo};
 use crate::error::AuditError;
 use crate::manifest::{AuditManifest, RepositoryEntry};
 use crate::package::{self, ReturnPackage};
+use crate::progress::{Progress, ProgressSink};
 use crate::run::{self, RunReport};
 use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
 use crate::workdir::{Area, WorkDir};
@@ -229,6 +230,14 @@ pub struct Session {
     manifest_path: PathBuf,
     config_path: PathBuf,
     auto_install: bool,
+    /// Where live progress goes while a long capability runs (#5823).
+    ///
+    /// A field rather than a parameter on [`Session::execute`] because progress
+    /// is a property of the FRONT END, not of the command — the CLI decides once
+    /// that it renders to a terminal, and the Tauri shell decides once that it
+    /// renders to a window. Defaults to [`Progress::none`], on which every
+    /// update is dropped, so nothing here depends on there being a terminal.
+    progress: Progress,
 }
 
 impl Session {
@@ -248,7 +257,28 @@ impl Session {
             manifest_path,
             config_path,
             auto_install: true,
+            progress: Progress::none(),
         }
+    }
+
+    /// Render this session's progress through `sink` (#5823).
+    ///
+    /// Why: the long capabilities — installing, cloning, sweeping — report what
+    /// they are doing, and without a sink that reporting goes nowhere. Which is
+    /// the point: [`Session::execute`] must stay callable by a front end that
+    /// has no terminal, so the display is something a caller SUPPLIES rather
+    /// than something the dispatch reaches for. `crate::main` supplies
+    /// [`crate::progress::terminal::TerminalProgress`]; a GUI supplies its own,
+    /// and neither has to know the other exists.
+    /// What: stores the sink. Absent, every update is discarded and the
+    /// capabilities behave identically.
+    /// Test: `crate::run::run_tests::a_childs_stage_events_reach_the_progress_sink`
+    /// for a sink that receives, `a_sweep_without_a_sink_is_unchanged` for the
+    /// default.
+    #[must_use]
+    pub fn with_progress(mut self, sink: std::sync::Arc<dyn ProgressSink>) -> Self {
+        self.progress = Progress::to(sink);
+        self
     }
 
     /// Whether a capability that needs the pinned tools may install them itself.
@@ -338,7 +368,7 @@ impl Session {
             // #5215: acquisition writes only under `self.work`, which is what
             // keeps `rm -rf <root>` a complete uninstall.
             Command::CloneRepos { repos, options } => {
-                clone::clone_all(&self.work, &repos, &options)
+                clone::clone_all(&self.work, &repos, &options, &self.progress)
                     .await
                     .map(Outcome::Cloned)
             }
@@ -385,9 +415,9 @@ impl Session {
         // pins. An install that cannot resolve every pin fails here and the
         // sweep never starts — the #5454 guarantee, reached earlier.
         if self.auto_install {
-            tools::ensure(&self.work, &config.tools).await?;
+            tools::ensure(&self.work, &config.tools, &self.progress).await?;
         }
-        run::sweep(&self.work, &config).await
+        run::sweep(&self.work, &config, &self.progress).await
     }
 
     /// Read the engagement's pins, then install exactly those.
@@ -397,7 +427,7 @@ impl Session {
     /// "latest" — is the version-skew defect #5454 closed (#5495).
     async fn install_tools(&self) -> Result<Vec<InstalledTool>, AuditError> {
         let config = EngagementConfig::load(&self.config_path)?;
-        tools::install(&self.work, &config.tools).await
+        tools::install(&self.work, &config.tools, &self.progress).await
     }
 
     fn work_dir_report(&self) -> Result<WorkDirReport, AuditError> {
@@ -487,7 +517,7 @@ impl Session {
         let Some(config) = EngagementConfig::load_if_present(&self.config_path)? else {
             return Ok(None);
         };
-        tools::ensure(&self.work, &config.tools).await
+        tools::ensure(&self.work, &config.tools, &self.progress).await
     }
 }
 

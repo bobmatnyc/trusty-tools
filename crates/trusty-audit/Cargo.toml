@@ -64,6 +64,11 @@ serde_json = { workspace = true }
 # Async runtime for the binary. `Session::execute` is async because installing
 # the pinned tools downloads; the Tauri shell will drive the same future.
 tokio = { workspace = true }
+# #5823: the workspace's single progress renderer (#1315), and the wire format
+# the `tga audit` child relays its stage events through. Reaching for
+# `indicatif` here instead would be a second implementation of a shared
+# capability, which CLAUDE.md's common-entry-point rule makes a defect.
+trusty-progress = { workspace = true }
 # #5499: the return package is one zip file, because the return channel is
 # manual (#5642) and a directory cannot be attached to an email.
 zip = { workspace = true }

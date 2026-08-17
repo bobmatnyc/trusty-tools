@@ -10297,6 +10297,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-test",
  "trusty-common",
+ "trusty-progress",
  "uuid",
  "wiremock",
 ]
@@ -11308,6 +11309,7 @@ dependencies = [
  "toml 0.8.23",
  "trusty-common",
  "trusty-installer",
+ "trusty-progress",
  "walkdir",
  "zip 2.4.2",
 ]
