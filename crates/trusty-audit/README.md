@@ -36,7 +36,9 @@ trusty-audit repos              # repositories this engagement is configured to 
 trusty-audit tools              # which pinned tools are installed, at which versions
 trusty-audit install            # download and verify the pinned tools
 trusty-audit manifest           # engagement metadata from the companion manifest.toml
-trusty-audit run                # run `tga audit` over the selected repositories
+trusty-audit run                # run `tga audit` over the selected repositories,
+                                #   resuming an interrupted sweep
+trusty-audit run --fresh        # audit every selected repository again
 trusty-audit package            # assemble the deliverable zip to send back
 ```
 
@@ -79,6 +81,35 @@ sanitizing alone is not injective — `acme/api` and `acme-api` would otherwise
 share an output directory and a log file, and the second child would overwrite
 the first's evidence. Each child writes to `out/<stem>/`, `logs/<stem>.log`, and
 `extract/<stem>.db`. The results land in `state/run-progress.toml`.
+
+**An interrupted run is resumed, not repeated.** `state/run-progress.toml` is
+written after every repository — through a temporary file and a rename, so a
+`kill -9` mid-write leaves either the previous whole record or the new one,
+never a prefix. Re-run `trusty-audit run` and it picks up where it stopped: a
+repository the record calls audited is carried over and printed as `resumed`, a
+repository it calls FAILED is retried, and the summary separates the two. A
+failure is usually the transient thing you re-ran to clear, so skipping it would
+make the re-run a no-op reporting the same failure forever.
+
+Being carried over is decided against the disk, not against the record alone.
+The recorded output must still exist and still pass the same verification that
+accepted it the first time, and the current selection must still put that
+repository at the same `out/<stem>/` — reordering the selection changes the stem,
+so a moved repository is audited again rather than credited with a directory this
+run never wrote. Every re-collection states its reason. A record that exists but
+cannot be parsed is a refusal, not an empty slate: starting over silently would
+redo hours you were told were saved.
+
+`trusty-audit run --fresh` ignores the record and audits everything again.
+Reach for it when the recorded outputs are stale rather than missing — you
+re-cloned the repositories, or changed the config in a way that should reach work
+already done. It is the expensive direction, which is why it has to be asked for
+by name.
+
+`trusty-audit package` refuses a sweep that did not finish. The record carries a
+completion flag, so a checkpoint left behind by a run that died is not mistaken
+for a short run that succeeded, and a partial engagement is not sent as a whole
+one. The remedy it names is the resume.
 
 **A zero exit from `tga audit` is not proof anything was assessed.** Its own
 contract is to exit 0 whenever the sweep completed, failed stages included — so
@@ -131,7 +162,7 @@ Everything this client writes lives under one root. The default is
 | `tools/` | pinned `tga` / `trusty-analyze` / `trusty-review` binaries |
 | `repos/` | **clones of your repositories — your source code** |
 | `extract/` | the tga extract database, derived from those clones |
-| `state/` | repository selection and run progress |
+| `state/` | repository selection, tool versions, and the run checkpoint |
 | `out/` | the deliverable to return: report and `manifest.toml` |
 | `logs/` | output from the tools this client runs |
 
@@ -139,6 +170,8 @@ Everything this client writes lives under one root. The default is
 Nothing is written outside the root — that is a tested property
 (`workdir::layout_tests::every_layout_path_is_inside_the_root`), not a claim.
 Deleting mid-run loses the clones and the run progress; nothing else is affected.
+Deleting only `state/run-progress.toml` throws away the resume — the next
+`trusty-audit run` re-collects every selected repository from scratch.
 
 **Open questions, recorded rather than resolved** (#5502): whether the root
 should sit beside the unzipped package (today's default) or under the user's

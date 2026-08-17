@@ -143,9 +143,9 @@ pub fn load_selection(work: &WorkDir) -> Result<Vec<SelectedRepo>, AuditError> {
 /// atomic-rename and `count`-first obligations are one decision rather than a
 /// note each producer re-reads; #5497's picker writes through here too.
 /// What: renders `count` ahead of the entries (serde field order, and `toml`
-/// emits values before tables), writes to a uniquely-named temporary file in
-/// the same directory, and renames it into place. The unique name is what lets
-/// two writers race without either reading the other's half-written file.
+/// emits values before tables), then publishes through
+/// [`workdir::write_atomically`], which owns the temporary-file-and-rename
+/// obligation for every state document this crate writes (#5494).
 /// Test: `super::run_tests::a_saved_selection_reads_back_whole`,
 /// `super::run_tests::racing_writers_never_leave_a_torn_selection`.
 ///
