@@ -73,6 +73,10 @@ pub mod error;
 pub mod inference;
 pub mod manifest;
 pub mod package;
+// #5823: the seam a front end renders live progress through, and the pump that
+// reads a spawned child's stages back out of its output.
+pub mod progress;
+mod relay;
 pub mod run;
 pub mod session;
 pub mod tools;

@@ -26,6 +26,8 @@ use tga::audit::{
 };
 use tga::core::config::Config;
 use tga::core::db::Database;
+// #5823: the relay that carries the sweep's stage events to a parent process.
+use tga::core::progress::{ProgressBus, ProgressEvent, Stage, StageRelay};
 use tga::report::dd_manifest::{
     build_dd_manifest, configured_secrets, dd_repository_entries, DdManifestOptions,
 };
@@ -185,7 +187,11 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
         output: Some(output.clone()),
         weeks: args.weeks,
     };
-    let stats = run_full_sweep(&config, db, &options, None).await?;
+    // #5823: a parent that spawned this process gets the sweep's per-stage
+    // events on stderr. Off unless it asked (`TRUSTY_PROGRESS_RELAY`), so a
+    // hand-run `tga audit` behaves exactly as before.
+    let relay = StageRelay::from_env();
+    let stats = run_full_sweep(&config, db, &options, relay.bus()).await?;
     print_stage_report(&stats);
 
     // #5236: the manifest is the whole tga→trusty-review seam. It carries the
@@ -208,7 +214,12 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     // After the sweep, because clone-on-demand (#5215) is what puts a repository
     // on disk, and before the manifest is built, because a repository that could
     // not be indexed owes a gap line and the manifest is where gap lines go.
+    // #5823: the two post-sweep phases are minutes each (indexing walks every
+    // checkout; the render calls an LLM), so a parent watching only the sweep
+    // would see the display stop and the process keep running.
+    let phase = announce(relay.bus(), PHASE_INDEX);
     let indexed = ensure_repositories_indexed(&dd_repository_entries(&config, &base_dir)).await;
+    finish_phase(relay.bus(), phase);
     gaps.extend(index_gap_lines(&indexed, &secrets));
 
     // #5405: the board-correlation figures the report renders. A write failure
@@ -246,7 +257,52 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     std::fs::write(&manifest_path, manifest.to_toml()?)?;
     println!("\nManifest: {}", manifest_path.display());
 
-    render_report(&manifest_path, &output).await
+    let phase = announce(relay.bus(), PHASE_RENDER);
+    let rendered = render_report(&manifest_path, &output).await;
+    match &rendered {
+        Ok(()) => finish_phase(relay.bus(), phase),
+        Err(e) => fail_phase(relay.bus(), phase, format!("{e:#}")),
+    }
+    // #5823: the relay's task is joined before returning, so the last verdict
+    // reaches the parent rather than racing this function's return.
+    relay.finish().await;
+    rendered
+}
+
+/// Target name for the post-sweep repository-indexing phase (#5823).
+const PHASE_INDEX: &str = "index repositories";
+
+/// Target name for the post-sweep report render (#5823).
+const PHASE_RENDER: &str = "render report";
+
+/// Tell a watching parent that `phase` began, and hand back its name.
+///
+/// Why: [`run_full_sweep`] announces its own nine stages, but the two phases
+/// after it have no instrumentation at all — and the render is the slowest step
+/// of the whole command. Returning the name keeps the start and the finish from
+/// drifting apart at the call site.
+/// What: emits a [`Stage::Audit`] start event when the relay is on; a no-op
+/// otherwise.
+/// Test: `crate::audit::tests::the_post_sweep_phases_are_announced`.
+fn announce(progress: Option<&ProgressBus>, phase: &'static str) -> &'static str {
+    if let Some(bus) = progress {
+        bus.emit(ProgressEvent::started(Stage::Audit, phase, Some(1)));
+    }
+    phase
+}
+
+/// Report that `phase` finished.
+fn finish_phase(progress: Option<&ProgressBus>, phase: &'static str) {
+    if let Some(bus) = progress {
+        bus.emit(ProgressEvent::completed(Stage::Audit, phase, 1));
+    }
+}
+
+/// Report that `phase` failed, with the reason the caller is about to return.
+fn fail_phase(progress: Option<&ProgressBus>, phase: &'static str, reason: String) {
+    if let Some(bus) = progress {
+        bus.emit(ProgressEvent::failed(Stage::Audit, phase, reason));
+    }
 }
 
 /// Filename of the DD manifest written into the audit's output directory.
@@ -441,6 +497,40 @@ mod tests {
     use tga::core::db::Database;
 
     use super::write_stage_report;
+    use super::{announce, fail_phase, finish_phase, PHASE_INDEX, PHASE_RENDER};
+    use tga::core::progress::{Outcome, ProgressBus};
+
+    /// Why (#5823): [`run_full_sweep`] announces its nine stages, but the two
+    /// phases after it — indexing every checkout, then an LLM-backed render —
+    /// had no instrumentation at all, so a parent's display would stop while
+    /// the process kept running for minutes.
+    /// What: both phases emit a start, and their verdict reaches the bus with
+    /// the reason attached when they fail.
+    /// Test: this is the test.
+    #[test]
+    fn the_post_sweep_phases_are_announced() {
+        let bus = ProgressBus::new();
+        let phase = announce(Some(&bus), PHASE_INDEX);
+        finish_phase(Some(&bus), phase);
+        let phase = announce(Some(&bus), PHASE_RENDER);
+        fail_phase(Some(&bus), phase, "the renderer exited 1".to_string());
+
+        let events = bus.drain();
+        let targets: Vec<&str> = events.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(
+            targets,
+            vec![PHASE_INDEX, PHASE_INDEX, PHASE_RENDER, PHASE_RENDER]
+        );
+        assert_eq!(events[1].outcome, Some(Outcome::Completed));
+        assert_eq!(
+            events[3].outcome.as_ref().and_then(Outcome::reason),
+            Some("the renderer exited 1")
+        );
+        // A relay that is off costs nothing and says nothing.
+        announce(None, PHASE_INDEX);
+        finish_phase(None, PHASE_INDEX);
+        fail_phase(None, PHASE_RENDER, "ignored".to_string());
+    }
 
     /// Proves DOC-67 §9's "named gap, never a silent skip" obligation at the
     /// rendering layer: a failed stage prints `FAILED` (not silently `ok`) on
