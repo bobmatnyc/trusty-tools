@@ -9,7 +9,12 @@ name        = "trusty-review"
 # #4421: this PR (#5754) additionally converts config/mod.rs's module doc to
 # the inner `//!`-only standard — a doc-comment-only change, so it lands under
 # the 0.18.0 above with no further bump needed.
-version     = "0.18.0"
+#
+# #5886: PATCH bump — 0.18.0 is already published, and this PR edits
+# synthesize_prompt.rs's prompt text (adds a coverage-gaps instruction). No
+# public API changed; the `PR version bump vs crates.io` gate (#4421) still
+# requires the bump since `src/**` changed.
+version     = "0.18.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

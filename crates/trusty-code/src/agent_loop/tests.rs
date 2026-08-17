@@ -1237,6 +1237,10 @@ mod write_batch;
 // in a focused child module to keep this file under its SLOC cap.
 mod sink_events;
 
+// #2272 bounded inference-retry regression guards live in a focused child
+// module so transient transport policy stays independent of unrelated tests.
+mod inference_retry;
+
 /// Live OpenRouter test: trivial task through the real client + a real tool.
 ///
 /// Why: End-to-end confidence that the loop drives a real model to a final

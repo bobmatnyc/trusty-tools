@@ -130,12 +130,22 @@ pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
 /// template or analyst may steer — see [`section_instructions`] for the
 /// generic → template → analyst layering (the same shape as the crate's
 /// existing stock → principles → voice reviewer layering, see `src/voice/`).
-/// What: the "Absolute rules" block is a static invariant; the "Output"
-/// section embeds `resolved[EXECUTIVE_SUMMARY]` / `resolved[TOP_RISKS]` /
+/// What: the "Absolute rules" and "Coverage gaps in the assessed set" blocks
+/// are static invariants; the "Output" section embeds
+/// `resolved[EXECUTIVE_SUMMARY]` / `resolved[TOP_RISKS]` /
 /// `resolved[FINDING_ELABORATION]` verbatim.  `retry_concise` appends a
 /// directive to shorten the response (used on the one truncation retry).
+///
+/// The coverage-gaps block is static rather than a fourth section instruction
+/// because a template that overrides `executive_summary` would otherwise drop
+/// it, and because the response schema is fixed — the executive summary is the
+/// only narrative field the model controls, so the note has nowhere else to
+/// go.  It is scoped to targets ABSENT from the assessed set, which is a
+/// different question from the per-repo dimension coverage that
+/// [`super::investigate::render::coverage_prompt_summary`] already mandates.
 /// Test: `synthesize_tests.rs::{system_prompt_embeds_resolved_instructions,
-/// system_prompt_concise_retry_directive}`.
+/// system_prompt_concise_retry_directive,
+/// system_prompt_asks_for_unregistered_target_gaps}`.
 fn synthesis_system_prompt(
     resolved: &std::collections::BTreeMap<String, String>,
     retry_concise: bool,
@@ -162,6 +172,12 @@ fn synthesis_system_prompt(
 - Write prose for RED and AMBER findings ONLY. Do not mention, elaborate, or infer GREEN/positive findings — none are provided, and none should appear.
 - Be concise, specific, and deal-relevant: what an acquirer must act on.
 - Every finding field is structurally required. Emit an empty string for any you have nothing grounded to say in — never fill one with invented content.
+
+## Coverage gaps in the assessed set
+- The applications listed under "Applications assessed" are the ENTIRE assessed set. When the data references a repository, service, database schema, or project board that is not one of them, name it in a short coverage-gaps note closing the executive summary.
+- In that note, recommend the operator register the named targets and re-run, so the report reflects the full technology estate under assessment.
+- Check specifically for schema and migration repositories: a finding citing a table, a migration, or a stored procedure with no corresponding schema repository in the assessed set is exactly this case, and it is the omission operators make most often.
+- Name ONLY targets the data above actually references. Never list one you infer probably exists, and write no note at all when the data references nothing outside the assessed set.
 
 ## Output
 Populate the structured response:

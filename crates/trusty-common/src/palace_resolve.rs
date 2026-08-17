@@ -388,10 +388,20 @@ pub fn resolve_palace_with_remote(
 /// against ADR-0012 §1. `--git-common-dir` names the main repo's `.git` from
 /// any worktree, so its parent is the one directory every worktree agrees on.
 /// What: runs `git rev-parse --path-format=absolute --git-common-dir` under
-/// `start` and returns that path's parent. Returns `None` when git is absent,
-/// `start` is outside a repo, or the flag is unsupported (git < 2.31), in which
-/// case the caller falls back to the detected project root.
-/// Test: `worktree_and_main_checkout_agree`, `git_probes_outside_a_repo_are_none`.
+/// `start`, takes that path's parent, and returns it only after
+/// [`is_main_worktree_of`] confirms the parent really is the main working tree of
+/// the same repository. Returns `None` when git is absent, `start` is outside a
+/// repo, the flag is unsupported (git < 2.31), or the parent fails that check —
+/// in which case the caller falls back to the detected project root.
+///
+/// The confirmation exists because "parent of the common dir" is the main
+/// worktree only when the common dir is `<root>/.git`. In a submodule, or any
+/// repo created with `--separate-git-dir`, the common dir is
+/// `<outer>/.git/modules/<name>` and the parent is `<outer>/.git/modules` — a
+/// directory that is not a working tree at all, returned with no signal that it
+/// is wrong (#5819).
+/// Test: `worktree_and_main_checkout_agree`, `git_probes_outside_a_repo_are_none`,
+/// `separate_git_dir_child_yields_none_not_a_git_internals_path`.
 pub fn main_worktree_root(start: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
@@ -406,7 +416,71 @@ pub fn main_worktree_root(start: &Path) -> Option<PathBuf> {
     if git_dir.is_empty() {
         return None;
     }
-    PathBuf::from(git_dir).parent().map(Path::to_path_buf)
+    let root = PathBuf::from(&git_dir).parent().map(Path::to_path_buf)?;
+    is_main_worktree_of(&root, &git_dir).then_some(root)
+}
+
+/// Confirm `root` is the main working tree of the repo whose common dir is
+/// `git_dir`.
+///
+/// Why (#5819): see [`main_worktree_root`]. A caller cannot tell a real
+/// worktree root from `<outer>/.git/modules` by looking at the path, and the
+/// wrong answer is worse than no answer — trusty-memory's prompt-context filter
+/// compares every drawer's recorded cwd against this root and drops what falls
+/// outside, so an unreachable root drops every tagged drawer.
+/// What: runs `git rev-parse --path-format=absolute --show-toplevel
+/// --git-common-dir` under `root` and requires both that the toplevel IS `root`
+/// and that the common dir matches `git_dir`. The first rejects a path that is
+/// not a working tree root; the second rejects a working tree that belongs to
+/// some other repository. Paths are compared verbatim first and through
+/// `canonicalize` only on mismatch, so a symlinked prefix does not read as a
+/// different tree. Any probe failure answers `false`.
+///
+/// Reconciliation goes through the shared common dir rather than a prefix test
+/// against `start`, because a linked worktree provisioned outside the main
+/// checkout is a legitimate answer that no prefix test would accept.
+/// Test: `separate_git_dir_child_yields_none_not_a_git_internals_path`,
+/// `worktree_and_main_checkout_agree`.
+fn is_main_worktree_of(root: &Path, git_dir: &str) -> bool {
+    let Ok(output) = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-common-dir",
+        ])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let (Some(toplevel), Some(root_git_dir)) = (lines.next(), lines.next()) else {
+        return false;
+    };
+    same_path(toplevel.trim(), &root.to_string_lossy()) && same_path(root_git_dir.trim(), git_dir)
+}
+
+/// Compare two path strings, tolerating a symlinked prefix.
+///
+/// Why: git's `--path-format=absolute` output is already symlink-resolved on
+/// every platform measured, so the verbatim comparison is the normal path; the
+/// `canonicalize` retry is there so a future divergence degrades to a slower
+/// comparison rather than a wrong `false`.
+/// Test: `separate_git_dir_child_yields_none_not_a_git_internals_path`.
+fn same_path(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Read `remote.origin.url` for the repo containing `start` (best-effort).

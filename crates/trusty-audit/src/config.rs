@@ -434,6 +434,33 @@ impl EngagementConfig {
     pub fn resolve_path(explicit: Option<PathBuf>, package_dir: &Path) -> PathBuf {
         explicit.unwrap_or_else(|| Self::default_path(package_dir))
     }
+
+    /// Every secret value this config carries, in one list.
+    ///
+    /// Why: two guards need exactly this set and had derived it separately —
+    /// [`crate::package`] refuses an archive member containing any of them, and
+    /// [`crate::run`] strips them out of a child's log. The board credentials
+    /// are what makes a shared list worth having: they arrive here from the
+    /// TOML rather than from the environment, so
+    /// `trusty_common::credentials::resolved_secret_values` — which enumerates
+    /// the registered providers — does not know them, and each guard has to add
+    /// them by hand. A guard that added one and forgot the other is the #5869
+    /// leak class, one credential over.
+    /// What: the OpenRouter key, plus each board credential the engagement was
+    /// given. Raw values: the only correct uses are as scrub needles and as
+    /// scan needles.
+    /// Test: `super::config_tests::configured_secrets_covers_every_credential`,
+    /// `crate::run::run_tests::a_child_that_echoes_a_board_credential_does_not_leave_it_in_the_log`.
+    pub fn configured_secrets(&self) -> Vec<&str> {
+        let mut secrets = vec![self.openrouter_key.expose()];
+        if let Some(jira) = self.boards.jira.as_ref() {
+            secrets.push(jira.token.expose());
+        }
+        if let Some(linear) = self.boards.linear.as_ref() {
+            secrets.push(linear.api_key.expose());
+        }
+        secrets
+    }
 }
 
 /// The TOML key holding the OpenRouter credential.
@@ -694,6 +721,38 @@ trusty-review = "0.15.1"
             "Debug leaked: {debug}"
         );
         assert!(!debug.contains("lin_api_secret"), "Debug leaked: {debug}");
+    }
+
+    /// The list both credential guards draw from holds every secret the config
+    /// carries, and shrinks to just the OpenRouter key when no board is given.
+    ///
+    /// The count assertions are the point: a new secret field added to the
+    /// schema and not to `configured_secrets` fails here, rather than reaching
+    /// a child's log or a handoff archive unnoticed.
+    #[test]
+    fn configured_secrets_covers_every_credential() {
+        let text = format!(
+            "{SAMPLE}\n[boards.jira]\nurl = \"https://acme.atlassian.net\"\n\
+             email = \"auditor@acme.example\"\ntoken = \"jira-token-secret\"\n\
+             \n[boards.linear]\napi_key = \"lin_api_secret\"\n"
+        );
+        let cfg = EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("parses");
+
+        let secrets = cfg.configured_secrets();
+        assert!(
+            secrets.contains(&cfg.openrouter_key.expose()),
+            "{secrets:?}"
+        );
+        assert!(secrets.contains(&"jira-token-secret"), "{secrets:?}");
+        assert!(secrets.contains(&"lin_api_secret"), "{secrets:?}");
+        assert_eq!(secrets.len(), 3, "{secrets:?}");
+
+        let bare = EngagementConfig::from_toml(SAMPLE, Path::new("engagement.toml"))
+            .expect("parses without boards");
+        assert_eq!(
+            bare.configured_secrets(),
+            vec![bare.openrouter_key.expose()]
+        );
     }
 
     /// `boards.jira.url` is a plain `String` an operator may have pasted

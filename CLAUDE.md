@@ -471,7 +471,8 @@ ADR-0049 committable, directly in the main checkout. Check `git status
 --porcelain` before installing from either location; don't assume it.
 
 > **Extended discipline rationale, the install-from-worktree commands, and the
-> stash-first fallback:** see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
+> throwaway-worktree fallback for installing from a dirty checkout:** see
+> [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
 
 ## Abbreviations & Aliases
 

@@ -1,0 +1,5 @@
+Fixed
+
+- `session.get_transcript` reports a per-session `memory_durability` status — lifetime failed turns, the current streak, and the latest failure's category and time — and the registry logs a warning at the first and third consecutive failed turn, so a session whose durable history is thinning no longer looks identical to a healthy one ([#2425](https://github.com/bobmatnyc/trusty-tools/issues/2425))
+- Turn-recorder warnings name a closed failure category instead of quoting the memory daemon's error text and `memory_remember` `reason` back, either of which can carry a preview of the very credential the #2520 secret gate refused to store ([#2425](https://github.com/bobmatnyc/trusty-tools/issues/2425))
+- An outcome the reorder reconciler refuses is counted in `memory_durability.unrecorded_outcomes` and reported by the observer instead of being discarded, so exceeding the bound no longer erases the degradation signal it was meant to surface ([#2425](https://github.com/bobmatnyc/trusty-tools/issues/2425))
