@@ -3,7 +3,7 @@ name = "trusty-memory"
 # #4421: patch bump — 0.23.0 already published on crates.io and this PR
 # touches src/**. Every hunk is a doc-comment edit (module docs moved to the
 # inner `//!` standard, #5754) — no item signature or behavior changed.
-version = "0.23.1"
+version = "0.23.2"
 edition = "2021"
 description = "MCP server (stdio + HTTP/SSE) for trusty-memory"
 license.workspace = true
