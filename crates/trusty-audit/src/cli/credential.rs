@@ -30,6 +30,7 @@
 //! - **The value is never displayed.** Echo is off while it is typed, and what
 //!   this module writes to the terminal is a fixed set of constants that no
 //!   entered text is ever interpolated into.
+//!
 //! Test: `super::credential_tests`.
 
 use std::io;
@@ -115,7 +116,7 @@ impl CredentialSource {
 ///
 /// `Debug` is derived and safe to use: [`SecretKey`]'s own `Debug` redacts, so
 /// the derive prints `SecretKey(<redacted>)` for the value.
-/// Test: `super::credential_tests::a_resolved_credential_never_renders_its_value`.
+/// Test: `super::credential_tests::no_entered_credential_reaches_any_rendered_output`.
 #[derive(Debug, Clone)]
 pub struct Resolved {
     key: SecretKey,
@@ -454,7 +455,8 @@ trusty-review = "0.15.1"
         /// A terminal whose first read fails outright.
         fn broken() -> Self {
             let mut fake = Self::new([]);
-            fake.answers.push_back(Err(io::Error::other("terminal went away")));
+            fake.answers
+                .push_back(Err(io::Error::other("terminal went away")));
             fake
         }
 
@@ -554,8 +556,13 @@ trusty-review = "0.15.1"
             "sk-or-v1-correct",
             "sk-or-v1-correct",
         ]);
-        let resolved = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
-            .expect("the second round agrees");
+        let resolved = resolve(
+            None,
+            Some(&SecretKey::new("")),
+            config_path(),
+            Some(&mut tty),
+        )
+        .expect("the second round agrees");
 
         assert_eq!(resolved.source(), CredentialSource::Prompt);
         assert_eq!(resolved.into_key().expose(), "sk-or-v1-correct");
@@ -574,8 +581,13 @@ trusty-review = "0.15.1"
     #[test]
     fn a_blank_entry_is_refused_and_asks_again() {
         let mut tty = FakeTty::new(["", "   \t ", "sk-or-v1-real", "sk-or-v1-real"]);
-        let resolved = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
-            .expect("the third round is usable");
+        let resolved = resolve(
+            None,
+            Some(&SecretKey::new("")),
+            config_path(),
+            Some(&mut tty),
+        )
+        .expect("the third round is usable");
 
         assert_eq!(resolved.into_key().expose(), "sk-or-v1-real");
         assert_eq!(
@@ -597,8 +609,13 @@ trusty-review = "0.15.1"
     #[test]
     fn surrounding_whitespace_is_trimmed_from_the_entry() {
         let mut tty = FakeTty::new(["  sk-or-v1-padded  ", "sk-or-v1-padded\t"]);
-        let resolved = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
-            .expect("resolves");
+        let resolved = resolve(
+            None,
+            Some(&SecretKey::new("")),
+            config_path(),
+            Some(&mut tty),
+        )
+        .expect("resolves");
 
         assert_eq!(resolved.into_key().expose(), "sk-or-v1-padded");
     }
@@ -608,8 +625,13 @@ trusty-review = "0.15.1"
     #[test]
     fn a_prompt_that_never_agrees_gives_up() {
         let mut tty = FakeTty::new(["a", "b", "c", "d", "e", "f"]);
-        let err = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
-            .expect_err("three disagreements is enough");
+        let err = resolve(
+            None,
+            Some(&SecretKey::new("")),
+            config_path(),
+            Some(&mut tty),
+        )
+        .expect_err("three disagreements is enough");
 
         assert!(
             matches!(err, AuditError::CredentialNotEntered { attempts } if attempts == MAX_ATTEMPTS),
@@ -623,8 +645,13 @@ trusty-review = "0.15.1"
     #[test]
     fn an_unusual_looking_key_is_accepted_with_a_note() {
         let mut tty = FakeTty::new(["not-the-usual-shape", "not-the-usual-shape"]);
-        let resolved = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
-            .expect("an unusual key is still a key");
+        let resolved = resolve(
+            None,
+            Some(&SecretKey::new("")),
+            config_path(),
+            Some(&mut tty),
+        )
+        .expect("an unusual key is still a key");
 
         assert_eq!(resolved.into_key().expose(), "not-the-usual-shape");
         assert!(
@@ -657,8 +684,13 @@ trusty-review = "0.15.1"
     #[test]
     fn a_terminal_that_fails_is_reported_without_the_entry() {
         let mut tty = FakeTty::broken();
-        let err = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
-            .expect_err("a broken terminal is an error");
+        let err = resolve(
+            None,
+            Some(&SecretKey::new("")),
+            config_path(),
+            Some(&mut tty),
+        )
+        .expect_err("a broken terminal is an error");
 
         assert!(
             matches!(err, AuditError::CredentialPromptFailed { .. }),
@@ -675,8 +707,13 @@ trusty-review = "0.15.1"
         // A round that mismatches, a round that is blank, then a good one, so
         // every message the loop can emit is on the record.
         let mut tty = FakeTty::new([SECRET, "sk-or-v1-mismatch", "", SECRET, SECRET]);
-        let resolved = resolve(None, Some(&SecretKey::new("")), config_path(), Some(&mut tty))
-            .expect("resolves on the third round");
+        let resolved = resolve(
+            None,
+            Some(&SecretKey::new("")),
+            config_path(),
+            Some(&mut tty),
+        )
+        .expect("resolves on the third round");
 
         let displayed = tty.everything_displayed();
         assert!(

@@ -436,7 +436,10 @@ mod layout_tests {
 
         write_private_atomically(&target, "openrouter_key = \"sk-or-v1-x\"\n").expect("write");
 
-        let mode = std::fs::metadata(&target).expect("stat").permissions().mode();
+        let mode = std::fs::metadata(&target)
+            .expect("stat")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
         assert_eq!(
             std::fs::read_to_string(&target).expect("reads"),
