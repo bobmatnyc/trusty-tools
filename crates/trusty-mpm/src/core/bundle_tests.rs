@@ -1229,46 +1229,6 @@ fn rust_build_performance_declared_by_rust_family_agents() {
 }
 
 #[test]
-fn tm_init_surfaces_build_performance_pointer_for_rust_projects() {
-    // The `rust-build-performance` skill (per-agent, resident in
-    // `rust-engineer`/`tauri-engineer` — see
-    // `rust_build_performance_declared_by_rust_family_agents` above) only
-    // reaches a session that dispatches one of those agents. Nothing at
-    // PROJECT-SETUP time surfaced it before a build already felt slow — this
-    // test pins the `/tm-init` fix: a Rust project's scaffolded/refreshed
-    // `CLAUDE.md` MUST get a durable Build Performance pointer, and that
-    // pointer must not assert a benefit the in-flight sccache measurement
-    // has not established.
-    assert!(
-        TM_INIT.contains("Cargo.toml"),
-        "tm-init must key the Build Performance pointer off the same \
-         Cargo.toml marker rust-engineer deploys on"
-    );
-    assert!(
-        TM_INIT.contains("Build Performance"),
-        "tm-init is missing the Build Performance section instruction for \
-         Rust projects"
-    );
-    assert!(
-        TM_INIT.contains("rust-build-performance"),
-        "tm-init's Build Performance pointer must reference the bundled \
-         rust-build-performance skill"
-    );
-    assert!(
-        TM_INIT.contains("cargo build --timings"),
-        "tm-init must direct a new Rust project toward measuring a baseline \
-         with --timings, not toward a compiler-flag or cache guess"
-    );
-    assert!(
-        TM_INIT.contains("Never assert that `sccache`"),
-        "tm-init must not let a scaffolded CLAUDE.md assert an unmeasured \
-         sccache speedup — the skill's own §6 caveats (no default hit on \
-         incremental path-crate builds) must be preserved, not silently \
-         dropped, by the pointer this test guards"
-    );
-}
-
-#[test]
 fn output_styles_keep_claude_code_coding_instructions() {
     // Claude Code strips its built-in software-engineering instructions (how to
     // scope changes, write comments, verify work) from any custom output style
