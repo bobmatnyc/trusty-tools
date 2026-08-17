@@ -427,7 +427,8 @@ fn build_http_client() -> Option<reqwest::Client> {
 /// `force: true` (bypasses trusty-memory's signal/noise gate for
 /// short/structured content, same rationale as `CreateDrawerReq::force`).
 /// Test: `create_tagged_drawer_at_and_drawers_by_tag_at_round_trip`,
-/// `create_tagged_drawer_at_no_project_root_errs`.
+/// `create_tagged_drawer_at_without_a_project_root_still_resolves_a_palace`,
+/// `create_tagged_drawer_at_malformed_pin_errs`.
 pub(crate) async fn create_tagged_drawer_at(
     cwd: &Path,
     base_url: &str,

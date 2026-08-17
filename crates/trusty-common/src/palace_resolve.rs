@@ -130,7 +130,9 @@ impl ProjectPin {
 /// indistinguishable once produced, which is how a derived name ended up in the
 /// operator-override slot.
 /// What: one variant per level, in precedence order.
-/// Test: `env_override_reports_its_source`, `pin_reports_its_source`.
+/// Test: `env_override_wins_over_pin_and_warns`, `pin_beats_git_derivation`,
+/// `git_owner_repo_used_when_unpinned`, `a_caller_with_no_git_identity_still_resolves`
+/// — one assertion on `source` per variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PalaceSource {
@@ -389,7 +391,7 @@ pub fn resolve_palace_with_remote(
 /// `start` and returns that path's parent. Returns `None` when git is absent,
 /// `start` is outside a repo, or the flag is unsupported (git < 2.31), in which
 /// case the caller falls back to the detected project root.
-/// Test: `worktree_and_main_checkout_agree`, `main_worktree_root_outside_repo_is_none`.
+/// Test: `worktree_and_main_checkout_agree`, `git_probes_outside_a_repo_are_none`.
 pub fn main_worktree_root(start: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
@@ -415,7 +417,7 @@ pub fn main_worktree_root(start: &Path) -> Option<PathBuf> {
 /// What: runs `git -C <start> config --get remote.origin.url`. Returns `None`
 /// when there is no origin, git is absent, or `start` is outside a repo. Works
 /// unchanged inside a worktree, which shares the main repo's config. No network.
-/// Test: `git_remote_origin_outside_repo_is_none`, plus every `*_git_remote` test.
+/// Test: `git_probes_outside_a_repo_are_none`, `git_owner_repo_used_when_unpinned`.
 pub fn git_remote_origin(start: &Path) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")

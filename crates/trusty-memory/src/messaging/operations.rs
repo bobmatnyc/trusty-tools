@@ -219,8 +219,8 @@ pub fn cwd_palace_slug() -> Result<String> {
 /// `tests::cwd_palace_slug_at_reads_pin_from_subdir`,
 /// `tests::cwd_palace_slug_at_pin_read_does_not_create_pin_file`,
 /// `tests::cwd_palace_slug_at_env_override_wins`,
-/// `tests::cwd_palace_slug_at_uses_git_owner_repo`, plus
-/// `trusty_common::palace_resolve`'s own suite.
+/// `tests::cwd_palace_slug_at_uses_git_owner_repo`. The shared resolver carries
+/// its own suite in trusty-common's palace_resolve module.
 pub fn cwd_palace_slug_at(start: &Path) -> Result<String> {
     // #5811: every level now lives in one place. This used to inline the four
     // steps, which made trusty-memory the only crate that read the pin — the
