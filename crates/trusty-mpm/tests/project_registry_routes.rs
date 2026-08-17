@@ -78,6 +78,7 @@ async fn register_get_list_status_round_trip() {
         stack_hint: Some("rust".into()),
         gh_user: Some("acme-bot".into()),
         gh_account: None,
+        gh_config_dir: None,
         worktree: None,
     };
     let registered = client.registry_register_project(&args).await.unwrap();
@@ -132,6 +133,7 @@ async fn register_is_idempotent_upsert() {
         stack_hint: None,
         gh_user: None,
         gh_account: None,
+        gh_config_dir: None,
         worktree: None,
     };
     client.registry_register_project(&base).await.unwrap();
@@ -162,6 +164,7 @@ async fn register_preserves_unspecified_optional_fields_on_existing_project() {
             stack_hint: Some("rust".into()),
             gh_user: Some("bobmatnyc".into()),
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -179,6 +182,7 @@ async fn register_preserves_unspecified_optional_fields_on_existing_project() {
             stack_hint: None,
             gh_user: None,
             gh_account: Some("bob-work".into()),
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -223,6 +227,7 @@ async fn register_explicit_fields_still_override_existing() {
             stack_hint: Some("rust".into()),
             gh_user: Some("bobmatnyc".into()),
             gh_account: Some("bobmatnyc".into()),
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -238,6 +243,7 @@ async fn register_explicit_fields_still_override_existing() {
             stack_hint: Some("python".into()),
             gh_user: Some("bob-work".into()),
             gh_account: Some("bob-work".into()),
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -302,6 +308,7 @@ async fn register_preserves_identity_binding_not_expressible_in_body() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -340,6 +347,51 @@ async fn register_preserves_identity_binding_not_expressible_in_body() {
     assert!(refetched.github.is_some());
 }
 
+/// #5851: one `register` call sets BOTH keys per-project `gh` selection needs.
+///
+/// Why: `configured_account_pair` arms only when `github.config_dir` AND
+/// `github.account` are both set, and before #5851 neither had a register-time
+/// flag — an operator could pin `gh_account` and still have nothing that
+/// actually selects the account. This drives the real HTTP route and reads the
+/// record back, so a wire field that serializes but is never folded into the
+/// binding would fail here.
+#[tokio::test]
+async fn register_gh_config_dir_writes_the_github_binding() {
+    let (client, _state) = serve_with_state().await;
+
+    let created = client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: None,
+            tags: None,
+            stack_hint: None,
+            gh_user: None,
+            gh_account: Some("bobmatnyc".into()),
+            gh_config_dir: Some("/home/bob/.config/gh-bobmatnyc".into()),
+            worktree: None,
+        })
+        .await
+        .unwrap();
+
+    let github = created.github.as_ref().expect("github binding written");
+    assert_eq!(
+        github.config_dir.as_deref(),
+        Some(std::path::Path::new("/home/bob/.config/gh-bobmatnyc"))
+    );
+    assert_eq!(github.account.as_deref(), Some("bobmatnyc"));
+
+    // Durable, not just an artifact of the response body.
+    let refetched = client.registry_get_project("widget").await.unwrap();
+    let github = refetched.github.as_ref().expect("binding persisted");
+    assert_eq!(
+        github.config_dir.as_deref(),
+        Some(std::path::Path::new("/home/bob/.config/gh-bobmatnyc"))
+    );
+    assert_eq!(github.account.as_deref(), Some("bobmatnyc"));
+}
+
 /// Fetching an unregistered project surfaces an error (the daemon 404s).
 #[tokio::test]
 async fn get_unknown_project_errors() {
@@ -365,6 +417,7 @@ async fn patch_round_trip_updates_fields() {
             stack_hint: Some("rust".into()),
             gh_user: Some("acme-bot".into()),
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -415,6 +468,7 @@ async fn patch_absent_fields_untouched() {
             stack_hint: Some("rust".into()),
             gh_user: Some("acme-bot".into()),
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -487,6 +541,7 @@ async fn patch_rejects_blank_repo_url_surfaces_server_message() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -522,6 +577,7 @@ async fn patch_rejects_name_change() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -559,6 +615,7 @@ async fn patch_is_idempotent() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -604,6 +661,7 @@ async fn patch_rejects_blank_tags_add() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -636,6 +694,7 @@ async fn patch_rejects_blank_tags_remove() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -669,6 +728,7 @@ async fn patch_trims_tags_add_whitespace() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -704,6 +764,7 @@ async fn patch_round_trips_worktree_opt_out() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
@@ -758,6 +819,7 @@ async fn register_preserves_worktree_opt_out_when_absent() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            gh_config_dir: None,
             worktree: Some(false),
         })
         .await
@@ -774,6 +836,7 @@ async fn register_preserves_worktree_opt_out_when_absent() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            gh_config_dir: None,
             worktree: None,
         })
         .await
