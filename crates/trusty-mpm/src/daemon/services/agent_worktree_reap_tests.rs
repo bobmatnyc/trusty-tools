@@ -253,6 +253,56 @@ fn hermetic() -> (
     )
 }
 
+/// The three answers the merged-PR reclaim gate keys on (#5661).
+///
+/// Why: `Ended` is the only one that permits a deletion, so the boundary
+/// between it and the two refusing answers is the whole safety property. In
+/// particular an empty registry must read `Unknown` and not `Ended` — that is
+/// the post-restart shape, and reading it as `Ended` is what would let the
+/// sweep delete a live agent's tree after a daemon restart.
+#[tokio::test]
+async fn delegation_state_reports_live_ended_and_unknown() {
+    use crate::core::agent::{Delegation, DelegationStatus, ModelTier};
+    use crate::session_manager::worktree_ownership::AgentDelegationState;
+
+    let (state, _dir, session) = hermetic();
+    assert_eq!(
+        super::delegation_state_for_agent(&state, "never-seen"),
+        AgentDelegationState::Unknown,
+        "an empty registry knows nothing; it does not know the agent is gone"
+    );
+
+    let mut running = Delegation::new(session, None, "rust-engineer", ModelTier::Sonnet, "work");
+    running.agent_id = Some("agent-running".into());
+    running.status = DelegationStatus::Running;
+    state.upsert_delegation(running);
+    assert_eq!(
+        super::delegation_state_for_agent(&state, "agent-running"),
+        AgentDelegationState::Live
+    );
+
+    let mut done = Delegation::new(session, None, "rust-engineer", ModelTier::Sonnet, "work");
+    done.agent_id = Some("agent-done".into());
+    done.status = DelegationStatus::Completed;
+    state.upsert_delegation(done);
+    assert_eq!(
+        super::delegation_state_for_agent(&state, "agent-done"),
+        AgentDelegationState::Ended
+    );
+
+    // `Stale` is neither live nor terminal — tracking lost the agent rather than
+    // watching it exit — so it must NOT read as `Ended`. Same reading
+    // `paths_in_use` gives it, and for the same reason.
+    let mut lost = Delegation::new(session, None, "rust-engineer", ModelTier::Sonnet, "work");
+    lost.agent_id = Some("agent-stale".into());
+    lost.status = DelegationStatus::Stale;
+    state.upsert_delegation(lost);
+    assert_eq!(
+        super::delegation_state_for_agent(&state, "agent-stale"),
+        AgentDelegationState::Live
+    );
+}
+
 /// `spawn_on_stop` is a no-op for anything that is not an agent exit.
 ///
 /// Why: it runs on the hook pipeline's hot path, in front of every event in

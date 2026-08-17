@@ -63,7 +63,8 @@ use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::worktree_liveness::process_holding;
 use crate::session_manager::worktree_ownership::{
-    SentinelOwner, find_agent_worktree, read_sentinel_owner,
+    AgentDelegationState, SentinelOwner, find_agent_worktree, is_harness_agent_worktree,
+    read_sentinel_owner,
 };
 use crate::session_manager::worktree_safety::{DirtyWorktreePolicy, dirt_blocks_removal};
 
@@ -95,30 +96,40 @@ impl ReapOutcome {
 
 /// Is `path` a leaf of a harness agent-worktree store — `…/.claude/worktrees/<name>`?
 ///
-/// Why: this is the only shape this module will delete, and it is deliberately
-/// the STRICT form. `worktree_reconcile::categorize` carries a looser
-/// "somewhere under `.claude/worktrees`" test, but that one is documented as
-/// report text that is "never an input to [`ReconcileState`]" — promoting a
-/// descriptive label to a deletion gate is precisely what that doc forbids, so
-/// this is a separate predicate answering a separate question.
+/// What the delegation registry can say about `agent_id` (#5661).
 ///
-/// A path the agent reported from anywhere else — a `/private/tmp` scratchpad,
-/// a `/private/var/folders` tree, a checkout outside the project — is still
-/// RECORDED against the delegation, and is refused here. Recording it is what
-/// makes it visible; refusing it is what keeps this module from deleting a
-/// directory whose provenance it cannot establish.
-/// What: the immediate parent's name is `worktrees` and its parent's is
-/// `.claude`.
-/// Test: `reap_refuses_a_worktree_outside_the_harness_base`.
-pub(crate) fn is_harness_agent_worktree(path: &Path) -> bool {
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    parent.file_name().is_some_and(|n| n == "worktrees")
-        && parent
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|n| n == ".claude")
+/// Why: the merged-PR reclaim sweep needs the same "is this agent still
+/// working?" answer this module's gate 3 gets from [`paths_in_use`], but keyed
+/// on the agent the SENTINEL names rather than on a path — the sweep starts from
+/// a directory, not from a stop event. Resolving it here keeps one reading of
+/// `DaemonState::delegations`; a second copy in `session_manager` would drift
+/// from this one, and both authorise deletions.
+/// What: scans every delegation in every session for one whose `agent_id`
+/// matches. Any non-terminal match is [`AgentDelegationState::Live`]; matches
+/// that are all terminal are [`AgentDelegationState::Ended`]; no match at all is
+/// [`AgentDelegationState::Unknown`] — which is what a post-restart empty
+/// `DashMap` yields, and is why the sweep treats it as undeterminable rather
+/// than as "the agent is gone".
+/// Test: `delegation_state_reports_live_ended_and_unknown`.
+pub(crate) fn delegation_state_for_agent(
+    state: &Arc<DaemonState>,
+    agent_id: &str,
+) -> AgentDelegationState {
+    let mut seen = false;
+    for d in state.all_delegations() {
+        if d.agent_id.as_deref() != Some(agent_id) {
+            continue;
+        }
+        if !d.status.is_terminal() {
+            return AgentDelegationState::Live;
+        }
+        seen = true;
+    }
+    if seen {
+        AgentDelegationState::Ended
+    } else {
+        AgentDelegationState::Unknown
+    }
 }
 
 /// Reap one registered agent worktree, or say why not.

@@ -108,7 +108,7 @@ use crate::session_manager::worktree_ownership::{
     AgentWorktreeOwner, SentinelOwner, read_sentinel_owner, write_agent_sentinel,
 };
 
-use super::agent_worktree_reap::is_harness_agent_worktree;
+use crate::session_manager::worktree_ownership::is_harness_agent_worktree;
 
 /// How long after an `agent_delegate` call an observed dispatch may be treated
 /// as the *same* delegation.
