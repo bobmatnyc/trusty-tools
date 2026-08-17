@@ -215,10 +215,10 @@ fn resolve_key(
     template: &EngagementConfig,
     template_path: &Path,
 ) -> Result<(SecretKey, bool), AuditError> {
-    if let Some(key) = supplied {
-        if !key.is_empty() {
-            return Ok((key.clone(), true));
-        }
+    if let Some(key) = supplied
+        && !key.is_empty()
+    {
+        return Ok((key.clone(), true));
     }
     if !template.openrouter_key.is_empty() {
         return Ok((template.openrouter_key.clone(), false));
