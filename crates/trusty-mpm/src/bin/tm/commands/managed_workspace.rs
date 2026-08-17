@@ -315,12 +315,11 @@ pub(crate) async fn provision_for_fallback(
             base.display()
         );
     } else {
-        // Deliberately terse: this path ends in `launch()`, which calls
-        // `provision_for_launch` and prints the full "worktree isolation is
-        // disabled … no managed clone, no worktree" line itself. Repeating it
-        // here showed the operator the same sentence twice. What is NOT
-        // redundant is the daemon-unreachable context, which only this path
-        // knows.
+        // Deliberately terse: this path hands `launch()` a
+        // `LaunchDir::CallerResolved`, so `provision_for_launch` prints no
+        // placement line at all and `print_launch_banner` names the directory
+        // the session opens in. What is NOT redundant is the
+        // daemon-unreachable context, which only this path knows.
         eprintln!(
             "tm: daemon unreachable — this project opted out of worktrees (#3455), \
              so there is nothing to redirect to."
