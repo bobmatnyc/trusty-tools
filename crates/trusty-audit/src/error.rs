@@ -360,6 +360,97 @@ pub enum AuditError {
         source: std::io::Error,
     },
 
+    /// A generated file could not be serialized.
+    ///
+    /// Why: [`crate::config::generate`] re-renders a TOML table, and a render
+    /// that fails must not produce a config the recipient would run against
+    /// (#5825). Separate from [`AuditError::Parse`], which is about reading.
+    /// What: names what was being written. Never quotes the content, because
+    /// the content is the config carrying the credential.
+    /// Test: `crate::config::config_tests::generating_a_config_that_would_not_load_fails_here`
+    /// covers the neighbouring refusal; this arm has no reachable trigger for
+    /// a `toml::Table` and exists so one cannot be swallowed.
+    #[error("cannot render {what}: {source}")]
+    Render {
+        /// What was being written, e.g. `"engagement config"`.
+        what: &'static str,
+        /// The underlying serialization failure. Boxed for the same reason
+        /// [`AuditError::Parse`]'s is.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// An input the inbound install package cannot be assembled without.
+    ///
+    /// Why: #5825's packaging step is the classic fail-open — a missing binary
+    /// or an unreadable template that produces a zip anyway ships a deliverable
+    /// that cannot run, and the operator finds out from the client. Every input
+    /// is checked before a byte is written, and a refusal leaves nothing behind.
+    /// What: names which input and where it was looked for.
+    /// Test: `crate::distribute::distribute_tests::a_missing_binary_is_refused_and_leaves_no_file`,
+    /// `crate::distribute::distribute_tests::a_missing_template_is_refused_and_leaves_no_file`.
+    #[error("cannot build the install package: no {what} at {path}")]
+    MissingPackageInput {
+        /// Which input, e.g. `"taudit binary"`.
+        what: &'static str,
+        /// Where it was looked for.
+        path: PathBuf,
+    },
+
+    /// No OpenRouter key to write into the generated engagement config.
+    ///
+    /// Why: the inbound package's whole purpose is that the recipient can run
+    /// the audit without supplying anything of ours, and a config with a blank
+    /// key produces a package that installs, launches, and then fails at the
+    /// first inference call (#5825). Refusing at packaging time is where the
+    /// operator can still fix it.
+    /// What: names the environment variable to set and the template that could
+    /// have carried one instead. The key itself is never quoted, and neither is
+    /// a blank one — there is nothing to quote.
+    /// Test: `crate::distribute::distribute_tests::a_blank_credential_is_refused_and_leaves_no_file`.
+    #[error(
+        "cannot build the install package: no OpenRouter key. Set {env}, or put one in the \
+         template config at {template}"
+    )]
+    MissingCredential {
+        /// The environment variable that supplies it.
+        env: &'static str,
+        /// The template config that could carry one instead.
+        template: PathBuf,
+    },
+
+    /// The install package's destination is already taken.
+    ///
+    /// Why: #5825 — an operator regenerating a package must not destroy the one
+    /// they already sent. Versioning the name instead would leave two files a
+    /// hand could pick the wrong one of; a refusal puts the decision at the
+    /// moment the mistake would happen, and `rm` is the explicit act that says
+    /// the old package no longer matters.
+    /// What: names the file and what to do about it.
+    /// Test: `crate::distribute::distribute_tests::an_existing_package_is_never_overwritten`.
+    #[error(
+        "{path} already exists. This client never overwrites a package that may already have \
+         been sent — remove it, or choose another --out"
+    )]
+    PackageExists {
+        /// The destination that is already taken.
+        path: PathBuf,
+    },
+
+    /// The install package could not be read, written, or renamed into place.
+    ///
+    /// Deliberately a different variant from [`AuditError::Package`]: the two
+    /// travel in opposite directions and their messages must not be confusable
+    /// in an operator's terminal (#5825).
+    #[error("install package {path}: {source}")]
+    Distribute {
+        /// The path that failed.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// A registration spec is not a target this client will register.
     ///
     /// Why: #5822. `taudit add` writes the spec into a file the sweep later

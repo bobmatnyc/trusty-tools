@@ -26,6 +26,7 @@ use crate::chain::{self, ChainOptions, ChainReport};
 use crate::clone::{self, CloneOptions, CloneReport};
 use crate::config::EngagementConfig;
 use crate::discover::{self, DiscoveredRepo};
+use crate::distribute::{self, DistributeOptions, InstallPackage};
 use crate::error::AuditError;
 use crate::manifest::{AuditManifest, RepositoryEntry};
 use crate::package::{self, ReturnPackage};
@@ -112,6 +113,17 @@ pub enum Command {
     /// needs to run just that phase. See [`crate::chain`] for the partial-success
     /// policy and what each phase is.
     Audit(ChainOptions),
+    /// Assemble the install package that goes TO a client (#5825).
+    ///
+    /// The one capability here the AUDITOR runs rather than the recipient: it
+    /// builds the zip every other capability presupposes has already been
+    /// extracted. Carries its options because the output directory and the
+    /// binary to ship are both operator choices with defaults.
+    ///
+    /// Deliberately NOT [`Command::Package`] with a direction flag — the two
+    /// travel opposite ways and disagree about the credential, so they are two
+    /// variants dispatching to two modules. See [`crate::distribute`].
+    Distribute(DistributeOptions),
 }
 
 /// The working directory's layout, as reported to a front end.
@@ -224,6 +236,9 @@ pub enum Outcome {
     /// the front end must show. [`Outcome::exit_code`] is what stops that
     /// reading as success.
     Audit(ChainReport),
+    /// From [`Command::Distribute`] — the file to send a client, and what it
+    /// will run on.
+    Distributed(InstallPackage),
 }
 
 /// Exit status for a run that succeeded but did not cover everything asked for.
@@ -277,6 +292,11 @@ impl Outcome {
     }
 }
 
+/// The real environment lookup every shipped [`Session`] holds.
+fn read_environment(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
 /// One audit engagement, rooted at a working directory.
 ///
 /// Why: the front ends share this and nothing else.
@@ -294,6 +314,17 @@ pub struct Session {
     auto_install: bool,
     /// Which `gh` invocations a repository registration runs (#5822).
     repo_probe: validate::RepoProbe,
+    /// How [`Session::distribute`] reads the operator's environment (#5825).
+    ///
+    /// A `fn` pointer, and for the same two reasons
+    /// [`validate::RepoProbe`] is one: `Session` stays `Debug + Clone + Copy`-able
+    /// without a manual impl, and the lookup becomes a value a test supplies. A
+    /// test that reached `std::env::var` instead would write whatever key the
+    /// developer exports into a zip on disk, and could assert nothing about
+    /// which source the key came from — because both sources look alike from
+    /// outside. `std::env::set_var` is not the alternative: it is `unsafe` in
+    /// edition 2024 and races every other thread in a parallel test binary.
+    credential_env: fn(&str) -> Option<String>,
     /// Where live progress goes while a long capability runs (#5823).
     ///
     /// A field rather than a parameter on [`Session::execute`] because progress
@@ -322,6 +353,7 @@ impl Session {
             config_path,
             auto_install: true,
             repo_probe: validate::RepoProbe::real(),
+            credential_env: read_environment,
             progress: Progress::none(),
         }
     }
@@ -340,6 +372,28 @@ impl Session {
     #[must_use]
     pub(crate) fn with_repo_probe(mut self, probe: validate::RepoProbe) -> Self {
         self.repo_probe = probe;
+        self
+    }
+
+    /// Read the packaging credential from `lookup` rather than the process
+    /// environment.
+    ///
+    /// Why: #5825 — `distribute` chooses between an environment key and the
+    /// template's, and neither branch was provable while the source was a
+    /// global. Worse, the branch that was NOT provable is the one that writes a
+    /// live credential into a zip: a developer with `OPENROUTER_API_KEY`
+    /// exported (which `docs/reference/environment-variables.md` tells them to
+    /// do for `tga audit`) had their real key packaged by the test suite.
+    /// `#[cfg(test)]` because it is the injection seam for that proof and
+    /// nothing else — a shipped build reads the environment and only the
+    /// environment, so [`Session::execute`] stays the one door a front end gets.
+    /// What: replaces the lookup [`Session::distribute`] calls.
+    /// Test: `super::session_tests::a_credential_in_the_environment_is_the_one_packaged`,
+    /// `super::session_tests::no_credential_in_the_environment_packages_the_templates`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_credential_env(mut self, lookup: fn(&str) -> Option<String>) -> Self {
+        self.credential_env = lookup;
         self
     }
 
@@ -466,6 +520,7 @@ impl Session {
             // #5824: the one-shot chain over the four above. `crate::chain`
             // calls each of them unchanged, so this and they cannot drift.
             Command::Audit(options) => self.audit(&options).await.map(Outcome::Audit),
+            Command::Distribute(options) => self.distribute(&options).map(Outcome::Distributed),
         }
     }
 
@@ -609,6 +664,41 @@ impl Session {
             &self.progress,
         )
         .await
+    }
+
+    /// Assemble the install package that goes TO a client (#5825).
+    ///
+    /// Why: the only capability run on the AUDITOR's machine, so it takes
+    /// nothing from the working directory — a client's engagement has not
+    /// started yet. It reads the engagement config as a TEMPLATE rather than as
+    /// this session's own config: the file on the auditor's disk supplies the
+    /// instructions, the pins and the labels, and the credential that reaches
+    /// the generated copy is preferably one that was never written down.
+    ///
+    /// The credential is read from the environment HERE, at the one place that
+    /// has to touch it, rather than inside [`distribute::assemble`]. That keeps
+    /// the assembly function pure — its tests never mutate a global every other
+    /// test in the binary shares — and it is the same division `main.rs`
+    /// already uses for `TRUSTY_AUDIT_WORKDIR`. No CLI flag carries the key:
+    /// argv is world-readable through `ps` and lands in shell history.
+    /// What: resolves the key through [`Session::credential_env`], then hands
+    /// off. Everything else — validation, the fail-open guards, the zip — is
+    /// [`distribute::assemble`]'s.
+    /// Test: `super::session_tests::distributing_without_a_template_is_refused`,
+    /// `super::session_tests::a_credential_in_the_environment_is_the_one_packaged`,
+    /// `super::session_tests::no_credential_in_the_environment_packages_the_templates`,
+    /// `crate::distribute::distribute_tests`.
+    fn distribute(&self, options: &DistributeOptions) -> Result<InstallPackage, AuditError> {
+        // #5825: the injected lookup, never `std::env::var` inline — a test that
+        // reached the live environment would package the developer's own key.
+        let supplied =
+            (self.credential_env)(run::ENV_INFERENCE_CREDENTIAL).map(crate::config::SecretKey::new);
+        distribute::assemble(
+            &self.config_path,
+            options,
+            supplied.as_ref(),
+            &self.progress,
+        )
     }
 
     /// Read the engagement's key and pins, then sweep the selected repositories.
@@ -963,6 +1053,127 @@ trusty-review = "0.0.0-never-published"
             !crate::package::default_destination(session.work_dir()).exists(),
             "a refused package must leave no file"
         );
+    }
+
+    /// Read one member out of a written install package.
+    fn package_member(zip_path: &Path, entry: &str) -> String {
+        use std::io::Read as _;
+        let file = std::fs::File::open(zip_path).expect("open package");
+        let mut archive = zip::ZipArchive::new(file).expect("read package");
+        let mut member = archive.by_name(entry).expect("member present");
+        let mut text = String::new();
+        member.read_to_string(&mut text).expect("member is text");
+        text
+    }
+
+    /// Assemble an install package through `execute`, with `lookup` standing in
+    /// for the operator's environment.
+    ///
+    /// Nothing here reads the real environment. That is the point: a developer
+    /// with `OPENROUTER_API_KEY` exported must not have their own credential
+    /// written into a zip by `cargo test`.
+    async fn distribute_through_execute(
+        tmp: &Path,
+        lookup: fn(&str) -> Option<String>,
+    ) -> InstallPackage {
+        let session = session_with_config(tmp, UNPUBLISHABLE_CONFIG).with_credential_env(lookup);
+        let binary = tmp.join("taudit-fixture");
+        std::fs::write(&binary, b"bytes to copy").expect("write binary");
+
+        let outcome = session
+            .execute(Command::Distribute(DistributeOptions {
+                output_dir: Some(tmp.join("packages")),
+                binary: Some(binary),
+            }))
+            .await
+            .expect("assembles");
+        let Outcome::Distributed(package) = outcome else {
+            panic!("expected Distributed");
+        };
+        package
+    }
+
+    /// #5825: the inbound package reaches the recipient through `execute`, the
+    /// same door as everything else — and it is the AUDITOR-side capability, so
+    /// it needs no sweep, no manifest, and nothing in the working directory.
+    #[tokio::test]
+    async fn distributing_builds_a_package_from_the_template_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = distribute_through_execute(tmp.path(), |_| None).await;
+
+        assert_eq!(
+            package.path,
+            tmp.path()
+                .join("packages")
+                .join(crate::distribute::PACKAGE_FILE_NAME),
+            "the package lands where the operator asked"
+        );
+        assert!(package.path.is_file());
+        assert_eq!(package.files.len(), 4);
+        assert!(!package.platform.is_empty());
+    }
+
+    /// #5825: an exported credential is the one that reaches the recipient.
+    ///
+    /// The whole `execute` → `Session::distribute` → `distribute::assemble`
+    /// chain is under test, in both directions, which is what the environment
+    /// read being a global made unprovable: pointing `distribute` at the wrong
+    /// variable name, or dropping `supplied` on the way to `assemble`, leaves
+    /// this test packaging the template's key and failing.
+    #[tokio::test]
+    async fn a_credential_in_the_environment_is_the_one_packaged() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = distribute_through_execute(tmp.path(), |name| {
+            (name == run::ENV_INFERENCE_CREDENTIAL)
+                .then(|| "sk-or-v1-from-the-environment".to_owned())
+        })
+        .await;
+
+        assert!(package.key_from_environment);
+        let config = package_member(&package.path, "trusty-audit/engagement.toml");
+        assert!(config.contains("sk-or-v1-from-the-environment"), "{config}");
+        assert!(!config.contains("sk-or-v1-not-a-real-key"), "{config}");
+    }
+
+    /// #5825: the other direction — nothing exported, so the template's key
+    /// ships and `key_from_environment` says so.
+    #[tokio::test]
+    async fn no_credential_in_the_environment_packages_the_templates() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = distribute_through_execute(tmp.path(), |_| None).await;
+
+        assert!(!package.key_from_environment);
+        let config = package_member(&package.path, "trusty-audit/engagement.toml");
+        assert!(config.contains("sk-or-v1-not-a-real-key"), "{config}");
+    }
+
+    /// #5825: a missing template is a refusal, not an empty config the
+    /// recipient discovers on their own machine.
+    #[tokio::test]
+    async fn distributing_without_a_template_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out = tmp.path().join("packages");
+        // `session_in` points the config path at a file nothing wrote.
+        let session = session_in(tmp.path());
+
+        let err = session
+            .execute(Command::Distribute(DistributeOptions {
+                output_dir: Some(out.clone()),
+                binary: None,
+            }))
+            .await
+            .expect_err("no template, no package");
+        assert!(
+            matches!(
+                err,
+                AuditError::MissingPackageInput {
+                    what: "engagement config template",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(!out.exists(), "a refused package must leave no directory");
     }
 
     /// #5494: the checkpoint is written after every repository now, so a record
