@@ -262,12 +262,25 @@ fn sessions_payload(filtered: FilteredSessions) -> (Vec<PausedSessionJson>, usiz
 /// Test: `generate_catchup_json_returns_structured_fields`,
 /// `generate_catchup_json_respects_watermark`.
 pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
-    let palace_id = derive_palace_id_for(&opts.project_dir);
+    // #5811: an unresolvable palace used to become the shared literal
+    // `"unknown-project"`, so this read a watermark another project had written
+    // and reported "nothing new" for activity that was genuinely new. With no
+    // palace: apply NO watermark (nothing is suppressed) and skip the drawer
+    // source, which has no palace to query.
+    let palace_id = match derive_palace_id_for(&opts.project_dir) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            eprintln!(
+                "catchup: warning: palace resolution failed ({e}); \
+                 reporting full history and omitting recent memory"
+            );
+            None
+        }
+    };
 
-    let watermark: Option<DateTime<Utc>> = if opts.full {
-        None
-    } else {
-        load_catchup_state(&palace_id).map(|s| s.last_catchup_at)
+    let watermark: Option<DateTime<Utc>> = match (opts.full, palace_id.as_deref()) {
+        (false, Some(id)) => load_catchup_state(id).map(|s| s.last_catchup_at),
+        _ => None,
     };
 
     // #5072: shared fail-closed predicate — see `filter_sessions_since`.
@@ -288,14 +301,10 @@ pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
         Vec::new()
     };
 
-    let recent_memory = if opts.include_palace {
-        match fetch_recent_palace_drawers(
-            &opts.memory_url,
-            &palace_id,
-            opts.drawer_limit,
-            watermark,
-        )
-        .await
+    let recent_memory = if let (true, Some(palace_id)) = (opts.include_palace, palace_id.as_deref())
+    {
+        match fetch_recent_palace_drawers(&opts.memory_url, palace_id, opts.drawer_limit, watermark)
+            .await
         {
             Some(drawers) => drawers
                 .iter()
@@ -414,7 +423,7 @@ mod tests {
         init_git_repo(&tmp);
 
         // A far-future watermark should exclude every commit/session.
-        let palace_id = derive_palace_id_for(tmp.path());
+        let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
         let state = CatchupState {
             last_catchup_at: "2099-01-01T00:00:00Z".parse().unwrap(),
             palace_id: palace_id.clone(),
@@ -476,7 +485,7 @@ mod tests {
         )
         .unwrap();
 
-        let palace_id = derive_palace_id_for(tmp.path());
+        let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
         save_catchup_state(
             &palace_id,
             &CatchupState {
@@ -535,7 +544,7 @@ mod tests {
         )
         .unwrap();
 
-        let palace_id = derive_palace_id_for(tmp.path());
+        let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
         save_catchup_state(
             &palace_id,
             &CatchupState {

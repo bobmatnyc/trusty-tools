@@ -360,6 +360,121 @@ pub enum AuditError {
         source: std::io::Error,
     },
 
+    /// A registration spec is not a target this client will register.
+    ///
+    /// Why: #5822. `taudit add` writes the spec into a file the sweep later
+    /// reads, and a repository identity becomes a path under the working
+    /// directory, so the same containment argument as
+    /// [`AuditError::InvalidRepoName`] applies — `crate::registry` reuses
+    /// `crate::clone`'s charset check rather than deciding a second one.
+    /// What: quotes the rejected input and names the shape that was expected.
+    /// Test: `crate::registry::registry_tests::a_spec_that_is_neither_shape_is_refused`.
+    #[error("{spec} is not a target this client will register — {expected}")]
+    InvalidTarget {
+        /// What was asked for, verbatim.
+        spec: String,
+        /// The shape that was expected, e.g. `"expected owner/name"`.
+        expected: &'static str,
+    },
+
+    /// A board was registered and the engagement config carries no credential
+    /// for its provider.
+    ///
+    /// Why: registration VALIDATES before it persists (#5822), and a validation
+    /// that cannot even be attempted must say what to go and set — the
+    /// recipient is not the author of this config. Refusing here also keeps the
+    /// registry honest: nothing is persisted that was never checked.
+    /// What: names the provider and the exact config field.
+    /// Test: `crate::registry::registry_tests::a_board_without_a_credential_names_the_config_field`.
+    #[error(
+        "no {provider} credential in the engagement config, so {key} cannot be checked; \
+         set `{field}` in the engagement config and add it again — nothing was registered"
+    )]
+    BoardCredentialMissing {
+        /// `"jira"` or `"linear"`.
+        provider: &'static str,
+        /// The board that could not be checked.
+        key: String,
+        /// The config field to set, e.g. `"boards.jira"`.
+        field: &'static str,
+    },
+
+    /// A repository was registered and the recipient's `gh` credential cannot
+    /// read it.
+    ///
+    /// Why: #5822's whole point — a target that cannot be reached is rejected at
+    /// registration, not discovered an hour into a sweep. The `gh` failure is
+    /// kept structured for the same reason [`AuditError::Discovery`] keeps it:
+    /// "gh is not installed" and "you cannot see that repository" call for
+    /// different actions.
+    /// What: names the repository; the reason is `gh`'s own.
+    /// Test: `crate::validate::validate_tests::a_gh_that_cannot_answer_refuses_the_repository`.
+    #[error("cannot read {name_with_owner} with your GitHub credential: {source}")]
+    RepoUnreachable {
+        /// The repository that was refused.
+        name_with_owner: String,
+        /// The underlying `gh` failure, verbatim. Boxed for the same
+        /// `clippy::result_large_err` reason as [`AuditError::Install`].
+        #[source]
+        source: Box<trusty_common::gh::GhError>,
+    },
+
+    /// A board was registered and the configured credential cannot read it.
+    ///
+    /// Why: the board half of [`AuditError::RepoUnreachable`] (#5822).
+    /// What: names the provider and the board. `reason` is built from the HTTP
+    /// status and, for a GraphQL refusal, the provider's own message — never
+    /// from the request, so the credential cannot reach this string. That is
+    /// asserted directly rather than argued.
+    /// Test: `crate::validate::validate_tests::a_provider_message_is_scrubbed_of_the_credential`.
+    #[error("cannot read {provider} {key} with the configured credential: {reason}")]
+    BoardUnreachable {
+        /// `"jira"` or `"linear"`.
+        provider: &'static str,
+        /// The board that was refused.
+        key: String,
+        /// Why, in one line. Never carries a credential.
+        reason: String,
+    },
+
+    /// The target registry carries fewer entries than it declares.
+    ///
+    /// The registry's half of [`AuditError::TruncatedSelection`], for the same
+    /// reason and detected the same way — see `crate::registry` (#5822).
+    #[error(
+        "{path} declares {declared} targets but carries {found} — it was written partially. \
+         Register them again; nothing was changed"
+    )]
+    TruncatedRegistry {
+        /// The registry file.
+        path: PathBuf,
+        /// The `count` the file declared.
+        declared: usize,
+        /// How many `[[targets]]` entries it actually holds.
+        found: usize,
+    },
+
+    /// The registry's read-modify-write could not be serialised.
+    ///
+    /// Why: #5822 — registering and removing a target both load
+    /// `state/audit-targets.toml`, mutate it and save it back. Two of those
+    /// running at once against one working directory each load the same
+    /// snapshot, and the later save discards the earlier one's target while both
+    /// report success. `trusty_common::file_lock::with_exclusive_lock` closes
+    /// that, and it never fails open — so a lock that cannot be taken has to be
+    /// a refusal here rather than an unserialised write.
+    /// What: names the registry the lock guards. `source` is the lock failure,
+    /// or the panic that escaped the critical section.
+    /// Test: `crate::registry::registry_tests::concurrent_registrations_keep_every_target`.
+    #[error("could not update {path} under its lock: {source}. Nothing was changed")]
+    RegistryLock {
+        /// The registry file whose lock could not be held.
+        path: PathBuf,
+        /// Why the critical section could not be entered or completed.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// A capability this scaffold declares but does not yet implement.
     ///
     /// Why: a half-built capability must fail closed rather than silently

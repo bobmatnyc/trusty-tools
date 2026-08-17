@@ -10297,6 +10297,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-test",
  "trusty-common",
+ "trusty-progress",
  "uuid",
  "wiremock",
 ]
@@ -11299,6 +11300,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -11308,6 +11310,7 @@ dependencies = [
  "toml 0.8.23",
  "trusty-common",
  "trusty-installer",
+ "trusty-progress",
  "walkdir",
  "zip 2.4.2",
 ]
@@ -11620,7 +11623,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11735,7 +11738,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-progress"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "indicatif 0.17.11",
  "thiserror 1.0.69",

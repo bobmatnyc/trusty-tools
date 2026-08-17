@@ -127,8 +127,8 @@ gate their expensive steps inside the job body on a `docs_only` boolean
 pending forever, which is why none of them has one. On a code PR the six settle
 in about 4 minutes; on a docs-only PR, in under one.
 
-🔴 **`Rust tests (pre-publish gate)` — the four shards — does not run on pull
-requests.** It runs 11-13.5 minutes per shard, roughly 3x the entire required set,
+🔴 **`Rust tests (pre-publish gate)` — the eight shards — does not run on pull
+requests.** It runs ~9.6 minutes per shard, roughly 3x the entire required set,
 and it is not a required context, so on a PR it is skipped outright rather than
 run-and-ignored. It runs on every push to `main` and on `workflow_dispatch`. Do
 not wait for it on a PR — there is nothing to wait for.
