@@ -12,11 +12,27 @@
 	 *
 	 * Sourcing: verbs and flags from `src/cli.rs`; the pinned four-tool set from
 	 * `src/tools.rs` (`RequiredTool::ALL`) and `src/config.rs` (`ToolPins`); the
-	 * credential precedence and prompt from `src/cli/credential.rs` (#5872); the
-	 * working-directory layout and defaults from `src/workdir.rs`; the return
-	 * package from `src/package.rs`; the refusals below from `install.sh`
-	 * (#5873). The crate README is a draft here, not a source — it still names
-	 * three pinned tools where the code pins four.
+	 * credential precedence and prompt from `src/cli/credential.rs` (#5872);
+	 * which commands actually need that credential from `src/session.rs`
+	 * (`Command::credential_need` — only `run` and `audit` are `Required`; a
+	 * bare/`guided` invocation is `None`, so the first-run status card never
+	 * prompts); the working-directory layout and defaults from `src/workdir.rs`;
+	 * the return package from `src/package.rs`; the refusals below from
+	 * `install.sh` (#5873). The crate README is a draft here, not a source — it
+	 * still names three pinned tools where the code pins four, and its "bare
+	 * invocation … does not launch an unattended sweep" line is what the shipped
+	 * v0.1.0 binary does; PR #5896 (open, unmerged as of this writing) changes
+	 * that to a one-step guided registration-then-launch flow — do not document
+	 * it until it ships.
+	 *
+	 * Verified directly against the built v0.1.0 binary in a scratch directory:
+	 * `trusty-audit --help`; a bare invocation with no `engagement.toml`, which
+	 * prints the status card below and exits 0; `install`/`audit` with no
+	 * `engagement.toml`, which both refuse; `add repo`, `targets`, `remove`,
+	 * `discover` against a live `gh` credential; and the real
+	 * `curl -fsSL … install.sh | sh` command with `TRUSTY_AUDIT_INSTALL_DIR` and
+	 * `TRUSTY_AUDIT_NO_LAUNCH=1`, which resolved latest as 0.1.0, verified its
+	 * sha256, and installed both `trusty-audit` and `taudit`.
 	 */
 	import ToolPage from '$lib/components/ToolPage.svelte';
 	import { installCommand, TOOLS } from '$lib/tools';
@@ -138,21 +154,17 @@
 	<div>
 		<h2 class="font-display text-2xl font-bold sm:text-3xl">2 · First run</h2>
 		<p class="mt-4 max-w-3xl text-foundry-secondary">
-			The audit renders its report through a language model, so it needs an OpenRouter key. Your
-			auditor conveys theirs out of band — it is not in anything you downloaded — or you supply your
-			own OpenRouter account. On the first run that needs it, trusty-audit asks at the terminal,
-			with the typing hidden, and asks twice so a mistyped key is caught immediately.
+			Whether the installer launched it for you or you type <code class="text-sm">trusty-audit</code
+			> by itself, a bare invocation is a status check, not a sweep. It reports the working
+			directory it will use, that no audit has run there yet, that none of the four pinned tools are
+			installed, and reminds you to register what to audit. It asks for nothing and downloads
+			nothing yet — that starts with the next two steps.
 		</p>
 		<p class="mt-4 max-w-3xl text-foundry-secondary">
-			What you type is written into <code class="text-sm">engagement.toml</code>, readable only by
-			your account, and it is not asked for again. An
-			<code class="text-sm">OPENROUTER_API_KEY</code> already exported in your shell wins over the file,
-			and the run prints which of the two it used. The key never reaches a log line, an error message,
-			or the package you send back.
-		</p>
-		<p class="mt-4 max-w-3xl text-foundry-secondary">
-			If there is no terminal to ask on — a script, a CI job — it refuses and names both ways to
-			supply a key, rather than hanging or reading whatever happened to be on standard input.
+			It does not need <code class="text-sm">engagement.toml</code> to show you this — only installing
+			tools and running the audit do. Its reminder to register targets does not go away once you have
+			registered some; check <code class="text-sm">trusty-audit targets</code> for the registry itself,
+			not this status line.
 		</p>
 	</div>
 
@@ -189,6 +201,22 @@ trusty-audit targets</pre>
 			<pre
 				class="overflow-x-auto rounded-sm border border-foundry-border bg-foundry-card p-4 text-xs leading-relaxed text-foundry-text">trusty-audit audit</pre>
 		</div>
+		<p class="mt-4 max-w-3xl text-foundry-secondary">
+			This is the first command that needs your OpenRouter key — installing tools and registering
+			targets never touch it. The audit renders its report through a language model, so before the
+			sweep can start it resolves a key: an <code class="text-sm">OPENROUTER_API_KEY</code> already
+			exported in your shell wins; otherwise a key already in
+			<code class="text-sm">engagement.toml</code> — your auditor may have put theirs there — is used;
+			otherwise trusty-audit asks at the terminal, with the typing hidden, and asks twice so a mistyped
+			key is caught immediately. Either way the run prints which of the three it used. What you type at
+			the prompt is written back into <code class="text-sm">engagement.toml</code>, readable only by
+			your account, and is not asked for again. The key never reaches a log line, an error message, or
+			the package you send back.
+		</p>
+		<p class="mt-4 max-w-3xl text-foundry-secondary">
+			If there is no terminal to ask on — a script, a CI job — it refuses and names both ways to
+			supply a key, rather than hanging or reading whatever happened to be on standard input.
+		</p>
 		<p class="mt-4 max-w-3xl text-foundry-secondary">
 			One command chains four phases. It downloads and version-checks the four tools the engagement
 			pins — tga, trusty-search, trusty-analyze and trusty-review — clones the repositories you
