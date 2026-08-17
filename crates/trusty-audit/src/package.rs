@@ -194,6 +194,55 @@ struct PackagedRepo {
 /// `extract/`,
 /// [`AuditError::CredentialInPackage`] when a member carries the engagement key,
 /// and [`AuditError::Package`] for any read, write, or rename failure.
+/// Assemble from the sweep's own record, refusing one that did not finish.
+///
+/// Why: #5824 gave packaging a second caller. The completion check used to live
+/// in `Session::package`, so the chain would either have had to duplicate it or
+/// to skip it by passing the report it already held in memory — and skipping it
+/// is how a sweep that died three repositories into six gets sent as a whole
+/// engagement. One function, both callers, one precondition.
+///
+/// The completion signal is [`crate::run::RunProgress::complete`], not the
+/// record's mere presence: since #5494 the record is written after every
+/// repository, so an unfinished sweep leaves one behind.
+/// What: reads `state/run-progress.toml`, requires it to be complete, and hands
+/// its report to [`assemble`].
+/// Test: `crate::session::session_tests::packaging_before_any_sweep_is_refused`,
+/// `crate::session::session_tests::packaging_an_unfinished_sweep_is_refused`,
+/// `crate::chain::chain_tests::the_chain_installs_collects_and_packages`.
+///
+/// # Errors
+///
+/// [`AuditError::NothingToPackage`] when no sweep has finished here, and
+/// whatever [`assemble`] fails with.
+pub fn from_checkpoint(
+    work: &WorkDir,
+    config: &EngagementConfig,
+    destination: &Path,
+) -> Result<ReturnPackage, AuditError> {
+    let progress =
+        crate::run::read_progress(work)?.ok_or_else(|| AuditError::NothingToPackage {
+            reason: format!(
+                "no sweep has finished in {} — run `trusty-audit run` first",
+                work.root().display()
+            ),
+        })?;
+    if !progress.complete {
+        return Err(AuditError::NothingToPackage {
+            reason: format!(
+                "the last sweep in {} did not finish — {} recorded so far; \
+                 run `trusty-audit run` to resume it",
+                work.root().display(),
+                match progress.repos.len() {
+                    1 => "1 repository".to_owned(),
+                    n => format!("{n} repositories"),
+                }
+            ),
+        });
+    }
+    assemble(work, config, &progress.report(), destination)
+}
+
 pub fn assemble(
     work: &WorkDir,
     config: &EngagementConfig,

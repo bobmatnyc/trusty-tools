@@ -47,6 +47,12 @@ pub enum Operation {
     CloneRepos,
     /// Running `tga audit` over the selected repositories (#5555).
     Sweep,
+    /// Assembling the deliverable to send back (#5499).
+    ///
+    /// One unit — the archive. It earns an operation anyway because #5824's
+    /// chain would otherwise fall silent for its last phase, and a display that
+    /// stops before the run does reads as a hang.
+    Package,
 }
 
 impl Operation {
@@ -56,6 +62,7 @@ impl Operation {
             Self::InstallTools => "installing pinned tools",
             Self::CloneRepos => "cloning repositories",
             Self::Sweep => "auditing repositories",
+            Self::Package => "assembling the return package",
         }
     }
 
@@ -64,6 +71,7 @@ impl Operation {
         match self {
             Self::InstallTools => "tool",
             Self::CloneRepos | Self::Sweep => "repository",
+            Self::Package => "archive",
         }
     }
 
@@ -75,6 +83,7 @@ impl Operation {
         match self {
             Self::InstallTools => "tools",
             Self::CloneRepos | Self::Sweep => "repositories",
+            Self::Package => "archives",
         }
     }
 }
