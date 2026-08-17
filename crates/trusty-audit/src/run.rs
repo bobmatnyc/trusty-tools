@@ -528,15 +528,22 @@ where
 /// What: the registry-wide resolved set from
 /// [`trusty_common::credentials::resolved_secret_values`] — the shared entry
 /// point, so a credential added there is scrubbed without this changing — plus
-/// the engagement key, which comes from the config file rather than the
-/// environment and so is not in that set.
+/// [`EngagementConfig::configured_secrets`], which is every credential this
+/// engagement's TOML carries and so reaches none of that registry.
+///
+/// #5857: the board credentials are in that second half for the same reason the
+/// OpenRouter key always was. `resolved_secret_values` walks
+/// `registered_providers`, and no provider there is a board, so a child that
+/// quotes a JIRA token in an auth error would otherwise write it to the log
+/// verbatim. [`crate::package::secret_needles`] draws from the same list.
 ///
 /// This removes only values this process already holds; see [`crate::relay`]
 /// for what that leaves behind.
-/// Test: `super::run_tests::a_child_that_echoes_the_key_does_not_leave_it_in_the_log`.
+/// Test: `super::run_tests::a_child_that_echoes_the_key_does_not_leave_it_in_the_log`,
+/// `super::run_tests::a_child_that_echoes_a_board_credential_does_not_leave_it_in_the_log`.
 fn child_output_scrubber(config: &EngagementConfig) -> Scrubber {
     let mut secrets = trusty_common::credentials::resolved_secret_values();
-    secrets.push(config.openrouter_key.expose().to_owned());
+    secrets.extend(config.configured_secrets().into_iter().map(str::to_owned));
     Scrubber::over(secrets)
 }
 
@@ -1675,6 +1682,73 @@ trusty-review = "0.15.1"
             .expect("the stub recorded its environment");
         assert!(seen.contains("jira=\n"), "{seen}");
         assert!(seen.contains("linear=\n"), "{seen}");
+    }
+
+    /// Why: #5869's filter is the OpenRouter test above, one credential over.
+    /// [`child_output_scrubber`] builds its needles from
+    /// `resolved_secret_values`, which enumerates the registered providers —
+    /// openrouter, anthropic, github, slack, and no board. A board credential
+    /// arrives from the engagement TOML rather than the environment, so before
+    /// #5857 appended it nothing put it in the needle set and a child that
+    /// quoted it wrote it to `work/logs/<repo>.log` in the clear.
+    /// What: a child that echoes both board credentials back, on both streams,
+    /// in the shapes a real one would — a provider rejection body quoting the
+    /// token, and an auth failure quoting the key — leaves neither in the log
+    /// nor in any other file the run wrote.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_echoes_a_board_credential_does_not_leave_it_in_the_log() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let mut script = String::from(
+            "#!/bin/sh\n\
+             echo \"jira 401: {\\\"message\\\":\\\"token \
+             $TRUSTY_AUDIT_JIRA_TOKEN is not valid\\\"}\"\n\
+             echo \"linear auth failed: key $TRUSTY_AUDIT_LINEAR_API_KEY rejected\" >&2\n",
+        );
+        script.push_str(writes_a_manifest(None).trim_start_matches("#!/bin/sh\n"));
+        install_stubs(&work, &script);
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        register_boards(&work, &["jira:ACME", "linear:ENG"]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let log = std::fs::read_to_string(&report.repos[0].log).expect("read the child log");
+        assert!(
+            !log.contains(JIRA_TOKEN),
+            "the log carries the token:\n{log}"
+        );
+        assert!(!log.contains(LINEAR_KEY), "the log carries the key:\n{log}");
+        // The child really did echo both — otherwise the assertions above prove
+        // nothing about the filter.
+        assert_eq!(
+            log.matches("[REDACTED]").count(),
+            2,
+            "both echoes must be masked, one per stream:\n{log}"
+        );
+        // The log is still a log: masking replaced the credentials, not the
+        // diagnosis.
+        assert!(log.contains("jira 401"), "{log}");
+        assert!(log.contains("linear auth failed"), "{log}");
+
+        for path in files_under(work.root()) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains(JIRA_TOKEN) && !text.contains(LINEAR_KEY),
+                "{} carries a board credential",
+                path.display()
+            );
+        }
     }
 
     /// The CRITICAL arm: `tga audit` exits 0 whenever the sweep COMPLETED,

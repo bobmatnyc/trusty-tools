@@ -687,20 +687,19 @@ fn start(zip: &mut Archive, entry: &str, bytes: u64, temporary: &Path) -> Result
 /// child writes are exactly the files this function's caller packages and sends
 /// off the recipient's network. One list, so a credential added to
 /// [`EngagementConfig`] is refused here the moment it is configured.
-/// What: the OpenRouter key, then whichever board credentials the config names.
-/// A provider with no entry contributes no needle.
+/// What: [`EngagementConfig::configured_secrets`] as byte slices — the same
+/// list [`crate::run`]'s child-log scrubber uses as its needles, so the two
+/// guards cannot come to disagree about what a secret is. A provider with no
+/// entry contributes no needle.
 /// Test: `super::package_tests::a_member_carrying_the_jira_token_is_refused_and_leaves_no_zip`,
 /// `super::package_tests::a_member_carrying_the_linear_api_key_is_refused_and_leaves_no_zip`,
 /// `super::package_tests::a_member_carrying_several_secrets_is_refused_on_the_first_pass`.
 fn secret_needles(config: &EngagementConfig) -> Vec<&[u8]> {
-    let mut needles = vec![config.openrouter_key.expose().as_bytes()];
-    if let Some(jira) = config.boards.jira.as_ref() {
-        needles.push(jira.token.expose().as_bytes());
-    }
-    if let Some(linear) = config.boards.linear.as_ref() {
-        needles.push(linear.api_key.expose().as_bytes());
-    }
-    needles
+    config
+        .configured_secrets()
+        .into_iter()
+        .map(str::as_bytes)
+        .collect()
 }
 
 /// Copy one file into the archive, refusing it if it carries any credential.
