@@ -34,8 +34,29 @@
 //! A child's output is not guaranteed to be UTF-8 — one `git` message in an
 //! unexpected encoding is enough. Reading `String` lines would end the pump at
 //! the first such byte and truncate the log from there, turning a cosmetic
-//! feature into evidence loss. So the pump is byte-oriented throughout, and a
-//! segment that is not valid UTF-8 is scrubbed run-by-run rather than lost.
+//! feature into evidence loss. So the pump is byte-oriented throughout.
+//!
+//! ## One search space, no invented boundaries
+//!
+//! A needle is removed only if the scrubber sees it whole, so every boundary
+//! this module invents is somewhere a credential can hide in two halves. Two
+//! such boundaries existed and both leaked (#5869 review round):
+//!
+//! - The pump used to scrub only the part of its buffer it was about to write,
+//!   so a needle straddling that cut was split, matched neither half, and both
+//!   halves reached the log verbatim. The pump now scrubs the WHOLE buffer and
+//!   cuts the result.
+//! - The mixed-encoding path used to scrub each valid-UTF-8 run separately, so
+//!   one invalid byte injected between a credential's characters split it the
+//!   same way. A needle cannot CONTAIN an invalid byte, but nothing stops one
+//!   being injected INTO it. [`Scrubber::scrub`] now searches the runs
+//!   concatenated — invalid bytes elided — and maps each match back to the
+//!   segment's own byte offsets.
+//!
+//! What survives is a hold-back: bytes at the tail of the buffer that the pump
+//! keeps rather than writes, because a needle that has only PARTLY ARRIVED
+//! cannot be matched yet. That is a bound on the stream, not a boundary in the
+//! search space.
 //!
 //! Test: `super::relay_tests`.
 
@@ -62,12 +83,30 @@ const SEGMENT_LIMIT: usize = 256 * 1024;
 
 /// Most bytes held back across a mid-line flush, whatever the needles say.
 ///
-/// Why: the hold-back exists so a credential straddling a flush is still
-/// matched next round, so it wants to be the longest needle. It must also stay
-/// far below [`SEGMENT_LIMIT`] or the pump stops making progress — it would
-/// re-hold everything it just read. A pathological "secret" longer than this is
-/// bounded here and loses only the straddling case, never the ordinary one.
+/// Why: the hold-back exists so a credential that has only PARTLY ARRIVED is
+/// still matched next round, so it wants to be as long as the longest needle.
+/// It must also stay far below [`SEGMENT_LIMIT`] or the pump stops making
+/// progress — it would re-hold everything it just read. A pathological "secret"
+/// longer than this is bounded here and loses only the partly-arrived case,
+/// never the ordinary one.
+///
+/// It caps the hold-back twice, because the hold-back is counted in two units.
+/// [`Scrubber::held_back`] is a count of TEXT bytes, so that invalid bytes
+/// injected between a needle's characters are retained along with them; this
+/// same value then caps the RAW byte count the tail may reach, so a segment
+/// padded with injected garbage cannot make the pump hold its whole buffer.
+/// Test: `super::relay_tests::an_absurd_needle_cannot_stall_the_pump`.
 const MAX_HELD_BACK: usize = 4096;
+
+/// The token [`scrub_secrets`] leaves in a needle's place.
+///
+/// Why: [`Scrubber::redact_spans`] splices the replacement into a byte buffer
+/// rather than a `str`, which is a thing `scrub_secrets` — `&str` in, `String`
+/// out — cannot express, so this module writes the token itself.
+/// `trusty_common` does not export it, so this restates it.
+/// Test: `super::relay_tests::the_replacement_token_matches_the_redactor`,
+/// which fails the moment the two drift.
+const REDACTED: &[u8] = b"[REDACTED]";
 
 /// The credential values to strip from a child's output.
 ///
@@ -80,7 +119,8 @@ const MAX_HELD_BACK: usize = 4096;
 /// `Arc` bump. An empty set makes [`Scrubber::scrub`] a borrow and the pump's
 /// hold-back zero, so a build with no resolvable credential pays nothing.
 /// Test: `super::relay_tests::a_credential_never_reaches_the_log`,
-/// `super::relay_tests::a_credential_split_across_a_flush_is_still_caught`.
+/// `super::relay_tests::a_credential_straddling_the_flush_cut_is_still_caught`,
+/// `super::relay_tests::a_credential_interrupted_by_an_invalid_byte_is_removed`.
 #[derive(Clone, Debug)]
 pub(crate) struct Scrubber {
     secrets: Arc<[String]>,
@@ -90,10 +130,14 @@ pub(crate) struct Scrubber {
 impl Scrubber {
     /// Build a scrubber over `secrets`, deriving the hold-back from them.
     ///
-    /// What: the hold-back is one byte short of the longest needle — enough
-    /// that any needle straddling a mid-line flush still lies whole inside the
-    /// next segment — capped at [`MAX_HELD_BACK`].
+    /// What: drops the values [`scrub_secrets`] would decline (it applies a
+    /// minimum length, which it does not export — [`Self::qualifies`] asks it
+    /// rather than restating the rule), then takes the hold-back one byte short
+    /// of the longest survivor, capped at [`MAX_HELD_BACK`]. Filtering here is
+    /// what keeps [`Self::redact_spans`], which locates needles itself, from
+    /// removing a value the redactor would have left alone.
     pub(crate) fn over(secrets: Vec<String>) -> Self {
+        let secrets: Vec<String> = secrets.into_iter().filter(|s| Self::qualifies(s)).collect();
         let held_back = secrets
             .iter()
             .map(String::len)
@@ -107,6 +151,18 @@ impl Scrubber {
         }
     }
 
+    /// Whether [`scrub_secrets`] would actually remove `needle`.
+    ///
+    /// Why: `trusty_common` owns the rule for which values are worth redacting
+    /// — too short a needle turns prose into `[REDACTED]` confetti — and keeps
+    /// the threshold private. Asking the redactor what it does to a needle in
+    /// isolation reads the rule without copying it: a value it declines comes
+    /// back unchanged.
+    /// Test: `super::relay_tests::a_needle_the_redactor_declines_is_dropped`.
+    fn qualifies(needle: &str) -> bool {
+        scrub_secrets(needle, std::slice::from_ref(&needle)) != needle
+    }
+
     /// A scrubber that removes nothing, for a caller with no credential to hide.
     #[cfg(test)]
     pub(crate) fn none() -> Self {
@@ -115,28 +171,43 @@ impl Scrubber {
 
     /// `bytes` with every known credential replaced by `[REDACTED]`.
     ///
+    /// # Postconditions
+    /// On return, no needle of `self` occurs in the result — neither
+    /// contiguously nor with invalid bytes injected between its characters.
+    /// Every byte of `bytes` that no needle covers is present unchanged and in
+    /// order; a needle's own bytes, and any invalid bytes injected among them,
+    /// are gone. This holds for the WHOLE of `bytes`: the caller owes it a
+    /// contiguous buffer, because a needle split across two calls is a needle
+    /// neither call can see.
+    ///
     /// Why: the hot path is a log line with no credential in it, run once per
-    /// line for hours. It must not allocate, so a segment that is whole UTF-8
-    /// and matches nothing is returned borrowed.
-    /// What: validates once, then asks each needle whether it occurs; only a hit
-    /// reaches [`scrub_secrets`], the workspace's one redactor. A segment that
-    /// is not valid UTF-8 falls to [`Self::scrub_mixed`] rather than being
-    /// lossily converted, because the log is a verbatim record.
+    /// line for hours. It must not allocate, so a segment that matches nothing
+    /// is returned borrowed — including one holding invalid bytes, which the
+    /// pre-review code always copied.
+    /// What: whole-UTF-8 segments — nearly all of them — take one validation,
+    /// one search, and [`scrub_secrets`], the workspace's one redactor. A
+    /// segment carrying invalid bytes is searched over its valid runs
+    /// CONCATENATED, so a needle those bytes interrupt is still found, and a
+    /// match is spliced back by byte offset rather than lossily converted,
+    /// because the log is a verbatim record where nothing was removed.
     /// Test: `super::relay_tests::a_credential_never_reaches_the_log`,
-    /// `super::relay_tests::a_credential_beside_non_utf8_bytes_is_still_removed`.
+    /// `super::relay_tests::a_credential_beside_non_utf8_bytes_is_still_removed`,
+    /// `super::relay_tests::a_credential_interrupted_by_an_invalid_byte_is_removed`.
     fn scrub<'a>(&self, bytes: &'a [u8]) -> Cow<'a, [u8]> {
         if self.secrets.is_empty() {
             return Cow::Borrowed(bytes);
         }
-        match std::str::from_utf8(bytes) {
-            Ok(text) => {
-                if !self.occurs_in(text) {
-                    return Cow::Borrowed(bytes);
-                }
-                Cow::Owned(scrub_secrets(text, &self.secrets).into_bytes())
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            if !self.occurs_in(text) {
+                return Cow::Borrowed(bytes);
             }
-            Err(_) => Cow::Owned(self.scrub_mixed(bytes)),
+            return Cow::Owned(scrub_secrets(text, &self.secrets).into_bytes());
         }
+        let (text, runs) = utf8_runs(bytes);
+        if !self.occurs_in(&text) {
+            return Cow::Borrowed(bytes);
+        }
+        Cow::Owned(self.redact_spans(bytes, &text, &runs))
     }
 
     /// Whether any needle occurs in `text`.
@@ -148,45 +219,158 @@ impl Scrubber {
         self.secrets.iter().any(|s| text.contains(s.as_str()))
     }
 
-    /// Scrub the valid-UTF-8 runs of `bytes`, passing the invalid bytes through.
+    /// `bytes` with every needle found in `text` cut out by byte offset.
     ///
-    /// Why: a credential is by construction valid UTF-8, so it can never span an
-    /// invalid byte — scrubbing each valid run and copying the invalid bytes
-    /// verbatim removes exactly as much as scrubbing the whole would, while
-    /// keeping the log byte-faithful where the child was not text. Converting
-    /// lossily instead would substitute replacement characters into the one
-    /// artifact a failure is diagnosed from.
-    /// What: walks the segment, splitting at each [`std::str::Utf8Error`], and
-    /// scrubs only the runs on the valid side of the split. An `error_len` of
-    /// `None` is an incomplete trailing sequence, which is copied whole.
-    /// Test: `super::relay_tests::a_credential_beside_non_utf8_bytes_is_still_removed`.
-    fn scrub_mixed(&self, bytes: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(bytes.len());
-        let mut rest = bytes;
-        loop {
-            let (valid, tail, skip) = match std::str::from_utf8(rest) {
-                Ok(_) => (rest, &[][..], 0),
-                Err(e) => {
-                    let (valid, tail) = rest.split_at(e.valid_up_to());
-                    (valid, tail, e.error_len().unwrap_or(tail.len()).max(1))
+    /// Why: `text` is the segment's valid-UTF-8 runs concatenated, so a match in
+    /// it can span a gap of invalid bytes — the case that reached the log in the
+    /// clear before the #5869 review. Splicing by offset is what keeps the
+    /// invalid bytes OUTSIDE a match, which are ordinary evidence, while
+    /// dropping the ones INSIDE one, which are part of the credential's span.
+    /// What: matches longest needle first and drops any overlap, mirroring
+    /// [`scrub_secrets`]' own longest-first ordering so a secret that is a
+    /// prefix of another cannot leave the longer one's tail behind. Each match
+    /// is mapped from `text` offsets back to `bytes` offsets through `runs`, and
+    /// the surviving stretches are copied unchanged.
+    /// Test: `super::relay_tests::a_credential_interrupted_by_an_invalid_byte_is_removed`,
+    /// `super::relay_tests::a_credential_beside_non_utf8_bytes_is_still_removed`.
+    fn redact_spans(&self, bytes: &[u8], text: &str, runs: &[Run]) -> Vec<u8> {
+        let mut needles: Vec<&str> = self.secrets.iter().map(String::as_str).collect();
+        needles.sort_unstable_by_key(|s| std::cmp::Reverse(s.len()));
+
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for needle in needles {
+            for (at, _) in text.match_indices(needle) {
+                let (start, end) = (at, at + needle.len());
+                if !spans.iter().any(|&(a, b)| a < end && start < b) {
+                    spans.push((start, end));
                 }
-            };
-            // `valid` is UTF-8 by `valid_up_to`, so this conversion never
-            // substitutes anything; it is the no-unwrap spelling of the cast.
-            let text = String::from_utf8_lossy(valid);
-            if self.occurs_in(&text) {
-                out.extend_from_slice(scrub_secrets(&text, &self.secrets).as_bytes());
-            } else {
-                out.extend_from_slice(valid);
-            }
-            let skip = skip.min(tail.len());
-            out.extend_from_slice(&tail[..skip]);
-            rest = &tail[skip..];
-            if rest.is_empty() {
-                return out;
             }
         }
+        spans.sort_unstable();
+
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut cursor = 0usize;
+        for (start, end) in spans {
+            let from = Run::origin_at(runs, start);
+            let to = Run::origin_after(runs, end);
+            out.extend_from_slice(&bytes[cursor..from]);
+            out.extend_from_slice(REDACTED);
+            cursor = to;
+        }
+        out.extend_from_slice(&bytes[cursor..]);
+        out
     }
+
+    /// Where to cut `bytes` so the tail keeps every byte of a needle that has
+    /// only partly arrived.
+    ///
+    /// Why: the pump writes what it cuts off, so anything it cuts through is
+    /// written in the clear. A partly-arrived needle occupies at most
+    /// [`Self::held_back`] bytes of TEXT at the very end of the buffer — but
+    /// invalid bytes injected between its characters make its RAW length longer
+    /// than that, and a raw-byte hold-back would slice its head off. So the walk
+    /// counts text bytes and lets the invalid bytes among them ride along.
+    /// What: walks the valid-UTF-8 runs backwards until the tail holds
+    /// [`Self::held_back`] bytes of text, then clamps the tail to
+    /// [`MAX_HELD_BACK`] raw bytes and to half the buffer, so garbage padding
+    /// can neither unbound the buffer nor stall the pump.
+    /// Test: `super::relay_tests::a_credential_straddling_the_flush_cut_is_still_caught`,
+    /// `super::relay_tests::an_interrupted_credential_straddling_a_cut_is_removed`,
+    /// `super::relay_tests::a_line_that_never_ends_does_not_grow_without_bound`.
+    fn cut_for(&self, bytes: &[u8]) -> usize {
+        if self.held_back == 0 {
+            return bytes.len();
+        }
+        let (_, runs) = utf8_runs(bytes);
+        let mut want = self.held_back;
+        let mut cut = 0usize;
+        for run in runs.iter().rev() {
+            if run.len >= want {
+                cut = run.orig + run.len - want;
+                want = 0;
+                break;
+            }
+            want -= run.len;
+            cut = run.orig;
+        }
+        if want > 0 {
+            // Fewer text bytes in the whole buffer than the hold-back wants.
+            cut = 0;
+        }
+        let hold = (bytes.len() - cut).min(MAX_HELD_BACK).min(bytes.len() / 2);
+        bytes.len() - hold
+    }
+}
+
+/// One maximal run of valid UTF-8 inside a segment.
+///
+/// `text` is the run's offset in the segment's runs CONCATENATED — the space a
+/// needle is searched in; `orig` is its offset in the segment itself.
+#[derive(Clone, Copy, Debug)]
+struct Run {
+    text: usize,
+    orig: usize,
+    len: usize,
+}
+
+impl Run {
+    /// The segment offset of the text byte at `text` offset `at`.
+    fn origin_at(runs: &[Run], at: usize) -> usize {
+        let i = runs.partition_point(|r| r.text <= at).saturating_sub(1);
+        runs[i].orig + (at - runs[i].text)
+    }
+
+    /// The segment offset one past the text byte ending at `text` offset `end`.
+    ///
+    /// Distinct from [`Run::origin_at`] because a match ending exactly at a
+    /// run's end must resolve to that run, not to the next one across the gap —
+    /// resolving forwards would swallow invalid bytes that are not part of it.
+    fn origin_after(runs: &[Run], end: usize) -> usize {
+        let i = runs.partition_point(|r| r.text + r.len < end);
+        runs[i].orig + (end - runs[i].text)
+    }
+}
+
+/// Split `bytes` into its valid-UTF-8 runs, and those runs concatenated.
+///
+/// Why: a needle is valid UTF-8, so it can never CONTAIN an invalid byte — but
+/// nothing stops one being INJECTED INTO it, and the pre-review code split at
+/// every such byte and searched each side alone. The concatenation is the one
+/// contiguous search space a needle is guaranteed to lie inside; the runs are
+/// how a match in it maps back to the segment's own offsets.
+/// What: walks the segment, splitting at each [`std::str::Utf8Error`]. An
+/// `error_len` of `None` is an incomplete trailing sequence, skipped whole.
+/// Runs are non-empty and in stream order, so their `text` offsets increase.
+/// Test: `super::relay_tests::a_credential_interrupted_by_an_invalid_byte_is_removed`.
+fn utf8_runs(bytes: &[u8]) -> (String, Vec<Run>) {
+    let mut text = String::with_capacity(bytes.len());
+    let mut runs: Vec<Run> = Vec::new();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let rest = &bytes[at..];
+        let (valid_len, skip) = match std::str::from_utf8(rest) {
+            Ok(_) => (rest.len(), 0),
+            Err(e) => (
+                e.valid_up_to(),
+                e.error_len().unwrap_or(rest.len() - e.valid_up_to()).max(1),
+            ),
+        };
+        if valid_len > 0 {
+            runs.push(Run {
+                text: text.len(),
+                orig: at,
+                len: valid_len,
+            });
+            // `valid_up_to` guarantees this borrows rather than substituting;
+            // it is the no-unwrap spelling of the cast.
+            text.push_str(&String::from_utf8_lossy(&rest[..valid_len]));
+        }
+        at += valid_len + skip;
+        if skip == 0 {
+            break;
+        }
+    }
+    (text, runs)
 }
 
 /// Copy `reader` into `log` with credentials removed, forwarding progress lines.
@@ -207,11 +391,18 @@ impl Scrubber {
 /// `[REDACTED]` carries no tab, so the wire format's field count survives.
 ///
 /// A segment that reaches [`SEGMENT_LIMIT`] with no newline is written out
-/// early, minus a hold-back tail long enough that a credential straddling the
-/// cut is matched on the next segment instead. That is what keeps a child
-/// printing one endless line from growing this buffer without bound.
+/// early. The buffer is scrubbed WHOLE and the CUT IS TAKEN FROM THE SCRUBBED
+/// RESULT, so a credential lying across the cut is already gone before there is
+/// a cut to lie across; what the tail holds back is only a needle that has not
+/// finished arriving ([`Scrubber::cut_for`]). Scrubbing the emitted part alone,
+/// as this did before the #5869 review, wrote both halves of a straddling
+/// credential verbatim. Early writing is also what keeps a child printing one
+/// endless line from growing this buffer without bound: it peaks at
+/// [`SEGMENT_LIMIT`] plus [`MAX_HELD_BACK`], with one scrubbed copy of that
+/// alive at a time.
 /// Test: `super::relay_tests::every_non_secret_byte_reaches_the_log_and_events_reach_the_sink`,
-/// `super::relay_tests::a_credential_split_across_a_flush_is_still_caught`,
+/// `super::relay_tests::a_credential_straddling_the_flush_cut_is_still_caught`,
+/// `super::relay_tests::an_interrupted_credential_straddling_a_cut_is_removed`,
 /// `super::relay_tests::a_line_that_never_ends_does_not_grow_without_bound`.
 ///
 /// # Errors
@@ -238,36 +429,47 @@ where
             // EOF. The child was killed mid-line, or simply ended without one;
             // either way what is held is the last thing it managed to say.
             if !pending.is_empty() {
-                emit(&scrubber, &mut log, &progress, &target, &pending).await?;
+                let clean = scrubber.scrub(&pending);
+                emit(&mut log, &progress, &target, &clean).await?;
             }
             break;
         }
         if pending.ends_with(b"\n") {
-            emit(&scrubber, &mut log, &progress, &target, &pending).await?;
+            {
+                let clean = scrubber.scrub(&pending);
+                emit(&mut log, &progress, &target, &clean).await?;
+            }
             pending.clear();
         } else if pending.len() >= SEGMENT_LIMIT {
-            let cut = pending.len() - scrubber.held_back.min(pending.len());
-            emit(&scrubber, &mut log, &progress, &target, &pending[..cut]).await?;
-            pending.drain(..cut);
+            // #5869: scrub the WHOLE buffer, THEN cut it. Cutting first split a
+            // straddling credential into two unmatched halves.
+            let clean = scrubber.scrub(&pending).into_owned();
+            let cut = scrubber.cut_for(&clean);
+            emit(&mut log, &progress, &target, &clean[..cut]).await?;
+            pending.clear();
+            pending.extend_from_slice(&clean[cut..]);
         }
     }
     log.flush().await
 }
 
-/// Scrub one segment, write it, and relay it if it is an event.
+/// Write one ALREADY-SCRUBBED segment, and relay it if it is an event.
+///
+/// Why: every caller scrubs a whole buffer before cutting anything out of it,
+/// so this cannot scrub for them without re-introducing the boundary the
+/// #5869 review found. The contract is therefore on the caller: `clean` is
+/// what [`Scrubber::scrub`] returned, or a prefix of it.
 async fn emit(
-    scrubber: &Scrubber,
     log: &mut tokio::fs::File,
     progress: &Progress,
     target: &str,
-    segment: &[u8],
+    clean: &[u8],
 ) -> std::io::Result<()> {
-    let clean = scrubber.scrub(segment);
-    log.write_all(&clean).await?;
+    log.write_all(clean).await?;
     // `is_active` first: the common segment is ordinary logging, and with no
     // sink attached there is nothing to decode it for.
     if progress.is_active()
-        && let Some(event) = decode(&clean)
+        && let Some(event) = decode(clean)
     {
         progress.unit_stage(target, event);
     }
@@ -447,6 +649,148 @@ mod relay_tests {
             "tail: {:?}",
             &log[log.len() - 40..]
         );
+    }
+
+    /// Why: #5869 review round, CRITICAL 1. The pump used to scrub only the
+    /// part of its buffer it was about to write, so a needle whose start lay in
+    /// `[cut - len + 1, cut - 1]` was split by the cut, matched neither half,
+    /// and BOTH HALVES reached the log verbatim. The reproduction measured a log
+    /// byte-identical in length to its input — not one byte redacted anywhere.
+    /// `a_credential_split_across_a_flush_is_still_caught` passed throughout
+    /// because it starts its key AFTER the cut rather than across it.
+    /// What: the key starts exactly `held_back` bytes before the first cut — the
+    /// adversarial position — and is still removed, because the buffer is
+    /// scrubbed whole before there is a cut to straddle.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn a_credential_straddling_the_flush_cut_is_still_caught() {
+        let scrubber = Scrubber::over(vec![KEY.to_owned()]);
+        // The first cut lands `held_back` from the end of a full segment, so a
+        // key starting `held_back` before that cut lies across it.
+        let cut = SEGMENT_LIMIT - scrubber.held_back;
+        let head = "x".repeat(cut - scrubber.held_back);
+        // Long enough that the newline arrives well after SEGMENT_LIMIT, so the
+        // pump reaches the mid-line flush at all.
+        let tail = format!(" trailing{}\n", "y".repeat(200));
+        let input = format!("{head}{KEY}{tail}");
+        assert!(
+            input.len() > SEGMENT_LIMIT,
+            "the flush path must be reached"
+        );
+
+        let (log, _) = run_bytes(input.as_bytes(), scrubber).await;
+        let log = String::from_utf8(log).expect("text");
+
+        assert_no_fragment_of_the_key(&log);
+        assert!(
+            log.contains("[REDACTED] trailing"),
+            "the key was not replaced"
+        );
+        assert_eq!(log.len(), input.len() - KEY.len() + REDACTED.len());
+    }
+
+    /// Why: #5869 review round, CRITICAL 2. The mixed-encoding path used to
+    /// scrub each valid-UTF-8 run alone. A needle cannot CONTAIN an invalid
+    /// byte, which is what the old reasoning said — but nothing stops one being
+    /// INJECTED INTO it, and after the split neither run held the whole key. The
+    /// reproduction recovered the entire key from two fragments flanking one
+    /// meaningless byte. It needs no long line and no cut alignment.
+    /// What: a key cut in two by a single stray non-UTF-8 byte is removed whole,
+    /// the injected byte goes with it, and the text either side survives.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn a_credential_interrupted_by_an_invalid_byte_is_removed() {
+        let (head, rest) = KEY.split_at(20);
+        let mut input: Vec<u8> = format!("before {head}").into_bytes();
+        input.push(0xff);
+        input.extend_from_slice(format!("{rest} after\n").as_bytes());
+
+        let (log, _) = run_bytes(&input, Scrubber::over(vec![KEY.to_owned()])).await;
+
+        assert_no_fragment_of_the_key(&String::from_utf8_lossy(&log));
+        assert_eq!(log, b"before [REDACTED] after\n".to_vec());
+    }
+
+    /// Why: #5869 review round — the case that catches a partial fix. Removing
+    /// one of the two boundaries leaves the other: a needle both interrupted by
+    /// an invalid byte AND cut in half by the flush is missed by a fix to either
+    /// alone. It is also why the hold-back counts TEXT bytes, not raw ones — the
+    /// arrived prefix here is 50 raw bytes against a 40-byte hold-back, so a
+    /// raw-byte hold-back would slice nine characters of the key off and write
+    /// them.
+    /// What: the segment ends mid-key with garbage injected into the arrived
+    /// prefix; nothing of the key reaches the log, and it is removed whole once
+    /// the rest arrives.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn an_interrupted_credential_straddling_a_cut_is_removed() {
+        let scrubber = Scrubber::over(vec![KEY.to_owned()]);
+        const GARBAGE: usize = 20;
+        let (head, rest) = KEY.split_at(20);
+        let (middle, last) = rest.split_at(10);
+        // Land the segment boundary exactly at the end of `middle`, so the key
+        // is half-arrived when the pump flushes.
+        let filler = "x".repeat(SEGMENT_LIMIT - head.len() - GARBAGE - middle.len());
+
+        let mut input: Vec<u8> = format!("{filler}{head}").into_bytes();
+        input.extend(std::iter::repeat_n(0xff_u8, GARBAGE));
+        input.extend_from_slice(format!("{middle}{last} trailing\n").as_bytes());
+        assert!(
+            input.len() > SEGMENT_LIMIT,
+            "the flush path must be reached"
+        );
+        assert!(
+            head.len() + GARBAGE + middle.len() > scrubber.held_back,
+            "the arrived prefix must outrun a raw-byte hold-back"
+        );
+
+        let (log, _) = run_bytes(&input, scrubber).await;
+        let log = String::from_utf8(log).expect("only the garbage was invalid, and it went");
+
+        assert_no_fragment_of_the_key(&log);
+        assert_eq!(log, format!("{filler}[REDACTED] trailing\n"));
+    }
+
+    /// No run of the key's characters, at any length worth recovering, is in
+    /// `log`. A whole-key check alone passes on a leak of all but one character.
+    fn assert_no_fragment_of_the_key(log: &str) {
+        for len in [8, 16, 24, 32, KEY.len()] {
+            let fragment = &KEY[..len];
+            assert!(
+                !log.contains(fragment),
+                "a {len}-character fragment of the key reached the log: {fragment}"
+            );
+        }
+    }
+
+    /// Why: [`Scrubber::redact_spans`] writes [`REDACTED`] itself, because
+    /// splicing into bytes is a thing `scrub_secrets` cannot express. The two
+    /// tokens must not drift.
+    /// What: the redactor's own replacement for a qualifying needle is byte-for
+    /// byte what this module writes.
+    /// Test: this is the test.
+    #[test]
+    fn the_replacement_token_matches_the_redactor() {
+        let probe = "0123456789abcdef";
+        assert_eq!(scrub_secrets(probe, &[probe]).as_bytes(), REDACTED);
+    }
+
+    /// Why: this module locates needles itself, so a value it would remove but
+    /// `scrub_secrets` would decline is a value redacted on one path and not the
+    /// other — divergence in a credential filter.
+    /// What: a needle under the redactor's minimum is dropped at construction,
+    /// so it can never reach either path, and the hold-back follows the
+    /// survivors.
+    /// Test: this is the test.
+    #[test]
+    fn a_needle_the_redactor_declines_is_dropped() {
+        assert!(!Scrubber::qualifies(""));
+        assert!(!Scrubber::qualifies("abc"));
+        assert!(Scrubber::qualifies(KEY));
+
+        let mixed = Scrubber::over(vec!["abc".to_owned(), KEY.to_owned()]);
+        assert_eq!(&*mixed.secrets, &[KEY.to_owned()]);
+        assert_eq!(mixed.held_back, KEY.len() - 1);
     }
 
     /// Why: a needle is valid UTF-8, so it cannot span an invalid byte — but a
