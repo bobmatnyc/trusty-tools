@@ -53,6 +53,14 @@ toml = { workspace = true }
 serde_yaml = { workspace = true }
 # Library error type.
 thiserror = { workspace = true }
+# #5868: first-run credential entry with echo disabled. Already the workspace's
+# hidden-input answer (`trusty-common`'s `config keys set` reaches for it), so
+# this is the shared choice rather than a second one, and it is why this crate
+# spells no `termios` call of its own. Its unix defaults are what the feature
+# needs: it reads AND prompts on `/dev/tty` rather than stdin — which under
+# `curl … | sh` is the pipe carrying the script — and it restores the terminal's
+# previous state when it drops.
+rpassword = { workspace = true }
 # #5495: the pinned, fail-closed download entry point. Downloading, verifying
 # and placing binaries is this crate's domain, not ours — CLAUDE.md's
 # common-entry-point rule makes a second implementation here a defect. It also

@@ -23,6 +23,8 @@
 //! for every state file under the root: `state/selected-repos.toml`
 //! (`crate::run`) and `state/audit-targets.toml` (`crate::registry`) both go
 //! through it, so the temp-file-then-rename discipline is decided once (#5822).
+//! [`write_private_atomically`] is the same writer at mode 0600, for the one
+//! file that carries a credential (#5868).
 //! Test: `super::layout_tests`.
 //!
 //! ## Open questions, recorded rather than resolved (#5502)
@@ -229,9 +231,14 @@ impl WorkDir {
 /// file beside the target, and renames it into place. The rename is atomic; the
 /// unique suffix is what lets two writers race without either reading the
 /// other's half-written file. A failed rename removes the temporary file.
+///
+/// The temporary is created with `O_EXCL`, so whatever the suffix names is
+/// created here or the write fails — see [`write_temp`], which owns that
+/// guarantee and the one recovery it allows.
 /// Test: `crate::run::run_tests::racing_writers_never_leave_a_torn_selection`,
 /// `crate::registry::registry_tests::a_registry_round_trips_both_kinds`,
 /// `super::layout_tests::an_atomic_write_leaves_no_temporary_behind`,
+/// `super::layout_tests::a_stale_temporary_is_replaced_not_reused`,
 /// `super::layout_tests::an_unpublishable_target_is_an_error_and_leaves_no_temporary`.
 ///
 /// This makes ONE write untearable. It does not make a load-mutate-save
@@ -242,6 +249,52 @@ impl WorkDir {
 /// [`AuditError::WorkDir`] naming the directory, the temporary file, or the
 /// target, depending on which step failed.
 pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<(), AuditError> {
+    write_with_mode(path, text, None)
+}
+
+/// Write a file only its owner can read, without ever tearing it.
+///
+/// Why: `engagement.toml` carries the OpenRouter credential, and the first-run
+/// prompt persists it there (#5868). Under a default 022 umask the plain writer
+/// above leaves that file 0644 — readable by every account on the machine,
+/// which on a client's shared build host is the whole exposure. The recipient
+/// did not choose the mode and should not have to know to check it.
+/// What: [`write_atomically`] with the temporary file created at 0600. Two
+/// guarantees, and it is worth being exact about which one each mechanism buys:
+///
+/// - **The bytes go where this function names.** The temporary is opened with
+///   `O_EXCL`, so a symlink pre-planted at its (guessable) name is refused
+///   rather than followed. Mode 0600 does not provide this on its own: it
+///   constrains a file at CREATION, and an open that follows a symlink creates
+///   nothing. Before #5868's follow-up fix, that open wrote the plaintext key
+///   into whatever the link pointed at.
+/// - **The credential is never readable by another account.** 0600 is passed to
+///   `open`, so the file holds those bits from the moment it exists, and the
+///   rename publishes it under them.
+///
+/// Neither reaches PAST the rename. A symlink pre-planted at the TARGET is
+/// replaced by the rename rather than written through, but this function does
+/// not police what the target's parent directory permits (#5495 is that
+/// question for the areas it owns).
+/// Test: `super::layout_tests::a_private_write_is_owner_only_and_still_atomic`,
+/// `super::layout_tests::a_pre_planted_symlink_never_receives_the_credential`.
+///
+/// # Errors
+///
+/// As [`write_atomically`].
+pub(crate) fn write_private_atomically(path: &Path, text: &str) -> Result<(), AuditError> {
+    write_with_mode(path, text, Some(OWNER_ONLY))
+}
+
+/// Mode a file holding a credential is created with: owner read/write, nothing else.
+#[cfg(unix)]
+const OWNER_ONLY: u32 = 0o600;
+/// Windows has no mode bits; the constant exists so the signature is uniform.
+#[cfg(not(unix))]
+const OWNER_ONLY: u32 = 0;
+
+/// The shared temp-file-then-rename writer. See [`write_atomically`].
+fn write_with_mode(path: &Path, text: &str, mode: Option<u32>) -> Result<(), AuditError> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|source| AuditError::WorkDir {
         path: dir.to_path_buf(),
@@ -250,7 +303,7 @@ pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<(), AuditError
 
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     let temp = path.with_file_name(format!("{file_name}.{}.tmp", writer_tag()));
-    std::fs::write(&temp, text).map_err(|source| AuditError::WorkDir {
+    write_temp(&temp, text, mode).map_err(|source| AuditError::WorkDir {
         path: temp.clone(),
         source,
     })?;
@@ -263,7 +316,82 @@ pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<(), AuditError
     })
 }
 
+/// Create the temporary file holding `text`, at `mode` when one is asked for.
+///
+/// The open is exclusive ([`create_exclusive`]), which is what decides where
+/// the bytes go. Whatever is already at the temporary path — a symlink, a
+/// regular file — is refused rather than opened, so the write cannot be
+/// redirected through a pre-planted link and cannot land on top of an existing
+/// file. A refusal is recovered ONCE by unlinking and re-creating: a temporary
+/// left behind by a writer that crashed holding this tag is the ordinary cause,
+/// and unlinking a symlink removes the link, never what it points at. The
+/// retry is exclusive too, so a racing re-plant loses rather than being
+/// followed. There is no second retry — a path that stays occupied is an error
+/// the caller must see.
+///
+/// `mode` is applied twice for two different reasons: [`create_exclusive`]
+/// passes it to `open` so the file is never momentarily wider, and
+/// [`enforce_mode`] sets it afterwards because `open`'s mode is masked by the
+/// process umask, which can only clear bits — an unusual umask would otherwise
+/// leave the credential file narrower than asked for, not wider.
+fn write_temp(temp: &Path, text: &str, mode: Option<u32>) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let mut file = match create_exclusive(temp, mode) {
+        Err(occupied) if occupied.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(temp)?;
+            create_exclusive(temp, mode)?
+        }
+        first => first?,
+    };
+    if let Some(mode) = mode {
+        enforce_mode(&file, mode)?;
+    }
+    file.write_all(text.as_bytes())
+}
+
+/// `open` the temporary with `O_EXCL`, at `mode` when one is asked for.
+#[cfg(unix)]
+fn create_exclusive(temp: &Path, mode: Option<u32>) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    if let Some(mode) = mode {
+        options.mode(mode);
+    }
+    options.open(temp)
+}
+
+/// See the unix arm. Windows carries no mode bits, so the request is dropped;
+/// `create_new` is the half that matters here and is portable.
+#[cfg(not(unix))]
+fn create_exclusive(temp: &Path, _mode: Option<u32>) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp)
+}
+
+/// Set `mode` on an already-open file, undoing any umask narrowing.
+#[cfg(unix)]
+fn enforce_mode(file: &std::fs::File, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+}
+
+/// See the unix arm. Windows has no mode bits to enforce.
+#[cfg(not(unix))]
+fn enforce_mode(_file: &std::fs::File, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// A suffix no two concurrent writers share: process, plus thread within it.
+///
+/// This is not a secret and must not be relied on as one. The pid is visible in
+/// `ps` and `DefaultHasher` is fixed-seed, so the name it builds is guessable
+/// by a local attacker — [`write_temp`]'s exclusive open is what makes that
+/// harmless (#5868).
 fn writer_tag() -> String {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -351,6 +479,115 @@ mod layout_tests {
             .filter(|p| p.extension().is_some_and(|e| e == "tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// #5868: the file the credential lands in is owner-only, and it gets there
+    /// through the same untearable rename as every other state file. Both
+    /// halves matter — a 0600 file written non-atomically is still a file a
+    /// reader can catch half-written.
+    #[cfg(unix)]
+    #[test]
+    fn a_private_write_is_owner_only_and_still_atomic() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("engagement.toml");
+
+        // Land on an existing world-readable file: the mode must be replaced,
+        // not inherited, because that is the shape a hand-edited config has.
+        std::fs::write(&target, "openrouter_key = \"\"\n").expect("seed");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        write_private_atomically(&target, "openrouter_key = \"sk-or-v1-x\"\n").expect("write");
+
+        let mode = std::fs::metadata(&target)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("reads"),
+            "openrouter_key = \"sk-or-v1-x\"\n"
+        );
+        let leftovers: Vec<PathBuf> = std::fs::read_dir(tmp.path())
+            .expect("read dir")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// #5868: the temporary name is predictable — the pid is visible in `ps`
+    /// and `DefaultHasher` has a fixed seed over a near-deterministic main
+    /// `ThreadId` — so a local attacker can pre-plant a symlink at it. Opening
+    /// without `O_EXCL` followed that symlink: the credential landed in the
+    /// attacker's file and the config became a symlink pointing there. Mode
+    /// 0600 does not help, because it constrains a file at CREATION and this
+    /// path created nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_pre_planted_symlink_never_receives_the_credential() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("engagement.toml");
+        std::fs::write(&target, "openrouter_key = \"\"\n").expect("seed target");
+
+        let victim = tmp.path().join("attacker-readable.txt");
+        std::fs::write(&victim, "untouched\n").expect("seed victim");
+
+        // The exact temporary this thread's write will choose.
+        let planted = target.with_file_name(format!("engagement.toml.{}.tmp", writer_tag()));
+        std::os::unix::fs::symlink(&victim, &planted).expect("plant symlink");
+
+        write_private_atomically(&target, "openrouter_key = \"sk-or-v1-secret\"\n")
+            .expect("the write replaces the plant rather than following it");
+
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("read victim"),
+            "untouched\n",
+            "the credential was written through the pre-planted symlink"
+        );
+        assert!(
+            !std::fs::symlink_metadata(&target)
+                .expect("stat target")
+                .file_type()
+                .is_symlink(),
+            "the rename published the plant instead of a real file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "openrouter_key = \"sk-or-v1-secret\"\n"
+        );
+        let mode = std::fs::metadata(&target)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+        assert!(!planted.exists(), "the temporary outlived the write");
+    }
+
+    /// The other thing `O_EXCL` refuses is a stale temporary from a writer that
+    /// crashed holding this tag. It must be replaced wholesale, never opened
+    /// and partially overwritten — a shorter new document would leave the old
+    /// tail behind and publish a hybrid.
+    #[test]
+    fn a_stale_temporary_is_replaced_not_reused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("state/run-progress.toml");
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("mkdir");
+
+        let stale = target.with_file_name(format!("run-progress.toml.{}.tmp", writer_tag()));
+        std::fs::write(&stale, "complete = false\nleftover = \"from the crash\"\n")
+            .expect("seed stale");
+
+        write_atomically(&target, "complete = true\n").expect("write");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("reads"),
+            "complete = true\n"
+        );
+        assert!(!stale.exists(), "the temporary outlived the write");
     }
 
     /// A target that cannot be published is an error, never a silent no-op —

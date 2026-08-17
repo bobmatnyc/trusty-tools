@@ -419,6 +419,80 @@ pub enum AuditError {
         template: PathBuf,
     },
 
+    /// The engagement config carries a key, but it is blank.
+    ///
+    /// Why: a present-but-empty `openrouter_key` used to sail through. The
+    /// sweep started, [`crate::inference::inference_env`] read the blank key as
+    /// "select nothing" and returned no variables, and the `tga audit` child
+    /// ran without its `TRUSTY_REVIEW_*` selection — so `trusty-review` fell
+    /// back to its Bedrock default. The operator found out hours later, at the
+    /// report stage, as a missing-AWS-credentials failure; the worse outcome is
+    /// the one where it works and bills a provider nobody chose. Refusing
+    /// before the sweep starts is the whole point (#5868).
+    /// What: names the file and both ways to put a key in play. Nothing is
+    /// quoted — a blank key has nothing to quote.
+    /// Test: `crate::session::session_tests::a_blank_configured_key_refuses_before_the_sweep`.
+    #[error(
+        "the OpenRouter key in {config} is blank. The audit's report stage cannot run without \
+         one: set {env} in the environment, or set `openrouter_key` in that file"
+    )]
+    BlankCredential {
+        /// The engagement config carrying the blank key.
+        config: PathBuf,
+        /// The environment variable that supplies one instead.
+        env: &'static str,
+    },
+
+    /// Nothing configured a credential, and there is no terminal to ask on.
+    ///
+    /// Why: the install path this crate is heading for is `curl … | sh`, where
+    /// stdin is the pipe carrying the script text. A run with no controlling
+    /// terminal must therefore say what to do and stop — hanging on a read, or
+    /// treating the next line of that pipe as a credential, are the two
+    /// failures this refusal exists to rule out (#5868).
+    /// What: names both ways to supply the key. The key itself is never
+    /// quoted, because there is none to quote.
+    /// Test: `crate::cli::credential::credential_tests::without_a_terminal_the_refusal_names_both_sources`.
+    #[error(
+        "no OpenRouter key is configured, and there is no terminal to ask on. Either set {env} \
+         in the environment, or set `openrouter_key` in {config}"
+    )]
+    NoCredentialSource {
+        /// The environment variable that supplies it.
+        env: &'static str,
+        /// The engagement config that could carry one instead.
+        config: PathBuf,
+    },
+
+    /// The operator was asked and did not produce a usable key.
+    ///
+    /// Why: the prompt re-asks a mistyped or blank entry rather than exiting on
+    /// the first mistake, but it cannot re-ask forever — a `/dev/tty` that
+    /// opens and then immediately reports end-of-file would spin (#5868).
+    /// What: names how many attempts were made. Never quotes what was typed,
+    /// including the entry that failed to match.
+    /// Test: `crate::cli::credential::credential_tests::a_prompt_that_never_agrees_gives_up`.
+    #[error("no usable OpenRouter key was entered after {attempts} attempts")]
+    CredentialNotEntered {
+        /// How many times the key was asked for.
+        attempts: usize,
+    },
+
+    /// The terminal could not be read from or written to.
+    ///
+    /// Why: distinguished from [`AuditError::CredentialNotEntered`] because the
+    /// operator did nothing wrong and re-running will not help until whatever
+    /// broke the terminal is fixed (#5868).
+    /// What: carries the underlying I/O failure. `std::io::Error` renders the
+    /// OS message only, so nothing that was typed can reach it.
+    /// Test: `crate::cli::credential::credential_tests::a_terminal_that_fails_is_reported_without_the_entry`.
+    #[error("cannot read the OpenRouter key from the terminal: {source}")]
+    CredentialPromptFailed {
+        /// What the terminal read or write failed with.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// The install package's destination is already taken.
     ///
     /// Why: #5825 — an operator regenerating a package must not destroy the one
