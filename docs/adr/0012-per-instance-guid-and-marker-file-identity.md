@@ -1,6 +1,6 @@
 # 0012. Per-instance GUID and marker-file canonical identity for trusty-search indexes
 
-- **Status:** Amended by [0051](0051-palace-id-stays-hyphen-joined-owner-and-project-fields-added.md), specifically §1's implicit separator choice.
+- **Status:** Amended by [0051](0051-palace-id-stays-hyphen-joined-owner-and-project-fields-added.md)
 - **Date:** 2026-06-25
 - **Accepted:** 2026-06-25
 - **Scope:** trusty-search (index discovery, registration, move-relink,
@@ -9,7 +9,9 @@
   Also referenced by issue #1680 (case-insensitive aliases) and epic #1681
   (canonical index/source identity model).
 - **Supersedes / Superseded by:** Amends ADR-0008, specifically its worktree
-  clause. ADR-0008's remaining project-identity rules stay in force.
+  clause. ADR-0008's remaining project-identity rules stay in force. ADR-0051
+  amends only §1's implicit separator choice; the rest of this ADR stays in
+  force.
 
 ## Context
 
