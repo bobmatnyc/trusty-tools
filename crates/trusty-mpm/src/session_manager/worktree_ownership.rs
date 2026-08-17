@@ -193,9 +193,80 @@ pub(crate) enum SentinelOwner {
     /// the reclamation authority where it belongs: the agent's own exit
     /// (`daemon::services::agent_worktree_reap`), which resolves on the exact
     /// `agent_id` a `SubagentStop` quotes.
+    ///
+    /// # Which paths actually read this (#5661)
+    ///
+    /// Three do, and they do not agree on the answer, so state each one rather
+    /// than a single claim. `session_manager::prune::prune_orphaned_worktrees`
+    /// and `worktree_reconcile::classify` skip an `Agent` tree
+    /// UNCONDITIONALLY. `worktree_reclaim::classify` — the merged-PR reclaim
+    /// reached by `tm session prune-worktrees --merged-prs` — did not read this
+    /// enum at all until #5661, which is how it deleted three live agents'
+    /// worktrees on 2026-08-15/16; it now consults it and permits only the one
+    /// case the delegation registry can positively call finished (see
+    /// [`AgentDelegationState`]).
     Agent(AgentWorktreeOwner, DateTime<Utc>),
     /// Absent, empty, or unparsable — legacy or corrupted; owner unknown.
     Unknown,
+}
+
+/// What the delegation registry can say about the agent named by an
+/// [`SentinelOwner::Agent`] sentinel (#5661).
+///
+/// Why: "no non-terminal delegation claims this agent" and "this registry has
+/// never heard of this agent" are the same empty answer read two ways, and only
+/// the first one is evidence. `DaemonState::delegations` is a `DashMap` built
+/// empty at every boot with no load path, so after a restart the registry
+/// answers "nothing claims it" for an agent that is still working — which on a
+/// destructive path is [ADR-0045](../../../../docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md)'s
+/// absent-vs-undeterminable confusion, and is how the merged-PR reclaim deleted
+/// live agents' worktrees. Splitting the two lets the reclaim gate permit only
+/// the answer that carries information.
+/// What: [`Live`](Self::Live) — a delegation naming this agent has not reached a
+/// terminal status; [`Ended`](Self::Ended) — the registry holds at least one
+/// delegation naming this agent and every one of them is terminal;
+/// [`Unknown`](Self::Unknown) — the registry holds no delegation naming this
+/// agent, so its silence proves nothing.
+/// Test: `classify_blocks_a_live_agents_worktree`,
+/// `classify_blocks_an_agent_the_registry_never_heard_of`,
+/// `classify_allows_a_finished_agents_merged_worktree`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentDelegationState {
+    /// A delegation naming this agent has not ended — the agent is still working.
+    Live,
+    /// Every delegation the registry holds for this agent has ended.
+    Ended,
+    /// The registry holds no delegation for this agent at all.
+    Unknown,
+}
+
+/// Is `path` a leaf of a harness agent-worktree store — `…/.claude/worktrees/<name>`?
+///
+/// Why: the STRICT form of "this directory belongs to the agent store", used by
+/// every gate that must treat such a directory differently from a session
+/// worktree. `worktree_reconcile::categorize` carries a looser "somewhere under
+/// `.claude/worktrees`" test, but that one is documented as report text that is
+/// "never an input to `ReconcileState`" — promoting a descriptive label to a
+/// deletion gate is precisely what that doc forbids, so this is a separate
+/// predicate answering a separate question.
+///
+/// It lives here rather than in `daemon::services::agent_worktree_reap` (its
+/// first home, #4311) because two reclamation paths now ask it and this module
+/// already owns the store's shape — [`find_agent_worktree`] enumerates the same
+/// directory. One implementation, in the domain that owns it.
+/// What: the immediate parent's name is `worktrees` and its parent's is
+/// `.claude`.
+/// Test: `reap_refuses_a_worktree_outside_the_harness_base`,
+/// `classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel`.
+pub(crate) fn is_harness_agent_worktree(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    parent.file_name().is_some_and(|n| n == "worktrees")
+        && parent
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == ".claude")
 }
 
 /// Read and tolerantly parse the ownership sentinel under `worktree_path`.

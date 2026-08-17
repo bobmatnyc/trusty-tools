@@ -4,16 +4,18 @@
 //! therefore gets a test that FAILS if that gate is removed — a guard whose
 //! absence no test notices is not a guard. The gates are exercised through the
 //! real `classify`, against real git worktrees where the check reads git.
-//! What: one refusal test per gate (non-admitted, live session, open PR,
+//! What: one refusal test per gate (non-admitted, live session, not
+//! tm-provisioned, agent-owned and still live, agent-owned with the registry
+//! unable to answer, an unreadable sentinel inside the agent store, open PR,
 //! closed-unmerged PR, no PR, indeterminate PR state, dirty tree, unpushed
-//! commits), the single approval path, the [`super::PrIndex`]
+//! commits), the approval paths, the [`super::PrIndex`]
 //! truncation/availability rules that decide when "absent" is allowed to mean
 //! "no PR", and the `Report`-mode and re-check behaviour of the removal path.
 
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
+use crate::session_manager::worktree_git_fixture::{GitWorktreeFixture, deny_all};
 use crate::session_manager::worktree_safety::inspect_dirt;
 
 /// A dirt probe that always reports CLEAN — used only where the test's subject
@@ -40,6 +42,48 @@ fn land(path: &Path) {
 
 fn merged(pr: u64) -> BranchPrState {
     BranchPrState::Merged { pr }
+}
+
+/// A delegation registry that has never heard of any agent — the REFUSING
+/// answer (#5661).
+///
+/// Used as the default in every pre-#5661 test below, deliberately: those
+/// fixtures are session-owned, so the strictest possible agent probe must still
+/// leave their verdicts untouched. A test that went green only because the probe
+/// was permissive would prove nothing about the gate's scope.
+fn no_agents(_: &AgentWorktreeOwner) -> AgentDelegationState {
+    AgentDelegationState::Unknown
+}
+
+/// A registry that reports the owning agent as still working.
+fn agent_live(_: &AgentWorktreeOwner) -> AgentDelegationState {
+    AgentDelegationState::Live
+}
+
+/// A registry that holds the owning agent's delegation and calls it finished.
+fn agent_ended(_: &AgentWorktreeOwner) -> AgentDelegationState {
+    AgentDelegationState::Ended
+}
+
+/// [`classify`] with the refusing agent probe, for the tests whose subject is a
+/// different gate (#5661).
+fn classify_no_agent(
+    path: &Path,
+    admission: Admission,
+    live: bool,
+    pr: &BranchPrState,
+    probe_dirt: &dyn Fn(&Path) -> Option<DirtyWorktree>,
+) -> ReclaimVerdict {
+    classify(path, admission, live, pr, probe_dirt, &no_agents)
+}
+
+/// A real git worktree in the harness agent store, landed and pushed — the
+/// exact shape `tm session prune-worktrees --merged-prs --force` deleted three
+/// live agents' trees in (#5661).
+fn agent_store_worktree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
+    let path = fx.add_worktree_at(&fx.repo.join(".claude").join("worktrees"), name);
+    land(&path);
+    path
 }
 
 /// A synthetic path that satisfies the OWNERSHIP gate, so tests aimed at the
@@ -76,7 +120,7 @@ fn classify_blocks_non_admitted_worktree() {
         Admission::OutsideProject,
         Admission::OutsideReposRoot,
     ] {
-        let v = classify(&wt(), admission, false, &merged(1), &clean);
+        let v = classify_no_agent(&wt(), admission, false, &merged(1), &clean);
         assert!(
             !v.is_reclaimable(),
             "{admission:?} must never be reclaimable, even with a merged PR"
@@ -94,7 +138,7 @@ fn classify_blocks_live_session_workspace() {
     // The strongest gate: a merged PR plus a clean tree still loses to a
     // session that claims the path. A live session can sit in a directory whose
     // record reads terminal — measured on this repo 2026-07-28.
-    let v = classify(&wt(), Admission::Admitted, true, &merged(42), &clean);
+    let v = classify_no_agent(&wt(), Admission::Admitted, true, &merged(42), &clean);
     assert!(!v.is_reclaimable());
     assert!(
         reason(&v).contains("claims this workspace"),
@@ -136,7 +180,7 @@ fn live_check_matches_exact_ancestor_and_descendant_paths() {
 
 #[test]
 fn classify_blocks_open_pr() {
-    let v = classify(
+    let v = classify_no_agent(
         &wt(),
         Admission::Admitted,
         false,
@@ -151,7 +195,7 @@ fn classify_blocks_open_pr() {
 fn classify_blocks_closed_unmerged_pr() {
     // Closed-without-merging is NOT landing evidence — the branch may hold the
     // only copy of abandoned-but-wanted work.
-    let v = classify(
+    let v = classify_no_agent(
         &wt(),
         Admission::Admitted,
         false,
@@ -164,7 +208,7 @@ fn classify_blocks_closed_unmerged_pr() {
 
 #[test]
 fn classify_blocks_no_pr() {
-    let v = classify(
+    let v = classify_no_agent(
         &wt(),
         Admission::Admitted,
         false,
@@ -179,7 +223,7 @@ fn classify_blocks_no_pr() {
 fn classify_blocks_unknown_pr_state() {
     // THE indeterminate case. An unanswerable probe must be a skip, never a
     // delete — this is the fail-closed property the whole module rests on.
-    let v = classify(
+    let v = classify_no_agent(
         &wt(),
         Admission::Admitted,
         false,
@@ -203,7 +247,7 @@ fn classify_blocks_dirty_worktree() {
     // A merged PR does not prove the directory holds nothing novel. The
     // 2026-07-21 salvage found merged-PR worktrees carrying real unpushed
     // source; this gate is why they survive.
-    let v = classify(&wt(), Admission::Admitted, false, &merged(5), &dirty);
+    let v = classify_no_agent(&wt(), Admission::Admitted, false, &merged(5), &dirty);
     assert!(!v.is_reclaimable());
     assert!(reason(&v).contains("unsaved work"), "{}", reason(&v));
 }
@@ -215,7 +259,7 @@ fn classify_blocks_a_really_dirty_worktree() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("dirty-2919");
     std::fs::write(path.join("scratch.rs"), "fn main() {}\n").expect("write untracked file");
-    let v = classify(&path, Admission::Admitted, false, &merged(5), &inspect_dirt);
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(5), &inspect_dirt);
     assert!(
         !v.is_reclaimable(),
         "a real untracked file must block: {v:?}"
@@ -229,7 +273,7 @@ fn classify_blocks_a_worktree_with_unpushed_commits() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("unpushed-2919");
     GitWorktreeFixture::commit_unpushed(&path);
-    let v = classify(&path, Admission::Admitted, false, &merged(6), &inspect_dirt);
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(6), &inspect_dirt);
     assert!(!v.is_reclaimable(), "an unpushed commit must block: {v:?}");
 }
 
@@ -244,7 +288,7 @@ fn classify_allows_clean_pushed_merged_worktree() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("clean-2919");
     land(&path);
-    let v = classify(
+    let v = classify_no_agent(
         &path,
         Admission::Admitted,
         false,
@@ -252,6 +296,139 @@ fn classify_allows_clean_pushed_merged_worktree() {
         &inspect_dirt,
     );
     assert_eq!(v, ReclaimVerdict::Reclaimable { pr: 77 });
+}
+
+// ---------------------------------------------------------------------------
+// Gate 4 — a dispatched agent's ownership (#5661)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn classify_blocks_a_live_agents_worktree() {
+    // THE #5661 defect, in one test. The worktree carries an agent sentinel, has
+    // no session record (so gate 2's `live` is false), sits under
+    // `.claude/worktrees/`, and its branch merged — every condition the three
+    // gates above check is satisfied, and before this gate existed `classify`
+    // returned `Reclaimable` and the sweep deleted it out from under the agent.
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "live-agent-5661");
+    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-a39a3a8181f33e597");
+    let v = classify(
+        &path,
+        Admission::Admitted,
+        false,
+        &merged(101),
+        &inspect_dirt,
+        &agent_live,
+    );
+    assert!(!v.is_reclaimable(), "a live agent's worktree: {v:?}");
+    assert!(reason(&v).contains("has not ended"), "{}", reason(&v));
+    assert!(
+        reason(&v).contains("agent-a39a3a8181f33e597"),
+        "the refusal must name the agent it is protecting: {}",
+        reason(&v)
+    );
+}
+
+#[test]
+fn classify_blocks_an_agent_the_registry_never_heard_of() {
+    // The post-restart shape. `DaemonState::delegations` is rebuilt empty at
+    // every boot, so "no delegation names this agent" is what the registry says
+    // about an agent that is still working. An empty observation on a
+    // destructive path is undeterminable, not absent (ADR-0045).
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "forgotten-agent-5661");
+    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-lost-to-a-restart");
+    let v = classify(
+        &path,
+        Admission::Admitted,
+        false,
+        &merged(102),
+        &inspect_dirt,
+        &no_agents,
+    );
+    assert!(!v.is_reclaimable(), "{v:?}");
+    assert!(reason(&v).contains("undeterminable"), "{}", reason(&v));
+}
+
+#[test]
+fn classify_allows_a_finished_agents_merged_worktree() {
+    // The complement, and the whole reason the gate consults the registry
+    // instead of refusing every agent-owned tree outright: once the delegation
+    // has ended, the tree must become reclaimable or the agent store grows
+    // without bound and the sweep stops doing its job.
+    let fx = GitWorktreeFixture::new();
+    let path = agent_store_worktree(&fx, "finished-agent-5661");
+    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-that-finished");
+    let v = classify(
+        &path,
+        Admission::Admitted,
+        false,
+        &merged(103),
+        &inspect_dirt,
+        &agent_ended,
+    );
+    assert_eq!(v, ReclaimVerdict::Reclaimable { pr: 103 });
+}
+
+#[test]
+fn classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel() {
+    // A sentinel file whose content names no owner could be a truncated agent
+    // claim, so inside the agent store it refuses — with the MOST permissive
+    // registry answer, which proves the refusal comes from the unreadable file
+    // and not from the liveness probe. Both spellings of unreadable are covered:
+    // content that does not parse, and a file the process cannot open at all.
+    let fx = GitWorktreeFixture::new();
+    let garbled = agent_store_worktree(&fx, "garbled-sentinel-5661");
+    std::fs::write(
+        garbled.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
+        b"{not json",
+    )
+    .expect("write a malformed sentinel");
+    let v = classify(
+        &garbled,
+        Admission::Admitted,
+        false,
+        &merged(104),
+        &inspect_dirt,
+        &agent_ended,
+    );
+    assert!(!v.is_reclaimable(), "malformed sentinel: {v:?}");
+    assert!(reason(&v).contains("names no owner"), "{}", reason(&v));
+
+    let denied = agent_store_worktree(&fx, "denied-sentinel-5661");
+    let sentinel = denied.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE);
+    GitWorktreeFixture::stamp_agent_sentinel(&denied, "agent-behind-a-locked-door");
+    let _restore = deny_all(&sentinel);
+    let v = classify(
+        &denied,
+        Admission::Admitted,
+        false,
+        &merged(105),
+        &inspect_dirt,
+        &agent_ended,
+    );
+    assert!(!v.is_reclaimable(), "unreadable sentinel: {v:?}");
+}
+
+#[test]
+fn classify_leaves_a_session_owned_worktree_alone() {
+    // The over-correction guard. A session-owned `.worktrees/<name>` worktree
+    // with a merged PR must still be reclaimable under the STRICTEST agent
+    // probe — the #5661 gate is scoped to agent ownership, and a version of it
+    // that refused everything would silently retire this whole feature.
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("session-owned-5661");
+    land(&path);
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&path);
+    let v = classify(
+        &path,
+        Admission::Admitted,
+        false,
+        &merged(106),
+        &inspect_dirt,
+        &no_agents,
+    );
+    assert_eq!(v, ReclaimVerdict::Reclaimable { pr: 106 });
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +612,7 @@ fn classify_blocks_a_worktree_trusty_mpm_does_not_own() {
     let fx = GitWorktreeFixture::new();
     let parent = fx.repo.join(".claude").join("worktrees");
     let path = fx.add_worktree_at(&parent, "harness-owned-2919");
-    let v = classify(&path, Admission::Admitted, false, &merged(9), &clean);
+    let v = classify_no_agent(&path, Admission::Admitted, false, &merged(9), &clean);
     assert!(!v.is_reclaimable(), "{v:?}");
     assert!(reason(&v).contains("out of scope"), "{}", reason(&v));
 }
@@ -499,7 +676,7 @@ fn pr_index_skips_fork_pull_requests() {
         "a fork PR must not make a local branch look merged"
     );
     assert!(
-        !classify(
+        !classify_no_agent(
             &wt(),
             Admission::Admitted,
             false,

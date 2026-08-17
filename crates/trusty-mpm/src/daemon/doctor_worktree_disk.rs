@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
+use crate::session_manager::worktree_ownership::AgentDelegationState;
 use crate::session_manager::worktree_reclaim::ReclaimSurvey;
 use crate::session_manager::worktree_reclaim_sweep::{SurveyBudget, survey};
 
@@ -253,7 +254,20 @@ pub(super) async fn check_worktree_disk(
     // reclaim path does the per-branch work.
     let joined = tokio::time::timeout(
         SURVEY_TIMEOUT + SURVEY_TIMEOUT + SURVEY_TIMEOUT_GRACE,
-        tokio::task::spawn_blocking(move || survey(&root, &active, budget, false)),
+        // #5661: a REPORT-only probe with no delegation registry to consult, so
+        // it says so — `Unknown` refuses, which keeps an agent-owned worktree
+        // out of the reclaimable count `tm doctor` prints and out of the command
+        // it advertises. Matching `worktree_reconcile::classify`, which has
+        // never reported an agent tree reclaimable either.
+        tokio::task::spawn_blocking(move || {
+            survey(
+                &root,
+                &active,
+                &|_| AgentDelegationState::Unknown,
+                budget,
+                false,
+            )
+        }),
     )
     .await;
     match joined {
