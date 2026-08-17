@@ -959,23 +959,30 @@ pub struct ContextBudgetSnapshot {
     /// for budget state (`session.get_context_budget`) instead of requiring
     /// a second `session.get_transcript` call.
     pub lifetime_compaction_alarm_count: u64,
-    /// (issue #3912) This SESSION's lowest-ever `working_context_pct`,
-    /// derived fresh from `agent_loop::telemetry::session_working_context_floor`
-    /// every time this RPC is queried — `None` when no durable sample for
-    /// this session exists yet. Same "read fresh at query time, `0`/`None`
-    /// placeholder on the write path" pattern as
-    /// `lifetime_compaction_alarm_count` immediately above, and for the same
-    /// reason: the load-realistic compression soak (epic #3866) proved the
-    /// single most-recent snapshot above (`working_context_pct`) can read
-    /// 98-99% while a durable per-turn sample this same session produced
-    /// moments earlier was 48-60% — a coarse once-per-`task.run`-call poll
-    /// reliably misses the turn where the floor was lowest. This field is
-    /// the fix: the real floor, not a snapshot that can miss it.
+    /// (issues #3912, #3948) This SESSION's lowest `working_context_pct`
+    /// across every cadence measurement `SessionRegistry` has recorded for
+    /// it — `None` until the first measurement lands. It exists because the
+    /// load-realistic compression soak (epic #3866) proved the single
+    /// most-recent snapshot above (`working_context_pct`) can read 98-99%
+    /// while the same session dipped to 48-60% moments earlier; a coarse
+    /// poll reliably misses the turn where the floor was lowest.
+    ///
+    /// (#3948) Unlike `lifetime_compaction_alarm_count` above, this is NOT
+    /// read fresh from a durable log at query time. It is folded in
+    /// incrementally by `SessionRegistry::record_context_budget` and lives
+    /// as long as the session does, which means the value is scoped to the
+    /// running daemon: a restart drops the session itself, so the RPC
+    /// answers `session_not_found` rather than a reset floor. Offline
+    /// history stays in `compression.jsonl`, readable via
+    /// `agent_loop::telemetry::session_working_context_floor`; that reader
+    /// aggregates a different sample set (only turns that did compaction
+    /// work, plus threshold fires), so its floor and this one can differ.
     pub working_context_pct_low_water_mark: Option<u8>,
-    /// (issue #3912) How many durable telemetry samples
+    /// (issues #3912, #3948) How many cadence measurements
     /// `working_context_pct_low_water_mark` was computed over for this
     /// session — lets a consumer distinguish "no samples yet" (`None` above)
-    /// from "exactly one, possibly unrepresentative, sample".
+    /// from "exactly one, possibly unrepresentative, sample". Counts live
+    /// measurements, not durable JSONL rows.
     pub working_context_pct_sample_count: usize,
     /// (issue #3911) Lifetime, cross-session count of a cadence-level
     /// 60%-floor breach (`CadenceOutcome::within_budget == false` after

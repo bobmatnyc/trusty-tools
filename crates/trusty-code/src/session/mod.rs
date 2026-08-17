@@ -39,6 +39,12 @@ pub mod protocol;
 pub mod registry;
 pub mod transcript;
 
+/// (issue #3948) The per-session working-context floor `registry` folds into
+/// each `SessionEntry` — a private sibling module, not part of the crate's
+/// public surface.
+#[path = "registry_context_floor.rs"]
+mod registry_context_floor;
+
 pub use connector::TcodeConnector;
 pub use memory_sink::{PalaceCreation, TurnMemorySink};
 pub use model::{Session, SessionStatus};
