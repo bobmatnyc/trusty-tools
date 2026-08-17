@@ -294,7 +294,7 @@ fn resolve_environment(env: Option<String>) -> Option<Resolved> {
 /// this command", and a generated config carries `openrouter_key = ""` when the
 /// auditor left the key out (#5825) — neither is a credential.
 /// Test: `super::credential_tests::the_environment_beats_the_config`,
-/// `a_blank_environment_value_falls_through_to_the_config`,
+/// `a_blank_value_at_any_tier_falls_through_to_the_next`,
 /// `without_a_terminal_the_refusal_names_both_sources`.
 ///
 /// # Errors
