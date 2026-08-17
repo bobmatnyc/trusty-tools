@@ -306,6 +306,7 @@ pub fn exit_code(outcome: &Outcome) -> i32 {
 // #5824: rendering moved out when the one-shot chain's own arm pushed this file
 // past the 500-SLOC production cap. Re-exported, so `crate::cli::render` stays
 // the name every caller and test already uses.
+pub mod credential;
 mod render;
 
 pub use render::render;

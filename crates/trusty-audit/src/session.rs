@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use crate::chain::{self, ChainOptions, ChainReport};
 use crate::clone::{self, CloneOptions, CloneReport};
-use crate::config::EngagementConfig;
+use crate::config::{EngagementConfig, SecretKey};
 use crate::discover::{self, DiscoveredRepo};
 use crate::distribute::{self, DistributeOptions, InstallPackage};
 use crate::error::AuditError;
@@ -124,6 +124,66 @@ pub enum Command {
     /// travel opposite ways and disagree about the credential, so they are two
     /// variants dispatching to two modules. See [`crate::distribute`].
     Distribute(DistributeOptions),
+}
+
+/// How hard a front end should look for the inference credential (#5868).
+///
+/// Why: only the front end can prompt, so only the front end can decide to.
+/// But WHICH capabilities need a key is a property of the capability, not of
+/// the front end — leaving it to each one is how the CLI and the Tauri shell
+/// end up disagreeing about when a client gets asked. So the answer is data on
+/// [`Command`], and every front end reads the same answer.
+/// What: three tiers, ordered by how many sources they permit.
+/// Test: `super::session_tests::only_the_inference_capabilities_need_a_credential`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CredentialNeed {
+    /// The capability sends nothing for inference. Never ask, never look.
+    None,
+    /// An exported variable is used when it is set, and nothing else is.
+    ///
+    /// Never prompts: these capabilities already have their own fallback and a
+    /// client running them is not the one who holds the key.
+    Environment,
+    /// The capability cannot run without a key, so every source is tried —
+    /// including asking, when there is a terminal.
+    Required,
+}
+
+impl Command {
+    /// Which credential sources a front end should consult for this command.
+    ///
+    /// Why: an exhaustive match, so a new [`Command`] variant fails to compile
+    /// until someone decides whether it needs a key. That is the same
+    /// enforcement `crate::cli`'s match over `Command` already provides for CLI
+    /// reachability — a rule the build checks rather than one to remember.
+    /// What: [`CredentialNeed::Required`] for the two capabilities that run
+    /// inference; [`CredentialNeed::Environment`] for the two that handle a key
+    /// without needing to obtain one; [`CredentialNeed::None`] for the rest.
+    /// Test: `super::session_tests::only_the_inference_capabilities_need_a_credential`.
+    pub fn credential_need(&self) -> CredentialNeed {
+        match self {
+            // The sweep and the chain both hand the key to a `tga audit` child.
+            Self::Run(_) | Self::Audit(_) => CredentialNeed::Required,
+            // `package` scans the deliverable for the key that was in play, and
+            // `distribute` writes one into the config it generates. Neither may
+            // prompt: packaging must not stop to ask, and the auditor running
+            // `distribute` supplies a key through the environment or the
+            // template, which is the contract #5825 set.
+            Self::Package { .. } | Self::Distribute(_) => CredentialNeed::Environment,
+            Self::Guided
+            | Self::WorkDir
+            | Self::Manifest
+            | Self::Tools
+            | Self::InstallTools
+            | Self::Repos
+            | Self::DiscoverRepos
+            | Self::CloneRepos { .. }
+            | Self::AddTarget { .. }
+            | Self::ListTargets
+            | Self::RemoveTarget { .. } => CredentialNeed::None,
+        }
+    }
 }
 
 /// The working directory's layout, as reported to a front end.
@@ -292,11 +352,6 @@ impl Outcome {
     }
 }
 
-/// The real environment lookup every shipped [`Session`] holds.
-fn read_environment(name: &str) -> Option<String> {
-    std::env::var(name).ok()
-}
-
 /// One audit engagement, rooted at a working directory.
 ///
 /// Why: the front ends share this and nothing else.
@@ -314,17 +369,27 @@ pub struct Session {
     auto_install: bool,
     /// Which `gh` invocations a repository registration runs (#5822).
     repo_probe: validate::RepoProbe,
-    /// How [`Session::distribute`] reads the operator's environment (#5825).
+    /// The credential the FRONT END resolved, when it resolved one (#5868).
     ///
-    /// A `fn` pointer, and for the same two reasons
-    /// [`validate::RepoProbe`] is one: `Session` stays `Debug + Clone + Copy`-able
-    /// without a manual impl, and the lookup becomes a value a test supplies. A
-    /// test that reached `std::env::var` instead would write whatever key the
-    /// developer exports into a zip on disk, and could assert nothing about
-    /// which source the key came from — because both sources look alike from
-    /// outside. `std::env::set_var` is not the alternative: it is `unsafe` in
-    /// edition 2024 and races every other thread in a parallel test binary.
-    credential_env: fn(&str) -> Option<String>,
+    /// Why: this replaced the `fn(&str) -> Option<String>` environment lookup
+    /// #5825 introduced. That seam could only ever read the process
+    /// environment, and first-run entry adds two more sources — an existing
+    /// engagement config and a `/dev/tty` prompt. Keeping the lookup AND adding
+    /// a resolved value would leave two ways for a credential to reach the same
+    /// code, free to disagree about precedence, so the lookup is gone:
+    /// `Session` now takes the ANSWER rather than a way to find one. That is
+    /// also what keeps [`Session::execute`] terminal-free, which the Tauri
+    /// shell (#5477) and the TUI after it both depend on.
+    ///
+    /// It is still the value a test supplies rather than a global it reads, so
+    /// #5825's guarantee is unchanged: `cargo test` cannot write a developer's
+    /// exported `OPENROUTER_API_KEY` into a zip on disk.
+    /// What: `None` means the front end resolved nothing, and every capability
+    /// behaves as it did before — `distribute` falls back to its template's
+    /// key, `run` and `audit` to the engagement config's.
+    /// Test: `super::session_tests::a_credential_in_the_environment_is_the_one_packaged`,
+    /// `super::session_tests::a_supplied_credential_beats_the_configs_own`.
+    credential: Option<SecretKey>,
     /// Where live progress goes while a long capability runs (#5823).
     ///
     /// A field rather than a parameter on [`Session::execute`] because progress
@@ -353,7 +418,7 @@ impl Session {
             config_path,
             auto_install: true,
             repo_probe: validate::RepoProbe::real(),
-            credential_env: read_environment,
+            credential: None,
             progress: Progress::none(),
         }
     }
@@ -375,25 +440,27 @@ impl Session {
         self
     }
 
-    /// Read the packaging credential from `lookup` rather than the process
-    /// environment.
+    /// Run with the credential the front end resolved (#5868).
     ///
-    /// Why: #5825 — `distribute` chooses between an environment key and the
-    /// template's, and neither branch was provable while the source was a
-    /// global. Worse, the branch that was NOT provable is the one that writes a
-    /// live credential into a zip: a developer with `OPENROUTER_API_KEY`
-    /// exported (which `docs/reference/environment-variables.md` tells them to
-    /// do for `tga audit`) had their real key packaged by the test suite.
-    /// `#[cfg(test)]` because it is the injection seam for that proof and
-    /// nothing else — a shipped build reads the environment and only the
-    /// environment, so [`Session::execute`] stays the one door a front end gets.
-    /// What: replaces the lookup [`Session::distribute`] calls.
-    /// Test: `super::session_tests::a_credential_in_the_environment_is_the_one_packaged`,
-    /// `super::session_tests::no_credential_in_the_environment_packages_the_templates`.
-    #[cfg(test)]
+    /// Why: `pub`, unlike the `#[cfg(test)]` lookup it replaced, because a real
+    /// front end now has something to say here. The CLI resolves
+    /// `OPENROUTER_API_KEY`, then the engagement config, then a `/dev/tty`
+    /// prompt (`crate::cli::credential`) and hands the ANSWER across this
+    /// boundary; the Tauri shell will resolve it its own way and use the same
+    /// setter. What must not cross is a way to ASK — [`Session::execute`] has
+    /// no terminal and must never acquire one.
+    ///
+    /// This is the only way a credential reaches `Session`. Passing `None`
+    /// leaves each capability on the fallback it had before: `distribute` on
+    /// its template's key, `run` and `audit` on the engagement config's.
+    /// What: stores the key. A blank one is not special-cased here —
+    /// [`Session::engagement_config`] refuses it, so every front end gets that
+    /// check rather than only the one that remembered to make it.
+    /// Test: `super::session_tests::a_supplied_credential_beats_the_configs_own`,
+    /// `super::session_tests::a_credential_in_the_environment_is_the_one_packaged`.
     #[must_use]
-    pub(crate) fn with_credential_env(mut self, lookup: fn(&str) -> Option<String>) -> Self {
-        self.credential_env = lookup;
+    pub fn with_credential(mut self, credential: Option<SecretKey>) -> Self {
+        self.credential = credential;
         self
     }
 
@@ -642,7 +709,12 @@ impl Session {
     /// Test: `super::session_tests::packaging_before_any_sweep_is_refused`,
     /// `super::session_tests::packaging_an_unfinished_sweep_is_refused`.
     fn package(&self, destination: Option<PathBuf>) -> Result<ReturnPackage, AuditError> {
-        let config = EngagementConfig::load(&self.config_path)?;
+        // #5868: through `engagement_config` so the outbound credential scan
+        // looks for the key the sweep actually used. `package::from_checkpoint`
+        // refuses a deliverable containing `config.openrouter_key`; with an
+        // environment key in play, loading the config directly would scan for
+        // the wrong bytes and let the real one through.
+        let config = self.engagement_config()?;
         let destination = destination.unwrap_or_else(|| package::default_destination(&self.work));
         // No unattempted targets: the standalone verb packages whatever the last
         // sweep recorded and knows nothing about a registry (#5824).
@@ -655,7 +727,7 @@ impl Session {
     /// and `auto_install` is forwarded so `--no-install` means the same thing on
     /// the chained path as on the four separate ones.
     async fn audit(&self, options: &ChainOptions) -> Result<ChainReport, AuditError> {
-        let config = EngagementConfig::load(&self.config_path)?;
+        let config = self.engagement_config()?;
         chain::audit(
             &self.work,
             &config,
@@ -675,30 +747,66 @@ impl Session {
     /// instructions, the pins and the labels, and the credential that reaches
     /// the generated copy is preferably one that was never written down.
     ///
-    /// The credential is read from the environment HERE, at the one place that
-    /// has to touch it, rather than inside [`distribute::assemble`]. That keeps
-    /// the assembly function pure — its tests never mutate a global every other
-    /// test in the binary shares — and it is the same division `main.rs`
-    /// already uses for `TRUSTY_AUDIT_WORKDIR`. No CLI flag carries the key:
-    /// argv is world-readable through `ps` and lands in shell history.
-    /// What: resolves the key through [`Session::credential_env`], then hands
-    /// off. Everything else — validation, the fail-open guards, the zip — is
-    /// [`distribute::assemble`]'s.
+    /// The credential is resolved by the FRONT END rather than inside
+    /// [`distribute::assemble`]. That keeps the assembly function pure — its
+    /// tests never mutate a global every other test in the binary shares — and
+    /// it is the same division `main.rs` already uses for
+    /// `TRUSTY_AUDIT_WORKDIR`. No CLI flag carries the key: argv is
+    /// world-readable through `ps` and lands in shell history.
+    /// What: hands [`Session::credential`] straight through. Everything else —
+    /// validation, the fail-open guards, the zip, and the fallback to the
+    /// template's own key when nothing was supplied — is
+    /// [`distribute::assemble`]'s and is unchanged.
     /// Test: `super::session_tests::distributing_without_a_template_is_refused`,
     /// `super::session_tests::a_credential_in_the_environment_is_the_one_packaged`,
     /// `super::session_tests::no_credential_in_the_environment_packages_the_templates`,
     /// `crate::distribute::distribute_tests`.
     fn distribute(&self, options: &DistributeOptions) -> Result<InstallPackage, AuditError> {
-        // #5825: the injected lookup, never `std::env::var` inline — a test that
-        // reached the live environment would package the developer's own key.
-        let supplied =
-            (self.credential_env)(run::ENV_INFERENCE_CREDENTIAL).map(crate::config::SecretKey::new);
         distribute::assemble(
             &self.config_path,
             options,
-            supplied.as_ref(),
+            self.credential.as_ref(),
             &self.progress,
         )
+    }
+
+    /// The engagement config, with the front end's credential applied.
+    ///
+    /// Why: two things have to be true before a sweep starts, and both are
+    /// decided once here so `run`, `audit` and `package` cannot disagree.
+    /// `OPENROUTER_API_KEY` must BEAT the config's own key (#5868) — before
+    /// this, `run` passed the config's key to the `tga audit` child
+    /// unconditionally, so an exported variable was silently ignored. And the
+    /// key that ends up in play must not be blank: a blank one is not a
+    /// refusal anywhere downstream, it is
+    /// [`crate::inference::inference_env`] returning NO variables, the child
+    /// running without its `TRUSTY_REVIEW_*` selection, and `trusty-review`
+    /// falling back to a provider nobody chose — discovered hours later at the
+    /// report stage, or not at all.
+    ///
+    /// The check lives on `Session` rather than in the CLI prompt because the
+    /// Tauri shell reaches this same code and must not be able to skip it.
+    /// What: loads the config, overwrites `openrouter_key` when this session
+    /// carries a resolved credential, then refuses a blank result.
+    /// Test: `super::session_tests::a_supplied_credential_beats_the_configs_own`,
+    /// `super::session_tests::a_blank_configured_key_refuses_before_the_sweep`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`EngagementConfig::load`] failed with, and
+    /// [`AuditError::BlankCredential`] when no usable key is in play.
+    fn engagement_config(&self) -> Result<EngagementConfig, AuditError> {
+        let mut config = EngagementConfig::load(&self.config_path)?;
+        if let Some(credential) = &self.credential {
+            config.openrouter_key = credential.clone();
+        }
+        if config.openrouter_key.is_empty() {
+            return Err(AuditError::BlankCredential {
+                config: self.config_path.clone(),
+                env: run::ENV_INFERENCE_CREDENTIAL,
+            });
+        }
+        Ok(config)
     }
 
     /// Read the engagement's key and pins, then sweep the selected repositories.
@@ -708,7 +816,7 @@ impl Session {
     /// an absent config is a refusal rather than a run that will fail an hour in
     /// (#5555).
     async fn run(&self, options: &RunOptions) -> Result<RunReport, AuditError> {
-        let config = EngagementConfig::load(&self.config_path)?;
+        let config = self.engagement_config()?;
         // #5797: the sweep's own preflight refuses over a tool that is missing,
         // unverified, or off the pin. Auto-install closes exactly that set
         // first, using the same three conditions, so the operator does not run
@@ -1066,17 +1174,20 @@ trusty-review = "0.0.0-never-published"
         text
     }
 
-    /// Assemble an install package through `execute`, with `lookup` standing in
-    /// for the operator's environment.
+    /// Assemble an install package through `execute`, with `credential`
+    /// standing in for what the front end resolved.
     ///
-    /// Nothing here reads the real environment. That is the point: a developer
-    /// with `OPENROUTER_API_KEY` exported must not have their own credential
-    /// written into a zip by `cargo test`.
+    /// Nothing here reads the real environment. That is the point, and #5868
+    /// did not weaken it: a developer with `OPENROUTER_API_KEY` exported must
+    /// not have their own credential written into a zip by `cargo test`. What
+    /// changed is only the shape of the seam — the `fn(&str) -> Option<String>`
+    /// lookup became the resolved value it would have produced, because the
+    /// front end now resolves it from three sources rather than one.
     async fn distribute_through_execute(
         tmp: &Path,
-        lookup: fn(&str) -> Option<String>,
+        credential: Option<SecretKey>,
     ) -> InstallPackage {
-        let session = session_with_config(tmp, UNPUBLISHABLE_CONFIG).with_credential_env(lookup);
+        let session = session_with_config(tmp, UNPUBLISHABLE_CONFIG).with_credential(credential);
         let binary = tmp.join("taudit-fixture");
         std::fs::write(&binary, b"bytes to copy").expect("write binary");
 
@@ -1099,7 +1210,7 @@ trusty-review = "0.0.0-never-published"
     #[tokio::test]
     async fn distributing_builds_a_package_from_the_template_config() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let package = distribute_through_execute(tmp.path(), |_| None).await;
+        let package = distribute_through_execute(tmp.path(), None).await;
 
         assert_eq!(
             package.path,
@@ -1123,10 +1234,10 @@ trusty-review = "0.0.0-never-published"
     #[tokio::test]
     async fn a_credential_in_the_environment_is_the_one_packaged() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let package = distribute_through_execute(tmp.path(), |name| {
-            (name == run::ENV_INFERENCE_CREDENTIAL)
-                .then(|| "sk-or-v1-from-the-environment".to_owned())
-        })
+        let package = distribute_through_execute(
+            tmp.path(),
+            Some(SecretKey::new("sk-or-v1-from-the-environment")),
+        )
         .await;
 
         assert!(package.key_from_environment);
@@ -1140,7 +1251,7 @@ trusty-review = "0.0.0-never-published"
     #[tokio::test]
     async fn no_credential_in_the_environment_packages_the_templates() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let package = distribute_through_execute(tmp.path(), |_| None).await;
+        let package = distribute_through_execute(tmp.path(), None).await;
 
         assert!(!package.key_from_environment);
         let config = package_member(&package.path, "trusty-audit/engagement.toml");

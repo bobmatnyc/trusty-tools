@@ -23,6 +23,8 @@
 //! for every state file under the root: `state/selected-repos.toml`
 //! (`crate::run`) and `state/audit-targets.toml` (`crate::registry`) both go
 //! through it, so the temp-file-then-rename discipline is decided once (#5822).
+//! [`write_private_atomically`] is the same writer at mode 0600, for the one
+//! file that carries a credential (#5868).
 //! Test: `super::layout_tests`.
 //!
 //! ## Open questions, recorded rather than resolved (#5502)
@@ -242,6 +244,38 @@ impl WorkDir {
 /// [`AuditError::WorkDir`] naming the directory, the temporary file, or the
 /// target, depending on which step failed.
 pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<(), AuditError> {
+    write_with_mode(path, text, None)
+}
+
+/// Write a file only its owner can read, without ever tearing it.
+///
+/// Why: `engagement.toml` carries the OpenRouter credential, and the first-run
+/// prompt persists it there (#5868). Under a default 022 umask the plain writer
+/// above leaves that file 0644 — readable by every account on the machine,
+/// which on a client's shared build host is the whole exposure. The recipient
+/// did not choose the mode and should not have to know to check it.
+/// What: [`write_atomically`] with the temporary file created at 0600. The mode
+/// is applied to the TEMPORARY file, before the rename, so the credential is
+/// never observable at the target path through a wider mode — not even for the
+/// instant between two syscalls.
+/// Test: `super::layout_tests::a_private_write_is_owner_only_and_still_atomic`.
+///
+/// # Errors
+///
+/// As [`write_atomically`].
+pub(crate) fn write_private_atomically(path: &Path, text: &str) -> Result<(), AuditError> {
+    write_with_mode(path, text, Some(OWNER_ONLY))
+}
+
+/// Mode a file holding a credential is created with: owner read/write, nothing else.
+#[cfg(unix)]
+const OWNER_ONLY: u32 = 0o600;
+/// Windows has no mode bits; the constant exists so the signature is uniform.
+#[cfg(not(unix))]
+const OWNER_ONLY: u32 = 0;
+
+/// The shared temp-file-then-rename writer. See [`write_atomically`].
+fn write_with_mode(path: &Path, text: &str, mode: Option<u32>) -> Result<(), AuditError> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|source| AuditError::WorkDir {
         path: dir.to_path_buf(),
@@ -250,7 +284,7 @@ pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<(), AuditError
 
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     let temp = path.with_file_name(format!("{file_name}.{}.tmp", writer_tag()));
-    std::fs::write(&temp, text).map_err(|source| AuditError::WorkDir {
+    write_temp(&temp, text, mode).map_err(|source| AuditError::WorkDir {
         path: temp.clone(),
         source,
     })?;
@@ -261,6 +295,36 @@ pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<(), AuditError
             source,
         }
     })
+}
+
+/// Create the temporary file holding `text`, at `mode` when one is asked for.
+///
+/// `OpenOptions::mode` decides the permissions the file is CREATED with, so
+/// there is no window in which it exists at the umask's default. The explicit
+/// `set_permissions` afterwards covers the one case `mode` does not: a
+/// leftover temporary from a crashed writer whose tag this one reused, which
+/// `create` opens rather than creates and therefore leaves at its old mode.
+#[cfg(unix)]
+fn write_temp(temp: &Path, text: &str, mode: Option<u32>) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    if let Some(mode) = mode {
+        options.mode(mode);
+    }
+    let mut file = options.open(temp)?;
+    if let Some(mode) = mode {
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    }
+    file.write_all(text.as_bytes())
+}
+
+/// See the unix arm. Windows carries no mode bits, so the request is dropped.
+#[cfg(not(unix))]
+fn write_temp(temp: &Path, text: &str, _mode: Option<u32>) -> std::io::Result<()> {
+    std::fs::write(temp, text)
 }
 
 /// A suffix no two concurrent writers share: process, plus thread within it.
@@ -347,6 +411,39 @@ mod layout_tests {
         );
         let leftovers: Vec<PathBuf> = std::fs::read_dir(tmp.path().join("state"))
             .expect("read state")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// #5868: the file the credential lands in is owner-only, and it gets there
+    /// through the same untearable rename as every other state file. Both
+    /// halves matter — a 0600 file written non-atomically is still a file a
+    /// reader can catch half-written.
+    #[cfg(unix)]
+    #[test]
+    fn a_private_write_is_owner_only_and_still_atomic() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("engagement.toml");
+
+        // Land on an existing world-readable file: the mode must be replaced,
+        // not inherited, because that is the shape a hand-edited config has.
+        std::fs::write(&target, "openrouter_key = \"\"\n").expect("seed");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        write_private_atomically(&target, "openrouter_key = \"sk-or-v1-x\"\n").expect("write");
+
+        let mode = std::fs::metadata(&target).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("reads"),
+            "openrouter_key = \"sk-or-v1-x\"\n"
+        );
+        let leftovers: Vec<PathBuf> = std::fs::read_dir(tmp.path())
+            .expect("read dir")
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|e| e == "tmp"))
             .collect();
