@@ -1,0 +1,159 @@
+# #5200: nothing in CI ran `website/`'s Vitest suite — this workflow does.
+#
+# The gap this closes: `scripts/detect-docs-only.sh` buckets `website/**` as
+# inert (same as `docs/**`) on the strength of a comment claiming the site
+# "builds and lints under its own workflow". That workflow did not exist, so a
+# website-only PR set `docs_only=true`, `ci.yml`'s `Test` job skipped, and the
+# `ui-checks` matrix — the only pnpm surface in `ci.yml` — never listed
+# `website/`. Every website PR merged on a green that tested nothing.
+#
+# WHY A SEPARATE WORKFLOW, not a ninth leg on `ci.yml`'s `ui-checks` matrix:
+# every step in that matrix is gated on `needs.changes.outputs.docs_only !=
+# 'true'`, and `website/**` IS `docs_only` by that classifier's own rule. A
+# website leg bolted onto that matrix would skip on exactly the PRs it exists
+# to check. Its own workflow with its own `paths:` filter inverts that — it
+# runs when `website/` changes and stays quiet otherwise.
+#
+# TRIGGER PATHS — derived from what the suite READS, not from Vercel's
+# rebuild set. The two overlap but are not the same list:
+#   website/**                        the suite and its sources
+#   docs/**                           `docs/public-manifest.tsv` drives the
+#                                     `/docs/**` routes `build-smoke.test.ts`
+#                                     asserts exist; a PAGE row naming a
+#                                     missing file fails the build
+#   Cargo.toml                        `site.test.ts` pins the advertised MSRV
+#                                     to `rust-version`
+#   crates/*/Cargo.toml               `site.test.ts` / `tools.test.ts` assert
+#                                     every advertised crate exists and its
+#                                     version matches
+#   crates/*/CHANGELOG.md             `changelog/parse.test.ts` and
+#                                     `changelog/site.test.ts` parse the real
+#                                     six-crate corpus
+#   .../commands/stable_set.rs        `site.test.ts` pins `STABLE_SET` to the
+#                                     Rust declaration
+#   .../download/platform.rs          `site.test.ts` pins the platform list to
+#                                     the Tier-1 triples
+#
+# `Cargo.lock` is in Vercel's rebuild set and deliberately NOT here: nothing
+# in the build or the suite reads it. The two `trusty-installer` source files
+# are here and NOT in Vercel's set — they are test inputs, not build inputs,
+# and a change to either is exactly what broke this suite on 2026-08-16
+# (commit 819f55cc9 took `StableMember::new(` from 7 occurrences to 9).
+#
+# PNPM — the version is READ from `website/package.json`'s `packageManager`
+# field rather than hardcoded, then asserted after install. `ui-checks` pins
+# `version: 9`, which floats across the 9.x line; `website/` pins the exact
+# `pnpm@9.15.9`, and a shell at the repo root has no pin at all. Parsing the
+# field keeps one source of truth, and the assertion makes a mis-resolution
+# fail loudly instead of running the suite under some other pnpm.
+#
+# NODE 20 — `website/` declares no `engines` field and has no `.nvmrc`. 20 is
+# the version every sibling workflow uses AND the lowest one all three
+# floors accept: vitest 4 wants `^20 || ^22 || >=24`, vite 6 wants
+# `^18 || ^20 || >=22`, SvelteKit 2 wants `>=18.13`.
+#
+# CHROMIUM — `tests/mobile-overflow.test.ts` launches a real browser to
+# measure `scrollWidth`; jsdom has no layout engine and cannot. That file's
+# header assumes a browser already cached by `crates/trusty-agents/ui`'s
+# Playwright install, which is a developer-machine assumption — an ephemeral
+# runner has nothing cached, so this installs it explicitly.
+name: Website tests
+
+on:
+  push:
+    branches: [main]
+    # Duplicated verbatim under `pull_request` below: GitHub Actions does not
+    # expand YAML anchors in workflow files, so the two lists are kept in sync
+    # by hand — same as token-drift.yml.
+    paths:
+      - "website/**"
+      - "docs/**"
+      - "Cargo.toml"
+      - "crates/*/Cargo.toml"
+      - "crates/*/CHANGELOG.md"
+      - "crates/trusty-installer/src/commands/stable_set.rs"
+      - "crates/trusty-installer/src/download/platform.rs"
+      - ".github/workflows/website-tests.yml"
+  pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks — PR #3838 did exactly that.
+    # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+    paths:
+      - "website/**"
+      - "docs/**"
+      - "Cargo.toml"
+      - "crates/*/Cargo.toml"
+      - "crates/*/CHANGELOG.md"
+      - "crates/trusty-installer/src/commands/stable_set.rs"
+      - "crates/trusty-installer/src/download/platform.rs"
+      - ".github/workflows/website-tests.yml"
+
+# Per-COMMIT concurrency group on push so a merge never cancels the previous
+# merge's verification (#4179); per-ref group on pull_request so a new push
+# still supersedes the superseded run. Matches ci.yml / token-drift.yml.
+concurrency:
+  group: website-tests-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  website-tests:
+    name: Vitest (unit + smoke)
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    # The `smoke` project shells out to a real `vite build` twice (once per
+    # `tests/**` file, `fileParallelism: false`) and then drives Chromium over
+    # the output. ~4 min on an M-series laptop; 20 leaves headroom on a
+    # slower hosted runner without letting a hang burn a full hour.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read the pinned pnpm version from website/package.json
+        id: pin
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([0-9][0-9.]*\).*/\1/p' website/package.json)"
+          if [ -z "$version" ]; then
+            echo "::error::no pnpm@<version> found in website/package.json packageManager" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.pin.outputs.version }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: website/pnpm-lock.yaml
+
+      - name: Verify the resolved pnpm is the pinned one
+        run: |
+          set -euo pipefail
+          resolved="$(pnpm --version)"
+          expected="${{ steps.pin.outputs.version }}"
+          if [ "$resolved" != "$expected" ]; then
+            echo "::error::pnpm $resolved resolved, but website/package.json pins $expected" >&2
+            exit 1
+          fi
+          echo "pnpm $resolved matches the pin"
+
+      - name: Install dependencies
+        working-directory: website
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium for the mobile-overflow smoke test
+        working-directory: website
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run the website test suite
+        working-directory: website
+        run: pnpm run test

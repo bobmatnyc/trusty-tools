@@ -551,10 +551,16 @@ the Root Directory", and the Ignored Build Step are configured in the Vercel
 dashboard only — dashboard drift leaves no trace in git. Setup and the full
 path table: [website/README.md](website/README.md).
 
-🔴 Website tests do not run in CI (#5200). Run them by hand: `pnpm test` from
-INSIDE `website/` — pnpm is pinned there (`packageManager` field); a shell at
-the repo root has no such pin and its resolved pnpm can require a Node version
-newer than what's installed.
+🟡 Website tests run in CI under `.github/workflows/website-tests.yml` (#5200) —
+its own workflow, not a leg on `ci.yml`'s `ui-checks` matrix, because
+`scripts/detect-docs-only.sh` buckets `website/**` as docs-only and every
+`ui-checks` step is gated on `docs_only != 'true'`; a leg there would skip on
+exactly the PRs it exists to check. Still run them by hand before pushing:
+`pnpm test` from INSIDE `website/` — pnpm is pinned there (`packageManager`
+field); a shell at the repo root has no such pin and its resolved pnpm can
+require a Node version newer than what's installed. The workflow runs Node 20;
+a newer local Node can report spurious `localStorage` failures in
+`theme.test.ts`.
 
 ## Common Pitfalls — Quick Checklist
 
