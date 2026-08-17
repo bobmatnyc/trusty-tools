@@ -625,8 +625,17 @@ async fn await_settled() {
 ///
 /// Why: `spawn_on_stop` detaches the removal onto a task, so the assertion has
 /// to wait on the condition rather than on a fixed sleep.
+///
+/// The budget is 60 s and not the 10 s it started at. One reap shells out to
+/// `git status`, `git worktree remove` and a system-wide `lsof` that costs about
+/// a second on an idle machine; inside a 5000-test parallel run competing with
+/// other builds it costs far more. At 10 s these tests passed alone and failed
+/// in the full suite — a timing artifact, not a reap that declined. A correct
+/// implementation still finishes in well under a second, so a wider budget
+/// costs a passing run nothing and only changes how long a genuine failure
+/// takes to report.
 async fn await_gone(path: &std::path::Path) {
-    for _ in 0..100 {
+    for _ in 0..600 {
         if !path.exists() {
             return;
         }
