@@ -1,0 +1,60 @@
+# Gate for the trusty-audit self-downloading installer (#5870).
+#
+# Why: `crates/trusty-audit/install.sh` is served over `curl … | sh`, so a
+# defect in it runs unreviewed on an operator's machine at a client site. It is
+# also invisible to every Rust gate in this repo — `cargo clippy` and the test
+# shards never look at a shell script — so without this workflow it would ship
+# with no mechanical check at all.
+#
+# What: three gates, cheapest first. `sh -n` catches syntax, `shellcheck`
+# catches lint, and the selftest drives every failure arm against stubbed
+# `curl`/`uname` with no network and no real release.
+#
+# NOTE: this is not a required status check, so it reports rather than blocks.
+# A red run on `main` is folded into the `ci-red-main` tracking issue by
+# `ci.yml`'s `notify-main-failure` job like any other failure.
+
+name: trusty-audit installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/trusty-audit/install.sh"
+      - "scripts/check_trusty_audit_install_selftest.sh"
+      - ".github/workflows/trusty-audit-install.yml"
+  pull_request:
+    paths:
+      - "crates/trusty-audit/install.sh"
+      - "scripts/check_trusty_audit_install_selftest.sh"
+      - ".github/workflows/trusty-audit-install.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer-gates:
+    name: install.sh syntax, lint, selftest
+    # macOS runner: the script is macOS-only and the selftest's fixtures use
+    # `shasum`, the tool the script itself selects on a stock Mac. Running the
+    # gate on the platform the script targets is the point.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: POSIX syntax check
+        run: sh -n crates/trusty-audit/install.sh
+
+      - name: ShellCheck
+        run: |
+          brew install shellcheck
+          shellcheck --shell=sh crates/trusty-audit/install.sh
+
+      # The selftest itself is bash (it needs arrays and `[[ ]]`); the script
+      # under test stays POSIX sh, which is what the `sh -n` gate above proves.
+      - name: ShellCheck the selftest
+        run: shellcheck --shell=bash scripts/check_trusty_audit_install_selftest.sh
+
+      - name: Installer selftest (every failure arm)
+        run: bash scripts/check_trusty_audit_install_selftest.sh
