@@ -1001,7 +1001,7 @@ fn registered_root_from_response(body: &str) -> Option<String> {
 /// then had every query answered from the OTHER tree, with no error and no
 /// warning. The response now carries the registered `root_path` and a mismatch
 /// downgrades the verdict to `NotConfirmed`.
-/// Test: `ensure_project_indexed_returns_derived_id_when_daemon_down`
+/// Test: `ensure_project_indexed_withholds_id_when_nothing_was_registered`
 /// (daemon-down path), `registered_root_from_response_*` (the body contract),
 /// `create_index_response_for_a_different_tree_is_not_confirmed` (the error arm).
 fn best_effort_create_index(
@@ -1098,7 +1098,7 @@ fn best_effort_create_index(
 /// `index_is_fresh_false_when_last_indexed_missing_or_malformed`; the live-HTTP
 /// trigger path is exercised the same way `best_effort_create_index` is
 /// (daemon-down graceful path via
-/// `ensure_project_indexed_returns_derived_id_when_daemon_down`).
+/// `ensure_project_indexed_withholds_id_when_nothing_was_registered`).
 fn best_effort_trigger_reindex(base: &str, index_id: &str) {
     let status_url = format!("{base}/indexes/{index_id}/status");
     let reindex_url = format!("{base}/indexes/{index_id}/reindex");

@@ -259,8 +259,6 @@ pub(super) async fn create_index_handler(
     // readiness check further down so even a `503` answer is not issued about an
     // id whose fate is still being decided.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&id).await;
-    let handles = state.registry.list_handles();
-    let cold_entries = state.cold_store.snapshot();
     // The id is already taken. Registration was ASYMMETRIC here: a request for a
     // registered TREE under a new id was refused (#2336, #3993), but a request
     // for a registered ID over a different tree was accepted with
@@ -294,8 +292,10 @@ pub(super) async fn create_index_handler(
             "created": false,
             "reason": "already exists",
             // Reported so the caller can verify which tree it was joined to
-            // rather than inferring success from a 2xx alone.
-            "root_path": registered_root,
+            // rather than inferring success from a 2xx alone. Lossy for the
+            // same reason as `root_path_mismatch_response` — serializing a raw
+            // `Path` through `json!` panics on a non-UTF-8 path (#5827).
+            "root_path": registered_root.display().to_string(),
         }))
         .into_response();
     }
@@ -314,6 +314,16 @@ pub(super) async fn create_index_handler(
     // race required (the cold entry just sat parked); the collision only
     // surfaced later, and on the wrong side, when the cold entry's first
     // query hit `restore_index_on_demand`'s live-handle check.
+    //
+    // #5827: read BELOW the id-already-registered early returns above, not
+    // beside the teardown guard. `list_handles` Arc-clones every live handle
+    // and `snapshot` deep-clones every cold `PersistedIndex` (tens to low
+    // hundreds of entries), and an idempotent same-tree re-registration —
+    // which every session launch performs — returns without reading either.
+    // Reading them here also keeps the snapshot→use window as narrow as it
+    // can be, which is what #2336/#3993 hardened.
+    let handles = state.registry.list_handles();
+    let cold_entries = state.cold_store.snapshot();
     if let Some(existing_id) =
         find_root_path_collision(&handles, &cold_entries, &req.root_path, Some(&id))
     {
@@ -706,6 +716,14 @@ pub(super) async fn create_index_handler(
     // (a concurrent residency-sweep park's) freshly-and-legitimately-inserted
     // cold entry instead of this id's own stale leftover.
     let cold_entry_before_register = state.cold_store.entry_token(&id);
+    // #5827: capture the parked root alongside the identity token, because the
+    // reap below is the one path that re-binds an id to a different tree
+    // WITHOUT a 409. The mismatch guard above catches only a LIVE handle; an id
+    // whose sole claim is a cold record is reaped and re-registered at the new
+    // root by design (#3993 round 3's recreate-after-move path), and until now
+    // it left no signal at all. `entry_token` returns an opaque `Arc<()>`, so
+    // the root has to be read separately.
+    let cold_root_before_register = state.cold_store.get_persisted(&id).map(|p| p.root_path);
     let registered = state.registry.register(handle);
     // Issue #3993 review round 3 (HIGH): `id` is now live at `req.root_path`
     // (which may be a BRAND NEW root, distinct from wherever `id` was last
@@ -738,6 +756,24 @@ pub(super) async fn create_index_handler(
     state
         .cold_store
         .mark_loaded_if(&id, cold_entry_before_register);
+    // #5827: the tree changed under a reused id and no 409 was raised, because
+    // the record backing the old tree was cold rather than resident. That is
+    // deliberate — nothing was serving the old tree, so there is no wrong
+    // answer to prevent — but it is also the one case the mismatch guard does
+    // not cover, so say so rather than leave it silent. Naming both roots is
+    // what makes a wrongly-recreated index diagnosable after the fact.
+    if let Some(cold_root) =
+        cold_root_before_register.filter(|old| !identifies_same_root(old, &registered.root_path))
+    {
+        tracing::warn!(
+            "create_index: '{}' was parked cold at {} and is now registered at {} — the id \
+             was re-bound to a different tree (no live handle was serving the old root, so \
+             this is the #3993 recreate-after-move path, not a refusal)",
+            req.id,
+            cold_root.display(),
+            registered.root_path.display(),
+        );
+    }
     // Issue #1621 (epic #1619 WI-2): start the filesystem watcher for the
     // freshly-registered index so saves trigger incremental indexing without a
     // manual reindex. No-op when disabled (`TRUSTY_DISABLE_WATCHER=1`) or when

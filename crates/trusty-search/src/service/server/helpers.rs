@@ -423,15 +423,6 @@ pub(crate) fn identifies_same_root(a: &std::path::Path, b: &std::path::Path) -> 
     trusty_common::index_id::identifies_same_path(a, b)
 }
 
-/// Build a `409 Conflict` response naming the index that already owns
-/// `root_path` (issue #2336).
-///
-/// Why: the caller must be told WHICH existing index it collided with so it
-/// can decide whether to reuse that index, delete it first, or pick a
-/// distinct root — a bare 409 with no context forces the operator to
-/// cross-reference `GET /indexes?details=true` by hand.
-/// What: `409 { "error": "...", "existing_id": "..." }`.
-/// Test: see `find_root_path_collision` test list above.
 /// Build a `409 Conflict` for a `POST /indexes` that reused a registered id
 /// while naming a DIFFERENT directory tree.
 ///
@@ -448,7 +439,8 @@ pub(crate) fn identifies_same_root(a: &std::path::Path, b: &std::path::Path) -> 
 /// Both roots are named because the caller cannot otherwise tell which of its
 /// checkouts it just collided with.
 /// Test: `create_index_same_id_different_root_is_refused`,
-/// `create_index_same_id_same_root_still_reports_already_exists` in
+/// `create_index_same_id_same_root_still_reports_already_exists`,
+/// `create_index_same_id_different_root_still_reaps_a_cold_entry` in
 /// `tests_same_id_root_mismatch.rs`.
 pub(super) fn root_path_mismatch_response(
     index_id: &IndexId,
@@ -467,13 +459,28 @@ pub(super) fn root_path_mismatch_response(
                 requested.display(),
             ),
             "index_id": index_id.0,
-            "registered_root_path": registered,
-            "requested_root_path": requested,
+            // #5827: `json!` on a non-literal expands to `to_value(..).unwrap()`,
+            // and serde's `Serialize for Path` ERRORS on a non-UTF-8 path — so
+            // serializing a raw `&Path` here panics the handler for a canonical
+            // root reached through a symlink to a non-UTF-8 target, which
+            // `validate_root_path` does not reject. The lossy form is what the
+            // sibling builders above and in `indexes_relocate.rs` already use.
+            "registered_root_path": registered.display().to_string(),
+            "requested_root_path": requested.display().to_string(),
         })),
     )
         .into_response()
 }
 
+/// Build a `409 Conflict` response naming the index that already owns
+/// `root_path` (issue #2336).
+///
+/// Why: the caller must be told WHICH existing index it collided with so it
+/// can decide whether to reuse that index, delete it first, or pick a
+/// distinct root — a bare 409 with no context forces the operator to
+/// cross-reference `GET /indexes?details=true` by hand.
+/// What: `409 { "error": "...", "existing_id": "..." }`.
+/// Test: see `find_root_path_collision`'s test list above.
 pub(super) fn root_path_collision_response(
     existing_id: &IndexId,
     root_path: &std::path::Path,
