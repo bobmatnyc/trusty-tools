@@ -4,6 +4,7 @@
 //! under the 500-SLOC cap.
 
 use super::*;
+use crate::session::TranscriptRecord;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
@@ -1060,7 +1061,7 @@ fn durable_project_root() -> &'static std::path::Path {
 /// `task.run`s on one session rather than being rebuilt per run.
 #[tokio::test]
 async fn memory_sink_for_reuses_the_same_sink_across_calls() {
-    let registry = SessionRegistry::new();
+    let registry = Arc::new(SessionRegistry::new());
     let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let first = registry
@@ -1105,7 +1106,7 @@ async fn memory_sink_for_unresolvable_palace_returns_no_sink() {
     )
     .unwrap();
 
-    let registry = SessionRegistry::new();
+    let registry = Arc::new(SessionRegistry::new());
     let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     assert!(
@@ -1121,7 +1122,7 @@ async fn memory_sink_for_unresolvable_palace_returns_no_sink() {
 /// (best-effort, mirrors `set_run_outcome`'s framing).
 #[tokio::test]
 async fn memory_sink_for_unknown_session_returns_none() {
-    let registry = SessionRegistry::new();
+    let registry = Arc::new(SessionRegistry::new());
     assert!(
         registry
             .memory_sink_for("nope", Some(durable_project_root()))
@@ -1146,7 +1147,7 @@ async fn memory_sink_for_unknown_session_returns_none() {
 /// `/private/var/folders/…`, so the guard must recognise both spellings).
 #[tokio::test]
 async fn memory_sink_for_temp_rooted_session_forbids_palace_create() {
-    let registry = SessionRegistry::new();
+    let registry = Arc::new(SessionRegistry::new());
     let project_dir = tempfile::TempDir::new().unwrap();
 
     let raw = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
@@ -1189,7 +1190,7 @@ async fn memory_sink_for_temp_rooted_session_forbids_palace_create() {
 /// palaces-that-could-be-minted, which is the quantity that leaked.
 #[tokio::test]
 async fn memory_sink_for_many_sessions_mint_at_most_one_palace() {
-    let registry = SessionRegistry::new();
+    let registry = Arc::new(SessionRegistry::new());
     let mut creatable: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut temp_rooted = 0usize;
 
@@ -1772,13 +1773,361 @@ async fn create_derives_project_label_from_binding() {
 /// be a clean `None`, not a panic and not a palace derived from a scratch path.
 #[tokio::test]
 async fn memory_sink_for_projectless_session_returns_none() {
-    let registry = SessionRegistry::new();
+    let registry = Arc::new(SessionRegistry::new());
     let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     assert!(
         registry.memory_sink_for(&session.id, None).is_none(),
         "a projectless session must have no project-scoped memory palace"
     );
+}
+
+// ── #2425: durable-memory degradation status ──────────────────────────────────
+
+/// Every warning `record_memory_durability` emitted for `id`, in order.
+fn durability_warnings(registry: &SessionRegistry, id: &str) -> Vec<String> {
+    registry
+        .replay(id)
+        .unwrap()
+        .into_iter()
+        .filter_map(|envelope| match envelope.event {
+            Event::Log { level, message, .. } if level == "warn" => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// #2425: the lifetime total never resets, the streak does, and only the first
+/// and third consecutive failure warn.
+#[test]
+fn memory_durability_retains_counts_resets_streak_and_warns_at_one_and_three() {
+    use crate::session::memory_sink::{MemoryFailureCategory, MemoryTurnOutcome};
+
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".into(), None, crate::binding::ProjectBinding::None);
+    let mut next_sequence = 1;
+    let mut degraded = |category| {
+        let sequence = next_sequence;
+        next_sequence += 1;
+        MemoryTurnOutcome::Degraded {
+            sequence,
+            category,
+            at: Utc::now(),
+        }
+    };
+
+    for category in [
+        MemoryFailureCategory::ChatTurnAppend,
+        MemoryFailureCategory::MemoryRemember,
+        MemoryFailureCategory::MemoryRememberSkipped,
+        MemoryFailureCategory::QueueFull,
+    ] {
+        registry
+            .record_memory_durability(&session.id, degraded(category))
+            .unwrap();
+    }
+
+    assert_eq!(
+        durability_warnings(&registry, &session.id).len(),
+        2,
+        "warn only at streaks one and three"
+    );
+
+    let status = registry
+        .get_transcript(&session.id)
+        .unwrap()
+        .memory_durability;
+    assert_eq!(status.total_failed_turns, 4);
+    assert_eq!(status.consecutive_failed_turns, 4);
+    assert_eq!(status.unrecorded_outcomes, 0);
+    assert_eq!(
+        status.latest_failure_category,
+        Some(MemoryFailureCategory::QueueFull)
+    );
+    assert!(status.latest_failure_at.is_some());
+
+    registry
+        .record_memory_durability(&session.id, MemoryTurnOutcome::Durable { sequence: 5 })
+        .unwrap();
+    let reset = registry
+        .get_transcript(&session.id)
+        .unwrap()
+        .memory_durability;
+    assert_eq!(reset.total_failed_turns, 4);
+    assert_eq!(reset.consecutive_failed_turns, 0);
+}
+
+/// #2425: a newer enqueue can fail synchronously while the detached drain is
+/// still completing an older accepted turn, so arrival order is the reverse of
+/// logical turn order. The older completion must not clear the newer failure.
+#[test]
+fn older_durable_completion_does_not_clear_newer_queue_failure() {
+    use crate::session::memory_sink::{MemoryFailureCategory, MemoryTurnOutcome};
+
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".into(), None, crate::binding::ProjectBinding::None);
+
+    registry
+        .record_memory_durability(
+            &session.id,
+            MemoryTurnOutcome::Degraded {
+                sequence: 2,
+                category: MemoryFailureCategory::QueueFull,
+                at: Utc::now(),
+            },
+        )
+        .unwrap();
+    registry
+        .record_memory_durability(&session.id, MemoryTurnOutcome::Durable { sequence: 1 })
+        .unwrap();
+
+    let status = registry
+        .get_transcript(&session.id)
+        .unwrap()
+        .memory_durability;
+    assert_eq!(status.total_failed_turns, 1);
+    assert_eq!(
+        status.consecutive_failed_turns, 1,
+        "an older durable completion must not erase a newer dropped turn"
+    );
+    assert_eq!(
+        status.latest_failure_category,
+        Some(MemoryFailureCategory::QueueFull)
+    );
+}
+
+/// #2425: two degradations arriving reversed still fold in logical order, so
+/// `latest_failure_*` describe turn 2, not the one that arrived last.
+#[test]
+fn two_out_of_order_degradations_fold_in_logical_sequence() {
+    use crate::session::memory_sink::{MemoryFailureCategory, MemoryTurnOutcome};
+
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".into(), None, crate::binding::ProjectBinding::None);
+    let first_at = Utc::now();
+    let second_at = first_at + chrono::Duration::seconds(1);
+
+    for outcome in [
+        MemoryTurnOutcome::Degraded {
+            sequence: 2,
+            category: MemoryFailureCategory::QueueFull,
+            at: second_at,
+        },
+        MemoryTurnOutcome::Degraded {
+            sequence: 1,
+            category: MemoryFailureCategory::ChatTurnAppend,
+            at: first_at,
+        },
+    ] {
+        registry
+            .record_memory_durability(&session.id, outcome)
+            .unwrap();
+    }
+
+    let status = registry
+        .get_transcript(&session.id)
+        .unwrap()
+        .memory_durability;
+    assert_eq!(status.total_failed_turns, 2);
+    assert_eq!(status.consecutive_failed_turns, 2);
+    assert_eq!(
+        status.latest_failure_category,
+        Some(MemoryFailureCategory::QueueFull)
+    );
+    assert_eq!(status.latest_failure_at, Some(second_at));
+}
+
+/// #2425: a run that jumps the streak from 0 to 3 in one fold must emit BOTH
+/// thresholds — a warning cannot be skipped just because it was crossed by a
+/// backlog rather than one turn at a time.
+#[test]
+fn three_out_of_order_degradations_emit_every_crossed_warning_threshold() {
+    use crate::session::memory_sink::{MemoryFailureCategory, MemoryTurnOutcome};
+
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".into(), None, crate::binding::ProjectBinding::None);
+    let now = Utc::now();
+
+    for (sequence, category) in [
+        (2, MemoryFailureCategory::QueueFull),
+        (3, MemoryFailureCategory::QueueFull),
+        (1, MemoryFailureCategory::ChatTurnAppend),
+    ] {
+        registry
+            .record_memory_durability(
+                &session.id,
+                MemoryTurnOutcome::Degraded {
+                    sequence,
+                    category,
+                    at: now + chrono::Duration::seconds(sequence as i64),
+                },
+            )
+            .unwrap();
+    }
+
+    let status = registry
+        .get_transcript(&session.id)
+        .unwrap()
+        .memory_durability;
+    assert_eq!(status.total_failed_turns, 3);
+    assert_eq!(status.consecutive_failed_turns, 3);
+    assert_eq!(
+        status.latest_failure_category,
+        Some(MemoryFailureCategory::QueueFull)
+    );
+
+    let warnings = durability_warnings(&registry, &session.id);
+    assert_eq!(
+        warnings.len(),
+        2,
+        "streak thresholds one and three both warn"
+    );
+    assert!(warnings[0].contains("category=ChatTurnAppend"));
+    assert!(warnings[0].contains("consecutive_failed_turns=1"));
+    assert!(warnings[1].contains("category=QueueFull"));
+    assert!(warnings[1].contains("consecutive_failed_turns=3"));
+}
+
+/// #2425: logical order is degraded(1), durable(2), degraded(3), but the
+/// synchronous queue failure for turn 3 overtakes both older drain completions.
+/// Older outcomes still count toward the lifetime total and must not rewrite
+/// turn 3's streak.
+#[test]
+fn mixed_out_of_order_memory_outcomes_preserve_the_newest_logical_state() {
+    use crate::session::memory_sink::{MemoryFailureCategory, MemoryTurnOutcome};
+
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".into(), None, crate::binding::ProjectBinding::None);
+    let now = Utc::now();
+
+    for outcome in [
+        MemoryTurnOutcome::Degraded {
+            sequence: 3,
+            category: MemoryFailureCategory::QueueFull,
+            at: now,
+        },
+        MemoryTurnOutcome::Degraded {
+            sequence: 1,
+            category: MemoryFailureCategory::DrainClosed,
+            at: now,
+        },
+        MemoryTurnOutcome::Durable { sequence: 2 },
+    ] {
+        registry
+            .record_memory_durability(&session.id, outcome)
+            .unwrap();
+    }
+
+    let status = registry
+        .get_transcript(&session.id)
+        .unwrap()
+        .memory_durability;
+    assert_eq!(status.total_failed_turns, 2);
+    assert_eq!(
+        status.consecutive_failed_turns, 1,
+        "late outcomes must not move the logical streak behind turn 3"
+    );
+    assert_eq!(
+        status.latest_failure_category,
+        Some(MemoryFailureCategory::QueueFull)
+    );
+    assert_eq!(status.latest_failure_at, Some(now));
+
+    // Turn 2 is durable, so turns 1 and 3 are two SEPARATE streaks and each
+    // reaches its own first consecutive failure. The warnings are named in
+    // logical order, not the order the outcomes arrived in.
+    let warnings = durability_warnings(&registry, &session.id);
+    assert_eq!(
+        warnings.len(),
+        2,
+        "each streak warns at its own first failure"
+    );
+    assert!(warnings[0].contains("category=DrainClosed"));
+    assert!(warnings[0].contains("consecutive_failed_turns=1"));
+    assert!(warnings[1].contains("category=QueueFull"));
+    assert!(warnings[1].contains("consecutive_failed_turns=1"));
+}
+
+/// #2425: an outcome the reconciler refuses must be COUNTED, not discarded —
+/// otherwise the three counters beside it silently under-report and the
+/// operator has no way to know the status is incomplete.
+///
+/// Regression for the fail-silent arm: `RegistryMemoryDurabilityObserver`
+/// discarded this `Err` and nothing else recorded it, so exceeding the reorder
+/// bound left no trace anywhere.
+#[test]
+fn outcome_beyond_the_reorder_bound_is_counted_as_unrecorded() {
+    use crate::session::memory_sink::{MemoryFailureCategory, MemoryTurnOutcome, QUEUE_CAPACITY};
+
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".into(), None, crate::binding::ProjectBinding::None);
+
+    // Sequence 1 never arrives, so nothing folds; the even sequences are
+    // non-adjacent, so no two of them compact into one run.
+    let bound = QUEUE_CAPACITY + 2;
+    let mut refusals = 0;
+    for sequence in (2..).step_by(2).take(bound + 1) {
+        let result = registry.record_memory_durability(
+            &session.id,
+            MemoryTurnOutcome::Degraded {
+                sequence,
+                category: MemoryFailureCategory::QueueFull,
+                at: Utc::now(),
+            },
+        );
+        if let Err(error) = result {
+            refusals += 1;
+            assert!(
+                error.message.contains("reorder bound exceeded"),
+                "unexpected error: {}",
+                error.message
+            );
+        }
+    }
+    assert_eq!(refusals, 1, "exactly the outcome past the bound is refused");
+
+    let status = registry
+        .get_transcript(&session.id)
+        .unwrap()
+        .memory_durability;
+    assert_eq!(
+        status.unrecorded_outcomes, 1,
+        "a refused outcome must leave a trace on the session's status"
+    );
+    assert_eq!(
+        status.total_failed_turns, bound as u64,
+        "the refused outcome is not counted as a failed turn — it was never applied"
+    );
+}
+
+/// #2425: a degradation warning must name the failure category and carry no
+/// session content.
+#[test]
+fn memory_degradation_event_is_redacted() {
+    use crate::session::memory_sink::{MemoryFailureCategory, MemoryTurnOutcome};
+
+    let registry = SessionRegistry::new();
+    let session = registry.create(
+        "secret prompt".into(),
+        None,
+        crate::binding::ProjectBinding::None,
+    );
+    registry
+        .record_memory_durability(
+            &session.id,
+            MemoryTurnOutcome::Degraded {
+                sequence: 1,
+                category: MemoryFailureCategory::MemoryRemember,
+                at: Utc::now(),
+            },
+        )
+        .unwrap();
+
+    let warnings = durability_warnings(&registry, &session.id);
+    let message = warnings.first().expect("warning event");
+    assert!(!message.contains("secret prompt"));
+    assert!(message.contains("MemoryRemember"));
+    assert!(message.contains("total_failed_turns=1"));
 }
 
 // ── #2784 / epic #2343: index readiness + working-context budget ───────────────

@@ -33,6 +33,10 @@
 //! [`protocol::register`]: crate::session::protocol::register
 
 pub mod connector;
+/// (#2425) Bounded logical-order fold for durable-memory turn outcomes.
+/// Private: `registry::SessionEntry` owns one per session and is the only
+/// thing that drives it.
+mod memory_outcome_reconciler;
 pub mod memory_sink;
 pub mod model;
 pub mod protocol;
@@ -40,7 +44,7 @@ pub mod registry;
 pub mod transcript;
 
 pub use connector::TcodeConnector;
-pub use memory_sink::{PalaceCreation, TurnMemorySink};
+pub use memory_sink::{MemoryFailureCategory, PalaceCreation, TurnMemorySink};
 pub use model::{Session, SessionStatus};
 pub use registry::SessionRegistry;
-pub use transcript::{GoalSlotRecord, TranscriptRecord};
+pub use transcript::{GoalSlotRecord, MemoryDurabilityStatus, TranscriptRecord};
