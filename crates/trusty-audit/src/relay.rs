@@ -62,10 +62,12 @@ where
             break;
         }
         log.write_all(&line).await?;
-        if progress.is_active() {
-            if let Some(event) = decode(&line) {
-                progress.unit_stage(target.as_str(), event);
-            }
+        // `is_active` first: the common line is ordinary logging, and with no
+        // sink attached there is nothing to decode it for.
+        if progress.is_active()
+            && let Some(event) = decode(&line)
+        {
+            progress.unit_stage(target.as_str(), event);
         }
     }
     log.flush().await
