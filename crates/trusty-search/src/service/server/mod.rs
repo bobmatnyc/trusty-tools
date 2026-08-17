@@ -58,6 +58,8 @@ mod tests_2984;
 mod tests_3304;
 #[cfg(test)]
 mod tests_allowlist_gate_767;
+#[cfg(test)]
+mod tests_same_id_root_mismatch;
 // #3049: DELETE must quiesce in-flight writers and report what it actually did.
 #[cfg(test)]
 mod tests_3049;
