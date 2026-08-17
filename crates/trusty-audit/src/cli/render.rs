@@ -14,7 +14,7 @@
 use crate::chain::ChainReport;
 use crate::clone::CloneState;
 use crate::distribute::InstallPackage;
-use crate::registry::TargetKind;
+use crate::registry::{COVERAGE_COACHING, TargetKind};
 use crate::run::{RepoResult, RunStatus};
 use crate::session::{NextStep, Outcome};
 
@@ -57,6 +57,15 @@ pub fn render(outcome: &Outcome) -> String {
                 status.tools.len()
             ));
             out.push_str(&format!("Next: {}\n", describe_next(&status.next)));
+            // The coaching rides every pre-sweep step, not only an empty
+            // registry: an operator who registered one repository has already
+            // left the state where `SelectRepositories` would say it, and that
+            // is exactly when a schema or infrastructure repository goes
+            // missing. Once the sweep has produced a deliverable the advice
+            // changes shape, so `ReturnPackage` is left alone.
+            if !matches!(status.next, NextStep::ReturnPackage) {
+                out.push_str(&format!("Coverage: {COVERAGE_COACHING}\n"));
+            }
             out
         }
         Outcome::WorkDir(report) => {

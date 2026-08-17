@@ -101,12 +101,23 @@ pub enum Verb {
         budget_gb: Option<u64>,
     },
     /// Register an audit target, after checking it can be read.
+    ///
+    /// Register everything in scope, not only the obvious application
+    /// repositories: the repository holding your database schema or migrations,
+    /// infrastructure and IaC, shared libraries and config repositories, and
+    /// every ticketing board in use. The assessment judges how mature, how
+    /// stable and how supportable the technology is, on what is registered and
+    /// nothing else.
     Add {
         /// What to register.
         #[command(subcommand)]
         target: AddTarget,
     },
     /// List the registered audit targets.
+    ///
+    /// Read it as the audit's coverage: a repository or board absent here —
+    /// a schema repository, an IaC repository, a second ticketing board — is
+    /// absent from the report too.
     Targets,
     /// Remove a registered audit target.
     Remove {
@@ -192,6 +203,9 @@ pub enum Verb {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum AddTarget {
     /// A GitHub repository, checked with your `gh` credential.
+    ///
+    /// Application, database-schema and migration, infrastructure, shared-library
+    /// and config repositories all belong here.
     Repo {
         /// The repository, as owner/name.
         #[arg(value_name = "OWNER/NAME")]
@@ -496,6 +510,33 @@ mod cli_tests {
         let outcome = session.execute(Command::Guided).await.expect("runs");
         let text = render(&outcome);
         assert!(text.contains("Next: pick the repositories"), "{text}");
+    }
+
+    /// The guided flow coaches breadth at the registration step, naming schema
+    /// repositories rather than asking for "relevant" ones.
+    #[tokio::test]
+    async fn the_guided_flow_coaches_registration_breadth() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = Session::new(WorkDir::new(tmp.path().join("work")));
+        let outcome = session.execute(Command::Guided).await.expect("runs");
+        let text = render(&outcome);
+        assert!(text.contains("Coverage: "), "{text}");
+        assert!(text.contains("database schema or migrations"), "{text}");
+        assert!(text.contains("ticketing board"), "{text}");
+    }
+
+    /// The `add` help is where an operator reading `--help` decides what counts
+    /// as a target, so the breadth nudge has to survive there too.
+    #[test]
+    fn the_add_help_names_schema_repositories() {
+        let mut command = <Cli as clap::CommandFactory>::command();
+        let add = command
+            .find_subcommand_mut("add")
+            .expect("`add` is a subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(add.contains("database schema or migrations"), "{add}");
+        assert!(add.contains("ticketing board"), "{add}");
     }
 
     /// A binary this client did not place must never be shown carrying a

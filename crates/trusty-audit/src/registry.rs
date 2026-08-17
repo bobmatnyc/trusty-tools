@@ -73,6 +73,44 @@ use crate::workdir::{self, Area, WorkDir};
 /// validation time only.
 pub const REGISTRY_FILE: &str = "audit-targets.toml";
 
+/// How much to register, in the words every front end uses to ask.
+///
+/// Why: the sweep covers what is registered and nothing else, and it cannot
+/// tell a repository the operator judged irrelevant from one they forgot. So
+/// completeness is the operator's to supply, and a passive `add` verb leaves
+/// the audit to degrade in silence. The wording is deliberately concrete:
+/// an operator who would not describe their migrations repository as a
+/// "relevant repository" still recognises "the repository holding your
+/// database schema", and that is the omission the owner named.
+///
+/// What: one paragraph, wrapped by whoever prints it, naming the kinds that
+/// get left out. It claims no detection — this client cannot see a target that
+/// was never registered, and the text must never imply otherwise. It also
+/// names no command, so the CLI, a chat wizard, or the Tauri shell can each
+/// present it in their own idiom without re-authoring the substance.
+///
+/// The engagement is named neutrally on purpose. The client may be a company or
+/// a single property, and more audit types are expected; today the wording is
+/// pitched at a strategic technology assessment, which is the engagement shape
+/// this client currently serves.
+///
+/// Naming that assessment's lens — how mature, how stable, how supportable and
+/// how staffable the technology is — is what makes the breadth ask land. An
+/// operator who reads only "register everything" hears an inventory chore; one
+/// who reads what the assessment judges can see why a schema or infrastructure
+/// repository changes the answer.
+///
+/// Test: `super::registry_tests::the_coverage_coaching_names_what_operators_leave_out`,
+/// `super::registry_tests::the_coverage_coaching_states_the_assessment_lens`,
+/// `super::registry_tests::the_coverage_coaching_claims_no_detection`.
+pub const COVERAGE_COACHING: &str = "Register every repository and board this \
+     engagement should cover — applications, the repository holding your database \
+     schema or migrations, infrastructure and IaC, shared libraries and config \
+     repositories, and every ticketing board in use. The assessment judges how \
+     mature, how stable and how supportable the technology is, and it judges only \
+     what you register, so anything left unregistered is simply absent from that \
+     picture of the organization's technology estate.";
+
 /// Which kind of target a command asked to register.
 ///
 /// Why: `taudit add repo` and `taudit add board` are separate verbs, so the
@@ -525,6 +563,61 @@ mod registry_tests {
         Target::Board {
             provider,
             key: key.to_owned(),
+        }
+    }
+
+    /// The owner named schema repositories specifically, because that is the
+    /// kind operators forget. Abstract phrasing ("relevant repositories") is
+    /// what the concrete list exists to replace, so the kinds are asserted
+    /// rather than left to whoever next edits the string.
+    #[test]
+    fn the_coverage_coaching_names_what_operators_leave_out() {
+        let text = COVERAGE_COACHING.to_lowercase();
+        for kind in [
+            "schema",
+            "migrations",
+            "infrastructure",
+            "shared librar",
+            "config repositor",
+            "board",
+        ] {
+            assert!(
+                text.contains(kind),
+                "coaching omits {kind}: {COVERAGE_COACHING}"
+            );
+        }
+    }
+
+    /// Breadth without a reason reads as an inventory chore. The coaching says
+    /// what the assessment judges, so an operator can tell why a schema or
+    /// infrastructure repository changes the answer.
+    #[test]
+    fn the_coverage_coaching_states_the_assessment_lens() {
+        let text = COVERAGE_COACHING.to_lowercase();
+        for lens in ["mature", "stable", "supportable"] {
+            assert!(
+                text.contains(lens),
+                "coaching omits the {lens} lens: {COVERAGE_COACHING}"
+            );
+        }
+    }
+
+    /// The coaching must not overstate what this client can see. Nothing here
+    /// can observe an unregistered target, so any claim of detection would be
+    /// false — that claim belongs only to a stage reading collected data.
+    #[test]
+    fn the_coverage_coaching_claims_no_detection() {
+        let text = COVERAGE_COACHING.to_lowercase();
+        for overclaim in [
+            "detect",
+            "finds missing",
+            "will discover",
+            "automatically add",
+        ] {
+            assert!(
+                !text.contains(overclaim),
+                "coaching claims {overclaim}: {COVERAGE_COACHING}"
+            );
         }
     }
 
