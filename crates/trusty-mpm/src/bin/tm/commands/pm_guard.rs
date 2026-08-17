@@ -141,7 +141,11 @@
 //! the daemon who holds this checkout, which both keeps the concurrency verdict
 //! alive if the harness ignores `updatedInput` and records the granted isolation
 //! so the tracker's original-payload record stops naming an isolated writer as a
-//! shared-checkout one.
+//! shared-checkout one. **A project may decline the grant (#5814):** with
+//! `agent_worktree = false` in its committed `.trusty-mpm.toml` the dispatch
+//! keeps the checkout and its prompt is annotated with the in-place workflow
+//! instead. That arm reports no granted worktree to the daemon — there is none —
+//! but still runs the #4480 concurrency check before printing.
 //! **Subagent fan-out denial (issue #4784):** [`pm_guard`] calls
 //! [`crate::commands::pm_guard_fanout::evaluate_subagent_fanout`] DIRECTLY,
 //! before Guards 1 and 4, denying `Task`/`Agent` when the calling session is
@@ -536,6 +540,28 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             pm_guard_worktree_grant::WorktreeGrant::Deny(reason) => {
                 audit_denied_tool(url, session_id, tool_name, reason).await;
                 println!("{}", build_pretooluse_deny_response(reason));
+            }
+            // #5814: this project declared `agent_worktree = false`, so the
+            // dispatch keeps the checkout and is told the workflow that replaces
+            // isolation. It must NOT go through `evaluate_granted_worktree` —
+            // that records a granted worktree, and there is none to record. The
+            // #4480 concurrency question is still asked here rather than skipped:
+            // opting out of isolation does not make two writers on one git HEAD
+            // safe, and a printed rewrite ends this call, so the check below
+            // would never run.
+            pm_guard_worktree_grant::WorktreeGrant::InPlace(updated_input) => {
+                match pm_guard_dispatch::evaluate(url, &payload, tool_name, tool_input, session_id)
+                    .await
+                {
+                    Some(reason) => {
+                        audit_denied_tool(url, session_id, tool_name, &reason).await;
+                        println!("{}", build_pretooluse_deny_response(&reason));
+                    }
+                    None => println!(
+                        "{}",
+                        pm_guard_worktree_grant::build_worktree_grant_response(&updated_input)
+                    ),
+                }
             }
         }
         return Ok(());

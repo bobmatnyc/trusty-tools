@@ -43,6 +43,28 @@ fn project_config_parses_worktree() {
     assert_eq!(cfg.default_model, None);
 }
 
+/// Why (#5814): `agent_worktree` is a SEPARATE key from `worktree` — a file
+/// that sets one must leave the other undecided, or the dispatched-agent opt-out
+/// would silently relocate the project's sessions as well.
+#[test]
+fn project_config_parses_agent_worktree() {
+    let cfg = ProjectLevelConfig::from_toml("agent_worktree = false\n", Path::new("t.toml"))
+        .expect("valid config");
+    assert_eq!(cfg.agent_worktree, Some(false));
+    assert_eq!(
+        cfg.worktree, None,
+        "the session-placement key must stay undecided"
+    );
+
+    let both = ProjectLevelConfig::from_toml(
+        "worktree = true\nagent_worktree = false\n",
+        Path::new("t.toml"),
+    )
+    .expect("valid config");
+    assert_eq!(both.worktree, Some(true));
+    assert_eq!(both.agent_worktree, Some(false));
+}
+
 /// Why: an empty (or comment-only) file is a legitimate state — it overrides
 /// nothing and must not be an error.
 #[test]

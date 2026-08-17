@@ -26,7 +26,8 @@
 //! stays host-level — it is a property of the operator's supervisor, not of the
 //! repository.
 //!
-//! Test: `project_config_parses_worktree`, `project_config_rejects_unknown_key`,
+//! Test: `project_config_parses_worktree`, `project_config_parses_agent_worktree`,
+//! `project_config_rejects_unknown_key`,
 //! `project_config_absent_is_none`, `project_config_rejects_wrong_type`,
 //! `project_config_empty_file_is_all_none` in `project_config_tests.rs`.
 //!
@@ -129,6 +130,37 @@ pub struct ProjectLevelConfig {
     /// `worktree_project_config_overrides_registry`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<bool>,
+
+    /// Whether a dispatched agent in this project gets a worktree of its own.
+    ///
+    /// Why (#5814): ADR-0048 decision 1 grants every dispatched writer its own
+    /// worktree when the session stands in a main checkout, and that grant is
+    /// mechanical — it never reads the dispatch prompt, so no instruction can
+    /// wave it off. Worktree isolation pays for concurrent writers and separate
+    /// build state; a writing or documentation repo has neither, and pays only
+    /// the costs: agent edits land in `.claude/worktrees/agent-<id>/` and never
+    /// reach the checkout, a second agent has to copy them across, and the trees
+    /// and branches pile up needing reclamation. This field is that project
+    /// class's opt-out.
+    ///
+    /// What: `None` (the default) → the grant behaves exactly as it did before
+    /// this key existed. `Some(false)` → dispatched agents stay in the main
+    /// checkout: nothing is created and nothing needs reclaiming. `Some(true)`
+    /// → the default, stated explicitly.
+    ///
+    /// This is a SEPARATE key from [`Self::worktree`], not a widening of it.
+    /// `worktree` decides where a managed SESSION is placed and ADR-0044
+    /// decision 6 narrowed its live effect to the daemon-unreachable
+    /// provisioning fallback; reusing it here would give one key two unrelated
+    /// meanings again — the double duty ADR-0037 called out. Setting this key
+    /// exempts the dispatch from the worktree GRANT only: the ADR-0044
+    /// main-checkout write boundary is untouched, so a source-file edit there is
+    /// still denied.
+    /// Test: `project_config_parses_agent_worktree`,
+    /// `agent_worktree_opt_out_is_honoured`,
+    /// `grants_nothing_when_the_project_opts_out`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_worktree: Option<bool>,
 
     /// Default model id (or tier alias) for sessions launched in this project.
     ///

@@ -70,7 +70,12 @@ leave the boundary unenforced. The owner's ruling is that both close together.
    the dispatch after reading a denial. The grant is reported to the daemon so
    the dispatch's delegation record carries the isolation it was given, and it is
    emitted only after that same call reports the checkout free — see
-   Consequences for why neither is optional.
+   Consequences for why neither is optional. Since #5814 a project may decline
+   this grant by setting `agent_worktree = false` in its committed
+   `.trusty-mpm.toml`; its dispatches then stay in the checkout with the in-place
+   workflow appended to the prompt. That key is separate from decision 6's
+   `worktree` flag, and exempts the grant only — the write boundary below is
+   unchanged.
 2. **Trusty-mpm still creates no worktrees.** ADR-0044 decision 4 is unchanged
    and this decision depends on it: the harness provisions the worktree under
    `.claude/worktrees/` per [ADR-0036](0036-all-worktrees-are-siblings-under-claude-worktrees.md)

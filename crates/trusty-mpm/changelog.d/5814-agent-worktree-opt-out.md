@@ -1,0 +1,4 @@
+Added
+
+- A project can now decline the dispatched-agent worktree grant. Set `agent_worktree = false` in the project's committed `.trusty-mpm.toml` and every agent dispatched there stays in the main checkout: no worktree is created, and none needs reclaiming (#5814). The dispatch's prompt is annotated with the workflow that replaces isolation — edit in place, commit on the branch the checkout already has, push. Isolation stays the default everywhere else; an absent, malformed, or unreadable config keeps ADR-0048's grant exactly as it was.
+- `agent_worktree` is a separate key from `worktree`, which decides where a managed SESSION runs. Setting one does not move the other. The opt-out exempts the dispatch from the worktree grant only: the ADR-0044 main-checkout write boundary is unchanged, and a second concurrent writer in the same checkout is still refused.
