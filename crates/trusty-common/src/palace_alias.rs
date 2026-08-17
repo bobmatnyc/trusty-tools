@@ -171,6 +171,44 @@ impl PalaceAliasStore {
     }
 }
 
+/// Name the palace an alias redirects to, but only when the redirect actually fires.
+///
+/// Why (#5810): the registry applied this rule privately, so every caller that
+/// wanted to *name* the palace it was about to reach had no way to ask. The
+/// `UserPromptSubmit` hook printed the derived slug — `bobmatnyc-trusty-tools` —
+/// while the drawers under it came from `trusty-tools`, and `palace_list` returns
+/// only the latter. A second copy of the rule in trusty-memory would be the drift
+/// this workspace's common-entry-point rule forbids, so the rule lives here and
+/// [`crate::memory_core::registry`] now reads it from the same place.
+/// What: returns `Some(target)` only when `<registry_dir>/<palace_id>/palace.json`
+/// is absent AND an alias maps `palace_id` to a `target` whose own `palace.json`
+/// is present. Returns `None` in every other case — the palace exists, no alias is
+/// registered, the target is missing, or the alias file cannot be read — so a
+/// caller's `unwrap_or(derived)` keeps today's behaviour on every degraded path.
+///
+/// Presence is `try_exists`, and only `Ok(false)` counts as absent (#5592,
+/// ADR-0045): a path we are denied to stat presumes PRESENT, so an unverifiable
+/// alias target never wins a redirect and an unstattable palace is never shadowed.
+/// Test: `alias_target_is_none_when_the_palace_exists`,
+/// `alias_target_names_the_redirect`,
+/// `alias_target_is_none_when_the_target_is_missing`,
+/// `alias_target_is_none_without_an_alias`.
+pub fn alias_target_if_absent(registry_dir: &Path, palace_id: &str) -> Option<String> {
+    let exists = |id: &str| {
+        !matches!(
+            registry_dir.join(id).join("palace.json").try_exists(),
+            Ok(false)
+        )
+    };
+    if exists(palace_id) {
+        return None;
+    }
+    match PalaceAliasStore::resolve_alias(registry_dir, palace_id) {
+        Ok(Some(target)) if exists(&target) => Some(target),
+        _ => None,
+    }
+}
+
 /// Resolve the directory that holds the per-palace subdirectories for a data dir.
 ///
 /// Why: two on-disk layouts exist in the wild. The current code treats the data
@@ -323,6 +361,58 @@ mod tests {
         let nested = tmp.path().join("palaces");
         std::fs::create_dir_all(&nested).unwrap();
         assert_eq!(palace_registry_dir_from(tmp.path().to_path_buf()), nested);
+    }
+
+    /// Write a minimal `palace.json` so the presence probe sees a real palace.
+    fn seed_palace(registry_dir: &Path, id: &str) {
+        let dir = registry_dir.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("palace.json"), b"{}").unwrap();
+    }
+
+    /// Why: an alias must never shadow a real palace, so a palace that exists on
+    /// disk reports no redirect even when an alias names it.
+    /// Test: itself.
+    #[test]
+    fn alias_target_is_none_when_the_palace_exists() {
+        let tmp = tempdir().unwrap();
+        seed_palace(tmp.path(), "owner-repo");
+        seed_palace(tmp.path(), "repo");
+        PalaceAliasStore::register_alias(tmp.path(), "owner-repo", "repo").unwrap();
+        assert_eq!(alias_target_if_absent(tmp.path(), "owner-repo"), None);
+    }
+
+    /// Why: the split-brain case this exists for — the derived name owns no
+    /// directory, the alias target does, so the target is the usable name.
+    /// Test: itself.
+    #[test]
+    fn alias_target_names_the_redirect() {
+        let tmp = tempdir().unwrap();
+        seed_palace(tmp.path(), "trusty-tools");
+        PalaceAliasStore::register_alias(tmp.path(), "bobmatnyc-trusty-tools", "trusty-tools")
+            .unwrap();
+        assert_eq!(
+            alias_target_if_absent(tmp.path(), "bobmatnyc-trusty-tools").as_deref(),
+            Some("trusty-tools")
+        );
+    }
+
+    /// Why: a stale alias pointing at a deleted palace must not rename anything —
+    /// the caller keeps the original id so its error names the palace asked for.
+    /// Test: itself.
+    #[test]
+    fn alias_target_is_none_when_the_target_is_missing() {
+        let tmp = tempdir().unwrap();
+        PalaceAliasStore::register_alias(tmp.path(), "ghost", "also-gone").unwrap();
+        assert_eq!(alias_target_if_absent(tmp.path(), "ghost"), None);
+    }
+
+    /// Why: the common case — no alias file at all — must be a cheap `None`.
+    /// Test: itself.
+    #[test]
+    fn alias_target_is_none_without_an_alias() {
+        let tmp = tempdir().unwrap();
+        assert_eq!(alias_target_if_absent(tmp.path(), "anything"), None);
     }
 
     /// Why: absent a `palaces/` subdir the data dir itself is the registry root

@@ -461,18 +461,14 @@ mod tests {
     /// Test: pure filesystem.
     #[test]
     fn audit_palaces_ok_when_pin_file_claims_it() {
-        use crate::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+        use crate::project_root::{write_project_pin, ProjectPin};
         let tmp = tempfile::tempdir().expect("tempdir");
 
         // Set up a fake "Projects" directory with a project that has a pin.
         let projects_dir = tmp.path().join("Projects");
         let project_dir = projects_dir.join("moved-project");
         std::fs::create_dir_all(&project_dir).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "my-old-name".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("my-old-name".to_string());
         write_project_pin(&project_dir, &pin).expect("write pin");
 
         // scan_project_dirs_for_pin must return true for the pinned id.
@@ -494,16 +490,12 @@ mod tests {
     /// Test: pure filesystem.
     #[test]
     fn scan_project_dirs_returns_false_for_mismatch() {
-        use crate::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+        use crate::project_root::{write_project_pin, ProjectPin};
         let tmp = tempfile::tempdir().expect("tempdir");
         let projects_dir = tmp.path().join("Projects");
         let project_dir = projects_dir.join("some-project");
         std::fs::create_dir_all(&project_dir).unwrap();
-        let pin = ProjectPin {
-            schema_version: PIN_SCHEMA_VERSION,
-            palace: "alpha".to_string(),
-            note: None,
-        };
+        let pin = ProjectPin::new("alpha".to_string());
         write_project_pin(&project_dir, &pin).expect("write pin");
         assert!(
             !scan_project_dirs_for_pin(&[projects_dir], "beta"),

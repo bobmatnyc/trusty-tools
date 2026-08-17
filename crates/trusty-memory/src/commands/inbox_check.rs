@@ -78,7 +78,9 @@ struct ServerMessage {
 /// failure path exits 0 silently with no stdout so the user's session
 /// start is never blocked.
 /// What:
-///   1. Resolves the recipient palace slug from cwd (or explicit `--palace`).
+///   1. Resolves the recipient palace slug from cwd (or explicit `--palace`),
+///      then follows any palace-level alias so the name it prints is one the
+///      memory tools accept as input (#5810).
 ///   2. Fetches unread messages via the daemon's HTTP API.
 ///   3. Prints the formatted Markdown blocks to stdout.
 ///   4. POSTs back to mark each delivered message read.
@@ -98,10 +100,13 @@ pub async fn handle_inbox_check(palace: Option<String>) -> Result<()> {
     // into the SessionStart hook reflects the user's actual cwd, which
     // differs from the hook process cwd when the hook was registered from a
     // different directory); then the process cwd; finally `"<unknown>"`.
+    // #5810: the inbox header printed this name, so it must be one `palace_list`
+    // returns — the redirect is a no-op unless the derived palace is absent.
     let recipient = palace
         .clone()
         .or_else(|| palace_slug_from_stdin_cwd(&trigger_prompt))
         .or_else(|| crate::messaging::cwd_palace_slug().ok())
+        .map(crate::palace_id_derive::follow_palace_alias)
         .unwrap_or_else(|| "<unknown>".to_string());
 
     let injection = run_inbox_fetch(&trigger_prompt, &recipient, start).await;
@@ -343,9 +348,18 @@ mod tests {
     /// What: build a JSON payload with a tempdir `cwd`; assert the derived
     /// slug matches `cwd_palace_slug_at(tempdir)` and reflects the tempdir
     /// basename rather than the process cwd basename.
+    ///
+    /// #5810: `TRUSTY_MEMORY_PALACE` is precedence level 1 and outranks the
+    /// tempdir path this asserts on, so an ambient value — every trusty-mpm
+    /// managed session exports one — made this fail with the developer's own
+    /// palace name. Scrubbed under `env_test_lock`, which is what serialises
+    /// every env mutation in this crate's test binary.
     /// Test: itself.
-    #[test]
-    fn palace_slug_from_stdin_cwd_uses_stdin_path() {
+    #[tokio::test]
+    async fn palace_slug_from_stdin_cwd_uses_stdin_path() {
+        let _guard = crate::commands::env_test_lock().lock().await;
+        // SAFETY: `env_test_lock` is held for the whole test.
+        unsafe { std::env::remove_var(trusty_common::PALACE_OVERRIDE_ENV) };
         let tmp = tempfile::tempdir().expect("tempdir");
         let project = tmp.path().join("inbox-stdin-project");
         std::fs::create_dir_all(&project).expect("create project dir");
