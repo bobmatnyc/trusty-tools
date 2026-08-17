@@ -295,6 +295,9 @@ impl TelegramFormatter {
                 name,
                 state,
                 action,
+                // The workspace verdict is rendered by the CLI only; this line
+                // reports the state transition.
+                ..
             } => format!(
                 "✅ {} ({}) {} → {}",
                 html_escape(name),
