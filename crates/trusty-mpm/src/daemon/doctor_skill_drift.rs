@@ -18,7 +18,10 @@
 //! the state. It distinguishes 'drifted — `tm install` will fix it' from
 //! 'drifted and FROZEN — `tm install` will deliberately skip it', because the
 //! remediation differs and a frozen skill can otherwise stay stale forever with
-//! no signal. Anything it cannot verify reports [`CheckStatus::Unknown`], never
+//! no signal. Since #5865 it also distinguishes drift BY TIER: `tm install`
+//! writes only the operator-home tier, so claiming it repairs managed-config or
+//! project-tier drift sent operators re-running a command that could not move
+//! the count. Anything it cannot verify reports [`CheckStatus::Unknown`], never
 //! `Ok`. READ-ONLY: the repair lives behind `tm doctor --fix-skills`.
 //!
 //! Test: `doctor_skill_drift_tests.rs`.
@@ -77,6 +80,11 @@ const CONVENTIONS_BEARING_SKILLS: &[&str] =
 /// - `Warn` for ordinary drift, a frozen ordinary skill, or a missing file;
 /// - `Ok` only when every managed skill at every tier matches byte-for-byte.
 ///
+/// Drift is reported one fragment per tier via [`drift_parts`], each carrying
+/// that tier's own remedy (#5865). Severity is unchanged by that split — the
+/// [`CONVENTIONS_BEARING_SKILLS`] escalation is stated per SKILL and fires at
+/// every tier, so managed-config drift in `tm-workflow` is still `Fail`.
+///
 /// The message reports the frozen set separately, since `tm install` will not
 /// repair it. An empty reference is itself `Unknown` — with nothing to compare
 /// against, "clean" would be a claim the probe cannot support.
@@ -114,7 +122,9 @@ fn report(
         );
     }
 
-    let mut drifted: Vec<String> = Vec::new();
+    // #5865: drift is grouped by TIER, because the remedy differs per tier and
+    // only one of them is the tier `tm install` writes.
+    let mut drifted: Vec<(&'static str, String)> = Vec::new();
     let mut frozen: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
     let mut unverifiable: Vec<String> = Vec::new();
@@ -147,7 +157,7 @@ fn report(
             let conventions_bearing = CONVENTIONS_BEARING_SKILLS.contains(&key_stem(&finding.stem));
             match finding.state {
                 SkillDrift::Fresh => continue,
-                SkillDrift::Drifted => drifted.push(where_.clone()),
+                SkillDrift::Drifted => drifted.push((tier.label, where_.clone())),
                 SkillDrift::DriftedFrozen => frozen.push(where_.clone()),
                 SkillDrift::Missing => missing.push(where_.clone()),
                 SkillDrift::Unverifiable(why) => {
@@ -176,13 +186,7 @@ fn report(
     }
 
     let mut parts: Vec<String> = Vec::new();
-    if !drifted.is_empty() {
-        parts.push(format!(
-            "{} drifted and REPAIRABLE by `tm install` ({})",
-            drifted.len(),
-            summarise(&drifted)
-        ));
-    }
+    parts.extend(drift_parts(&drifted));
     if !frozen.is_empty() {
         parts.push(format!(
             "{} drifted and FROZEN — hand-edited after deployment, so `tm install` will \
@@ -233,6 +237,79 @@ fn report(
     };
 
     DoctorCheck::new(CHECK_NAME, status, message)
+}
+
+/// One message fragment per DRIFTED tier, each naming the remedy that tier
+/// actually has (#5865).
+///
+/// Why: the single fragment this replaces said "N drifted and REPAIRABLE by
+/// `tm install`" for every finding at every tier, but `tm install` writes only
+/// `paths.claude_skills_dir()` — the operator-home tier. An operator reading
+/// that line re-ran `tm install` against managed-config and project-tier drift
+/// and watched the count refuse to move, which is the whole of #5865. Grouping
+/// by tier is what makes the sentence checkable against what the code does.
+/// What: preserves the tier order [`skill_deploy_tiers`] produced (findings are
+/// appended tier by tier), emits one fragment per tier that has drift, and
+/// tags each with [`drift_remedy`]. Returns an empty vector when nothing
+/// drifted, so a frozen-only or missing-only report gains no drift clause.
+/// Test: `drift_names_the_tm_install_remedy_only_for_the_operator_home_tier`,
+/// `managed_config_drift_does_not_claim_tm_install_repairs_it`.
+fn drift_parts(drifted: &[(&'static str, String)]) -> Vec<String> {
+    let mut order: Vec<&'static str> = Vec::new();
+    for (label, _) in drifted {
+        if !order.contains(label) {
+            order.push(label);
+        }
+    }
+    order
+        .into_iter()
+        .map(|label| {
+            let entries: Vec<String> = drifted
+                .iter()
+                .filter(|(l, _)| *l == label)
+                .map(|(_, where_)| where_.clone())
+                .collect();
+            format!(
+                "{} drifted at the {label} tier — {} ({})",
+                entries.len(),
+                drift_remedy(label),
+                summarise(&entries)
+            )
+        })
+        .collect()
+}
+
+/// What actually repairs drift at one deploy tier (#5865).
+///
+/// Why: three tiers, three writers. `tm install` deploys into
+/// `paths.claude_skills_dir()` and nowhere else; the managed
+/// `$CLAUDE_CONFIG_DIR/skills` tier is written by
+/// [`crate::core::standalone::global_config::ensure_global_config_dir`] on
+/// managed-session bootstrap; a project's `.claude/skills` is written when a
+/// managed session is prepared for that project. Naming one command for all
+/// three is the defect. `tm doctor --fix-skills` is the one remedy that covers
+/// every tier — [`crate::core::skill_repair::repair_skills_in_mode`] iterates
+/// [`skill_deploy_tiers`] — so it is offered wherever the tier's own writer is
+/// not something the operator can invoke directly.
+/// What: a phrase per known tier label. An unrecognised label (a tier added
+/// without updating this table) falls back to the tier-agnostic remedy rather
+/// than to a claim about `tm install` that may be false.
+/// Test: `drift_names_the_tm_install_remedy_only_for_the_operator_home_tier`,
+/// `project_tier_drift_names_a_remedy_that_writes_the_project_tier`,
+/// `an_unknown_tier_label_never_claims_tm_install_repairs_it`.
+fn drift_remedy(label: &str) -> &'static str {
+    match label {
+        "operator home" => "REPAIRABLE by `tm install`",
+        "managed config" => {
+            "`tm install` does NOT write this tier — it is refreshed on managed-session \
+             bootstrap, or repair it now with `tm doctor --fix-skills`"
+        }
+        "project" => {
+            "`tm install` does NOT write this tier — it is refreshed when a managed session \
+             is next prepared for this project, or repair it now with `tm doctor --fix-skills`"
+        }
+        _ => "repairable with `tm doctor --fix-skills`",
+    }
 }
 
 /// Render up to [`MAX_NAMED`] entries, then a count of the remainder.

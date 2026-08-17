@@ -285,6 +285,13 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// `$HOME/.claude/` was populated), silently missing the exact provisioning
 /// gap that issue is about.
 ///
+/// Issue #5867 narrows that scoping to a project that IS a managed workspace,
+/// decided by [`is_managed_workspace`] against `active_workspace_paths`. An
+/// unmanaged cwd now resolves the home layout, so the three skill deploy tiers
+/// stay distinct and `~/.claude/skills` is audited again. Two probes keep the
+/// old workspace-scoped layout on purpose — `deployment` and `agent_skills`,
+/// whose subject is a workspace's own `.claude/` payload, not the tier model.
+///
 /// Issue #4409 removes AGENTS from that scoping: bundled agents deploy into
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
@@ -297,19 +304,39 @@ pub async fn run_doctor(
     active_workspace_paths: &[PathBuf],
 ) -> DoctorReport {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let paths = match project_dir {
+    // #5867: only a project that IS a managed workspace gets the workspace
+    // layout. `tm doctor` sends the process cwd unconditionally, so an ordinary
+    // checkout took the managed arm too and `claude_skills_dir()` pointed at
+    // `<cwd>/.claude/skills` — the same path the "project" tier candidate
+    // produces, which `skill_deploy_tiers`' dedup then dropped. The operator's
+    // real `~/.claude/skills` went unaudited and project-tier findings surfaced
+    // labelled "operator home".
+    let managed_workspace =
+        project_dir.filter(|dir| is_managed_workspace(dir, active_workspace_paths));
+    let paths = match managed_workspace {
+        Some(dir) => FrameworkPaths::for_managed_workspace(dir),
+        None => FrameworkPaths::default(),
+    };
+    // The workspace-scoped layout, kept for the two probes whose SUBJECT is a
+    // provisioned workspace's own `.claude/` payload rather than the deploy-tier
+    // model: `check_deployment_completeness` (the same diff `tm validate` runs
+    // against a workspace) and `check_agent_skills` (which resolves an agent's
+    // `skills:` reference against the project tier the session will read). #5867
+    // deliberately leaves both unchanged.
+    let workspace_paths = match project_dir {
         Some(dir) => FrameworkPaths::for_managed_workspace(dir),
         None => FrameworkPaths::default(),
     };
     // Skills are probed at the same root the roster deploys to: the workspace
-    // itself for a managed session, else the operator's home directory.
-    let skills_root: &Path = project_dir.unwrap_or(&home);
+    // itself for a managed session, else the operator's home directory (#2149,
+    // narrowed by #5867 — an unmanaged cwd has no workspace deploy to probe).
+    let skills_root: &Path = managed_workspace.unwrap_or(&home);
 
     // DOC-42 issue #2906 review (MEDIUM finding): dangling `skills:`
     // references and informational prose-mention hints carry different
     // severities, so `check_agent_skills` now returns two independent
     // checks from one scan rather than folding both into a single `Warn`.
-    let (agent_skills, agent_skills_prose_hints) = check_agent_skills(&paths);
+    let (agent_skills, agent_skills_prose_hints) = check_agent_skills(&workspace_paths);
 
     let mut checks = vec![
         check_instructions(project_dir),
@@ -331,7 +358,7 @@ pub async fn run_doctor(
         check_output_style(project_dir, &home),
         check_output_style_staleness(project_dir, &home),
         check_output_style_legacy_ids(project_dir, &home),
-        check_deployment_completeness(&paths),
+        check_deployment_completeness(&workspace_paths),
         check_skill_staleness(&paths, project_dir),
         // #4605: and this proves the manifest that check consults actually
         // covers the deployed skills — an untracked bundled skill is
@@ -395,6 +422,40 @@ pub async fn run_doctor(
     ));
 
     DoctorReport::from_checks(checks)
+}
+
+/// Is `project_dir` a workspace some live session was provisioned into?
+///
+/// Why (#5867): [`FrameworkPaths::for_managed_workspace`] rewrites the SKILL
+/// deploy destination to `<dir>/.claude/skills`, which is true only of a
+/// managed session's own workspace. Every other production call site already
+/// passes one; `run_doctor` is the only one handed an arbitrary process cwd,
+/// and applying the workspace layout there collapsed the operator-home tier
+/// onto the project tier. `active_workspace_paths` is exactly the set of
+/// provisioned workspaces — `daemon::api::doctor` builds it from every session
+/// record's `workspace_path` — so it is the only input that can answer this
+/// without inventing a heuristic.
+/// What: canonicalizes both sides (a workspace under `/tmp` resolves through a
+/// symlink on macOS, so a raw `==` would miss the match) and reports whether
+/// `project_dir` appears in the set. A path that cannot be canonicalized —
+/// absent, dangling symlink, unreadable parent alike — falls back to its own
+/// raw spelling, so it is then compared verbatim. That is the safe answer in
+/// the sense that matters: it can still match a recorded workspace under the
+/// exact name the session recorded, but it can never match an unregistered
+/// directory, which is the promotion #5867 is about.
+/// Test: `unmanaged_cwd_audits_the_operator_home_tier`,
+/// `a_registered_workspace_still_gets_the_workspace_layout`,
+/// `an_uncanonicalizable_path_is_not_a_managed_workspace`,
+/// `an_unreadable_directory_is_not_a_managed_workspace`,
+/// `an_absent_path_still_matches_the_recorded_spelling_of_itself`.
+fn is_managed_workspace(project_dir: &Path, active_workspace_paths: &[PathBuf]) -> bool {
+    fn resolve(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+    let target = resolve(project_dir);
+    active_workspace_paths
+        .iter()
+        .any(|candidate| resolve(candidate) == target)
 }
 
 /// Probe for the `CLAUDE_CONFIG_DIR`-keyed OAuth login-loop risk (issue #2246).

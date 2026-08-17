@@ -260,11 +260,13 @@ fn evaluate_style(style_id: &str, home: &Path, source_path: &Path, source: &str)
         _ => DoctorCheck::new(
             "output_style",
             CheckStatus::Fail,
+            // #5866: `tm install` never wrote this file; `--fix` does.
             format!(
                 "{source} outputStyle {style_id:?} ({}) is a known id but {} is missing or \
-                 empty — run `tm install` to redeploy styles",
+                 empty — run `{}` to redeploy styles",
                 source_path.display(),
-                style_path.display()
+                style_path.display(),
+                crate::core::doctor_repair::OUTPUT_STYLE_REMEDY
             ),
         ),
     }
@@ -406,13 +408,16 @@ pub(crate) fn check_output_style_staleness(project_dir: Option<&Path>, home: &Pa
     let styles_dir = home.join(".claude").join("output-styles");
     let known_names: HashSet<&str> = OUTPUT_STYLES.iter().map(|s| s.file_name).collect();
 
-    let mut drifted: Vec<&str> = Vec::new();
-    for style in OUTPUT_STYLES {
-        match std::fs::read(styles_dir.join(style.file_name)) {
-            Ok(bytes) if bytes != style.content.as_bytes() => drifted.push(style.file_name),
-            _ => {} // in sync, missing (not this probe's concern), or unreadable (skip)
-        }
-    }
+    // #5866: the drift scan is shared with `core::doctor_repair::repair_output_style`
+    // so the file list this reports is exactly the list `tm doctor --fix` acts on.
+    // Missing and unreadable files are still filtered out here — a missing file is
+    // already `Fail`ed by `check_output_style` and must not be double-reported as
+    // drift, and an unreadable one is not evidence of staleness.
+    let drifted: Vec<&str> = crate::core::output_style_deployer::output_style_drift(&styles_dir)
+        .into_iter()
+        .filter(|(_, state)| *state == crate::core::output_style_deployer::StyleDrift::Drifted)
+        .map(|(file_name, _)| file_name)
+        .collect();
 
     let mut orphans: Vec<String> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&styles_dir) {
@@ -444,10 +449,13 @@ pub(crate) fn check_output_style_staleness(project_dir: Option<&Path>, home: &Pa
 
     let mut parts: Vec<String> = Vec::new();
     if !drifted.is_empty() {
+        // #5866: this named `tm install`, which has no output-style step — the
+        // deployed file kept its mtime across a full install run.
         parts.push(format!(
-            "{} drifted from bundled content ({}) — run `tm install` to redeploy",
+            "{} drifted from bundled content ({}) — run `{}` to redeploy",
             drifted.len(),
-            drifted.join(", ")
+            drifted.join(", "),
+            crate::core::doctor_repair::OUTPUT_STYLE_REMEDY
         ));
     }
     if !orphans.is_empty() {
