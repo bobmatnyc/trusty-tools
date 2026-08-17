@@ -40,7 +40,10 @@
 //!   deliverable.
 //! - A sweep in which SOME repository failed still packages, and
 //!   [`crate::package::assemble`] names every repository it does not cover in
-//!   the package's own README and metadata.
+//!   the package's own README and metadata. So does every target the chain
+//!   never attempted: a repository that failed to CLONE reaches the same two
+//!   generated members, because the recipient opening the zip has those and not
+//!   this process's console output (#5824 review).
 //! - Either way [`crate::session::Outcome::exit_code`] is non-zero, so
 //!   `taudit audit && send-it` cannot chain onward over an incomplete
 //!   engagement.
@@ -152,13 +155,17 @@ pub struct ChainReport {
     pub run: RunReport,
     /// The deliverable, and what it does not cover.
     pub package: ReturnPackage,
-    /// What this engagement targets and the chain could not audit.
+    /// What this engagement targets and the chain never attempted.
     ///
-    /// Distinct from [`ReturnPackage::excluded`], which names repositories the
-    /// sweep ATTEMPTED and failed. A gap here is something never attempted at
-    /// all — a registered board today. Non-empty makes the run's exit status
-    /// non-zero, so a silently unaudited target cannot read as a whole
-    /// engagement.
+    /// Two sources: a registered board, which [`board_gap`] explains, and a
+    /// registered repository that failed to clone. Neither reaches the sweep, so
+    /// neither can appear among [`RunReport::failures`] — which is why the chain
+    /// carries them itself rather than deriving everything from the sweep.
+    ///
+    /// [`ReturnPackage::excluded`] is the superset: these lines PLUS the
+    /// repositories the sweep attempted and failed. Non-empty here makes the
+    /// run's exit status non-zero, so a silently unaudited target cannot read as
+    /// a whole engagement.
     pub gaps: Vec<String>,
 }
 
@@ -201,16 +208,22 @@ pub async fn audit(
         .await
         .map_err(|e| stopped(Phase::InstallTools, e))?;
 
-    let (repos, gaps) = split_targets(work).map_err(|e| stopped(Phase::Materialize, e))?;
+    let (repos, mut gaps) = split_targets(work).map_err(|e| stopped(Phase::Materialize, e))?;
     let acquired = materialize(work, &repos, progress)
         .await
         .map_err(|e| stopped(Phase::Materialize, e))?;
+    // #5824: a repository that failed to clone is named ONLY on the clone
+    // report. It is never selected, so the sweep cannot report it and nothing
+    // downstream would otherwise learn it was registered.
+    if let Some(acquired) = &acquired {
+        gaps.extend(acquired.gaps.iter().cloned());
+    }
 
     let run = collect(work, config, options, progress)
         .await
         .map_err(|e| stopped(Phase::Collect, e))?;
 
-    let package = assemble(work, config, options.destination.clone(), progress)
+    let package = assemble(work, config, &gaps, options.destination.clone(), progress)
         .map_err(|e| stopped(Phase::Package, e))?;
 
     Ok(ChainReport {
@@ -374,12 +387,21 @@ async fn collect(
 /// proves — that the record on disk describes a sweep which FINISHED. Passing
 /// the in-memory report would skip that check and leave two packaging paths with
 /// different preconditions.
+///
+/// `gaps` is threaded through rather than merged into
+/// [`ReturnPackage::excluded`] afterwards, because the zip is already written by
+/// the time this returns: a gap appended to the returned value would correct
+/// what this process prints and leave the README and metadata INSIDE the
+/// deliverable still claiming full coverage — and the zip is what the third
+/// party opens (#5824 review).
 /// What: announces the phase through `progress`, then assembles.
 /// Test: `super::chain_tests::the_chain_installs_collects_and_packages`,
-/// `super::chain_tests::progress_covers_every_phase`.
+/// `super::chain_tests::progress_covers_every_phase`,
+/// `cli_end_to_end::a_registered_repository_that_never_cloned_is_named_in_the_package`.
 fn assemble(
     work: &WorkDir,
     config: &EngagementConfig,
+    gaps: &[String],
     destination: Option<PathBuf>,
     progress: &Progress,
 ) -> Result<ReturnPackage, AuditError> {
@@ -390,7 +412,7 @@ fn assemble(
     );
     progress.operation_started(Operation::Package, 1);
     progress.unit_started(Operation::Package, name.as_str(), 1, 1);
-    let assembled = package::from_checkpoint(work, config, &destination);
+    let assembled = package::from_checkpoint(work, config, gaps, &destination);
     progress.unit_finished(
         Operation::Package,
         name.as_str(),

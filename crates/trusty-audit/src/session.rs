@@ -589,7 +589,9 @@ impl Session {
     fn package(&self, destination: Option<PathBuf>) -> Result<ReturnPackage, AuditError> {
         let config = EngagementConfig::load(&self.config_path)?;
         let destination = destination.unwrap_or_else(|| package::default_destination(&self.work));
-        package::from_checkpoint(&self.work, &config, &destination)
+        // No unattempted targets: the standalone verb packages whatever the last
+        // sweep recorded and knows nothing about a registry (#5824).
+        package::from_checkpoint(&self.work, &config, &[], &destination)
     }
 
     /// Drive the whole engagement in one call (#5824).

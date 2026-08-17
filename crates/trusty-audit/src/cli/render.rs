@@ -255,7 +255,13 @@ fn render_chain(report: &ChainReport) -> String {
     out.push_str(&render_run(&report.run));
     // A gap here is a registered target the chain never attempted, which the
     // sweep's own report has no way to mention — it only knows what it swept.
-    for gap in &report.gaps {
+    //
+    // #5824: since the chain folds the clone report's gaps into its own, a
+    // failed clone would otherwise print the identical sentence twice on one
+    // screen — once as the acquisition section's `Gap:` above, once here. The
+    // roll-up states only what no earlier section did.
+    let acquired: &[String] = report.acquired.as_ref().map_or(&[], |a| a.gaps.as_slice());
+    for gap in report.gaps.iter().filter(|g| !acquired.contains(g)) {
         out.push_str(&format!("Not audited: {gap}\n"));
     }
     out.push('\n');
