@@ -202,10 +202,11 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
     // so a fresh signed install verified green against a stale 1.0.2 image. Bail
     // out with the launchctl verb instead of racing launchd. The label is
     // resolved rather than assumed so the recipe names a unit that exists here.
-    if let Some(label) = crate::commands::launchd_probe::daemon_launchd_label() {
-        anyhow::bail!(crate::commands::launchd_probe::cli_spawn_refusal_hint(
-            &label
-        ));
+    //
+    // #5623: a `LaunchAgents` that could not be read also refuses here — it used
+    // to read as "no unit registered" and wave the spawn straight through.
+    if let Some(msg) = crate::commands::launchd_probe::cli_spawn_refusal() {
+        anyhow::bail!(msg);
     }
 
     // Resolve the log file under `~/.trusty-mpm/`, creating the dir if absent.
@@ -289,10 +290,9 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
 /// spawn/wait path is exercised by running `tm restart` against a clean
 /// environment.
 pub(crate) async fn restart(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
-    if let Some(label) = crate::commands::launchd_probe::daemon_launchd_label() {
-        anyhow::bail!(crate::commands::launchd_probe::cli_spawn_refusal_hint(
-            &label
-        ));
+    // #5623: refuses on an unreadable `LaunchAgents` too — see `start`.
+    if let Some(msg) = crate::commands::launchd_probe::cli_spawn_refusal() {
+        anyhow::bail!(msg);
     }
     if daemon_healthy(client, url).await {
         print!("Stopping daemon... ");
@@ -359,12 +359,21 @@ pub(crate) async fn stop_daemon() -> anyhow::Result<()> {
 
     // #4230: launchd will NOT bring this back on its own — the plist sets
     // `KeepAlive {SuccessfulExit: false}` and a SIGTERM stop exits 0.
-    if let Some(label) = crate::commands::launchd_probe::daemon_launchd_label() {
-        println!(
+    // #5623: the undeterminable arm says so rather than staying silent — silence
+    // here reads as "no launchd unit", and the operator walks away from a stopped
+    // daemon believing nothing owns it.
+    match crate::commands::launchd_probe::daemon_launchd_label() {
+        crate::commands::launchd_probe::DaemonLabelProbe::Registered(label) => println!(
             "note: launchd unit `{label}` owns this daemon and will NOT respawn it \
              (KeepAlive.SuccessfulExit=false). Bring it back with `{}` — issue #4230.",
             crate::commands::launchd_probe::daemon_restart_command_for(Some(&label))
-        );
+        ),
+        crate::commands::launchd_probe::DaemonLabelProbe::Undeterminable => println!(
+            "note: `~/Library/LaunchAgents` could not be read, so whether a launchd unit \
+             owns this daemon is unknown. If one does, it will NOT respawn it \
+             (KeepAlive.SuccessfulExit=false) — issue #4230."
+        ),
+        crate::commands::launchd_probe::DaemonLabelProbe::NotRegistered => {}
     }
 
     // Phase 1: SIGTERM all targets.
