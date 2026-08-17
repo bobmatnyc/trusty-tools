@@ -42,7 +42,9 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{
+    AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWriteExt as _, BufReader,
+};
 use trusty_common::credentials::scrub_secrets;
 use trusty_progress::relay::StageEvent;
 
@@ -309,10 +311,7 @@ mod relay_tests {
             .await
             .expect("the pump completes");
 
-        (
-            std::fs::read(&path).expect("read log"),
-            recorder.stages(),
-        )
+        (std::fs::read(&path).expect("read log"), recorder.stages())
     }
 
     /// Why: the two obligations at once, and they pull in opposite directions —
@@ -398,7 +397,10 @@ mod relay_tests {
         let log = String::from_utf8(log).expect("text");
 
         assert!(!log.contains(KEY), "{log}");
-        assert_eq!(log, "ERROR 401: the key [REDACTED] is not valid\nnext line\n");
+        assert_eq!(
+            log,
+            "ERROR 401: the key [REDACTED] is not valid\nnext line\n"
+        );
     }
 
     /// Why: #5869 — a credential quoted in a stage detail would otherwise reach
@@ -409,7 +411,7 @@ mod relay_tests {
     #[tokio::test]
     async fn a_credential_inside_a_relay_line_is_masked_before_the_sink() {
         let leaky = StageEvent::new("Audit", "review", StageState::Failed)
-            .with_detail(&format!("provider rejected {KEY}"));
+            .with_detail(format!("provider rejected {KEY}"));
         let input = format!("{}\n", leaky.encode());
 
         let (log, stages) = run_bytes(input.as_bytes(), Scrubber::over(vec![KEY.to_owned()])).await;
@@ -440,7 +442,11 @@ mod relay_tests {
         let log = String::from_utf8(log).expect("text");
 
         assert!(!log.contains(KEY), "the key survived the flush boundary");
-        assert!(log.contains("[REDACTED] trailing"), "tail: {:?}", &log[log.len() - 40..]);
+        assert!(
+            log.contains("[REDACTED] trailing"),
+            "tail: {:?}",
+            &log[log.len() - 40..]
+        );
     }
 
     /// Why: a needle is valid UTF-8, so it cannot span an invalid byte — but a
@@ -463,18 +469,59 @@ mod relay_tests {
     /// Why: `read_until` grows its buffer until a newline arrives, so a child
     /// printing one endless line is an unbounded allocation in a process that
     /// runs for hours.
-    /// What: a stream several times [`SEGMENT_LIMIT`] with no newline at all
-    /// still reaches the log whole, which is only possible because the pump
-    /// flushed it in pieces rather than holding it.
+    /// What: the assertion is that bytes reach the log while the stream is
+    /// STILL OPEN and has carried no newline. A pump that buffered the line
+    /// would have written nothing yet, so an empty log here is the unbounded
+    /// behaviour and a non-empty one is the bound. The log then still holds the
+    /// whole stream once it closes — flushing early costs no bytes.
     /// Test: this is the test.
     #[tokio::test]
     async fn a_line_that_never_ends_does_not_grow_without_bound() {
-        let input = vec![b'z'; SEGMENT_LIMIT * 3 + 17];
-        let (log, stages) = run_bytes(&input, Scrubber::over(vec![KEY.to_owned()])).await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("child.log");
+        let file = tokio::fs::File::create(&path).await.expect("create log");
+        let (_recorder, progress) = Recorder::new();
+        let (mut writer, reader) = tokio::io::duplex(64 * 1024);
 
-        assert_eq!(log.len(), input.len(), "the log must hold the whole stream");
-        assert_eq!(log, input);
-        assert!(stages.is_empty(), "{stages:?}");
+        let pump = tokio::spawn(tee_and_relay(
+            reader,
+            file,
+            progress,
+            "acme/api".into(),
+            Scrubber::over(vec![KEY.to_owned()]),
+        ));
+
+        let burst = vec![b'z'; SEGMENT_LIMIT * 3 + 17];
+        let feeder = tokio::spawn(async move {
+            writer.write_all(&burst).await.expect("feed the pump");
+            // Hold the stream open: the point is what the log holds BEFORE EOF.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            writer
+        });
+
+        // Poll rather than sleep-and-hope: the condition is "the pump wrote
+        // something", and it is either reached or the test fails on the bound.
+        let mut on_disk = 0;
+        for _ in 0..100 {
+            on_disk = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if on_disk > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            on_disk > 0,
+            "nothing reached the log while the endless line was still open — \
+             the pump is buffering it whole"
+        );
+
+        drop(feeder.await.expect("the feeder finishes"));
+        pump.await.expect("join").expect("the pump completes");
+        assert_eq!(
+            std::fs::read(&path).expect("read log"),
+            vec![b'z'; SEGMENT_LIMIT * 3 + 17],
+            "flushing early must not cost a byte"
+        );
     }
 
     /// Why: the hold-back is derived from the needles, and a set with none must

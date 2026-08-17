@@ -1439,6 +1439,62 @@ trusty-review = "0.15.1"
         }
     }
 
+    /// Why: #5869 — the test above walks the whole root but its stub never
+    /// ECHOES the key, so it passed against a log written verbatim. This is the
+    /// arm that did not hold: a child that prints the credential back, on both
+    /// streams, in the two shapes a real one would — a provider's rejection body
+    /// and a `git` remote URL in a clone failure.
+    /// What: the key reaches neither the log nor any other file the run wrote,
+    /// and the surrounding diagnostic text survives so the log is still useful.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_echoes_the_key_does_not_leave_it_in_the_log() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let mut script = String::from(
+            "#!/bin/sh\n\
+             echo \"ERROR 401 from provider: {\\\"message\\\":\\\"key $OPENROUTER_API_KEY \
+             is not valid\\\"}\"\n\
+             echo \"fatal: could not read from \
+             https://x-access-token:$OPENROUTER_API_KEY@github.com/acme/api\" >&2\n",
+        );
+        script.push_str(writes_a_manifest(None).trim_start_matches("#!/bin/sh\n"));
+        install_stubs(&work, &script);
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let log = std::fs::read_to_string(&report.repos[0].log).expect("read the child log");
+        assert!(
+            !log.contains("sk-or-v1-not-a-real-key"),
+            "the log carries the key:\n{log}"
+        );
+        // The child really did echo it — otherwise the assertion above proves
+        // nothing about the filter.
+        assert_eq!(
+            log.matches("[REDACTED]").count(),
+            2,
+            "both echoes must be masked, one per stream:\n{log}"
+        );
+        // The log is still a log: masking replaced the key, not the diagnosis.
+        assert!(log.contains("ERROR 401 from provider"), "{log}");
+        assert!(log.contains("github.com/acme/api"), "{log}");
+
+        for path in files_under(work.root()) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains("sk-or-v1-not-a-real-key"),
+                "{} carries the key",
+                path.display()
+            );
+        }
+    }
+
     /// The CRITICAL arm: `tga audit` exits 0 whenever the sweep COMPLETED,
     /// failed stages included, so a zero exit alone is not evidence anything was
     /// assessed. A child that wrote no manifest audited nothing.
