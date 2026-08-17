@@ -54,6 +54,11 @@
 //! file persists on disk, and a command-line argument is world-readable in
 //! `ps`).
 //!
+//! A registered board's credential travels the same way (#5857). The generated
+//! config gets a `${TRUSTY_AUDIT_JIRA_TOKEN}`-style reference and the value goes
+//! in the environment beside it; [`boards`] owns that split and the reasons for
+//! it.
+//!
 //! Test: `super::run_tests`.
 
 use std::path::{Path, PathBuf};
@@ -61,12 +66,12 @@ use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{EngagementConfig, ToolPins};
+use crate::config::EngagementConfig;
 use crate::error::AuditError;
 use crate::inference;
 use crate::progress::{Operation, Progress, StageEvent, StageState, UnitOutcome};
+use crate::registry;
 use crate::relay::{Scrubber, tee_and_relay};
-use crate::tools::{self, RequiredTool};
 use crate::workdir::{Area, WorkDir};
 
 // #5823: the selection file crossed run.rs past the 500-SLOC production cap, and
@@ -74,6 +79,12 @@ use crate::workdir::{Area, WorkDir};
 // `crate::run::SelectedRepo` and friends stay where every caller already names
 // them.
 mod selection;
+
+// #5857: what a registered board contributes to a child — the generated config
+// section, the variable carrying its secret, and the gap when it cannot be
+// collected. Public because `crate::chain` states the same gaps in the return
+// package and must reach them through this one resolution, not a second copy.
+pub mod boards;
 
 // #5494: the checkpoint and its resume rules are one subject and they are not
 // this file's — `run.rs` drives children, `checkpoint.rs` decides what a re-run
@@ -85,6 +96,13 @@ pub mod checkpoint;
 // judgement is what makes it a module rather than a step inside `run_one`.
 mod verify;
 
+// #5857: the pinned-tool preflight, split out when this file crossed the
+// 500-SLOC production cap. It runs to completion before any child starts and
+// answers one question — are the installed tools the ones this engagement pins
+// — so it separates cleanly.
+mod pins;
+
+use pins::{PinnedBinaries, pinned_binaries};
 use verify::verify_output;
 
 pub use checkpoint::{PROGRESS_FILE, Recollect, RunProgress, progress_path, read_progress};
@@ -222,85 +240,6 @@ pub struct RunOptions {
     pub fresh: bool,
 }
 
-/// The four binaries a run drives, each proven to be at the engagement's pin.
-///
-/// Why: named fields rather than a lookup table, so the "tool not found" branch
-/// does not exist. The obvious table version needs a fallback arm at every use
-/// site, and the natural fallback — the bare binary name — is a `PATH` lookup,
-/// which is the one thing this module must never do.
-#[derive(Debug, Clone)]
-struct PinnedBinaries {
-    tga: PathBuf,
-    search: PathBuf,
-    analyze: PathBuf,
-    review: PathBuf,
-}
-
-/// The pinned binaries this run drives, or a refusal naming what is wrong.
-///
-/// Why: the run must use the binaries THIS client installed and verified at the
-/// version THIS engagement pins — never whatever `tga` happens to be on the
-/// operator's `PATH`, and never a copy installed before the config was bumped.
-/// Both are the #5454 version-skew class, and there is no fallback for either.
-///
-/// Three conditions, each a refusal: the file is present, the version record
-/// this client wrote names it, and that recorded version equals the engagement's
-/// pin. The second matters because a binary someone dropped into `tools/` by
-/// hand reads as `installed` with no version — unverified is not a weaker kind
-/// of installed. The third matters because install and run are separate steps,
-/// so the config can change between them.
-/// What: reads [`tools::status`], checks all three conditions, and returns the
-/// paths by name.
-/// Test: `super::run_tests::a_run_without_the_pinned_tools_is_refused`,
-/// `super::run_tests::an_unverified_binary_does_not_count_as_installed`,
-/// `super::run_tests::a_binary_installed_at_a_different_pin_is_refused`.
-///
-/// # Errors
-///
-/// [`AuditError::ToolsNotInstalled`] naming every tool that is missing or
-/// unverified, [`AuditError::VersionMismatch`] for the first tool whose recorded
-/// version is not the engagement's pin, and whatever [`tools::status`] fails
-/// with.
-fn pinned_binaries(work: &WorkDir, pins: &ToolPins) -> Result<PinnedBinaries, AuditError> {
-    let statuses = tools::status(work)?;
-    let missing: Vec<&'static str> = statuses
-        .iter()
-        .filter(|s| !s.installed || s.version.is_none())
-        .map(|s| s.tool.binary_name())
-        .collect();
-    if !missing.is_empty() {
-        return Err(AuditError::ToolsNotInstalled { missing });
-    }
-
-    let path_of = |tool: RequiredTool| -> Result<PathBuf, AuditError> {
-        let pinned = tool.pin_in(pins).version();
-        let status = statuses.iter().find(|s| s.tool == tool).ok_or_else(|| {
-            AuditError::ToolsNotInstalled {
-                missing: vec![tool.binary_name()],
-            }
-        })?;
-        // `version` is Some: the missing check above rejected every None.
-        match status.version.as_deref() {
-            Some(v) if v == pinned => Ok(status.path.clone()),
-            Some(v) => Err(AuditError::VersionMismatch {
-                tool: tool.crate_name(),
-                pinned: pinned.to_owned(),
-                installed: v.to_owned(),
-            }),
-            None => Err(AuditError::ToolsNotInstalled {
-                missing: vec![tool.binary_name()],
-            }),
-        }
-    };
-
-    Ok(PinnedBinaries {
-        tga: path_of(RequiredTool::Tga)?,
-        search: path_of(RequiredTool::TrustySearch)?,
-        analyze: path_of(RequiredTool::TrustyAnalyze)?,
-        review: path_of(RequiredTool::TrustyReview)?,
-    })
-}
-
 /// A filename-safe, collision-free stem for one repository's files.
 ///
 /// Why: two things at once. The name comes from a selection file this client did
@@ -348,10 +287,20 @@ fn sanitize(name: &str) -> String {
 /// The database is placed under `extract/`, which is the area `workdir` names
 /// for exactly that, so it is inside the root that `rm -rf` cleans.
 /// The engagement credential is deliberately NOT here; see the module docs.
+///
+/// #5857: a registered board adds a `jira:` or `linear:` section, and those
+/// carry a `${VAR}` reference rather than the board's secret — the secret
+/// itself still travels only in the child's environment. Both are omitted when
+/// no board is registered, so a repo-only engagement generates exactly the
+/// document it always did.
 #[derive(Debug, Serialize)]
 struct TgaConfig {
     repositories: Vec<TgaRepository>,
     database: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jira: Option<boards::TgaJira>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linear: Option<boards::TgaLinear>,
 }
 
 #[derive(Debug, Serialize)]
@@ -411,7 +360,47 @@ pub async fn sweep(
     options: &RunOptions,
     progress: &Progress,
 ) -> Result<RunReport, AuditError> {
-    sweep_with_budget(work, config, options, PER_REPO_TIMEOUT, progress).await
+    sweep_with_budget(work, config, options, None, PER_REPO_TIMEOUT, progress).await
+}
+
+/// [`sweep`], over boards the caller has already resolved.
+///
+/// Why: #5857 left `crate::chain` and this module each calling
+/// [`boards::resolve`] against their own [`registry::Registry::load`], hours
+/// apart — the chain states its board gaps in the Materialize phase and the
+/// sweep runs after tool install and every clone. A `taudit remove board`
+/// inside that window made the two reads disagree: the report claimed coverage
+/// while the child got no board section, and the engagement exited 0 having
+/// never read the board. The chain now resolves once and hands the result here,
+/// so there is one resolution per invocation rather than two reads that can
+/// diverge.
+///
+/// # Preconditions
+/// `boards` was resolved from the same [`EngagementConfig::boards`] passed as
+/// `config` — [`boards::Boards::env`] reads the secrets out of `config`, and a
+/// section resolved against different credentials would reference a variable
+/// this call does not set.
+/// Test: `crate::chain::chain_tests::a_board_removed_after_the_chain_resolved_it_still_reaches_the_child`.
+///
+/// # Errors
+///
+/// Exactly [`sweep`]'s, minus the registry read this call does not perform.
+pub async fn sweep_with_boards(
+    work: &WorkDir,
+    config: &EngagementConfig,
+    options: &RunOptions,
+    boards: &boards::Boards,
+    progress: &Progress,
+) -> Result<RunReport, AuditError> {
+    sweep_with_budget(
+        work,
+        config,
+        options,
+        Some(boards),
+        PER_REPO_TIMEOUT,
+        progress,
+    )
+    .await
 }
 
 /// [`sweep`], with the per-repository timeout as an argument.
@@ -426,10 +415,11 @@ async fn sweep_with_budget(
     work: &WorkDir,
     config: &EngagementConfig,
     options: &RunOptions,
+    boards: Option<&boards::Boards>,
     budget: std::time::Duration,
     progress: &Progress,
 ) -> Result<RunReport, AuditError> {
-    sweep_with_env(work, config, options, budget, progress, |name| {
+    sweep_with_env(work, config, options, boards, budget, progress, |name| {
         std::env::var(name).ok()
     })
     .await
@@ -450,6 +440,7 @@ async fn sweep_with_env<F>(
     work: &WorkDir,
     config: &EngagementConfig,
     options: &RunOptions,
+    resolved: Option<&boards::Boards>,
     budget: std::time::Duration,
     progress: &Progress,
     operator: F,
@@ -462,6 +453,22 @@ where
     // Resolved once, before any child: a half-named selection is identical for
     // every repository, so failing per-repo would just repeat one misconfiguration.
     let inference = inference::inference_env(config, operator)?;
+    // #5857: ONE resolution per invocation. `crate::chain` resolved the boards
+    // an hour ago to state its gaps and hands that result down, so the coverage
+    // the report claims and the sections the child gets cannot diverge over a
+    // registry edited meanwhile. `taudit run` supplies nothing and resolves here
+    // — still once, and still after the refusals above, so a truncated registry
+    // is not reported ahead of a missing tool. Every child gets the same
+    // sections: a board is a dimension of the engagement, not a unit of the
+    // sweep, and tga correlates it against whichever repository it is auditing.
+    let owned;
+    let boards = match resolved {
+        Some(boards) => boards,
+        None => {
+            owned = boards::resolve(registry::Registry::load(work)?.targets(), &config.boards);
+            &owned
+        }
+    };
     let selected = load_selection(work)?;
     // #5869: materialized once for the whole sweep — resolving reads
     // `.env.local` and opens the secure store, which is not a per-child cost,
@@ -487,8 +494,8 @@ where
             Err(why) => {
                 announce_recollection(&repo.name, &why, progress);
                 run_one(
-                    work, config, &binaries, &inference, index, repo, budget, progress, total,
-                    &scrubber,
+                    work, config, &binaries, &inference, boards, index, repo, budget, progress,
+                    total, &scrubber,
                 )
                 .await?
             }
@@ -521,15 +528,22 @@ where
 /// What: the registry-wide resolved set from
 /// [`trusty_common::credentials::resolved_secret_values`] — the shared entry
 /// point, so a credential added there is scrubbed without this changing — plus
-/// the engagement key, which comes from the config file rather than the
-/// environment and so is not in that set.
+/// [`EngagementConfig::configured_secrets`], which is every credential this
+/// engagement's TOML carries and so reaches none of that registry.
+///
+/// #5857: the board credentials are in that second half for the same reason the
+/// OpenRouter key always was. `resolved_secret_values` walks
+/// `registered_providers`, and no provider there is a board, so a child that
+/// quotes a JIRA token in an auth error would otherwise write it to the log
+/// verbatim. [`crate::package::secret_needles`] draws from the same list.
 ///
 /// This removes only values this process already holds; see [`crate::relay`]
 /// for what that leaves behind.
-/// Test: `super::run_tests::a_child_that_echoes_the_key_does_not_leave_it_in_the_log`.
+/// Test: `super::run_tests::a_child_that_echoes_the_key_does_not_leave_it_in_the_log`,
+/// `super::run_tests::a_child_that_echoes_a_board_credential_does_not_leave_it_in_the_log`.
 fn child_output_scrubber(config: &EngagementConfig) -> Scrubber {
     let mut secrets = trusty_common::credentials::resolved_secret_values();
-    secrets.push(config.openrouter_key.expose().to_owned());
+    secrets.extend(config.configured_secrets().into_iter().map(str::to_owned));
     Scrubber::over(secrets)
 }
 
@@ -590,6 +604,7 @@ async fn run_one(
     config: &EngagementConfig,
     binaries: &PinnedBinaries,
     inference: &[(&'static str, String)],
+    boards: &boards::Boards,
     index: usize,
     repo: SelectedRepo,
     budget: std::time::Duration,
@@ -604,13 +619,14 @@ async fn run_one(
     progress.unit_started(Operation::Sweep, repo.name.as_str(), index + 1, total);
 
     let mut gaps = Vec::new();
-    let result = match prepare(work, &output, &stem, &checkout)? {
+    let result = match prepare(work, &output, &stem, &checkout, boards)? {
         Err(reason) => RepoResult::Failed { reason },
         Ok(config_path) => {
             match spawn_tga(
                 binaries,
                 config,
                 inference,
+                boards,
                 &config_path,
                 &output,
                 &log,
@@ -661,6 +677,7 @@ fn prepare(
     output: &Path,
     stem: &str,
     checkout: &Path,
+    boards: &boards::Boards,
 ) -> Result<Result<PathBuf, String>, AuditError> {
     if !checkout.is_dir() {
         return Ok(Err(format!(
@@ -676,6 +693,10 @@ fn prepare(
             name: stem.to_string(),
         }],
         database: work.path(Area::Extract).join(format!("{stem}.db")),
+        // #5857: `${TRUSTY_AUDIT_JIRA_TOKEN}`, not the token — see
+        // `boards`'s module docs for why the file may never hold the value.
+        jira: boards.jira.clone(),
+        linear: boards.linear.clone(),
     };
     // Infallible in practice — the document is owned strings and paths with no
     // map keys — but a serializer error must not be swallowed into a default.
@@ -752,6 +773,7 @@ async fn spawn_tga(
     binaries: &PinnedBinaries,
     config: &EngagementConfig,
     inference: &[(&'static str, String)],
+    boards: &boards::Boards,
     config_path: &Path,
     output: &Path,
     log: &Path,
@@ -799,6 +821,12 @@ async fn spawn_tga(
     // named too. Resolved by `sweep_with_env`: either all four or none, never a
     // subset that could pair one provider with another's model ids.
     for (name, value) in inference {
+        command.env(name, value);
+    }
+    // #5857: the board credential the generated config only references. Exposed
+    // here rather than held on `Boards`, so it lives no longer than this
+    // `Command` — the same shape as the inference credential above.
+    for (name, value) in boards.env(&config.boards) {
         command.env(name, value);
     }
 
@@ -935,6 +963,7 @@ const ENV_REVIEW_BIN: &str = "TRUSTY_REVIEW_BIN";
 mod run_tests {
     use super::*;
     use crate::progress::{ProgressUpdate, Recorder, StageEvent, StageState};
+    use crate::tools::{self, RequiredTool};
     // The selection document itself, so a test can write a torn one by hand.
     use crate::run::selection::Selection;
 
@@ -1495,6 +1524,233 @@ trusty-review = "0.15.1"
         }
     }
 
+    // ── #5857: a registered board reaches the child ──────────────────────────
+
+    /// The JIRA API token this engagement is given. Never expected on disk.
+    const JIRA_TOKEN: &str = "jira-token-never-on-disk";
+
+    /// The Linear personal API key. Never expected on disk.
+    const LINEAR_KEY: &str = "lin_api_never-on-disk";
+
+    /// An engagement carrying both board credentials.
+    fn board_config() -> EngagementConfig {
+        let text = format!(
+            "{CONFIG}\n[boards.jira]\nurl = \"https://acme.atlassian.net\"\n\
+             email = \"auditor@acme.example\"\ntoken = \"{JIRA_TOKEN}\"\n\
+             \n[boards.linear]\napi_key = \"{LINEAR_KEY}\"\n"
+        );
+        EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("parses")
+    }
+
+    /// Register boards the way `taudit add board` does, so the sweep reads them
+    /// from the file it actually reads rather than from an injected value.
+    fn register_boards(work: &WorkDir, specs: &[&str]) {
+        let mut targets = registry::Registry::default();
+        for spec in specs {
+            targets
+                .insert(registry::parse(Some(registry::TargetKind::Board), spec).expect("parses"));
+        }
+        targets.save(work).expect("write registry");
+    }
+
+    /// The generated config carries a REFERENCE to each board credential and
+    /// never the credential, and the JIRA section carries both halves of the
+    /// Basic-auth pair.
+    ///
+    /// The `username` assertion is the one that catches the silent failure:
+    /// `JiraClient::new` builds its credential from `(&username, &token)` and
+    /// takes the `(Some, Some)` arm only, so a section with the token alone
+    /// runs UNAUTHENTICATED and reports no error at all.
+    ///
+    /// Against `origin/main` this fails at the first assertion — `TgaConfig` had
+    /// no `jira` field, so the board never reached the document.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_generated_config_references_the_board_secret_and_never_holds_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        register_boards(&work, &["jira:ACME", "linear:ENG"]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let generated =
+            std::fs::read_to_string(work.path(Area::State).join("tga-00-acme-api.yaml"))
+                .expect("the generated tga config");
+        assert!(
+            generated.contains("${TRUSTY_AUDIT_JIRA_TOKEN}"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("${TRUSTY_AUDIT_LINEAR_API_KEY}"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("username: auditor@acme.example"),
+            "a token without a username is an unauthenticated client: {generated}"
+        );
+        assert!(generated.contains("project_key: ACME"), "{generated}");
+        assert!(generated.contains("- ENG"), "{generated}");
+
+        // Not just this file: every file the run left anywhere under the root.
+        for path in files_under(work.root()) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains(JIRA_TOKEN) && !text.contains(LINEAR_KEY),
+                "{} carries a board credential",
+                path.display()
+            );
+        }
+    }
+
+    /// A stub that records the board variables it was handed.
+    fn records_its_board_env() -> String {
+        format!(
+            "{}{}",
+            writes_a_manifest(None).trim_end_matches("exit 0\n"),
+            "{\n  echo \"jira=$TRUSTY_AUDIT_JIRA_TOKEN\"\n  \
+             echo \"linear=$TRUSTY_AUDIT_LINEAR_API_KEY\"\n} > \"$out/board-env.txt\"\nexit 0\n",
+        )
+    }
+
+    /// The `${…}` reference is worth nothing unless the variable is set, so this
+    /// asserts on what the SPAWNED PROCESS received — not on what this crate
+    /// computed. tga expands the reference on the far side.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_child_environment_carries_the_real_board_credentials() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &records_its_board_env());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        register_boards(&work, &["jira:ACME", "linear:ENG"]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let seen = std::fs::read_to_string(report.repos[0].output.join("board-env.txt"))
+            .expect("the stub recorded its environment");
+        assert!(seen.contains(&format!("jira={JIRA_TOKEN}")), "{seen}");
+        assert!(seen.contains(&format!("linear={LINEAR_KEY}")), "{seen}");
+    }
+
+    /// An engagement that registers no board generates the document it always
+    /// did, and exports no board variable — so the sections and the variables
+    /// appear together or not at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_repo_only_engagement_gets_no_board_section_and_no_board_variable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &records_its_board_env());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+
+        let generated =
+            std::fs::read_to_string(work.path(Area::State).join("tga-00-acme-api.yaml"))
+                .expect("the generated tga config");
+        assert!(!generated.contains("jira"), "{generated}");
+        assert!(!generated.contains("linear"), "{generated}");
+        let seen = std::fs::read_to_string(report.repos[0].output.join("board-env.txt"))
+            .expect("the stub recorded its environment");
+        assert!(seen.contains("jira=\n"), "{seen}");
+        assert!(seen.contains("linear=\n"), "{seen}");
+    }
+
+    /// Why: #5869's filter is the OpenRouter test above, one credential over.
+    /// [`child_output_scrubber`] builds its needles from
+    /// `resolved_secret_values`, which enumerates the registered providers —
+    /// openrouter, anthropic, github, slack, and no board. A board credential
+    /// arrives from the engagement TOML rather than the environment, so before
+    /// #5857 appended it nothing put it in the needle set and a child that
+    /// quoted it wrote it to `work/logs/<repo>.log` in the clear.
+    /// What: a child that echoes both board credentials back, on both streams,
+    /// in the shapes a real one would — a provider rejection body quoting the
+    /// token, and an auth failure quoting the key — leaves neither in the log
+    /// nor in any other file the run wrote.
+    /// Test: this is the test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_echoes_a_board_credential_does_not_leave_it_in_the_log() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let mut script = String::from(
+            "#!/bin/sh\n\
+             echo \"jira 401: {\\\"message\\\":\\\"token \
+             $TRUSTY_AUDIT_JIRA_TOKEN is not valid\\\"}\"\n\
+             echo \"linear auth failed: key $TRUSTY_AUDIT_LINEAR_API_KEY rejected\" >&2\n",
+        );
+        script.push_str(writes_a_manifest(None).trim_start_matches("#!/bin/sh\n"));
+        install_stubs(&work, &script);
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        register_boards(&work, &["jira:ACME", "linear:ENG"]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let log = std::fs::read_to_string(&report.repos[0].log).expect("read the child log");
+        assert!(
+            !log.contains(JIRA_TOKEN),
+            "the log carries the token:\n{log}"
+        );
+        assert!(!log.contains(LINEAR_KEY), "the log carries the key:\n{log}");
+        // The child really did echo both — otherwise the assertions above prove
+        // nothing about the filter.
+        assert_eq!(
+            log.matches("[REDACTED]").count(),
+            2,
+            "both echoes must be masked, one per stream:\n{log}"
+        );
+        // The log is still a log: masking replaced the credentials, not the
+        // diagnosis.
+        assert!(log.contains("jira 401"), "{log}");
+        assert!(log.contains("linear auth failed"), "{log}");
+
+        for path in files_under(work.root()) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains(JIRA_TOKEN) && !text.contains(LINEAR_KEY),
+                "{} carries a board credential",
+                path.display()
+            );
+        }
+    }
+
     /// The CRITICAL arm: `tga audit` exits 0 whenever the sweep COMPLETED,
     /// failed stages included, so a zero exit alone is not evidence anything was
     /// assessed. A child that wrote no manifest audited nothing.
@@ -1586,6 +1842,7 @@ trusty-review = "0.15.1"
             &work,
             &config(),
             &RunOptions::default(),
+            None,
             std::time::Duration::from_millis(200),
             &Progress::none(),
         )
@@ -1667,6 +1924,7 @@ trusty-review = "0.15.1"
             work,
             &config(),
             &RunOptions::default(),
+            None,
             PER_REPO_TIMEOUT,
             &Progress::none(),
             operator,

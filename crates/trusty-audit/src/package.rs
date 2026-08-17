@@ -679,7 +679,30 @@ fn start(zip: &mut Archive, entry: &str, bytes: u64, temporary: &Path) -> Result
         })
 }
 
-/// Copy one file into the archive, refusing it if it carries the credential.
+/// Every secret this engagement holds, as the bytes a member may not carry.
+///
+/// Why: the guard used to scan for `openrouter_key` alone, and #5857 put two
+/// more secrets on the same trust boundary — the JIRA token and the Linear API
+/// key reach a `tga audit` child through its environment, and the files that
+/// child writes are exactly the files this function's caller packages and sends
+/// off the recipient's network. One list, so a credential added to
+/// [`EngagementConfig`] is refused here the moment it is configured.
+/// What: [`EngagementConfig::configured_secrets`] as byte slices — the same
+/// list [`crate::run`]'s child-log scrubber uses as its needles, so the two
+/// guards cannot come to disagree about what a secret is. A provider with no
+/// entry contributes no needle.
+/// Test: `super::package_tests::a_member_carrying_the_jira_token_is_refused_and_leaves_no_zip`,
+/// `super::package_tests::a_member_carrying_the_linear_api_key_is_refused_and_leaves_no_zip`,
+/// `super::package_tests::a_member_carrying_several_secrets_is_refused_on_the_first_pass`.
+fn secret_needles(config: &EngagementConfig) -> Vec<&[u8]> {
+    config
+        .configured_secrets()
+        .into_iter()
+        .map(str::as_bytes)
+        .collect()
+}
+
+/// Copy one file into the archive, refusing it if it carries any credential.
 fn copy_member(
     zip: &mut Archive,
     entry: &str,
@@ -694,8 +717,8 @@ fn copy_member(
     let bytes = input.metadata().map(|m| m.len()).unwrap_or(0);
     start(zip, entry, bytes, temporary)?;
 
-    let needle = config.openrouter_key.expose().as_bytes().to_vec();
-    let mut scan = CredentialScan::over(&needle);
+    let needles = secret_needles(config);
+    let mut scan = CredentialScan::over(&needles);
     let mut buffer = vec![0_u8; CHUNK_BYTES];
     let mut written = 0_u64;
     loop {
@@ -721,37 +744,54 @@ fn copy_member(
     Ok(written)
 }
 
-/// A substring search across a stream, without holding the stream in memory.
+/// A multi-needle substring search across a stream, without holding the stream
+/// in memory.
 ///
 /// Why: the credential check has to cover an extract database that can run to
 /// hundreds of megabytes, and a match that straddles two reads is exactly the
-/// case a naive per-chunk search misses. Keeping the last `needle.len() - 1`
-/// bytes as the next window's prefix is what closes that gap.
+/// case a naive per-chunk search misses. Keeping the last `len - 1` bytes as the
+/// next window's prefix is what closes that gap.
+///
+/// The carried tail is sized to the LONGEST needle (#5857): one buffer serves
+/// every needle, and a tail cut to the shortest would let a longer secret
+/// straddle two reads undetected — the precise failure a per-needle tail exists
+/// to prevent. One shared window also means one copy per chunk rather than one
+/// per needle per chunk, which matters at extract-database size.
 /// Test: `super::package_tests::a_credential_split_across_two_reads_is_caught`.
 struct CredentialScan<'a> {
-    needle: &'a [u8],
+    /// Every secret to refuse. Empty needles are dropped at construction — an
+    /// unset credential must not match every file.
+    needles: Vec<&'a [u8]>,
+    /// Bytes to carry into the next window: `longest needle - 1`.
+    keep: usize,
     tail: Vec<u8>,
 }
 
 impl<'a> CredentialScan<'a> {
-    fn over(needle: &'a [u8]) -> Self {
+    fn over(needles: &[&'a [u8]]) -> Self {
+        let needles: Vec<&'a [u8]> = needles.iter().copied().filter(|n| !n.is_empty()).collect();
+        let keep = needles.iter().map(|n| n.len()).max().unwrap_or(1) - 1;
         Self {
-            needle,
+            needles,
+            keep,
             tail: Vec::new(),
         }
     }
 
-    /// Whether the needle appears in the stream up to and including `chunk`.
+    /// Whether any needle appears in the stream up to and including `chunk`.
     fn feed(&mut self, chunk: &[u8]) -> bool {
-        if self.needle.is_empty() {
+        if self.needles.is_empty() {
             return false;
         }
         let mut window = std::mem::take(&mut self.tail);
         window.extend_from_slice(chunk);
-        let found = window
-            .windows(self.needle.len())
-            .any(|candidate| candidate == self.needle);
-        let keep = (self.needle.len() - 1).min(window.len());
+        let found = self.needles.iter().any(|needle| {
+            window.len() >= needle.len()
+                && window
+                    .windows(needle.len())
+                    .any(|candidate| candidate == *needle)
+        });
+        let keep = self.keep.min(window.len());
         self.tail = window[window.len() - keep..].to_vec();
         found
     }
@@ -947,17 +987,157 @@ trusty-review = "0.15.1"
         );
     }
 
-    /// A needle straddling two reads is the case the chunked scan exists for.
+    /// The board credentials #5857 routes through this crate, on the same
+    /// engagement that already carries the OpenRouter key.
+    const BOARD_CONFIG: &str = r#"
+openrouter_key = "sk-or-v1-not-a-real-key"
+instructions = "Assess the last 52 weeks."
+client = "Acme"
+
+[tools]
+tga = "2.9.4"
+trusty-search = "0.47.0"
+trusty-analyze = "0.9.2"
+trusty-review = "0.15.1"
+
+[boards.jira]
+url = "https://acme.atlassian.net"
+email = "auditor@acme.example"
+token = "jira-token-do-not-package-me"
+
+[boards.linear]
+api_key = "lin_api_do-not-package-me"
+"#;
+
+    fn config_with_boards() -> EngagementConfig {
+        EngagementConfig::from_toml(BOARD_CONFIG, Path::new("engagement.toml")).expect("parses")
+    }
+
+    /// Package one member carrying `leaked`, and return what `assemble` did.
+    fn packaging_a_member_carrying(
+        work: &WorkDir,
+        config: &EngagementConfig,
+        leaked: &str,
+    ) -> Result<ReturnPackage, AuditError> {
+        install_record(work);
+        let run = audited(work, "00-acme-api", "acme-api");
+        std::fs::write(run.output.join("leaked.log"), leaked).expect("write");
+        let report = RunReport::of(vec![run]);
+        assemble(work, config, &report, &[], &default_destination(work))
+    }
+
+    /// The JIRA token is a secret this crate now hands to a child, so the
+    /// package guard owes it the refusal the OpenRouter key already gets.
+    ///
+    /// Against `5a615fe0e` this fails on the first assertion: `copy_member`
+    /// scanned for `openrouter_key` alone, so the token was packaged and the
+    /// engagement's own board credential left the recipient's network.
+    #[test]
+    fn a_member_carrying_the_jira_token_is_refused_and_leaves_no_zip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let destination = default_destination(&work);
+
+        let err = packaging_a_member_carrying(
+            &work,
+            &config_with_boards(),
+            "authorization: Basic jira-token-do-not-package-me\n",
+        )
+        .expect_err("a package carrying the JIRA token must not be produced");
+
+        assert!(
+            matches!(err, AuditError::CredentialInPackage { .. }),
+            "{err:?}"
+        );
+        assert!(
+            !destination.exists(),
+            "a refused package must leave no file"
+        );
+        assert!(
+            !destination.with_extension("zip.part").exists(),
+            "the temporary must be removed too"
+        );
+    }
+
+    /// The Linear key, same reason. Two providers, one guard.
+    #[test]
+    fn a_member_carrying_the_linear_api_key_is_refused_and_leaves_no_zip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let destination = default_destination(&work);
+
+        let err = packaging_a_member_carrying(
+            &work,
+            &config_with_boards(),
+            "LINEAR_API_KEY=lin_api_do-not-package-me\n",
+        )
+        .expect_err("a package carrying the Linear key must not be produced");
+
+        assert!(
+            matches!(err, AuditError::CredentialInPackage { .. }),
+            "{err:?}"
+        );
+        assert!(!destination.exists());
+        assert!(!destination.with_extension("zip.part").exists());
+    }
+
+    /// Several needles in one member: neither board secret hides behind the
+    /// other, and neither depends on the OpenRouter key being present to trip
+    /// the guard.
+    #[test]
+    fn a_member_carrying_several_secrets_is_refused_on_the_first_pass() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+
+        let err = packaging_a_member_carrying(
+            &work,
+            &config_with_boards(),
+            "jira=jira-token-do-not-package-me\nlinear=lin_api_do-not-package-me\n",
+        )
+        .expect_err("a package carrying two board secrets must not be produced");
+
+        assert!(
+            matches!(err, AuditError::CredentialInPackage { .. }),
+            "{err:?}"
+        );
+        assert!(!default_destination(&work).exists());
+    }
+
+    /// A member carrying none of them still packages — the widened scan must not
+    /// refuse ordinary output.
+    #[test]
+    fn an_ordinary_member_still_packages_under_the_widened_scan() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+
+        let package =
+            packaging_a_member_carrying(&work, &config_with_boards(), "commits: 412\nauthors: 9\n")
+                .expect("output carrying no secret packages");
+
+        assert!(package.path.is_file(), "{package:?}");
+    }
+
+    /// A needle straddling two reads is the case the chunked scan exists for,
+    /// and with several needles the tail has to be sized to the LONGEST — a tail
+    /// cut to the shortest would let the longest one straddle undetected.
     #[test]
     fn a_credential_split_across_two_reads_is_caught() {
-        let needle = b"sk-or-v1-secret";
-        let mut scan = CredentialScan::over(needle);
+        let mut scan = CredentialScan::over(&[b"sk-or-v1-secret".as_slice()]);
         assert!(!scan.feed(b"noise sk-or-v1-"));
         assert!(scan.feed(b"secret more noise"));
 
+        // The LONGEST needle straddles while a shorter one is also registered —
+        // a tail sized to the shortest would miss this.
+        let mut several =
+            CredentialScan::over(&[b"lin_api".as_slice(), b"jira-token-that-is-long".as_slice()]);
+        assert!(!several.feed(b"noise jira-token-"));
+        assert!(several.feed(b"that-is-long more noise"));
+
         // And an empty key never matches everything.
-        let mut blank = CredentialScan::over(b"");
+        let mut blank = CredentialScan::over(&[b"".as_slice()]);
         assert!(!blank.feed(b"anything at all"));
+        let mut nothing = CredentialScan::over(&[]);
+        assert!(!nothing.feed(b"anything at all"));
     }
 
     /// Following a symlink would read a file outside the working directory into
