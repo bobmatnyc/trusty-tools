@@ -34,12 +34,25 @@ export const NAV_LINKS: { href: string; label: string }[] = [
 ];
 
 /**
- * The six flagship crates, each with a hand-authored page under `/tools/`.
- * The records live in `./tools` because those pages need more per-crate detail
- * than a landing-page card does, and a second copy here would drift.
+ * The flagship crates, each with a hand-authored page under `/tools/` and a
+ * card on the landing page. The records live in `./tools` because those pages
+ * need more per-crate detail than a landing-page card does, and a second copy
+ * here would drift.
  */
 export type Flagship = Tool;
 export const FLAGSHIPS: Flagship[] = TOOLS;
+
+/**
+ * The flagships whose release history drives the "What's new" surfaces — the
+ * strip on each landing-page card, and `/whats-new`.
+ *
+ * Why a subset rather than `FLAGSHIPS`: `$lib/changelog/site` fails the build
+ * for a crate whose `CHANGELOG.md` parses to zero release sections, because an
+ * empty section is indistinguishable from "nothing shipped". trusty-audit is
+ * `publish = false` and has no release tag, so it is carded and paged like the
+ * rest and carries no strip until its first release (`Tool.released`).
+ */
+export const RELEASED_FLAGSHIPS: Flagship[] = FLAGSHIPS.filter((f) => f.released);
 
 export interface CrateGroup {
 	group: string;

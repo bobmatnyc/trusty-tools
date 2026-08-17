@@ -13,8 +13,9 @@
 	/**
 	 * The strip is keyed by crate name rather than zipped by index so the card
 	 * loop cannot silently pair a crate with another crate's release. Every
-	 * flagship always has one: `$lib/changelog/site` fails the build otherwise,
-	 * so the `{#if}` below satisfies the type, it is not a fallback.
+	 * RELEASED flagship always has one: `$lib/changelog/site` fails the build
+	 * otherwise. The `{#if}` below is for the other kind — a flagship with no
+	 * release yet (`Tool.released`), whose card carries no strip.
 	 */
 	const strips = $derived(new Map(data.strips.map((strip) => [strip.name, strip])));
 
@@ -69,9 +70,9 @@
 		</p>
 		<p class="text-foundry-secondary">
 			Each crate versions, tags, and publishes independently, and everything is MIT licensed. Five
-			of the six flagship tools below speak the Model Context Protocol, so they plug into Claude
-			Code and any other MCP client without a bespoke integration; the sixth is a command-line
-			analytics tool.
+			of the seven flagship tools below speak the Model Context Protocol, so they plug into Claude
+			Code and any other MCP client without a bespoke integration; the other two are command-line
+			tools.
 		</p>
 	</div>
 </section>
@@ -79,7 +80,7 @@
 <!-- FLAGSHIP TOOLS -->
 <section class="mx-auto max-w-content px-4 pb-16 sm:px-6">
 	<h2 id="flagships" class="scroll-mt-24 font-display text-2xl font-bold sm:text-3xl">
-		Six flagship tools
+		Seven flagship tools
 	</h2>
 	<p class="mt-3 max-w-2xl text-foundry-secondary">
 		Each one has its own page — what it does, how it works, and how to install it.
@@ -203,8 +204,12 @@
 <section class="mx-auto max-w-content px-4 py-16 sm:px-6">
 	<h2 id="install" class="scroll-mt-24 font-display text-2xl font-bold sm:text-3xl">Install</h2>
 	<p class="mt-3 max-w-2xl text-foundry-secondary">
-		A bare <code class="text-sm">tctl install</code> brings up the seven managed crates in dependency
-		order. Name one to install just that crate and whatever it needs at runtime.
+		A bare <code class="text-sm">tctl install</code> brings up the eight managed crates in
+		dependency order. Name one to install just that crate and whatever it needs at runtime.
+		trusty-audit is not one of them — it
+		<a href="/tools/trusty-audit" class="text-foundry-primary underline underline-offset-2"
+			>installs itself</a
+		>.
 	</p>
 	<div class="mt-8 grid gap-6 lg:grid-cols-3">
 		{#each INSTALL_OPTIONS as option (option.id)}

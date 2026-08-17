@@ -2,15 +2,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { TOOLS } from './tools';
+import { installCommand, TOOLS } from './tools';
 import { STABLE_SET } from './site';
 
 /**
  * Why: the flagship pages assert things about crates. The two claims most
  * likely to rot silently are the ones the reader will act on — the `-p` flag
- * they paste into `cargo test`, and the `tctl install` target — because both
- * look plausible while being wrong. `crates/trusty-git-analytics` is package
- * `tga`, so the directory name is NOT the package name and cannot be assumed.
+ * they paste into `cargo test`, and the install command — because both look
+ * plausible while being wrong. `crates/trusty-git-analytics` is package `tga`,
+ * so the directory name is NOT the package name and cannot be assumed.
  *
  * What: re-derives each record's crate directory, package name, install
  * target, and docs route from the repository rather than from prose.
@@ -27,7 +27,7 @@ const REPO_ROOT = path.resolve(HERE, '../../..');
 
 describe('flagship tool records are grounded in the repository', () => {
 	it('names a crate directory that exists', () => {
-		expect(TOOLS.length).toBe(6);
+		expect(TOOLS.length).toBe(7);
 		for (const tool of TOOLS) {
 			expect(existsSync(path.join(REPO_ROOT, 'crates', tool.name, 'Cargo.toml')), tool.name).toBe(
 				true
@@ -47,10 +47,47 @@ describe('flagship tool records are grounded in the repository', () => {
 		}
 	});
 
-	it('every install command targets a stable-set member', () => {
-		for (const tool of TOOLS) {
-			const target = tool.install.replace('tctl install', '').trim();
+	it('every tctl install command targets a stable-set member', () => {
+		const tctl = TOOLS.filter((tool) => tool.install.via === 'tctl');
+		expect(tctl.length).toBe(TOOLS.length - 1);
+		for (const tool of tctl) {
+			const target = tool.install.via === 'tctl' ? tool.install.target : '';
 			expect(STABLE_SET, `${tool.name} installs ${target}`).toContain(target);
+			// The rendered block is the bootstrap line, then the tctl line.
+			expect(installCommand(tool)).toContain(`\ntctl install ${target}`);
+		}
+	});
+
+	/**
+	 * The one tool tctl does not manage. `trusty-audit` is `publish = false` and
+	 * absent from `stable_set.rs`, so a `tctl install` line on its page would be
+	 * a command that cannot work. Its own bootstrap script is shipped by #5873;
+	 * this asserts the URL SHAPE rather than the file's presence, because the
+	 * script lands in a different PR from this page.
+	 */
+	it('installs trusty-audit from its own bootstrap script, not tctl', () => {
+		const audit = TOOLS.find((tool) => tool.name === 'trusty-audit')!;
+		expect(audit.install.via).toBe('script');
+		expect(installCommand(audit)).toBe(
+			'curl -fsSL https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/crates/trusty-audit/install.sh | sh'
+		);
+		expect(STABLE_SET).not.toContain('trusty-audit');
+	});
+
+	/**
+	 * `$lib/changelog/site` fails the build for a crate whose CHANGELOG.md
+	 * parses to zero releases, so `released` and the file have to agree: a
+	 * record claiming a release the changelog does not carry breaks the build
+	 * on `/whats-new`, and the reverse silently hides a shipped crate.
+	 */
+	it('marks a tool released only when its CHANGELOG.md carries a release', () => {
+		for (const tool of TOOLS) {
+			const changelog = readFileSync(
+				path.join(REPO_ROOT, 'crates', tool.name, 'CHANGELOG.md'),
+				'utf8'
+			);
+			const hasRelease = /^## \[(?!Unreleased\])/m.test(changelog);
+			expect(tool.released, `${tool.name} CHANGELOG.md`).toBe(hasRelease);
 		}
 	});
 
@@ -84,7 +121,10 @@ describe('flagship tool records are grounded in the repository', () => {
 			'trusty-mpm-telegram',
 			'trusty-memory-core',
 			'TRUSTY_ALLOW_UNLISTED',
-			'search_code'
+			'search_code',
+			// The `taudit` alias still exists in the binary and is being dropped.
+			// No user-facing string may name it: `trusty-audit` everywhere.
+			'taudit'
 		]) {
 			expect(prose, banned).not.toContain(banned);
 		}

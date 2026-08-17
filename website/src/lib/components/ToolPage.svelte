@@ -1,10 +1,10 @@
 <script lang="ts">
 	/**
-	 * Why: the six flagship pages share a hero, an install block, and a
-	 * footer of outbound links. Writing that markup six times would let the
-	 * pages drift apart visually and would repeat the `<svelte:head>` wiring
-	 * six ways. The BODY is not shared — each page writes its own sections
-	 * through the `children` snippet, because the copy is the point.
+	 * Why: the flagship pages share a hero, an install block, and a footer of
+	 * outbound links. Writing that markup once per page would let the pages
+	 * drift apart visually and would repeat the `<svelte:head>` wiring as many
+	 * ways. The BODY is not shared — each page writes its own sections through
+	 * the `children` snippet, because the copy is the point.
 	 *
 	 * What: chrome only. Takes the tool's record from `$lib/tools`, plus the
 	 * facts strip that page wants above the fold.
@@ -13,7 +13,7 @@
 	 * and asserts it loads no third-party subresource.
 	 */
 	import { GITHUB_URL } from '$lib/site';
-	import type { Tool } from '$lib/tools';
+	import { installCommand, type Tool } from '$lib/tools';
 
 	interface Props {
 		tool: Tool;
@@ -73,20 +73,25 @@
 <section class="border-y border-foundry-border bg-foundry-raised">
 	<div class="mx-auto max-w-content px-4 py-16 sm:px-6">
 		<h2 id="install" class="scroll-mt-24 font-display text-2xl font-bold sm:text-3xl">Install</h2>
-		<p class="mt-3 max-w-2xl text-foundry-secondary">
-			<code class="text-sm">tctl</code> resolves whatever else this crate needs at runtime and keeps
-			macOS signing grants stable across upgrades. The
-			<a href="/#install" class="text-foundry-primary underline underline-offset-2"
-				>other install paths</a
-			>
-			— Homebrew, or <code class="text-sm">cargo install</code> from source — are on the home page.
-		</p>
+		{#if tool.install.via === 'tctl'}
+			<p class="mt-3 max-w-2xl text-foundry-secondary">
+				<code class="text-sm">tctl</code> resolves whatever else this crate needs at runtime and
+				keeps macOS signing grants stable across upgrades. The
+				<a href="/#install" class="text-foundry-primary underline underline-offset-2"
+					>other install paths</a
+				>
+				— Homebrew, or <code class="text-sm">cargo install</code> from source — are on the home page.
+			</p>
+		{:else}
+			<p class="mt-3 max-w-2xl text-foundry-secondary">{tool.install.note}</p>
+		{/if}
 		<!-- `min-w-0`: a `<pre>` never wraps, so without it the flex child
 		     widens to the longest command and the page scrolls sideways. -->
 		<div class="mt-6 max-w-xl min-w-0">
 			<pre
-				class="overflow-x-auto rounded-sm border border-foundry-border bg-foundry-card p-3 text-xs leading-relaxed text-foundry-text">curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh
-{tool.install}</pre>
+				class="overflow-x-auto rounded-sm border border-foundry-border bg-foundry-card p-3 text-xs leading-relaxed text-foundry-text">{installCommand(
+					tool
+				)}</pre>
 		</div>
 		<p class="mt-6 max-w-2xl text-sm text-foundry-secondary">
 			Build and test this crate from a checkout with
