@@ -102,6 +102,13 @@ mod verify;
 // — so it separates cleanly.
 mod pins;
 
+// #5915: approving each clone with `trusty-search` before `tga` tries to index
+// it. Its own module for the same reason `pins` is one — this file is at the
+// 500-SLOC production cap — and because the flag it deliberately does not pass
+// needs somewhere to be explained and asserted.
+mod approve;
+
+use approve::approve_for_indexing;
 use pins::{PinnedBinaries, pinned_binaries};
 use verify::verify_output;
 
@@ -619,7 +626,7 @@ async fn run_one(
     progress.unit_started(Operation::Sweep, repo.name.as_str(), index + 1, total);
 
     let mut gaps = Vec::new();
-    let result = match prepare(work, &output, &stem, &checkout, boards)? {
+    let result = match prepare(work, &output, &stem, &checkout, boards, &binaries.search)? {
         Err(reason) => RepoResult::Failed { reason },
         Ok(config_path) => {
             match spawn_tga(
@@ -672,18 +679,29 @@ async fn run_one(
 /// The inner `Result` is the per-repo verdict: `Err(reason)` is a recorded
 /// failure for this repository, while the outer `Result` is a failure of the
 /// sweep itself (the working directory is not writable).
+///
+/// #5915: approving the checkout with `trusty-search` belongs here rather than
+/// inside the child, for two reasons. It runs before any child spawns, so a
+/// refusal costs nothing; and this function already returns `Err(reason)` as a
+/// per-repo verdict, which is what turns the refusal into a NAMED failure. Left
+/// where it was, a refusal reached nobody — `tga audit` exits 0 whenever the
+/// sweep completed, so the run reported success with an empty code-analysis leg.
 fn prepare(
     work: &WorkDir,
     output: &Path,
     stem: &str,
     checkout: &Path,
     boards: &boards::Boards,
+    search: &Path,
 ) -> Result<Result<PathBuf, String>, AuditError> {
     if !checkout.is_dir() {
         return Ok(Err(format!(
             "no checkout at {} — nothing was audited for this repository",
             checkout.display()
         )));
+    }
+    if let Err(reason) = approve_for_indexing(search, checkout) {
+        return Ok(Err(reason));
     }
     mkdir(output)?;
     let config_path = work.path(Area::State).join(format!("tga-{stem}.yaml"));
@@ -1020,12 +1038,34 @@ trusty-review = "0.15.1"
         )
     }
 
+    /// A stub `trusty-search` that approves whatever it is asked to approve.
+    ///
+    /// #5915: `prepare` now runs `trusty-search index add <checkout>` before any
+    /// tga child, so a stub that refuses fails the repository before the
+    /// behaviour under test is reached. Every test that is about tga gets this
+    /// one; the two that are about the approval install their own.
+    const SEARCH_APPROVES: &str = "#!/bin/sh\nexit 0\n";
+
     /// Place stub binaries AND the version record, which together are what
     /// `pinned_binaries` accepts.
+    ///
+    /// `script` is the TGA-side behaviour under test. `trusty-search` gets
+    /// [`SEARCH_APPROVES`] instead, because it answers a different question and
+    /// a shared script conflates the two (#5915).
     fn install_stubs(work: &WorkDir, script: &str) {
+        install_stubs_with_search(work, script, SEARCH_APPROVES);
+    }
+
+    /// [`install_stubs`], with the `trusty-search` stub named separately.
+    fn install_stubs_with_search(work: &WorkDir, script: &str, search: &str) {
         for tool in RequiredTool::ALL {
             let path = tool.path_in(work);
-            std::fs::write(&path, script).expect("stub binary");
+            let body = if tool == RequiredTool::TrustySearch {
+                search
+            } else {
+                script
+            };
+            std::fs::write(&path, body).expect("stub binary");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
@@ -1339,6 +1379,58 @@ trusty-review = "0.15.1"
     /// The error arm this module exists for: a child that exits non-zero must
     /// not read as a success, and the sweep must not stop at it.
     #[cfg(unix)]
+    /// #5915: the refusal that used to reach nobody. `trusty-search` is
+    /// default-deny, tga's index call uses the strict denylist check, and
+    /// `tga audit` exits 0 whenever its sweep completed — so an unapproved
+    /// checkout produced a SUCCESSFUL run whose code-analysis leg had read
+    /// nothing. It must now be a named per-repository failure instead, and the
+    /// tga child must not run at all.
+    #[tokio::test]
+    async fn an_unapprovable_checkout_fails_the_repository_by_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let ran = tmp.path().join("tga-ran");
+        install_stubs_with_search(
+            &work,
+            &format!("#!/bin/sh\ntouch '{}'\nexit 0\n", ran.display()),
+            "#!/bin/sh\necho 'indexing refused: not approved for indexing' >&2\nexit 1\n",
+        );
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+
+        assert_eq!(report.status, RunStatus::AllFailed, "{report:?}");
+        let RepoResult::Failed { reason } = &report.repos[0].result else {
+            panic!("a refused approval must fail the repository: {report:?}");
+        };
+        assert!(reason.contains("trusty-search index add"), "{reason}");
+        assert!(reason.contains("not approved for indexing"), "{reason}");
+        assert!(
+            !ran.exists(),
+            "tga was spawned for a checkout it could never have indexed"
+        );
+    }
+
+    /// The other half: an approval that succeeds leaves the sweep exactly as it
+    /// was, so #5915's fix costs a working run nothing.
+    #[tokio::test]
+    async fn an_approved_checkout_proceeds_to_the_child() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+    }
+
     #[tokio::test]
     async fn a_failing_child_is_recorded_and_the_sweep_continues() {
         let tmp = tempfile::tempdir().expect("tempdir");

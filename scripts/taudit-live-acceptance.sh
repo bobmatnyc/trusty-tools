@@ -17,12 +17,24 @@
 #      validation against a real `gh` credential.
 #   5. Runs the one-shot `audit` chain end to end: install the pinned tools,
 #      clone, analyse via OpenRouter, and assemble the return package.
-#   6. Opens the returned zip and checks its CONTENTS, not just its
-#      existence: the collected SQLite extract database is present and
-#      non-trivial, and the report is present and non-empty.
+#   6. Opens the returned zip and checks its DATA, not just its shape: the
+#      extract database holds ROWS in the tables the audit is made of, more
+#      than one commit, more than one author, and the report names real
+#      files from the audited repository.
 #   7. Greps every extracted member of the returned zip for the OpenRouter
 #      key and fails loudly if it finds it — the one guard whose failure is
 #      invisible by inspection alone.
+#
+# What it deliberately does NOT do any more (#5915, #5916):
+#   - It does not count `sqlite_master` rows. That counts TABLES, which a
+#     migration creates whether or not one byte of data was ever collected,
+#     so it passed against a database holding nothing.
+#   - It does not check the report is merely non-empty. A report assembled
+#     from an empty extract is several KiB of headings.
+#   - It does not put its scratch tree under `mktemp -d`. On macOS that is
+#     `/var/folders/...`, which `trusty-search` refuses to index — so the
+#     script structurally guaranteed the very refusal it should have been
+#     able to catch, and no placement bug could ever make it fail.
 #
 # Requires:
 #   - A real OPENROUTER_API_KEY exported in the environment (never read from
@@ -46,11 +58,23 @@
 #   TAUDIT_E2E_REPO=owner/name OPENROUTER_API_KEY=... scripts/taudit-live-acceptance.sh
 #
 # Idempotent: every artifact this script writes lives under a fresh
-# `mktemp -d` scratch directory, so `taudit distribute`'s refusal to
-# overwrite an existing package never triggers — there is never a package
-# already at the destination. Two consecutive runs are two independent
-# scratch trees. Nothing under ~/duetto/audit, or any other real working
-# directory, is ever touched.
+# per-run directory beneath ~/.taudit-acceptance, so `taudit distribute`'s
+# refusal to overwrite an existing package never triggers — there is never a
+# package already at the destination. Two consecutive runs are two
+# independent scratch trees. Nothing under ~/duetto/audit is ever touched.
+#
+# NOT under `mktemp -d`: see the note above. `~/.taudit-acceptance` is a
+# location `trusty-search` permits, which is the point — the script must be
+# able to observe a placement bug rather than guarantee one.
+#
+# What this script leaves behind on your machine, and how to remove it:
+#   - `~/.trusty-tools/trusty-audit/work` — the run's own tree. `rm -rf` it.
+#   - One `trusty-search` allowlist row per audited clone, in
+#     `~/Library/Application Support/trusty-search/allowlist.toml`. The script
+#     prints them and asserts it destroyed no PRE-EXISTING row, but it does
+#     not remove its own: `trusty-search index remove` ignores its path
+#     argument in 0.45.1 and resolves the index from the CWD instead, so
+#     calling it here would drop an unrelated index. Remove them by hand.
 
 set -euo pipefail
 
@@ -106,17 +130,31 @@ if ! gh auth status >/dev/null 2>&1; then
 fi
 ok "gh auth status: authenticated"
 
-# A small, real, public repository so the sweep finishes in minutes rather
-# than hours: essentially one file and a handful of commits, which still
-# exercises every phase (clone, tga collection, trusty-review inference,
-# packaging) without a large checkout or a long analysis pass. Override with
-# TAUDIT_E2E_REPO=owner/name for a heavier exercise of the pipeline.
-TARGET_REPO="${TAUDIT_E2E_REPO:-octocat/Hello-World}"
+# A small, real, public repository with a REAL history: 1.2 MiB, ~400
+# commits by ~30 authors over a decade, and actual Rust source for the code
+# analysis to have something to name. The previous default,
+# octocat/Hello-World, was too small to test anything — 3 commits means a
+# "more than one commit" assertion barely separates a full clone from a
+# shallow one, and a repository of one README gives the code-analysis leg no
+# file to mention whether it worked or not.
+# Override with TAUDIT_E2E_REPO=owner/name for a heavier exercise.
+TARGET_REPO="${TAUDIT_E2E_REPO:-BurntSushi/xsv}"
 ok "audit target: $TARGET_REPO (override with TAUDIT_E2E_REPO)"
 
 # --- scratch state, cleaned up on success, kept (and named) on failure ---
 
-SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/taudit-live-acceptance.XXXXXX")"
+# Deliberately NOT `mktemp -d`: on macOS that is /var/folders/..., which
+# `trusty-search` refuses to index (SENSITIVE_PATH_PREFIXES). A run whose
+# every path is pre-refused cannot distinguish a working pipeline from a
+# broken one. `~/.taudit-acceptance` is permitted — it is not `~` itself and
+# not one of SENSITIVE_HOME_TOP_DIRS (Desktop, Downloads, Documents,
+# Pictures, Movies, Music, Library).
+SCRATCH="$HOME/.taudit-acceptance/run-$$-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$SCRATCH"
+case "$SCRATCH" in
+  /var/folders/*|/private/var/folders/*|/tmp/*|/private/tmp/*)
+    fail "scratch root landed on a path trusty-search refuses to index: $SCRATCH" ;;
+esac
 cleanup() {
   local exit_code=$?
   if [ "$exit_code" -eq 0 ]; then
@@ -126,6 +164,19 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# The allowlist rows this run adds live outside the work root, so `rm -rf` on
+# either does not undo them. Snapshot what was approved BEFORE, so the run
+# can be shown to have destroyed none of it.
+ALLOWLIST="$HOME/Library/Application Support/trusty-search/allowlist.toml"
+ALLOWLIST_BEFORE="$SCRATCH/allowlist-before.toml"
+if [ -f "$ALLOWLIST" ]; then
+  cp "$ALLOWLIST" "$ALLOWLIST_BEFORE"
+  ok "snapshotted the pre-existing trusty-search allowlist ($(grep -c '^\[\[index\]\]' "$ALLOWLIST_BEFORE" || true) entries)"
+else
+  : >"$ALLOWLIST_BEFORE"
+  ok "no pre-existing trusty-search allowlist to preserve"
+fi
 
 AUDITOR_DIR="$SCRATCH/auditor"
 DIST_DIR="$SCRATCH/dist"
@@ -215,7 +266,26 @@ else
   fail "extracted engagement.toml does not carry OPENROUTER_API_KEY — 'taudit distribute' did not embed the supplied credential"
 fi
 
-# --- 5. register a real target, from the EXTRACTED copy --------------------
+# --- 5. ask the client where its working directory is, and reset it -------
+
+# Asked, never assumed. #5915 MOVED this location, and a hardcoded path would
+# make this script agree with only one revision of the client — which is the
+# opposite of what an acceptance test is for.
+step "workdir: ask the client where it will write"
+WORKDIR_OUTPUT="$("$LAUNCHER" workdir 2>&1)" \
+  || { printf '%s\n' "$WORKDIR_OUTPUT" >&2; fail "'audit.sh workdir' exited non-zero"; }
+printf '%s\n' "$WORKDIR_OUTPUT"
+WORK_ROOT="$(printf '%s\n' "$WORKDIR_OUTPUT" | head -1 | tr -d ' \t')"
+case "$WORK_ROOT" in
+  /*) ok "work root: $WORK_ROOT" ;;
+  *) fail "could not read an absolute work root from 'audit.sh workdir': '$WORK_ROOT'" ;;
+esac
+
+# A previous run's tree would make "did THIS run collect anything" unanswerable.
+rm -rf "$WORK_ROOT"
+ok "work root reset"
+
+# --- 6. register a real target, from the EXTRACTED copy -------------------
 
 step "add: register $TARGET_REPO from the extracted client"
 ADD_OUTPUT="$("$LAUNCHER" add repo "$TARGET_REPO" 2>&1)" \
@@ -234,7 +304,8 @@ case "$TARGETS_OUTPUT" in
   *) fail "'audit.sh targets' did not list $TARGET_REPO" ;;
 esac
 
-# --- 6. run the one-shot audit chain: install, clone, analyse, package ----
+
+# --- 7. run the one-shot audit chain: install, clone, analyse, package ----
 
 step "audit: install tools, clone, analyse via OpenRouter, package (this is the slow step)"
 RETURN_ZIP="$RETURN_DIR/audit-return-package.zip"
@@ -248,7 +319,37 @@ esac
 [ -s "$RETURN_ZIP" ] || fail "expected return package not found or empty: $RETURN_ZIP"
 ok "return package: $RETURN_ZIP ($(wc -c <"$RETURN_ZIP" | tr -d ' ') bytes)"
 
-# --- 7. verify the return package BY CONTENT --------------------------------
+# --- 8. the approvals this run added, and the ones it must not have removed --
+
+step "verify: the run added allowlist rows and destroyed no pre-existing one"
+if [ -s "$ALLOWLIST_BEFORE" ]; then
+  MISSING=""
+  while IFS= read -r prior; do
+    grep -q -F -- "$prior" "$ALLOWLIST" 2>/dev/null || MISSING="$MISSING$prior
+"
+  done <<EOF
+$(grep '^path *=' "$ALLOWLIST_BEFORE" || true)
+EOF
+  if [ -n "$MISSING" ]; then
+    printf '%s\n' "$MISSING" >&2
+    fail "the run removed allowlist entries that existed before it (listed above)"
+  fi
+  ok "every pre-existing allowlist entry survived the run"
+fi
+
+APPROVED="$(grep '^path *=' "$ALLOWLIST" 2>/dev/null | grep -F -- "$WORK_ROOT" || true)"
+if [ -n "$APPROVED" ]; then
+  ok "the run approved these clones for indexing (remove by hand — see the header):"
+  printf '%s\n' "$APPROVED"
+else
+  fail "no allowlist row names a clone under $WORK_ROOT.
+       The audit reported success, but nothing approved a checkout — which
+       means trusty-search refused the index and the code analysis read
+       nothing (#5915). A report can still be produced in that state, which is
+       why this check exists rather than trusting the exit status."
+fi
+
+# --- 9. verify the return package BY CONTENT --------------------------------
 
 step "verify: extract and inspect the return package"
 RETURN_EXTRACT="$SCRATCH/return-extracted"
@@ -264,25 +365,107 @@ case "$HEADER" in
   "SQLite format 3"*) ok "DB header is a real SQLite file: $DB_FILE" ;;
   *) fail "DB does not have a SQLite header (got: '$HEADER'): $DB_FILE" ;;
 esac
-if [ "$SQLITE3_AVAILABLE" -eq 1 ]; then
-  TABLE_COUNT="$(sqlite3 "$DB_FILE" 'SELECT count(*) FROM sqlite_master;')" \
-    || fail "sqlite3 could not read $DB_FILE"
-  [ "$TABLE_COUNT" -gt 0 ] || fail "collected DB has zero tables — not a real extract: $DB_FILE"
-  ok "DB is non-trivial: $DB_BYTES bytes, $TABLE_COUNT tables"
-else
-  # Belt-and-suspenders floor when sqlite3 is unavailable: still refuse a
-  # DB too small to be a real extract rather than only the header check.
-  [ "$DB_BYTES" -gt 1024 ] || fail "collected DB is suspiciously small ($DB_BYTES bytes) and sqlite3 is unavailable to inspect it: $DB_FILE"
-  ok "DB passes header+size check: $DB_BYTES bytes (sqlite3 unavailable for a table count)"
+# The check this script used to make was `SELECT count(*) FROM sqlite_master`
+# — a count of TABLES. Every migration creates those on an empty database, so
+# it passed against an extract holding no data at all, which is exactly the
+# state #5916 (shallow clone) and #5915 (unapproved index) produced. Count
+# ROWS in the tables the audit is actually made of.
+if [ "$SQLITE3_AVAILABLE" -eq 0 ]; then
+  fail "sqlite3 is not on PATH. This script's central claim is that the collected
+       database holds DATA, and only sqlite3 can check that. A size-and-header
+       fallback passes against an empty extract, which is the defect class this
+       test exists to catch. Install sqlite3 and re-run."
 fi
+
+query() {
+  sqlite3 "$DB_FILE" "$1" 2>/dev/null || printf 'ERR'
+}
+
+COMMIT_ROWS="$(query 'SELECT count(*) FROM commits;')"
+AUTHOR_ROWS="$(query 'SELECT count(*) FROM authors;')"
+FILE_ROWS="$(query 'SELECT count(*) FROM files;')"
+case "$COMMIT_ROWS$AUTHOR_ROWS$FILE_ROWS" in
+  *ERR*) fail "the extract is missing the core audit tables (commits/authors/files): $DB_FILE" ;;
+esac
+
+# #5916: `taudit clone` appended `--depth=1`, so every repository reached tga
+# as ONE synthetic commit by ONE author, with the whole tree credited to
+# whoever last touched each line. A full clone of the default target is ~400
+# commits by ~30 authors. Asserting "more than one" is the weakest statement
+# that a shallow clone cannot satisfy.
+[ "$COMMIT_ROWS" -gt 1 ] || fail "the extract holds $COMMIT_ROWS commit(s).
+       One commit is the signature of a shallow clone (#5916): the whole
+       history collapses to a single synthetic commit and every metric derived
+       from it — authors, tenure, churn over time — is fabricated."
+[ "$AUTHOR_ROWS" -gt 1 ] || fail "the extract holds $AUTHOR_ROWS author(s) across $COMMIT_ROWS commits.
+       A real history of this repository has ~30. One author is what a shallow
+       clone produces (#5916)."
+[ "$FILE_ROWS" -gt 0 ] || fail "the extract holds no file rows — nothing was collected: $DB_FILE"
+
+# A period whose start equals its end is the other shallow-clone signature:
+# one commit means one timestamp, so the "last 52 weeks" window is a point.
+COMMIT_SPAN_DAYS="$(query "SELECT CAST(julianday(max(timestamp)) - julianday(min(timestamp)) AS INTEGER) FROM commits;")"
+case "$COMMIT_SPAN_DAYS" in
+  ERR|'') printf '[INFO] commits.timestamp is absent or unreadable — span check skipped\n' ;;
+  *) [ "$COMMIT_SPAN_DAYS" -gt 0 ] || fail "every commit in the extract shares one date —
+       the history has no span, which is what a depth-1 clone produces (#5916)." ;;
+esac
+
+ok "DB holds real data: $COMMIT_ROWS commits, $AUTHOR_ROWS authors, $FILE_ROWS files, ${COMMIT_SPAN_DAYS:-?} days of history ($DB_BYTES bytes)"
 
 REPORT_FILE="$(find "$RETURN_EXTRACT" -path '*/reports/*/report.md' -type f -print -quit)"
 [ -n "$REPORT_FILE" ] || fail "no reports/*/report.md member found in the return package"
 REPORT_BYTES="$(wc -c <"$REPORT_FILE" | tr -d ' ')"
 [ "$REPORT_BYTES" -gt 0 ] || fail "report is empty: $REPORT_FILE"
-ok "report is present and non-empty: $REPORT_FILE ($REPORT_BYTES bytes)"
 
-# --- 8. the guard that matters most: no credential in the return package --
+ok "git-activity report present: $REPORT_FILE ($REPORT_BYTES bytes)"
+
+# #5915: "non-empty" was never the question, and `report.md` is the wrong file
+# to ask it of — that one is tga's git-activity summary, built from the commit
+# tables alone, so it looks identical whether or not the code was ever read.
+# The CODE analysis lands in `<date>-technical-due-diligence.md`. That is the
+# artifact that must name files from the repository: assembled without an
+# indexed checkout it is prose about commit counts, and it stays several KiB
+# either way, so size cannot tell the two apart.
+step "verify: the code-analysis report names real files from the repository"
+DD_FILE="$(find "$RETURN_EXTRACT" -path '*/reports/*' -name '*technical-due-diligence.md' -type f -print -quit)"
+[ -n "$DD_FILE" ] || fail "no technical-due-diligence report in the return package — the code-analysis leg produced nothing at all"
+DD_BYTES="$(wc -c <"$DD_FILE" | tr -d ' ')"
+
+# The clone lands at repos/<owner>/<name>, so the repository root is the
+# directory holding `.git` — not the first directory under repos/, which is the
+# owner. Getting that wrong points the search at a directory with no source in
+# it and reports a false empty report.
+GIT_DIR="$(find "$WORK_ROOT/repos" -mindepth 1 -maxdepth 3 -type d -name '.git' -print -quit 2>/dev/null || true)"
+CHECKOUT_DIR="$(dirname "$GIT_DIR")"
+[ -n "$CHECKOUT_DIR" ] || fail "no checkout under $WORK_ROOT/repos — the clone phase left nothing behind"
+
+# Real source files from the clone, matched as REPOSITORY-RELATIVE paths
+# (`src/main.rs`), not bare basenames: `main.rs` appears in generic prose about
+# any Rust project, while `src/main.rs` is a path the analysis had to have read
+# the tree to write.
+NAMED=0
+NAMED_EXAMPLES=""
+while IFS= read -r candidate; do
+  [ -n "$candidate" ] || continue
+  rel="${candidate#"$CHECKOUT_DIR"/}"
+  if grep -q -F -- "$rel" "$DD_FILE"; then
+    NAMED=$((NAMED + 1))
+    [ -n "$NAMED_EXAMPLES" ] && NAMED_EXAMPLES="$NAMED_EXAMPLES, "
+    NAMED_EXAMPLES="$NAMED_EXAMPLES$rel"
+  fi
+done <<EOF
+$(find "$CHECKOUT_DIR" -type f \( -name '*.rs' -o -name '*.py' -o -name '*.go' -o -name '*.ts' -o -name '*.js' -o -name '*.java' \) -not -path '*/.git/*' | head -60)
+EOF
+
+[ "$NAMED" -gt 0 ] || fail "the code-analysis report ($DD_BYTES bytes) names not one source
+       path from $CHECKOUT_DIR. That is what it looks like when the analysis
+       read nothing — trusty-search is default-deny, so an unapproved checkout
+       is refused and tga still exits 0 (#5915)."
+ok "code-analysis report names $NAMED source path(s): $NAMED_EXAMPLES"
+ok "code-analysis report: $DD_FILE ($DD_BYTES bytes)"
+
+# --- 10. the guard that matters most: no credential in the return package --
 
 step "verify: the OpenRouter key never reaches the return package"
 LEAK_HITS="$(grep -a -r -l -F -- "$OPENROUTER_API_KEY" "$RETURN_EXTRACT" 2>/dev/null || true)"
@@ -296,12 +479,16 @@ ok "grepped every extracted member of the return package — no credential found
 
 REPO_COUNT="$(find "$RETURN_EXTRACT" -path '*/extract/*.db' -type f | wc -l | tr -d ' ')"
 printf '\n================ VERDICT: PASS ================\n'
-printf 'target repository:   %s\n' "$TARGET_REPO"
+printf 'target repository:    %s\n' "$TARGET_REPO"
 printf 'repositories audited: %s (extract DB present)\n' "$REPO_COUNT"
 printf 'install package:      %s\n' "$INSTALL_ZIP"
 printf 'return package:       %s\n' "$RETURN_ZIP"
 printf 'collected DB:         %s (%s bytes)\n' "$DB_FILE" "$DB_BYTES"
-printf 'report:                %s (%s bytes)\n' "$REPORT_FILE" "$REPORT_BYTES"
+printf 'collected data:       %s commits, %s authors, %s files, %s days\n' \
+  "$COMMIT_ROWS" "$AUTHOR_ROWS" "$FILE_ROWS" "${COMMIT_SPAN_DAYS:-?}"
+printf 'report:               %s (%s bytes, names %s checkout file(s))\n' \
+  "$REPORT_FILE" "$REPORT_BYTES" "$NAMED"
 printf 'credential leak check: none found\n'
+printf 'work root (kept):     %s\n' "$WORK_ROOT"
 printf 'scratch (removed on exit): %s\n' "$SCRATCH"
 printf '=================================================\n'

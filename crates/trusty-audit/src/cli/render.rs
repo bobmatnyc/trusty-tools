@@ -69,8 +69,14 @@ pub fn render(outcome: &Outcome) -> String {
             out
         }
         Outcome::WorkDir(report) => {
+            // #5915: this used to say "everything this client wrote". Approving
+            // a clone for indexing writes a row to `trusty-search`'s own
+            // allowlist, which is outside this root, so deleting the directory
+            // no longer removes everything.
             let mut out = format!(
-                "{}\n  (delete this directory to remove everything this client wrote)\n",
+                "{}\n  (delete this directory to remove what this client wrote here;\n\
+                 \x20  `trusty-search index remove <path>` undoes the indexing approval\n\
+                 \x20  it recorded for each clone, which lives outside this directory)\n",
                 report.root.display()
             );
             for (area, path) in &report.areas {

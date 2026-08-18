@@ -68,11 +68,13 @@ pub const STAGING_DIR: &str = "clone-staging";
 pub const DEFAULT_BUDGET_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 
 /// How to clone.
+///
+/// #5916: there is no depth knob. A shallow clone is what made the tga database
+/// degenerate — see [`clone_command`] — and the disk it saves is what
+/// [`CloneOptions::budget_bytes`] is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CloneOptions {
-    /// Fetch only the tip commit. Bounds disk use; loses history.
-    pub shallow: bool,
     /// Stop STARTING new clones once this much is already on disk. `None` never
     /// stops.
     ///
@@ -87,14 +89,9 @@ pub struct CloneOptions {
 }
 
 impl Default for CloneOptions {
-    /// Shallow, and bounded at [`DEFAULT_BUDGET_BYTES`].
-    ///
-    /// Shallow is the default because tga's sweep is configured per repository
-    /// and a hundred full clones is the case that fills a laptop. A caller that
-    /// needs history sets `shallow: false` explicitly.
+    /// Bounded at [`DEFAULT_BUDGET_BYTES`].
     fn default() -> Self {
         Self {
-            shallow: true,
             budget_bytes: Some(DEFAULT_BUDGET_BYTES),
         }
     }
@@ -113,8 +110,8 @@ pub enum CloneState {
     /// `gh` exited zero but produced no checkout worth analyzing.
     ///
     /// Why: its own state rather than a flavour of `Failed`, because the cause
-    /// is different and so is what the recipient should do. `git clone --depth=1`
-    /// of a commitless repository EXITS ZERO and leaves a directory containing
+    /// is different and so is what the recipient should do. Cloning a
+    /// commitless repository EXITS ZERO and leaves a directory containing
     /// only `.git`; `gh repo clone` forwards that status. Reported as `Cloned`,
     /// that is an audit claiming coverage of a repository it never read
     /// (#5215 review).
@@ -270,19 +267,25 @@ fn ensure_real_dir(path: PathBuf) -> Result<(), AuditError> {
 
 /// The clone invocation, as a command rather than a run.
 ///
-/// The `--` separates `gh`'s own flags from the ones it forwards to `git`.
-/// Test: `super::clone_tests::a_shallow_clone_forwards_depth_to_git`.
-fn clone_command(name_with_owner: &str, into: &Path, shallow: bool) -> GhCommand {
-    let mut args: Vec<std::ffi::OsString> = vec![
+/// Why (#5916): this used to append `-- --depth=1`, and that one flag emptied
+/// the whole git-analytics leg. A depth-1 checkout has exactly one commit, so
+/// tga collected `commits=1`, `authors=1`, a period whose start equals its end,
+/// and every line in the tree attributed to whoever last touched it — measured
+/// on `BurntSushi/xsv`, whose real history is 407 commits by 30 authors from
+/// 2014 to 2025. Every CSV in the deliverable was a header and one row. What
+/// bounds the disk that saved is [`CloneOptions::budget_bytes`], which stops
+/// STARTING clones and does not need history thrown away to work: the same
+/// repository is 628 KiB shallow and 1.2 MiB full, against a 20 GiB default.
+/// What: `gh repo clone <owner/name> <dest>`, with no flags forwarded to `git`
+/// at all — so there is no `--` separator either.
+/// Test: `super::clone_tests::a_clone_asks_git_for_the_whole_history`.
+fn clone_command(name_with_owner: &str, into: &Path) -> GhCommand {
+    let args: Vec<std::ffi::OsString> = vec![
         "repo".into(),
         "clone".into(),
         name_with_owner.into(),
         into.as_os_str().to_os_string(),
     ];
-    if shallow {
-        args.push("--".into());
-        args.push("--depth=1".into());
-    }
     // #5215: `GH_REPO` would otherwise override the repository argument.
     GhCommand::new(args).env_remove("GH_REPO")
 }
@@ -327,8 +330,8 @@ fn dir_size(path: &Path) -> (u64, bool) {
 
 /// Is this staged tree a checkout the sweep can actually read?
 ///
-/// Why: `gh` exiting zero is not proof of a usable repository. `git clone
-/// --depth=1` of a COMMITLESS repository exits zero and leaves a directory
+/// Why: `gh` exiting zero is not proof of a usable repository. Cloning a
+/// COMMITLESS repository exits zero and leaves a directory
 /// holding only `.git`, and `gh repo clone` forwards that status — reported as
 /// `Cloned`, the audit claims coverage of a repository nothing ever read
 /// (#5215 review). This is the check the `#[ignore]`d live test was making and
@@ -582,7 +585,7 @@ pub async fn clone_all(
             })?;
         }
 
-        let ran = clone_command(&name_with_owner, &staged, options.shallow)
+        let ran = clone_command(&name_with_owner, &staged)
             .output()
             .await
             .and_then(|o| o.ok())
@@ -937,12 +940,19 @@ mod clone_tests {
         ensure_real_dir(work_in(tmp.path()).path(Area::Repos)).expect("a real directory is fine");
     }
 
+    /// Why (#5916): the argv is where the defect lived. `-- --depth=1` here
+    /// made every tga database report one commit by one author over a
+    /// zero-length period, and nothing downstream could tell that apart from a
+    /// repository that genuinely has one commit.
+    /// What: the invocation carries no depth flag and no `--` separator, so
+    /// `gh` forwards nothing to `git` that could truncate the history.
+    /// Test: this is the test.
     #[test]
-    fn a_shallow_clone_forwards_depth_to_git() {
-        let argv = clone_command("acme/api", Path::new("/w/stage/acme/api"), true).argv_display();
-        assert_eq!(argv, "repo clone acme/api /w/stage/acme/api -- --depth=1");
-        let full = clone_command("acme/api", Path::new("/w/stage/acme/api"), false).argv_display();
-        assert!(!full.contains("--depth"), "{full}");
+    fn a_clone_asks_git_for_the_whole_history() {
+        let argv = clone_command("acme/api", Path::new("/w/stage/acme/api")).argv_display();
+        assert_eq!(argv, "repo clone acme/api /w/stage/acme/api");
+        assert!(!argv.contains("--depth"), "{argv}");
+        assert!(!argv.contains(" -- "), "{argv}");
     }
 
     /// The fail-open regression: a clone that died part-way must not leave a
@@ -1081,7 +1091,6 @@ mod clone_tests {
             &work,
             &["acme/api".to_string(), "acme/web".to_string()],
             &CloneOptions {
-                shallow: true,
                 budget_bytes: Some(4),
             },
             &Progress::none(),
@@ -1099,6 +1108,14 @@ mod clone_tests {
 
     /// The whole path against a real remote.
     ///
+    /// #5916: `.git/shallow` is the filesystem marker `git` writes exactly when
+    /// a clone was truncated, so asserting its ABSENCE is the depth contract
+    /// stated where it can only be true of a real fetch — `clone_command`'s argv
+    /// test proves the flag is gone, and this proves the fetch it produces is
+    /// whole. Its presence is what made every tga database report one commit.
+    /// The measured size is checked against the default budget in the same
+    /// breath, because full clones are the ones that could newly exhaust it.
+    ///
     /// `#[ignore]` because it needs an authenticated `gh` and network —
     /// `cargo test -p trusty-audit -- --include-ignored` runs it.
     #[tokio::test]
@@ -1115,8 +1132,18 @@ mod clone_tests {
         .await
         .expect("a public repository clones");
         assert_eq!(report.repos[0].state, CloneState::Cloned);
-        assert!(report.repos[0].path.join(".git").is_dir());
+        let checkout = &report.repos[0].path;
+        assert!(checkout.join(".git").is_dir());
+        assert!(
+            !checkout.join(".git/shallow").exists(),
+            "the clone was truncated — tga would read one commit by one author"
+        );
         assert!(report.total_bytes > 0, "the report must state disk use");
+        assert!(
+            report.total_bytes < DEFAULT_BUDGET_BYTES,
+            "one ordinary full clone must not exhaust the default budget: {} of {DEFAULT_BUDGET_BYTES}",
+            report.total_bytes
+        );
     }
     /// Why (#5823): every arm of the acquisition loop ends a unit, and two of
     /// them return early. A missed one leaves a display holding a repository
