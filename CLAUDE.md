@@ -118,34 +118,49 @@ claims, and disputed results. Full rule in
 
 ### What CI actually gates
 
-🔴 **The required-checks list drifts — read it from the API, not from this
-file.** The list below is a snapshot, and a stale snapshot has already cost a
-merge (next paragraph). Before trusting a count, run:
+🔴 **A bounded list of required checks gates every merge — read it live, never
+hand-copy the count.** This section has re-copied that count repeatedly: six,
+then nine, then eleven, with a rise to thirteen already staged (`ci.yml`
+gained `trusty-mpm-gui clippy` and `trusty-code-gui clippy` in
+[#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958); only the
+branch-protection update to make them required is still pending). A stale copy
+has already cost a real merge (next paragraph). The list is never worth
+copying here — read it directly:
 
 ```bash
 gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   --jq '.required_status_checks.contexts'
 ```
 
-Read 2026-08-18 from that command, branch protection requires these eleven
-contexts: `Format check`, `500-line file-size cap`, `Clippy`, `trusty-search
-daemon smoke test`, `MSRV check`, `PR version bump vs crates.io (issue
-#4421)`, `Doc-comment pointer lint (Why/What/Test)`, `Durable writes hold the
-teardown guard`, `No leaked AI-generation / tool-call artifacts`,
-`trusty-agents-ui clippy`, and `trusty-audit-ui clippy`. This list is
-authoritative only as of that read — re-run the command above before trusting
-a count. All eleven trigger unconditionally and gate their expensive steps
-inside the job body on a `docs_only` boolean (`ci.yml:145-172`) — a `paths:`
-filter on a required job would leave the check pending forever, which is why
-none of them has one. `required_status_checks.strict` is `false`: a PR's head
-does not need to be up to date with `main` for its checks to count toward the
-merge — only the checks on the PR's own head matter.
+That endpoint is readable by this account with no special access needed.
+Every required job triggers unconditionally — none of them carries a `paths:`
+filter, because a `paths:` filter would leave a required context pending
+forever on a PR that never touches those paths, instead of reporting green.
+What varies per PR is not whether a job runs but how much it does once
+running: each gates its expensive steps behind a
+`docs_only` boolean computed once by the `changes` job (`ci.yml:166-195`), so
+a docs-only PR gets a green required check in well under a minute of runner
+startup instead of tens of minutes of cargo — a code PR settles in roughly
+four minutes, a docs-only PR in under one. `required_status_checks.strict` is
+`false`: a PR's head does not need to be up to date with `main` for its own
+checks to count toward the merge.
 
 🔴 **A stale copy of this list costs a real merge.** A stale six-item copy of
 this list cost [#5836](https://github.com/bobmatnyc/trusty-tools/pull/5836) a
 merge attempt: every documented check was green, and `gh pr merge` refused
 anyway with "the base branch policy prohibits the merge." That error names no
 check, so it never points back at the stale list as the cause.
+
+🟡 **Why `trusty-agents-ui clippy` and `trusty-audit-ui clippy` exist as
+separate jobs.** The required `Clippy` job runs `--workspace --all-targets`
+but excludes the Tauri UI crates (`ci.yml:34-47`) because they need
+WebKit2GTK; dedicated per-crate jobs compile them instead. Before
+2026-08-18 those dedicated jobs ran but were not required, so a gate that
+runs without being required is not a gate: [#5929](https://github.com/bobmatnyc/trusty-tools/pull/5929)
+merged with `trusty-audit-ui clippy` red, and `main` failed
+`cargo check --workspace` for hours
+([#5935](https://github.com/bobmatnyc/trusty-tools/issues/5935), fixed by
+`15dca258`).
 
 🔴 **`Rust tests (pre-publish gate)` — the eight shards — does not run on pull
 requests.** It runs ~9.6 minutes per shard, roughly 3x the entire required set,
@@ -168,22 +183,52 @@ every push to `main`, folds every job conclusion (the shards included) through
 the `ci-red-main`-labelled tracking issue, then fails the run. It is a GitHub issue,
 not a page — nobody is woken up.
 
-🟡 **A `BEHIND` branch has been observed refusing to merge — cause unconfirmed.**
-A prior session saw `gh pr merge` refuse with "the head branch is not up to date
-with the base branch" even with all required contexts green. `strict: false` (see
-above) rules out the classic "require branches up to date" setting as the cause,
-so if this recurs, a repository ruleset invisible to the
-`branches/main/protection` endpoint is the likelier candidate — not the `strict`
-flag. If you hit it, `gh pr update-branch <n>` and let checks re-report; on a
-docs-only PR that costs well under a minute. A genuine `CONFLICTING` state is a
-different and harder problem.
+🟡 **A `BEHIND` branch merges fine.** `strict: false` (above) means GitHub
+requires only that the PR's own head carry green required contexts, not that
+the branch be current with base — so `gh pr merge --squash --delete-branch
+--auto` is the right tool for an ordinary PR; GitHub owns the wait.
+[#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958) proves it: its
+squash commit `d18184ee` has a single parent, `a4e629e0`
+([#5961](https://github.com/bobmatnyc/trusty-tools/pull/5961)), which had
+merged 47 seconds earlier — the PR had synced `main` into its branch twice
+(04:34Z, 04:48Z) and was still exactly one commit BEHIND, missing that PR,
+when armed auto-merge fired at 04:52:55Z. It merged anyway.
+Updating for BEHIND alone buys nothing and costs real time: every
+`update-branch` restarts CI from scratch, including four Tauri UI clippy jobs
+at roughly 15 minutes each on a cold system-deps install, and while it
+reruns, `main` can move again — which is how a merge loop forms and fails to
+converge. That happened here too: two manual `Merge branch 'main' into …`
+sync commits, 14 minutes apart, before it merged BEHIND regardless. What
+actually blocks a merge is `mergeStateStatus` reporting `BLOCKED` — pending or
+failing checks — which GitHub reports with priority over `BEHIND` in that same
+field; that priority is almost certainly why past "refuses to merge while
+BEHIND" reports read as a branch-currency problem when the real block was
+pending checks. `gh pr update-branch <n>` stays correct for a genuine
+`CONFLICTING` state, which is different and harder.
+
+🔴 **BEHIND does not block a merge; a missing required job definition does —
+and the two look identical from the outside.** A `pull_request`-triggered
+workflow runs from the PR's own ref, not from `main`'s. A PR whose branch
+does not contain the commit that ADDED a job has no definition for that job
+in its workflow snapshot and can never produce that check run. GitHub counts
+a required context with no check run as UNMET, so the PR sits `BLOCKED`
+permanently — and `gh pr checks` does not list the missing context as
+pending, it is simply absent, so everything the PR *can* produce reads
+SUCCESS. [#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958) added
+`trusty-mpm-gui clippy` and `trusty-code-gui clippy`, and branch protection
+made both required immediately after; [#5962](https://github.com/bobmatnyc/trusty-tools/pull/5962),
+opened before that merge, had every context it could produce green,
+auto-merge armed, and sat BLOCKED indefinitely with nothing red anywhere. For
+a PR predating a newly-required job, `update-branch` is not optional — it is
+the only way the check can exist. Also expect the operational consequence:
+adding a required context wedges every open PR that predates the job, so plan
+to `update-branch` all of them once branch protection picks it up.
 
 🟡 **`gh pr merge --admin` bypasses nothing on this repo.** The working account is
 push-only (`admin: false`), so the flag is silently ineffective. `gh`'s own refusal
 message offers `--admin` as the remedy — following that suggestion is a dead end,
-not a fix. A PR merges when its eleven required contexts pass on the PR's own head
-— `strict: false` means the base does not have to be current too, though see above
-for a case where a merge was refused anyway.
+not a fix. A PR merges when every required context passes on the PR's own head
+— `strict: false` means the base does not have to be current too.
 
 ### Baseline failures — the Rust specifics
 
