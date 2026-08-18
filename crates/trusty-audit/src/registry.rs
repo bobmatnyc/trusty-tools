@@ -73,6 +73,7 @@ use trusty_common::file_lock::with_exclusive_lock;
 use crate::clone;
 use crate::config::{self, EngagementConfig};
 use crate::error::AuditError;
+use crate::local_repo;
 use crate::run;
 use crate::workdir::{self, Area, WorkDir};
 
@@ -241,6 +242,22 @@ pub enum Target {
         /// `owner/name`, the identity `gh` and [`crate::clone`] both take.
         name_with_owner: String,
     },
+    /// A repository already on the operator's disk, validated by reading it
+    /// (#6001).
+    ///
+    /// Why a variant rather than a `Repo` whose name happens to be a path: the
+    /// two are validated differently (a GitHub probe versus
+    /// [`crate::local_repo::inspect`]), acquired differently (`gh repo clone`
+    /// versus `git clone <path>`), and one of them must never have its
+    /// `owner/name` charset applied to it. Making that a field would put the
+    /// same fork inside every reader instead of at the one match arm.
+    LocalRepo {
+        /// The absolute path to the checkout, with trailing separators trimmed.
+        ///
+        /// Read only, ever — see [`crate::local_repo`] for the invariant and the
+        /// test that holds it.
+        path: PathBuf,
+    },
     /// A JIRA project or Linear team, validated with the configured credential.
     Board {
         /// Which provider.
@@ -251,21 +268,30 @@ pub enum Target {
 }
 
 impl Target {
-    /// The canonical spelling: `owner/name`, or `provider:key`.
+    /// The canonical spelling: `owner/name`, an absolute path, or
+    /// `provider:key`.
     ///
     /// This is what an operator types into `taudit remove`, and what the CLI
-    /// prints, so the two are the same string by construction.
+    /// prints, so the two are the same string by construction. It is also what
+    /// [`crate::chain`] hands to [`crate::clone::clone_all`] — a local target's
+    /// id is its path, which is exactly the spec that acquisition takes.
     pub fn id(&self) -> String {
         match self {
             Target::Repo { name_with_owner } => name_with_owner.clone(),
+            Target::LocalRepo { path } => path.display().to_string(),
             Target::Board { provider, key } => format!("{}:{key}", provider.as_str()),
         }
     }
 
     /// Which kind this is.
+    ///
+    /// A local checkout reports [`TargetKind::Repo`]: it is a repository the
+    /// engagement audits, and every count, filter and clone-versus-collect
+    /// decision in this crate wants it on that side of the line. The kind is the
+    /// VERB an operator used, and there is one verb for both — see [`parse`].
     pub fn kind(&self) -> TargetKind {
         match self {
-            Target::Repo { .. } => TargetKind::Repo,
+            Target::Repo { .. } | Target::LocalRepo { .. } => TargetKind::Repo,
             Target::Board { .. } => TargetKind::Board,
         }
     }
@@ -335,8 +361,18 @@ pub fn is_linear_team_key(key: &str) -> bool {
 /// [`clone::split_name`], the one place this crate decides that charset —
 /// registering a name `taudit clone` would later refuse is not a useful state to
 /// be able to reach.
+///
+/// #6001: the `repo` verb takes TWO shapes, and [`local_repo::is_local_spec`]
+/// decides which — an ABSOLUTE path is a checkout on disk, anything else is a
+/// GitHub `owner/repo`. One verb rather than two because the operator's intent
+/// is the same in both cases ("audit this repository"), and because the two
+/// spellings cannot overlap: `clone::split_name` refuses an empty owner, so no
+/// `owner/repo` is ever absolute. Nothing here touches the filesystem — whether
+/// the path is USABLE is [`crate::validate`]'s question, asked where it can be
+/// refused with the condition that failed.
 /// Test: `super::registry_tests::a_spec_that_is_neither_shape_is_refused`,
-/// `super::registry_tests::a_traversing_repo_name_is_never_registered`.
+/// `super::registry_tests::a_traversing_repo_name_is_never_registered`,
+/// `super::registry_tests::an_absolute_path_registers_as_a_local_checkout`.
 ///
 /// # Errors
 ///
@@ -345,12 +381,18 @@ pub fn is_linear_team_key(key: &str) -> bool {
 /// no known provider or carries an unusable key.
 pub fn parse(kind: Option<TargetKind>, spec: &str) -> Result<Target, AuditError> {
     let spec = spec.trim();
-    let wanted = kind.unwrap_or(if spec.contains(':') {
+    // #6001: a path is checked for FIRST, so a path holding a colon is still a
+    // path rather than a board with an unknown provider.
+    let local = local_repo::is_local_spec(spec);
+    let wanted = kind.unwrap_or(if !local && spec.contains(':') {
         TargetKind::Board
     } else {
         TargetKind::Repo
     });
     match wanted {
+        TargetKind::Repo if local => Ok(Target::LocalRepo {
+            path: local_repo::normalize(spec),
+        }),
         TargetKind::Repo => {
             clone::split_name(spec)?;
             Ok(Target::Repo {
@@ -1405,15 +1447,93 @@ trusty-review = "0.15.1"
         assert!(parse(Some(TargetKind::Board), "acme/api").is_err());
     }
 
+    /// 🔴 #6001: an absolute path registers as a checkout on disk rather than
+    /// being run through the `owner/name` charset, which refuses a leading `/`.
+    ///
+    /// Against `7eef4bb9b` every one of these is `InvalidRepoName`, which is the
+    /// whole reason a 1.4 GB checkout with full history could not be audited.
+    #[test]
+    fn an_absolute_path_registers_as_a_local_checkout() {
+        for spec in ["/srv/apex", " /srv/apex ", "/srv/apex/", "/srv/apex.git"] {
+            let target = parse(Some(TargetKind::Repo), spec).expect("{spec} must register");
+            let Target::LocalRepo { path } = &target else {
+                panic!("{spec} registered as {target:?}, not a local checkout");
+            };
+            assert!(path.is_absolute(), "{spec}");
+            // The kind is the verb, and there is one verb for both shapes — so
+            // every count and filter that asks "is this a repository" still
+            // says yes.
+            assert_eq!(target.kind(), TargetKind::Repo);
+            // The id round-trips: `taudit remove <the path you typed>` works.
+            assert_eq!(parse(None, &target.id()).expect("round-trips"), target);
+        }
+    }
+
+    /// The two shapes cannot overlap, so `add repo` needs no second verb: a
+    /// relative `owner/repo` is never read as a path, and a path is never run
+    /// through the GitHub charset.
+    #[test]
+    fn a_relative_spec_is_still_a_github_repository() {
+        assert_eq!(
+            parse(Some(TargetKind::Repo), "acme/api").expect("parses"),
+            repo("acme/api")
+        );
+        // A path holding a colon is still a path, not a board with an unknown
+        // provider — `parse(None, …)` is what `taudit remove` passes.
+        let target = parse(None, "/srv/odd:name").expect("parses");
+        assert_eq!(target.kind(), TargetKind::Repo);
+    }
+
+    /// A local checkout survives the config round trip, so an engagement that
+    /// declares one reads it back as one.
+    #[test]
+    fn a_local_checkout_round_trips_through_the_engagement_config() {
+        let path = PathBuf::from("engagement.toml");
+        let local = parse(Some(TargetKind::Repo), "/srv/apex").expect("parses");
+        let text = config::with_targets(ENGAGEMENT, std::slice::from_ref(&local), &path)
+            .expect("declares");
+        let declared = EngagementConfig::from_toml(&text, &path)
+            .expect("loads")
+            .declared_targets()
+            .expect("declares a set")
+            .to_vec();
+        assert_eq!(declared, vec![local]);
+        assert!(
+            text.contains("local_repo"),
+            "the kind tag must be stable: {text}"
+        );
+    }
+
     /// A registered name becomes a path under the working directory when it is
     /// cloned, so the containment argument in `clone::split_name` applies here.
+    ///
+    /// #6001 moved `/abs/path` out of this list — an absolute path is now a
+    /// LOCAL checkout rather than a malformed `owner/repo`. Containment is not
+    /// weakened by that, and the second half is where it is now proved: a local
+    /// target's DESTINATION is `repos/local/<basename>`, built by
+    /// `local_repo::derive_name`, which maps every character outside the
+    /// checkout charset to `-`. The operator's path is read; it never becomes
+    /// one this crate writes to.
     #[test]
     fn a_traversing_repo_name_is_never_registered() {
-        for spec in ["../etc/passwd", "acme/../../etc", "/abs/path", "acme/a/b"] {
+        for spec in ["../etc/passwd", "acme/../../etc", "acme/a/b"] {
             assert!(
                 parse(Some(TargetKind::Repo), spec).is_err(),
                 "{spec} was accepted"
             );
+        }
+
+        let work = WorkDir::new("/engagement/work");
+        for spec in ["/abs/path", "/../../etc/passwd", "/srv/a/../../../etc"] {
+            let target = parse(Some(TargetKind::Repo), spec).expect("a path registers");
+            let name = local_repo::derive_name(&PathBuf::from(spec)).expect("a checkout name");
+            let dest = clone::destination(&work, &name).expect("a destination");
+            assert!(
+                dest.starts_with(work.path(Area::Repos).join(local_repo::LOCAL_OWNER)),
+                "{spec} escaped to {}",
+                dest.display()
+            );
+            assert_eq!(target.kind(), TargetKind::Repo);
         }
     }
 

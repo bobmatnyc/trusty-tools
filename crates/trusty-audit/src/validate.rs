@@ -190,6 +190,16 @@ pub async fn validate(
         Target::Repo { name_with_owner } => validate_repo(name_with_owner, gh)
             .await
             .map(|()| target.clone()),
+        // #6001: a path has no GitHub to probe, so the check is the reading
+        // itself — and it is one `crate::local_repo` owns, so the sweep and the
+        // registration cannot disagree about what a usable source is.
+        Target::LocalRepo { path } => crate::local_repo::inspect(path)
+            .await
+            .map(|()| target.clone())
+            .map_err(|reason| AuditError::LocalRepoUnusable {
+                path: path.clone(),
+                reason,
+            }),
         Target::Board { provider, key } => match provider {
             BoardProvider::Jira => {
                 let creds = config
@@ -738,6 +748,50 @@ trusty-review = "0.15.1"
             .expect_err("a gh that cannot answer must not register a repository");
         assert!(matches!(err, AuditError::RepoUnreachable { .. }), "{err:?}");
         assert!(err.to_string().contains("acme/api"), "{err}");
+    }
+
+    /// 🔴 #6001: a local path is validated by READING it, with no `gh` and no
+    /// network — and a path that is not a usable source is refused at
+    /// registration naming which condition failed, never accepted and then
+    /// silently empty.
+    #[tokio::test]
+    async fn an_unusable_local_source_names_what_failed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plain = tmp.path().join("not-a-repo");
+        std::fs::create_dir(&plain).expect("mkdir");
+        let target = Target::LocalRepo {
+            path: plain.clone(),
+        };
+
+        // `RepoProbe::unusable` proves no `gh` is consulted: this path must
+        // still refuse for its OWN reason rather than a credential's.
+        let err = validate(&target, None, RepoProbe::unusable())
+            .await
+            .expect_err("a directory that is not a repository must not register");
+        let AuditError::LocalRepoUnusable { path, reason } = &err else {
+            panic!("expected LocalRepoUnusable, got {err:?}");
+        };
+        assert_eq!(path, &plain);
+        assert!(reason.contains("not a git repository"), "{reason}");
+        assert!(err.to_string().contains("nothing was registered"), "{err}");
+    }
+
+    /// The accepted half, with the same probe: a real checkout validates
+    /// offline, so `taudit add repo <path>` works on a machine whose GitHub
+    /// credential reaches nothing.
+    #[tokio::test]
+    async fn a_real_checkout_validates_with_no_credential_at_all() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("apex");
+        crate::local_repo::local_repo_tests::source_repo(&src);
+        let target = Target::LocalRepo { path: src };
+
+        assert_eq!(
+            validate(&target, None, RepoProbe::unusable())
+                .await
+                .expect("a real checkout needs no credential"),
+            target
+        );
     }
 
     #[test]
