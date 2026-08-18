@@ -308,13 +308,27 @@ fn model_tier_resolves_through_the_public_reexport() {
 /// Why: a later change that "completes the table" by guessing Bedrock's Opus
 /// 4.8 inference-profile id would ship a string that fails at call time, not
 /// compile time. The gap is the ruled outcome (#5971), so it is asserted.
-/// What: both opus arms are `None` on Bedrock; the haiku arm still resolves.
+/// What: the analysis arm is `None` on Bedrock through the public re-export.
 #[test]
-fn model_tier_bedrock_opus_stays_unmapped_and_haiku_does_not() {
+fn model_tier_bedrock_analysis_stays_unmapped() {
     use trusty_common::inference::ModelTier;
 
     assert_eq!(ModelTier::Analysis.resolve(ProviderId::Bedrock), None);
-    assert_eq!(ModelTier::Interaction.resolve(ProviderId::Bedrock), None);
+}
+
+/// Why: the two mapped Bedrock arms spell their profiles differently — Sonnet
+/// bare, Haiku date-stamped and version-suffixed — so pinning both together
+/// catches a change that normalises one onto the other's shape (#5987).
+/// What: the interaction and classification arms resolve through the public
+/// re-export, each to its own verified profile form.
+#[test]
+fn model_tier_bedrock_sonnet_and_haiku_resolve() {
+    use trusty_common::inference::ModelTier;
+
+    assert_eq!(
+        ModelTier::Interaction.resolve(ProviderId::Bedrock),
+        Some("us.anthropic.claude-sonnet-4-6")
+    );
     assert_eq!(
         ModelTier::Classification.resolve(ProviderId::Bedrock),
         Some("us.anthropic.claude-haiku-4-5-20251001-v1:0")
