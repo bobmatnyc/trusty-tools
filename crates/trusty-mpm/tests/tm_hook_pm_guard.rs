@@ -46,11 +46,50 @@ fn isolated_home() -> tempfile::TempDir {
 
 /// Spawn `tm hook --pm-guard` with the given stdin JSON and optional extra env,
 /// returning stdout as a string. Asserts a clean `exit 0` (fail-open contract).
+///
+/// It sets NO working directory, so the child inherits the test binary's, and a
+/// payload carrying no `cwd` field lets that decide every rule keyed on
+/// `hook_cwd` (`pm_guard.rs`) — a main checkout in CI, a linked worktree on a
+/// developer machine. Never use this for a dispatch-tool payload or any other
+/// cwd-sensitive rule; reach for [`run_pm_guard_outside_a_checkout`] or
+/// [`run_pm_guard_at`], which pin the directory. See #5708.
 fn run_pm_guard(stdin_json: &str, extra_env: &[(&str, &str)]) -> String {
+    finish_pm_guard(spawn_pm_guard(
+        stdin_json,
+        UNREACHABLE_DAEMON,
+        None,
+        extra_env,
+    ))
+}
+
+/// The daemon URL the URL-insensitive helpers pin: nothing listens on port 1,
+/// so a daemon call fails open on a refused connection, never on a timeout.
+const UNREACHABLE_DAEMON: &str = "http://127.0.0.1:1";
+
+/// Spawn `tm hook --pm-guard` and hand back the running child (#5914).
+///
+/// Why: the concurrency test needs both children STARTED before either is
+/// collected, so it cannot use a helper that waits. Splitting spawn from
+/// collect also gives this file one place that scrubs the environment — five
+/// `env_remove` calls had been copied into three spawn sites, which is how one
+/// of them drifts into inheriting an operator escape hatch from the runner and
+/// quietly asserting nothing.
+/// What: builds the child, writes `stdin_json`, closes stdin, and returns
+/// without waiting. `cwd` of `None` inherits the runner's directory, which is
+/// [`run_pm_guard`]'s documented behaviour.
+/// Test: every helper below routes through it, and
+/// `pm_guard_denies_the_second_of_two_simultaneous_dispatches` is the one
+/// caller that needs the un-waited child.
+fn spawn_pm_guard(
+    stdin_json: &str,
+    url: &str,
+    cwd: Option<&std::path::Path>,
+    extra_env: &[(&str, &str)],
+) -> std::process::Child {
     let bin = env!("CARGO_BIN_EXE_tm");
     let mut command = Command::new(bin);
     command
-        .args(["--url", "http://127.0.0.1:1", "hook", "--pm-guard"])
+        .args(["--url", url, "hook", "--pm-guard"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
         .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
@@ -59,20 +98,27 @@ fn run_pm_guard(stdin_json: &str, extra_env: &[(&str, &str)]) -> String {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     for (k, v) in extra_env {
         command.env(k, v);
     }
     let mut child = command
         .spawn()
         .expect("failed to spawn `tm hook --pm-guard`");
-
     child
         .stdin
         .take()
         .expect("child stdin")
         .write_all(stdin_json.as_bytes())
         .expect("write stdin");
+    child
+}
 
+/// Collect a child started by [`spawn_pm_guard`], asserting the fail-open
+/// contract (`exit 0`, always) and returning its stdout.
+fn finish_pm_guard(child: std::process::Child) -> String {
     let output = child
         .wait_with_output()
         .expect("wait for tm hook --pm-guard");
@@ -259,15 +305,16 @@ fn pm_guard_allows_read_tool() {
 
 #[test]
 fn pm_guard_allows_git_status_and_task() {
-    let git = run_pm_guard(
+    // #5708: pinned outside any checkout because the `Task` arm is a dispatch —
+    // in a main checkout ADR-0048 denies it for want of an `isolation` field,
+    // which is its own rule's business and asserted separately.
+    let git = run_pm_guard_outside_a_checkout(
         r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}"#,
-        &[],
     );
     assert_eq!(git.trim(), "", "git status must be allowed");
 
-    let task = run_pm_guard(
+    let task = run_pm_guard_outside_a_checkout(
         r#"{"hook_event_name":"PreToolUse","tool_name":"Task","tool_input":{"subagent_type":"rust-engineer","prompt":"do it"}}"#,
-        &[],
     );
     assert_eq!(task.trim(), "", "Task must be allowed");
 }
@@ -510,6 +557,38 @@ fn pm_guard_denies_composition_hidden_verb() {
     assert_denied(&run_pm_guard(redirect, &[("HOME", &home2_s)]));
 }
 
+/// A working directory outside every root in `WORKTREE_TMP_DENYLIST_ROOTS`
+/// (`pm_guard_bash/mod.rs`), used to pin the two ALLOW cases below (#5914).
+///
+/// Why: `resolves_under_denylisted_tmp` is purely lexical and never touches the
+/// filesystem, so this path does not have to exist — and must not, since a
+/// directory that existed as a git checkout would drag the ADR-0048 rules into
+/// a test about the worktree-tmp rule.
+const NON_DENYLISTED_CWD: &str = "/projects/example-repo";
+
+/// A `git worktree add` payload whose target is the in-project convention and
+/// whose working directory is stated rather than inherited (#5914).
+///
+/// Why: the guard resolves a RELATIVE worktree target against `hook_cwd` —
+/// the payload's own `cwd` field, falling back to the guard process's
+/// directory. With no `cwd` in the payload the verdict became the RUNNER's:
+/// run from a scratch worktree under `/private/tmp`, the two ALLOW assertions
+/// below both saw a DENY, because the resolved target landed under a
+/// denylisted root. That is the test's location deciding the test's outcome.
+/// What: emits the payload with `cwd` set to [`NON_DENYLISTED_CWD`], and
+/// `agent_id` present only when the caller is exercising the native-subagent
+/// shape.
+/// Test: `pm_guard_allows_worktree_add_under_project_dir_via_subagent_payload`,
+/// `pm_guard_claude_mpm_sub_agent_env_still_allows_everything_else`.
+fn in_project_worktree_add_payload(agent_id: Option<&str>) -> String {
+    let agent = agent_id
+        .map(|id| format!(r#""agent_id":"{id}","#))
+        .unwrap_or_default();
+    format!(
+        r#"{{"hook_event_name":"PreToolUse",{agent}"cwd":"{NON_DENYLISTED_CWD}","tool_name":"Bash","tool_input":{{"command":"git worktree add .claude/worktrees/wt-x"}}}}"#
+    )
+}
+
 #[test]
 fn pm_guard_blocks_worktree_add_under_tmp_for_pm_own_call() {
     // The PM's own (non-subagent) `git worktree add /tmp/...` must be denied
@@ -589,7 +668,9 @@ fn pm_guard_claude_mpm_sub_agent_env_still_allows_everything_else() {
     // Edit, which `pm_guard_sub_agent_env_allows_all` already covers, and a
     // worktree add targeting an in-project path.
     let ok_worktree = run_pm_guard(
-        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add .claude/worktrees/wt-x"}}"#,
+        // #5914: the payload names its own working directory, so the relative
+        // target resolves the same wherever the suite runs.
+        &in_project_worktree_add_payload(None),
         &[("CLAUDE_MPM_SUB_AGENT", "1")],
     );
     assert_eq!(
@@ -639,9 +720,11 @@ fn pm_guard_unrestricted_env_still_allows_worktree_add_under_tmp() {
 fn pm_guard_allows_worktree_add_under_project_dir_via_subagent_payload() {
     // The companion positive case: the SAME subagent payload shape, but
     // targeting the documented in-project convention, must be allowed.
-    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","tool_name":"Bash","tool_input":{"command":"git worktree add .claude/worktrees/wt-x"}}"#;
+    // #5914: the payload names its own working directory, so the relative
+    // target resolves the same wherever the suite runs.
+    let payload = in_project_worktree_add_payload(Some("agent-xyz789"));
     assert_eq!(
-        run_pm_guard(payload, &[]).trim(),
+        run_pm_guard(&payload, &[]).trim(),
         "",
         "an in-project worktree target must be allowed even unbudgeted \
          (worktree add is not a budget-eligible file-change deny)"
@@ -755,15 +838,20 @@ fn pm_guard_denies_task_dispatch_from_mpm_subagent_env() {
 
 #[test]
 fn pm_guard_allows_agent_dispatch_from_pm() {
-    // The load-bearing arm: the PM carries neither marker, so its dispatches
-    // must pass silently. A regression here halts every delegation in the
-    // system, which is strictly worse than the fan-out this guard prevents.
+    // The arm every delegation depends on: the PM carries neither marker, so
+    // its dispatches must pass silently. A regression here halts every
+    // delegation in the system, which is strictly worse than the fan-out this
+    // guard prevents.
+    //
+    // #5708: pinned outside any checkout so this asserts the FAN-OUT rule
+    // alone. In a main checkout ADR-0048 rewrites the same payload to add
+    // `isolation`, which is a different rule with its own tests.
     for tool in ["Agent", "Task"] {
         let payload = format!(
             r#"{{"hook_event_name":"PreToolUse","tool_name":"{tool}","tool_input":{{"subagent_type":"rust-engineer","prompt":"go"}}}}"#
         );
         assert_eq!(
-            run_pm_guard(&payload, &[]).trim(),
+            run_pm_guard_outside_a_checkout(&payload).trim(),
             "",
             "the PM's own {tool} dispatch must be allowed"
         );
@@ -775,12 +863,17 @@ fn pm_guard_fanout_fails_open_on_indeterminate_caller() {
     // An empty-string `agent_id` and a payload with no marker at all are both
     // INDETERMINATE. Indeterminate must ALLOW (#4784): a false deny against
     // the PM halts orchestration; a false allow reproduces prior behaviour.
+    //
+    // #5708: pinned outside any checkout because these payloads carry no
+    // `subagent_type` and are therefore also UNTYPED dispatches, which ADR-0048
+    // deliberately isolates in a main checkout rather than failing open. The two
+    // rules disagree by design; this one is asserted where only it can fire.
     for payload in [
         r#"{"hook_event_name":"PreToolUse","agent_id":"","tool_name":"Agent","tool_input":{"prompt":"go"}}"#,
         r#"{"hook_event_name":"PreToolUse","agent_type":"rust-engineer","tool_name":"Agent","tool_input":{"prompt":"go"}}"#,
     ] {
         assert_eq!(
-            run_pm_guard(payload, &[]).trim(),
+            run_pm_guard_outside_a_checkout(payload).trim(),
             "",
             "an indeterminate caller context must fail OPEN: {payload}"
         );
@@ -846,6 +939,27 @@ fn run_pm_guard_at(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String
     run_pm_guard_at_with_env(stdin_json, url, cwd, &[])
 }
 
+/// Spawn `tm hook --pm-guard` standing in a directory that is no git checkout.
+///
+/// Why (#5708): [`run_pm_guard`] inherits the runner's working directory, and
+/// the ADR-0048 worktree grant fires only in a main checkout. Three tests
+/// asserting a silent allow therefore passed from a worktree and failed from
+/// CI's `actions/checkout` clone — one denied, two got an `updatedInput`
+/// rewrite — off the same binary at the same commit. Pinning a directory that
+/// is no checkout makes the verdict the payload's rather than the runner's.
+/// What: [`run_pm_guard_at`] against the same unreachable daemon URL
+/// [`run_pm_guard`] fixes, in a fresh empty tempdir — no `.git` entry of either
+/// shape, so `is_main_checkout` answers false wherever the suite runs. For
+/// payloads whose rule is cwd-INSENSITIVE by intent only; an assertion ABOUT a
+/// tree belongs in [`run_pm_guard_at`] with a fixture naming the tree it wants.
+/// Test: `pm_guard_allows_git_status_and_task`,
+/// `pm_guard_allows_agent_dispatch_from_pm`,
+/// `pm_guard_fanout_fails_open_on_indeterminate_caller`.
+fn run_pm_guard_outside_a_checkout(stdin_json: &str) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    run_pm_guard_at(stdin_json, UNREACHABLE_DAEMON, dir.path())
+}
+
 /// [`run_pm_guard_at`] returning STDERR instead of stdout.
 ///
 /// Why (#5769): one guard signal is deliberately not a verdict. When the daemon
@@ -856,25 +970,7 @@ fn run_pm_guard_at(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String
 /// silent regression there would leave every test green.
 /// What: as [`run_pm_guard_at`], but hands back the child's stderr.
 fn run_pm_guard_at_stderr(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String {
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let mut child = Command::new(bin)
-        .args(["--url", url, "hook", "--pm-guard"])
-        .current_dir(cwd)
-        .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
-        .env_remove("CLAUDE_MPM_SUB_AGENT")
-        .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
-        .env_remove("TM_MANAGED_SESSION_ID")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn `tm hook --pm-guard`");
-    child
-        .stdin
-        .take()
-        .expect("child stdin")
-        .write_all(stdin_json.as_bytes())
-        .expect("write stdin");
+    let child = spawn_pm_guard(stdin_json, url, Some(cwd), &[]);
     let output = child.wait_with_output().expect("wait");
     assert!(output.status.success(), "the guard must always exit 0");
     String::from_utf8(output.stderr).expect("stderr is utf8")
@@ -890,38 +986,7 @@ fn run_pm_guard_at_with_env(
     cwd: &std::path::Path,
     extra_env: &[(&str, &str)],
 ) -> String {
-    let bin = env!("CARGO_BIN_EXE_tm");
-    let mut command = Command::new(bin);
-    command
-        .args(["--url", url, "hook", "--pm-guard"])
-        .current_dir(cwd)
-        .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
-        .env_remove("CLAUDE_MPM_SUB_AGENT")
-        .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
-        .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT")
-        .env_remove("TM_MANAGED_SESSION_ID")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (k, v) in extra_env {
-        command.env(k, v);
-    }
-    let mut child = command
-        .spawn()
-        .expect("failed to spawn `tm hook --pm-guard`");
-    child
-        .stdin
-        .take()
-        .expect("child stdin")
-        .write_all(stdin_json.as_bytes())
-        .expect("write stdin");
-    let output = child.wait_with_output().expect("wait");
-    assert!(
-        output.status.success(),
-        "tm hook --pm-guard must always exit 0 (fail-open): stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("stdout is utf8")
+    finish_pm_guard(spawn_pm_guard(stdin_json, url, Some(cwd), extra_env))
 }
 
 /// A one-shot HTTP stand-in for the daemon's shared-tree-dispatch route.
@@ -999,6 +1064,12 @@ struct CapturedRequest(std::sync::mpsc::Receiver<String>);
 
 impl CapturedRequest {
     /// The forwarded hook payload the guard sent, or `None` if nothing arrived.
+    ///
+    /// The five seconds are a deadlock backstop, not a wait, so they carry no
+    /// load sensitivity (#5914). Every caller collects the guard child first,
+    /// and the mock sends on this channel BEFORE it writes the response the
+    /// child is waiting for — so the value is already queued by the time any
+    /// caller asks, and the receive returns without blocking.
     fn posted(&self) -> Option<serde_json::Value> {
         let raw = self
             .0
@@ -1176,6 +1247,29 @@ fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfil
     (format!("http://{addr}"), dir)
 }
 
+/// Run one throwaway `tm hook --pm-guard` so the next exec is not the cold one
+/// (#5914).
+///
+/// Why: the concurrency test below is the only test whose correctness depends
+/// on how long a child takes to START, because the barrier holds one child's
+/// request open across the other's startup and the guard's HTTP client gives up
+/// after 2 s. Paging a ~100 MB debug binary in is the whole of that cost, and it
+/// is paid once per machine, not once per exec — so moving it ahead of the
+/// barrier removes it from the window entirely rather than budgeting for it.
+/// What: the cheapest complete path through the same binary — a `Read` payload,
+/// which no rule gates and which never dials the daemon. The verdict is
+/// discarded; only the page cache it leaves behind is wanted.
+fn prewarm_pm_guard_binary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/x/a.rs"}}"#;
+    let verdict = run_pm_guard_at(payload, UNREACHABLE_DAEMON, dir.path());
+    assert_eq!(
+        verdict.trim(),
+        "",
+        "the warm-up payload must be one no rule gates"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
     // #5324, the window #4480 left open. Two `Agent` dispatches issued in one PM
@@ -1203,31 +1297,47 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
     // through `claim_shared_tree_dispatch` directly with no scheduler in the
     // way. Treat the two as a pair: this one proves the wiring, that one proves
     // the mutual exclusion.
+    // #5914: the barrier holds the FIRST child's HTTP request open until the
+    // SECOND child's arrives, and `post_shared_tree` gives up after 2 s and
+    // fails OPEN. So the whole of the second child's process startup sits
+    // inside a 2 s budget. A COLD first exec of `tm` measured 1.5 s on this
+    // machine against 40 ms warm, and under a parallel `cargo build` it crossed
+    // the budget: the held request timed out, its guard read the timeout as
+    // "nobody else is here", and BOTH dispatches were admitted — the reported
+    // `got: ["", ""]`. Two changes take startup out of the window, neither of
+    // them a tuned delay: `prewarm_pm_guard_binary` pays the cold-exec cost
+    // before the barrier is armed, and both children are forked back to back
+    // from this one thread, so what remains between their arrivals is two warm
+    // execs, not a thread hand-off plus a page-in.
     let (url, _dir) = serve_delegation_router_behind_a_barrier(2);
     let cwd = tempfile::tempdir().expect("tempdir");
+    prewarm_pm_guard_binary();
 
-    let mut children = Vec::new();
-    for tool_use_id in ["toolu_race_a", "toolu_race_b"] {
-        let payload = format!(
-            r#"{{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"{tool_use_id}","tool_name":"Agent","tool_input":{{"subagent_type":"rust-engineer","prompt":"go"}}}}"#
-        );
-        let url = url.clone();
-        let dir = cwd.path().to_path_buf();
-        children.push(std::thread::spawn(move || {
-            run_pm_guard_at(&payload, &url, &dir)
-        }));
-    }
+    let started = std::time::Instant::now();
+    let children: Vec<std::process::Child> = ["toolu_race_a", "toolu_race_b"]
+        .iter()
+        .map(|tool_use_id| {
+            let payload = format!(
+                r#"{{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"{tool_use_id}","tool_name":"Agent","tool_input":{{"subagent_type":"rust-engineer","prompt":"go"}}}}"#
+            );
+            spawn_pm_guard(&payload, &url, Some(cwd.path()), &[])
+        })
+        .collect();
 
     let verdicts: Vec<String> = children
         .into_iter()
-        .map(|h| h.join().expect("guard thread").trim().to_string())
+        .map(|child| finish_pm_guard(child).trim().to_string())
         .collect();
+    let elapsed = started.elapsed();
 
     let allowed = verdicts.iter().filter(|v| v.is_empty()).count();
     let denied: Vec<&String> = verdicts.iter().filter(|v| !v.is_empty()).collect();
     assert_eq!(
         allowed, 1,
-        "exactly one of two simultaneous dispatches may be admitted, got: {verdicts:?}"
+        "exactly one of two simultaneous dispatches may be admitted, got: {verdicts:?} \
+         (both children ran in {elapsed:?}; at or past the guard's 2 s client budget in \
+         `post_shared_tree` the held request timed out and failed open — that is the \
+         machine, not this rule regressing, see #5914)"
     );
     assert_eq!(denied.len(), 1, "and exactly one must be denied");
     assert_denied(denied[0]);

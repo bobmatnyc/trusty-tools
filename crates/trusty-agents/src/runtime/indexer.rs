@@ -162,18 +162,29 @@ fn load_search_cool_after(project_root: &Path) -> std::time::Duration {
 /// What: Resolves the store dir, opens `RedbUsearchStore`, constructs a
 /// `FastEmbedder`, wraps both in a `CodeIndexer`, returns a `FileWatcher`
 /// with the default extensions. Honors `[search] cool_after_minutes` from
-/// `.trusty-agents/config.toml` for the cool-down threshold (#372).
+/// `.trusty-agents/config.toml` for the cool-down threshold (#372). The
+/// construction runs on the blocking pool: `CodeStore::open` and
+/// `FastEmbedder::new` are synchronous, and `FastEmbedder::new` in particular
+/// reaches the on-disk model cache (and, on a cold cache, the network) through
+/// `fastembed` -> `hf_hub`, which is unbounded blocking I/O. Running it inline
+/// pinned a runtime worker thread for as long as that I/O took — forever, when
+/// the cache lived on an unresponsive volume (#3655).
 pub(super) async fn build_file_watcher() -> Result<FileWatcher> {
     const EMBED_DIM: usize = 384;
     let root = std::env::current_dir().context("failed to read cwd")?;
     let code_dir = default_code_dir()?;
-    std::fs::create_dir_all(&code_dir)
-        .with_context(|| format!("failed to create code dir: {}", code_dir.display()))?;
-    let store = CodeStore::open(&code_dir, EMBED_DIM).context("failed to open CodeStore")?;
-    let embedder = FastEmbedder::new().context("failed to construct FastEmbedder")?;
     let cool_after = load_search_cool_after(&root);
-    let indexer =
-        Arc::new(CodeIndexer::new(Arc::new(store), Arc::new(embedder)).with_cool_after(cool_after));
+    let indexer = tokio::task::spawn_blocking(move || -> Result<Arc<CodeIndexer>> {
+        std::fs::create_dir_all(&code_dir)
+            .with_context(|| format!("failed to create code dir: {}", code_dir.display()))?;
+        let store = CodeStore::open(&code_dir, EMBED_DIM).context("failed to open CodeStore")?;
+        let embedder = FastEmbedder::new().context("failed to construct FastEmbedder")?;
+        Ok(Arc::new(
+            CodeIndexer::new(Arc::new(store), Arc::new(embedder)).with_cool_after(cool_after),
+        ))
+    })
+    .await
+    .context("file-watcher construction task failed to join")??;
     Ok(FileWatcher::new(indexer, root, default_extensions()))
 }
 

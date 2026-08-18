@@ -493,6 +493,240 @@ async fn a_cold_load_failure_propagates() {
     lane.shutdown().await;
 }
 
+/// Why (#5887): the budget popped a palace out of the LRU and only then flushed
+/// it, so a snapshot that could not be written took the index's unflushed
+/// documents down with it — the exact loss the flush is there to prevent. The
+/// lane must keep an index it could not persist and evict a flushable one
+/// instead, even at the cost of staying over budget.
+/// What: seals the coldest palace's snapshot directory with `chmod 0o500` (the
+/// pattern `a_failed_flush_leaves_the_index_dirty` uses), runs one budget sweep,
+/// and asserts the sealed palace is still resident with its write intact.
+///
+/// [`Bm25Lane::shutdown`] runs first, before anything is resident: it stops the
+/// flush ticker, which would otherwise flush `alpha` clean before the directory
+/// was sealed and leave the eviction nothing to lose. The lane stays fully
+/// usable afterwards — only the ticker is gone.
+/// Test: this test itself.
+#[tokio::test]
+#[cfg(unix)]
+async fn the_budget_keeps_a_palace_whose_snapshot_cannot_be_flushed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Running as root defeats the permission bits entirely; skip rather than
+    // assert something the environment cannot produce.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempdir();
+    let lane = Bm25Lane::with_limits(dir.path().to_path_buf(), 8, Some(0));
+    lane.shutdown().await;
+
+    lane.index("alpha", "d1", "unflushable-but-not-lost")
+        .await
+        .unwrap();
+    lane.index("beta", "d2", "beta text").await.unwrap();
+
+    let alpha_dir = lane.data_dir_for_palace("alpha");
+    let alpha_snapshot = alpha_dir.join(crate::bm25_index::SNAPSHOT_FILENAME);
+    std::fs::set_permissions(&alpha_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    lane.enforce_text_budget().await;
+
+    // Restore before asserting so the tempdir can always be cleaned up.
+    std::fs::set_permissions(&alpha_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Non-vacuity: had `chmod 0o500` not blocked the flush, the snapshot would
+    // be on disk and the rest of this test would prove nothing.
+    assert!(
+        !alpha_snapshot.exists(),
+        "the sealed directory must have failed alpha's flush, but {} exists",
+        alpha_snapshot.display()
+    );
+    assert_eq!(
+        lane.resident_count().await,
+        1,
+        "a zero budget over two palaces must evict exactly one"
+    );
+    let hits = lane
+        .search("alpha", "unflushable-but-not-lost", 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the unflushable palace's write was dropped with the index: {hits:?}"
+    );
+    // Reading alpha did not reload it, which is what proves the index the lane
+    // could not flush was kept rather than evicted and rebuilt from an absent
+    // snapshot.
+    assert_eq!(
+        lane.loaded_count(),
+        2,
+        "alpha was evicted and reloaded — the lane dropped an index it could not flush"
+    );
+}
+
+/// Why (#5887): the cold-load path had the same defect as the budget sweep, via
+/// `LruCache::push`, which hands back an already-removed victim. A failed flush
+/// there loses the victim's writes to make room for an unrelated palace.
+/// What: caps residency at 1, seals the resident palace's snapshot directory,
+/// and asks for a second palace. The load must fail rather than buy its slot
+/// with the sealed palace's unflushed documents.
+/// Test: this test itself.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_cold_load_refuses_to_evict_an_unflushable_victim() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempdir();
+    let lane = Bm25Lane::with_limits(dir.path().to_path_buf(), 1, None);
+    // As above: the ticker must not flush alpha clean before it is sealed.
+    lane.shutdown().await;
+
+    lane.index("alpha", "d1", "unflushable-but-not-lost")
+        .await
+        .unwrap();
+
+    let alpha_dir = lane.data_dir_for_palace("alpha");
+    let alpha_snapshot = alpha_dir.join(crate::bm25_index::SNAPSHOT_FILENAME);
+    std::fs::set_permissions(&alpha_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let result = lane.index("beta", "d2", "beta text").await;
+
+    std::fs::set_permissions(&alpha_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Non-vacuity, as above.
+    assert!(
+        !alpha_snapshot.exists(),
+        "the sealed directory must have failed alpha's flush, but {} exists",
+        alpha_snapshot.display()
+    );
+    let err = result.expect_err("loading beta must fail rather than drop alpha's unflushed write");
+    assert!(
+        format!("{err:#}").contains("beta"),
+        "the error must name the palace that could not be loaded: {err:#}"
+    );
+    assert_eq!(
+        lane.evicted_count(),
+        0,
+        "nothing may be evicted when no resident snapshot could be flushed"
+    );
+    // #5887: beta was loaded from disk but never became resident, so counting it
+    // would over-report residency in exactly the degraded state an operator reads
+    // this counter in.
+    assert_eq!(
+        lane.loaded_count(),
+        1,
+        "a load discarded by a failed eviction must not count as resident"
+    );
+    assert_eq!(lane.resident_count().await, 1);
+    let hits = lane
+        .search("alpha", "unflushable-but-not-lost", 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "alpha's write was lost to a failed eviction: {hits:?}"
+    );
+}
+
+/// Why (#5887): `enforce_text_budget`'s doc claims "Palaces that CAN be flushed
+/// are still evicted, so one unwritable palace does not disable enforcement."
+/// The two neighbouring tests cannot show it — one runs a single loop iteration
+/// (two palaces, so `resident.len() > 1` exits immediately after the first
+/// eviction) and the other caps residency at 1. This is the case where the sweep
+/// must walk PAST an unflushable palace more than once.
+/// What: four palaces under a cap of 8 so the cap cannot be what evicts, a zero
+/// budget, and the coldest palace's snapshot directory sealed with `chmod 0o500`.
+/// The sweep must evict the three flushable palaces and leave the sealed one
+/// resident with its write intact.
+///
+/// What this does NOT prove: the skip-set fix. Both before and after it the sweep
+/// reaches the same end state — the difference is that the unfixed code
+/// re-serialises alpha's whole corpus once per eviction instead of once per
+/// sweep, and a correctness assertion cannot see wasted work. This test pins the
+/// documented behaviour against regression; the cost fix is argued in the PR, not
+/// measured here.
+/// Test: this test itself.
+#[tokio::test]
+#[cfg(unix)]
+async fn the_budget_evicts_past_a_palace_it_cannot_flush() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempdir();
+    let lane = Bm25Lane::with_limits(dir.path().to_path_buf(), 8, Some(0));
+    // As in the neighbouring tests: stop the ticker before anything is resident,
+    // so it cannot flush alpha clean before the directory is sealed.
+    lane.shutdown().await;
+
+    lane.index("alpha", "d1", "unflushable-but-not-lost")
+        .await
+        .unwrap();
+    for (palace, doc, text) in [
+        ("beta", "d2", "beta text"),
+        ("gamma", "d3", "gamma text"),
+        ("delta", "d4", "delta text"),
+    ] {
+        lane.index(palace, doc, text).await.unwrap();
+    }
+    assert_eq!(
+        lane.resident_count().await,
+        4,
+        "cap of 8 must hold all four"
+    );
+
+    let alpha_dir = lane.data_dir_for_palace("alpha");
+    let alpha_snapshot = alpha_dir.join(crate::bm25_index::SNAPSHOT_FILENAME);
+    std::fs::set_permissions(&alpha_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    lane.enforce_text_budget().await;
+
+    // Restore before asserting so the tempdir can always be cleaned up.
+    std::fs::set_permissions(&alpha_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Non-vacuity: had `chmod 0o500` not blocked the flush, alpha would have been
+    // evictable like the rest and the test would prove nothing about walking past
+    // an unflushable palace.
+    assert!(
+        !alpha_snapshot.exists(),
+        "the sealed directory must have failed alpha's flush, but {} exists",
+        alpha_snapshot.display()
+    );
+    assert_eq!(
+        lane.resident_count().await,
+        1,
+        "one unwritable palace must not stop the other three being evicted"
+    );
+    assert_eq!(
+        lane.evicted_count(),
+        3,
+        "beta, gamma and delta were all flushable and must all have been evicted"
+    );
+    let hits = lane
+        .search("alpha", "unflushable-but-not-lost", 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the surviving palace must be alpha, with its write intact: {hits:?}"
+    );
+    // Alpha was never reloaded, which is what makes the survivor the ORIGINAL
+    // in-memory index rather than one rebuilt from a snapshot that does not exist.
+    assert_eq!(
+        lane.loaded_count(),
+        4,
+        "alpha was evicted and reloaded — the lane dropped an index it could not flush"
+    );
+}
+
 #[test]
 fn bm25_hit_round_trips() {
     let h = BM25Hit {

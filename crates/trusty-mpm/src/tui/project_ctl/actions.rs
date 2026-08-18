@@ -71,7 +71,12 @@ pub(crate) async fn dispatch(
             apply_mutation_result(state, result, "resumed");
         }
         PendingAction::Decommission(id) => {
-            let result = client.decommission_managed_session(&id).await;
+            // The notice reports the state change; the workspace verdict rides on
+            // the outcome for the CLI's message (#5899).
+            let result = client
+                .decommission_managed_session(&id)
+                .await
+                .map(|outcome| outcome.summary);
             apply_mutation_result(state, result, "decommissioned");
         }
         PendingAction::Attach(id) => match client.managed_session_attach_cmd(&id).await {

@@ -328,18 +328,21 @@ branch), then the local branch. The remote branch is usually already gone via
 <branch>` goes last, since until the squash-merge lands the branch is the only
 durable copy of the workstream.
 
-**Escape hatch — stash first.** If you genuinely must run one command from the
-main checkout, stash, operate, restore:
+**Escape hatch — a throwaway worktree.** If you genuinely need a clean tree to
+run one command — a baseline check, a bisect, a build against `origin/main` —
+provision a disposable one rather than clearing a checkout another session may
+be writing:
 
 ```bash
-git -C /path/to/main-checkout stash push -u -m "pre-op-safety $(date +%s)"
+git worktree add .claude/worktrees/baseline-$$ origin/main
 # … do the op …
-git -C /path/to/main-checkout stash pop
+git worktree remove .claude/worktrees/baseline-$$
 ```
 
-Surface the stash name in your report if popping fails, so a human can restore
-it manually. This is a narrow exception, not license for routine edits from the
-main checkout.
+This escape hatch used to stash the main checkout, operate, then restore. The
+throwaway worktree needs no main checkout at all, and a run that dies partway
+through leaves every other tree exactly as it was instead of stranding
+uncommitted work in a stash entry a human has to go find (#4730).
 
 Project-specific worktree hazards (binary-install caveats, code-signing caches,
 and the like) belong in the project's own reference docs, not here.

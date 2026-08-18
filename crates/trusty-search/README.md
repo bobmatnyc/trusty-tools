@@ -449,12 +449,19 @@ restores it on the next boot).
 
 ### Upgrading an existing install
 
-On the first boot after this gate ships, a daemon with no `allowlist.toml`
-seeds one from the roots it is already serving — so nothing you have indexed
-stops being indexed. The pass runs once; an existing file, including one you
-emptied on purpose, is never rewritten. Roots the hard denylist refuses are NOT
-carried over and are logged at `warn`. Review what was seeded with
-`trusty-search index list` and prune anything you do not want indexed.
+On the first boot after this gate ships, the daemon adds every root it is
+already serving to `allowlist.toml` — so nothing you have indexed stops being
+indexed. It creates the file when absent and completes it when it already
+exists but does not cover every registered root; a file left from before the
+gate is a partial record of `index add` calls, not a policy the gate had ever
+read. Roots the hard denylist refuses are NOT carried over and are logged at
+`warn`. Review what was added with `trusty-search index list` and prune
+anything you do not want indexed.
+
+The pass runs once per install and records that in a `.grandfathered` stamp
+beside `allowlist.toml`. After it has run, the file IS the policy: a root you
+remove stays removed, and deleting the file entirely leaves you at default-deny
+rather than re-seeding. Delete the stamp to let the pass run again.
 
 ### Format
 

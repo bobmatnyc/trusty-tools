@@ -22,9 +22,10 @@
 //! doc for why the old `Provisioning`-seed/409 scenario no longer applies
 //! cleanly at this layer) established for the prior direct-POST
 //! implementation.
-//! The pre-existing `truncate_*`/`short_timestamp_*`/
-//! `decommission_message_reflects_workspace_removed` unit tests are carried
-//! over unchanged from the inline module this file replaced.
+//! The pre-existing `truncate_*`/`short_timestamp_*` unit tests are carried over
+//! unchanged from the inline module this file replaced;
+//! `decommission_message_reflects_workspace_removed` was replaced by
+//! `session_decommission_prints_daemon_verdict_over_http` (#5899).
 //! Test: this file IS the test module for `commands::managed`.
 
 use std::future::IntoFuture as _;
@@ -139,39 +140,63 @@ fn short_timestamp_formats_correctly() {
     assert_eq!(short_timestamp("2025-06-27T14:32"), "2025-06-27 14:32");
 }
 
-#[test]
-fn decommission_message_reflects_workspace_removed() {
-    // Guard that the key field names used in session_decommission match the
-    // daemon's DecommissionResponse serde output. If the daemon renames those
-    // keys this test catches the drift before the JSON decodes silently to None.
-    let owned_removed = serde_json::json!({
-        "id": "abc-123",
-        "workspace_removed": true,
-        "workspace_path_was": "/some/workspace/path"
-    });
-    assert_eq!(
-        owned_removed
-            .get("workspace_removed")
-            .and_then(|v| v.as_bool()),
-        Some(true)
+/// #5899: `session_decommission` must decode the real daemon response body and
+/// leave an unowned workspace alone.
+///
+/// Replaces `decommission_message_reflects_workspace_removed`, which asserted only
+/// that `serde_json` can read keys out of a literal it had just built — it never
+/// touched the daemon or the handler, which is why the handler could go on printing
+/// a hardcoded "workspace removed". This drives the handler against the real route:
+/// the typed [`ManagedDecommissionOutcome`] decode is now part of the path, so a
+/// daemon-side key rename surfaces as an `Err` here instead of a silent `None`.
+/// The wording itself is asserted by `decommission_message_honours_every_verdict`.
+#[tokio::test]
+async fn session_decommission_prints_daemon_verdict_over_http() {
+    use std::future::IntoFuture as _;
+    use trusty_mpm::daemon::{api, state::DaemonState};
+    use trusty_mpm::runtime::RuntimeKind;
+    use trusty_mpm::session_manager::ManagedSessionId;
+
+    let root = tempfile::tempdir().unwrap().keep();
+    let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root.clone()).await);
+    let id = ManagedSessionId::new();
+    let ws = root.join(format!("{id}-unowned-ws"));
+    std::fs::create_dir_all(&ws).unwrap();
+    state
+        .session_manager()
+        .await
+        .create_with_id(
+            id,
+            "regression: #5899 decommission over HTTP".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws.clone()),
+            None,
+            None,
+            RuntimeKind::default(),
+            false,
+            // Unowned: the daemon must report `workspace_removed: false`.
+            false,
+        )
+        .await
+        .expect("seed session");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, api::router(state)).into_future());
+
+    session_decommission(
+        &reqwest::Client::new(),
+        &format!("http://{addr}"),
+        id.to_string(),
+    )
+    .await
+    .expect("decommissioning a seeded session must succeed");
+    assert!(
+        ws.exists(),
+        "an unowned workspace must survive decommission: {}",
+        ws.display()
     );
-    assert_eq!(
-        owned_removed
-            .get("workspace_path_was")
-            .and_then(|v| v.as_str()),
-        Some("/some/workspace/path")
-    );
-    let adopted_not_removed = serde_json::json!({
-        "id": "xyz-456",
-        "workspace_removed": false
-    });
-    assert_eq!(
-        adopted_not_removed
-            .get("workspace_removed")
-            .and_then(|v| v.as_bool()),
-        Some(false)
-    );
-    assert!(adopted_not_removed.get("workspace_path_was").is_none());
 }
 
 /// Spawn the daemon's real HTTP API on a random loopback port, rooted in a

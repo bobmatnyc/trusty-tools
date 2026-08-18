@@ -504,10 +504,21 @@ trusty-review = "0.15.1"
     /// The stub binaries AND the version record, which together are what the
     /// sweep's `pinned_binaries` preflight accepts — so the install phase finds
     /// the pins satisfied and never reaches the network.
+    ///
+    /// #5915: `trusty-search` gets an approving stub rather than `script`. The
+    /// sweep now runs `trusty-search index add <checkout>` before each tga
+    /// child, and `script` describes what TGA does — sharing it would make every
+    /// chain test that expects a failing tga also fail its approval, for a
+    /// reason none of them is about.
     fn install_stubs(work: &WorkDir, script: &str) {
         for tool in RequiredTool::ALL {
             let path = tool.path_in(work);
-            std::fs::write(&path, script).expect("stub binary");
+            let body = if tool == RequiredTool::TrustySearch {
+                "#!/bin/sh\nexit 0\n"
+            } else {
+                script
+            };
+            std::fs::write(&path, body).expect("stub binary");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;

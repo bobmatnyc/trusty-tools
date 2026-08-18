@@ -241,10 +241,21 @@ impl RetentionOutcome {
 /// `.worktrees` layout, and treating an undetermined sentinel probe as present
 /// covers it for the rest. Unprotected only when there is no path, the path is
 /// gone, or it is a plain directory with no sentinel — the main-checkout case.
+/// #5897: `pub(super)` rather than module-private because
+/// [`super::prune::PruneOutcome`]'s compaction branch releases the slot behind
+/// the record it removes, and must gate that release on the SAME workspace
+/// condition this sweep does. A second copy of the predicate in `prune.rs`
+/// would drift, and the two paths disagreeing about who may free a slot is
+/// what #5897 is. Prune adds one condition this sweep has no need of — that
+/// the record is STILL a tombstone when the slot is freed, which it re-reads
+/// from the store because its own snapshot predates an unbounded teardown
+/// loop. This sweep already re-reads for the same reason, in
+/// [`SessionManager::revalidate_for_eviction`].
 /// Test: `workspace_needs_protection_treats_an_undetermined_path_as_protected`,
 /// `workspace_needs_protection_covers_a_session_worktree`,
-/// `workspace_needs_protection_ignores_a_plain_main_checkout`.
-fn workspace_needs_protection(
+/// `workspace_needs_protection_ignores_a_plain_main_checkout`,
+/// `prune_compaction_keeps_the_slot_when_the_worktree_is_still_on_disk`.
+pub(super) fn workspace_needs_protection(
     path: Option<&std::path::Path>,
     names: &trusty_common::workspace_layout::WorktreeDirNames,
     probe: impl Fn(&std::path::Path) -> std::io::Result<bool>,

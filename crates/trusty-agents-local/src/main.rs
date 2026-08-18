@@ -5,7 +5,13 @@
 //!      through the declarative `cto-db` Python skill instead. So the launcher
 //!      has nothing left to install.
 //! What: Thin pass-through launcher — delegates straight to
-//!       `trusty_agents::run()` with no local plugin installation.
+//!       `trusty_agents::run_to_completion()` (which owns the tokio runtime)
+//!       with no local plugin installation.
+//!
+//! #3655: this used to be `#[tokio::main]` over `run()`. That attribute drops
+//! the runtime with an unbounded wait on the blocking pool, so one background
+//! task stuck in a syscall made the process un-exitable. The shared launcher
+//! bounds that wait for both this binary and `tagent`.
 //! Test: `cargo run -p trusty-agents-local` starts the agent server; agent
 //!       tools come from the bundled agent packages, not from this binary.
 
@@ -17,7 +23,6 @@
 
 use anyhow::Result;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    trusty_agents::run().await
+fn main() -> Result<()> {
+    trusty_agents::run_to_completion()
 }

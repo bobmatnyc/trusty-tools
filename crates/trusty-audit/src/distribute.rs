@@ -77,9 +77,6 @@ pub const LAUNCHER_NAME: &str = "audit.sh";
 /// The generated README member.
 pub const README_NAME: &str = "README.md";
 
-/// Working directory the launcher pins, relative to the extracted root.
-const WORK_DIR_NAME: &str = "work";
-
 /// How much of the binary is read at a time while copying it.
 const CHUNK_BYTES: usize = 64 * 1024;
 
@@ -559,9 +556,24 @@ fn copy_binary<W: std::io::Write + std::io::Seek>(
 /// one in the package, and a `taudit` already installed on their machine at some
 /// other version must not win.
 /// What: POSIX `sh`, `set -eu`, `exec` so the exit status the client returns is
-/// the one the shell sees. Pins `--work-dir` beside the launcher so the client's
-/// `rm -rf` uninstall promise covers one predictable place.
-/// Test: `super::distribute_tests::the_launcher_resolves_everything_beside_itself`.
+/// the one the shell sees.
+///
+/// #5915: it no longer pins `--work-dir "$here/work"`. That pin put the run's
+/// tree wherever the recipient unzipped the package, and it therefore DECIDED
+/// the placement for every packaged run — the `WorkDir::resolve` default was
+/// unreachable from the only flow that ships. `trusty-search` refuses to index a
+/// checkout under `/tmp`, `/var/folders`, `~/Downloads`, `~/Desktop` or
+/// `~/Documents`, which is where an emailed zip gets opened, so the pin cost the
+/// code-analysis leg its data. Dropping it lets the default
+/// (`~/.trusty-tools/trusty-audit/work`) apply; `--work-dir` and
+/// `TRUSTY_AUDIT_WORKDIR` still override, and the recipient can still pass
+/// `--work-dir` through this launcher because `"$@"` is forwarded.
+///
+/// What this trades: the tree is no longer beside the launcher, so deleting the
+/// extracted folder no longer removes it. [`render_readme`] names the new
+/// location and the command that removes it.
+/// Test: `super::distribute_tests::the_launcher_resolves_everything_beside_itself`,
+/// `super::distribute_tests::the_launcher_leaves_the_work_root_to_the_client`.
 fn render_launcher() -> String {
     format!(
         "#!/bin/sh\n\
@@ -570,7 +582,6 @@ fn render_launcher() -> String {
          here=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
          exec \"$here/{BINARY_NAME}\" \\\n\
          \x20 --config \"$here/{config}\" \\\n\
-         \x20 --work-dir \"$here/{WORK_DIR_NAME}\" \\\n\
          \x20 \"$@\"\n",
         config = EngagementConfig::FILE_NAME,
     )
@@ -600,12 +611,17 @@ fn render_readme(config: &EngagementConfig, platform: &str, explicit_binary: boo
         "# Audit client — {engagement}\n\
          \n\
          Extract this folder anywhere and run the three commands below from inside it.\n\
-         Nothing is installed on your machine outside this folder: deleting the folder\n\
-         removes the client, its tooling, and everything it wrote.\n\
+         Nothing is installed into your system directories.\n\
          \n\
          {platform_line}\n\
          - Configuration: `{config_file}` (readable — open it before you run anything)\n\
-         - Working directory: `{work}/`, created beside this file on first run\n\
+         - Working directory: `{work}`, created on first run\n\
+         \n\
+         The working directory holds the clones, the collected database and the\n\
+         tooling. It is NOT inside this folder — the code analysis cannot read a\n\
+         checkout under `~/Downloads`, `~/Desktop`, `~/Documents` or a temporary\n\
+         directory, which is where this folder usually lands. Override it with\n\
+         `--work-dir <path>` if you want it somewhere else.\n\
          \n\
          ## 1. Register what to audit\n\
          \n\
@@ -639,6 +655,18 @@ fn render_readme(config: &EngagementConfig, platform: &str, explicit_binary: boo
          carries reports and metadata, and it never carries the credential in\n\
          `{config_file}`.\n\
          \n\
+         ## 4. Remove it afterwards\n\
+         \n\
+         ```sh\n\
+         rm -rf {work}\n\
+         trusty-search index remove <each cloned repository path>\n\
+         ```\n\
+         \n\
+         Then delete this folder. The second command matters: to analyse your code the\n\
+         client approves each clone with `trusty-search`, and that approval is recorded\n\
+         in `trusty-search`'s own settings, outside the working directory. `run` prints\n\
+         each path it approves. `trusty-search index list` shows what is approved.\n\
+         \n\
          ## If macOS refuses to run it\n\
          \n\
          A zip that arrived over the network is quarantined, and this build is not yet\n\
@@ -649,7 +677,7 @@ fn render_readme(config: &EngagementConfig, platform: &str, explicit_binary: boo
          ```\n",
         config_file = EngagementConfig::FILE_NAME,
         launcher = LAUNCHER_NAME,
-        work = WORK_DIR_NAME,
+        work = crate::workdir::DEFAULT_ROOT_DISPLAY,
     )
 }
 
@@ -863,7 +891,6 @@ trusty-review = "0.16.0"
             script.contains("--config \"$here/engagement.toml\""),
             "{script}"
         );
-        assert!(script.contains("--work-dir \"$here/work\""), "{script}");
         // The binary is never named bare: every occurrence is `$here/`-prefixed,
         // so a `taudit` already on PATH at some other version cannot win.
         for (index, _) in script.match_indices(BINARY_NAME) {
@@ -872,6 +899,50 @@ trusty-review = "0.16.0"
                 "the launcher must never reach for an installed taudit: {script}"
             );
         }
+    }
+
+    /// #5915: the launcher used to pass `--work-dir "$here/work"`, which decided
+    /// the placement for every packaged run and made `WorkDir::resolve`'s default
+    /// dead code. A checkout under the unzip location is one `trusty-search`
+    /// refuses to index, so the code-analysis leg came back empty on every real
+    /// recipient machine. The launcher must now name no work directory at all
+    /// and forward whatever the recipient passes.
+    #[test]
+    fn the_launcher_leaves_the_work_root_to_the_client() {
+        let fixture = Fixture::new(TEMPLATE);
+        let package = fixture.assemble().expect("assembles");
+
+        let script = member(&package.path, "trusty-audit/audit.sh");
+        assert!(
+            !script.contains("--work-dir"),
+            "the launcher pins the work root again: {script}"
+        );
+        assert!(
+            script.contains("\"$@\""),
+            "the recipient can no longer pass --work-dir through: {script}"
+        );
+    }
+
+    /// The README's uninstall instructions are the only place the recipient
+    /// learns that the tree is not beside the launcher and that approving a
+    /// clone wrote a row outside it (#5915).
+    #[test]
+    fn the_readme_names_where_the_work_root_is_and_how_to_undo_the_approval() {
+        let fixture = Fixture::new(TEMPLATE);
+        let package = fixture.assemble().expect("assembles");
+
+        let readme = member(&package.path, "trusty-audit/README.md");
+        assert!(
+            readme.contains(crate::workdir::DEFAULT_ROOT_DISPLAY),
+            "{readme}"
+        );
+        assert!(readme.contains("trusty-search index remove"), "{readme}");
+        assert!(
+            !readme.contains(
+                "deleting the folder\nremoves the client, its tooling, and everything it wrote"
+            ),
+            "the README still promises a complete uninstall it cannot deliver: {readme}"
+        );
     }
 
     #[test]

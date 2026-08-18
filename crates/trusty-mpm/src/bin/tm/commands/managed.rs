@@ -31,8 +31,9 @@
 
 use std::io::IsTerminal as _;
 
-use trusty_mpm::client::ManagedSessionSummary;
+use trusty_mpm::client::{ManagedDecommissionOutcome, ManagedSessionSummary};
 
+use super::managed_route::decommission_message;
 use crate::cli::CatalogAction;
 
 /// Build the one-line deprecation message for a renamed CLI verb.
@@ -526,27 +527,27 @@ pub(crate) async fn session_resume(
 
 /// `tm session decommission <id>` — full teardown (may or may not remove workspace).
 ///
-/// Why: adopted/local-path sessions were NEVER owned by tm, so the workspace is
-/// NOT removed on their decommission. Previously the CLI printed an incorrect
-/// "workspace removed" message for every decommission — this fix surfaces the
-/// daemon's actual `workspace_removed` verdict so the operator is never misled.
-/// When the workspace was removed and a pre-decommission path is available, we run
-/// `git worktree prune` on the parent directory so git's worktree bookkeeping is
-/// cleaned up immediately (rather than waiting for the next GC pass).
-/// What: POSTs `/api/v1/sessions/managed/{id}/decommission`, reads the
-/// `workspace_removed` / `workspace_path_was` fields from the JSON response, and
-/// prints a message that accurately reflects what happened. When `workspace_removed`
-/// is `true` and `workspace_path_was` is present, runs `git worktree prune` on
-/// the parent directory (best-effort; errors are silently suppressed).
+/// Why: an adopted or local-path workspace was never tm's to delete, a worktree
+/// holding unsaved work is refused, and a removal can fail — so decommission
+/// often leaves the workspace on disk, and only the daemon knows which happened.
+/// This handler reports that verdict rather than assuming removal. When the
+/// workspace WAS removed and a pre-decommission path came back, it also runs
+/// `git worktree prune` on the parent directory so the base repo's worktree
+/// bookkeeping is cleaned up immediately instead of at the next GC pass.
+/// What: POSTs `/api/v1/sessions/managed/{id}/decommission`, decodes the typed
+/// [`ManagedDecommissionOutcome`], and prints
+/// [`super::managed_route::decommission_message`]'s line for the verdict it
+/// carries. Only `workspace_removed == Some(true)` triggers the
+/// `git worktree prune` (best-effort; errors are suppressed).
 /// A missing id is a genuine failure to decommission the requested session
 /// (#2457) — printing "not found" and returning `Ok(())` let a script/CI
 /// check treat it as success, so this now returns `Err` (non-zero exit)
 /// instead. `prune.rs`'s bulk teardown loop (the only other caller) already
 /// propagates this `Err` with `?`, matching its established fail-closed
 /// convention (#1508).
-/// Test: `decommission_message_reflects_workspace_removed` (unit);
-/// HTTP path covered by the integration test;
-/// `session_decommission_not_found_errors` covers the #2457 exit-code fix.
+/// Test: `session_decommission_prints_daemon_verdict_over_http`;
+/// `session_decommission_not_found_errors` covers the #2457 exit-code fix; the
+/// wording itself is covered by `decommission_message_honours_every_verdict`.
 pub(crate) async fn session_decommission(
     client: &reqwest::Client,
     url: &str,
@@ -559,20 +560,19 @@ pub(crate) async fn session_decommission(
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         anyhow::bail!("managed session '{id}' not found");
     }
-    let body: serde_json::Value = resp.error_for_status()?.json().await?;
-    let workspace_removed = body
-        .get("workspace_removed")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let id_display = body
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or(id.as_str());
-    if workspace_removed {
-        println!("decommissioned {id_display} — workspace removed; tombstone record kept");
-        // Run `git worktree prune` on the parent of the (now-deleted) workspace so
-        // the main repo's worktree bookkeeping is cleaned up immediately.
-        if let Some(ws_was) = body.get("workspace_path_was").and_then(|v| v.as_str()) {
+    // #5899: decode the typed response and render via the ONE message helper the
+    // routed `tm session decommission` verb also uses — key-fishing through a raw
+    // `serde_json::Value` here, and a hardcoded string there, is how the two paths
+    // drifted into disagreeing about what happened.
+    let outcome: ManagedDecommissionOutcome = resp.error_for_status()?.json().await?;
+    println!(
+        "{}",
+        decommission_message(&outcome.summary.id, outcome.workspace_removed)
+    );
+    if outcome.workspace_removed == Some(true) {
+        // Prune the parent of the (now-deleted) workspace so the base repo's
+        // worktree bookkeeping is cleaned up immediately.
+        if let Some(ws_was) = outcome.workspace_path_was.as_deref() {
             let parent = std::path::Path::new(ws_was)
                 .parent()
                 .unwrap_or(std::path::Path::new(ws_was));
@@ -580,11 +580,6 @@ pub(crate) async fn session_decommission(
                 .args(["-C", &parent.to_string_lossy(), "worktree", "prune"])
                 .output();
         }
-    } else {
-        println!(
-            "decommissioned {id_display} — record decommissioned; \
-             workspace left in place (not owned by tm)"
-        );
     }
     Ok(())
 }

@@ -11296,7 +11296,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-audit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -11321,6 +11321,7 @@ dependencies = [
 name = "trusty-audit-ui"
 version = "0.1.0"
 dependencies = [
+ "dirs 5.0.1",
  "serde",
  "serde_json",
  "tauri",

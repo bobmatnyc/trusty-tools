@@ -6,10 +6,15 @@
 //! now rather than retrofitting one once four features have each picked their
 //! own path. Two properties follow from designing it here:
 //!
-//! - **Everything is under one root.** `rm -rf <root>` is a complete uninstall
-//!   because no path this crate writes escapes the root — that is the property
-//!   `layout_tests::every_layout_path_is_inside_the_root` proves, and it is what
-//!   the README's deletion instructions rest on.
+//! - **Everything this module computes is under one root.** No path in the
+//!   layout escapes it — `layout_tests::every_layout_path_is_inside_the_root`
+//!   proves that, and the README's deletion instructions rest on it.
+//!
+//!   `rm -rf <root>` is no longer a COMPLETE uninstall, and #5915 is where that
+//!   stopped being true: approving a checkout for indexing writes a row to
+//!   `trusty-search`'s own allowlist, outside this root and outside this crate's
+//!   reach. `trusty-search index remove <checkout>` is what undoes it. The
+//!   README says so rather than promising a completeness that is not there.
 //! - **The root holds the recipient's source.** `repos/` is their checkouts and
 //!   `extract/` is derived from them, so this is a data-handling surface. The
 //!   README states what is written where (#5494).
@@ -29,15 +34,13 @@
 //!
 //! ## Open questions, recorded rather than resolved (#5502)
 //!
-//! 1. **Where the root should live.** The scaffold's default is
-//!    `<cwd>/trusty-audit-work`, chosen because the handoff arrives as an
-//!    unzipped directory the recipient already has open (#5473) — so the audit's
-//!    files sit beside the thing they unzipped instead of in a hidden home
-//!    directory they were never told about. The alternative,
-//!    `~/.trusty-tools/trusty-audit/`, matches the rest of this workspace's
-//!    convention and survives the recipient deleting the unzipped folder. Not
-//!    settled; the default here is a placeholder, and `--work-dir` plus
-//!    [`WORKDIR_ENV`] make it overridable meanwhile.
+//! 1. ~~**Where the root should live.**~~ Settled by #5915:
+//!    `~/.trusty-tools/trusty-audit/work`. The scaffold put it beside the
+//!    unzipped folder so the recipient could see it, but `trusty-search` refuses
+//!    to index a checkout under `/tmp`, `/var/folders`, `~/Downloads`,
+//!    `~/Desktop` or `~/Documents` — and those are where an emailed package gets
+//!    unzipped — so the placement silently cost every run its code-analysis leg.
+//!    See [`WorkDir::resolve`]. The property below is what this trades away.
 //! 2. **Whether two runs may share one root.** Nothing here locks, and the
 //!    scaffold does not decide. Sharing is attractive (a second engagement
 //!    reuses the downloaded tools) and dangerous (`state/` and `out/` are
@@ -54,8 +57,18 @@ use crate::error::AuditError;
 /// Environment variable that overrides the default working-directory root.
 pub const WORKDIR_ENV: &str = "TRUSTY_AUDIT_WORKDIR";
 
-/// Directory name appended to the current directory when nothing overrides it.
+/// Directory name appended to the current directory when home cannot be found.
 pub const DEFAULT_WORKDIR_NAME: &str = "trusty-audit-work";
+
+/// This crate's directory under `~/.trusty-tools`, per the workspace convention
+/// `trusty_common::crate_config` owns.
+const CRATE_NAME: &str = "trusty-audit";
+
+/// Subdirectory of `~/.trusty-tools/trusty-audit` the work root occupies.
+///
+/// `config.yaml` is the sibling `crate_config` writes, so the run's own tree is
+/// kept one level down rather than sharing that directory.
+const WORK_SUBDIR: &str = "work";
 
 /// One entry in the working-directory layout.
 ///
@@ -150,10 +163,25 @@ impl WorkDir {
     /// output directory and the extract database together.
     ///
     /// What: `explicit` wins; else `env_value` (the value of [`WORKDIR_ENV`]);
-    /// else [`DEFAULT_WORKDIR_NAME`]; then `cwd.join(...)`, which returns an
-    /// absolute choice unchanged. An empty env value is ignored, since
-    /// `TRUSTY_AUDIT_WORKDIR=` is far more likely to be an unset shell variable
-    /// than a request to use the filesystem root.
+    /// else `~/.trusty-tools/trusty-audit/work`; else — only when `home` is
+    /// `None` — [`DEFAULT_WORKDIR_NAME`] beside the cwd. Then `cwd.join(...)`,
+    /// which returns an absolute choice unchanged. An empty env value is
+    /// ignored, since `TRUSTY_AUDIT_WORKDIR=` is far more likely to be an unset
+    /// shell variable than a request to use the filesystem root.
+    ///
+    /// #5915: the default moved out of the cwd because the cwd is wherever the
+    /// recipient unzipped the package, and `trusty-search` refuses to index a
+    /// checkout under one — `/var/folders` and `/tmp` by
+    /// `SENSITIVE_PATH_PREFIXES`, and `~/Downloads`, `~/Desktop`, `~/Documents`
+    /// by `SENSITIVE_HOME_TOP_DIRS`. `~/Downloads` is where a recipient
+    /// unzipping an emailed package lands by default, so the refusal was the
+    /// ordinary case rather than an edge one, and it cost the whole
+    /// code-analysis leg. `~/.trusty-tools/<crate>` is the one home location the
+    /// denylist permits, and it is already this workspace's convention —
+    /// [`trusty_common::crate_config`] owns the path so this crate does not spell
+    /// a second one.
+    ///
+    /// `home` is passed in rather than read, for the same reason `env_value` is.
     ///
     /// This joins rather than calling `std::fs::canonicalize`, deliberately.
     /// The root normally does not exist yet — [`WorkDir::create`] makes it — and
@@ -162,15 +190,21 @@ impl WorkDir {
     /// print a root the recipient never typed and weaken the README's
     /// `rm -rf <root>` instruction. Joining needs no I/O and cannot fail.
     /// Test: `super::layout_tests::resolution_order_is_flag_then_env_then_default`,
-    /// `super::layout_tests::a_relative_choice_is_anchored_to_the_cwd`.
-    pub fn resolve(explicit: Option<PathBuf>, env_value: Option<&str>, cwd: &Path) -> Self {
+    /// `super::layout_tests::a_relative_choice_is_anchored_to_the_cwd`,
+    /// `super::layout_tests::the_default_root_is_one_trusty_search_will_index`.
+    pub fn resolve(
+        explicit: Option<PathBuf>,
+        env_value: Option<&str>,
+        home: Option<&Path>,
+        cwd: &Path,
+    ) -> Self {
         let chosen = explicit
             .or_else(|| {
                 env_value
                     .filter(|v| !v.trim().is_empty())
                     .map(PathBuf::from)
             })
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_WORKDIR_NAME));
+            .unwrap_or_else(|| default_root(home));
         Self::new(cwd.join(chosen))
     }
 
@@ -216,6 +250,28 @@ impl WorkDir {
         Ok(())
     }
 }
+
+/// Where the run's tree lands when neither the flag nor the environment names a
+/// place (#5915).
+///
+/// Absolute when `home` is known. The relative fallback is the pre-#5915
+/// behaviour, kept only for the case it was never the wrong answer to: a
+/// stripped environment with no home directory, where there is nowhere better
+/// and the cwd is at least writable.
+fn default_root(home: Option<&Path>) -> PathBuf {
+    match home {
+        Some(home) => {
+            trusty_common::crate_config::crate_config_dir_at(home, CRATE_NAME).join(WORK_SUBDIR)
+        }
+        None => PathBuf::from(DEFAULT_WORKDIR_NAME),
+    }
+}
+
+/// The default root as the README and the CLI spell it for a human (#5915).
+///
+/// The tilde is deliberate: it is what the recipient types to reach the
+/// directory, and what a `rm -rf` instruction must name.
+pub const DEFAULT_ROOT_DISPLAY: &str = "~/.trusty-tools/trusty-audit/work";
 
 /// Write a state file so no reader can ever observe a partial one.
 ///
@@ -403,18 +459,65 @@ fn writer_tag() -> String {
 mod layout_tests {
     use super::*;
 
+    const HOME: &str = "/Users/recipient";
+
     #[test]
     fn resolution_order_is_flag_then_env_then_default() {
         let cwd = Path::new("/engagement");
+        let home = Some(Path::new(HOME));
 
-        let flag = WorkDir::resolve(Some(PathBuf::from("/flag")), Some("/env"), cwd);
+        let flag = WorkDir::resolve(Some(PathBuf::from("/flag")), Some("/env"), home, cwd);
         assert_eq!(flag.root(), Path::new("/flag"));
 
-        let env = WorkDir::resolve(None, Some("/env"), cwd);
+        let env = WorkDir::resolve(None, Some("/env"), home, cwd);
         assert_eq!(env.root(), Path::new("/env"));
 
-        let default = WorkDir::resolve(None, None, cwd);
-        assert_eq!(default.root(), Path::new("/engagement/trusty-audit-work"));
+        let default = WorkDir::resolve(None, None, home, cwd);
+        assert_eq!(
+            default.root(),
+            Path::new("/Users/recipient/.trusty-tools/trusty-audit/work")
+        );
+    }
+
+    /// #5915: the default is the one placement `trusty-search` will index. The
+    /// cwd is the recipient's unzip location, and every likely one of those —
+    /// `/tmp`, `/var/folders`, `~/Downloads`, `~/Desktop`, `~/Documents` — is on
+    /// a denylist no flag on tga's path relaxes, so a checkout under the cwd was
+    /// refused and the code-analysis leg came back empty.
+    ///
+    /// The assertion is the placement, not the refusal: the denylist lives in
+    /// `trusty-search` and this crate cannot call it. What this pins is that the
+    /// default no longer descends from the cwd at all.
+    #[test]
+    fn the_default_root_is_one_trusty_search_will_index() {
+        let home = Path::new(HOME);
+        for unzipped_at in [
+            "/var/folders/9x/T/taudit-package",
+            "/tmp/taudit-package",
+            "/Users/recipient/Downloads/trusty-audit",
+            "/Users/recipient/Desktop/trusty-audit",
+            "/Users/recipient/Documents/trusty-audit",
+        ] {
+            let resolved = WorkDir::resolve(None, None, Some(home), Path::new(unzipped_at));
+            assert_eq!(
+                resolved.root(),
+                Path::new("/Users/recipient/.trusty-tools/trusty-audit/work"),
+                "unzipping at {unzipped_at} still decided the root"
+            );
+            assert!(
+                !resolved.root().starts_with(unzipped_at),
+                "the root descends from the unzip location: {}",
+                resolved.root().display()
+            );
+        }
+    }
+
+    /// The one case the pre-#5915 cwd-relative default survives for: no home to
+    /// put anything under. It is not a good root — it is the only one left.
+    #[test]
+    fn without_a_home_directory_the_root_falls_back_beside_the_cwd() {
+        let resolved = WorkDir::resolve(None, None, None, Path::new("/engagement"));
+        assert_eq!(resolved.root(), Path::new("/engagement/trusty-audit-work"));
     }
 
     /// #5672: a relative choice from either source becomes absolute, because
@@ -422,19 +525,32 @@ mod layout_tests {
     #[test]
     fn a_relative_choice_is_anchored_to_the_cwd() {
         let cwd = Path::new("/engagement");
+        let home = Some(Path::new(HOME));
 
-        let flag = WorkDir::resolve(Some(PathBuf::from("w")), None, cwd);
+        let flag = WorkDir::resolve(Some(PathBuf::from("w")), None, home, cwd);
         assert_eq!(flag.root(), Path::new("/engagement/w"));
 
-        let env = WorkDir::resolve(None, Some("w"), cwd);
+        let env = WorkDir::resolve(None, Some("w"), home, cwd);
         assert_eq!(env.root(), Path::new("/engagement/w"));
     }
 
     #[test]
     fn a_blank_env_value_falls_through_to_the_default() {
         let cwd = Path::new("/engagement");
-        let resolved = WorkDir::resolve(None, Some("   "), cwd);
-        assert_eq!(resolved.root(), Path::new("/engagement/trusty-audit-work"));
+        let resolved = WorkDir::resolve(None, Some("   "), Some(Path::new(HOME)), cwd);
+        assert_eq!(
+            resolved.root(),
+            Path::new("/Users/recipient/.trusty-tools/trusty-audit/work")
+        );
+    }
+
+    /// The README and the CLI print this string; the resolver computes a path.
+    /// They must name the same place, and nothing else checks that they do.
+    #[test]
+    fn the_display_string_names_the_path_the_resolver_returns() {
+        let home = Path::new(HOME);
+        let expanded = DEFAULT_ROOT_DISPLAY.replacen('~', &home.display().to_string(), 1);
+        assert_eq!(default_root(Some(home)), PathBuf::from(expanded));
     }
 
     /// The property the README's "delete the directory" instruction rests on.

@@ -109,6 +109,37 @@ pub(crate) fn to_command(action: &SessionAction) -> Option<TrustyCommand> {
     })
 }
 
+/// The one decommission result line the CLI prints, for every verdict (#5899).
+///
+/// Why: two CLI paths report a decommission — the routed chat-core verb
+/// ([`render_cli`]) and the raw-HTTP handler the bulk prune sweep calls
+/// ([`super::managed::session_decommission`]) — and they disagreed. The routed one
+/// hardcoded "workspace removed" for every decommission, so it announced deletion
+/// of worktrees still on disk (#5899, a reintroduction of #1787). One function
+/// both call means the honest wording cannot drift back apart.
+/// What: maps the daemon's verdict to a message. `Some(true)` reports removal,
+/// `Some(false)` says the workspace is still on disk, and `None` — an older daemon
+/// that sends no verdict — reports the tombstone and says the workspace outcome is
+/// unknown. There is no fourth state, and no case claims removal without
+/// `Some(true)`: the CLI never probes the filesystem itself, since the daemon's
+/// verdict is the authority (it is the only party that knows whether
+/// `remove_dir_all` actually ran).
+/// Test: `decommission_message_honours_every_verdict`,
+/// `decommission_cli_message_never_claims_removal_when_workspace_remains`.
+pub(crate) fn decommission_message(id: &str, workspace_removed: Option<bool>) -> String {
+    match workspace_removed {
+        Some(true) => format!("decommissioned {id} — workspace removed; tombstone record kept"),
+        Some(false) => format!(
+            "decommissioned {id} — tombstone record kept; workspace NOT removed \
+             (still on disk)"
+        ),
+        None => format!(
+            "decommissioned {id} — tombstone record kept; workspace outcome not \
+             reported by the daemon"
+        ),
+    }
+}
+
 /// Render a [`CommandResult`] as plain, scriptable terminal text.
 ///
 /// Why: chat-core hands back a structured result; the CLI must render it in its
@@ -154,14 +185,14 @@ pub(crate) fn render_cli(result: &CommandResult) -> String {
             name,
             state,
             action,
+            workspace_removed,
         } => match action.as_str() {
             "stopped" => {
                 format!("runtime stopped {id} (workspace intact; use 'resume' to restart)")
             }
             "resumed" => format!("resumed {name} ({id}) [{state}]"),
-            "decommissioned" => {
-                format!("decommissioned {id} (workspace removed; tombstone record kept)")
-            }
+            // #5899: report the daemon's verdict, never a hardcoded "removed".
+            "decommissioned" => decommission_message(id, *workspace_removed),
             other => format!("{other} {id} ({name}) [{state}]"),
         },
         CommandResult::Error(msg) => msg.clone(),
@@ -530,6 +561,7 @@ mod tests {
             name: "alpha".into(),
             state: "Stopped".into(),
             action: "stopped".into(),
+            workspace_removed: None,
         };
         assert_eq!(
             render_cli(&stop),
@@ -540,17 +572,132 @@ mod tests {
             name: "alpha".into(),
             state: "Running".into(),
             action: "resumed".into(),
+            workspace_removed: None,
         };
         assert_eq!(render_cli(&resume), "resumed alpha (m-1) [Running]");
-        let decom = CommandResult::ManagedLifecycle {
+    }
+
+    /// Build a decommission result carrying `verdict` as the daemon's verdict.
+    fn decommissioned(verdict: Option<bool>) -> CommandResult {
+        CommandResult::ManagedLifecycle {
             id: "m-1".into(),
             name: "alpha".into(),
             state: "Decommissioned".into(),
             action: "decommissioned".into(),
-        };
+            workspace_removed: verdict,
+        }
+    }
+
+    /// #5899: the rendered decommission line must follow the daemon's verdict, and
+    /// only `Some(true)` may claim removal. The `Some(false)` arm is the whole bug
+    /// — the CLI printed "workspace removed" for a worktree still on disk — so it
+    /// gets an explicit assertion, as does the no-verdict arm.
+    #[test]
+    fn decommission_message_honours_every_verdict() {
         assert_eq!(
-            render_cli(&decom),
-            "decommissioned m-1 (workspace removed; tombstone record kept)"
+            render_cli(&decommissioned(Some(true))),
+            "decommissioned m-1 — workspace removed; tombstone record kept"
+        );
+
+        let not_removed = render_cli(&decommissioned(Some(false)));
+        assert_eq!(
+            not_removed,
+            "decommissioned m-1 — tombstone record kept; workspace NOT removed (still on disk)"
+        );
+        assert!(
+            !not_removed.contains("workspace removed"),
+            "a `workspace_removed: false` verdict must never read as removal: {not_removed}"
+        );
+
+        let unknown = render_cli(&decommissioned(None));
+        assert_eq!(
+            unknown,
+            "decommissioned m-1 — tombstone record kept; workspace outcome not reported by the daemon"
+        );
+        assert!(
+            !unknown.contains("workspace removed"),
+            "an absent verdict must not be rendered as removal: {unknown}"
+        );
+    }
+
+    /// #5899 regression: `tm session decommission <id>` must not print the removal
+    /// message while the workspace is still on disk.
+    ///
+    /// This is the reported scenario reproduced whole — a session whose workspace tm
+    /// does not own (the adopt / local-path shape), decommissioned through
+    /// `TrustyCommand::ManagedDecommission` on the real daemon route, rendered by
+    /// [`render_cli`]. The daemon side was already correct and already covered; what
+    /// broke was the client dropping the verdict, so the assertion is on the CLI's
+    /// own output, checked against the filesystem rather than against a fixture.
+    /// Nothing here touches tmux (the isolated test daemon uses a no-op driver) or
+    /// git, so it is deterministic.
+    ///
+    /// Against the pre-fix commit it fails: the workspace survives and the CLI
+    /// announces "workspace removed" anyway. The opposite direction — the removal
+    /// message appearing when the workspace IS gone — is covered end-to-end by
+    /// `executor_decommission_reports_daemon_workspace_verdict`, which asserts the
+    /// verdict against the filesystem in both directions, and exhaustively over the
+    /// three verdicts by `decommission_message_honours_every_verdict`.
+    #[tokio::test]
+    async fn decommission_cli_message_never_claims_removal_when_workspace_remains() {
+        use std::future::IntoFuture as _;
+
+        use trusty_mpm::client::{CommandExecutor, TrustyCommand};
+        use trusty_mpm::daemon::{api, state::DaemonState};
+        use trusty_mpm::runtime::RuntimeKind;
+        use trusty_mpm::session_manager::ManagedSessionId;
+
+        let root = tempfile::tempdir().unwrap().keep();
+        let state =
+            std::sync::Arc::new(DaemonState::with_root_isolated_managed(root.clone()).await);
+        let id = ManagedSessionId::new();
+        let ws = root.join(format!("{id}-unowned-ws"));
+        std::fs::create_dir_all(&ws).expect("create seeded workspace");
+        state
+            .session_manager()
+            .await
+            .create_with_id(
+                id,
+                "regression: #5899 decommission workspace verdict".to_string(),
+                Some(ws.clone()),
+                None,
+                Some(ws.clone()),
+                None,
+                None,
+                RuntimeKind::default(),
+                false,
+                // Unowned: the daemon must refuse to delete this workspace.
+                false,
+            )
+            .await
+            .expect("seed session");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, api::router(state)).into_future());
+
+        let result = CommandExecutor::new(format!("http://{addr}"))
+            .execute(TrustyCommand::ManagedDecommission {
+                target: id.to_string(),
+            })
+            .await;
+        let rendered = render_cli(&result);
+
+        assert!(
+            ws.exists(),
+            "fixture invariant: decommission must NOT delete an unowned workspace \
+             at {}",
+            ws.display()
+        );
+        assert!(
+            !rendered.contains("workspace removed"),
+            "the CLI claimed removal while the workspace is still on disk at {}: \
+             {rendered}",
+            ws.display()
+        );
+        assert!(
+            rendered.contains("NOT removed"),
+            "the operator must be told the workspace survived: {rendered}"
         );
     }
 

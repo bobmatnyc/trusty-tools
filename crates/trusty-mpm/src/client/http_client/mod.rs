@@ -39,10 +39,10 @@ pub use types::{
     CoordinatorSession, DiscoveredProjectRow, EventRow, FleetByProjectWireResponse,
     FleetProjectGroupWire, HealthSnapshot, LastSeen, LlmChatOutcome, ManagedActivityResponse,
     ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse,
-    ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
-    ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
-    ManagedStoreHealth, OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow,
-    TmuxSessionRow,
+    ManagedAttachCmdResponse, ManagedDecommissionOutcome, ManagedListResponse,
+    ManagedSendInputRequest, ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest,
+    ManagedSpawnResponse, ManagedStoreHealth, OverseerSnapshot, PairConfirm, PairRequest,
+    PairStatus, SessionRow, TmuxSessionRow,
 };
 
 use serde::Deserialize;

@@ -629,6 +629,58 @@ pub struct ManagedStoreHealth {
     pub observed_at: String,
 }
 
+/// Response body for `POST /api/v1/sessions/managed/{id}/decommission` (#5899).
+///
+/// Why: the daemon answers a decommission with a session summary PLUS its verdict
+/// on the workspace directory — decommission deletes it only when tm provisioned
+/// it and the deletion actually succeeded. The client used to decode that body
+/// into [`ManagedSessionSummary`], which has no field for the verdict, so serde
+/// dropped `workspace_removed` and `workspace_path_was` without a word and every
+/// `tm session decommission` printed "workspace removed" — including for
+/// worktrees still on disk (#5899, a reintroduction of #1787). A purpose-built
+/// response type is the structural fix: each field the daemon sends has somewhere
+/// to land, and [`Self::unrecognized`] catches the ones this client does not model
+/// yet, so the NEXT field added daemon-side cannot vanish the same way.
+/// What: mirrors `daemon::managed_routes::DecommissionResponse` field-for-field —
+/// the flattened summary, the `workspace_removed` verdict, the pre-tombstone
+/// `workspace_path_was` hint, and a catch-all for unmodelled keys.
+/// Test: `decommission_outcome_round_trips_daemon_response`,
+/// `decommission_outcome_keeps_unmodelled_daemon_fields`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedDecommissionOutcome {
+    /// The post-tombstone session summary (`state = decommissioned`,
+    /// `workspace_path = None`).
+    #[serde(flatten)]
+    pub summary: ManagedSessionSummary,
+    /// Whether the daemon actually removed the workspace directory from disk.
+    ///
+    /// `Some(true)` — tm owned the workspace and deleted it.
+    /// `Some(false)` — nothing was deleted: the workspace was not tm's to remove,
+    /// the worktree held unsaved work, the removal failed, or the caller passed
+    /// `?record_only=true`.
+    /// `None` — the daemon reported no verdict (it predates the field). A caller
+    /// must render that as unknown; reading it as either outcome is the #5899 bug
+    /// in a new spelling.
+    #[serde(default)]
+    pub workspace_removed: Option<bool>,
+    /// The workspace path as of just before the tombstone cleared it, for a
+    /// tm-owned workspace. The CLI uses it to locate the base git repo and run
+    /// `git worktree prune`; `None` for adopted/local-path sessions.
+    #[serde(default)]
+    pub workspace_path_was: Option<String>,
+    /// Every response key this client does not model yet.
+    ///
+    /// Why: an unmodelled key is the exact shape of #5899 — the daemon sends
+    /// information and the client discards it silently. Collecting the leftovers
+    /// keeps them observable (the executor logs the key names) and lets a test
+    /// prove nothing is dropped.
+    /// What: the flattened remainder after the named fields and `summary` claim
+    /// theirs; empty against a daemon this client fully models.
+    /// Test: `decommission_outcome_keeps_unmodelled_daemon_fields`.
+    #[serde(flatten)]
+    pub unrecognized: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 /// Request body for `POST /api/v1/sessions/managed` (spawn).
 ///
 /// Why: spawning a managed session requires the repo, ref, and task; an optional

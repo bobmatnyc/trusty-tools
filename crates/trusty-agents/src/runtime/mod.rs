@@ -70,6 +70,7 @@
 //! stdin returns a JSON Result line on stdout.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -105,6 +106,51 @@ pub(crate) mod tool_registry;
 mod workflow_mode;
 
 use cli_def::{Cli, HELP, argv_as_task_text};
+
+/// How long process shutdown waits for background tasks after [`run`] returns.
+///
+/// Why (#3655): a `#[tokio::main]` binary drops its runtime at the end of
+/// `main`, and that drop waits on the blocking pool with NO ceiling. One task
+/// stuck in a synchronous syscall therefore makes `tagent` un-exitable: the
+/// REPL printed `Bye.`, `run()` returned, and the process still never died.
+/// A background convenience task must never be able to hold the process
+/// hostage, so shutdown gets a bound. Healthy runs pay nothing — the wait
+/// returns as soon as the pool drains.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Launch the whole binary: own the tokio runtime, run [`run`] on it, and tear
+/// the runtime down with a bounded wait.
+///
+/// Why (#3655): this is the single launcher both `tagent` and
+/// `trusty-agents-local` call, so the shutdown ceiling above exists once
+/// rather than once per `main.rs`. See [`SHUTDOWN_GRACE`] for what the bound
+/// is protecting against.
+/// What: builds the same multi-thread, all-drivers-enabled runtime
+/// `#[tokio::main]` would have built, blocks on `run()`, then calls
+/// `shutdown_timeout` instead of letting `Drop` wait forever. When the grace
+/// is actually consumed it logs which bound was hit, so a wedged background
+/// task is visible rather than silent. `run()`'s own result is returned
+/// unchanged — shutdown never rewrites the exit status.
+/// Test: `wedged_model_cache_cannot_block_process_exit` in
+/// `tests/plain_cli_repl.rs` blocks the code-index embedder on a FIFO and
+/// asserts the process still exits.
+pub fn run_to_completion() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to build the tokio runtime")?;
+    let result = runtime.block_on(run());
+
+    let started = Instant::now();
+    runtime.shutdown_timeout(SHUTDOWN_GRACE);
+    if started.elapsed() >= SHUTDOWN_GRACE {
+        tracing::warn!(
+            grace_secs = SHUTDOWN_GRACE.as_secs(),
+            "background tasks did not finish within the shutdown grace; exiting anyway"
+        );
+    }
+    result
+}
 
 /// Library entry point — contains the full top-level dispatch previously
 /// hosted in `fn main()`.

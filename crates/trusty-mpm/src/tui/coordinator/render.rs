@@ -102,6 +102,8 @@ pub fn render_result(result: &CommandResult) -> Vec<Line<'static>> {
             name,
             state,
             action,
+            // The verdict line is CLI-only; this view reports the state change.
+            ..
         } => vec![ok_line(format!(
             "{action} {name} [{state}] ({})",
             short(id)

@@ -280,7 +280,7 @@ impl CommandExecutor {
             Err(err) => return err,
         };
         match self.client().runtime_stop_managed_session(&id).await {
-            Ok(summary) => lifecycle(summary, "stopped"),
+            Ok(summary) => lifecycle(summary, "stopped", None),
             Err(e) => CommandResult::Error(format!("runtime-stop failed: {e}")),
         }
     }
@@ -292,20 +292,40 @@ impl CommandExecutor {
             Err(err) => return err,
         };
         match self.client().resume_managed_session(&id).await {
-            Ok(summary) => lifecycle(summary, "resumed"),
+            Ok(summary) => lifecycle(summary, "resumed", None),
             Err(e) => CommandResult::Error(format!("resume failed: {e}")),
         }
     }
 
     /// `managed-decommission` — decommission a session (terminal; removes the
-    /// workspace).
+    /// workspace only when tm provisioned it).
+    ///
+    /// Why: decommission may leave the workspace on disk — an adopted or
+    /// local-path workspace is never tm's to delete, a worktree holding unsaved
+    /// work is refused, and a removal can fail. The daemon reports which happened;
+    /// this method used to discard that verdict, so every renderer downstream had
+    /// to guess and the CLI guessed "removed" every time (#5899).
+    /// What: forwards the daemon's `workspace_removed` verdict into
+    /// [`CommandResult::ManagedLifecycle`] verbatim, `None` included, and logs the
+    /// key names of any response field this client does not model yet.
+    /// Test: `executor_decommission_reports_daemon_workspace_verdict` and
+    /// `decommission_message_honours_every_verdict`.
     pub(super) async fn managed_decommission(&self, target: &str) -> CommandResult {
         let id = match self.resolve_managed(target).await {
             Ok(s) => s.id,
             Err(err) => return err,
         };
         match self.client().decommission_managed_session(&id).await {
-            Ok(summary) => lifecycle(summary, "decommissioned"),
+            // #5899: carry the daemon's workspace verdict instead of dropping it.
+            Ok(outcome) => {
+                if !outcome.unrecognized.is_empty() {
+                    tracing::debug!(
+                        fields = ?outcome.unrecognized.keys().collect::<Vec<_>>(),
+                        "decommission response carried fields this client does not model"
+                    );
+                }
+                lifecycle(outcome.summary, "decommissioned", outcome.workspace_removed)
+            }
             Err(e) => CommandResult::Error(format!("decommission failed: {e}")),
         }
     }
@@ -315,15 +335,21 @@ impl CommandExecutor {
 ///
 /// Why: the three lifecycle verbs (stop/resume/decommission) all report the same
 /// id/name/state shape; one helper keeps their result construction identical.
-/// What: builds the lifecycle result from the updated summary and the verb that
-/// produced it.
+/// What: builds the lifecycle result from the updated summary, the verb that
+/// produced it, and — for decommission only — the daemon's workspace verdict
+/// (`None` for stop/resume, which never touch the workspace).
 /// Test: covered by the managed lifecycle dispatch tests.
-fn lifecycle(summary: ManagedSessionSummary, action: &str) -> CommandResult {
+fn lifecycle(
+    summary: ManagedSessionSummary,
+    action: &str,
+    workspace_removed: Option<bool>,
+) -> CommandResult {
     CommandResult::ManagedLifecycle {
         id: summary.id,
         name: summary.name,
         state: summary.state,
         action: action.to_string(),
+        workspace_removed,
     }
 }
 

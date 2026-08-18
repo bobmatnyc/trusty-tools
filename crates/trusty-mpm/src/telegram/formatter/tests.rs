@@ -245,6 +245,7 @@ fn managed_arms_escape_daemon_sourced_fields() {
         name: raw.into(),
         state: raw.into(),
         action: raw.into(),
+        workspace_removed: None,
     };
     let lifecycle_text = TelegramFormatter::format(&lifecycle);
     assert!(
