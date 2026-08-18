@@ -363,11 +363,14 @@ pub async fn handle_start(
                     .prior_index_count
                     .store(prior, std::sync::atomic::Ordering::Relaxed);
                 // #767: before the first allowlist-gated restore, carry the
-                // roots this daemon is ALREADY serving into `allowlist.toml`
-                // if that file does not exist yet. Without this, switching on
-                // default-deny would silently stop indexing a working install.
-                // Runs once; an existing file (including an emptied one) is
-                // never rewritten.
+                // roots this daemon is ALREADY serving into `allowlist.toml`.
+                // Without this, switching on default-deny would silently stop
+                // indexing a working install.
+                // #5926: runs once per install, keyed on the `.grandfathered`
+                // stamp rather than on whether `allowlist.toml` exists — a
+                // pre-upgrade file the gate never read is incomplete, not
+                // curated. Once the stamp is written, a pruned root stays
+                // pruned.
                 if let Ok(registry_path) = crate::service::persistence::indexes_toml_path() {
                     if let Err(e) = crate::allowlist::grandfather_existing_indexes(
                         &install_state.allowlist_paths,

@@ -914,8 +914,11 @@ pub(super) async fn health_handler(
 /// `recompute_does_not_flag_an_in_progress_tail_job_as_degraded`.
 ///
 /// What: re-derives `warm_boot_degraded` as `degraded_by_tcc ||
-/// degraded_by_timeout || degraded_by_count || any_stage_failed`, where the
+/// degraded_by_unapproved || degraded_by_timeout || degraded_by_count ||
+/// any_stage_failed`, where the
 /// first three reuse the ORIGINAL boot-time counters (`indexes_skipped_tcc`,
+/// `indexes_skipped_unapproved` — #5926, a boot-time allowlist exclusion that
+/// nothing at runtime can heal, for the same reason the TCC counter cannot —
 /// `indexes_skipped_timeout`, and a fresh `registry.list_handles().len()`
 /// vs. `prior_index_count` comparison — live rather than the frozen
 /// boot-time `total`, since new indexes can register between boot and
@@ -936,8 +939,18 @@ pub(super) async fn health_handler(
 /// `recompute_reports_whether_its_scan_was_conclusive` in
 /// `tests_health_degraded.rs`.
 pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) -> bool {
-    let (degraded_by_tcc, old) = match state.warmboot_summary.lock() {
-        Ok(summary) => (summary.indexes_skipped_tcc > 0, summary.warm_boot_degraded),
+    // #5926: `indexes_skipped_unapproved` is read alongside the TCC counter and
+    // for the same reason — both are boot-time facts that a deferred-embed drain
+    // cannot heal. An index the allowlist excluded never entered the registry,
+    // so nothing this recompute scans can observe it; without this term the
+    // first drain after boot would clear a degraded signal while 103 registered
+    // indexes stayed unserved.
+    let (degraded_by_tcc, degraded_by_unapproved, old) = match state.warmboot_summary.lock() {
+        Ok(summary) => (
+            summary.indexes_skipped_tcc > 0,
+            summary.indexes_skipped_unapproved > 0,
+            summary.warm_boot_degraded,
+        ),
         Err(_) => return false,
     };
     // #4250: this used to read the FROZEN boot-time `indexes_skipped_timeout`,
@@ -978,6 +991,7 @@ pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) -> bool {
     // still clears, and a proven failure still sets. Defaulting the other way
     // would be this same defect with the sign flipped.
     let new = degraded_by_tcc
+        || degraded_by_unapproved
         || degraded_by_timeout
         || degraded_by_count
         || any_stage_failed
