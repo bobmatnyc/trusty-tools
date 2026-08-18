@@ -55,13 +55,23 @@
 //! both are denied. That ordering predates this module and is not made more
 //! likely by it; the remedy the deny prints (declare isolation) resolves it.
 //!
-//! **This guard FAILS OPEN at every step.** A down, slow, or unreachable daemon
-//! answers "nobody else is here" and the dispatch proceeds; so does an
-//! unresolvable cwd, an unrecognised agent name, an untyped dispatch, and any
-//! malformed response. The asymmetry is deliberate and matches
-//! [`super::pm_guard_fanout`]: a false DENY lands on the PM and halts every
-//! dispatch in the system, while a false ALLOW merely reproduces the behaviour
-//! that shipped before this module.
+//! **This guard fails open where a failure says the guard cannot run, and
+//! CLOSED where it only says the answer did not arrive (#5923).** An
+//! unresolvable cwd, an unrecognised agent name, an untyped dispatch, and a
+//! daemon that is not listening all allow — the first three never reach the
+//! daemon, and the fourth means no delegation can be registered through it at
+//! all, so a deny would block every dispatch on a machine with no daemon
+//! running. That arm now prints a warning rather than passing silently.
+//!
+//! A daemon that IS listening and does not answer usably — a request timeout, a
+//! 5xx, a body that does not parse — is the opposite case: a writer may already
+//! be recorded and the reply simply did not arrive. Those admitted the dispatch
+//! until #5923, and the 2 s budget is reachable on an idle machine, so the
+//! guard switched itself off under exactly the load that makes two concurrent
+//! dispatches likely; two simultaneous dispatches were measured both admitted.
+//! [`claim_shared_tree`] now denies there. The asymmetry between the two is
+//! deliberate: a false DENY lands on the PM and halts every dispatch in the
+//! system, so it is spent only where the guard's own question is genuinely open.
 //!
 //! **A second caller reads the same answer without claiming (ADR-0048
 //! decision 10).** [`live_shared_tree_writers`] is the query half on its own,
@@ -89,13 +99,19 @@
 //! Test: `denies_a_second_concurrent_unisolated_engineer`,
 //! `allows_the_first_dispatch`, `allows_an_isolated_dispatch`,
 //! `allows_a_read_only_agent`, `allows_when_the_agent_is_unknown`,
-//! `allows_every_non_dispatch_tool` below. The six declared fail-open branches
-//! each have an error-arm test: unreachable daemon
-//! (`claim_shared_tree_is_empty_when_the_daemon_is_unreachable`),
-//! malformed response (`pm_guard_allows_when_the_daemon_answer_is_malformed`),
+//! `allows_every_non_dispatch_tool` below. Each declared fail-open branch has an
+//! error-arm test: unreachable daemon
+//! (`claim_shared_tree_is_empty_when_the_daemon_is_unreachable`), a daemon
+//! without the route (`claim_is_empty_when_the_daemon_has_no_such_route`), an
+//! answer of the wrong shape
+//! (`pm_guard_allows_when_the_daemon_answer_has_the_wrong_shape`),
 //! unresolvable cwd (`evaluate_allows_when_the_cwd_cannot_be_resolved`),
 //! unknown agent (`allows_when_the_agent_is_unknown`), untyped dispatch (same),
-//! and non-dispatch tool (`allows_every_non_dispatch_tool`).
+//! and non-dispatch tool (`allows_every_non_dispatch_tool`). The three
+//! fail-CLOSED arms have theirs too: `claim_is_unknown_when_the_daemon_times_out`,
+//! `claim_is_unknown_when_the_daemon_answers_500`, and
+//! `claim_is_unknown_when_the_body_does_not_parse`, each of which allowed before
+//! #5923.
 
 use std::path::{Path, PathBuf};
 
@@ -286,24 +302,105 @@ fn project_dispatch_input(forwarded: &mut Value) {
 /// body stays small enough that a size limit is not a reachable failure arm.
 /// Sent under the same tight connect/total bounds `pm_guard`'s
 /// audit POSTs use (500 ms / 2 s) — this call sits inside a `PreToolUse` budget,
-/// so a slow daemon must cost a bounded wait and nothing more. EVERY failure —
-/// client build, transport, non-2xx, malformed body — returns an empty vec,
-/// which the pure policy above reads as ALLOW; nothing is claimed, and the
-/// verdict degrades to exactly the behaviour that shipped before #4480.
-/// Test: `claim_shared_tree_is_empty_when_the_daemon_is_unreachable`.
+/// so a slow daemon must cost a bounded wait and nothing more.
+///
+/// **The failure arms are not one outcome (#5923).** They used to be: client
+/// build, transport, non-2xx and malformed body all returned an empty vec,
+/// which the pure policy above reads as ALLOW. A request that timed out
+/// therefore admitted the dispatch, and the 2 s budget is reachable on an idle
+/// machine — so the guard was off under exactly the load that makes two
+/// concurrent dispatches likely, and two simultaneous dispatches were measured
+/// both admitted. What the daemon's silence MEANS now decides the verdict: no
+/// daemon at all is a degraded mode that allows and warns, while a daemon that
+/// is running and did not answer leaves the question open and denies.
+/// Test: `claim_shared_tree_is_empty_when_the_daemon_is_unreachable`,
+/// `claim_is_unknown_when_the_daemon_times_out`,
+/// `claim_is_unknown_when_the_daemon_answers_500`.
 pub(crate) async fn claim_shared_tree(
     url: &str,
     session_id: &str,
     cwd: &Path,
     payload: &Value,
-) -> Vec<String> {
-    let Some(body) = post_shared_tree(url, session_id, cwd, payload, SHARED_TREE_ROUTE).await
-    else {
-        return Vec::new();
-    };
-    let live = writers_in(&body);
-    warn_on_eligibility_divergence(&body, &live);
-    live
+) -> SharedTreeClaim {
+    match post_shared_tree(url, session_id, cwd, payload, SHARED_TREE_ROUTE).await {
+        SharedTreeReply::Answered(body) => {
+            let live = writers_in(&body);
+            warn_on_eligibility_divergence(&body, &live);
+            SharedTreeClaim::Writers(live)
+        }
+        // #5923: no daemon to ask, so the guard cannot function here at all —
+        // allow, but never silently.
+        SharedTreeReply::Unavailable(detail) => {
+            warn_guard_unavailable(&detail);
+            SharedTreeClaim::Writers(Vec::new())
+        }
+        SharedTreeReply::Unanswered(detail) => SharedTreeClaim::Unknown(detail),
+    }
+}
+
+/// What one claim learned about who is already writing in the directory.
+///
+/// Why: the caller needs three outcomes and a `Vec<String>` carries two —
+/// writers and no writers. Folding "no answer" into the empty vec IS the #5923
+/// defect, so the third outcome is a variant rather than a convention.
+/// What: [`Self::Writers`] is the daemon's answer, empty or not.
+/// [`Self::Unknown`] carries why no answer arrived, for the deny message.
+/// Test: `claim_is_unknown_when_the_daemon_times_out`,
+/// `claim_is_unknown_when_the_daemon_answers_500`.
+pub(crate) enum SharedTreeClaim {
+    /// The daemon answered: these agents are already writing here.
+    Writers(Vec<String>),
+    /// A running daemon did not answer, so whether a writer is registered here
+    /// is unknown.
+    Unknown(String),
+}
+
+/// Warn that the guard is not enforcing, and why (#5923).
+///
+/// Why: allowing on an absent daemon is a deliberate degraded mode — a false
+/// DENY lands on the PM and halts every dispatch in the system, and a daemon
+/// nobody started is an ordinary state. What kept the fail-open invisible is
+/// that the degraded mode was SILENT: an operator with no daemon running saw a
+/// guard that looked like it was working.
+/// What: one stderr line, which Claude Code surfaces without it reaching the
+/// hook's stdout verdict — the same channel and the same reasoning as
+/// [`warn_on_eligibility_divergence`].
+/// Test: `pm_guard_warns_when_no_daemon_answers_the_claim` in
+/// `tests/tm_hook_pm_guard.rs`.
+fn warn_guard_unavailable(detail: &str) {
+    eprintln!(
+        "tm hook --pm-guard: no daemon answered the shared-tree claim (#5923) — {detail}. \
+         Concurrent shared-worktree dispatch is NOT being enforced for this dispatch: a second \
+         file-mutating agent can join this git HEAD, and git reports nothing when it does. Start \
+         the daemon (`tm start`) to restore the guard. Allowing the dispatch: an absent daemon is \
+         a degraded mode this path accepts deliberately, unlike a daemon that is running and did \
+         not answer, which denies."
+    );
+}
+
+/// Build the deny message for a claim a running daemon left unanswered (#5923).
+///
+/// Why: [`deny_reason`] names the sibling already in the tree, and here there is
+/// no name to give — the point is precisely that nobody could say. A reader
+/// handed that message would go looking for an agent that may not exist.
+/// What: names the failure, the directory, and the two remedies that need no
+/// daemon answer — declare isolation (an isolated dispatch never reaches this
+/// route at all) or serialize — plus how to check the daemon.
+/// Test: `unanswered_deny_reason_names_the_failure_and_offers_isolation`.
+fn unanswered_deny_reason(agent: &str, cwd: &Path, detail: &str) -> String {
+    format!(
+        "Concurrent shared-worktree dispatch denied (#5923): the daemon did not answer this \
+         guard's claim for {} — {detail}. That answer is the only thing that can say whether \
+         another file-mutating agent is already writing in this directory, so admitting this \
+         {agent} dispatch would put a second agent on one git HEAD with the check that exists to \
+         stop it never having run. A timeout or an error from a running daemon is correlated with \
+         load, which is when a concurrent dispatch is most likely, so this denies rather than \
+         assuming the tree is free. Re-dispatch this agent with `isolation: \"worktree\"` — an \
+         isolated dispatch never needs this answer and is never blocked by it. If isolation is \
+         unavailable here, serialize instead: dispatch one file-mutating agent at a time. If the \
+         daemon is unhealthy, `tm doctor` reports it and `tm restart` clears it.",
+        cwd.display()
+    )
 }
 
 /// Who is already writing in `cwd`, asked without claiming it (ADR-0048
@@ -332,8 +429,14 @@ pub(crate) async fn live_shared_tree_writers(
     cwd: &Path,
     payload: &Value,
 ) -> Vec<String> {
+    // #5923: the fail-closed arm is the CLAIM path's alone. This one gates
+    // `git merge`/`git rebase`/a docs commit, where denying on a daemon that
+    // did not answer would block ordinary git work on the operator's own
+    // checkout — a far wider blast radius than one dispatch, and not the
+    // failure #5923 reported.
     post_shared_tree(url, session_id, cwd, payload, SHARED_TREE_ROUTE)
         .await
+        .answered()
         .as_ref()
         .map(writers_in)
         .unwrap_or_default()
@@ -424,7 +527,13 @@ pub(crate) async fn evaluate_granted_worktree(
 ) -> Option<String> {
     let mut granted = payload.clone();
     granted["tool_input"] = updated_input.clone();
-    let body = post_shared_tree(url, session_id, cwd, &granted, GRANTED_WORKTREE_ROUTE).await;
+    // #5923: this path keeps its fail-open contract. The grant it is deciding
+    // gives the dispatch a tree of ITS OWN, so an unanswered claim admits an
+    // isolated writer rather than a second one on the shared HEAD — the
+    // opposite of the claim path's exposure.
+    let body = post_shared_tree(url, session_id, cwd, &granted, GRANTED_WORKTREE_ROUTE)
+        .await
+        .answered();
     let live = body.as_ref().map(writers_in).unwrap_or_default();
     if live.is_empty() {
         warn_on_unrecorded_grant(body.as_ref(), &live, cwd);
@@ -521,39 +630,155 @@ const SHARED_TREE_ROUTE: &str = "shared-tree-dispatch";
 /// The route that answers and records the isolation the guard granted (#5769).
 const GRANTED_WORKTREE_ROUTE: &str = "granted-worktree";
 
-/// POST one call to the shared-tree route and return its parsed body.
+/// What one shared-tree POST came back with (#5923).
+///
+/// Why: this used to be `Option<Value>`, which gave five different failures one
+/// value, and [`claim_shared_tree`]'s caller reads a missing answer as "nobody
+/// else is here". A refused connection and a request that timed out then
+/// produced the same verdict, though only one of them says anything about who
+/// is writing in this directory: nothing is listening, versus a daemon that IS
+/// listening and may already hold another writer's record. The second arm
+/// allowed the dispatch, and the 2 s budget is reachable on an idle machine, so
+/// the guard switched itself off under exactly the load that makes two
+/// concurrent dispatches likely.
+/// What: three arms, split by what the failure says about the DAEMON rather
+/// than by where in the call it happened. [`Self::Unavailable`] means no daemon
+/// — or no such route — can answer this call at all, which the guard treats as
+/// a degraded mode and says so on stderr. [`Self::Unanswered`] means a daemon is
+/// there and did not give a usable answer, which leaves the question open and
+/// denies at the claim path.
+/// Test: `claim_is_unknown_when_the_daemon_times_out`,
+/// `claim_is_unknown_when_the_daemon_answers_500`,
+/// `claim_is_unknown_when_the_body_does_not_parse`,
+/// `claim_shared_tree_is_empty_when_the_daemon_is_unreachable`.
+enum SharedTreeReply {
+    /// The daemon answered and its body parsed.
+    Answered(Value),
+    /// No daemon, or no such route, can answer this call — the guard cannot
+    /// function here at all, and no retry inside this hook call would change
+    /// that.
+    Unavailable(String),
+    /// A daemon is there and did not give a usable answer.
+    Unanswered(String),
+}
+
+impl SharedTreeReply {
+    /// The parsed body, discarding which failure arm produced its absence.
+    ///
+    /// Why: the read-only callers ([`live_shared_tree_writers`]) and the grant
+    /// path ([`evaluate_granted_worktree`]) keep the pre-#5923 fail-open
+    /// contract, and reading them all through one accessor keeps that a stated
+    /// choice at each call site rather than a shape the type quietly allows.
+    /// What: `Some` only for [`Self::Answered`].
+    /// Test: `pm_guard_allows_a_merge_when_the_daemon_is_unreachable` in
+    /// `tests/tm_hook_pm_guard.rs`.
+    fn answered(self) -> Option<Value> {
+        match self {
+            Self::Answered(body) => Some(body),
+            Self::Unavailable(_) | Self::Unanswered(_) => None,
+        }
+    }
+}
+
+/// POST one call to the shared-tree route and classify what came back.
 ///
 /// Why: split from [`claim_shared_tree`] so the claiming and the read-only
 /// callers share one wire contract — the endpoint, the payload projection, and
 /// the timeout bounds are the parts a second copy would drift on.
-/// What: `None` on EVERY failure — empty session id, client build, transport,
-/// non-2xx, unparseable body — which both callers read as "nobody else is
-/// here". Sent under the same tight connect/total bounds `pm_guard`'s audit
-/// POSTs use (500 ms / 2 s), because this call sits inside a `PreToolUse`
-/// budget.
+/// What: an answered body, or which KIND of failure stopped it (see
+/// [`SharedTreeReply`]). Sent under the same tight connect/total bounds
+/// `pm_guard`'s audit POSTs use (500 ms / 2 s), because this call sits inside a
+/// `PreToolUse` budget. A 404 is read as route-absence rather than as a daemon
+/// error: the route arrived in #5324, and a running daemon older than the `tm`
+/// on PATH is the ordinary way to meet one — denying on that would block every
+/// unisolated dispatch on version skew.
 /// Test: `claim_shared_tree_is_empty_when_the_daemon_is_unreachable`,
-/// `claim_shared_tree_is_empty_without_a_session_id`.
+/// `claim_shared_tree_is_empty_without_a_session_id`,
+/// `claim_is_unknown_when_the_daemon_answers_500`,
+/// `claim_is_unknown_when_the_body_does_not_parse`,
+/// `claim_is_empty_when_the_daemon_has_no_such_route`.
 async fn post_shared_tree(
     url: &str,
     session_id: &str,
     cwd: &Path,
     payload: &Value,
     route: &str,
-) -> Option<Value> {
+) -> SharedTreeReply {
     if session_id.is_empty() {
-        return None;
+        return SharedTreeReply::Unavailable(
+            "the hook payload carries no session id, so no session's delegations can be addressed"
+                .to_string(),
+        );
     }
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_millis(500))
         .timeout(std::time::Duration::from_secs(2))
         .build()
-        .ok()?;
+    {
+        Ok(client) => client,
+        // #5923: a client that cannot be built never reached the network, and
+        // no retry in this process would change that — the guard is off, not
+        // uncertain.
+        Err(error) => {
+            return SharedTreeReply::Unavailable(format!(
+                "the guard's HTTP client could not be built: {error}"
+            ));
+        }
+    };
     let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/{route}");
     let mut forwarded = build_hook_payload(&cwd.display().to_string(), Some(payload), None);
     project_dispatch_input(&mut forwarded);
     let body = serde_json::json!({ "payload": forwarded });
-    let response = client.post(&endpoint).json(&body).send().await.ok()?;
-    response.error_for_status().ok()?.json::<Value>().await.ok()
+    let response = match client.post(&endpoint).json(&body).send().await {
+        Ok(response) => response,
+        Err(error) => return classify_transport_failure(&endpoint, &error),
+    };
+    let status = response.status();
+    let response = match response.error_for_status() {
+        Ok(response) => response,
+        // #5923: 404 is version skew — a daemon built before this route
+        // existed. Every other non-2xx is a daemon that HAS the route and
+        // failed to serve it, which says nothing about who is writing here.
+        Err(_) if status == reqwest::StatusCode::NOT_FOUND => {
+            return SharedTreeReply::Unavailable(format!(
+                "the daemon has no {route} route (404), so it is older than this `tm`"
+            ));
+        }
+        Err(error) => {
+            return SharedTreeReply::Unanswered(format!("the daemon answered {status}: {error}"));
+        }
+    };
+    match response.json::<Value>().await {
+        Ok(body) => SharedTreeReply::Answered(body),
+        Err(error) => {
+            SharedTreeReply::Unanswered(format!("the daemon's answer did not parse: {error}"))
+        }
+    }
+}
+
+/// Which arm a transport failure belongs to (#5923).
+///
+/// Why: this is the split the reported bug turns on. A refused connection
+/// answers the question on its own — nothing is listening, so no delegation can
+/// be registered through this daemon at all, and the guard is structurally off.
+/// A timeout does not: the daemon accepted the connection, so a writer may
+/// already be recorded and the answer simply did not arrive in time.
+/// What: `Unavailable` only for a connect-phase failure that is NOT a timeout.
+/// reqwest reports a refused connection and a connect TIMEOUT through the same
+/// `is_connect`, so the timeout is excluded explicitly: on loopback a connect
+/// that times out means a listener whose accept queue is saturated, which is a
+/// daemon under load rather than an absent one. Everything else — the total
+/// request timeout, a body error, a redirect failure — leaves the question
+/// open.
+/// Test: `claim_shared_tree_is_empty_when_the_daemon_is_unreachable` (refused),
+/// `claim_is_unknown_when_the_daemon_times_out` (accepted then silent).
+fn classify_transport_failure(endpoint: &str, error: &reqwest::Error) -> SharedTreeReply {
+    if error.is_connect() && !error.is_timeout() {
+        return SharedTreeReply::Unavailable(format!("nothing is listening at {endpoint}"));
+    }
+    SharedTreeReply::Unanswered(format!(
+        "the request to {endpoint} did not complete: {error}"
+    ))
 }
 
 /// The live writers named in a shared-tree answer.
@@ -626,10 +851,12 @@ fn eligibility_diverged(body: &Value, live: &[String]) -> bool {
 /// than being re-derived at the call site.
 /// What: returns `None` immediately unless [`dispatch_shares_the_tree`] and a
 /// resolvable [`dispatch_cwd`]; only then claims the tree through the daemon and
-/// runs [`evaluate_shared_tree_dispatch`] on the answer.
+/// runs [`evaluate_shared_tree_dispatch`] on the answer, or denies outright when
+/// a running daemon left the claim unanswered (#5923).
 /// Test: the pure half is covered exhaustively below; the network half's
-/// fail-open is `claim_shared_tree_is_empty_when_the_daemon_is_unreachable`,
-/// and the end-to-end path runs through the real binary in
+/// fail-open is `claim_shared_tree_is_empty_when_the_daemon_is_unreachable` and
+/// its fail-closed arms are `claim_is_unknown_when_the_daemon_times_out` and
+/// siblings, and the end-to-end path runs through the real binary in
 /// `tests/tm_hook_pm_guard.rs`.
 pub(crate) async fn evaluate(
     url: &str,
@@ -669,8 +896,18 @@ pub(crate) async fn evaluate_with_cwd(
         return None;
     }
     let cwd = cwd?;
-    let live = claim_shared_tree(url, session_id, &cwd, payload).await;
-    evaluate_shared_tree_dispatch(tool_name, tool_input, &cwd, &live)
+    match claim_shared_tree(url, session_id, &cwd, payload).await {
+        SharedTreeClaim::Writers(live) => {
+            evaluate_shared_tree_dispatch(tool_name, tool_input, &cwd, &live)
+        }
+        // #5923: a running daemon that did not answer leaves the question open,
+        // and admitting on an open question is the fail-open this closes.
+        SharedTreeClaim::Unknown(detail) => Some(unanswered_deny_reason(
+            dispatch_agent(tool_input).unwrap_or("this"),
+            &cwd,
+            &detail,
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -993,20 +1230,88 @@ mod tests {
         assert_eq!(dispatch_cwd(&payload), std::env::current_dir().ok());
     }
 
-    #[tokio::test]
-    async fn claim_shared_tree_is_empty_when_the_daemon_is_unreachable() {
-        // Fail-open on the network path: an unroutable daemon must resolve to
-        // "nobody else is here", never hang and never deny. Nothing is claimed
-        // either, so the verdict degrades to the pre-#4480 behaviour rather
-        // than to a directory nobody can release.
-        let live = claim_shared_tree(
-            "http://127.0.0.1:1",
+    /// The writers a claim reported, panicking if the claim was unanswered.
+    ///
+    /// Why: the ALLOW-arm tests assert on the writer list, and an `Unknown`
+    /// there is a different failure than an empty list — one denies, the other
+    /// allows — so it must be loud rather than compared as equal.
+    fn writers_of(claim: SharedTreeClaim) -> Vec<String> {
+        match claim {
+            SharedTreeClaim::Writers(live) => live,
+            SharedTreeClaim::Unknown(detail) => {
+                panic!("expected an answered claim, got Unknown({detail})")
+            }
+        }
+    }
+
+    /// A one-shot mock that ACCEPTS the connection and never answers (#5923).
+    ///
+    /// Why: this is the arm the reported bug rides in on, and it is the one a
+    /// refused port cannot stand in for — the guard's whole new distinction is
+    /// between a socket nobody is listening on and a daemon that took the
+    /// connection and went quiet. Only a real accepted-then-silent listener
+    /// exercises it.
+    /// What: binds an ephemeral port, accepts one connection, reads the request
+    /// and holds the socket open past the client's 2 s total budget. The
+    /// detached thread ends with the test binary.
+    fn spawn_silent_mock() -> String {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+        });
+        url
+    }
+
+    /// A one-shot mock answering an arbitrary status line and body.
+    ///
+    /// Why: [`spawn_denying_mock`] always answers 200 with a well-formed body,
+    /// so it cannot drive the non-2xx or unparseable-body arms.
+    fn spawn_mock_answering(status_line: &'static str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes());
+            }
+        });
+        url
+    }
+
+    /// Claim against `url` with a fixed session, directory and payload.
+    async fn claim_against(url: &str) -> SharedTreeClaim {
+        claim_shared_tree(
+            url,
             "11111111-1111-1111-1111-111111111111",
             Path::new("/repo"),
             &serde_json::json!({"tool_use_id": "toolu_X"}),
         )
-        .await;
-        assert!(live.is_empty());
+        .await
+    }
+
+    #[tokio::test]
+    async fn claim_shared_tree_is_empty_when_the_daemon_is_unreachable() {
+        // Declared fail-open branch, kept by #5923: nothing is LISTENING, so no
+        // delegation can be registered through this daemon at all and denying
+        // would block every dispatch on a machine with no daemon running. The
+        // reply must be an answered-shaped empty list, never `Unknown`.
+        assert!(writers_of(claim_against("http://127.0.0.1:1").await).is_empty());
     }
 
     #[tokio::test]
@@ -1015,15 +1320,132 @@ mod tests {
         // delegations at all. Fail open before dialling anything — an unroutable
         // URL would cost a real (bounded) wait if this branch were removed.
         let started = std::time::Instant::now();
-        let live = claim_shared_tree(
+        let claim = claim_shared_tree(
             "http://127.0.0.1:1",
             "",
             Path::new("/repo"),
             &serde_json::json!({}),
         )
         .await;
-        assert!(live.is_empty());
+        assert!(writers_of(claim).is_empty());
         assert!(started.elapsed() < std::time::Duration::from_millis(400));
+    }
+
+    #[tokio::test]
+    async fn claim_is_empty_when_the_daemon_has_no_such_route() {
+        // #5923 splits non-2xx by what it says about the daemon, and 404 is the
+        // version-skew shape: the route arrived in #5324, so a running daemon
+        // older than this `tm` answers 404 for every dispatch. Denying there
+        // would fail CLOSED on version skew and block them all.
+        let url = spawn_mock_answering("404 Not Found", r#"{"error":"no such route"}"#);
+        assert!(writers_of(claim_against(&url).await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_is_unknown_when_the_daemon_times_out() {
+        // The reported bug (#5923). A daemon that accepted the connection and
+        // did not answer inside the 2 s budget may well have another writer
+        // recorded, so the claim must report that it does not know. Before the
+        // fix this returned an empty list, which the policy reads as ALLOW.
+        let url = spawn_silent_mock();
+        let started = std::time::Instant::now();
+        let claim = claim_against(&url).await;
+        assert!(
+            matches!(claim, SharedTreeClaim::Unknown(_)),
+            "a daemon that never answered must not read as an empty tree"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the claim must stay inside its own bounded budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_is_unknown_when_the_daemon_answers_500() {
+        // A daemon that HAS the route and failed to serve it says nothing about
+        // who is writing here — unlike the 404 above, which says the route is
+        // not there at all.
+        let url = spawn_mock_answering("500 Internal Server Error", r#"{"error":"boom"}"#);
+        assert!(matches!(
+            claim_against(&url).await,
+            SharedTreeClaim::Unknown(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn claim_is_unknown_when_the_body_does_not_parse() {
+        // 200 with a body that is not JSON: the daemon answered and the answer
+        // is unusable, which leaves the question open rather than settling it.
+        let url = spawn_mock_answering("200 OK", "not json at all");
+        assert!(matches!(
+            claim_against(&url).await,
+            SharedTreeClaim::Unknown(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn claim_is_answered_when_the_body_parses_with_an_unexpected_shape() {
+        // The boundary of the arm above: well-formed JSON the guard cannot read
+        // writers out of is still an ANSWER. `warn_on_eligibility_divergence`
+        // already covers that case, and treating it as unanswered would deny
+        // every dispatch against a daemon whose reply shape drifted.
+        let url = spawn_mock_answering("200 OK", r#"{"unexpected":"shape"}"#);
+        assert!(writers_of(claim_against(&url).await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn evaluate_denies_when_a_running_daemon_does_not_answer() {
+        // The verdict half of `claim_is_unknown_when_the_daemon_times_out`: the
+        // guard's own entry point must turn an unanswered claim into a DENY,
+        // and the message must name #5923 and the remedy that needs no daemon.
+        let url = spawn_silent_mock();
+        let reason = evaluate_with_cwd(
+            &url,
+            Some(PathBuf::from("/repo")),
+            &serde_json::json!({"tool_use_id": "toolu_X"}),
+            "Agent",
+            Some(&input("rust-engineer", None)),
+            "11111111-1111-1111-1111-111111111111",
+        )
+        .await
+        .expect("an unanswered claim must deny");
+        assert!(reason.contains("#5923"), "{reason}");
+        assert!(reason.contains("isolation"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn evaluate_allows_when_no_daemon_is_listening() {
+        // The other side of the same entry point: a refused connection stays an
+        // ALLOW. This is the arm a fix that denied on every failure would have
+        // broken, turning a machine with no daemon into one that cannot
+        // dispatch at all.
+        let verdict = evaluate_with_cwd(
+            "http://127.0.0.1:1",
+            Some(PathBuf::from("/repo")),
+            &serde_json::json!({"tool_use_id": "toolu_X"}),
+            "Agent",
+            Some(&input("rust-engineer", None)),
+            "11111111-1111-1111-1111-111111111111",
+        )
+        .await;
+        assert_eq!(verdict, None);
+    }
+
+    #[test]
+    fn unanswered_deny_reason_names_the_failure_and_offers_isolation() {
+        // The reader of this message must not go looking for a sibling agent:
+        // the point is that nobody could say whether one exists. It has to name
+        // what failed, and offer the remedy that works with no daemon at all.
+        let reason = unanswered_deny_reason(
+            "rust-engineer",
+            Path::new("/repo"),
+            "the daemon answered 500 Internal Server Error",
+        );
+        assert!(reason.contains("#5923"), "{reason}");
+        assert!(reason.contains("/repo"), "{reason}");
+        assert!(reason.contains("500 Internal Server Error"), "{reason}");
+        assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+        assert!(reason.contains("serialize"), "{reason}");
     }
 
     #[test]

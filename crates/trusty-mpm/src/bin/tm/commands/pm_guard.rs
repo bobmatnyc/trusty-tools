@@ -574,9 +574,11 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // early-return ALLOW precisely when the caller IS a subagent, and such a
     // caller's dispatch has already been denied above. The `caller_is_subagent`
     // gate keeps a subagent from paying for a check that can never apply to it.
-    // Fails OPEN throughout (see `pm_guard_dispatch`): a read-only or isolated
-    // dispatch never reaches the daemon at all, and a down daemon answers
-    // "nobody else is here".
+    // A read-only or isolated dispatch never reaches the daemon at all, and a
+    // daemon that is not listening answers "nobody else is here" with a warning
+    // on stderr. #5923: a daemon that IS listening and does not answer usably
+    // now DENIES — see `pm_guard_dispatch`'s module doc for which failure sits
+    // on which side of that line.
     if !caller_is_subagent
         && let Some(reason) =
             pm_guard_dispatch::evaluate(url, &payload, tool_name, tool_input, session_id).await

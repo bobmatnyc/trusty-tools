@@ -1163,30 +1163,122 @@ fn spawn_writers_mock_with(status_line: &'static str, body: &'static str) -> Str
     url
 }
 
+/// A mock that ACCEPTS the connection and never answers (#5923).
+///
+/// Why: the reported fail-open rides in on a request that timed out, and a
+/// refused port cannot stand in for it — the guard's distinction is precisely
+/// between a socket nobody is listening on and a daemon that took the
+/// connection and went quiet. Only a real accepted-then-silent listener
+/// exercises the arm.
+/// What: as [`spawn_writers_mock_with`], but it reads the request and holds the
+/// socket open past the guard's 2 s total budget. The detached thread ends with
+/// the test binary.
+fn spawn_silent_mock() -> String {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        }
+    });
+    url
+}
+
+/// The dispatch payload every #5923 case below sends: an unisolated engineer.
+const UNISOLATED_ENGINEER_DISPATCH: &str = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_bad","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
+
 #[test]
-fn pm_guard_allows_when_the_daemon_answer_is_malformed() {
-    // Declared fail-open branch: every unusable answer — a 5xx, a body that is
-    // not JSON, and well-formed JSON of the wrong shape — must ALLOW. A false
-    // deny here lands on the PM and halts every dispatch in the system.
-    let cases: [(&'static str, &'static str); 4] = [
+fn pm_guard_denies_when_a_running_daemon_does_not_answer() {
+    // #5923: a daemon that accepted the connection and did not answer inside
+    // the 2 s budget may already hold another writer's record, so the guard
+    // cannot read its silence as an empty tree. Against the pre-fix binary all
+    // three of these print nothing at all — the ALLOW this closes.
+    let cases: [(&'static str, String); 3] = [
+        ("a request that timed out", spawn_silent_mock()),
         (
-            "500 Internal Server Error",
-            r#"{"agents":[{"agent":"rust-engineer"}]}"#,
+            "a 500 from a daemon that has the route",
+            spawn_writers_mock_with("500 Internal Server Error", r#"{"error":"boom"}"#),
         ),
-        ("200 OK", "not json at all"),
+        (
+            "a body that is not JSON",
+            spawn_writers_mock_with("200 OK", "not json at all"),
+        ),
+    ];
+    for (case, url) in cases {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let stdout = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, &url, cwd.path());
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("{case} must deny with JSON on stdout: {e}: {stdout:?}"));
+        assert_eq!(
+            parsed["hookSpecificOutput"]["permissionDecision"].as_str(),
+            Some("deny"),
+            "{case} must fail CLOSED, got: {stdout}"
+        );
+        let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("reason is a string");
+        assert!(
+            reason.contains("#5923") && reason.contains("isolation"),
+            "{case}: the deny must name the rule and the remedy that needs no daemon, got: {reason}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_allows_when_the_daemon_answer_has_the_wrong_shape() {
+    // The boundary of the deny above, and a declared fail-open branch #5923
+    // deliberately keeps: an answer that PARSES but carries no readable writer
+    // list is still an answer. `warn_on_eligibility_divergence` covers it, and
+    // denying there would block every dispatch against a daemon whose reply
+    // shape drifted. A 404 belongs here too — it is a daemon older than this
+    // `tm`, not a daemon that failed.
+    let cases: [(&'static str, &'static str); 3] = [
         ("200 OK", r#"{"agents":"rust-engineer"}"#),
         ("200 OK", r#"{"unexpected":"shape"}"#),
+        ("404 Not Found", r#"{"error":"no such route"}"#),
     ];
     for (status_line, body) in cases {
         let url = spawn_writers_mock_with(status_line, body);
         let cwd = tempfile::tempdir().expect("tempdir");
-        let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_bad","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
         assert_eq!(
-            run_pm_guard_at(payload, &url, cwd.path()).trim(),
+            run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, &url, cwd.path()).trim(),
             "",
             "a {status_line} / {body} answer must fail OPEN"
         );
     }
+}
+
+#[test]
+fn pm_guard_warns_when_no_daemon_answers_the_claim() {
+    // #5923: an absent daemon still ALLOWS — denying would stop every dispatch
+    // on a machine with no daemon running — but it must not do so silently.
+    // The silence is what let the fail-open sit unnoticed: an operator running
+    // without a daemon saw a guard that looked like it was working.
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let stderr = run_pm_guard_at_stderr(
+        UNISOLATED_ENGINEER_DISPATCH,
+        "http://127.0.0.1:1",
+        cwd.path(),
+    );
+    assert!(
+        stderr.contains("#5923") && stderr.contains("NOT being enforced"),
+        "an unreachable daemon must say the guard is off, got: {stderr:?}"
+    );
+    assert_eq!(
+        run_pm_guard_at(
+            UNISOLATED_ENGINEER_DISPATCH,
+            "http://127.0.0.1:1",
+            cwd.path()
+        )
+        .trim(),
+        "",
+        "and it must still allow the dispatch"
+    );
 }
 
 /// Serve the REAL delegation router, releasing requests only once `expected` of
