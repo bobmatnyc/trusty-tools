@@ -86,6 +86,13 @@ mod selection;
 // package and must reach them through this one resolution, not a second copy.
 pub mod boards;
 
+// #5980: what a registered repository automatically contributes — its GitHub
+// issues. Public for the same reason `boards` is: the generated section and
+// the environment variable carrying its secret both need to reach `chain` /
+// `session` call sites that construct or inspect a sweep from outside this
+// module.
+pub mod github_issues;
+
 // #5494: the checkpoint and its resume rules are one subject and they are not
 // this file's — `run.rs` drives children, `checkpoint.rs` decides what a re-run
 // may skip.
@@ -174,6 +181,13 @@ fn sanitize(name: &str) -> String {
 /// itself still travels only in the child's environment. Both are omitted when
 /// no board is registered, so a repo-only engagement generates exactly the
 /// document it always did.
+///
+/// #5980: `github` is different from `jira`/`linear` in one respect — it is
+/// never `None`. Every repository this document is generated for already
+/// names itself (the one entry in `repositories`), so its own issue tracker
+/// is not something that can be absent from the engagement the way an
+/// unregistered board is; see `github_issues`'s module docs for why the
+/// section still gets written even when no `gh` credential could be read.
 #[derive(Debug, Serialize)]
 struct TgaConfig {
     repositories: Vec<TgaRepository>,
@@ -182,6 +196,7 @@ struct TgaConfig {
     jira: Option<boards::TgaJira>,
     #[serde(skip_serializing_if = "Option::is_none")]
     linear: Option<boards::TgaLinear>,
+    github: github_issues::TgaGithub,
 }
 
 #[derive(Debug, Serialize)]
@@ -360,6 +375,11 @@ where
         }
     };
     let selected = load_selection(work)?;
+    // #5980: resolved once for the whole sweep, the same shape as `boards`
+    // above — every child gets the same `gh`-derived credential, not a
+    // per-repository one. See `github_issues`'s module docs for why a `gh`
+    // that cannot answer still lets the sweep proceed.
+    let github_access = github_issues::resolve_github_access().await;
     // #5869: materialized once for the whole sweep — resolving reads
     // `.env.local` and opens the secure store, which is not a per-child cost,
     // let alone a per-line one.
@@ -384,8 +404,18 @@ where
             Err(why) => {
                 announce_recollection(&repo.name, &why, progress);
                 run_one(
-                    work, config, &binaries, &inference, boards, index, repo, budget, progress,
-                    total, &scrubber,
+                    work,
+                    config,
+                    &binaries,
+                    &inference,
+                    boards,
+                    &github_access,
+                    index,
+                    repo,
+                    budget,
+                    progress,
+                    total,
+                    &scrubber,
                 )
                 .await?
             }
@@ -495,6 +525,7 @@ async fn run_one(
     binaries: &PinnedBinaries,
     inference: &[(&'static str, String)],
     boards: &boards::Boards,
+    github_access: &github_issues::GithubAccess,
     index: usize,
     repo: SelectedRepo,
     budget: std::time::Duration,
@@ -509,7 +540,16 @@ async fn run_one(
     progress.unit_started(Operation::Sweep, repo.name.as_str(), index + 1, total);
 
     let mut gaps = Vec::new();
-    let result = match prepare(work, &output, &stem, &checkout, boards, &binaries.search)? {
+    let result = match prepare(
+        work,
+        &output,
+        &stem,
+        &checkout,
+        boards,
+        github_access,
+        &repo.name,
+        &binaries.search,
+    )? {
         Err(reason) => RepoResult::Failed { reason },
         Ok(config_path) => {
             match spawn_tga(
@@ -517,6 +557,7 @@ async fn run_one(
                 config,
                 inference,
                 boards,
+                github_access,
                 &config_path,
                 &output,
                 &log,
@@ -569,12 +610,15 @@ async fn run_one(
 /// per-repo verdict, which is what turns the refusal into a NAMED failure. Left
 /// where it was, a refusal reached nobody — `tga audit` exits 0 whenever the
 /// sweep completed, so the run reported success with an empty code-analysis leg.
+#[allow(clippy::too_many_arguments)]
 fn prepare(
     work: &WorkDir,
     output: &Path,
     stem: &str,
     checkout: &Path,
     boards: &boards::Boards,
+    github_access: &github_issues::GithubAccess,
+    name_with_owner: &str,
     search: &Path,
 ) -> Result<Result<PathBuf, String>, AuditError> {
     if !checkout.is_dir() {
@@ -598,6 +642,9 @@ fn prepare(
         // `boards`'s module docs for why the file may never hold the value.
         jira: boards.jira.clone(),
         linear: boards.linear.clone(),
+        // #5980: always written — see `github_issues`'s module docs for why
+        // this is never `None` the way `jira`/`linear` can be.
+        github: github_access.section(name_with_owner),
     };
     // Infallible in practice — the document is owned strings and paths with no
     // map keys — but a serializer error must not be swallowed into a default.
@@ -675,6 +722,7 @@ async fn spawn_tga(
     config: &EngagementConfig,
     inference: &[(&'static str, String)],
     boards: &boards::Boards,
+    github_access: &github_issues::GithubAccess,
     config_path: &Path,
     output: &Path,
     log: &Path,
@@ -728,6 +776,12 @@ async fn spawn_tga(
     // here rather than held on `Boards`, so it lives no longer than this
     // `Command` — the same shape as the inference credential above.
     for (name, value) in boards.env(&config.boards) {
+        command.env(name, value);
+    }
+    // #5980: the `gh`-derived credential the generated config's `github:`
+    // section only references, when one was read — see `github_issues`'s
+    // module docs for why a missing one does not stop the child from running.
+    if let Some((name, value)) = github_access.env() {
         command.env(name, value);
     }
 
@@ -1586,6 +1640,40 @@ trusty-review = "0.15.1"
                 path.display()
             );
         }
+    }
+
+    /// #5980: the load-bearing regression. Against `origin/main` before this
+    /// change, `TgaConfig` carried no `github` field at all, so a registered
+    /// repository's own issues were never collected — not because a fetch
+    /// failed and was reported, but because nothing ever asked. That is the
+    /// silent-empty-success shape #5982 already fixed once for a Linear board
+    /// stored as an id; this proves the same shape cannot recur for a
+    /// repository's own GitHub issues by asserting the section is present
+    /// with NO board registered at all — the case that most directly exposes
+    /// an omission, since there is no `boards.jira`/`boards.linear` machinery
+    /// nearby that could be mistaken for covering it.
+    #[tokio::test]
+    async fn every_registered_repository_generates_a_github_section() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        // Deliberately no `register_boards` call — a repo-only engagement.
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("the sweep completes");
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+
+        let generated =
+            std::fs::read_to_string(work.path(Area::State).join("tga-00-acme-api.yaml"))
+                .expect("the generated tga config");
+        assert!(
+            generated.contains("github:"),
+            "a repo-only engagement must still collect its own issues: {generated}"
+        );
+        assert!(generated.contains("repo: acme-api"), "{generated}");
     }
 
     /// The `taudit run` half of #5982. `boards::resolve` states a gap for a
