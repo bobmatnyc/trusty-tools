@@ -3,8 +3,9 @@
 //! Why: matches how `trusty-memory` (`web::router` + `run_http_on`) and
 //! `trusty-search` (`service::server::build_router`) stand up their axum
 //! daemons: a pure `axum::Router` builder — testable via `oneshot`, no real
-//! socket — wrapped in `trusty_common::server::with_standard_middleware`
-//! (CORS/trace/gzip), plus a bind+serve entry point that installs the
+//! socket — wrapped in the shared guarded middleware stack
+//! (`trusty_common::server::with_guarded_middleware_same_origin_cors`, #6003),
+//! plus a bind+serve entry point that installs the
 //! shared `trusty_common::shutdown_signal()` graceful-shutdown watcher
 //! (SIGTERM + SIGINT), exactly like `trusty-memory`'s `run_http_on`. `POST
 //! /rpc` and `GET /health` dispatch through the SAME [`crate::jsonrpc::Router`]
@@ -57,6 +58,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
 use trusty_common::mcp::Response;
+use trusty_common::server::SelfOrigins;
 
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::{ConnectionContext, Router};
@@ -87,8 +89,23 @@ struct HttpState {
 ///
 /// Why: kept separate from [`run_http`] so unit tests exercise routing and
 /// dispatch via `tower::util::ServiceExt::oneshot` without opening a real
-/// socket, and so the standard CORS/trace/gzip middleware stack wraps it
-/// identically to trusty-memory/trusty-search.
+/// socket, and so the shared guarded middleware stack wraps it identically to
+/// trusty-agents/trusty-memory/trusty-search.
+///
+/// #6003: the stack is
+/// `trusty_common::server::with_guarded_middleware_same_origin_cors`, not the
+/// permissive `with_standard_middleware` this router used to call. Two things
+/// change. `guard_write_origin` runs router-wide and innermost, so a browser
+/// POST/PUT/PATCH/DELETE carrying a foreign `Origin` is `403`ed before any
+/// handler runs — `POST /rpc` (the whole JSON-RPC method surface), `/tasks`,
+/// `/sessions`, `/sessions/{id}/messages`, `/agents`, and the `workstream.*`
+/// write routes. And the CORS policy reflects only same-machine origins
+/// instead of `Any`, so a page on a foreign origin cannot READ
+/// `GET /sessions/{id}/transcript` or either SSE stream either — those are
+/// `GET`, which the method-gated guard deliberately lets through, and they
+/// carry conversation content. Callers that send no `Origin` at all (the
+/// `tcode tui` client, the console reverse proxy, `curl`) are untouched: the
+/// guard passes an absent `Origin` through, and CORS is browser-enforced.
 /// What: `POST /rpc` dispatches the request body through
 /// `Router::dispatch_json` (shared with the STDIO transport); `GET /health`
 /// returns [`health_payload`]; `GET /sessions/{id}/events` streams that
@@ -124,7 +141,8 @@ struct HttpState {
 /// `http_rest_get_workstreams_route_is_merged_in` (also pins the
 /// `GET /workstreams/{id}/events` merge),
 /// `http_rest_get_projects_route_is_merged_in`,
-/// `http_rest_get_agent_and_skill_catalog_routes_are_merged_in`.
+/// `http_rest_get_agent_and_skill_catalog_routes_are_merged_in`;
+/// the #6003 guard arms live in `http_origin_guard_tests`.
 pub fn build_axum_router(
     router: Arc<Router>,
     sessions: Arc<SessionRegistry>,
@@ -153,7 +171,10 @@ pub fn build_axum_router(
         .merge(rest::search_audit::routes(router.clone()))
         .merge(rest::workstreams::routes(router))
         .merge(crate::workstreams::sse::routes(workstreams));
-    trusty_common::server::with_standard_middleware(app)
+    // #6003: the daemon binds loopback only (`run_http`), so the guard needs no
+    // bind-derived allowlist — `SelfOrigins::default()` trusts loopback and
+    // nothing else.
+    trusty_common::server::with_guarded_middleware_same_origin_cors(app, SelfOrigins::default())
 }
 
 /// `POST /rpc` — JSON-RPC 2.0 dispatch endpoint.
@@ -332,3 +353,7 @@ pub async fn run_http(
 #[cfg(test)]
 #[path = "http_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "http_origin_guard_tests.rs"]
+mod origin_guard_tests;
