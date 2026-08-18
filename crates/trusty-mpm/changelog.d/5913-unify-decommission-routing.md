@@ -1,6 +1,10 @@
 Changed
 
-- Both decommission entry points now route through one implementation,
+- The `tm projects` TUI's `[d]` decommission hotkey now routes through the same
+  shared implementation as every other entry point, so it too repairs the base
+  repo's worktree bookkeeping. It called the daemon endpoint directly and left a
+  stale `git worktree list` entry behind — the same bug the rest of #5913 closes.
+- Every decommission entry point now routes through one implementation,
   `CommandExecutor::decommission_managed_id`
   (closes [#5913](https://github.com/bobmatnyc/trusty-tools/issues/5913)). The
   bulk prune sweep used to reach the endpoint through its own hand-rolled
