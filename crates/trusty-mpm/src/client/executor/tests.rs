@@ -26,6 +26,38 @@ async fn spawn_test_daemon() -> (std::sync::Arc<crate::daemon::state::DaemonStat
     (state, format!("http://{addr}"))
 }
 
+/// Point `$HOME` at a temp directory and restore it on drop, panic or not.
+///
+/// Why: the daemon's workspace-removal path resolves the containment root from
+/// `$HOME`, so a decommission test that wants a removal to actually happen must
+/// seed its workspace under a redirected root. The redirect is process-wide, so
+/// every user is `#[serial_test::serial]` and every user needs the restore to
+/// survive a failed assertion.
+/// What: `redirect` swaps `$HOME` and returns the guard holding the prior value;
+/// `Drop` puts it back (or removes the variable when there was none).
+/// Test: used by `executor_decommission_reports_daemon_workspace_verdict` and
+/// `decommission_managed_id_prunes_stale_worktree_bookkeeping`.
+struct HomeGuard(Option<String>);
+
+impl HomeGuard {
+    fn redirect(to: &std::path::Path) -> Self {
+        let prior = std::env::var("HOME").ok();
+        // SAFETY: every caller is serialized via `#[serial_test::serial]`.
+        unsafe { std::env::set_var("HOME", to) };
+        Self(prior)
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: serialized via `#[serial_test::serial]`.
+        match self.0 {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
 #[tokio::test]
 async fn execute_help_returns_help() {
     // The `/help` path is pure — no HTTP, no daemon.
@@ -543,22 +575,8 @@ async fn executor_decommission_reports_daemon_workspace_verdict() {
     use crate::runtime::RuntimeKind;
     use crate::session_manager::ManagedSessionId;
 
-    /// Restores `$HOME` even if an assertion below panics mid-loop.
-    struct HomeGuard(Option<String>);
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialized via `#[serial_test::serial]`.
-            match self.0 {
-                Some(ref p) => unsafe { std::env::set_var("HOME", p) },
-                None => unsafe { std::env::remove_var("HOME") },
-            }
-        }
-    }
-
     let home = tempfile::TempDir::new().unwrap();
-    let _home_guard = HomeGuard(std::env::var("HOME").ok());
-    // SAFETY: serialized via `#[serial_test::serial]`; restored by the guard.
-    unsafe { std::env::set_var("HOME", home.path()) };
+    let _home_guard = HomeGuard::redirect(home.path());
     let workspace_root = trusty_common::workspace_layout::resolve_workspace_root(None);
 
     for owned in [true, false] {
@@ -611,6 +629,170 @@ async fn executor_decommission_reports_daemon_workspace_verdict() {
         }
         let _ = std::fs::remove_dir_all(&ws);
     }
+}
+
+/// #5913: pin which decommission outcomes run `git worktree prune`, so a later
+/// change cannot flip the decision silently.
+///
+/// The daemon has two removal branches and only one leaves git's bookkeeping
+/// stale. It removes an in-project worktree it does NOT own with `git worktree
+/// remove` — that prunes daemon-side, and the response carries no
+/// `workspace_path_was`. It removes a workspace tm OWNED with a plain
+/// `remove_dir_all`, which git never learns about, and reports the path. So the
+/// path's presence, not a caller-supplied flag, is what selects the prune.
+#[test]
+fn worktree_prune_dir_fires_only_on_a_named_removal() {
+    use crate::client::ManagedDecommissionOutcome;
+
+    let outcome = |removed: serde_json::Value, was: serde_json::Value| {
+        serde_json::from_value::<ManagedDecommissionOutcome>(serde_json::json!({
+            "id": "11111111-2222-3333-4444-555555555555",
+            "name": "tm-5913",
+            "state": "decommissioned",
+            "workspace_removed": removed,
+            "workspace_path_was": was,
+        }))
+        .expect("fixture must match the daemon's wire shape")
+    };
+    let named = serde_json::json!("/base/.worktrees/tm-5913");
+    let parent = Some(std::path::PathBuf::from("/base/.worktrees"));
+
+    assert_eq!(
+        super::managed::worktree_prune_dir(&outcome(serde_json::json!(true), named.clone())),
+        parent,
+        "a removal the daemon named left git's bookkeeping stale"
+    );
+    assert_eq!(
+        super::managed::worktree_prune_dir(&outcome(
+            serde_json::json!(true),
+            serde_json::json!(null)
+        )),
+        None,
+        "the daemon already pruned the branch it reports no path for"
+    );
+    assert_eq!(
+        super::managed::worktree_prune_dir(&outcome(serde_json::json!(false), named.clone())),
+        None,
+        "nothing was deleted, so nothing is stale"
+    );
+    assert_eq!(
+        super::managed::worktree_prune_dir(&outcome(serde_json::json!(null), named)),
+        None,
+        "an absent verdict is never read as a removal (#5899)"
+    );
+}
+
+/// #5913: the routed `tm session decommission <id>` must leave the base repo's
+/// worktree bookkeeping clean, exactly as the bulk prune sweep already did.
+///
+/// This is the live asymmetry the issue reports, reproduced whole. The daemon
+/// removes a tm-owned workspace with `remove_dir_all`; git never learns about it,
+/// so the entry survives in `git worktree list` until something prunes it. The
+/// bulk path pruned and the routed path did not, because each reached the
+/// endpoint by its own route. Against the pre-#5913 routed path this fails: the
+/// workspace is gone and the stale entry is still listed.
+///
+/// `$HOME` is redirected because the daemon's removal path applies a containment
+/// guard against the configured workspace root, so the base repo lives under that
+/// root. Serial, because the redirect is process-wide.
+#[tokio::test]
+#[serial_test::serial]
+async fn decommission_managed_id_prunes_stale_worktree_bookkeeping() {
+    use crate::runtime::RuntimeKind;
+    use crate::session_manager::ManagedSessionId;
+
+    /// Run `git` in `dir`, failing the test on a nonzero exit.
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to start: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeGuard::redirect(home.path());
+    let workspace_root = trusty_common::workspace_layout::resolve_workspace_root(None);
+
+    let base = workspace_root.join("tm-5913-base");
+    std::fs::create_dir_all(&base).expect("create base repo dir");
+    git(&base, &["init", "--quiet"]);
+    git(&base, &["config", "user.email", "tm@example.invalid"]);
+    git(&base, &["config", "user.name", "tm test"]);
+    std::fs::write(base.join("README.md"), "seed\n").unwrap();
+    git(&base, &["add", "README.md"]);
+    git(&base, &["commit", "--quiet", "-m", "seed"]);
+
+    let id = ManagedSessionId::new();
+    let leaf = format!("tm-5913-{id}");
+    let ws = base.join(".worktrees").join(&leaf);
+    git(
+        &base,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            &format!("session/{leaf}"),
+            &ws.to_string_lossy(),
+        ],
+    );
+    assert!(
+        git(&base, &["worktree", "list", "--porcelain"]).contains(&leaf),
+        "fixture invariant: the worktree must be registered before decommission"
+    );
+
+    let (state, url) = spawn_test_daemon().await;
+    state
+        .session_manager()
+        .await
+        .create_with_id(
+            id,
+            "regression: #5913 decommission worktree bookkeeping".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws.clone()),
+            None,
+            None,
+            RuntimeKind::default(),
+            false,
+            // Owned: the daemon removes it with `remove_dir_all`, which is the
+            // branch that leaves git's bookkeeping behind.
+            true,
+        )
+        .await
+        .expect("seed session");
+
+    let result = CommandExecutor::new(url)
+        .execute(TrustyCommand::ManagedDecommission {
+            target: id.to_string(),
+        })
+        .await;
+    match result {
+        CommandResult::ManagedLifecycle {
+            workspace_removed, ..
+        } => assert_eq!(
+            workspace_removed,
+            Some(true),
+            "fixture invariant: the daemon must have removed the owned workspace"
+        ),
+        other => panic!("expected ManagedLifecycle, got {other:?}"),
+    }
+    assert!(!ws.exists(), "the workspace must be gone: {}", ws.display());
+    assert!(
+        !git(&base, &["worktree", "list", "--porcelain"]).contains(&leaf),
+        "the routed decommission left a stale worktree entry for {leaf} — the \
+         bookkeeping repair did not run"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[tokio::test]
