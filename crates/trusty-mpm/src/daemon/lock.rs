@@ -6,8 +6,9 @@
 //! owns the record format, the product-magic check, and the ownership rule for
 //! removal. This module exists so the daemon's call sites read as
 //! `lock::write_lock(&url)` rather than reaching across into `core`.
-//! Test: the record's behaviour is covered in `core::daemon_identity`;
-//! `write_and_remove_round_trip` covers this facade.
+//! Test: the record's behaviour is covered hermetically in
+//! `core::daemon_identity`. This facade carries no test of its own — the note
+//! at the foot of this file says why (#1731).
 
 use crate::core::daemon_identity;
 
@@ -17,7 +18,7 @@ use crate::core::daemon_identity;
 /// ADR-0011's loopback-only doctrine (issue #3330) the daemon never binds a
 /// second (Tailscale) listener, so the record carries no `tailscale_addr`.
 /// What: delegates to [`daemon_identity::write_lock`]; best-effort.
-/// Test: `write_and_remove_round_trip`.
+/// Test: `read_lock_returns_written_record` in `core::daemon_identity`.
 pub fn write_lock(addr: &str) {
     daemon_identity::write_lock(addr);
 }
