@@ -36,7 +36,8 @@
 //!   supposed to keep the transcript under budget at all times).
 //!
 //! All logs go to **stderr** via `tracing` (never stdout — see the module
-//! doc above) and are filtered by `RUST_LOG` (`EnvFilter::from_default_env`).
+//! doc above) and are filtered by `RUST_LOG`, falling back to `info` when it
+//! is unset or invalid.
 //!
 //! **Logs vs. events:** structured [`crate::events`] are telemetry for the
 //! UI (a typed, machine-consumed fact stream); `tracing` logs here are for
@@ -46,16 +47,28 @@
 
 use tracing_subscriber::EnvFilter;
 
+/// Build the tracing filter, falling back to [`DEFAULT_LOG_LEVEL`].
+///
+/// Why: `EnvFilter::from_default_env` yields an EMPTY directive set when
+/// `RUST_LOG` is unset or malformed, which filters everything below `error`
+/// and silences the `warn!` decision points this module's convention requires.
+/// What: parses `RUST_LOG`; on any parse failure builds a filter from
+/// [`DEFAULT_LOG_LEVEL`] instead.
+/// Test: `tests/logging_e2e.rs`.
+fn env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_LEVEL))
+}
+
 /// Initialise the global tracing subscriber.
 ///
 /// Why: All daemons and CLI entry points call this once at startup to ensure
 /// log output is consistently routed to stderr with the `RUST_LOG` filter.
-/// What: Installs a stderr-bound fmt subscriber with `EnvFilter::from_default_env()`.
+/// What: Installs a stderr-bound fmt subscriber with [`env_filter`].
 /// Panics if called twice (use `init_tracing_for_test` in test binaries).
 /// Test: Called in `main.rs`; correctness is verified by observing log output.
 pub fn init_tracing() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(env_filter())
         .with_writer(std::io::stderr)
         .init();
 }
@@ -69,7 +82,7 @@ pub fn init_tracing() {
 /// Test: `init_tracing_for_test_is_idempotent`.
 pub fn init_tracing_for_test() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(env_filter())
         .with_writer(std::io::stderr)
         .try_init();
 }
@@ -78,8 +91,8 @@ pub fn init_tracing_for_test() {
 ///
 /// Why: Documents and centralises the default so operators know what to expect
 /// without reading source.
-/// What: A static string literal; the default filter used by `EnvFilter::from_default_env()`.
-/// Test: Not directly tested — the value is advisory documentation.
+/// What: A static string literal used by [`env_filter`] as its real fallback.
+/// Test: `tests/logging_e2e.rs` covers unset and invalid `RUST_LOG` values.
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
