@@ -91,7 +91,9 @@ impl ImportSummary {
 /// it. Each line is independent, so each failure is contained and counted.
 /// What: skips blank lines, counts an unparseable or unverifiable line as
 /// [`ImportOutcome::Skipped`] with a warning naming the line number, and applies
-/// the rest through [`import_palace_records`].
+/// the rest through [`import_palace_records`]. Per-line containment covers the
+/// FILE's failures only — an embedder that cannot be resolved aborts the whole
+/// run with `Err` and no summary, per [`import_palace_records`].
 /// Test: `export_then_import_preserves_metadata`, `import_skips_a_bad_line_and_keeps_the_rest`.
 pub async fn import_palace_jsonl(handle: &PalaceHandle, path: &Path) -> Result<ImportSummary> {
     let text = std::fs::read_to_string(path)
@@ -144,6 +146,18 @@ pub async fn import_palace_jsonl(handle: &PalaceHandle, path: &Path) -> Result<I
 /// union, and importance takes the maximum, on the same reasoning: a merge may add
 /// information, never remove it.
 ///
+/// 🔴 An embedder that cannot be RESOLVED aborts the whole run (#5902). This
+/// function resolves `shared_embedder()` once, before the first record, and
+/// returns `Err` if that fails — no records are examined and no summary is
+/// produced. That is a behaviour change from resolving inside `insert_new`,
+/// where each record resolved for itself, so a failure was caught per record,
+/// counted [`ImportOutcome::Skipped`], and the next record tried again. Both
+/// forms fail closed — nothing is written either way — but the failure now
+/// surfaces as an error rather than a summary of N skips, and it surfaces once
+/// instead of after N embed timeouts. A per-record embed that FAILS or times out
+/// is unchanged: still skipped, still counted, and the run continues (see
+/// [`insert_new`]).
+///
 /// What: for each verified record, looks its hash up in the in-memory drawer
 /// table. Absent → embed, upsert the vector, persist the drawer with the record's
 /// own `created_at` and metadata, push it into the table. Present → apply the
@@ -160,9 +174,10 @@ pub async fn import_palace_records(
     if records.is_empty() {
         return Ok(ImportSummary::default());
     }
-    // #5902: resolved once for the whole run, not once per inserted record — and
-    // resolved HERE rather than inside `insert_new` so a test can supply its own.
-    // See `import_palace_records_with_embedder`.
+    // #5902: resolved once for the whole run, not once per inserted record, and
+    // resolved HERE rather than inside `insert_new` so a test can supply its own
+    // (see `import_palace_records_with_embedder`). That move also changed what a
+    // resolution failure does — see this function's doc.
     let embedder = shared_embedder()
         .await
         .context("acquire the shared embedder for import")?;

@@ -156,6 +156,9 @@ impl<'de> Deserialize<'de> for ContentHash {
 ///    U+FEFF (BOM) are REMOVED wherever they occur; U+00A0 (NBSP) folds to a
 ///    regular space. See the decision note below.
 /// 3. Unicode: NFC (canonical composition), so `e` + U+0301 and U+00E9 agree.
+///    Step 2 must precede this one: a zero-width character has canonical
+///    combining class 0, so `e` + U+200B + U+0301 does not compose if NFC sees
+///    the U+200B, and stripping afterwards cannot recover the composition.
 /// 4. Per line: trailing whitespace removed (`str::trim_end`).
 /// 5. Whole string: all trailing newlines and whitespace removed, so zero, one,
 ///    and five trailing blank lines are one identity.
@@ -187,14 +190,19 @@ impl<'de> Deserialize<'de> for ContentHash {
 /// `normalize_collapses_trailing_newlines`, `normalize_applies_nfc`,
 /// `normalize_preserves_leading_whitespace_and_interior_blanks`,
 /// `normalize_strips_zero_width_characters`, `normalize_folds_nbsp_to_a_space`,
-/// `normalize_preserves_bidi_marks`, `normalize_preserves_non_bmp_codepoints`.
+/// `normalize_preserves_bidi_marks`, `normalize_preserves_non_bmp_codepoints`,
+/// `a_zero_width_between_base_and_mark_still_composes` (the step order itself).
 pub fn normalize_for_hash(content: &str) -> String {
     // Step 1: line endings. Done before NFC so the `\r` removal cannot be
     // perturbed by a composition that spans the boundary.
     let unix: String = content.replace("\r\n", "\n").replace('\r', "\n");
-    // Step 2 (#5902): invisible characters, before NFC and before the trims —
-    // an NBSP folded to a space is then trimmable like any other trailing space,
-    // and a zero-width character is not whitespace to `trim_end` at all.
+    // Step 2 (#5902): invisible characters, before NFC and before the trims.
+    // Before NFC because a zero-width character has canonical combining class 0
+    // and therefore BLOCKS composition: leave `e` U+200B U+0301 for NFC to see
+    // and the mark never composes. Before the trims because an NBSP folded to a
+    // space is then trimmable like any other trailing space, and a zero-width
+    // character is not whitespace to `trim_end` at all. Reordering this against
+    // step 3 re-mints ids — `a_zero_width_between_base_and_mark_still_composes`.
     let visible: String = unix
         .chars()
         .filter_map(|c| match c {
@@ -377,6 +385,34 @@ mod tests {
             memory_content_hash("cafe\u{0301}\u{200B} time"),
             memory_content_hash("caf\u{00E9} time")
         );
+    }
+
+    /// Why (#5902, review): rule 2 runs BEFORE rule 3, and this is the only case
+    /// that proves it. U+200B has canonical combining class 0, so it BLOCKS
+    /// composition: with NFC first, `e` + U+200B + U+0301 stays decomposed and
+    /// the later strip cannot put the mark back, leaving a digest different from
+    /// the composed `é`. Every other test here passes under either order —
+    /// including `normalize_preserves_non_bmp_codepoints`, whose zero-width
+    /// character sits AFTER the mark, where it blocks nothing. Swap the two steps
+    /// in [`normalize_for_hash`] and only this test goes red.
+    /// Test: This test.
+    #[test]
+    fn a_zero_width_between_base_and_mark_still_composes() {
+        // `e` U+200B U+0301 — the ZWSP is WEDGED BETWEEN the base and its mark.
+        let wedged = "caf\u{0065}\u{200B}\u{0301} time";
+        let composed = "caf\u{00E9} time";
+        assert_ne!(wedged, composed, "the inputs must differ as bytes");
+        assert_eq!(normalize_for_hash(wedged), composed);
+        assert_eq!(memory_content_hash(wedged), memory_content_hash(composed));
+        // The same wedge with each of the other stripped codepoints.
+        for zw in ['\u{200C}', '\u{200D}', '\u{FEFF}'] {
+            let body = format!("caf\u{0065}{zw}\u{0301} time");
+            assert_eq!(
+                memory_content_hash(&body),
+                memory_content_hash(composed),
+                "{zw:?} between base and mark blocked the composition"
+            );
+        }
     }
 
     /// Why: an empty or whitespace-only body must have ONE identity, whatever

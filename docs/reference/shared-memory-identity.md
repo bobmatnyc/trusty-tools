@@ -106,6 +106,15 @@ Deliberately NOT normalized: leading whitespace, interior blank lines, and case.
 Indentation distinguishes a memory holding a nested code block from the same text
 flush-left, and those are different facts.
 
+**The order of steps 2 and 3 is part of the contract.** A zero-width character
+has canonical combining class 0, so under NFC it blocks composition: run NFC
+first and `e` + U+200B + U+0301 stays decomposed, where stripping first lets it
+compose to `é`. Stripping afterwards cannot recover the composition, so the two
+orders mint different ids for the same pasted text. Every other normalization
+case agrees under either order, which is why
+`a_zero_width_between_base_and_mark_still_composes` exists — it is the only test
+that goes red when the two steps are swapped.
+
 ### Why rule 2 (added in review of PR #5908)
 
 NFC does not fold or remove any of those characters — canonical composition
@@ -231,6 +240,14 @@ removing from the write path. A slow import is the accepted cost; a silently
 unsearchable one is not. The deferred-embed lane is deliberately not reached for —
 it exists so an interactive write need not block on a cold model, and an import
 has no user waiting on it.
+
+Two failures, two outcomes. A per-record embed that errors or times out skips
+that record and the run continues. An embedder that cannot be RESOLVED at all
+aborts the run before the first record: `import_palace_records` resolves
+`shared_embedder()` once and returns an error if that fails, so the caller gets
+an error rather than a summary of N skips. Both fail closed — nothing is written
+either way — and failing once beats N embed timeouts when the embedder is simply
+down.
 
 *Re-embedding is not guaranteed deterministic across machines.* Two machines
 running different embedder versions, models, or dimensions will produce different
