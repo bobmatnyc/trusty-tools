@@ -505,6 +505,43 @@ gh pr merge <PR> --squash --delete-branch
 After a squash-merge the local feature branch shows as "unmerged" to git (the
 squashed commit has a different hash). That is expected, not a failed merge.
 
+## Merge-Queue Ownership — the Procedure
+
+The rule is in the instruction package's workflow section: one session owns a
+repository's merge queue, an owner's authorization is scoped to the PRs it named,
+and green required contexts alone never license a merge. This is how to run it.
+
+**Establish who owns the queue before merging anything.** Ownership is a claim in
+git/GitHub state, not an understanding between sessions. Read it from the open
+PRs: `gh pr list --json number,author,assignees,isDraft,labels,headRefName`. If
+another session's PRs are open on the same base branch and you were not told you
+own the queue, you do not — hand your merge-ready PR to that session and report
+that you routed it rather than merging.
+
+**Per-PR pre-merge check, in this order.** Required contexts are the last gate,
+not the first:
+
+```bash
+gh pr view <PR> --json isDraft,labels,assignees,reviewDecision,statusCheckRollup
+gh pr view <PR> --json reviews --jq '.reviews[-3:][] | {author:.author.login,state}'
+```
+
+Stop on any of: `isDraft: true`; a hold label (`do-not-merge`, or whatever the
+project uses); `reviewDecision: CHANGES_REQUESTED`; an unresolved `code-critic`
+BLOCK in the PR comments. A critic verdict is a PR comment, so
+`statusCheckRollup` cannot see it — read the comments
+(`gh pr view <PR> --comments`) before a batch merge, once per PR, not once per
+batch.
+
+**Holding someone else's PR.** Convert it to draft (`gh pr ready --undo <PR>`) or
+apply the hold label. Send the message too, for awareness — but the message is
+never the hold. It loses the race; tonight's incident had a block arrive four
+minutes after the merge.
+
+**Handing the queue off.** Say which repository, which base branch, and which PRs
+are in flight. The receiving session re-reads state rather than trusting the
+list — the handoff is a notification, and the PRs are the record.
+
 ## Shipped Defaults on the PR
 
 These trusty-mpm framework defaults override any harness default and belong in
