@@ -90,9 +90,6 @@ pub enum Verb {
         /// Repositories to clone, as owner/name.
         #[arg(value_name = "OWNER/NAME", required = true)]
         repos: Vec<String>,
-        /// Fetch full history instead of only the tip commit.
-        #[arg(long)]
-        full: bool,
         /// Stop STARTING clones once this many gigabytes are on disk (0: never).
         ///
         /// Not a cap on one repository: a clone already running is never
@@ -242,14 +239,9 @@ impl Cli {
             // omitting the flag keeps `CloneOptions`' bounded default, because
             // the recipient who never thought about disk is the one the budget
             // exists for.
-            Some(Verb::Clone {
-                repos,
-                full,
-                budget_gb,
-            }) => Command::CloneRepos {
+            Some(Verb::Clone { repos, budget_gb }) => Command::CloneRepos {
                 repos: repos.clone(),
                 options: CloneOptions {
-                    shallow: !full,
                     budget_bytes: match budget_gb {
                         Some(0) => None,
                         // #5215 review: `--budget-gb 17179869184` overflowed u64 —
@@ -628,19 +620,26 @@ mod cli_tests {
         assert!(text.contains("archived"), "{text}");
     }
 
+    /// #5916: the verb has no depth knob to get wrong. `--full` used to exist
+    /// and default to off, so the ordinary invocation was the truncating one.
     #[test]
-    fn the_clone_verb_defaults_to_a_shallow_bounded_clone() {
+    fn the_clone_verb_defaults_to_a_bounded_clone_and_takes_no_depth_flag() {
         let cli = Cli::try_parse_from(["taudit", "clone", "acme/api", "acme/web"])
             .expect("the clone verb parses");
         let Command::CloneRepos { repos, options } = cli.to_command() else {
             panic!("clone must route to CloneRepos");
         };
         assert_eq!(repos, vec!["acme/api", "acme/web"]);
-        assert!(options.shallow);
         assert_eq!(
             options.budget_bytes,
             Some(crate::clone::DEFAULT_BUDGET_BYTES)
         );
+        for gone in ["--full", "--depth", "--shallow"] {
+            assert!(
+                Cli::try_parse_from(["taudit", "clone", "acme/api", gone]).is_err(),
+                "{gone} must not be accepted — a truncated clone empties the audit"
+            );
+        }
     }
 
     /// The ceiling comes off only when the recipient asks for it in words.
@@ -654,14 +653,12 @@ mod cli_tests {
         };
         assert_eq!(options.budget_bytes, None);
 
-        let full =
-            Cli::try_parse_from(["taudit", "clone", "acme/api", "--full", "--budget-gb", "2"])
-                .expect("parses")
-                .to_command();
-        let Command::CloneRepos { options, .. } = full else {
+        let bounded = Cli::try_parse_from(["taudit", "clone", "acme/api", "--budget-gb", "2"])
+            .expect("parses")
+            .to_command();
+        let Command::CloneRepos { options, .. } = bounded else {
             panic!("clone must route to CloneRepos");
         };
-        assert!(!options.shallow);
         assert_eq!(options.budget_bytes, Some(2 * 1024 * 1024 * 1024));
     }
 
