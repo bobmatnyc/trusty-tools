@@ -125,6 +125,17 @@ pub struct HealthResult {
 pub trait ProcessProber: Send + Sync {
     /// Run `pgrep -f <pattern>` and return the first matched PID.
     fn pgrep(&self, pattern: &str) -> Option<u32>;
+
+    /// PID of the process listening on `port`, if any.
+    ///
+    /// Why (#5951): name matching cannot tell a daemon from a same-named
+    /// sibling; the process holding the listening socket can. Defaults to
+    /// `None` so a prober that cannot answer falls back to `pgrep`.
+    /// Test: `pid_prefers_port_owner_over_name_match`.
+    fn pid_listening_on(&self, port: u16) -> Option<u32> {
+        let _ = port;
+        None
+    }
 }
 
 /// Trait for port file reading.
@@ -189,6 +200,10 @@ impl ProcessProber for RealProcessProber {
             .split_whitespace()
             .next()
             .and_then(|s| s.parse::<u32>().ok())
+    }
+
+    fn pid_listening_on(&self, port: u16) -> Option<u32> {
+        crate::core::daemon_identity::pid_listening_on(port)
     }
 }
 
@@ -440,8 +455,8 @@ impl Discoverer {
     /// What: runs process, port, health, version, and uptime probes in sequence.
     /// Test: covered by the mock-based discoverer unit tests.
     fn probe(&mut self, name: &str, decl: &ServiceDecl) -> ServiceStatus {
-        let pid = self.probe_process(decl);
         let port = self.probe_port(decl);
+        let pid = self.probe_pid(decl, port);
         let url = port.map(|p| format!("http://localhost:{p}"));
 
         let health = if let Some(u) = &url {
@@ -493,6 +508,28 @@ impl Discoverer {
             log_path,
             uptime_secs,
         }
+    }
+
+    /// PID of the service: the port's owner when there is one, else a name match.
+    ///
+    /// Why (#5951): `tm services list` reported `trusty-mpm-daemon` as PID 7009,
+    /// a `trusty-mpm serve --stdio` MCP bridge, because the manifest's
+    /// `process_match: "trusty-mpm"` is a substring every sibling shares and
+    /// `pgrep` returns the lowest PID first. Four independent sources —
+    /// `launchctl list`, `ps`, the daemon's `/health`, and the console
+    /// gateway — named the daemon, and `tm` named something else. Operators are
+    /// told to use `tm services` instead of raw `ps`/`lsof`, so the wrong PID
+    /// here is a PID somebody signals.
+    /// What: when the service has a resolved port, the process holding its
+    /// listening socket is the service, definitionally. Name matching stays the
+    /// fallback for portless services (`trusty-embedderd`), for a port nothing
+    /// is listening on, and for a host without `lsof`.
+    /// Test: `pid_prefers_port_owner_over_name_match`,
+    /// `pid_falls_back_to_name_match_without_port`,
+    /// `pid_falls_back_to_name_match_when_port_unowned`.
+    fn probe_pid(&self, decl: &ServiceDecl, port: Option<u16>) -> Option<u32> {
+        port.and_then(|p| self.process_prober.pid_listening_on(p))
+            .or_else(|| self.probe_process(decl))
     }
 
     /// Run pgrep for the service's `process_match` pattern.

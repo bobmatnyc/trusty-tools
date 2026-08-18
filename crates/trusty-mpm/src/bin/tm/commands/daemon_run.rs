@@ -115,6 +115,18 @@ pub(crate) async fn run_daemon(
         return Ok(());
     }
 
+    // #1731: the lock file now has to carry the trusty-mpm product magic to be
+    // trusted, so a daemon started by a pre-#1731 binary is invisible to the
+    // check above and the `AddrInUse` fallback below would quietly spawn a
+    // duplicate on an ephemeral port. Ask the address this invocation intends
+    // to bind whether a daemon already answers there. Scoped to `addr`, not the
+    // default, so `--addr` still starts a second daemon on a free port.
+    let intended_url = format!("http://{addr}");
+    if trusty_common::probe_health(&intended_url, "/health").await {
+        eprintln!("trusty-mpm daemon is already running at {intended_url}");
+        return Ok(());
+    }
+
     // Auto port selection: try configured address; fall back to ephemeral.
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
