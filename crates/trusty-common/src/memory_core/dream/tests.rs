@@ -697,7 +697,7 @@ async fn dream_cycle_semantic_consolidation_with_mock() {
         .drawers
         .read()
         .iter()
-        .any(|d| d.content == canonical_text);
+        .any(|d| d.content() == canonical_text);
     assert!(has_canonical, "canonical drawer must be present");
 }
 
@@ -1883,7 +1883,7 @@ async fn dream_merge_into_caps_multibyte_content_without_panicking() {
         drawers
             .iter()
             .find(|d| d.id == survivor_id)
-            .map(|d| d.content.clone())
+            .map(|d| d.content().to_string())
             .unwrap()
     };
 
@@ -1984,7 +1984,7 @@ async fn merge_into_keeps_the_content_hash_in_step() {
         let find = |id: Uuid| drawers.iter().find(|d| d.id == id).cloned().unwrap();
         (find(survivor_id), find(loser_id))
     };
-    let before = survivor.content_hash;
+    let before = survivor.content_hash();
 
     merge_into(&handle, &survivor, &loser);
 
@@ -1997,16 +1997,18 @@ async fn merge_into_keeps_the_content_hash_in_step() {
             .unwrap()
     };
     assert_ne!(
-        merged.content, survivor.content,
+        merged.content(),
+        survivor.content(),
         "precondition: the merge must actually have rewritten the body"
     );
     assert_ne!(
-        merged.content_hash, before,
+        merged.content_hash(),
+        before,
         "a rewritten body must mint a new identity"
     );
     assert_eq!(
-        merged.content_hash,
-        memory_content_hash(&merged.content),
+        merged.content_hash(),
+        memory_content_hash(merged.content()),
         "the digest must describe the body the drawer now holds"
     );
 }

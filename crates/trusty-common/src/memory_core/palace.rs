@@ -205,11 +205,25 @@ impl DrawerType {
 }
 
 /// Atomic memory unit: verbatim text plus metadata.
+///
+/// Why `#[non_exhaustive]` (#5902): `content_hash` is derived from `content`, so
+/// a struct literal built outside this crate would set one without the other and
+/// mint a drawer whose digest does not describe its body. Every construction goes
+/// through [`Drawer::new`], which derives the digest, and every field addition
+/// after this one is a non-breaking change instead of a required version bump.
+/// What: outside `trusty-common` this type cannot be built by struct literal or
+/// matched exhaustively. Inside it, nothing changes.
+/// Test: `drawer_new_hashes_its_content`, `set_content_recomputes_the_hash`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Drawer {
     pub id: Uuid,
     pub room_id: Uuid,
-    pub content: String,
+    /// The memory body, verbatim as written. PRIVATE by design (#5902) — read it
+    /// with [`Drawer::content`], change it with [`Drawer::set_content`]. A public
+    /// field would let an assignment leave [`Self::content_hash`] describing a
+    /// body the drawer no longer holds.
+    content: String,
     /// Importance in [0.0, 1.0]. Used to rank L1 essential drawers.
     pub importance: f32,
     pub source_file: Option<PathBuf>,
@@ -268,6 +282,13 @@ pub struct Drawer {
     /// Nothing reads it from disk, so no postcard migration and no stale digest
     /// is reachable.
     ///
+    /// Why it is PRIVATE (#5902, review): "always change a body through
+    /// `set_content`" was a convention the type system did not enforce — both
+    /// this field and `content` were `pub`, so one assignment anywhere could
+    /// leave a drawer exporting under an identity nobody else can reproduce.
+    /// Read it with [`Drawer::content_hash`]; nothing outside this module can
+    /// write it.
+    ///
     /// What: [`ContentHash::UNSET`] via `#[serde(default)]` for JSON written
     /// before this field existed; [`Self::refresh_content_hash`] replaces the
     /// sentinel (or a stale value) with the digest of the current content.
@@ -276,7 +297,7 @@ pub struct Drawer {
     /// `refresh_content_hash_heals_an_unset_or_stale_digest`,
     /// `drawer_type_serde_default_is_unknown` (the legacy-decode arm).
     #[serde(default)]
-    pub content_hash: ContentHash,
+    content_hash: ContentHash,
 }
 
 impl Drawer {
@@ -311,14 +332,30 @@ impl Drawer {
         }
     }
 
+    /// This drawer's body, verbatim as written.
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// This drawer's content-addressed identity (#5902).
+    ///
+    /// Why an accessor rather than a public field: the digest is derived from
+    /// `content`, so nothing outside this module may set it independently. See
+    /// the field's doc comment.
+    /// What: the digest of the current body, as maintained by [`Self::new`],
+    /// [`Self::set_content`], and [`Self::refresh_content_hash`].
+    /// Test: `drawer_new_hashes_its_content`, `set_content_recomputes_the_hash`.
+    pub fn content_hash(&self) -> ContentHash {
+        self.content_hash
+    }
+
     /// Replace this drawer's body, keeping [`Self::content_hash`] in agreement
     /// with it (#5902).
     ///
-    /// Why: `content` is a public field, so a direct assignment can desync the
-    /// derived digest. This is the one supported way to change a body, and
-    /// `dream::helpers::merge_into` — the only production path that rewrites
-    /// content in place — routes through it. A drawer whose digest disagreed
-    /// with its content would export under an identity nobody else can
+    /// Why: `content` is private precisely so this is the ONLY way to change a
+    /// body. `dream::helpers::merge_into` — the only production path that
+    /// rewrites content in place — routes through it. A drawer whose digest
+    /// disagreed with its content would export under an identity nobody else can
     /// reproduce, so the two must move together.
     /// What: stores `content` verbatim (no normalization — normalization is for
     /// hashing only) and recomputes the digest from it.

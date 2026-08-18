@@ -1,0 +1,5 @@
+Changed
+
+- `Drawer` is now `#[non_exhaustive]`, and `Drawer::content` / `Drawer::content_hash` are private behind `Drawer::content()` and `Drawer::content_hash()`. The digest is derived from the body, so a struct literal or a field assignment outside this module could mint a drawer whose digest describes text it no longer holds; `Drawer::new` and `Drawer::set_content` are now the only ways to set a body. Breaking for any consumer that read those fields directly (#5902).
+- `content_hash::normalize_for_hash` strips U+200B, U+200C, U+200D and U+FEFF, and folds U+00A0 to a space, before hashing. NFC does not touch those codepoints, so the same fact pasted from a webpage and typed by hand used to produce two hashes, two memories, and no convergence. `CONTENT_HASH_VERSION` stays 1: nothing has shipped, so there is no prior state to migrate. Bidi marks are deliberately left alone (#5902).
+- `share::import` takes the embedder as a parameter internally, so a test can drive an import through a failing embedder. That proves the embed runs before the durable write and aborts the insert with nothing written — previously an inspection claim with no coverage (#5902).

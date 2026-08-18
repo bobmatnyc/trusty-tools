@@ -152,10 +152,27 @@ impl<'de> Deserialize<'de> for ContentHash {
 ///
 /// What, in order:
 /// 1. Line endings: `\r\n` and lone `\r` both become `\n`.
-/// 2. Unicode: NFC (canonical composition), so `e` + U+0301 and U+00E9 agree.
-/// 3. Per line: trailing whitespace removed (`str::trim_end`).
-/// 4. Whole string: all trailing newlines and whitespace removed, so zero, one,
+/// 2. Invisible characters: U+200B (ZWSP), U+200C (ZWNJ), U+200D (ZWJ) and
+///    U+FEFF (BOM) are REMOVED wherever they occur; U+00A0 (NBSP) folds to a
+///    regular space. See the decision note below.
+/// 3. Unicode: NFC (canonical composition), so `e` + U+0301 and U+00E9 agree.
+/// 4. Per line: trailing whitespace removed (`str::trim_end`).
+/// 5. Whole string: all trailing newlines and whitespace removed, so zero, one,
 ///    and five trailing blank lines are one identity.
+///
+/// Why rule 2 (#5902, review): NFC does not fold or remove any of these — they
+/// are distinct codepoints canonical composition never touches — so without this
+/// rule a fact pasted from a webpage, Slack, or Notion carrying a zero-width
+/// space hashes differently from the same fact typed by hand. Two memories, no
+/// convergence, and no error raised anywhere, on a difference no reader can see.
+/// Invisible characters are noise in memory prose, and making identity depend on
+/// how text was pasted is the exact failure this module exists to prevent.
+/// The accepted cost: U+200D is also the emoji ZWJ joiner, so a body containing
+/// a joined emoji sequence hashes the same as one containing its component
+/// codepoints unjoined. Two memories differing ONLY in that are the same fact for
+/// this purpose, and the alternative — identity that depends on an invisible
+/// codepoint — is worse. Bidi controls (U+200E/U+200F and the U+202x/U+2066
+/// families) are deliberately NOT stripped: they change how visible text reads.
 ///
 /// What it deliberately does NOT do: leading whitespace is PRESERVED, per line
 /// and for the string as a whole. Indentation carries meaning in a memory that
@@ -168,14 +185,27 @@ impl<'de> Deserialize<'de> for ContentHash {
 /// would be a silent data migration of every palace on disk.
 /// Test: `normalize_collapses_line_endings`, `normalize_trims_trailing_space_per_line`,
 /// `normalize_collapses_trailing_newlines`, `normalize_applies_nfc`,
-/// `normalize_preserves_leading_whitespace_and_interior_blanks`.
+/// `normalize_preserves_leading_whitespace_and_interior_blanks`,
+/// `normalize_strips_zero_width_characters`, `normalize_folds_nbsp_to_a_space`,
+/// `normalize_preserves_bidi_marks`, `normalize_preserves_non_bmp_codepoints`.
 pub fn normalize_for_hash(content: &str) -> String {
     // Step 1: line endings. Done before NFC so the `\r` removal cannot be
     // perturbed by a composition that spans the boundary.
     let unix: String = content.replace("\r\n", "\n").replace('\r', "\n");
-    // Step 2: NFC over the whole string.
-    let composed: String = unix.nfc().collect();
-    // Step 3: per-line trailing whitespace.
+    // Step 2 (#5902): invisible characters, before NFC and before the trims —
+    // an NBSP folded to a space is then trimmable like any other trailing space,
+    // and a zero-width character is not whitespace to `trim_end` at all.
+    let visible: String = unix
+        .chars()
+        .filter_map(|c| match c {
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' => None,
+            '\u{00A0}' => Some(' '),
+            other => Some(other),
+        })
+        .collect();
+    // Step 3: NFC over the whole string.
+    let composed: String = visible.nfc().collect();
+    // Step 4: per-line trailing whitespace.
     let mut out = String::with_capacity(composed.len());
     for (i, line) in composed.split('\n').enumerate() {
         if i > 0 {
@@ -183,7 +213,7 @@ pub fn normalize_for_hash(content: &str) -> String {
         }
         out.push_str(line.trim_end());
     }
-    // Step 4: trailing newlines / whitespace for the string as a whole.
+    // Step 5: trailing newlines / whitespace for the string as a whole.
     let trimmed_len = out.trim_end().len();
     out.truncate(trimmed_len);
     out
@@ -272,6 +302,103 @@ mod tests {
     fn normalize_of_only_whitespace_is_empty() {
         assert_eq!(normalize_for_hash("   \n\t\r\n  "), "");
         assert_eq!(normalize_for_hash(""), "");
+    }
+
+    /// Why (#5902, review): NFC does not fold or remove zero-width characters,
+    /// so before rule 2 a fact pasted from a webpage carrying a U+200B and the
+    /// same fact typed by hand produced two hashes, two memories, and no
+    /// convergence — silently, with no error raised.
+    /// Test: This test.
+    #[test]
+    fn normalize_strips_zero_width_characters() {
+        let clean = "the daemon binds loopback only";
+        // Each class, one at a time, interior and at both edges.
+        assert_eq!(
+            normalize_for_hash("the daemon\u{200B} binds"),
+            "the daemon binds"
+        );
+        assert_eq!(normalize_for_hash("the\u{200C} daemon"), "the daemon");
+        assert_eq!(normalize_for_hash("the\u{200D} daemon"), "the daemon");
+        assert_eq!(normalize_for_hash("\u{FEFF}the daemon"), "the daemon");
+        assert_eq!(normalize_for_hash("the daemon\u{FEFF}"), "the daemon");
+        // And the whole sentence, one of each, hashes as the clean sentence.
+        let pasted = "\u{FEFF}the\u{200B} daemon\u{200C} binds\u{200D} loopback only";
+        assert_eq!(normalize_for_hash(pasted), clean);
+        assert_eq!(memory_content_hash(pasted), memory_content_hash(clean));
+        // A body that is nothing but invisible characters normalizes to empty.
+        assert_eq!(normalize_for_hash("\u{200B}\u{200C}\u{200D}\u{FEFF}"), "");
+    }
+
+    /// Why: NBSP is the other invisible difference a paste introduces, and
+    /// `str::trim_end` already treats it as whitespace — so leaving it unfolded
+    /// made a trailing NBSP normalize away while an interior one forked the
+    /// identity. Folding it to a space makes both cases agree.
+    /// Test: This test.
+    #[test]
+    fn normalize_folds_nbsp_to_a_space() {
+        assert_eq!(normalize_for_hash("a\u{00A0}b"), "a b");
+        assert_eq!(
+            memory_content_hash("MSRV\u{00A0}1.94"),
+            memory_content_hash("MSRV 1.94")
+        );
+        // Folded before the trims, so a trailing NBSP is trimmed like a space.
+        assert_eq!(normalize_for_hash("a\u{00A0}\nb\u{00A0}"), "a\nb");
+        assert_eq!(normalize_for_hash("\u{00A0}\u{00A0}"), "");
+        // Leading NBSP survives as leading whitespace, which rule 2's note says
+        // is preserved — it is now indistinguishable from a leading space.
+        assert_eq!(normalize_for_hash("\u{00A0}a"), " a");
+    }
+
+    /// Why: the strip list is deliberately narrow. Bidi marks change how visible
+    /// text reads, so two bodies differing by one are not the same fact, and a
+    /// rule that swept up "all format characters" would erase that distinction.
+    /// Test: This test.
+    #[test]
+    fn normalize_preserves_bidi_marks() {
+        assert_eq!(normalize_for_hash("a\u{200E}b"), "a\u{200E}b");
+        assert_eq!(normalize_for_hash("a\u{200F}b"), "a\u{200F}b");
+        assert_ne!(memory_content_hash("a\u{200E}b"), memory_content_hash("ab"));
+    }
+
+    /// Why: the filter runs per `char`, so a codepoint outside the BMP must pass
+    /// through byte-identically — a `char`-level rule that corrupted a surrogate
+    /// pair or a combining sequence would re-mint ids for every emoji or accented
+    /// memory. Combining marks are the NFC case checked here against the strip
+    /// rule, which must not disturb them.
+    /// Test: This test.
+    #[test]
+    fn normalize_preserves_non_bmp_codepoints() {
+        assert_eq!(normalize_for_hash("ship it 🚀"), "ship it 🚀");
+        assert_eq!(normalize_for_hash("𝔘𝔫𝔦𝔠𝔬𝔡𝔢"), "𝔘𝔫𝔦𝔠𝔬𝔡𝔢");
+        assert_eq!(normalize_for_hash("𝔘\u{200B}𝔫"), "𝔘𝔫");
+        // Combining marks still compose, and a stripped zero-width character
+        // between base and mark does not block the composition.
+        assert_eq!(
+            memory_content_hash("cafe\u{0301}\u{200B} time"),
+            memory_content_hash("caf\u{00E9} time")
+        );
+    }
+
+    /// Why: an empty or whitespace-only body must have ONE identity, whatever
+    /// mix of invisible and visible whitespace produced it — otherwise a
+    /// degenerate memory forks per paste.
+    /// Test: This test.
+    #[test]
+    fn normalize_of_invisible_only_bodies_is_one_identity() {
+        let empty = memory_content_hash("");
+        for body in [
+            "",
+            "   ",
+            "\n\n",
+            "\u{200B}",
+            "\u{FEFF}\u{00A0}\n\u{200D}  \r\n",
+        ] {
+            assert_eq!(
+                memory_content_hash(body),
+                empty,
+                "body {body:?} must hash as the empty body"
+            );
+        }
     }
 
     #[test]

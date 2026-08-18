@@ -655,7 +655,7 @@ impl PalaceHandle {
                 drawers
                     .iter()
                     .find(|d| d.id == id)
-                    .map(|d| d.content.clone())
+                    .map(|d| d.content().to_string())
             };
             let Some(content) = content else {
                 continue;

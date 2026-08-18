@@ -396,8 +396,8 @@ fn ranks_by_injection_count() {
     let cold = drawer("COLD drawer content", 0.5, 20, &[]);
     fixture_palace(root.path(), "p", &[hot.clone(), cold.clone()]);
 
-    let hot_inj = section("p", &[(&drawer_preview(&hot.content), &["status"])]);
-    let cold_inj = section("p", &[(&drawer_preview(&cold.content), &[])]);
+    let hot_inj = section("p", &[(&drawer_preview(hot.content()), &["status"])]);
+    let cold_inj = section("p", &[(&drawer_preview(cold.content()), &[])]);
     write_log(
         logs.path(),
         "enriched-prompts.2026-08-01.jsonl",
@@ -426,7 +426,7 @@ fn min_injections_filters() {
     let a = drawer("kept drawer", 0.5, 5, &[]);
     let b = drawer("dropped drawer", 0.5, 5, &[]);
     fixture_palace(root.path(), "p", &[a.clone(), b.clone()]);
-    let inj = section("p", &[(&drawer_preview(&a.content), &[])]);
+    let inj = section("p", &[(&drawer_preview(a.content()), &[])]);
     write_log(
         logs.path(),
         "enriched-prompts.2026-08-01.jsonl",
@@ -473,12 +473,12 @@ fn colliding_excerpts_are_marked_on_every_affected_row() {
     fixture_palace(root.path(), "p", &[a.clone(), b.clone(), unique.clone()]);
 
     assert_eq!(
-        drawer_preview(&a.content),
-        drawer_preview(&b.content),
+        drawer_preview(a.content()),
+        drawer_preview(b.content()),
         "fixture precondition: these two must actually collide"
     );
 
-    let inj = section("p", &[(&drawer_preview(&a.content), &["status"])]);
+    let inj = section("p", &[(&drawer_preview(a.content()), &["status"])]);
     write_log(
         logs.path(),
         "enriched-prompts.2026-08-01.jsonl",
@@ -733,7 +733,7 @@ fn stanza_carries_every_decision_field() {
         &["status"],
     );
     fixture_palace(root.path(), "p", std::slice::from_ref(&d));
-    let inj = section("p", &[(&drawer_preview(&d.content), &["status"])]);
+    let inj = section("p", &[(&drawer_preview(d.content()), &["status"])]);
     write_log(
         logs.path(),
         "enriched-prompts.2026-08-01.jsonl",
@@ -769,7 +769,7 @@ fn json_round_trips() {
     let root = tempfile::tempdir().expect("root");
     let d = drawer("json drawer", 0.75, 4, &["status"]);
     fixture_palace(root.path(), "p", std::slice::from_ref(&d));
-    let inj = section("p", &[(&drawer_preview(&d.content), &["status"])]);
+    let inj = section("p", &[(&drawer_preview(d.content()), &["status"])]);
     write_log(
         logs.path(),
         "enriched-prompts.2026-08-01.jsonl",

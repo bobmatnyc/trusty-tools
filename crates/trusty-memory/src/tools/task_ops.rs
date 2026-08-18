@@ -121,7 +121,7 @@ pub(crate) async fn handle_task_list(state: &AppState, args: Value) -> Result<Va
             .map(|d| {
                 json!({
                     "drawer_id": d.id.to_string(),
-                    "content": d.content,
+                    "content": d.content(),
                     "importance": d.importance,
                     "tags": d.tags,
                     "created_at": d.created_at.to_rfc3339(),

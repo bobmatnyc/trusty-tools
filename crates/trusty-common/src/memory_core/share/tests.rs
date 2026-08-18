@@ -79,7 +79,7 @@ fn hashes(handle: &PalaceHandle) -> Vec<ContentHash> {
         .drawers
         .read()
         .iter()
-        .map(|d| d.content_hash)
+        .map(|d| d.content_hash())
         .collect();
     h.sort();
     h
@@ -94,7 +94,7 @@ fn hash_of(handle: &PalaceHandle, id: Uuid) -> ContentHash {
         .iter()
         .find(|d| d.id == id)
         .unwrap_or_else(|| panic!("drawer {id} present"))
-        .content_hash
+        .content_hash()
 }
 
 fn bodies(handle: &PalaceHandle) -> Vec<String> {
@@ -102,7 +102,7 @@ fn bodies(handle: &PalaceHandle) -> Vec<String> {
         .drawers
         .read()
         .iter()
-        .map(|d| d.content.clone())
+        .map(|d| d.content().to_string())
         .collect();
     b.sort();
     b
@@ -116,10 +116,10 @@ fn record_round_trips_through_json() {
     let rec = SharedMemoryRecord::from_drawer(&drawer, "backend");
     let line = serde_json::to_string(&rec).unwrap();
     // The digest travels as readable hex, so a committed file stays greppable.
-    assert!(line.contains(&drawer.content_hash.to_hex()), "{line}");
+    assert!(line.contains(&drawer.content_hash().to_hex()), "{line}");
     let back: SharedMemoryRecord = serde_json::from_str(&line).unwrap();
     assert_eq!(back, rec);
-    assert_eq!(back.verify().unwrap(), drawer.content_hash);
+    assert_eq!(back.verify().unwrap(), drawer.content_hash());
 }
 
 #[test]
@@ -237,8 +237,8 @@ async fn stored_content_is_never_normalized() {
         .iter()
         .find(|d| d.id == id)
         .unwrap()
-        .content
-        .clone();
+        .content()
+        .to_string();
     assert_eq!(stored, raw, "the caller's bytes must survive verbatim");
     assert_ne!(
         stored,
@@ -253,8 +253,8 @@ async fn stored_content_is_never_normalized() {
             .into_iter()
             .find(|d| d.id == id)
             .unwrap();
-    assert_eq!(durable.content, raw);
-    assert_eq!(durable.content_hash, memory_content_hash(raw));
+    assert_eq!(durable.content(), raw);
+    assert_eq!(durable.content_hash(), memory_content_hash(raw));
 }
 
 // ── Export ──────────────────────────────────────────────────────────────────
@@ -373,8 +373,8 @@ async fn export_then_import_preserves_metadata() {
     assert_eq!(summary.inserted, 1);
 
     let imported = dst.drawers.read().first().cloned().unwrap();
-    assert_eq!(imported.content, original.content);
-    assert_eq!(imported.content_hash, original.content_hash);
+    assert_eq!(imported.content(), original.content());
+    assert_eq!(imported.content_hash(), original.content_hash());
     assert_eq!(imported.created_at, original.created_at);
     assert_eq!(imported.tags, original.tags);
     assert_eq!(imported.drawer_type, DrawerType::UserFact);
@@ -531,7 +531,7 @@ async fn two_machines_converge_on_one_memory() {
         .drawers
         .read()
         .iter()
-        .find(|d| d.content_hash == memory_content_hash("release tags are per-crate"))
+        .find(|d| d.content_hash() == memory_content_hash("release tags are per-crate"))
         .cloned()
         .expect("the shared fact is present exactly once by hash");
     assert!(shared.tags.contains(&"release".to_string()));
@@ -681,7 +681,7 @@ async fn imported_memory_is_recallable() {
         .expect("recall");
     assert!(
         hits.iter()
-            .any(|r| r.drawer.content.contains("bundled ORT")),
+            .any(|r| r.drawer.content().contains("bundled ORT")),
         "the imported memory must be reachable through recall"
     );
 }
@@ -781,7 +781,7 @@ async fn supersede_mints_a_new_hash_and_links_the_original() {
     let tmp = tempdir().unwrap();
     let h = open_palace(tmp.path(), "sup");
     let original = write(&h, "the MSRV floor is 1.90", &["policy"]).await;
-    let original_hash = h.drawers.read().first().unwrap().content_hash;
+    let original_hash = h.drawers.read().first().unwrap().content_hash();
 
     let outcome = supersede_drawer(
         &h,
@@ -803,11 +803,12 @@ async fn supersede_mints_a_new_hash_and_links_the_original() {
         .cloned()
         .unwrap();
     assert_ne!(
-        replacement.content_hash, original_hash,
+        replacement.content_hash(),
+        original_hash,
         "an edited body is a different identity"
     );
     assert_eq!(
-        replacement.content_hash,
+        replacement.content_hash(),
         memory_content_hash("the MSRV floor is 1.94")
     );
 
@@ -907,4 +908,75 @@ async fn supersede_leaves_the_original_intact_when_the_replacement_cannot_be_wri
             .filter(|t| t.predicate == SUPERSEDED_BY)
             .collect();
     assert!(edges.is_empty(), "{edges:?}");
+}
+
+// ── Fail-closed: the embed runs before the durable write ────────────────────
+
+/// Why: `insert_new` embeds BEFORE it writes, so an embedder failure must leave
+/// the palace exactly as it was. Until #5902's review that ordering was correct
+/// only by inspection — the embedder came from the process-wide `OnceCell`, which
+/// a test can seed once, with a mock that never fails, so no test could reach the
+/// failure branch. A drawer written whose embed then failed would be durable and
+/// permanently unfindable, which is the defect #4906 removed from the write path;
+/// this is the test that stops it coming back through the import door.
+///
+/// What: drives a real import through `DeadEmbedder`, then asserts the in-memory
+/// table, the redb rows, AND the vector index are all still empty — and follows it
+/// with the same records under the working embedder, so a passing assertion cannot
+/// be the fixture being empty. Moving the durable write ahead of the embed turns
+/// the three emptiness assertions red.
+/// Test: This test.
+#[tokio::test]
+async fn an_embedder_failure_during_import_writes_nothing_durably() {
+    use crate::memory_core::embed::Embedder;
+    use crate::memory_core::retrieval::embed_repair_tests::DeadEmbedder;
+    use crate::memory_core::share::import::import_palace_records_with_embedder;
+
+    let tmp = tempdir().unwrap();
+    let src = open_palace(tmp.path(), "embed-fail-src");
+    let dst = open_palace(tmp.path(), "embed-fail-dst");
+    write(&src, "a fact that must not land without a vector", &["net"]).await;
+
+    let records = export_palace_records(&src).unwrap();
+    assert_eq!(records.len(), 1, "precondition: one record to import");
+    assert!(
+        dst.drawers.read().is_empty(),
+        "precondition: empty destination"
+    );
+
+    let dead: Arc<dyn Embedder + Send + Sync> = Arc::new(DeadEmbedder);
+    let summary = import_palace_records_with_embedder(&dst, &records, &dead)
+        .await
+        .expect("the run itself completes; the record is what fails");
+
+    assert_eq!(
+        summary,
+        ImportSummary {
+            inserted: 0,
+            merged: 0,
+            unchanged: 0,
+            skipped: 1
+        },
+        "an unembeddable record is skipped, never inserted"
+    );
+    assert!(
+        dst.drawers.read().is_empty(),
+        "the in-memory table gained a row despite the embed failing"
+    );
+    assert!(
+        dst.kg.load_drawers().unwrap().is_empty(),
+        "a drawer was written durably despite the embed failing — the embed must \
+         run first and abort the insert"
+    );
+    assert_eq!(
+        dst.vector_store.index_size(),
+        0,
+        "no vector can exist for a drawer that was never written"
+    );
+
+    // Control: the same records under the working embedder do land, so the three
+    // assertions above are about the failure, not about an empty fixture.
+    let ok = import_palace_records(&dst, &records).await.unwrap();
+    assert_eq!(ok.inserted, 1);
+    assert_eq!(dst.kg.load_drawers().unwrap().len(), 1);
 }

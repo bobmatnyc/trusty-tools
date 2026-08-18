@@ -95,20 +95,53 @@ no reader would call a difference.
 The contract, in order (`memory_core::content_hash::normalize_for_hash`):
 
 1. `\r\n` and lone `\r` become `\n`.
-2. Unicode NFC.
-3. Trailing whitespace removed per line.
-4. All trailing whitespace and newlines removed from the string as a whole.
+2. Invisible characters: U+200B (ZWSP), U+200C (ZWNJ), U+200D (ZWJ) and U+FEFF
+   (BOM) are **removed** wherever they occur; U+00A0 (NBSP) folds to a regular
+   space.
+3. Unicode NFC.
+4. Trailing whitespace removed per line.
+5. All trailing whitespace and newlines removed from the string as a whole.
 
 Deliberately NOT normalized: leading whitespace, interior blank lines, and case.
 Indentation distinguishes a memory holding a nested code block from the same text
 flush-left, and those are different facts.
 
+### Why rule 2 (added in review of PR #5908)
+
+NFC does not fold or remove any of those characters — canonical composition
+never touches them. So without rule 2 a fact copy-pasted from a webpage, Slack,
+or Notion carrying a zero-width space hashed differently from the same fact typed
+by hand: two memories, no convergence, no error raised, on a difference no reader
+can see. Invisible characters are noise in memory prose, and making identity
+depend on how the text was pasted is the exact failure this design exists to
+prevent.
+
+Two consequences, both accepted:
+
+- U+200D is also the emoji ZWJ joiner, so a body containing a joined emoji
+  sequence hashes the same as one containing its component codepoints unjoined.
+  Identity that depends on an invisible codepoint is the worse of the two.
+- A leading NBSP becomes a leading space, which rule "leading whitespace is
+  preserved" then keeps — so it is now indistinguishable from a typed space.
+
+Bidi controls (U+200E/U+200F and the U+202x / U+2066 families) are **not**
+stripped: they change how visible text reads, so two bodies differing by one are
+not the same fact.
+
 **This is a versioned, breaking-to-change contract.**
 `CONTENT_HASH_VERSION` is folded into the digest preimage, so a v2 normalization
 mints ids in a different space rather than silently overlapping v1. Changing any
-rule re-mints every id in every exported file in every repo that ever ran the
-code, and two clients on different versions stop converging. Bumping it is a
-breaking change.
+rule — adding one, removing one, or altering the order — re-mints every id in
+every exported file in every repo that ever ran the code, and two clients on
+different versions stop converging. Bumping it is a breaking change.
+
+Rule 2 landed at version **1**, not 2, because nothing had shipped when it was
+added: `trusty-common` 0.35.0 is the published maximum and the field arrives in
+0.36.0, the digest is never written to redb (`DrawerRecord` has no hash field),
+and every path that reads a `Drawer` back from bytes re-derives it. There was no
+prior state to migrate, so a bump would have implied a migration that did not
+exist. That reasoning does not extend past the release: once 0.36.0 is on
+crates.io, any change to the list above needs the bump.
 
 Normalization applies to HASHING only. `Drawer.content` keeps the caller's bytes
 verbatim; rewriting stored content would be a silent data migration of every

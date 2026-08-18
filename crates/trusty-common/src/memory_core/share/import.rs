@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -21,6 +22,7 @@ use uuid::Uuid;
 
 use super::record::SharedMemoryRecord;
 use crate::memory_core::content_hash::ContentHash;
+use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
 use crate::memory_core::room_identity::DEFAULT_WING_ID;
@@ -155,6 +157,38 @@ pub async fn import_palace_records(
     handle: &PalaceHandle,
     records: &[SharedMemoryRecord],
 ) -> Result<ImportSummary> {
+    if records.is_empty() {
+        return Ok(ImportSummary::default());
+    }
+    // #5902: resolved once for the whole run, not once per inserted record — and
+    // resolved HERE rather than inside `insert_new` so a test can supply its own.
+    // See `import_palace_records_with_embedder`.
+    let embedder = shared_embedder()
+        .await
+        .context("acquire the shared embedder for import")?;
+    import_palace_records_with_embedder(handle, records, &embedder).await
+}
+
+/// [`import_palace_records`] against a caller-supplied embedder.
+///
+/// Why this seam exists (#5902): [`insert_new`] embeds BEFORE it writes, and its
+/// failure must abort the insert with nothing written. That claim was correct by
+/// inspection but unprovable by test while the embedder came from the
+/// process-wide `shared_embedder()` `OnceCell` — a cell that can only be seeded
+/// once per test binary, and is seeded there with the always-succeeding
+/// `MockEmbedder`. Passing the embedder in is the same seam
+/// `retrieval::deferred_embed::embed_and_store` already uses for the same reason,
+/// and it lets a failing double prove the ordering rather than assert it.
+/// What: identical to [`import_palace_records`] except that the embedder is a
+/// parameter. Not public API — the shared embedder is the only correct choice in
+/// production.
+/// Test: `an_embedder_failure_during_import_writes_nothing_durably`, plus every
+/// test that reaches this through [`import_palace_records`].
+pub(crate) async fn import_palace_records_with_embedder(
+    handle: &PalaceHandle,
+    records: &[SharedMemoryRecord],
+    embedder: &Arc<dyn Embedder + Send + Sync>,
+) -> Result<ImportSummary> {
     let mut summary = ImportSummary::default();
     if records.is_empty() {
         return Ok(summary);
@@ -180,7 +214,7 @@ pub async fn import_palace_records(
 
     let mut changed = false;
     for rec in records {
-        match apply_one(handle, rec).await {
+        match apply_one(handle, rec, embedder).await {
             Ok(outcome) => {
                 if matches!(outcome, ImportOutcome::Inserted | ImportOutcome::Merged) {
                     changed = true;
@@ -217,7 +251,11 @@ pub async fn import_palace_records(
 /// What: verifies, then inserts or merges as described on
 /// [`import_palace_records`].
 /// Test: as [`import_palace_records`].
-async fn apply_one(handle: &PalaceHandle, rec: &SharedMemoryRecord) -> Result<ImportOutcome> {
+async fn apply_one(
+    handle: &PalaceHandle,
+    rec: &SharedMemoryRecord,
+    embedder: &Arc<dyn Embedder + Send + Sync>,
+) -> Result<ImportOutcome> {
     // A record whose declared digest does not describe its body would enter the
     // palace under an identity no other machine can reproduce.
     let hash = rec.verify().context("verify the record")?;
@@ -235,7 +273,7 @@ async fn apply_one(handle: &PalaceHandle, rec: &SharedMemoryRecord) -> Result<Im
             )
             .await
         }
-        None => insert_new(handle, rec)
+        None => insert_new(handle, rec, embedder)
             .await
             .map(|_| ImportOutcome::Inserted),
     }
@@ -257,7 +295,7 @@ fn find_by_hash(
         .drawers
         .read()
         .iter()
-        .filter(|d| d.content_hash == hash)
+        .filter(|d| d.content_hash() == hash)
         .min_by_key(|d| (d.created_at, d.id))
         .map(|d| (d.id, d.created_at, d.tags.clone(), d.importance))
 }
@@ -328,9 +366,15 @@ async fn merge_into_existing(
 /// insert. That ordering is the contract, not an accident. The export carries no
 /// embedding vector by owner decision (see [`super::record::SharedMemoryRecord`]),
 /// so import is the only place this memory's vector can come from. If the embedder
-/// is unavailable, cold past its timeout, or errors, the record is counted
+/// is cold past its timeout or errors, the record is counted
 /// [`ImportOutcome::Skipped`] and NOTHING is written — no drawer row, no in-memory
-/// entry. An import that wrote the drawer and let the embed fail would leave a
+/// entry. (An embedder that cannot be resolved AT ALL fails the run before this
+/// point; see [`import_palace_records`].) That ordering is what
+/// `an_embedder_failure_during_import_writes_nothing_durably` pins: it drives a
+/// real import through an embedder that always errors and asserts both the
+/// in-memory table and `kg.load_drawers()` are still empty, so reordering the
+/// embed after the write turns the test red.
+/// An import that wrote the drawer and let the embed fail would leave a
 /// memory that is durable and permanently unfindable, which is the failure mode
 /// #4906 spent a whole lane removing from the write path. A slow import is the
 /// accepted cost of excluding vectors; a silently unsearchable one is not. The
@@ -354,8 +398,13 @@ async fn merge_into_existing(
 /// the write path uses, upserts the vector, persists the drawer, and pushes it
 /// into the in-memory table.
 /// Test: `import_preserves_the_record_created_at_on_insert`,
-/// `export_then_import_preserves_metadata`, `imported_memory_is_recallable`.
-async fn insert_new(handle: &PalaceHandle, rec: &SharedMemoryRecord) -> Result<Uuid> {
+/// `export_then_import_preserves_metadata`, `imported_memory_is_recallable`,
+/// `an_embedder_failure_during_import_writes_nothing_durably`.
+async fn insert_new(
+    handle: &PalaceHandle,
+    rec: &SharedMemoryRecord,
+    embedder: &Arc<dyn Embedder + Send + Sync>,
+) -> Result<Uuid> {
     let room = RoomType::parse(&rec.room);
     let room_id = resolve_or_create_room_in_wing(&handle.kg, &room, DEFAULT_WING_ID).await;
 
@@ -371,9 +420,6 @@ async fn insert_new(handle: &PalaceHandle, rec: &SharedMemoryRecord) -> Result<U
     drawer.fact_key = None;
     let id = drawer.id;
 
-    let embedder = shared_embedder()
-        .await
-        .context("acquire the shared embedder for import")?;
     let embed_timeout = timeouts::embed_batch_timeout();
     let vecs = tokio::time::timeout(
         embed_timeout,

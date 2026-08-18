@@ -359,7 +359,7 @@ pub(crate) fn serialize_recall(
         .map(|r| {
             json!({
                 "drawer_id": r.drawer.id.to_string(),
-                "content":   r.drawer.content,
+                "content":   r.drawer.content(),
                 "score":     r.score,
                 "layer":     r.layer,
                 "tags":      r.drawer.tags,

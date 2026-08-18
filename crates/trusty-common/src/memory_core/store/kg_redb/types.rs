@@ -209,7 +209,7 @@ pub(super) fn decode_drawer_record(bytes: &[u8]) -> Result<DrawerRecord, postcar
 pub(super) fn drawer_to_record(drawer: &Drawer) -> DrawerRecord {
     DrawerRecord {
         room_id: drawer.room_id.to_string(),
-        content: drawer.content.clone(),
+        content: drawer.content().to_string(),
         importance: drawer.importance,
         tags: drawer.tags.clone(),
         source_file: drawer

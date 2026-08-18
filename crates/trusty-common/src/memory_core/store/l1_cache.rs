@@ -271,7 +271,7 @@ mod tests {
             loaded[0].id,
             Uuid::from_u128(20),
             "the newest of a tie must lead the snapshot; got {:?}",
-            loaded.iter().map(|d| &d.content).collect::<Vec<_>>()
+            loaded.iter().map(|d| d.content()).collect::<Vec<_>>()
         );
         assert!(
             loaded.iter().all(|d| d.id >= Uuid::from_u128(6)),

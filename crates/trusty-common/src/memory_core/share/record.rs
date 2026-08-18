@@ -129,8 +129,8 @@ impl SharedMemoryRecord {
         Self {
             format_version: SHARE_FORMAT_VERSION,
             hash_version: CONTENT_HASH_VERSION,
-            content_hash: drawer.content_hash,
-            content: drawer.content.clone(),
+            content_hash: drawer.content_hash(),
+            content: drawer.content().to_string(),
             tags: drawer.tags.clone(),
             created_at: drawer.created_at,
             drawer_type: drawer.drawer_type.as_str().to_string(),

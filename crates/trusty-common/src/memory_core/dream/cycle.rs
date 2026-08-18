@@ -59,7 +59,7 @@ pub(super) async fn content_prune_pass(
         if drawer.drawer_type.is_protected() {
             continue;
         }
-        if is_low_quality_content(&drawer.content, min_words) {
+        if is_low_quality_content(drawer.content(), min_words) {
             victims.push(drawer.id);
         }
     }
@@ -179,7 +179,7 @@ pub(super) async fn dedup_pass(
         .await
         .map_err(|e| e.context("acquire shared embedder for dream dedup"))?;
 
-    let contents: Vec<String> = snapshot.iter().map(|d| d.content.clone()).collect();
+    let contents: Vec<String> = snapshot.iter().map(|d| d.content().to_string()).collect();
     let vectors = embedder
         .embed_batch(&contents)
         .await
