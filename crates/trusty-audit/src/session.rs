@@ -320,19 +320,27 @@ impl Outcome {
     /// next stage over a set the operator never actually got (#5215 review,
     /// #5555).
     /// What: [`EXIT_PARTIAL`] for a [`RunReport`] that did not fully succeed;
-    /// [`EXIT_INCOMPLETE`] for a [`CloneReport`] that carries gaps, and for a
-    /// [`ReturnPackage`] that does not cover every repository the sweep
-    /// attempted (#5499 — the package is still worth sending, and it is still
-    /// not the whole engagement); 0 otherwise. The policy lives here rather than
-    /// in `main.rs` so the Tauri shell reads the same judgement rather than
-    /// re-deriving it.
+    /// [`EXIT_INCOMPLETE`] for a [`CloneReport`] that carries gaps, for a
+    /// [`RunReport`] whose repositories all succeeded and which skipped a
+    /// registered board (#5982), and for a [`ReturnPackage`] that does not cover
+    /// every repository the sweep attempted (#5499 — the package is still worth
+    /// sending, and it is still not the whole engagement); 0 otherwise. The
+    /// policy lives here rather than in `main.rs` so the Tauri shell reads the
+    /// same judgement rather than re-deriving it.
     /// Test: `crate::cli::cli_tests::a_partial_sweep_does_not_exit_zero`,
     /// `crate::cli::cli_tests::a_run_with_gaps_exits_non_zero`,
+    /// `crate::cli::cli_tests::a_sweep_that_skipped_a_board_does_not_exit_zero`,
     /// `crate::cli::cli_tests::a_package_that_omits_a_repository_does_not_exit_zero`,
     /// `crate::chain::chain_tests::a_partly_failed_chain_packages_and_still_does_not_exit_zero`.
     pub fn exit_code(&self) -> i32 {
         match self {
             Outcome::Run(report) if report.status != run::RunStatus::AllSucceeded => EXIT_PARTIAL,
+            // #5982: a registered board the sweep could not collect is the same
+            // shape as a `Cloned` gap — every repository was audited and the
+            // engagement still did not cover what was registered. Without this,
+            // `taudit run` over a legacy `linear:<team-id>` exits 0 and chains
+            // onward over a board nobody read.
+            Outcome::Run(report) if !report.board_gaps.is_empty() => EXIT_INCOMPLETE,
             Outcome::Cloned(report) if !report.gaps.is_empty() => EXIT_INCOMPLETE,
             Outcome::Package(package) if !package.excluded.is_empty() => EXIT_INCOMPLETE,
             // #5824: the chain reports the sweep's verdict for the same reason
@@ -616,6 +624,13 @@ impl Session {
     /// access check, and [`registry::register`] owns the write — including the
     /// lock that stops two concurrent `add` runs discarding each other's target.
     ///
+    /// #5982: what is written is the target validation ANSWERED with, not the
+    /// one parsed from argv. `linear:<team-id>` names a readable team and is not
+    /// a key the sweep can collect against, so validation resolves it to the
+    /// team key while it already has Linear's team list in hand. The
+    /// [`Registration`] reports that same resolved target, so an operator who
+    /// typed an id is shown what was actually registered.
+    ///
     /// #5979: the config is REQUIRED here, where it used to be optional. It is
     /// the file a target is now declared in, so an absent one is
     /// [`AuditError::NoEngagementConfig`] rather than a registration that lands
@@ -647,7 +662,9 @@ impl Session {
         // other `add` for this engagement behind one unreachable site.
         // `register` re-reads the config, so the append is decided against the
         // snapshot current at write time.
-        validate::validate(&target, Some(&config), self.repo_probe).await?;
+        // #5982: what gets persisted is what validation resolved, not what was
+        // typed — a Linear team id would otherwise be stored and never collect.
+        let target = validate::validate(&target, Some(&config), self.repo_probe).await?;
         let inserted = self
             .under_registry_lock({
                 let (target, config_path) = (target.clone(), self.config_path.clone());

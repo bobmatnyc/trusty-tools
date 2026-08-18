@@ -850,6 +850,38 @@ mod cli_tests {
         );
     }
 
+    /// #5982: every repository succeeded and a registered board was skipped, so
+    /// this is `AllSucceeded` and still not a whole engagement. Before the
+    /// `board_gaps` wiring, `taudit run` over a legacy `linear:<team-id>` exited
+    /// 0 and rendered nothing at all about the board — the silent-empty shape
+    /// `boards::resolve`'s gap lines exist to replace.
+    ///
+    /// Against `9ee9cc386` the `RunReport::stating` constructor does not exist.
+    #[test]
+    fn a_sweep_that_skipped_a_board_does_not_exit_zero() {
+        use crate::run::{RepoRun, RunReport, SelectedRepo};
+
+        let audited = RepoRun {
+            repo: SelectedRepo {
+                name: "acme-api".to_owned(),
+                path: PathBuf::from("repos/acme-api"),
+            },
+            output: PathBuf::from("/work/out/00-acme-api"),
+            log: PathBuf::from("/work/logs/00-acme-api.log"),
+            gaps: Vec::new(),
+            resumed: false,
+            result: RepoResult::Succeeded,
+        };
+        let gap = "linear:a1b2c3d4 was not audited — re-register it (#5982)";
+        let outcome = Outcome::Run(RunReport::of(vec![audited]).stating(vec![gap.to_owned()]));
+
+        let text = render(&outcome);
+        assert!(text.contains(&format!("Not audited: {gap}")), "{text}");
+        // The board is not a repository that failed: the verdict is unchanged.
+        assert!(text.contains("Audited 1 repository"), "{text}");
+        assert_eq!(exit_code(&outcome), EXIT_INCOMPLETE);
+    }
+
     /// #5494: silent skipping is the defect. A resumed sweep finishes in
     /// seconds, and without a word about it that reads as a run that did
     /// nothing — so each carried-over repository is marked in its own line and

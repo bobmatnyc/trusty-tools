@@ -294,6 +294,35 @@ impl fmt::Display for Target {
 /// The shape a board spec must have, quoted back on a refusal.
 const BOARD_SHAPE: &str = "expected jira:<PROJECT-KEY> or linear:<TEAM-KEY-or-ID>";
 
+/// The longest team key tga's own extractor can produce. See
+/// [`is_linear_team_key`].
+const LINEAR_TEAM_KEY_MAX: usize = 10;
+
+/// Whether a Linear board key is one the sweep can actually collect against.
+///
+/// Why: #5982. `crate::validate` accepts a team's short key or its internal id,
+/// and only the short key ever reaches a collected issue — tga matches
+/// `linear.team_keys` against the text before the hyphen in an identifier like
+/// `ENG-1234`. A registered id validated green and collected nothing, and
+/// nothing said so, because from the collector's side a team with no matching
+/// issues looks exactly like a team with no issues. This is the one place that
+/// question is answered, so `crate::validate` (which resolves an id to the key
+/// before it is persisted) and `crate::run::boards` (which states the gap when a
+/// key stored earlier cannot collect) cannot drift apart.
+///
+/// What: `[A-Z][A-Z0-9]{0,9}`, the prefix shape
+/// `tga::classify::sources::linear::linear_key_regex` can capture. A team id
+/// fails it on all three counts — 36 characters, lowercase hex, and hyphens.
+///
+/// Test: `super::registry_tests::a_team_id_is_not_a_key_the_sweep_can_collect`.
+pub fn is_linear_team_key(key: &str) -> bool {
+    (1..=LINEAR_TEAM_KEY_MAX).contains(&key.len())
+        && key.starts_with(|c: char| c.is_ascii_uppercase())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
 /// Turn a command-line spec into a target.
 ///
 /// Why: the one place argv becomes a [`Target`], so the CLI and the Tauri shell
@@ -713,6 +742,27 @@ mod registry_tests {
         Target::Board {
             provider,
             key: key.to_owned(),
+        }
+    }
+
+    /// The line between the two things `linear:<key>` has always accepted
+    /// (#5982). A team id is a legal spec and a readable team; it is simply not
+    /// a key any collected issue can carry.
+    #[test]
+    fn a_team_id_is_not_a_key_the_sweep_can_collect() {
+        for collectable in ["ENG", "FE", "A", "X9", "ABCDEFGHIJ"] {
+            assert!(is_linear_team_key(collectable), "{collectable}");
+        }
+        for not in [
+            "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "eng",
+            "ENG-1",
+            "ENG_X",
+            "9ENG",
+            "ABCDEFGHIJK",
+            "",
+        ] {
+            assert!(!is_linear_team_key(not), "{not}");
         }
     }
 
