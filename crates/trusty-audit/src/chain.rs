@@ -249,6 +249,7 @@ pub async fn audit(
         .map_err(|e| stopped(Phase::Collect, e))?;
 
     let package = assemble(work, config, &gaps, options.destination.clone(), progress)
+        .await
         .map_err(|e| stopped(Phase::Package, e))?;
 
     Ok(ChainReport {
@@ -429,7 +430,7 @@ async fn collect(
 /// Test: `super::chain_tests::the_chain_installs_collects_and_packages`,
 /// `super::chain_tests::progress_covers_every_phase`,
 /// `cli_end_to_end::a_registered_repository_that_never_cloned_is_named_in_the_package`.
-fn assemble(
+async fn assemble(
     work: &WorkDir,
     config: &EngagementConfig,
     gaps: &[String],
@@ -443,7 +444,12 @@ fn assemble(
     );
     progress.operation_started(Operation::Package, 1);
     progress.unit_started(Operation::Package, name.as_str(), 1, 1);
-    let assembled = package::from_checkpoint(work, config, gaps, &destination);
+    // #5980 CRITICAL 4: resolved here, not threaded from `collect` — the phase
+    // is a separate step from collection and re-derives what it needs, the
+    // same pattern `run::sweep` and `session::package` both follow.
+    let github_access = crate::run::github_issues::resolve_github_access().await;
+    let assembled =
+        package::from_checkpoint(work, config, gaps, &destination, github_access.raw_token());
     progress.unit_finished(
         Operation::Package,
         name.as_str(),

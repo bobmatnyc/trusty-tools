@@ -601,7 +601,9 @@ impl Session {
             Command::ListTargets => self.list_targets().map(Outcome::Targets),
             Command::RemoveTarget { spec } => self.remove_target(&spec).await.map(Outcome::Removed),
             Command::Run(options) => self.run(&options).await.map(Outcome::Run),
-            Command::Package { destination } => self.package(destination).map(Outcome::Package),
+            Command::Package { destination } => {
+                self.package(destination).await.map(Outcome::Package)
+            }
             // #5824: the one-shot chain over the four above. `crate::chain`
             // calls each of them unchanged, so this and they cannot drift.
             Command::Audit(options) => self.audit(&options).await.map(Outcome::Audit),
@@ -807,7 +809,7 @@ impl Session {
     /// precondition enforced in two places is one that drifts.
     /// Test: `super::session_tests::packaging_before_any_sweep_is_refused`,
     /// `super::session_tests::packaging_an_unfinished_sweep_is_refused`.
-    fn package(&self, destination: Option<PathBuf>) -> Result<ReturnPackage, AuditError> {
+    async fn package(&self, destination: Option<PathBuf>) -> Result<ReturnPackage, AuditError> {
         // #5868: through `engagement_config` so the outbound credential scan
         // looks for the key the sweep actually used. `package::from_checkpoint`
         // refuses a deliverable containing `config.openrouter_key`; with an
@@ -815,9 +817,21 @@ impl Session {
         // the wrong bytes and let the real one through.
         let config = self.engagement_config()?;
         let destination = destination.unwrap_or_else(|| package::default_destination(&self.work));
+        // #5980 CRITICAL 4: re-resolved here rather than threaded from `run` —
+        // packaging is a standalone command that can run long after (even in a
+        // different process from) the sweep that collected GitHub issues, so
+        // there is no live `GithubAccess` to inherit. The outbound credential
+        // scan needs the same value the scrubber used during collection.
+        let github_access = run::github_issues::resolve_github_access().await;
         // No unattempted targets: the standalone verb packages whatever the last
         // sweep recorded and knows nothing about a registry (#5824).
-        package::from_checkpoint(&self.work, &config, &[], &destination)
+        package::from_checkpoint(
+            &self.work,
+            &config,
+            &[],
+            &destination,
+            github_access.raw_token(),
+        )
     }
 
     /// Drive the whole engagement in one call (#5824).

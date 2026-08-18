@@ -261,6 +261,11 @@ struct PackagedRepo {
 /// `crate::session::session_tests::packaging_an_unfinished_sweep_is_refused`,
 /// `crate::chain::chain_tests::the_chain_installs_collects_and_packages`.
 ///
+/// `github_token` is the raw `gh`-derived credential (#5980 CRITICAL 4), when
+/// one was read — see `secret_needles`'s docs below for why the outbound scan
+/// needs it and [`crate::run::github_issues::GithubAccess::raw_token`] for why
+/// nothing else exposes the value this way.
+///
 /// # Errors
 ///
 /// [`AuditError::NothingToPackage`] when no sweep has finished here, and
@@ -270,6 +275,7 @@ pub fn from_checkpoint(
     config: &EngagementConfig,
     unattempted: &[String],
     destination: &Path,
+    github_token: Option<&str>,
 ) -> Result<ReturnPackage, AuditError> {
     let progress =
         crate::run::read_progress(work)?.ok_or_else(|| AuditError::NothingToPackage {
@@ -291,7 +297,14 @@ pub fn from_checkpoint(
             ),
         });
     }
-    assemble(work, config, &progress.report(), unattempted, destination)
+    assemble(
+        work,
+        config,
+        &progress.report(),
+        unattempted,
+        destination,
+        github_token,
+    )
 }
 
 pub fn assemble(
@@ -300,6 +313,7 @@ pub fn assemble(
     report: &RunReport,
     unattempted: &[String],
     destination: &Path,
+    github_token: Option<&str>,
 ) -> Result<ReturnPackage, AuditError> {
     let audited: Vec<&RepoRun> = report
         .repos
@@ -333,7 +347,15 @@ pub fn assemble(
     let metadata = render_metadata(work, config, report, &audited, unattempted)?;
     let readme = render_readme(config, &audited, &excluded);
 
-    write_archive(destination, config, readme, metadata, collected, excluded)
+    write_archive(
+        destination,
+        config,
+        readme,
+        metadata,
+        collected,
+        excluded,
+        github_token,
+    )
 }
 
 /// The directory name `run` wrote its output under, which is also the name its
@@ -633,6 +655,7 @@ fn write_archive(
     metadata: String,
     collected: Vec<(String, PathBuf)>,
     excluded: Vec<String>,
+    github_token: Option<&str>,
 ) -> Result<ReturnPackage, AuditError> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|source| AuditError::Package {
@@ -641,7 +664,14 @@ fn write_archive(
         })?;
     }
     let temporary = destination.with_extension("zip.part");
-    let result = fill_archive(&temporary, config, readme, metadata, collected);
+    let result = fill_archive(
+        &temporary,
+        config,
+        readme,
+        metadata,
+        collected,
+        github_token,
+    );
     let mut files = match result {
         Ok(files) => files,
         Err(e) => {
@@ -680,6 +710,7 @@ fn fill_archive(
     readme: String,
     metadata: String,
     collected: Vec<(String, PathBuf)>,
+    github_token: Option<&str>,
 ) -> Result<Vec<PackagedFile>, AuditError> {
     let file = std::fs::File::create(temporary).map_err(|source| AuditError::Package {
         path: temporary.to_path_buf(),
@@ -703,7 +734,14 @@ fn fill_archive(
     }
 
     for (entry, source) in collected {
-        let bytes = credential_scan::copy_member(&mut zip, &entry, &source, config, temporary)?;
+        let bytes = credential_scan::copy_member(
+            &mut zip,
+            &entry,
+            &source,
+            config,
+            temporary,
+            github_token,
+        )?;
         files.push(PackagedFile {
             entry,
             source: Some(source),
@@ -738,9 +776,10 @@ fn start(zip: &mut Archive, entry: &str, bytes: u64, temporary: &Path) -> Result
 
 #[cfg(test)]
 mod package_tests {
+    use std::io::Read as _;
+
     use super::*;
     use crate::run::{RepoResult, RepoRun, SelectedRepo};
-    use std::io::Read as _;
 
     const CONFIG: &str = r#"
 openrouter_key = "sk-or-v1-not-a-real-key"
@@ -847,7 +886,8 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
 
         assert_eq!(package.path, destination);
         assert!(destination.is_file(), "the zip was not written");
@@ -874,7 +914,7 @@ trusty-review = "0.15.1"
         install_record(&work);
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
-        assemble(&work, &config(), &report, &[], &destination).expect("assembles");
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
 
         // `by_index` succeeding with no password IS the unencrypted property:
         // the zip crate returns `UnsupportedArchive` for an encrypted entry.
@@ -911,7 +951,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a package carrying the key must not be produced");
         assert!(
             matches!(err, AuditError::CredentialInPackage { .. }),
@@ -959,11 +999,29 @@ api_key = "lin_api_do-not-package-me"
         config: &EngagementConfig,
         leaked: &str,
     ) -> Result<ReturnPackage, AuditError> {
+        packaging_a_member_carrying_with_token(work, config, leaked, None)
+    }
+
+    /// [`packaging_a_member_carrying`], with the `gh`-derived credential the
+    /// caller wants in the needle set (#5980 CRITICAL 4).
+    fn packaging_a_member_carrying_with_token(
+        work: &WorkDir,
+        config: &EngagementConfig,
+        leaked: &str,
+        github_token: Option<&str>,
+    ) -> Result<ReturnPackage, AuditError> {
         install_record(work);
         let run = audited(work, "00-acme-api", "acme-api");
         std::fs::write(run.output.join("leaked.log"), leaked).expect("write");
         let report = RunReport::of(vec![run]);
-        assemble(work, config, &report, &[], &default_destination(work))
+        assemble(
+            work,
+            config,
+            &report,
+            &[],
+            &default_destination(work),
+            github_token,
+        )
     }
 
     /// The JIRA token is a secret this crate now hands to a child, so the
@@ -996,6 +1054,36 @@ api_key = "lin_api_do-not-package-me"
         assert!(
             !destination.with_extension("zip.part").exists(),
             "the temporary must be removed too"
+        );
+    }
+
+    /// #5980 CRITICAL 4: the `gh`-derived GitHub credential is a third source
+    /// alongside the two board secrets above — it never lives in
+    /// `EngagementConfig`, so `configured_secrets()` alone cannot see it.
+    /// Before `secret_needles` took a `github_token` parameter, this member
+    /// packaged clean and the token left the recipient's network.
+    #[test]
+    fn a_member_carrying_the_github_token_is_refused_and_leaves_no_zip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let destination = default_destination(&work);
+        const TOKEN: &str = "ghp_do-not-package-me";
+
+        let err = packaging_a_member_carrying_with_token(
+            &work,
+            &config(),
+            "auth error: bad credentials (token ghp_do-not-package-me rejected)\n",
+            Some(TOKEN),
+        )
+        .expect_err("a package carrying the GitHub token must not be produced");
+
+        assert!(
+            matches!(err, AuditError::CredentialInPackage { .. }),
+            "{err:?}"
+        );
+        assert!(
+            !destination.exists(),
+            "a refused package must leave no file"
         );
     }
 
@@ -1072,7 +1160,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a symlink must not be followed into the package");
         assert!(
             matches!(err, AuditError::UnsafePackageEntry { .. }),
@@ -1097,7 +1185,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a hardlink must not carry outside content into the package");
         let AuditError::UnsafePackageEntry { kind, .. } = &err else {
             panic!("expected UnsafePackageEntry, got {err:?}");
@@ -1129,7 +1217,7 @@ api_key = "lin_api_do-not-package-me"
         .expect("hard link");
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a hardlink under extract/ must be refused too");
         let AuditError::UnsafePackageEntry { kind, .. } = &err else {
             panic!("expected UnsafePackageEntry, got {err:?}");
@@ -1160,8 +1248,15 @@ api_key = "lin_api_do-not-package-me"
             assert_eq!(links, 1, "{} has {links} links", path.display());
         }
         let report = RunReport::of(vec![run]);
-        assemble(&work, &config(), &report, &[], &default_destination(&work))
-            .expect("ordinary output must still package");
+        assemble(
+            &work,
+            &config(),
+            &report,
+            &[],
+            &default_destination(&work),
+            None,
+        )
+        .expect("ordinary output must still package");
     }
 
     /// A sweep in which nothing was audited must not produce a package that
@@ -1173,7 +1268,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![failed(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("no audited repository means no package");
         assert!(
             matches!(err, AuditError::NothingToPackage { .. }),
@@ -1195,7 +1290,8 @@ api_key = "lin_api_do-not-package-me"
         ]);
         let destination = default_destination(&work);
 
-        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
         assert_eq!(package.excluded.len(), 1);
         assert!(
             package.excluded[0].contains("acme-web"),
@@ -1242,7 +1338,8 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = tmp.path().join("Desktop/return.zip");
 
-        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
         assert_eq!(package.path, destination);
         assert!(destination.is_file());
         assert!(!destination.starts_with(work.root()));
@@ -1265,7 +1362,7 @@ api_key = "lin_api_do-not-package-me"
         std::fs::write(work.path(Area::Extract).join("09-other.db"), b"other").expect("write");
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &[], &destination).expect("assembles");
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
         let names = entries(&destination);
         assert!(
             names.contains(&"extract/00-acme-api.db".to_owned()),
@@ -1296,7 +1393,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a report with no database must not be packaged");
         let AuditError::MissingExtractDatabase { repo, expected } = &err else {
             panic!("expected MissingExtractDatabase, got {err:?}");
@@ -1327,7 +1424,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a missing extract/ directory must not be packaged");
         assert!(
             matches!(err, AuditError::MissingExtractDatabase { .. }),

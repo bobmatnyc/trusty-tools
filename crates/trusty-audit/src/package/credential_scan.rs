@@ -4,7 +4,11 @@
 //! Why: split out of `package.rs` when adding [`crate::error::AuditError::MissingExtractDatabase`]
 //! pushed that file one line past the 500-SLOC production cap (#5862) — the
 //! same split pattern documented in the project's file-size-cap policy. The
-//! scan itself is unchanged; only its home moved.
+//! scan itself is unchanged; only its home moved. The needle set grew once
+//! more the same way: the `gh`-derived GitHub token (#5980 CRITICAL 4) joined
+//! `openrouter_key` and the two board secrets as a value the deliverable must
+//! never carry, so `secret_needles` and `copy_member` both take it as an
+//! explicit parameter rather than reaching for a type this crate does not own.
 //!
 //! What: [`copy_member`] streams one file into the archive through
 //! [`CredentialScan`], a byte-oriented sliding window that has no notion of
@@ -33,19 +37,32 @@ const CHUNK_BYTES: usize = 64 * 1024;
 /// child writes are exactly the files this function's caller packages and sends
 /// off the recipient's network. One list, so a credential added to
 /// [`EngagementConfig`] is refused here the moment it is configured.
-/// What: [`EngagementConfig::configured_secrets`] as byte slices — the same
-/// list [`crate::run`]'s child-log scrubber uses as its needles, so the two
-/// guards cannot come to disagree about what a secret is. A provider with no
-/// entry contributes no needle.
+///
+/// `github_token` extends the same guard to the `gh`-derived credential
+/// (#5980 CRITICAL 4): before this parameter existed, a token echoed into a
+/// `tga`-written file under `out/`/`extract/` — the same shape #5857 already
+/// covers for JIRA and Linear — reached the deliverable unscanned, because
+/// [`EngagementConfig::configured_secrets`] has no way to name a credential
+/// that never lived in the engagement TOML.
+/// What: [`EngagementConfig::configured_secrets`] as byte slices, plus
+/// `github_token` when one was read — the same pair `crate::run`'s
+/// child-log scrubber uses as its needles, so the two guards cannot come to
+/// disagree about what a secret is. A provider with no entry contributes no
+/// needle.
 /// Test: `super::super::package_tests::a_member_carrying_the_jira_token_is_refused_and_leaves_no_zip`,
 /// `super::super::package_tests::a_member_carrying_the_linear_api_key_is_refused_and_leaves_no_zip`,
-/// `super::super::package_tests::a_member_carrying_several_secrets_is_refused_on_the_first_pass`.
-fn secret_needles(config: &EngagementConfig) -> Vec<&[u8]> {
-    config
+/// `super::super::package_tests::a_member_carrying_several_secrets_is_refused_on_the_first_pass`,
+/// `super::super::package_tests::a_member_carrying_the_github_token_is_refused_and_leaves_no_zip`.
+fn secret_needles<'a>(config: &'a EngagementConfig, github_token: Option<&'a str>) -> Vec<&'a [u8]> {
+    let mut needles: Vec<&[u8]> = config
         .configured_secrets()
         .into_iter()
         .map(str::as_bytes)
-        .collect()
+        .collect();
+    if let Some(token) = github_token {
+        needles.push(token.as_bytes());
+    }
+    needles
 }
 
 /// Copy one file into the archive, refusing it if it carries any credential.
@@ -55,6 +72,7 @@ pub(super) fn copy_member(
     source: &Path,
     config: &EngagementConfig,
     temporary: &Path,
+    github_token: Option<&str>,
 ) -> Result<u64, AuditError> {
     let mut input = std::fs::File::open(source).map_err(|e| AuditError::Package {
         path: source.to_path_buf(),
@@ -63,7 +81,7 @@ pub(super) fn copy_member(
     let bytes = input.metadata().map(|m| m.len()).unwrap_or(0);
     start(zip, entry, bytes, temporary)?;
 
-    let needles = secret_needles(config);
+    let needles = secret_needles(config, github_token);
     let mut scan = CredentialScan::over(&needles);
     let mut buffer = vec![0_u8; CHUNK_BYTES];
     let mut written = 0_u64;

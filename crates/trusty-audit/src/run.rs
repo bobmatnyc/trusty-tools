@@ -383,7 +383,7 @@ where
     // #5869: materialized once for the whole sweep — resolving reads
     // `.env.local` and opens the secure store, which is not a per-child cost,
     // let alone a per-line one.
-    let scrubber = child_output_scrubber(config);
+    let scrubber = child_output_scrubber(config, &github_access);
     // #5494: decided once, against the whole selection, so a repository's fate
     // does not depend on a record another repository's child rewrote meanwhile.
     let plan = checkpoint::plan(work, &selected, options.fresh)?;
@@ -457,13 +457,29 @@ where
 /// quotes a JIRA token in an auth error would otherwise write it to the log
 /// verbatim. [`crate::package::secret_needles`] draws from the same list.
 ///
+/// #5980 CRITICAL 3: `github_access`'s raw token (when `gh auth token`
+/// answered) is a THIRD source, alongside `resolved_secret_values` and
+/// `configured_secrets` — it comes from the recipient's `gh` keychain, never
+/// from `EngagementConfig`, so neither of those two sees it. A child that
+/// echoes a rejected GitHub credential back (an auth-failure HTTP body, for
+/// instance) would otherwise land the Bearer token in the log unredacted —
+/// the same `boards` gap #5857 closed, reopened here for a credential that
+/// reaches the child a different way.
+///
 /// This removes only values this process already holds; see [`crate::relay`]
 /// for what that leaves behind.
 /// Test: `super::run_tests::a_child_that_echoes_the_key_does_not_leave_it_in_the_log`,
-/// `super::run_tests::a_child_that_echoes_a_board_credential_does_not_leave_it_in_the_log`.
-fn child_output_scrubber(config: &EngagementConfig) -> Scrubber {
+/// `super::run_tests::a_child_that_echoes_a_board_credential_does_not_leave_it_in_the_log`,
+/// `super::run_tests::a_child_that_echoes_the_github_token_does_not_leave_it_in_the_log`.
+fn child_output_scrubber(
+    config: &EngagementConfig,
+    github_access: &github_issues::GithubAccess,
+) -> Scrubber {
     let mut secrets = trusty_common::credentials::resolved_secret_values();
     secrets.extend(config.configured_secrets().into_iter().map(str::to_owned));
+    if let Some(token) = github_access.raw_token() {
+        secrets.push(token.to_owned());
+    }
     Scrubber::over(secrets)
 }
 
@@ -1899,6 +1915,28 @@ trusty-review = "0.15.1"
                 path.display()
             );
         }
+    }
+
+    /// #5980 CRITICAL 3 / MEDIUM 1: the `gh`-derived token is a THIRD
+    /// credential source, alongside `resolved_secret_values` and
+    /// `configured_secrets` — before `child_output_scrubber` took a
+    /// `github_access` parameter, nothing put it in the needle set and a
+    /// child that echoed a rejected GitHub credential wrote it to the log in
+    /// the clear, the same shape #5857 already closed for `boards`.
+    ///
+    /// `Scrubber::scrub` itself is private to `crate::relay`, so this proves
+    /// the needle set through `Scrubber`'s derived `Debug` rather than
+    /// through a real spawned child — [`github_issues::GithubAccess::with_token`]
+    /// exists for exactly this: constructing the token-present case without a
+    /// real `gh` on `PATH`.
+    #[test]
+    fn child_output_scrubber_includes_the_github_token() {
+        let access = github_issues::GithubAccess::with_token("ghp_test-token-in-needle-set");
+        let scrubber = child_output_scrubber(&config(), &access);
+        assert!(
+            format!("{scrubber:?}").contains("ghp_test-token-in-needle-set"),
+            "the github token must be in the scrubber's needle set: {scrubber:?}"
+        );
     }
 
     /// The CRITICAL arm: `tga audit` exits 0 whenever the sweep COMPLETED,

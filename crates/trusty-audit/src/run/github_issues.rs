@@ -28,19 +28,31 @@
 //!
 //! ## Fail-open: no gap invented here, because tga already states one
 //!
-//! DOC-67 §9 / tga #5655 already turns ANY `work_items` fetch fault — issues
-//! disabled (HTTP 410), a rejected credential (401/403), or an unreachable
-//! endpoint — into a failed `collect` stage, which `sweep_gap_lines` turns
+//! Corrected (#5980 CRITICAL 2): the section below used to credit DOC-67 §9
+//! for this mechanism; that section is about `report --analyze`'s
+//! `HttpAnalyzeMetricsSource` enrichment, not about `work_items` collection —
+//! wrong governing spec, kept here only as the record of the mistake.
+//!
+//! tga #5655 turns ANY `work_items` fetch fault — issues disabled (HTTP
+//! 410), a rejected credential (401/403), or an unreachable endpoint — into a
+//! failed `collect` stage, which `tga::audit::gaps::sweep_gap_lines` turns
 //! into a named line in that repository's own manifest gaps
 //! (`crate::run::verify_output` reads it into `crate::run::RepoRun::gaps`).
-//! That is the JIRA precedent #5980 asks this feature to match: a stage that
-//! failed must not read as a stage that produced nothing. Because that
-//! mechanism already exists and already fires once `github:` is present in
-//! the generated config, this module's only obligation is to make sure that
-//! section is ALWAYS generated for every registered repository — never
-//! omitted because a token could not be read. Omitting it on a credential
-//! failure would be the silent-empty-success shape #5982 already fixed for
-//! Linear, repeated here under a new name.
+//! **That chain depends on the fetch actually erroring**, though: before
+//! #5980 CRITICAL 1's fix, `GitHubClient::fetch_issue` mapped a private
+//! repository's every-request-404 to `Ok(None)` — indistinguishable from "no
+//! such issue" — so `work_item_pipeline::run_one_adapter`'s authoritative
+//! not-found arm recorded nothing and #5655's mechanism never fired at all.
+//! The repo-visibility probe added there is what makes an invisible repo
+//! reach `stats.fail_stage`/`skip_item` in the first place; this module's
+//! job is unchanged — making sure `github:` is present in the generated
+//! config for every registered repository, never omitted because a token
+//! could not be read, so that when the fetch below it fails, the failure has
+//! something to attach to. Omitting the section on a credential failure
+//! would be the silent-empty-success shape #5982 already fixed for Linear,
+//! repeated here under a new name. That is the JIRA precedent #5980 asks
+//! this feature to match: a stage that failed must not read as a stage that
+//! produced nothing.
 //!
 //! Test: `github_issues_tests` below.
 
@@ -88,6 +100,24 @@ impl GithubAccess {
         self.token.as_deref().map(|t| (ENV_GITHUB_TOKEN, t))
     }
 
+    /// The real token value, for the outbound credential guards ONLY (#5980
+    /// CRITICAL 3 / CRITICAL 4) — every other consumer gets [`Self::env`]'s
+    /// child-environment pair or [`Self::section`]'s `${VAR}` placeholder,
+    /// never this.
+    ///
+    /// Why: a child that echoes an auth failure back (a rejected `gh`-derived
+    /// token quoted in an HTTP error body) can put the raw value in its own
+    /// stdout/stderr, or in a file it writes under `out/`/`extract/` — the
+    /// same two places `crate::run`'s child-log scrubber and
+    /// `crate::package`'s outbound scan already guard for `boards`' JIRA and
+    /// Linear credentials (#5857). Neither guard could see this token before
+    /// it had a way to read it back out of [`GithubAccess`].
+    /// What: the raw `Option<&str>`, unmodified.
+    /// Test: `github_issues_tests::raw_token_exposes_the_value_the_placeholder_hides`.
+    pub(crate) fn raw_token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
     /// This repository's `github:` section — always `Some`, per the module
     /// docs: a repository target always contributes its issues, and a
     /// missing credential is not a reason to omit the attempt.
@@ -104,6 +134,18 @@ impl GithubAccess {
                 .token
                 .as_ref()
                 .map(|_| format!("${{{ENV_GITHUB_TOKEN}}}")),
+        }
+    }
+
+    /// Build a [`GithubAccess`] carrying a specific token, for tests that
+    /// need to prove the credential reaches a child's environment or an
+    /// outbound guard's needle set without spawning a real `gh` (#5980
+    /// MEDIUM 1). Production code only ever constructs this type through
+    /// [`resolve_github_access`].
+    #[cfg(test)]
+    pub(crate) fn with_token(token: impl Into<String>) -> Self {
+        Self {
+            token: Some(token.into()),
         }
     }
 }
@@ -192,5 +234,19 @@ mod github_issues_tests {
     fn an_ok_result_is_carried_through() {
         let access = from_probe_result(Ok("a-real-token".to_owned()));
         assert_eq!(access.token.as_deref(), Some("a-real-token"));
+    }
+
+    /// #5980 MEDIUM 1: `section()` and `env()` both hide the real value behind
+    /// a placeholder or a not-yet-dereferenced pair; `raw_token` is the one
+    /// path that hands back the value itself, and only the outbound guards
+    /// (the child-log scrubber, the package's credential scan) may call it.
+    #[test]
+    fn raw_token_exposes_the_value_the_placeholder_hides() {
+        let access = GithubAccess::with_token("ghp_real-token-do-not-write-me-down");
+        assert_eq!(
+            access.raw_token(),
+            Some("ghp_real-token-do-not-write-me-down")
+        );
+        assert_eq!(GithubAccess::default().raw_token(), None);
     }
 }
