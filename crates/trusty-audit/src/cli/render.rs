@@ -372,6 +372,13 @@ fn render_package(package: &crate::package::ReturnPackage) -> String {
 /// `super::cli_tests::a_resumed_sweep_says_what_it_carried_over_and_what_it_audited`.
 fn render_run(report: &crate::run::RunReport) -> String {
     let mut out = String::new();
+    // #5982: a registered board this sweep will not collect, stated before the
+    // per-repository lines because it is a dimension of the whole sweep rather
+    // than of any one repository. Empty on the chain path, which states the same
+    // gaps in its own roll-up below — see `crate::run::RunReport::board_gaps`.
+    for gap in &report.board_gaps {
+        out.push_str(&format!("Not audited: {gap}\n"));
+    }
     for run in &report.repos {
         match &run.result {
             // #5494: a repository this run carried over from an earlier

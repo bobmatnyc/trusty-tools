@@ -43,7 +43,7 @@ use trusty_common::gh::GhCommand;
 use crate::config::{EngagementConfig, JiraCredentials, LinearCredentials};
 use crate::discover;
 use crate::error::AuditError;
-use crate::registry::{BoardProvider, Target};
+use crate::registry::{BoardProvider, Target, is_linear_team_key};
 
 /// Ceiling on one validation request.
 ///
@@ -165,12 +165,14 @@ const NO_SUCH_SUBCOMMAND: &str = "no-such-subcommand-5822";
 ///
 /// # Postconditions
 /// The returned target has the same [`Target::kind`] as `target`, and for a
-/// Linear board its key satisfies [`crate::registry::is_linear_team_key`] —
-/// which is the property `crate::run::boards::resolve` requires before a board
-/// reaches `linear.team_keys`.
+/// Linear board its key satisfies [`is_linear_team_key`] — which is the property
+/// `crate::run::boards::resolve` requires before a board reaches
+/// `linear.team_keys`. [`resolve_team_key`] is what enforces it; before #5982 it
+/// was a claim about a string this function echoed from the reply unchecked.
 ///
 /// Test: `super::validate_tests::a_board_with_no_credential_names_the_field`,
 /// `super::validate_tests::a_team_id_registers_as_the_team_key_that_collects`,
+/// `super::validate_tests::a_team_whose_key_the_sweep_cannot_match_is_refused`,
 /// and the `#[ignore]`d live probes.
 ///
 /// # Errors
@@ -335,14 +337,42 @@ struct Team {
 /// the id and the lowercase spelling Linear accepts here are both dead on
 /// arrival at collection. This is the only place that knows both what was typed
 /// and what Linear calls the team, so it is where the two are reconciled.
+///
 /// What: the first team whose `key` or `id` equals `typed` ignoring ASCII case,
-/// answered with that team's OWN `key` — never the caller's string.
-/// Test: `super::validate_tests::a_team_id_registers_as_the_team_key_that_collects`.
-fn resolve_team_key(teams: &[Team], typed: &str) -> Option<String> {
-    teams
+/// answered with that team's OWN `key` — never the caller's string, and only
+/// once uppercased — the same normalisation [`crate::run::boards::resolve`]
+/// applies to a key already on disk — and only when the result satisfies
+/// [`is_linear_team_key`]. Answering with the reply's
+/// key unchecked is what made [`validate`]'s postcondition a claim nothing
+/// enforced: [`Team::key`] is `#[serde(default)]`, so a reply that omits the
+/// field yields `""`, and an empty key registers green, can never collect, and
+/// cannot be removed either — `registry::parse(None, "linear:")` is an error, so
+/// the operator has no spelling that names the entry to drop. The `Err` is the
+/// reason [`board_refusal`] states, so the two failures read differently: the
+/// credential sees no such team, or it sees the team and Linear calls it
+/// something the sweep cannot match.
+///
+/// Test: `super::validate_tests::a_team_id_registers_as_the_team_key_that_collects`,
+/// `super::validate_tests::a_team_whose_key_the_sweep_cannot_match_is_refused`.
+fn resolve_team_key(teams: &[Team], typed: &str) -> Result<String, String> {
+    let Some(team) = teams
         .iter()
         .find(|t| t.key.eq_ignore_ascii_case(typed) || t.id.eq_ignore_ascii_case(typed))
-        .map(|t| t.key.clone())
+    else {
+        return Err(format!(
+            "the credential reaches {} team(s), and none of them is that one",
+            teams.len()
+        ));
+    };
+    let key = team.key.to_ascii_uppercase();
+    if is_linear_team_key(&key) {
+        return Ok(key);
+    }
+    Err(format!(
+        "Linear reports that team's key as `{}`, and `tga audit` matches issues by a key like the \
+         `ENG` in `ENG-1234` — one to ten characters of A-Z and 0-9 starting with a letter (#5982)",
+        team.key
+    ))
 }
 
 /// Prove the configured Linear credential can read this team, and name it.
@@ -396,17 +426,10 @@ async fn validate_linear(
         ));
     }
     let teams = reply.data.map(|d| d.teams.nodes).unwrap_or_default();
-    if let Some(team_key) = resolve_team_key(&teams, key) {
-        return Ok(team_key);
-    }
-    Err(board_refusal(
-        BoardProvider::Linear,
-        key,
-        format!(
-            "the credential reaches {} team(s), and none of them is that one",
-            teams.len()
-        ),
-    ))
+    // #5982: the resolver owns both outcomes, so a team the sweep could never
+    // match is refused here rather than persisted as a green registration.
+    resolve_team_key(&teams, key)
+        .map_err(|reason| board_refusal(BoardProvider::Linear, key, reason))
 }
 
 fn board_refusal(provider: BoardProvider, key: &str, reason: String) -> AuditError {
@@ -599,8 +622,35 @@ trusty-review = "0.15.1"
                 "the sweep cannot collect against {resolved}"
             );
         }
-        assert_eq!(resolve_team_key(&teams, "OPS"), None);
-        assert_eq!(resolve_team_key(&[], TEAM_ID), None);
+        for (teams, typed) in [(teams.as_slice(), "OPS"), (&[], TEAM_ID)] {
+            let reason = resolve_team_key(teams, typed).expect_err("no such team");
+            assert!(reason.contains("none of them is that one"), "{reason}");
+        }
+    }
+
+    /// The postcondition `validate` states, which nothing enforced: the reply's
+    /// `key` was echoed verbatim, and `Team::key` is `#[serde(default)]`, so a
+    /// reply that omits the field registered an empty key. That entry validated
+    /// green, could never collect, and could not be removed either —
+    /// `registry::parse(None, "linear:")` is an error, so no spelling names it.
+    /// Refusing at registration is the only point where the operator can still
+    /// act on it. See #5982.
+    #[test]
+    fn a_team_whose_key_the_sweep_cannot_match_is_refused() {
+        const TEAM_ID: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        for key in ["", "eng-team", "ABCDEFGHIJK", "1ENG"] {
+            let teams = vec![Team {
+                id: TEAM_ID.to_owned(),
+                key: key.to_owned(),
+            }];
+            let reason = resolve_team_key(&teams, TEAM_ID)
+                .expect_err("a key the sweep cannot match is not a registration");
+            assert!(reason.contains("#5982"), "key {key:?}: {reason}");
+            assert!(
+                reason.contains("matches issues by a key"),
+                "key {key:?}: {reason}"
+            );
+        }
     }
 
     /// The credential must not reach an error string, asserted directly rather
