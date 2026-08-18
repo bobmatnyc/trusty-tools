@@ -14,7 +14,57 @@
 //! deciding what to tell the operator needs that distinction intact.
 //! Test: `super::error_tests`.
 
+use std::fmt;
 use std::path::PathBuf;
+
+/// One line of a targets file that could not be read as a target (#5978).
+///
+/// Why: the line NUMBER is the whole point — an operator holding a
+/// thirty-line `repos.txt` needs to go straight to the three that are wrong,
+/// and a message naming only the entries makes them search for each one.
+/// What: the file's own name, the 1-based line number, the entry verbatim, and
+/// the reason that entry specifically was refused.
+/// Test: `crate::cli::targets_file::targets_file_tests::one_bad_line_refuses_the_whole_read`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadLine {
+    /// Which file, e.g. `repos.txt`.
+    pub file: String,
+    /// 1-based line number within that file.
+    pub line: usize,
+    /// What was on the line, trimmed.
+    pub entry: String,
+    /// Why this entry is not a target.
+    pub reason: String,
+}
+
+impl fmt::Display for BadLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            file,
+            line,
+            entry,
+            reason,
+        } = self;
+        write!(f, "{file} line {line}: {entry} — {reason}")
+    }
+}
+
+/// Every [`BadLine`] one read produced, rendered one per line.
+///
+/// A newtype rather than a bare `Vec` so [`AuditError::TargetsFileRefused`] can
+/// interpolate the whole list into its message while the caller keeps the
+/// structure to assert on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadLines(pub Vec<BadLine>);
+
+impl fmt::Display for BadLines {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for bad in &self.0 {
+            writeln!(f, "  {bad}")?;
+        }
+        Ok(())
+    }
+}
 
 /// Everything `trusty-audit`'s library surface can fail with.
 ///
@@ -507,6 +557,27 @@ pub enum AuditError {
         /// What the terminal read or write failed with.
         #[source]
         source: std::io::Error,
+    },
+
+    /// A `repos.txt` or `boards.txt` line is not a target, so none was taken.
+    ///
+    /// Why: #5978. Skipping the bad lines and registering the rest produces an
+    /// audit that covers fewer repositories than the file lists and reports
+    /// success over the absent ones. Every bad line is named at once so one run
+    /// fixes them all, and the message says the OpenRouter key is already saved
+    /// because the operator's next thought is whether re-running costs them the
+    /// key prompt again.
+    /// What: carries every refused line, from both files, with its number and
+    /// its own reason. The entry is quoted; a targets file holds no credential.
+    /// Test: `crate::cli::targets_file::targets_file_tests::one_bad_line_refuses_the_whole_read`.
+    #[error(
+        "these lines are not audit targets:\n{bad}\n\nNothing was registered. Fix them and run \
+         `trusty-audit` again — your OpenRouter key is saved, so you will not be asked for it \
+         again."
+    )]
+    TargetsFileRefused {
+        /// Every line that could not be read, in file order.
+        bad: BadLines,
     },
 
     /// The install package's destination is already taken.

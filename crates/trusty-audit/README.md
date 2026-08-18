@@ -29,6 +29,40 @@ A bare invocation is the entry point, and on a terminal it is the whole
 engagement: it asks for the audit targets one at a time, registers each as you
 enter it, installs the pinned tools, and then asks before starting the sweep.
 
+## Handing over the target list instead of typing it
+
+Put a `repos.txt` or a `boards.txt` beside `engagement.toml` — the directory you
+run from, or wherever `--config` points — and the launch reads it instead of
+asking for each target. One per line; `#` starts a comment. Both short forms and
+the URLs you copy out of a browser are accepted, and a `.git` suffix, a
+`/tree/<branch>` path and a Linear issue number are all stripped:
+
+```
+# repos.txt
+acme/api
+https://github.com/acme/web.git
+https://github.com/acme/iac/tree/main
+
+# boards.txt
+linear:ENG
+https://linear.app/acme/team/PLATFORM/active
+https://acme.atlassian.net/browse/OPS-412
+```
+
+One line that is not a target stops the whole read: nothing from either file is
+registered, every bad line is named with its number and its own reason, and you
+fix them and run again. Your OpenRouter key is already saved by then, so the
+second run does not ask for it. Partial registration is what the rule exists to
+prevent — an audit covering nineteen of twenty repositories still reports
+success, over the one it never saw.
+
+Either way the launch ends on the same review menu, which states how many
+repositories it will clone and how many boards it will collect from, and offers
+add, delete and proceed. Those counts are the point: `17 repositories, 2 boards`
+catches a truncated file at a glance. Add and delete write through to
+`engagement.toml`. With no terminal there is no menu — the counts and the full
+list are printed and the run proceeds.
+
 Two ways to get the status card instead, prompting for nothing: run
 `trusty-audit guided`, which is the named verb for exactly that, or run the bare
 invocation with no controlling terminal — a script, a cron entry, a CI job.

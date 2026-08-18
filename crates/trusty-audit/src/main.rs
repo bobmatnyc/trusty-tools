@@ -61,7 +61,14 @@ async fn main() -> Result<()> {
     // #5896 review: the PARSED CLI decides, not the `Command`. `to_command`
     // maps both a bare launch and `trusty-audit guided` onto `Command::Guided`,
     // so asking the command made the named verb block on a prompt.
-    let mut terminal = cli::registration::is_interactive(&cli)
+    //
+    // #5978: whether this is a BARE launch is kept, separately from whether a
+    // terminal opened. The targets files are adopted on both — a scripted run
+    // that quietly audits four of a `repos.txt`'s twenty repositories reports
+    // success over the sixteen it never saw. What the terminal buys is the
+    // review menu.
+    let bare = cli::registration::is_interactive(&cli);
+    let mut terminal = bare
         .then(cli::credential::DevTty::open)
         .and_then(Result::ok);
 
@@ -118,7 +125,20 @@ async fn main() -> Result<()> {
                     .await?
             }
         },
-        None => session.execute(command).await?,
+        // #5978: no terminal, so no menu — the counts and the full list are
+        // printed and the run proceeds. On stderr, because stdout carries the
+        // report. A file with an unparseable line never gets this far: `adopt`
+        // refuses the whole read, naming every bad line.
+        None => {
+            if bare
+                && let Some(lines) = cli::registration::adopt_without_a_terminal(&session).await?
+            {
+                for line in lines {
+                    eprintln!("{line}");
+                }
+            }
+            session.execute(command).await?
+        }
     };
     print!("{}", cli::render(&outcome));
 

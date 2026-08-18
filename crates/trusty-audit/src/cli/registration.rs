@@ -12,11 +12,17 @@
 //! terminal to prompt on. What crosses that boundary is a registered TARGET,
 //! never a way to ask for one.
 //!
-//! What: [`guided_at_the_terminal`] is the whole launch path — the loop, then
-//! the guided flow's own next step, then the sweep when the operator says so.
-//! [`register_targets`] is the loop on its own. Both take a
-//! [`Tty`](crate::cli::credential::Tty), so every branch is drivable from a test
-//! binary that has no controlling terminal.
+//! What: [`guided_at_the_terminal`] is the whole launch path — the targets, then
+//! the review menu, then the guided flow's own next step, then the sweep when
+//! the operator says so. [`register_targets`] is the prompt loop on its own.
+//! Both take a [`Tty`](crate::cli::credential::Tty), so every branch is drivable
+//! from a test binary that has no controlling terminal.
+//!
+//! Where the targets come from is decided by [`targets_file::detect`] (#5978): a
+//! `repos.txt` or `boards.txt` beside the config REPLACES the prompt loop rather
+//! than seeding it, and one unparseable line in either file registers nothing at
+//! all. [`adopt_without_a_terminal`] is the same adoption for a launch with no
+//! terminal, which gets the counts and the list instead of the menu.
 //!
 //! Three properties this module exists to hold:
 //!
@@ -36,7 +42,7 @@
 use crate::chain::ChainOptions;
 use crate::cli::bootstrap::{self, ColdStart};
 use crate::cli::credential::Tty;
-use crate::cli::{Cli, render};
+use crate::cli::{Cli, render, review, targets_file};
 use crate::error::AuditError;
 use crate::registry::{self, COVERAGE_COACHING, Target};
 use crate::session::{Command, NextStep, Outcome, Session};
@@ -161,7 +167,23 @@ pub async fn guided_at_the_terminal(
     // entirely and the flow is what it always was.
     bootstrap::cold_start(session, cold, tty).await?;
 
-    register_targets(session, tty).await?;
+    // #5978: a `repos.txt` or `boards.txt` beside the config IS the target
+    // list, so the per-target prompt loop is skipped rather than seeded. A file
+    // with an unparseable line never reaches here — `detect` refuses the whole
+    // read, and nothing has been registered by then.
+    match targets_file::detect(session.config_path())? {
+        Some(detected) => {
+            for line in adopt(session, &detected).await? {
+                say(tty, &line)?;
+            }
+        }
+        None => {
+            register_targets(session, tty).await?;
+        }
+    }
+
+    // Both paths end here — one confirmation surface, reached two ways.
+    review::review(session, tty).await?;
 
     let guided = session.execute(Command::Guided).await?;
     if !ready_for_run(&guided) {
@@ -171,7 +193,7 @@ pub async fn guided_at_the_terminal(
     // The card first: the operator decides whether to commit hours from what is
     // actually installed and registered, not from a bare question.
     say(tty, render(&guided).trim_end())?;
-    if !confirmed(tty)? {
+    if !confirmed(tty, RUN_PROMPT)? {
         say(tty, SWEEP_DECLINED)?;
         return Ok(Launch::Reported(Box::new(guided)));
     }
@@ -250,13 +272,83 @@ pub async fn register_targets(
     Ok(registered)
 }
 
+/// Register everything a targets file named, reporting what happened.
+///
+/// Why: the registration is separate from [`targets_file::detect`] so the parse
+/// can be all-or-nothing while the registration is not. A line that parses but
+/// cannot be VALIDATED — an unreachable repository, a board whose credential is
+/// not configured — is the ordinary refusal the prompt loop already tolerates,
+/// and the counts on the review menu are where the operator sees the shortfall.
+/// What: one [`register_one`] per spec, then the lines to show: every refusal,
+/// then where the list came from and what it produced. Returning the lines
+/// rather than printing them is what lets the no-terminal launch print the same
+/// text to stderr (`main.rs`).
+/// Test: `super::registration_tests::a_targets_file_registers_without_prompting`,
+/// `super::registration_tests::a_refused_line_does_not_stop_the_rest_of_the_file`.
+///
+/// # Errors
+///
+/// Whatever [`Session::execute`] fails with for a reason other than a refused
+/// target.
+pub async fn adopt(
+    session: &Session,
+    detected: &targets_file::Detected,
+) -> Result<Vec<String>, AuditError> {
+    let mut lines = Vec::new();
+    let mut registered = Vec::new();
+    for spec in &detected.specs {
+        match register_one(session, spec).await {
+            Ok(target) => registered.push(target),
+            Err(refusal) => lines.push(format!("not registered: {refusal}")),
+        }
+    }
+    lines.push(format!(
+        "Read {} from {}.",
+        review::summary(&registered),
+        detected.named()
+    ));
+    Ok(lines)
+}
+
+/// Adopt the targets files for a launch that has no terminal to review at.
+///
+/// Why: #5978's stop-on-parse-error rule holds with and without a terminal —
+/// a scripted run that quietly audits four of a file's twenty repositories
+/// reports success over the sixteen it never saw. What a terminal buys is the
+/// MENU; without one the counts and the full list are printed and the run
+/// proceeds.
+/// What: `None` when neither file is there, which is every invocation that
+/// predates this feature. The caller prints the lines — this crate is a library
+/// and writes to no stream of its own.
+/// Test: `super::registration_tests::without_a_terminal_the_files_are_still_adopted`,
+/// `super::registration_tests::without_a_terminal_a_bad_line_still_refuses_everything`.
+///
+/// # Errors
+///
+/// [`AuditError::TargetsFileRefused`] naming every unparseable line, plus
+/// whatever registering one of them fails with.
+pub async fn adopt_without_a_terminal(
+    session: &Session,
+) -> Result<Option<Vec<String>>, AuditError> {
+    let Some(detected) = targets_file::detect(session.config_path())? else {
+        return Ok(None);
+    };
+    let mut lines = adopt(session, &detected).await?;
+    // The full list, because nobody can ask for it here.
+    let registered = review::registered(session).await?;
+    if !registered.is_empty() {
+        lines.push(review::listing(&registered));
+    }
+    Ok(Some(lines))
+}
+
 /// Register one typed entry through the same path `trusty-audit add` takes.
 ///
 /// [`registry::parse`] decides which kind the spec is — the CLI knows because
 /// the operator used a verb, and here they did not — and then the registration
 /// goes through [`Session::execute`] so validation, the idempotent re-add and
 /// the registry lock are the ones `add` already has.
-async fn register_one(session: &Session, spec: &str) -> Result<Target, AuditError> {
+pub(super) async fn register_one(session: &Session, spec: &str) -> Result<Target, AuditError> {
     let target = registry::parse(None, spec)?;
     session
         .execute(Command::AddTarget {
@@ -272,39 +364,56 @@ fn ready_for_run(outcome: &Outcome) -> bool {
     matches!(outcome, Outcome::Guided(status) if status.next == NextStep::ReadyForRun)
 }
 
-/// Ask once before committing the operator to an unattended sweep.
+/// Ask `prompt` once, after discarding anything typed ahead of it.
 ///
-/// Enter means yes: the sweep is what they launched this for, and everything it
-/// needs is already in place by the time this is asked. Anything starting with
-/// `n` declines; end of input declines too, because a terminal that closed
-/// cannot have agreed to anything.
+/// Why: a terminal in canonical mode holds whatever arrived before the program
+/// asked for it. The registration loop ends when the operator presses Enter on
+/// an empty line, so an operator double-tapping Enter to finish adding targets
+/// had the second newline answer whatever came next — which was, and is, a
+/// question that commits hours of unattended work spending the client's
+/// inference credential (#5896 review). #5978 makes it worse rather than
+/// better: a stray line at the review menu can select `delete`.
+/// What: `discard_typeahead` FIRST, then the read. Discarding afterwards would
+/// close nothing. `Ok(None)` at end of input.
+/// Test: `super::registration_tests::the_sweep_prompt_discards_typeahead_first`,
+/// `super::super::review::review_tests::the_menu_discards_typeahead_before_every_choice`.
 ///
-/// The input queue is discarded FIRST (#5896 review). The registration loop
-/// ends when the operator presses Enter on an empty line, and a terminal in
-/// canonical mode holds whatever arrived after that — so an operator
-/// double-tapping Enter to finish adding targets had the second newline
-/// answered this question, starting hours of unattended work that spends the
-/// client's inference credential. The prompt itself is unchanged: Enter still
-/// starts the sweep, it just has to be an Enter pressed after reading the
-/// question.
-fn confirmed(tty: &mut dyn Tty) -> Result<bool, AuditError> {
+/// # Errors
+///
+/// [`AuditError::RegistrationPromptFailed`] when the terminal cannot be read,
+/// written, or flushed.
+pub(super) fn read_deliberately(
+    tty: &mut dyn Tty,
+    prompt: &str,
+) -> Result<Option<String>, AuditError> {
     tty.discard_typeahead().map_err(prompt_failed)?;
-    let answer = tty.read_line(RUN_PROMPT).map_err(prompt_failed)?;
+    tty.read_line(prompt).map_err(prompt_failed)
+}
+
+/// Ask `prompt` as a yes/no, defaulting to yes.
+///
+/// Enter means yes: by the time either caller asks, what the answer commits to
+/// is what the operator launched this for. Anything starting with `n` declines;
+/// end of input declines too, because a terminal that closed cannot have agreed
+/// to anything. The prompt is a parameter since #5978, because the review menu
+/// and the sweep are two questions taking the same guard.
+fn confirmed(tty: &mut dyn Tty, prompt: &str) -> Result<bool, AuditError> {
+    let answer = read_deliberately(tty, prompt)?;
     Ok(answer.is_some_and(|line| !line.trim().to_ascii_lowercase().starts_with('n')))
 }
 
 /// Show one line, turning a terminal failure into this module's error.
-fn say(tty: &mut dyn Tty, line: &str) -> Result<(), AuditError> {
+pub(super) fn say(tty: &mut dyn Tty, line: &str) -> Result<(), AuditError> {
     tty.say(line).map_err(prompt_failed)
 }
 
 /// Wrap a terminal I/O failure. Never carries what was typed.
-fn prompt_failed(source: std::io::Error) -> AuditError {
+pub(super) fn prompt_failed(source: std::io::Error) -> AuditError {
     AuditError::RegistrationPromptFailed { source }
 }
 
 #[cfg(test)]
-mod registration_tests {
+pub(crate) mod registration_tests {
     use super::*;
     use crate::registry::Registry;
     use crate::validate::RepoProbe;
@@ -320,19 +429,19 @@ mod registration_tests {
     /// with the queue feeding the VISIBLE read instead of the hidden one — a
     /// test binary has no controlling terminal, and every decision this module
     /// makes is above the terminal rather than inside it.
-    struct FakeTty {
+    pub(crate) struct FakeTty {
         answers: VecDeque<io::Result<String>>,
-        prompts: Vec<String>,
-        shown: Vec<String>,
+        pub(crate) prompts: Vec<String>,
+        pub(crate) shown: Vec<String>,
         /// How many prompts had been issued when typeahead was last discarded.
         ///
         /// The ORDER is what matters: discarding after the question has been
         /// asked closes nothing, so a count alone would not prove the fix.
-        discarded_after: Vec<usize>,
+        pub(crate) discarded_after: Vec<usize>,
     }
 
     impl FakeTty {
-        fn new<I: IntoIterator<Item = &'static str>>(answers: I) -> Self {
+        pub(crate) fn new<I: IntoIterator<Item = &'static str>>(answers: I) -> Self {
             Self {
                 answers: answers.into_iter().map(|a| Ok(a.to_owned())).collect(),
                 prompts: Vec::new(),
@@ -382,7 +491,7 @@ mod registration_tests {
     /// recipient-handed-a-config path every one of them was written for.
     /// `the_key_is_asked_for_before_the_first_target` is the case that starts
     /// from nothing.
-    fn accepting_session(dir: &Path) -> Session {
+    pub(crate) fn accepting_session(dir: &Path) -> Session {
         let session = Session::new(WorkDir::new(dir.join("work")))
             .with_config_path(dir.join("engagement.toml"))
             .with_repo_probe(RepoProbe::accepting())
@@ -409,7 +518,7 @@ mod registration_tests {
         }
     }
 
-    fn registered_ids(session: &Session) -> Vec<String> {
+    pub(crate) fn registered_ids(session: &Session) -> Vec<String> {
         Registry::load(session.work_dir())
             .expect("the registry reads")
             .targets()
@@ -425,7 +534,7 @@ mod registration_tests {
     async fn a_scripted_session_registers_and_advances_the_flow() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session = accepting_session(tmp.path());
-        let mut tty = FakeTty::new(["acme/api", "not a target", "acme/schema", ""]);
+        let mut tty = FakeTty::new(["acme/api", "not a target", "acme/schema", "", "p"]);
 
         let outcome = reported(
             guided_at_the_terminal(&session, &pins(), &mut tty)
@@ -464,7 +573,13 @@ mod registration_tests {
             .with_config_path(tmp.path().join("engagement.toml"))
             .with_repo_probe(RepoProbe::accepting())
             .with_auto_install(false);
-        let mut tty = FakeTty::new(["sk-or-v1-cold-start", "sk-or-v1-cold-start", "acme/api", ""]);
+        let mut tty = FakeTty::new([
+            "sk-or-v1-cold-start",
+            "sk-or-v1-cold-start",
+            "acme/api",
+            "",
+            "p",
+        ]);
 
         guided_at_the_terminal(&session, &pins(), &mut tty)
             .await
@@ -519,6 +634,207 @@ mod registration_tests {
         assert!(
             session.config_path().is_file(),
             "the engagement must already be on disk when registration opens"
+        );
+    }
+
+    /// Write a targets file beside the session's config.
+    fn seed_targets_file(session: &Session, file: &str, body: &str) {
+        let dir = session
+            .config_path()
+            .parent()
+            .expect("the config has a directory")
+            .to_path_buf();
+        std::fs::write(dir.join(file), body).expect("write the targets file");
+    }
+
+    /// 🔴 The whole point of #5978: a `repos.txt` is the target list, and the
+    /// per-target prompt loop never opens.
+    ///
+    /// Against the pre-fix commit the file is invisible — the operator is asked
+    /// for each of these one at a time, which is the thirty-prompt registration
+    /// this issue removes.
+    #[tokio::test]
+    async fn a_targets_file_registers_without_prompting_for_each_target() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = accepting_session(tmp.path());
+        seed_targets_file(
+            &session,
+            targets_file::REPOS_FILE,
+            "acme/api\n# the front end\nhttps://github.com/acme/web.git\n\
+             https://github.com/acme/iac/tree/main\n",
+        );
+        // `p` leaves the review menu; nothing else is answered.
+        let mut tty = FakeTty::new(["p"]);
+
+        guided_at_the_terminal(&session, &pins(), &mut tty)
+            .await
+            .expect("the launch runs");
+
+        assert_eq!(
+            registered_ids(&session),
+            vec!["acme/api", "acme/web", "acme/iac"],
+            "every line of the file must be registered, `.git` and `/tree/` stripped"
+        );
+        assert!(
+            !tty.prompts.iter().any(|p| p == PROMPT),
+            "the per-target prompt loop must be skipped entirely: {:?}",
+            tty.prompts
+        );
+    }
+
+    /// 🔴 One unparseable line registers NOTHING and names that line — with a
+    /// terminal, exactly as without one.
+    ///
+    /// Against a per-line-skip implementation `acme/api` is registered, the
+    /// launch proceeds, and the audit covers two of the three repositories the
+    /// operator listed while reporting success.
+    #[tokio::test]
+    async fn one_bad_line_registers_nothing_and_names_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = accepting_session(tmp.path());
+        seed_targets_file(
+            &session,
+            targets_file::REPOS_FILE,
+            "acme/api\nnot a repository\nacme/web\n",
+        );
+        let mut tty = FakeTty::new(["p"]);
+
+        let err = guided_at_the_terminal(&session, &pins(), &mut tty)
+            .await
+            .expect_err("a bad line stops the launch");
+
+        assert!(
+            matches!(err, AuditError::TargetsFileRefused { .. }),
+            "{err:?}"
+        );
+        assert!(
+            registered_ids(&session).is_empty(),
+            "nothing from a file with a bad line may be registered: {:?}",
+            registered_ids(&session)
+        );
+        let message = err.to_string();
+        assert!(message.contains("line 2"), "{message}");
+        assert!(message.contains("key is saved"), "{message}");
+    }
+
+    /// Both files absent is the pre-#5978 world: the prompt loop opens as it
+    /// always did.
+    #[tokio::test]
+    async fn both_files_absent_falls_back_to_the_prompt_loop() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = accepting_session(tmp.path());
+        let mut tty = FakeTty::new(["acme/api", "", "p"]);
+
+        guided_at_the_terminal(&session, &pins(), &mut tty)
+            .await
+            .expect("the launch runs");
+
+        assert!(
+            tty.prompts.iter().any(|p| p == PROMPT),
+            "with no targets file the loop must still ask: {:?}",
+            tty.prompts
+        );
+        assert_eq!(registered_ids(&session), vec!["acme/api"]);
+    }
+
+    /// A line that PARSES but cannot be validated is the ordinary refusal, not
+    /// the all-or-nothing case: it is reported and the rest of the file lands.
+    /// The review menu's counts are where the operator sees the shortfall.
+    #[tokio::test]
+    async fn a_refused_line_does_not_stop_the_rest_of_the_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = accepting_session(tmp.path());
+        seed_targets_file(&session, targets_file::REPOS_FILE, "acme/api\nacme/web\n");
+        // A board whose credential is not configured: well formed, unreachable.
+        seed_targets_file(&session, targets_file::BOARDS_FILE, "jira:ACME\n");
+
+        let detected = targets_file::detect(session.config_path())
+            .expect("every line parses")
+            .expect("both files are present");
+        let lines = adopt(&session, &detected).await.expect("adoption runs");
+
+        assert_eq!(registered_ids(&session), vec!["acme/api", "acme/web"]);
+        assert!(
+            lines.iter().any(|l| l.starts_with("not registered:")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("2 repositories to clone, 0 boards to collect from")),
+            "the counts must state what actually landed: {lines:?}"
+        );
+    }
+
+    /// 🔴 Without a terminal the files are still adopted, and the counts and the
+    /// full list are what the caller prints before proceeding.
+    #[tokio::test]
+    async fn without_a_terminal_the_files_are_still_adopted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = accepting_session(tmp.path());
+        seed_targets_file(
+            &session,
+            targets_file::REPOS_FILE,
+            "acme/api\nhttps://github.com/acme/web\n",
+        );
+        seed_targets_file(
+            &session,
+            targets_file::BOARDS_FILE,
+            "https://linear.app/wonka/team/ENG/active\n",
+        );
+
+        let lines = adopt_without_a_terminal(&session)
+            .await
+            .expect("adoption runs")
+            .expect("the files are present");
+
+        assert_eq!(registered_ids(&session), vec!["acme/api", "acme/web"]);
+        let shown = lines.join("\n");
+        assert!(
+            shown.contains("2 repositories to clone, 0 boards to collect from"),
+            "the counts must be printed: {shown}"
+        );
+        assert!(
+            shown.contains("acme/api") && shown.contains("acme/web"),
+            "the full list must be printed where there is no menu to ask at: {shown}"
+        );
+    }
+
+    /// 🔴 The stop-on-parse-error rule holds without a terminal too. A scripted
+    /// run that quietly audits some of the file reports success over the rest.
+    #[tokio::test]
+    async fn without_a_terminal_a_bad_line_still_refuses_everything() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = accepting_session(tmp.path());
+        seed_targets_file(
+            &session,
+            targets_file::REPOS_FILE,
+            "acme/api\nhttps://gitlab.com/acme/web\n",
+        );
+
+        let err = adopt_without_a_terminal(&session)
+            .await
+            .expect_err("a bad line refuses the run");
+
+        assert!(
+            matches!(err, AuditError::TargetsFileRefused { .. }),
+            "{err:?}"
+        );
+        assert!(registered_ids(&session).is_empty());
+    }
+
+    /// Neither file present is not a failure without a terminal either — it is
+    /// every invocation that predates this feature.
+    #[tokio::test]
+    async fn without_a_terminal_and_without_files_nothing_happens() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = accepting_session(tmp.path());
+
+        assert!(
+            adopt_without_a_terminal(&session)
+                .await
+                .expect("no files is not a failure")
+                .is_none()
         );
     }
 
@@ -662,7 +978,7 @@ mod registration_tests {
         for tool in crate::tools::RequiredTool::ALL {
             std::fs::write(tool.path_in(session.work_dir()), b"stub").expect("stub binary");
         }
-        let mut tty = FakeTty::new(["acme/api", "", "n"]);
+        let mut tty = FakeTty::new(["acme/api", "", "p", "n"]);
 
         let outcome = reported(
             guided_at_the_terminal(&session, &pins(), &mut tty)
@@ -686,7 +1002,7 @@ mod registration_tests {
     #[test]
     fn end_of_input_declines_the_sweep() {
         let mut tty = FakeTty::new([]);
-        assert!(!confirmed(&mut tty).expect("end of input is not an error"));
+        assert!(!confirmed(&mut tty, RUN_PROMPT).expect("end of input is not an error"));
     }
 
     /// The verb #5896 broke. `Cli::to_command` maps `taudit guided` and a bare
@@ -772,7 +1088,7 @@ mod registration_tests {
     #[test]
     fn the_sweep_prompt_discards_typeahead_first() {
         let mut tty = FakeTty::new([""]);
-        assert!(confirmed(&mut tty).expect("Enter still starts the sweep"));
+        assert!(confirmed(&mut tty, RUN_PROMPT).expect("Enter still starts the sweep"));
         assert_eq!(
             tty.discarded_after,
             vec![0],
@@ -787,11 +1103,17 @@ mod registration_tests {
     fn an_empty_answer_starts_the_sweep() {
         for answer in ["", "  ", "y", "Yes"] {
             let mut tty = FakeTty::new([answer]);
-            assert!(confirmed(&mut tty).expect("answers"), "{answer:?} declined");
+            assert!(
+                confirmed(&mut tty, RUN_PROMPT).expect("answers"),
+                "{answer:?} declined"
+            );
         }
         for answer in ["n", "N", "no"] {
             let mut tty = FakeTty::new([answer]);
-            assert!(!confirmed(&mut tty).expect("answers"), "{answer:?} agreed");
+            assert!(
+                !confirmed(&mut tty, RUN_PROMPT).expect("answers"),
+                "{answer:?} agreed"
+            );
         }
     }
 
@@ -926,8 +1248,9 @@ trusty-review = "0.15.1"
             .with_config_path(&config_path)
             .with_auto_install(false);
 
-        // Enter to finish adding targets, then Enter to start the sweep.
-        let mut tty = FakeTty::new(["", ""]);
+        // Enter to finish adding targets, `p` to proceed from the review menu
+        // (#5978), then Enter to start the sweep.
+        let mut tty = FakeTty::new(["", "p", ""]);
         let outcome = launch(&session, &mut tty)
             .await
             .expect("the confirmed launch runs");
