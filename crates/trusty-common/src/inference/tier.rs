@@ -70,6 +70,14 @@ const ANTHROPIC_SONNET_4_6: &str = "claude-sonnet-4-6";
 /// From the `claude-api` model reference.
 const ANTHROPIC_HAIKU_4_5: &str = "claude-haiku-4-5-20251001";
 
+/// Bedrock cross-region inference profile for Claude Sonnet 4.6 (US geography).
+///
+/// The bare form is the one Bedrock accepts — no date stamp and no `-v1:0`
+/// suffix, unlike the Haiku profile below. #5987: the owner ruled this arm maps
+/// because this id is verified, which is the whole difference from the analysis
+/// tier's unverifiable Opus profile.
+const BEDROCK_SONNET_4_6: &str = "us.anthropic.claude-sonnet-4-6";
+
 /// Bedrock cross-region inference profile for Claude Haiku 4.5 (US geography).
 ///
 /// Verified against a live Bedrock account; the short form
@@ -113,14 +121,15 @@ impl ModelTier {
     /// name a model. The caller already knows its provider (epic #2400's
     /// `provider_for` resolves it), so it passes both.
     /// What: returns the provider's id for this tier, or `None` when this
-    /// provider has no verified id for it — including AWS Bedrock's opus tiers,
-    /// deliberately unmapped because the inference-profile id could not be
-    /// verified and its shape is not derivable from the family name. `None` is
-    /// not an error: it means "no tier default here", and the caller keeps
-    /// whatever default it had. Providers that host no Claude model
+    /// provider has no verified id for it — including AWS Bedrock's analysis
+    /// tier, deliberately unmapped because the Opus 4.8 inference-profile id
+    /// could not be verified and its shape is not derivable from the family
+    /// name. `None` is not an error: it means "no tier default here", and the
+    /// caller keeps whatever default it had. Providers that host no Claude model
     /// (`OpenAI`, `Fireworks`, `Together`, `AtlasCloud`, `Local`) return `None`
     /// for every tier.
-    /// Test: `bedrock_opus_tiers_are_unmapped`, `bedrock_classification_resolves`,
+    /// Test: `bedrock_analysis_tier_is_unmapped`,
+    /// `bedrock_interaction_resolves_sonnet_4_6`, `bedrock_classification_resolves`,
     /// `every_tier_resolves_on_openrouter`, `every_tier_resolves_on_anthropic`,
     /// `non_claude_providers_resolve_nothing`.
     pub fn resolve(self, provider: ProviderId) -> Option<&'static str> {
@@ -135,13 +144,16 @@ impl ModelTier {
                 Self::Interaction => ANTHROPIC_SONNET_4_6,
                 Self::Classification => ANTHROPIC_HAIKU_4_5,
             }),
-            // #5971: Bedrock's Opus 4.8 inference-profile id is unmapped by
-            // owner ruling — it could not be verified and must not be guessed.
-            // #5987 moved interaction to Sonnet 4.6 but left this arm alone:
-            // the ruling covers the OpenRouter and Anthropic providers only, so
-            // adding a Bedrock sonnet mapping here needs its own decision.
             ProviderId::Bedrock => match self {
-                Self::Analysis | Self::Interaction => None,
+                // #5971: Bedrock's Opus 4.8 inference-profile id is unmapped by
+                // owner ruling — it could not be verified and must not be
+                // guessed. Do not map this arm from the Sonnet arm below: the
+                // profile shapes do not correspond, and an invented id fails at
+                // call time, not compile time.
+                Self::Analysis => None,
+                // #5987: the owner ruled this arm maps, because unlike Opus the
+                // Sonnet 4.6 profile id is verified.
+                Self::Interaction => Some(BEDROCK_SONNET_4_6),
                 Self::Classification => Some(BEDROCK_HAIKU_4_5),
             },
             ProviderId::OpenAI
@@ -216,12 +228,26 @@ mod tests {
 
     /// Why: guessing an unverified Bedrock inference-profile id fails at call
     /// time, not compile time, so the absence of a mapping is the intended
-    /// state and must be asserted rather than left to drift (#5971).
-    /// What: both opus-tier arms resolve to `None` on Bedrock.
+    /// state and must be asserted rather than left to drift (#5971). Its
+    /// neighbours now resolve, so a later change that "completes the table" from
+    /// their shape has to delete this assertion to do it.
+    /// What: the analysis tier resolves to `None` on Bedrock.
     #[test]
-    fn bedrock_opus_tiers_are_unmapped() {
+    fn bedrock_analysis_tier_is_unmapped() {
         assert_eq!(ModelTier::Analysis.resolve(ProviderId::Bedrock), None);
-        assert_eq!(ModelTier::Interaction.resolve(ProviderId::Bedrock), None);
+    }
+
+    /// Why: Bedrock's Sonnet 4.6 profile id is verified, so the interaction tier
+    /// resolves there while analysis stays unmapped (owner ruling, #5987).
+    /// What: the interaction arm returns the bare profile — no date stamp and no
+    /// `-v1:0` suffix, unlike the Haiku profile beside it.
+    #[test]
+    fn bedrock_interaction_resolves_sonnet_4_6() {
+        assert_eq!(
+            ModelTier::Interaction.resolve(ProviderId::Bedrock),
+            Some("us.anthropic.claude-sonnet-4-6"),
+            "the bare profile is the form Bedrock accepts for Sonnet 4.6"
+        );
     }
 
     #[test]
