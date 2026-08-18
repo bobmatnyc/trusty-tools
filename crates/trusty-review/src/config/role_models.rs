@@ -82,8 +82,18 @@ impl RoleModels {
     /// carries any values the caller parsed from `--reviewer-model` etc.
     /// `file_models` carries parsed TOML table values.  Both may be `None` to
     /// skip that layer.  The built-in default is a `ModelTier` (#5971): the
-    /// reviewer asks for `Analysis`, the verifier and summarizer for `Haiku`,
-    /// and the tier resolves against whichever provider won its own chain.
+    /// reviewer asks for `Analysis`, the verifier and summarizer for
+    /// `Classification`, and the tier resolves against whichever provider won
+    /// its own chain.
+    ///
+    /// The verifier and summarizer take `Classification` for its COST, not
+    /// because verifying or summarising IS classification (#5987).  The owner
+    /// ruling is that the model doing the judging is opus while not every
+    /// inference in the chain needs to be, and `Classification` is the cheapest
+    /// tier — the two roles land there for that reason alone.  Classification
+    /// as a workload is a separate concern that happens to resolve the same
+    /// model today; if the tiers diverge, revisit which one these roles want
+    /// rather than assuming this mapping still follows.
     /// Test: unit tests in `config::tests` cover all four precedence levels;
     /// the tier layer by `role_models_openrouter_*` / `role_models_bedrock_*`.
     pub fn resolve(
@@ -109,7 +119,7 @@ impl RoleModels {
             env.verifier_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.verifier.as_ref()),
-            ModelTier::Haiku,
+            ModelTier::Classification,
             crate::llm::models::DEFAULT_VERIFIER_MODEL,
             Provider::Bedrock,
             1.0,
@@ -121,7 +131,7 @@ impl RoleModels {
             env.summarizer_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.summarizer.as_ref()),
-            ModelTier::Haiku,
+            ModelTier::Classification,
             crate::llm::models::DEFAULT_SUMMARIZER_MODEL,
             Provider::Bedrock,
             0.0,

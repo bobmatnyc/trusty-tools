@@ -285,10 +285,10 @@ fn model_tier_resolves_through_the_public_reexport() {
     );
     assert_eq!(
         ModelTier::Interaction.resolve(ProviderId::OpenRouter),
-        Some("anthropic/claude-opus-4.8")
+        Some("anthropic/claude-sonnet-4.6")
     );
     assert_eq!(
-        ModelTier::Haiku.resolve(ProviderId::OpenRouter),
+        ModelTier::Classification.resolve(ProviderId::OpenRouter),
         Some("anthropic/claude-haiku-4.5")
     );
     assert_eq!(
@@ -296,7 +296,11 @@ fn model_tier_resolves_through_the_public_reexport() {
         Some("claude-opus-4-8")
     );
     assert_eq!(
-        ModelTier::Haiku.resolve(ProviderId::Anthropic),
+        ModelTier::Interaction.resolve(ProviderId::Anthropic),
+        Some("claude-sonnet-4-6")
+    );
+    assert_eq!(
+        ModelTier::Classification.resolve(ProviderId::Anthropic),
         Some("claude-haiku-4-5-20251001")
     );
 }
@@ -312,7 +316,7 @@ fn model_tier_bedrock_opus_stays_unmapped_and_haiku_does_not() {
     assert_eq!(ModelTier::Analysis.resolve(ProviderId::Bedrock), None);
     assert_eq!(ModelTier::Interaction.resolve(ProviderId::Bedrock), None);
     assert_eq!(
-        ModelTier::Haiku.resolve(ProviderId::Bedrock),
+        ModelTier::Classification.resolve(ProviderId::Bedrock),
         Some("us.anthropic.claude-haiku-4-5-20251001-v1:0")
     );
 }

@@ -525,7 +525,7 @@ fn role_models_openrouter_reviewer_resolves_opus_tier() {
 }
 
 #[test]
-fn role_models_openrouter_haiku_roles_resolve_haiku_tier() {
+fn role_models_openrouter_cost_roles_resolve_classification_tier() {
     let env = RoleEnv {
         provider: Some("openrouter".to_string()),
         ..Default::default()
@@ -552,10 +552,11 @@ fn role_models_bedrock_reviewer_keeps_sonnet_default() {
     assert_eq!(roles.reviewer.model, "us.anthropic.claude-sonnet-4-6");
 }
 
-/// Why: the haiku roles' resolved value must not change — only the mechanism
-/// producing it (a date-stamped constant became a tier lookup) (#5971).
+/// Why: the two cost-driven roles must keep the value they had — only the
+/// mechanism producing it changed (a date-stamped constant became a tier
+/// lookup in #5971, and that tier was renamed in #5987).
 #[test]
-fn role_models_bedrock_haiku_roles_resolve_the_same_id_as_before() {
+fn role_models_bedrock_cost_roles_resolve_the_same_id_as_before() {
     let roles = RoleModels::from_env(&RoleEnv::default());
     for (role, model) in [
         ("verifier", &roles.verifier.model),
