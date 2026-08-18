@@ -42,28 +42,43 @@
 //! fallback — a `git worktree remove` this module cannot complete leaves the
 //! tree alone.
 //!
-//! # The record survives a restart (#4311)
+//! # One trigger, because the other one had no proof (#5800)
 //!
-//! `DaemonState::delegations` is a `DashMap` built empty at every boot with no
-//! load path, so a restart used to end the reap permanently for any agent alive
-//! across it — a `SubagentStop` arrives once. Registration now writes an
-//! ownership sentinel into the worktree, and [`rebuild_from_disk`] reads it
-//! back when the registry has nothing, which is the from-disk reconstruction
-//! ADR-0023 point 4 requires of an ownership record.
+//! [`spawn_on_session_end`] is now the only trigger. A `SubagentStop` one was
+//! removed: that event is a TURN boundary, not the agent's exit, and the agent
+//! stays resumable after it. Four reaps on 2026-08-18 removed trees whose agents
+//! the harness still considered resumable — one had finished and pushed its work
+//! to an open PR — and the next `SendMessage` to each failed with "This agent
+//! cannot be resumed: its worktree no longer exists". Two properties made that
+//! reachable, and both were reachable ONLY from the stop trigger:
 //!
-//! # Two triggers, because one was not enough (#4311 follow-up)
+//! - **A terminal delegation status was read as a release.** It is not. It says
+//!   trusty-mpm watched the delegation finish, and says nothing about whether the
+//!   harness still needs the directory to resume the agent.
+//! - **An agent the registry had never heard of was reaped anyway.** The removed
+//!   `rebuild_from_disk` reconstructed ownership from the on-disk sentinel when
+//!   `DaemonState::delegations` — a `DashMap` rebuilt empty at every boot — held
+//!   no record, and proceeded on that reconstruction. That is fail-OPEN on the
+//!   `Unknown` state [ADR-0045](../../../../../docs/adr/0045-distinguish-absent-from-undeterminable-on-destructive-paths.md)
+//!   requires be treated as undeterminable, and it is the inverse of what
+//!   `worktree_reclaim::agent_ownership_blocks` does on the sibling reclaim path.
 //!
-//! [`spawn_on_stop`] was the only caller of [`reap_worktree`], so the reap ran
-//! exactly once per agent and only when a `SubagentStop` actually arrived. Every
-//! other exit route — the harness session exiting or restarting under an
-//! in-flight agent, an interrupt, a `tm hook` POST that lost its 2 s budget —
-//! reached it never, and `prune_orphaned_worktrees` skips a `SentinelOwner::Agent`
-//! tree by design, so nothing else could reclaim it either. [`spawn_on_session_end`]
-//! is the second trigger: a session's end is proof its agents exited, and it
-//! runs the same gates against the same store.
+//! A `SessionEnd` carries the proof a stop does not. A subagent runs inside its
+//! parent Claude Code session's process and cannot outlive it, so the session's
+//! end is Claude Code self-reporting that every agent it dispatched is gone and
+//! unresumable. That is the positive release signal this module now requires, and
+//! it is the one signal available today: the `.trusty-mpm-worktree` sentinel is
+//! not yet authoritative over the harness store (ADR-0055 decision C, unimplemented
+//! — #5997), so nothing on disk can answer "is this tree still resumable" instead.
 //!
-//! Stated gap: an agent interrupted inside a session that keeps running still
-//! reaches neither trigger, and its tree waits for that session to end.
+//! # What that costs, and why it is the right direction
+//!
+//! An agent whose session keeps running holds its tree until that session ends,
+//! and a session killed hard enough to emit no `SessionEnd` holds it until
+//! `tm session prune-worktrees --merged-prs` reclaims it behind
+//! `worktree_reclaim`'s own fail-closed gates. Both are leaks, and a leak is
+//! recoverable. The deletion this replaced was not: it destroyed ~11 minutes of
+//! in-flight build once and broke agent resumption four times in one day.
 //! Test: the `#[cfg(test)]` suite in `agent_worktree_reap_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -174,9 +189,11 @@ pub(crate) fn delegation_state_for_agent(
 /// 2. Not a `…/.claude/worktrees/<name>` leaf → refuse
 ///    ([`is_harness_agent_worktree`]).
 /// 3. `in_use` names the path → refuse. The caller supplies every live managed
-///    session's `workspace_path` and every other non-terminal delegation's
-///    registered worktree, so a tree whose owning session is still live, or
-///    that a sibling agent is still writing in, survives.
+///    session's `workspace_path` and every other delegation's registered
+///    worktree — terminal ones included since #5800, because a finished
+///    delegation's tree can still be one the harness needs to resume its agent.
+///    So a tree whose owning session is still live, that a sibling agent is
+///    still writing in, or that another agent may yet be resumed into, survives.
 /// 4. No git registry claims the path → refuse. There is deliberately no
 ///    `remove_dir_all` fallback here: `decommission::remove_session_worktree`
 ///    has one because it is removing a tree trusty-mpm created and can
@@ -329,15 +346,29 @@ fn ownership_unconfirmed(path: &Path, agent_id: &str) -> Option<String> {
 /// What: every managed session's `workspace_path` — deliberately UNFILTERED by
 /// record state, for the reason `prune.rs` gives (a record's state is
 /// bookkeeping, not a liveness signal) — plus the registered worktree of every
-/// non-terminal delegation in EVERY session, excluding `self_agent_id`'s own.
+/// delegation in EVERY session, excluding `self_agent_id`'s own.
 ///
 /// The delegation half was scoped to the stopping agent's own session until
 /// #4311's review. That scoping was wrong for the same reason the record-state
 /// filter above is: a sibling agent dispatched from a different session is
 /// exactly as live, and its worktree is exactly as un-deletable. Sessions are
 /// not an isolation boundary for "is something running in this directory".
+///
+/// # A terminal delegation is not a released tree (#5800)
+///
+/// This dropped every terminal delegation from the set until #5800, which made
+/// `is_terminal()` decide a question it cannot answer. Terminal means trusty-mpm
+/// watched THIS delegation finish. The harness can still hold the same agent's
+/// worktree open for a resume, and on 2026-08-18 it did: an agent that had
+/// finished and pushed to an open PR had its tree removed and became permanently
+/// unreachable. The record-state filter is dropped here for the same reason
+/// `prune.rs` never had one — bookkeeping is not a liveness signal, in either
+/// direction. Excluding `self_agent_id` is what still lets a candidate be
+/// reclaimed; without that exclusion the sweep would find every tree in use and
+/// reclaim none.
 /// Test: `reap_refuses_a_path_a_live_session_holds`,
-/// `reap_spares_a_worktree_another_sessions_agent_still_holds`.
+/// `reap_spares_a_worktree_another_sessions_agent_still_holds`,
+/// `paths_in_use_protects_a_terminal_delegations_worktree`.
 async fn paths_in_use(state: &Arc<DaemonState>, self_agent_id: &str) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = state
         .session_manager()
@@ -348,7 +379,7 @@ async fn paths_in_use(state: &Arc<DaemonState>, self_agent_id: &str) -> Vec<Path
         .filter_map(|r| r.workspace_path)
         .collect();
     for d in state.all_delegations() {
-        if d.status.is_terminal() || d.agent_id.as_deref() == Some(self_agent_id) {
+        if d.agent_id.as_deref() == Some(self_agent_id) {
             continue;
         }
         if let Some(p) = d.worktree_path {
@@ -375,108 +406,21 @@ fn store_for(payload: &Value) -> Option<PathBuf> {
     Some(root.join(".claude").join("worktrees"))
 }
 
-/// Recover an agent's worktree path from on-disk sentinels alone (#4311).
-///
-/// Why: the delegation map is a `DashMap` built empty at every daemon boot with
-/// no load path, so a restart drops every registration and, before this, ended
-/// the reap for every agent alive across it — permanently, since a `SubagentStop`
-/// arrives once. ADR-0023 point 4 requires the ownership record to be
-/// rebuildable from on-disk sentinels plus git and nothing else; this is that
-/// rebuild, applied to the one record the stop needs.
-/// What: resolves the harness worktree store from the stopping payload's `cwd`
-/// — [`harness_root_for`](crate::core::harness_root::harness_root_for) maps any
-/// checkout back to the one that owns the project's state, and ADR-0036 puts
-/// every worktree flat under `<that>/.claude/worktrees/` — then asks
-/// [`find_agent_worktree`] for the directory whose sentinel names this exact
-/// `agent_id`.
-///
-/// Returns `None` for a payload with no `cwd`, a `cwd` outside any repository,
-/// or a store holding no sentinel for this agent. Every one of those ends the
-/// reap, which is the pre-#4311 behaviour and keeps the directory.
-/// Test: `stop_reaps_a_worktree_the_registry_lost_to_a_restart`,
-/// `stop_ignores_a_sentinel_naming_a_different_agent`.
-fn rebuild_from_disk(payload: &Value, agent_id: &str) -> Option<PathBuf> {
-    let found = find_agent_worktree(&store_for(payload)?, agent_id)?;
-    tracing::info!(
-        agent_id,
-        worktree = %found.display(),
-        "agent-worktree reap: the delegation registry did not know this agent — its \
-         ownership sentinel did, so the reap proceeds against the rebuilt record (#4311)"
-    );
-    Some(found)
-}
-
-/// Reap the worktree of the agent a `SubagentStop` just ended (#4311).
-///
-/// Why: `SubagentStop` is the authoritative exit signal — it carries an exact
-/// `agent_id`, so closing one of two concurrent agents cannot close the other
-/// (see [`super::delegation_tracker`]'s correlation note). DOC-66 §5 makes the
-/// agent's exit the reap trigger, and this is the only event that reports one.
-/// What: no-ops for every event other than `SubagentStop`/`SubagentStopFailure`,
-/// for a payload with no `agent_id`, and for a delegation carrying no registered
-/// worktree. Otherwise spawns a detached task — the git calls are blocking and
-/// this runs inside the hook's synchronous budget — which clears the record's
-/// `worktree_path` on a removal so nothing reads a path that no longer exists.
-///
-/// A stale delegation is NOT reaped. `Stale` means tracking lost the agent, not
-/// that it exited, and removing the tree of an agent that may still be running
-/// is the one mistake this module must never make. Such a record keeps its
-/// `worktree_path`, which is what makes the tree visible to `tm doctor` and the
-/// reconcile report instead of invisible as it is today. Stated gap.
-/// # The returned handle
-///
-/// `None` means no reap was even attempted — the event was not a stop, the
-/// payload named no agent, or neither the registry nor the disk knew a worktree
-/// for it. `Some` is the detached task, and awaiting it yields the one
-/// [`ReapOutcome`]. Production callers ignore it; a test awaits it, which is
-/// what lets a negative assertion run AFTER the decision instead of racing a
-/// fixed sleep against it.
-/// Test: `spawn_on_stop_ignores_a_non_stop_event`,
-/// `spawn_on_stop_ignores_a_payload_without_an_agent_id`.
-pub fn spawn_on_stop(
-    state: &Arc<DaemonState>,
-    session: SessionId,
-    event: HookEvent,
-    payload: &Value,
-) -> Option<tokio::task::JoinHandle<ReapOutcome>> {
-    if !matches!(
-        event,
-        HookEvent::SubagentStop | HookEvent::SubagentStopFailure
-    ) {
-        return None;
-    }
-    let agent_id = payload
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)?;
-    let registered = state
-        .delegations_for(session)
-        .into_iter()
-        .find(|d| d.agent_id.as_deref() == Some(agent_id.as_str()))
-        .and_then(|d| d.worktree_path.clone().map(|p| (Some(d.id), p)));
-    let (id, path) =
-        registered.or_else(|| rebuild_from_disk(payload, &agent_id).map(|p| (None, p)))?;
-
-    let state = Arc::clone(state);
-    Some(tokio::spawn(async move {
-        reap_and_record(&state, &agent_id, path, id).await
-    }))
-}
-
 /// Run the reap for one agent's worktree and record what happened (#4311).
 ///
-/// Why a shared body: [`spawn_on_stop`] and [`spawn_on_session_end`] are two
-/// TRIGGERS for one decision. Two copies of the gate call, the registry
-/// clear and the refusal log would eventually disagree about what a reap does,
-/// and the trigger is the only thing that legitimately differs between them.
+/// Why still its own function with one caller: it is the whole decision minus
+/// the trigger, and #5800 removed a second trigger rather than a second copy of
+/// this body. Keeping the split is what made that removal a deletion of
+/// `spawn_on_stop` alone, with no gate, log line or registry write to
+/// re-derive.
 /// What: resolves this agent's `in_use` set, runs [`reap_worktree`] on a
 /// blocking thread (it shells out to git and `lsof`), clears the delegation's
 /// `worktree_path` on a removal so nothing reads a path that no longer exists,
 /// and reports a refusal.
 ///
-/// `id` is `None` when the path came from disk rather than the registry — there
-/// is no in-memory record to clear.
+/// `id` comes from the candidate's own sentinel, so it names a delegation the
+/// registry may no longer hold; [`DaemonState::mutate_delegation`] no-ops on an
+/// id it does not know.
 ///
 /// The refusal is `warn!` and not `info!` (#4311 follow-up): a refusal is the
 /// ONLY notice anyone gets that a tree was kept, and nothing retries it. On this
@@ -489,7 +433,7 @@ async fn reap_and_record(
     state: &Arc<DaemonState>,
     agent_id: &str,
     path: PathBuf,
-    id: Option<DelegationId>,
+    id: DelegationId,
 ) -> ReapOutcome {
     let in_use = paths_in_use(state, agent_id).await;
     let removal_path = path.clone();
@@ -500,9 +444,7 @@ async fn reap_and_record(
             .unwrap_or_else(|e| ReapOutcome::Refused(format!("reap task panicked: {e}")));
     match &outcome {
         ReapOutcome::Removed | ReapOutcome::AlreadyGone => {
-            if let Some(id) = id {
-                state.mutate_delegation(id, |d| d.worktree_path = None);
-            }
+            state.mutate_delegation(id, |d| d.worktree_path = None);
         }
         ReapOutcome::Refused(reason) => {
             tracing::warn!(
@@ -525,8 +467,21 @@ async fn reap_and_record(
 /// What: reads each immediate child of `store` and keeps those whose sentinel is
 /// [`SentinelOwner::Agent`] with a matching `parent_session_id`. An unreadable
 /// store yields nothing, which reclaims nothing.
+///
+/// # One agent must name one directory (#5800, ADR-0045)
+///
+/// A candidate is also dropped unless [`find_agent_worktree`] resolves its
+/// agent back to this exact directory. That lookup returns `None` when two
+/// directories carry a sentinel naming one agent, which is a state this store is
+/// measurably in: on 2026-08-18, `agent-a23097670a51a0450`'s sentinel recorded
+/// `agent_id: a5ed76bc80fd52e41`, cause undetermined. Nothing deletes a stale
+/// sentinel and registration re-fires on every `PreToolUse`, so an agent that
+/// moved between trees leaves the first one stamped. Which directory such an
+/// agent owns is undeterminable, and an undeterminable owner on a destructive
+/// path keeps every candidate rather than picking one.
 /// Test: `session_end_spares_another_sessions_agent`,
-/// `session_end_reaps_every_agent_of_the_ending_session`.
+/// `session_end_reaps_every_agent_of_the_ending_session`,
+/// `session_end_keeps_a_worktree_whose_agent_names_two_directories`.
 fn agent_worktrees_of(store: &Path, session: SessionId) -> Vec<(PathBuf, AgentWorktreeOwner)> {
     let Ok(entries) = std::fs::read_dir(store) else {
         return Vec::new();
@@ -542,30 +497,44 @@ fn agent_worktrees_of(store: &Path, session: SessionId) -> Vec<(PathBuf, AgentWo
                 _ => None,
             }
         })
+        .filter(|(path, owner)| {
+            if find_agent_worktree(store, &owner.agent_id).as_deref() == Some(path.as_path()) {
+                return true;
+            }
+            tracing::warn!(
+                agent_id = %owner.agent_id,
+                path = %path.display(),
+                "agent-worktree reap: keeping this worktree — its agent's sentinel does not \
+                 resolve to this directory alone, so which tree it owns is undeterminable \
+                 (#5800, ADR-0045)"
+            );
+            false
+        })
         .collect()
 }
 
 /// Reap the worktrees of every agent the session that just ended dispatched
 /// (#4311 follow-up).
 ///
-/// Why: [`spawn_on_stop`] was the reap's ONLY trigger, and it fires only on a
-/// `SubagentStop` the daemon actually receives. An agent that ends any other way
+/// Why: a `SubagentStop` trigger was the reap's only other one, and it fired on
+/// an event that reports a turn boundary rather than an exit — #5800 removed it
+/// for reaping trees the harness still needed. An agent that ends any way at all
 /// — the harness session it runs inside exits or restarts under it, a user
-/// interrupt, a `tm hook` POST that loses its 2 s budget — emits no stop, so the
-/// reap never ran and nothing recorded that it had not. `prune_orphaned_worktrees`
-/// skips `SentinelOwner::Agent` by design, so nothing else would ever reclaim
-/// the tree: the leak was permanent and, for this class, entirely silent. In
-/// this machine's daemon log, 54 registered agent worktrees produced 30
-/// removals; 17 of the 24 survivors carry no reap decision of any kind.
+/// interrupt, a `tm hook` POST that loses its 2 s budget — reaches this trigger
+/// and no other. `prune_orphaned_worktrees` skips `SentinelOwner::Agent` by
+/// design, so without it nothing else would ever reclaim the tree: the leak was
+/// permanent and, for this class, entirely silent. In this machine's daemon log,
+/// 54 registered agent worktrees produced 30 removals; 17 of the 24 survivors
+/// carry no reap decision of any kind.
 ///
 /// A leaked worktree is not only disk. The harness reassigns a stale worktree to
 /// a later agent along with the branch the previous one left checked out, which
 /// is how an unrelated commit reached an open PR's branch on 2026-08-17. That
 /// makes prompt reclamation a correctness property, not housekeeping.
-/// What: on `SessionEnd`, resolves the harness worktree store with [`store_for`]
-/// — the same resolution [`rebuild_from_disk`] uses — then runs the UNCHANGED
-/// [`reap_worktree`] gate stack against every directory whose sentinel names
-/// this session as its parent, and reports the split as a [`SweepSummary`].
+/// What: on `SessionEnd`, resolves the harness worktree store with [`store_for`],
+/// then runs the [`reap_worktree`] gate stack against every directory whose
+/// sentinel names this session as its parent, and reports the split as a
+/// [`SweepSummary`].
 ///
 /// # Why a `SessionEnd` is proof its agents exited
 ///
@@ -618,7 +587,7 @@ pub fn spawn_on_session_end(
             // own delegation. These agents never reported a stop, so their
             // records are still live and a set computed once would name every
             // candidate as in use — the sweep would then reclaim nothing.
-            match reap_and_record(&state, &owner.agent_id, path, Some(owner.delegation_id)).await {
+            match reap_and_record(&state, &owner.agent_id, path, owner.delegation_id).await {
                 ReapOutcome::Removed => summary.removed += 1,
                 ReapOutcome::AlreadyGone => summary.already_gone += 1,
                 ReapOutcome::Refused(_) => summary.kept += 1,

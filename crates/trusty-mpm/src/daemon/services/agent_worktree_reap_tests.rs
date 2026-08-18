@@ -325,49 +325,86 @@ async fn delegation_state_reports_live_ended_and_unknown() {
     );
 }
 
-/// `spawn_on_stop` is a no-op for anything that is not an agent exit.
+/// #5800 REGRESSION: a `SubagentStop` reaps nothing, because a turn boundary is
+/// not an exit.
 ///
-/// Why: it runs on the hook pipeline's hot path, in front of every event in
-/// every managed session, so an event that is not a stop must return before it
-/// reaches the delegation lookup at all.
+/// Why: this is the defect verbatim. On 2026-08-18 an agent that had finished
+/// and pushed its work to open PR #5990 had its worktree removed on its stop,
+/// and the next `SendMessage` to it failed with "This agent cannot be resumed:
+/// its worktree no longer exists". A `SubagentStop` reports that the agent's
+/// TURN ended; the harness can still resume it afterwards, so nothing in that
+/// event releases the tree.
+///
+/// The control is what gives this test its teeth. The fixture is a clean,
+/// fully-pushed, correctly-attributed tree — it passes every surviving gate —
+/// so its survival could otherwise be an artifact of some unrelated refusal.
+/// Delivering the `SessionEnd` afterwards proves the same tree IS reapable
+/// through the trigger that carries release evidence; only the stop declined.
+/// Against the pre-fix commit the first `await_gone`-shaped wait is unnecessary:
+/// `spawn_on_stop` removes the directory and the `wt.exists()` assertion below
+/// fails.
 #[tokio::test]
-async fn spawn_on_stop_ignores_a_non_stop_event() {
+async fn subagent_stop_does_not_reap_a_resumable_worktree() {
     let (state, _dir, session) = hermetic();
-    let started = super::spawn_on_stop(
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree_under(&fx, "agent-resumable", "a5800", session);
+    std::fs::write(wt.join("work.txt"), "finished and pushed\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+
+    for event in [HookEvent::SubagentStop, HookEvent::SubagentStopFailure] {
+        deliver(
+            &state,
+            session,
+            event,
+            serde_json::json!({ "agent_id": "a5800", "cwd": fx.repo.to_string_lossy() }),
+        );
+    }
+    // A removal takes 1-3 s (git subprocesses plus a system-wide `lsof`), so a
+    // same-instant assertion would pass against an implementation that reaps.
+    // Give a reap every chance to land before asserting it did not happen.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    assert!(
+        wt.exists(),
+        "a stop is a turn boundary — the agent stays resumable and its tree must survive"
+    );
+
+    // The control: the same tree, through the trigger that does carry proof.
+    deliver(
         &state,
         session,
-        HookEvent::PreToolUse,
-        &serde_json::json!({ "agent_id": "a1", "cwd": "/nowhere" }),
+        HookEvent::SessionEnd,
+        serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
     );
-    assert!(started.is_none(), "a non-stop event must start no reap");
-    assert!(state.delegations_for(session).is_empty());
+    await_gone(&wt).await;
 }
 
-/// A stop with no `agent_id` reaps nothing.
+/// #5800 REGRESSION: a terminal delegation's worktree is still protected.
 ///
-/// Why: `agent_id` is the only exact correlation key a stop carries, and
-/// `delegation_tracker`'s own note forbids a "most recent" guess — under
-/// concurrency it closes the wrong agent. Reaping on such a guess would delete
-/// the wrong directory, so the absence of the key must end the path.
+/// Why: `paths_in_use` dropped every terminal delegation from the protection set
+/// until #5800, letting `is_terminal()` decide a question it cannot answer.
+/// Terminal means trusty-mpm watched THAT delegation finish; the harness can
+/// still hold the same tree open to resume the agent. Against the pre-fix body
+/// this path is absent from the set and the assertion fails.
 #[tokio::test]
-async fn spawn_on_stop_ignores_a_payload_without_an_agent_id() {
+async fn paths_in_use_protects_a_terminal_delegations_worktree() {
+    use crate::core::agent::{Delegation, DelegationStatus, ModelTier};
+
     let (state, _dir, session) = hermetic();
-    let missing = super::spawn_on_stop(
-        &state,
-        session,
-        HookEvent::SubagentStop,
-        &serde_json::json!({ "cwd": "/nowhere" }),
+    let finished = PathBuf::from("/r/.claude/worktrees/agent-finished");
+
+    let mut done = Delegation::new(session, None, "rust-engineer", ModelTier::Sonnet, "work");
+    done.agent_id = Some("a-finished".into());
+    done.status = DelegationStatus::Completed;
+    done.worktree_path = Some(finished.clone());
+    state.upsert_delegation(done);
+
+    let in_use = super::paths_in_use(&state, "a-stopping-agent").await;
+
+    assert!(
+        in_use.contains(&finished),
+        "a finished delegation's tree can still be one the harness resumes into; got {in_use:?}"
     );
-    // An empty-string id is equally indeterminate, not a match.
-    let empty = super::spawn_on_stop(
-        &state,
-        session,
-        HookEvent::SubagentStop,
-        &serde_json::json!({ "agent_id": "", "cwd": "/nowhere" }),
-    );
-    assert!(missing.is_none(), "no agent_id must start no reap");
-    assert!(empty.is_none(), "an empty agent_id must start no reap");
-    assert!(state.delegations_for(session).is_empty());
 }
 
 // ── the liveness gate (#4311) ───────────────────────────────────────────────
@@ -444,80 +481,7 @@ async fn reap_spares_a_worktree_another_sessions_agent_still_holds() {
     );
 }
 
-// ── ownership rebuilt from disk (#4311, ADR-0023 point 4) ───────────────────
-
-/// #4311 REGRESSION: a stop reaps a tree the in-memory registry never knew.
-///
-/// Why: `DaemonState::delegations` is a `DashMap` built empty at every boot
-/// with no load path, so a daemon restart drops every registration — and a
-/// `SubagentStop` arrives once, so the reap was lost permanently for any agent
-/// alive across the restart. This test registers NOTHING in the daemon state
-/// (which is exactly what a post-restart daemon holds) and asserts the reap
-/// still fires from the on-disk sentinel alone. It fails against the pre-#4311
-/// body, whose only lookup was the DashMap.
-#[tokio::test]
-async fn stop_reaps_a_worktree_the_registry_lost_to_a_restart() {
-    let (state, _dir, session) = hermetic();
-    let fx = GitWorktreeFixture::new();
-    let wt = harness_worktree_for(&fx, "agent-restarted", "a601");
-    std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
-    GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
-    assert!(
-        state.delegations_for(session).is_empty(),
-        "this fixture must hold no registration — that is what a restarted daemon looks like"
-    );
-
-    let outcome = super::spawn_on_stop(
-        &state,
-        session,
-        HookEvent::SubagentStop,
-        &serde_json::json!({ "agent_id": "a601", "cwd": fx.repo.to_string_lossy() }),
-    )
-    .expect("the sentinel names a601, so a reap must start")
-    .await
-    .expect("the reap task must not panic");
-
-    assert_eq!(outcome, ReapOutcome::Removed);
-    assert!(
-        !wt.exists(),
-        "the sentinel is the whole ownership record here; the reap must act on it"
-    );
-}
-
-/// A sentinel naming a DIFFERENT agent is not this agent's tree.
-///
-/// Why: the disk lookup is the one place a "close enough" match would delete
-/// a directory belonging to an agent that is still running. It must be as
-/// exact as `on_subagent_stop`'s own `agent_id` resolution.
-#[tokio::test]
-async fn stop_ignores_a_sentinel_naming_a_different_agent() {
-    let (state, _dir, session) = hermetic();
-    let fx = GitWorktreeFixture::new();
-    let wt = harness_worktree_for(&fx, "agent-other", "a701");
-    std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
-    GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
-
-    let started = super::spawn_on_stop(
-        &state,
-        session,
-        HookEvent::SubagentStop,
-        &serde_json::json!({ "agent_id": "a702", "cwd": fx.repo.to_string_lossy() }),
-    );
-
-    // The same defect as the sweep's: a fixed sleep here sampled the filesystem
-    // at 750 ms while an `lsof`-gated removal lands at 1-3 s, so a wrong
-    // implementation looked correct. The absence of a task is the exact signal.
-    assert!(
-        started.is_none(),
-        "no sentinel names a702, so no reap task may start"
-    );
-    assert!(
-        wt.exists(),
-        "another agent's worktree must never be reaped by this stop"
-    );
-}
-
-// ── the session-end trigger (#4311 follow-up) ───────────────────────────────
+// ── the session-end trigger (#4311 follow-up, sole trigger since #5800) ─────
 
 /// Deliver `event` through the real hook pipeline, as the daemon does.
 ///
@@ -692,6 +656,113 @@ async fn session_end_spares_another_sessions_agent() {
         peer.exists(),
         "a peer session's agent worktree must survive"
     );
+}
+
+/// #5800: the legitimate reap still runs — known agent, terminal, released.
+///
+/// Why: #5800 tightened two gates and removed a trigger, and the failure mode of
+/// such a change is a reap that now never fires. This is the arm that must
+/// survive it: the registry KNOWS this agent (a delegation names it), that
+/// delegation is TERMINAL, and the parent session ending is the release
+/// evidence. All three hold, so the tree is removed.
+///
+/// It also pins the boundary the other two #5800 tests draw. The same terminal
+/// delegation that `paths_in_use` now protects from a stop must NOT protect this
+/// tree from its own session's end — `paths_in_use` excludes the candidate's own
+/// agent, and if that exclusion were lost this test reports `kept: 1`.
+#[tokio::test]
+async fn session_end_reaps_a_finished_agents_released_worktree() {
+    use crate::core::agent::{Delegation, DelegationStatus, ModelTier};
+
+    let (state, _dir, session) = hermetic();
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree_under(&fx, "agent-released", "a5801", session);
+    std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+
+    let mut done = Delegation::new(session, None, "rust-engineer", ModelTier::Sonnet, "work");
+    done.agent_id = Some("a5801".into());
+    done.status = DelegationStatus::Completed;
+    done.worktree_path = Some(wt.clone());
+    state.upsert_delegation(done);
+
+    let swept = settle(super::spawn_on_session_end(
+        &state,
+        session,
+        HookEvent::SessionEnd,
+        &serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
+    ))
+    .await;
+
+    assert_eq!(
+        swept,
+        Some(super::SweepSummary {
+            removed: 1,
+            already_gone: 0,
+            kept: 0,
+        }),
+        "known + terminal + released is the population this reap exists for"
+    );
+    assert!(!wt.exists(), "the directory must be gone: {}", wt.display());
+}
+
+/// #5800: an agent stamped on TWO directories owns neither, so both survive.
+///
+/// Why: nothing deletes a stale sentinel and registration re-fires on every
+/// `PreToolUse`, so an agent that moved between trees leaves the first one
+/// stamped — and this store is measurably in that state
+/// (`agent-a23097670a51a0450`'s sentinel recorded `agent_id: a5ed76bc80fd52e41`
+/// on 2026-08-18). Which tree such an agent owns is undeterminable, and ADR-0045
+/// forbids resolving an undeterminable owner by picking one.
+///
+/// The control tree carries the same weight it does in
+/// `session_end_spares_another_sessions_agent`: without it the sweep could
+/// reclaim nothing for an unrelated reason and this test would still pass.
+/// Remove the `find_agent_worktree` filter from `agent_worktrees_of` and this
+/// goes red — `removed` is 3 and both ambiguous directories are gone.
+#[tokio::test]
+async fn session_end_keeps_a_worktree_whose_agent_names_two_directories() {
+    let (state, _dir, session) = hermetic();
+    let fx = GitWorktreeFixture::new();
+    let mut ambiguous = Vec::new();
+    for name in ["agent-moved-from", "agent-moved-to"] {
+        let wt = harness_worktree_under(&fx, name, "a5802", session);
+        std::fs::write(wt.join("work.txt"), "done\n").expect("write work");
+        GitWorktreeFixture::commit_all_and_push(&wt, "agent work");
+        ambiguous.push(wt);
+    }
+    let control = harness_worktree_under(&fx, "agent-unambiguous", "a5803", session);
+    std::fs::write(control.join("work.txt"), "done\n").expect("write work");
+    GitWorktreeFixture::commit_all_and_push(&control, "agent work");
+
+    let swept = settle(super::spawn_on_session_end(
+        &state,
+        session,
+        HookEvent::SessionEnd,
+        &serde_json::json!({ "cwd": fx.repo.to_string_lossy() }),
+    ))
+    .await;
+
+    assert_eq!(
+        swept,
+        Some(super::SweepSummary {
+            removed: 1,
+            already_gone: 0,
+            kept: 0,
+        }),
+        "only the unambiguous tree is a candidate; the ambiguous pair is not swept at all"
+    );
+    assert!(
+        !control.exists(),
+        "the control must be gone, or this test proves nothing about the sweep having run"
+    );
+    for wt in &ambiguous {
+        assert!(
+            wt.exists(),
+            "an undeterminable owner keeps every candidate: {}",
+            wt.display()
+        );
+    }
 }
 
 /// A `SessionEnd` with no `cwd` resolves no store and reclaims nothing.

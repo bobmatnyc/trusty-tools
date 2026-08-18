@@ -258,26 +258,16 @@ impl HookService {
         // the verdict below.
         crate::daemon::services::delegation_tracker::observe(&self.state, session, event, &payload);
 
-        // 1d (#4311): reap the worktree of an agent that just exited. Runs
-        // AFTER `observe`, which is what terminalizes the record this reads, and
-        // no-ops for every event other than `SubagentStop`. Like 1b it spawns a
-        // detached task off this synchronous method — the reap runs git — and
-        // like 1b it cannot change the verdict below.
+        // 1d (#4311, sole trigger since #5800): reap the worktrees of every
+        // agent a session dispatched, when that session ends. A `SubagentStop`
+        // trigger stood here until #5800 — that event reports a turn boundary,
+        // not an exit, so it reaped trees the harness still needed to resume
+        // their agents. A `SessionEnd` proves every agent that session
+        // dispatched has exited, which is the release evidence a stop lacks.
+        // Like 1b it spawns a detached task off this synchronous method — the
+        // reap runs git — and like 1b it cannot change the verdict below.
         // The returned `JoinHandle` is the tests' completion signal; nothing on
         // this hot path may await it, so it is dropped and the task detaches.
-        drop(crate::daemon::services::agent_worktree_reap::spawn_on_stop(
-            &self.state,
-            session,
-            event,
-            &payload,
-        ));
-
-        // 1e (#4311 follow-up): the SECOND trigger. `SubagentStop` was the only
-        // one, so an agent killed by its session exiting or restarting emitted
-        // no stop and its worktree leaked permanently — the orphan sweep skips
-        // agent-owned trees by design. A `SessionEnd` proves every agent that
-        // session dispatched has exited, so it reclaims them through the same
-        // gate stack. Detached like 1b and 1d, and cannot change the verdict.
         drop(
             crate::daemon::services::agent_worktree_reap::spawn_on_session_end(
                 &self.state,
