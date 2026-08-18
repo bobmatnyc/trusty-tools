@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use super::record::{Project, repo_url_matches};
 use super::registry::ProjectRegistry;
-use crate::core::project_config::load_or_report;
+use crate::core::project_config::{DispatchIsolation, load_or_report};
 
 /// Directory name, under the framework root, holding `projects.json`.
 ///
@@ -152,6 +152,53 @@ pub async fn worktree_enabled_for_origin_at(registry_dir: &Path, origin: &str) -
 /// `worktree_project_config_malformed_falls_back_to_registry`.
 pub fn worktree_override_in_project(project_dir: &Path) -> Option<bool> {
     load_or_report(project_dir).and_then(|cfg| cfg.worktree)
+}
+
+/// Does this project isolate the agents it DISPATCHES, or leave them in the
+/// checkout? (#5814, ADR-0051.)
+///
+/// Why: ADR-0048 decision 1's worktree grant is mechanical and never reads the
+/// dispatch prompt, so a project that wants none of it has no way to say so. It
+/// says so here, in the same committed file that already carries the SESSION
+/// worktree decision — see [`DispatchIsolation`] for why the two are separate
+/// fields rather than one. Resolution lives beside
+/// [`worktree_override_in_project`] because both answer "what worktree policy
+/// does this project declare"; a second reader of `.trusty-mpm.toml` elsewhere
+/// would be a second definition of that question.
+///
+/// **Fail-closed, and this is the whole point of the function.** Every arm that
+/// is not an affirmative, successfully-parsed `main-checkout` resolves to
+/// [`DispatchIsolation::Worktree`]: an absent file, an unreadable one, a
+/// malformed one, one carrying an unknown key or an unknown token, and one that
+/// simply sets no `dispatch_isolation`. The failure this direction prevents is
+/// silent — an agent writing into a shared checkout raises no error at any step
+/// — so a default, an error, or a `false` must never be what drops isolation.
+/// [`load_or_report`] supplies the first four arms by rejecting a bad file
+/// WHOLESALE and logging at `error`; `unwrap_or_default()` supplies the last.
+/// What: `project_dir` is the MAIN CHECKOUT ROOT, not the caller's cwd — the
+/// config file sits at the checkout root and a dispatch made from a
+/// subdirectory must read the same declaration. Callers resolve it with
+/// [`crate::core::project_aliases::main_checkout_root`].
+/// Test: `dispatch_isolation_reads_an_opted_out_project`,
+/// `dispatch_isolation_defaults_to_worktree_without_a_config`,
+/// `dispatch_isolation_defaults_to_worktree_on_a_malformed_config`,
+/// `dispatch_isolation_defaults_to_worktree_on_an_unknown_token`,
+/// `dispatch_isolation_defaults_to_worktree_on_an_unreadable_config`,
+/// `dispatch_isolation_defaults_to_worktree_when_the_key_is_absent`.
+pub fn dispatch_isolation_for_project(project_dir: &Path) -> DispatchIsolation {
+    // #5814: only an affirmative, successfully-read opt-out lifts the ADR-0048
+    // grant; every other outcome keeps isolation on.
+    let decided = load_or_report(project_dir)
+        .and_then(|cfg| cfg.dispatch_isolation)
+        .unwrap_or_default();
+    if decided == DispatchIsolation::MainCheckout {
+        tracing::debug!(
+            dir = %project_dir.display(),
+            "dispatch isolation: this project's .trusty-mpm.toml exempts dispatched agents \
+             from the ADR-0048 worktree grant"
+        );
+    }
+    decided
 }
 
 /// Resolve worktree isolation for a project that EXISTS ON DISK (#5207).

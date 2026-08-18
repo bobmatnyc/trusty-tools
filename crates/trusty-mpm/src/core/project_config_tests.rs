@@ -12,7 +12,9 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-use super::{PROJECT_CONFIG_FILE, ProjectConfigError, ProjectLevelConfig, load_or_report};
+use super::{
+    DispatchIsolation, PROJECT_CONFIG_FILE, ProjectConfigError, ProjectLevelConfig, load_or_report,
+};
 
 /// Write a project config into a fresh temp project directory.
 fn project_with(body: &str) -> TempDir {
@@ -154,4 +156,72 @@ fn load_or_report_returns_a_valid_config() {
         load_or_report(dir.path()).and_then(|c| c.worktree),
         Some(true)
     );
+}
+
+// ── #5814: the dispatched-agent isolation opt-out ───────────────────────────
+
+/// Why: the affirmative opt-out is the only input that may ever reach
+/// `MainCheckout`, so the spelling operators will write in a committed file is
+/// pinned here. Kebab-case, matching the `rename_all` on the enum.
+#[test]
+fn dispatch_isolation_parses_main_checkout() {
+    let cfg =
+        ProjectLevelConfig::from_toml("dispatch_isolation = \"main-checkout\"\n", Path::new("t"))
+            .expect("valid config");
+    assert_eq!(cfg.dispatch_isolation, Some(DispatchIsolation::MainCheckout));
+    // The two worktree questions are separate fields: declaring one must not
+    // move the other (#5814 vs #3455 / ADR-0044 decision 6).
+    assert_eq!(cfg.worktree, None);
+}
+
+/// Why (fail-closed, arm 1 — the key is absent): a project that ships a config
+/// for some OTHER reason must not thereby opt out of isolation. The enum's
+/// `Default` is what makes this hold by construction rather than by the caller
+/// remembering which way a `bool` points.
+#[test]
+fn dispatch_isolation_defaults_to_worktree() {
+    let cfg = ProjectLevelConfig::from_toml("default_model = \"opus\"\n", Path::new("t"))
+        .expect("valid config");
+    assert_eq!(cfg.dispatch_isolation, None);
+    assert_eq!(DispatchIsolation::default(), DispatchIsolation::Worktree);
+    assert_eq!(
+        cfg.dispatch_isolation.unwrap_or_default(),
+        DispatchIsolation::Worktree,
+        "an absent key must resolve to isolation ON, never to the opt-out"
+    );
+}
+
+/// Why (fail-closed, arm 2 — an unknown token): `"main"`, `"none"`, `"false"`
+/// and every other near-miss an operator might guess must be REJECTED, which
+/// under `deny_unknown_fields`-class strictness rejects the whole file and
+/// leaves the caller with no config at all — the default, isolation ON. An enum
+/// that silently accepted an unrecognised token as "not worktree" would be the
+/// exact silent opt-out this direction exists to prevent.
+#[test]
+fn dispatch_isolation_rejects_an_unknown_value() {
+    for bad in ["main", "none", "false", "off", "checkout", "Main-Checkout"] {
+        let body = format!("dispatch_isolation = \"{bad}\"\n");
+        let err = ProjectLevelConfig::from_toml(&body, Path::new("t"))
+            .expect_err("an unrecognised isolation token must be rejected");
+        assert!(
+            matches!(err, ProjectConfigError::Malformed { .. }),
+            "{bad} must be Malformed, got {err:?}"
+        );
+    }
+    // A wrongly-TYPED value is the same case.
+    assert!(matches!(
+        ProjectLevelConfig::from_toml("dispatch_isolation = false\n", Path::new("t"))
+            .expect_err("a bool is not an isolation token"),
+        ProjectConfigError::Malformed { .. }
+    ));
+}
+
+/// Why: `"worktree"` must be writable explicitly, so a project can state the
+/// default rather than rely on it — and so the round trip is proven in both
+/// directions rather than only for the opt-out.
+#[test]
+fn dispatch_isolation_parses_the_explicit_default() {
+    let cfg = ProjectLevelConfig::from_toml("dispatch_isolation = \"worktree\"\n", Path::new("t"))
+        .expect("valid config");
+    assert_eq!(cfg.dispatch_isolation, Some(DispatchIsolation::Worktree));
 }

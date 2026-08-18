@@ -39,7 +39,8 @@ pub use resolver::{
 };
 pub use store::ProjectStoreError;
 pub use worktree_policy::{
-    registry_data_dir, registry_data_dir_under, worktree_enabled_for_origin,
+    dispatch_isolation_for_project, registry_data_dir, registry_data_dir_under,
+    worktree_enabled_for_origin,
     worktree_enabled_for_origin_at, worktree_enabled_for_project, worktree_enabled_in,
     worktree_override_in_project,
 };

@@ -28,7 +28,8 @@
 //!
 //! Test: `project_config_parses_worktree`, `project_config_rejects_unknown_key`,
 //! `project_config_absent_is_none`, `project_config_rejects_wrong_type`,
-//! `project_config_empty_file_is_all_none` in `project_config_tests.rs`.
+//! `project_config_empty_file_is_all_none` in `project_config_tests.rs`,
+//! plus the `dispatch_isolation_*` cases for the #5814 opt-out.
 //!
 //! [`PROJECT_CONFIG_FILE`]: crate::core::project_config::PROJECT_CONFIG_FILE
 //! [`ProjectLevelConfig::from_toml`]: crate::core::project_config::ProjectLevelConfig::from_toml
@@ -90,6 +91,46 @@ pub enum ProjectConfigError {
     },
 }
 
+/// Where a DISPATCHED AGENT works in a project whose session stands in the main
+/// checkout (#5814, [ADR-0051](../../../../docs/adr/0051-a-project-may-exempt-dispatched-agents-from-the-worktree-grant.md)).
+///
+/// Why: ADR-0048 decision 1 makes the worktree grant unconditional, and for a
+/// project class with neither concurrency nor build pressure — a markdown repo
+/// with a direct-to-main workflow — every dispatched agent's edits then land in
+/// a tree the operator never sees, and a second agent has to copy them across.
+/// A prompt-level "do not isolate" instruction cannot reach this: the grant is a
+/// mechanical `tm hook --pm-guard` decision that never reads the prompt.
+///
+/// An ENUM rather than a `bool` because the fail-closed direction has to hold by
+/// construction, not by a caller remembering which way `false` points. `Default`
+/// is [`DispatchIsolation::Worktree`], so every path that reaches for a default —
+/// an absent key, a rejected file, a `unwrap_or_default()` a later refactor adds
+/// — keeps isolation ON. Only the affirmative token
+/// [`DispatchIsolation::MainCheckout`] lifts the grant.
+///
+/// This is NOT [`ProjectLevelConfig::worktree`]. That field decides where the
+/// SESSION runs (#3455, narrowed by ADR-0044 decision 6 to the daemon-unreachable
+/// framework-deployment fallback); this one decides where an agent the session
+/// DISPATCHES runs. Two questions, deliberately not fused — a project can want
+/// its session in a worktree and its agents beside it, or neither.
+/// What: `"worktree"` (the default) keeps ADR-0048 decision 1's grant;
+/// `"main-checkout"` suppresses it, so cwd stays the main checkout and no
+/// worktree is created or reclaimed. An unrecognised token is a `deny_unknown_fields`
+/// -class parse error that rejects the whole file, which resolves back to the default.
+/// Test: `dispatch_isolation_parses_main_checkout`,
+/// `dispatch_isolation_defaults_to_worktree`,
+/// `dispatch_isolation_rejects_an_unknown_value`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum DispatchIsolation {
+    /// ADR-0048 decision 1 applies: a dispatched writer is granted a worktree.
+    #[default]
+    Worktree,
+    /// #5814: dispatched agents stay in the main checkout; no grant is emitted.
+    MainCheckout,
+}
+
 /// The committed, project-level trusty-mpm configuration.
 ///
 /// Why: one struct per project-level setting keeps the precedence chains honest
@@ -144,6 +185,22 @@ pub struct ProjectLevelConfig {
     /// Test: `project_default_model_tops_the_chain`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+
+    /// Where agents this project's sessions DISPATCH do their work (#5814).
+    ///
+    /// Why: see [`DispatchIsolation`] for the decision and for why it is not the
+    /// [`Self::worktree`] field. It is kept `Option` like its siblings so
+    /// "this project declines to decide" stays distinguishable from "this
+    /// project chose the default" — the resolver collapses both to
+    /// [`DispatchIsolation::Worktree`], but a future second layer would need the
+    /// distinction and could not recover it from a bare enum.
+    /// What: `None` → the built-in default, isolation ON.
+    /// `Some(DispatchIsolation::MainCheckout)` → the ADR-0048 decision-1 grant is
+    /// suppressed for every dispatch made from this checkout.
+    /// Test: `dispatch_isolation_parses_main_checkout`,
+    /// `dispatch_isolation_defaults_to_worktree`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_isolation: Option<DispatchIsolation>,
 }
 
 impl ProjectLevelConfig {

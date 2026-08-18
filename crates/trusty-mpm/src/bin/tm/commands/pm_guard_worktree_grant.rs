@@ -46,6 +46,20 @@
 //! unnecessary worktree to a read-only custom agent is the whole cost of that
 //! choice.
 //!
+//! **One project class opts out, and the opt-out itself fails closed (#5814,
+//! [ADR-0051](../../../../../../docs/adr/0051-a-project-may-exempt-dispatched-agents-from-the-worktree-grant.md)).**
+//! A project whose `.trusty-mpm.toml` declares `dispatch_isolation =
+//! "main-checkout"` gets no grant at all: cwd stays the checkout, no worktree is
+//! created, and nothing needs reclaiming. That is a reversal of ADR-0048
+//! decision 1 for a declared class, so the read that decides it resolves toward
+//! ISOLATION on every failure — an absent, unreadable, malformed, or
+//! unknown-token config all grant, because the harm an accidental opt-out causes
+//! (a second writer on a shared git HEAD) raises no error at any step. Only an
+//! affirmative, successfully parsed `main-checkout` suppresses the grant. The
+//! concurrency deny that follows this rule in `pm_guard` is NOT suppressed with
+//! it: an opted-out project still refuses a second unisolated writer in a
+//! checkout the daemon says is already held.
+//!
 //! Test: `grants_*`, `does_not_grant_*`, `task_dispatch_*` below;
 //! `pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout` and siblings in
 //! `tests/tm_hook_pm_guard.rs` run it through the real binary.
@@ -57,7 +71,9 @@ use trusty_mpm::core::agent::is_subagent_dispatch_tool;
 use trusty_mpm::core::dispatch_isolation::{
     dispatch_agent, dispatch_isolation, requires_own_worktree_in_main_checkout,
 };
-use trusty_mpm::core::project_aliases::is_main_checkout;
+use trusty_mpm::core::project_aliases::main_checkout_root;
+use trusty_mpm::core::project_config::DispatchIsolation;
+use trusty_mpm::project::dispatch_isolation_for_project;
 
 /// The `isolation` value granted to a dispatch that needs its own tree.
 ///
@@ -107,10 +123,15 @@ pub(crate) const TASK_DENY_REASON: &str = "Unisolated dispatch denied in a main 
 /// `isolation` added, or [`WorktreeGrant::Deny`] when the tool cannot accept
 /// one.
 ///
-/// `is_main_checkout` is tested LAST because it is the only branch that touches
-/// the filesystem, and every ordinary tool call must not pay for it.
+/// The two filesystem branches are tested LAST because they are the only ones
+/// that touch a disk, and every ordinary tool call must not pay for them. The
+/// checkout root is resolved before the project's opt-out is read, because the
+/// config file sits at that root and a dispatch made from a subdirectory must
+/// read the same declaration (#5814).
 /// Test: `grants_a_worktree_to_an_unisolated_writer`,
-/// `does_not_grant_outside_a_main_checkout`, `does_not_grant_a_read_only_agent`.
+/// `does_not_grant_outside_a_main_checkout`, `does_not_grant_a_read_only_agent`,
+/// `does_not_grant_in_a_project_that_declared_the_opt_out`,
+/// `grants_when_the_project_config_is_malformed`.
 pub(crate) fn evaluate_worktree_grant(
     tool_name: &str,
     tool_input: Option<&Value>,
@@ -123,7 +144,11 @@ pub(crate) fn evaluate_worktree_grant(
     if !requires_own_worktree_in_main_checkout(agent, dispatch_isolation(tool_input)) {
         return None;
     }
-    if !is_main_checkout(cwd) {
+    let checkout_root = main_checkout_root(cwd)?;
+    // #5814: a project may declare in its committed `.trusty-mpm.toml` that its
+    // dispatched agents work in the checkout; only an affirmative, successfully
+    // parsed declaration reaches `MainCheckout`, so every read failure grants.
+    if dispatch_isolation_for_project(&checkout_root) == DispatchIsolation::MainCheckout {
         return None;
     }
     if tool_name != ISOLATION_AWARE_DISPATCH_TOOL {
@@ -352,6 +377,106 @@ mod tests {
         assert_eq!(updated["model"], "sonnet");
         assert_eq!(updated["subagent_type"], "rust-engineer");
         assert_eq!(updated["isolation"], "worktree");
+    }
+
+    // ── #5814: the per-project opt-out, both branches ──────────────────────
+
+    /// Write a `.trusty-mpm.toml` body at a main checkout's root.
+    fn checkout_declaring(body: &str) -> TempDir {
+        let dir = main_checkout();
+        std::fs::write(
+            dir.path()
+                .join(trusty_mpm::core::project_config::PROJECT_CONFIG_FILE),
+            body,
+        )
+        .expect("write config");
+        dir
+    }
+
+    #[test]
+    fn does_not_grant_in_a_project_that_declared_the_opt_out() {
+        // #5814: the branch the feature exists for. Every dispatch shape that
+        // WOULD be granted must instead be left alone — an ordinary writer, an
+        // unknown agent, an untyped dispatch, and the `Task` deny, which is a
+        // refusal to isolate a dispatch that does not need isolating here.
+        let dir = checkout_declaring("dispatch_isolation = \"main-checkout\"\n");
+        for (tool, agent) in [
+            ("Agent", "rust-engineer"),
+            ("Agent", "some-project-custom-agent"),
+            ("Task", "rust-engineer"),
+        ] {
+            assert_eq!(
+                evaluate_worktree_grant(tool, Some(&input(agent, None)), dir.path()),
+                None,
+                "{tool}/{agent} must be left in the checkout in an opted-out project"
+            );
+        }
+        assert_eq!(
+            evaluate_worktree_grant("Agent", None, dir.path()),
+            None,
+            "an untyped dispatch is granted by default and must also be exempt here"
+        );
+        // A dispatch made from a SUBDIRECTORY reads the same declaration: the
+        // config sits at the checkout root, not at the cwd.
+        let sub = dir.path().join("docs/notes");
+        std::fs::create_dir_all(&sub).expect("mkdir");
+        assert_eq!(
+            evaluate_worktree_grant("Agent", Some(&input("rust-engineer", None)), &sub),
+            None
+        );
+    }
+
+    #[test]
+    fn grants_when_the_project_declares_the_default_or_says_nothing() {
+        // The other half of the pair. Proving the opt-out works is half the
+        // coverage; a rule that stopped granting everywhere would pass the test
+        // above and fail here.
+        for body in [
+            "dispatch_isolation = \"worktree\"\n",
+            "worktree = false\n",
+            "default_model = \"opus\"\n",
+            "",
+        ] {
+            let dir = checkout_declaring(body);
+            assert!(
+                matches!(
+                    evaluate_worktree_grant(
+                        "Agent",
+                        Some(&input("rust-engineer", None)),
+                        dir.path()
+                    ),
+                    Some(WorktreeGrant::Rewrite(_))
+                ),
+                "config {body:?} does not opt out and must still be granted"
+            );
+        }
+    }
+
+    #[test]
+    fn grants_when_the_project_config_is_malformed() {
+        // #5814's blocking constraint: the opt-out fails CLOSED. A file that
+        // cannot be trusted must grant, because an agent writing into a shared
+        // checkout raises no error at any step. Three unusable shapes, each of
+        // which a `false`-shaped default would silently read as the opt-out.
+        for body in [
+            "dispatch_isolation = \n",
+            "dispatch_isolation = \"none\"\n",
+            "dispatch_isolation = \"main-checkout\"\nworktre = false\n",
+            "not toml at all {{{\n",
+        ] {
+            let dir = checkout_declaring(body);
+            assert!(
+                matches!(
+                    evaluate_worktree_grant(
+                        "Agent",
+                        Some(&input("rust-engineer", None)),
+                        dir.path()
+                    ),
+                    Some(WorktreeGrant::Rewrite(_))
+                ),
+                "unusable config {body:?} must keep isolation ON"
+            );
+        }
     }
 
     #[test]
