@@ -62,9 +62,14 @@ pub fn set_contents_placeholder(root: &mut Scope) {
 /// with a numeric suffix, and replaces [`SENTINEL`] with one bullet per
 /// heading found. No sentinel in `rendered` (a custom template that never
 /// included the placeholder) leaves the text unchanged. Zero other headings
-/// found removes the sentinel with no list.
+/// found removes the sentinel with no list. A fenced code block (``` … ```)
+/// is tracked with the same `in_fence` toggle guard as
+/// [`super::polish::collapse_recursive`] — every fenced line is skipped, so a
+/// `## `-prefixed line inside a `raw_evidence` quote of source bytes is never
+/// misread as a heading and never linked as a dangling anchor.
 /// Test: `contents_links_tests::{links_every_top_level_heading,
-/// never_links_a_heading_absent_from_the_document, noop_without_sentinel}`.
+/// never_links_a_heading_absent_from_the_document, noop_without_sentinel,
+/// fenced_evidence_hash_line_is_not_mistaken_for_a_heading}`.
 pub fn inject(rendered: &str) -> String {
     if !rendered.contains(SENTINEL) {
         return rendered.to_string();
@@ -72,8 +77,16 @@ pub fn inject(rendered: &str) -> String {
 
     let mut seen_slugs: Vec<String> = Vec::new();
     let mut links: Vec<String> = Vec::new();
+    let mut in_fence = false;
     for line in rendered.lines() {
         let trimmed = line.trim_end();
+        if trimmed.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
         let Some(text) = trimmed.strip_prefix("## ") else {
             continue;
         };

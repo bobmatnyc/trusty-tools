@@ -53,3 +53,22 @@ fn slug_collision_gets_a_distinct_anchor() {
     assert!(out.contains("(#notes)"));
     assert!(out.contains("(#notes-2)"));
 }
+
+/// A `## `-prefixed line inside a fenced evidence quote (raw_evidence embeds
+/// source bytes verbatim) must never be mistaken for a document heading — it
+/// is quoted source text, not a section boundary, so it must produce no
+/// Contents link and no dangling anchor.
+#[test]
+fn fenced_evidence_hash_line_is_not_mistaken_for_a_heading() {
+    let doc = format!(
+        "## 2. Executive Summary\n\n{SENTINEL}\n\n## 3. Code Quality & Architecture\n\n```\n## Not A Real Section\n```\n\n## 9. Gaps & Caveats\n\nx\n"
+    );
+    let out = inject(&doc);
+    assert!(!out.contains(SENTINEL));
+    assert!(out.contains("[3. Code Quality & Architecture](#3-code-quality-architecture)"));
+    assert!(out.contains("[9. Gaps & Caveats](#9-gaps-caveats)"));
+    // The fenced quote's own text survives untouched, but it must never be
+    // linked as a heading (no bullet, no anchor).
+    assert!(!out.contains("[Not A Real Section]"));
+    assert!(!out.contains("(#not-a-real-section)"));
+}

@@ -794,6 +794,50 @@ fn code_quality_summary_guardrail_rejects_unverified_figure() {
     );
 }
 
+/// (c) #6004: `security_summary` is rejected exactly like
+/// `code_quality_summary` when it cites a figure absent from the model — same
+/// construction as `code_quality_summary_guardrail_rejects_unverified_figure`,
+/// mirrored onto the sibling field.
+/// What: one clean top-risk row (so the overall pass still succeeds) plus a
+/// `security_summary` citing 9999; asserts the field is dropped, a rejection
+/// note names it, and the clean row survives untouched.
+/// Test: this test itself.
+#[test]
+fn security_summary_guardrail_rejects_unverified_figure() {
+    let allowed: std::collections::HashSet<String> = ["moderate".to_string(), "Acme".to_string()]
+        .into_iter()
+        .collect();
+    let raw = super::RawSynthesis {
+        executive_summary: String::new(),
+        code_quality_summary: String::new(),
+        security_summary: "9999 vulnerable dependencies were flagged.".to_string(),
+        top_risks: vec![super::RiskRow {
+            description: "moderate".to_string(),
+            severity: "AMBER".to_string(),
+            cost: "moderate".to_string(),
+            apps: "Acme".to_string(),
+        }],
+        findings: vec![],
+    };
+
+    let result = super::apply_guardrail(raw, &allowed, Vec::new())
+        .expect("the clean top-risk row keeps this Ok");
+
+    assert!(
+        result.security_summary.is_none(),
+        "a security_summary citing 9999 must be rejected"
+    );
+    assert_eq!(result.top_risks.len(), 1, "the clean row must survive");
+    assert!(
+        result
+            .notes
+            .iter()
+            .any(|n| n.contains("rejected (unverified figure)") && n.contains("security")),
+        "a guardrail rejection note must name the security summary: {:?}",
+        result.notes
+    );
+}
+
 /// Why: when nothing survives verification there is no narrative, which #5454
 /// makes a failed report rather than a deterministic-only one.
 /// What: every field cites 9999; asserts

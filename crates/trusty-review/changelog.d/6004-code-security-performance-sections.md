@@ -24,3 +24,8 @@ Added
 - The default narrative voice (executive summary, top risks, and the two new
   slots) is now explicitly balanced/adversarial: acquirer-side, skeptical of
   risk, evenhanded about genuine strengths, never promotional.
+- The `report-technical-dd-cast.md` template variant intentionally does not
+  get the new Code Quality & Architecture / Security Posture / Performance &
+  Scalability sections, the Key Facts block, or the Contents jump-list yet —
+  porting them to CAST's own methodology and health-factor voice is deferred
+  to follow-up work tracked on #6004.
