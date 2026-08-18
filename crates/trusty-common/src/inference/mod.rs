@@ -15,7 +15,9 @@
 //! capability [`registry`] (context windows incl. the #2330 haiku fix, pricing,
 //! caching, tool dialects), the two-stage [`configurator`] (`provider_for` +
 //! [`Configurator`]), and the [`test_support`] doubles. Concrete provider HTTP
-//! adapters land in #2403/#2407.
+//! adapters land in #2403/#2407. Issue #5971 adds [`tier`] beside the
+//! configurator: the configurator answers "which provider and how do I reach
+//! it", [`ModelTier::resolve`] answers "which model on that provider".
 //!
 //! Test: the `inference-client` surface is covered by each submodule's inline
 //! tests and `crates/trusty-common/tests/inference_foundation.rs`; the
@@ -29,6 +31,8 @@
 //! [`configurator`]: crate::inference::configurator
 //! [`Configurator`]: configurator::Configurator
 //! [`test_support`]: crate::inference::test_support
+//! [`tier`]: crate::inference::tier
+//! [`ModelTier::resolve`]: crate::inference::tier::ModelTier::resolve
 
 /// Deprecated compatibility alias for [`crate::credentials`] (#4564).
 ///
@@ -67,6 +71,8 @@ pub mod streaming;
 #[cfg(feature = "inference-client")]
 pub mod test_support;
 #[cfg(feature = "inference-client")]
+pub mod tier;
+#[cfg(feature = "inference-client")]
 pub mod types;
 
 // Flat re-exports of the most-used surface so consumers write
@@ -94,6 +100,8 @@ pub use streaming::{
     ChatStream, ChatStreamEvent, SseDecoder, StreamAssembly, StreamCompletion, ToolCallDelta,
     buffered_stream, decode_event_stream,
 };
+#[cfg(feature = "inference-client")]
+pub use tier::ModelTier;
 // #4425: `PromptTokensDetails`/`UsageBlock` join the flat re-export because a
 // consumer that owns a `ChatResponse` owns its wire usage block — trusty-code
 // reads it directly for cost accounting and had to reach into `types::usage`.

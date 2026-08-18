@@ -69,6 +69,26 @@ pub enum Provider {
     Fireworks,
 }
 
+impl Provider {
+    /// The `trusty-common` provider identity this backend corresponds to.
+    ///
+    /// Why: `ModelTier::resolve` keys off `trusty_common`'s `ProviderId`, and
+    /// this crate's `Provider` is a narrower enum covering only the three
+    /// backends trusty-review builds clients for. The tier lookup needs the
+    /// shared identity, so the two are bridged in one place rather than at each
+    /// call site (#5971).
+    /// What: a total mapping — every `Provider` variant has a `ProviderId`.
+    /// Test: `provider_maps_to_common_provider_id`.
+    pub fn provider_id(&self) -> trusty_common::inference::ProviderId {
+        use trusty_common::inference::ProviderId;
+        match self {
+            Provider::OpenRouter => ProviderId::OpenRouter,
+            Provider::Bedrock => ProviderId::Bedrock,
+            Provider::Fireworks => ProviderId::Fireworks,
+        }
+    }
+}
+
 impl std::fmt::Display for Provider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

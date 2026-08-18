@@ -498,5 +498,137 @@ fn role_models_unparsable_provider_at_every_layer_falls_back_to_default() {
     assert_eq!(roles.reviewer.provider, Provider::Bedrock);
 }
 
+// ─── Model-tier resolution (#5971) ───────────────────────────────────────────
+
+#[test]
+fn provider_maps_to_common_provider_id() {
+    use trusty_common::inference::ProviderId;
+    assert_eq!(Provider::OpenRouter.provider_id(), ProviderId::OpenRouter);
+    assert_eq!(Provider::Bedrock.provider_id(), ProviderId::Bedrock);
+    assert_eq!(Provider::Fireworks.provider_id(), ProviderId::Fireworks);
+}
+
+/// Why: the reviewer is the role that does the judging, and the owner ruled it
+/// runs on the opus tier. On OpenRouter — the provider the trusty-audit path
+/// uses for all inference — that tier has a verified id, so the reviewer must
+/// come out as Opus 4.8 rather than the pinned Bedrock Sonnet default (#5971).
+/// What: selects OpenRouter with no model named at any layer.
+#[test]
+fn role_models_openrouter_reviewer_resolves_opus_tier() {
+    let env = RoleEnv {
+        provider: Some("openrouter".to_string()),
+        ..Default::default()
+    };
+    let roles = RoleModels::from_env(&env);
+    assert_eq!(roles.reviewer.provider, Provider::OpenRouter);
+    assert_eq!(roles.reviewer.model, "anthropic/claude-opus-4.8");
+}
+
+#[test]
+fn role_models_openrouter_haiku_roles_resolve_haiku_tier() {
+    let env = RoleEnv {
+        provider: Some("openrouter".to_string()),
+        ..Default::default()
+    };
+    let roles = RoleModels::from_env(&env);
+    assert_eq!(roles.verifier.model, "anthropic/claude-haiku-4.5");
+    assert_eq!(roles.summarizer.model, "anthropic/claude-haiku-4.5");
+}
+
+/// Why: Bedrock's Opus 4.8 inference-profile id could not be verified and is
+/// deliberately unmapped, so the tier lookup declines and trusty-review must
+/// keep the Sonnet 4.6 profile it defaulted to before #5971. A regression here
+/// would ship an id that fails at call time, not compile time.
+/// What: default provider (Bedrock) with no model named at any layer.
+#[test]
+fn role_models_bedrock_reviewer_keeps_sonnet_default() {
+    let roles = RoleModels::from_env(&RoleEnv::default());
+    assert_eq!(roles.reviewer.provider, Provider::Bedrock);
+    assert_eq!(
+        roles.reviewer.model,
+        crate::llm::models::DEFAULT_REVIEWER_MODEL,
+        "Bedrock's opus tiers are unmapped by ruling — the pinned Sonnet default must survive"
+    );
+    assert_eq!(roles.reviewer.model, "us.anthropic.claude-sonnet-4-6");
+}
+
+/// Why: the haiku roles' resolved value must not change — only the mechanism
+/// producing it (a date-stamped constant became a tier lookup) (#5971).
+#[test]
+fn role_models_bedrock_haiku_roles_resolve_the_same_id_as_before() {
+    let roles = RoleModels::from_env(&RoleEnv::default());
+    for (role, model) in [
+        ("verifier", &roles.verifier.model),
+        ("summarizer", &roles.summarizer.model),
+    ] {
+        assert_eq!(
+            model, "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "{role} must still resolve the date-versioned Bedrock Haiku profile"
+        );
+    }
+}
+
+/// Why: a tier default that outranked an explicitly-named model id would break
+/// `--reviewer-model`, `TRUSTY_REVIEW_REVIEWER_MODEL`, and the config file's
+/// `[models.reviewer].model` — the three layers spec REV-313 puts above the
+/// built-in default. The tier is the built-in layer, nothing more (#5971).
+/// What: on OpenRouter (where the tier DOES resolve, so it could win), each of
+/// the three explicit layers is asserted to beat it.
+#[test]
+fn role_models_explicit_model_beats_tier_default() {
+    let openrouter = || RoleEnv {
+        provider: Some("openrouter".to_string()),
+        ..Default::default()
+    };
+
+    // CLI flag.
+    let cli = RoleCliOverrides {
+        reviewer_model: Some("openai/gpt-5.4-20260305".to_string()),
+        ..Default::default()
+    };
+    let roles = RoleModels::resolve(Some(&cli), &openrouter(), None);
+    assert_eq!(roles.reviewer.model, "openai/gpt-5.4-20260305");
+
+    // Env var.
+    let env = RoleEnv {
+        reviewer_model: Some("openai/gpt-5.4-mini-20260317".to_string()),
+        ..openrouter()
+    };
+    let roles = RoleModels::from_env(&env);
+    assert_eq!(roles.reviewer.model, "openai/gpt-5.4-mini-20260317");
+
+    // Config file.
+    let file = FileModels {
+        reviewer: Some(RoleConfigOverride {
+            model: Some("openai/gpt-5.4-nano-20260317".to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let roles = RoleModels::resolve(None, &openrouter(), Some(&file));
+    assert_eq!(roles.reviewer.model, "openai/gpt-5.4-nano-20260317");
+}
+
+/// Why: Fireworks hosts no Claude model, so every tier declines there and the
+/// pinned built-in defaults must still apply — the tier layer must never leave
+/// a role with no model at all (#5971).
+#[test]
+fn role_models_fireworks_falls_back_to_pinned_defaults() {
+    let env = RoleEnv {
+        provider: Some("fireworks".to_string()),
+        ..Default::default()
+    };
+    let roles = RoleModels::from_env(&env);
+    assert_eq!(roles.reviewer.provider, Provider::Fireworks);
+    assert_eq!(
+        roles.reviewer.model,
+        crate::llm::models::DEFAULT_REVIEWER_MODEL
+    );
+    assert_eq!(
+        roles.verifier.model,
+        crate::llm::models::DEFAULT_VERIFIER_MODEL
+    );
+}
+
 // resolve_index and wiring-path tests are in the sibling file to stay under
 // the 500-line cap (#610).  See `config_resolve_index_tests.rs`.
