@@ -60,6 +60,32 @@ const DEFAULT_INSTRUCTIONS: &str = "Assess the last 52 weeks across the register
 /// Shown above the per-tool preflight lines.
 const CHECKING_TOOLS: &str = "\nChecking the pinned tools";
 
+/// The model the audit's judging calls run on.
+///
+/// Why: owner ruling, 2026-08-18 — the analysis tier is Opus 4.8. It is spelled
+/// here as a literal rather than taken from
+/// [`crate::inference::DEFAULT_REVIEWER_MODEL`], and that is deliberate. Those
+/// constants are the BUILT-IN FALLBACK, the bottom of `trusty-review`'s
+/// precedence chain (CLI flag > environment > config file > built-in). What this
+/// module writes lands at the config-file level, ABOVE them — so binding the two
+/// together would make a config value follow a constant it deliberately
+/// outranks, and #5971 is converting that constant into a tier lookup this path
+/// must not silently inherit.
+/// What: an OpenRouter model id, confirmed present in
+/// `GET https://openrouter.ai/api/v1/models` on 2026-08-18. Never derive a
+/// sibling id from this one's shape — OpenRouter's naming is not a pattern to
+/// extrapolate from, and a guessed slug is an HTTP 400 an hour into a sweep.
+/// Test: `super::bootstrap_tests::the_written_config_names_the_ruled_models`.
+const REVIEWER_MODEL: &str = "anthropic/claude-opus-4.8";
+
+/// The model the verifier and summarizer roles run on.
+///
+/// Short, high-volume, low-stakes calls, so the cheapest Haiku tier — the same
+/// role/cost split `trusty-review` uses. Confirmed live on 2026-08-18. See
+/// [`REVIEWER_MODEL`] for why this is a literal.
+/// Test: `super::bootstrap_tests::the_written_config_names_the_ruled_models`.
+const HAIKU_MODEL: &str = "anthropic/claude-haiku-4.5";
+
 /// Everything a cold start needs from outside this process.
 ///
 /// Why: `main.rs` reads the process environment once and hands the result in —
@@ -265,16 +291,17 @@ pub fn create_engagement(
 /// credential, so the crate still has exactly one place that does.
 ///
 /// The `[models]` table is written out in full rather than left to the built-in
-/// fallback. Owner ruling, 2026-08-18: all inference for this crate is
-/// OpenRouter, and an unset `provider` falls through to `trusty-review`'s own
-/// default, which is Bedrock. Naming it in the file is what makes the choice
-/// visible to the recipient reading it, which is the transparency premise of the
-/// whole handoff (#5473). All FOUR fields are named because
-/// [`crate::inference`] treats the table as all-or-none: a config carrying only
-/// `provider` is [`AuditError::SplitInferenceSelection`], not a partial
-/// override. The values are [`crate::inference`]'s own constants, so the written
-/// file states exactly what the crate would otherwise have fallen back to and
-/// no slug is minted here.
+/// fallback. Owner rulings, 2026-08-18: all inference for this crate is
+/// OpenRouter, the analysis tier is Opus 4.8, and the two cheap roles take the
+/// latest Haiku. An unset `provider` falls through to `trusty-review`'s own
+/// default, which is Bedrock, so naming it is what keeps the spend on the
+/// account this engagement was given — and naming it in the file is what makes
+/// that visible to the recipient reading it, the transparency premise of the
+/// whole handoff (#5473).
+///
+/// All FOUR fields are named because [`crate::inference`] treats the table as
+/// all-or-none: a config carrying only `provider` is
+/// [`AuditError::SplitInferenceSelection`], not a partial override.
 fn template(pins: &ToolPins) -> String {
     format!(
         "openrouter_key = \"\"\n\
@@ -286,17 +313,14 @@ fn template(pins: &ToolPins) -> String {
          trusty-review = \"{review}\"\n\
          \n[models]\n\
          provider = \"{provider}\"\n\
-         reviewer = \"{reviewer}\"\n\
-         verifier = \"{verifier}\"\n\
-         summarizer = \"{summarizer}\"\n",
+         reviewer = \"{REVIEWER_MODEL}\"\n\
+         verifier = \"{HAIKU_MODEL}\"\n\
+         summarizer = \"{HAIKU_MODEL}\"\n",
         tga = pins.tga.version(),
         search = pins.trusty_search.version(),
         analyze = pins.trusty_analyze.version(),
         review = pins.trusty_review.version(),
         provider = crate::inference::PROVIDER_OPENROUTER,
-        reviewer = crate::inference::DEFAULT_REVIEWER_MODEL,
-        verifier = crate::inference::DEFAULT_VERIFIER_MODEL,
-        summarizer = crate::inference::DEFAULT_SUMMARIZER_MODEL,
     )
 }
 
@@ -667,59 +691,76 @@ mod bootstrap_tests {
         );
     }
 
-    /// 🔴 Owner ruling, 2026-08-18: all inference for this crate is OpenRouter.
+    /// 🔴 Owner rulings, 2026-08-18: OpenRouter, Opus 4.8 for analysis, latest
+    /// Haiku for the two cheap roles.
     ///
-    /// A config that leaves `[models]` out falls through to `trusty-review`'s
-    /// own default provider, which is Bedrock — a spend on an account this
-    /// engagement never named. So the synthesised file names the provider, and
-    /// therefore all four fields: `crate::inference` treats the table as
-    /// all-or-none, so `provider` alone would be
-    /// `AuditError::SplitInferenceSelection` rather than a partial override.
+    /// Every id is asserted as a LITERAL, not against the constant that produced
+    /// it. A test that compares the file to `crate::inference`'s constants passes
+    /// whatever those happen to say — including a Bedrock `us.anthropic.…`
+    /// profile id named against an OpenRouter endpoint, which fails at call time
+    /// rather than at compile time. The literal is the only spelling that catches
+    /// that.
     ///
-    /// The end-to-end proof is the second half: the child environment this
-    /// config produces selects OpenRouter, which is the thing that actually
-    /// decides where the spend goes.
+    /// The second half is the end-to-end proof: what the `tga audit` child is
+    /// actually handed. `trusty-review`'s precedence is CLI flag > environment >
+    /// config file > built-in constant, and this table sits at the config-file
+    /// level — so these ids are what runs, and the built-in tier defaults are
+    /// never consulted on the audit path.
     #[test]
-    fn the_written_config_selects_openrouter_for_every_role() {
+    fn the_written_config_names_the_ruled_models() {
         let path = Path::new("engagement.toml");
         let text =
             crate::config::generate(&template(&fixed_pins("1.2.3")), &SecretKey::new(KEY), path)
                 .expect("generates");
         let config = EngagementConfig::from_toml(&text, path).expect("loads");
 
-        assert_eq!(
-            config.models.provider.as_deref(),
-            Some(crate::inference::PROVIDER_OPENROUTER)
-        );
+        assert_eq!(config.models.provider.as_deref(), Some("openrouter"));
         assert_eq!(
             config.models.reviewer.as_deref(),
-            Some(crate::inference::DEFAULT_REVIEWER_MODEL)
+            Some("anthropic/claude-opus-4.8")
         );
         assert_eq!(
             config.models.verifier.as_deref(),
-            Some(crate::inference::DEFAULT_VERIFIER_MODEL)
+            Some("anthropic/claude-haiku-4.5")
         );
         assert_eq!(
             config.models.summarizer.as_deref(),
-            Some(crate::inference::DEFAULT_SUMMARIZER_MODEL)
+            Some("anthropic/claude-haiku-4.5")
         );
         assert!(
-            !text.contains("bedrock"),
-            "a synthesised engagement must never name another provider: {text}"
+            !text.contains("bedrock") && !text.contains("us.anthropic."),
+            "a synthesised engagement must never name another provider or its \
+             inference-profile ids: {text}"
         );
 
-        // What the `tga audit` child is actually handed. `|_| None` is an
-        // environment naming none of the four, so the config is what decides.
+        // `|_| None` is an environment naming none of the four, so the config is
+        // what decides — which is the level that outranks the built-in defaults.
         let env =
             crate::inference::inference_env(&config, |_| None).expect("the whole table resolves");
-        let provider = env
-            .iter()
-            .find(|(name, _)| *name == crate::inference::ENV_PROVIDER)
-            .map(|(_, value)| value.as_str());
+        let selected = |name: &str| -> Option<&str> {
+            env.iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| value.as_str())
+        };
         assert_eq!(
-            provider,
-            Some(crate::inference::PROVIDER_OPENROUTER),
-            "the child must be pointed at OpenRouter: {env:?}"
+            selected(crate::inference::ENV_PROVIDER),
+            Some("openrouter"),
+            "{env:?}"
+        );
+        assert_eq!(
+            selected(crate::inference::ENV_REVIEWER_MODEL),
+            Some("anthropic/claude-opus-4.8"),
+            "the judging call must run on Opus 4.8: {env:?}"
+        );
+        assert_eq!(
+            selected(crate::inference::ENV_VERIFIER_MODEL),
+            Some("anthropic/claude-haiku-4.5"),
+            "{env:?}"
+        );
+        assert_eq!(
+            selected(crate::inference::ENV_SUMMARIZER_MODEL),
+            Some("anthropic/claude-haiku-4.5"),
+            "{env:?}"
         );
     }
 
