@@ -27,8 +27,10 @@ mod scope;
 mod tier_c;
 mod types;
 
+// #5902: `pub(crate)` only so `share::tests` can reuse this module's
+// always-failing `DeadEmbedder` instead of declaring its own.
 #[cfg(test)]
-mod embed_repair_tests;
+pub(crate) mod embed_repair_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

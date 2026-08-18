@@ -59,7 +59,7 @@ pub(super) async fn content_prune_pass(
         if drawer.drawer_type.is_protected() {
             continue;
         }
-        if is_low_quality_content(&drawer.content, min_words) {
+        if is_low_quality_content(drawer.content(), min_words) {
             victims.push(drawer.id);
         }
     }
@@ -179,7 +179,7 @@ pub(super) async fn dedup_pass(
         .await
         .map_err(|e| e.context("acquire shared embedder for dream dedup"))?;
 
-    let contents: Vec<String> = snapshot.iter().map(|d| d.content.clone()).collect();
+    let contents: Vec<String> = snapshot.iter().map(|d| d.content().to_string()).collect();
     let vectors = embedder
         .embed_batch(&contents)
         .await
@@ -464,16 +464,18 @@ pub(super) async fn record_provenance_and_collect_superseded(
     superseded_ids: &mut Vec<Uuid>,
 ) {
     for &orig_id in originals {
-        let triple = crate::memory_core::store::kg::Triple {
-            subject: format!("drawer:{orig_id}"),
-            predicate: "superseded_by".to_string(),
-            object: format!("drawer:{canonical_id}"),
-            valid_from: chrono::Utc::now(),
-            valid_to: None,
-            confidence: 1.0,
-            provenance: Some("dream:semantic_consolidation".to_string()),
-        };
-        match handle.kg.assert(triple).await {
+        // #5902: routed through the shared writer so the share path and this one
+        // assert the same edge with the same shape. The #1713 rule — an original
+        // joins `superseded_ids` only on a durable write — stays here, because
+        // only this caller evicts.
+        match crate::memory_core::share::assert_superseded_by(
+            &handle.kg,
+            orig_id,
+            canonical_id,
+            "dream:semantic_consolidation",
+        )
+        .await
+        {
             Ok(()) => superseded_ids.push(orig_id),
             Err(e) => {
                 tracing::warn!(

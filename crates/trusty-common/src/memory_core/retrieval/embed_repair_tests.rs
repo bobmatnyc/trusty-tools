@@ -76,7 +76,10 @@ impl Embedder for FlakyEmbedder {
 }
 
 /// Embedder that always fails — the permanent-failure case.
-struct DeadEmbedder;
+///
+/// #5902: `share::tests` reuses this rather than declaring a second always-failing
+/// double, so both fail-closed proofs assert against one behaviour.
+pub(crate) struct DeadEmbedder;
 
 #[async_trait]
 impl Embedder for DeadEmbedder {
@@ -973,8 +976,10 @@ fn seed_distinct_alias_group(dir: &std::path::Path) -> (PalaceHandle, Vec<Uuid>,
     let handle = make_handle(dir);
     // Keep content aligned with the id it belongs to, so a recall assertion can
     // ask "does THIS drawer answer ITS OWN query".
-    let mut by_id: Vec<(Uuid, String)> =
-        drawers.iter().map(|d| (d.id, d.content.clone())).collect();
+    let mut by_id: Vec<(Uuid, String)> = drawers
+        .iter()
+        .map(|d| (d.id, d.content().to_string()))
+        .collect();
     by_id.sort_by_key(|(id, _)| *id);
     for d in drawers {
         handle.add_drawer(d);

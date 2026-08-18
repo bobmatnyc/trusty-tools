@@ -697,7 +697,7 @@ async fn dream_cycle_semantic_consolidation_with_mock() {
         .drawers
         .read()
         .iter()
-        .any(|d| d.content == canonical_text);
+        .any(|d| d.content() == canonical_text);
     assert!(has_canonical, "canonical drawer must be present");
 }
 
@@ -1883,7 +1883,7 @@ async fn dream_merge_into_caps_multibyte_content_without_panicking() {
         drawers
             .iter()
             .find(|d| d.id == survivor_id)
-            .map(|d| d.content.clone())
+            .map(|d| d.content().to_string())
             .unwrap()
     };
 
@@ -1935,4 +1935,80 @@ fn char_safe_prefix_stops_below_a_multibyte_char() {
     assert_eq!(char_safe_prefix("短い", 80), "短い");
     assert_eq!(char_safe_prefix("", 80), "");
     assert_eq!(char_safe_prefix("🎉", 0), "");
+}
+
+/// Why (#5902): `merge_into` is the ONE production path that rewrites a stored
+/// drawer's content in place. Content-derived identity only holds if the digest
+/// moves with the body — a drawer left carrying its pre-merge hash would export
+/// under an identity no other machine can reproduce, and would collide on import
+/// with the unmerged original. `Drawer::set_content` is what keeps the two in
+/// step; this asserts the merge actually routes through it.
+/// Test: This test.
+#[tokio::test]
+async fn merge_into_keeps_the_content_hash_in_step() {
+    use crate::memory_core::content_hash::memory_content_hash;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let palace = Palace {
+        id: PalaceId::new("merge-hash"),
+        name: "merge-hash".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: dir.path().join("merge-hash"),
+    };
+    std::fs::create_dir_all(&palace.data_dir).unwrap();
+    let handle = PalaceHandle::open(&palace).unwrap();
+
+    let survivor_id = handle
+        .remember(
+            "the release tags are per-crate".to_string(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    let loser_id = handle
+        .remember(
+            "and each crate versions independently".to_string(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let (survivor, loser) = {
+        let drawers = handle.drawers.read();
+        let find = |id: Uuid| drawers.iter().find(|d| d.id == id).cloned().unwrap();
+        (find(survivor_id), find(loser_id))
+    };
+    let before = survivor.content_hash();
+
+    merge_into(&handle, &survivor, &loser);
+
+    let merged = {
+        let drawers = handle.drawers.read();
+        drawers
+            .iter()
+            .find(|d| d.id == survivor_id)
+            .cloned()
+            .unwrap()
+    };
+    assert_ne!(
+        merged.content(),
+        survivor.content(),
+        "precondition: the merge must actually have rewritten the body"
+    );
+    assert_ne!(
+        merged.content_hash(),
+        before,
+        "a rewritten body must mint a new identity"
+    );
+    assert_eq!(
+        merged.content_hash(),
+        memory_content_hash(merged.content()),
+        "the digest must describe the body the drawer now holds"
+    );
 }

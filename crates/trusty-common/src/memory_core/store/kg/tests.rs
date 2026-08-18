@@ -233,7 +233,7 @@ async fn upsert_drawer_then_load_drawers_round_trips() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].id, d.id);
     assert_eq!(loaded[0].room_id, room_id);
-    assert_eq!(loaded[0].content, "the cold-start drawer");
+    assert_eq!(loaded[0].content(), "the cold-start drawer");
     assert!((loaded[0].importance - 0.83).abs() < 1e-5);
     assert_eq!(loaded[0].tags, vec!["alpha".to_string(), "beta".into()]);
     assert_eq!(loaded[0].source_file, Some(PathBuf::from("/tmp/source.md")));
@@ -275,12 +275,12 @@ async fn upsert_drawer_replaces_existing_row() {
     let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).unwrap();
     let mut d = Drawer::new(Uuid::new_v4(), "original");
     kg.upsert_drawer(&d).await.unwrap();
-    d.content = "updated".into();
+    d.set_content("updated");
     d.importance = 0.95;
     kg.upsert_drawer(&d).await.unwrap();
     let loaded = kg.load_drawers().unwrap();
     assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].content, "updated");
+    assert_eq!(loaded[0].content(), "updated");
     assert!((loaded[0].importance - 0.95).abs() < 1e-5);
 }
 

@@ -196,7 +196,7 @@ pub(crate) fn dedup_gate(handle: &trusty_common::memory_core::PalaceHandle, cont
     recent
         .iter()
         .filter(|d| d.created_at >= window_start)
-        .any(|d| strsim::jaro_winkler(trimmed, d.content.trim()) > DEDUP_SIMILARITY_THRESHOLD)
+        .any(|d| strsim::jaro_winkler(trimmed, d.content().trim()) > DEDUP_SIMILARITY_THRESHOLD)
 }
 
 /// Build the strict MCP-level `RememberOptions`.

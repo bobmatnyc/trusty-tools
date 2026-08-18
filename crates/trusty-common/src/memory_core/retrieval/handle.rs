@@ -774,7 +774,7 @@ impl PalaceHandle {
         let snapshot: Vec<Drawer> = self.drawers.read().clone();
         let mut new_index: HashMap<String, Vec<Uuid>> = HashMap::new();
         for drawer in snapshot.iter() {
-            for kw in extract_keywords(&drawer.content) {
+            for kw in extract_keywords(drawer.content()) {
                 new_index.entry(kw).or_default().push(drawer.id);
             }
         }

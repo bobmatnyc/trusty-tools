@@ -296,21 +296,23 @@ impl KgStoreRedb {
             let completed_at = record
                 .completed_at_ms
                 .and_then(DateTime::from_timestamp_millis);
-            out.push(Drawer {
-                id,
-                room_id,
-                content: record.content,
-                importance: record.importance,
-                source_file: record.source_file.map(PathBuf::from),
-                created_at,
-                tags: record.tags,
-                last_accessed_at: None,
-                access_count: 0,
-                drawer_type,
-                expires_at,
-                completed_at,
-                fact_key: record.fact_key,
-            });
+            // #5902: the content digest is DERIVED from the row's content, never
+            // stored in `DrawerRecord` — one source of truth, and no postcard
+            // positional migration for a value that is already recomputable.
+            // `Drawer::new` is what derives it, which is why hydration builds
+            // through the constructor and then overwrites the identity fields
+            // rather than assembling a struct literal.
+            let mut drawer = Drawer::new(room_id, record.content);
+            drawer.id = id;
+            drawer.importance = record.importance;
+            drawer.source_file = record.source_file.map(PathBuf::from);
+            drawer.created_at = created_at;
+            drawer.tags = record.tags;
+            drawer.drawer_type = drawer_type;
+            drawer.expires_at = expires_at;
+            drawer.completed_at = completed_at;
+            drawer.fact_key = record.fact_key;
+            out.push(drawer);
         }
         Ok(out)
     }

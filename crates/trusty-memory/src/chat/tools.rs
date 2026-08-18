@@ -332,7 +332,7 @@ async fn execute_recall(state: &AppState, palace_id: &str, query: &str, top_k: u
             .into_iter()
             .map(|r| json!({
                 "drawer_id": r.drawer.id.to_string(),
-                "content": r.drawer.content,
+                "content": r.drawer.content(),
                 "importance": r.drawer.importance,
                 "tags": r.drawer.tags,
                 "score": r.score,
@@ -375,7 +375,7 @@ pub(crate) async fn execute_recall_all(
             .map(|r| json!({
                 "palace_id": r.palace_id,
                 "drawer_id": r.result.drawer.id.to_string(),
-                "content": r.result.drawer.content,
+                "content": r.result.drawer.content(),
                 "importance": r.result.drawer.importance,
                 "tags": r.result.drawer.tags,
                 "score": r.result.score,

@@ -94,7 +94,7 @@ impl Message {
             purpose,
             sent_at,
             read,
-            content: drawer.content.clone(),
+            content: drawer.content().to_string(),
         })
     }
 

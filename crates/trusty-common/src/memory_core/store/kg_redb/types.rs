@@ -209,7 +209,7 @@ pub(super) fn decode_drawer_record(bytes: &[u8]) -> Result<DrawerRecord, postcar
 pub(super) fn drawer_to_record(drawer: &Drawer) -> DrawerRecord {
     DrawerRecord {
         room_id: drawer.room_id.to_string(),
-        content: drawer.content.clone(),
+        content: drawer.content().to_string(),
         importance: drawer.importance,
         tags: drawer.tags.clone(),
         source_file: drawer
@@ -231,19 +231,14 @@ pub(super) fn drawer_to_record(drawer: &Drawer) -> DrawerRecord {
 /// Why: We persist the variant name as a string so the schema stays stable
 /// when new variants are added; readers tolerate unknown / absent tags by
 /// returning `DrawerType::Unknown` (the migration default).
-/// What: Match against the known variant names; anything else falls back
-/// to `DrawerType::Unknown`.
-/// Test: Indirect via `drawer_type_round_trips_through_redb`.
+/// What: delegates to [`DrawerType::from_tag`], the inverse of
+/// `DrawerType::as_str`. #5902 moved the match onto the enum so the JSONL share
+/// format reads the same projection this store writes; the wrapper stays because
+/// every call site in this module names it.
+/// Test: Indirect via `drawer_type_round_trips_through_redb`;
+/// `palace::tests::drawer_type_tag_round_trips_every_variant` pins the projection.
 pub(super) fn parse_drawer_type(tag: Option<&str>) -> crate::memory_core::palace::DrawerType {
-    use crate::memory_core::palace::DrawerType;
-    match tag {
-        Some("UserFact") => DrawerType::UserFact,
-        Some("SessionEvent") => DrawerType::SessionEvent,
-        Some("AgentNote") => DrawerType::AgentNote,
-        Some("Commit") => DrawerType::Commit,
-        Some("Task") => DrawerType::Task,
-        _ => DrawerType::Unknown,
-    }
+    crate::memory_core::palace::DrawerType::from_tag(tag)
 }
 
 /// Shared per-path state: the open `Database` plus its open mode and

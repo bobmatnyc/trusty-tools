@@ -273,7 +273,7 @@ pub fn validate_ollama_model(model: &str) -> Result<()> {
 pub(super) fn build_consolidation_prompt(drawers: &[Drawer]) -> String {
     let mut lines = Vec::new();
     for d in drawers {
-        lines.push(format!("ID: {}\nContent: {}\n", d.id, d.content));
+        lines.push(format!("ID: {}\nContent: {}\n", d.id, d.content()));
     }
     lines.join("---\n")
 }
@@ -348,7 +348,7 @@ pub fn parse_consolidation_actions(raw: &str) -> Result<Vec<ConsolidationAction>
 pub(super) fn batch_cache_key(batch: &[Drawer]) -> String {
     use sha2::Digest;
     use std::collections::BTreeMap;
-    let sorted: BTreeMap<Uuid, &str> = batch.iter().map(|d| (d.id, d.content.as_str())).collect();
+    let sorted: BTreeMap<Uuid, &str> = batch.iter().map(|d| (d.id, d.content())).collect();
     let mut hasher = sha2::Sha256::new();
     for (id, content) in &sorted {
         hasher.update(id.as_bytes());

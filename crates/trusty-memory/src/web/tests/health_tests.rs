@@ -593,7 +593,8 @@ async fn health_probe_self_heals_after_migration_wipe() {
             "sentinel must be seeded when palace is empty (issue #1142)"
         );
         assert_eq!(
-            drawers[0].content, PROBE_SENTINEL_CONTENT,
+            drawers[0].content(),
+            PROBE_SENTINEL_CONTENT,
             "seeded drawer must carry the well-known sentinel content"
         );
     }

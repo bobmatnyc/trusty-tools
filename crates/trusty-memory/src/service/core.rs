@@ -509,7 +509,7 @@ impl MemoryService {
         let payload: Vec<Value> = page
             .into_iter()
             .map(|drawer| {
-                let snippet = drawer_snippet(&drawer.content);
+                let snippet = drawer_snippet(drawer.content());
                 let mut value = serde_json::to_value(&drawer).unwrap_or_else(|_| json!({}));
                 if let Value::Object(ref mut map) = value {
                     // `null` when the drawer has no usable content so
@@ -730,7 +730,7 @@ impl MemoryService {
                 .map(|r| json!({
                     "palace_id": r.palace_id,
                     "drawer_id": r.result.drawer.id.to_string(),
-                    "content": r.result.drawer.content,
+                    "content": r.result.drawer.content(),
                     "importance": r.result.drawer.importance,
                     "tags": r.result.drawer.tags,
                     "score": r.result.score,
