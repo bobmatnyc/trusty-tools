@@ -23,6 +23,7 @@ use super::metrics::Severity;
 use super::model::{ReportModel, RepositoryReport};
 use super::polish::polish_with_gaps;
 use super::provenance::{self, Provenance, tag};
+use super::reporter_authorship::{fill_authorship_facts, push_authorship_rows};
 use super::reporter_codesec::{push_code_quality_rows, push_security_violation_rows};
 use super::reporter_facts::fill_key_facts;
 use super::reporter_fill::{
@@ -230,9 +231,12 @@ fn build_scope(model: &ReportModel) -> Scope {
     root.set("report_version", tag(crate_version(), Provenance::Measured));
     root.set("provenance_legend", provenance::LEGEND);
     root.set("analyst_instructions_block", instructions_block(model));
-    // #6004: the Key Facts block frontloads density/complexity/(author/
-    // trajectory once PR B lands) facts ahead of the executive summary.
+    // #6004: the Key Facts block frontloads density/complexity/author/
+    // trajectory facts ahead of the executive summary.
     fill_key_facts(&mut root, model);
+    // #5453/#6004: completes the author-count/trajectory rows PR A left as
+    // named gaps, once a repository's authorship artifact loaded.
+    fill_authorship_facts(&mut root, model);
     // #6004: deterministic structure, never data — always set.
     contents_links::set_contents_placeholder(&mut root);
     // Declared deal-side fields: filled + tagged when the manifest supplies them,
@@ -350,6 +354,11 @@ fn build_scope(model: &ReportModel) -> Scope {
     push_code_quality_rows(&mut root, model);
     push_security_violation_rows(&mut root, model);
     fill_performance_note(&mut root);
+    // #5453/#6004: key-man risk rows render IN this section, never scattered
+    // across Top Risks — the deterministic half of Authorship & Key-Person
+    // Risk. A repository whose artifact failed to load contributes no row;
+    // its gap already lives in `model.gaps` (fail-open, set by model.rs).
+    push_authorship_rows(&mut root, model);
 
     // #5318: §2 has a deterministic source.  It used to be filled ONLY from
     // verified synthesis, so a run without `--synthesize` — which was every
@@ -420,6 +429,12 @@ fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis
         root.set(
             "security_summary_paragraph",
             tag(sec.clone(), Provenance::Inferred),
+        );
+    }
+    if let Some(au) = &syn.authorship_summary {
+        root.set(
+            "authorship_summary_paragraph",
+            tag(au.clone(), Provenance::Inferred),
         );
     }
 

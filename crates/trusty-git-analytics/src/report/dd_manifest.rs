@@ -168,6 +168,21 @@ pub struct DdRepositoryEntry {
     pub name: String,
     /// Local checkout path trusty-review scans.
     pub path: PathBuf,
+    /// Path to this repository's authorship artifact, relative to the
+    /// manifest (#5453/#6004) — mirrors the DOC-67 §8 `velocity` field
+    /// precedent: a new, separate, per-repository optional field rather than
+    /// routing through `metrics` (whose "declared metrics always win"
+    /// precedence would block the live `--analyze` fetch).
+    ///
+    /// Why: [`dd_repository_entries`] stays pure (no I/O, no database), so
+    /// this starts `None` for every entry it builds; the caller
+    /// (`commands::audit`) sets it after writing the artifact, once it has a
+    /// database connection open. Omitted from the TOML when absent — the
+    /// same backward-compatibility shape [`DdReportSection::ticketing`] uses
+    /// — so an older trusty-review, or a manifest whose authorship stage
+    /// failed, sees exactly what it saw before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorship: Option<PathBuf>,
 }
 
 impl DdManifest {
@@ -258,6 +273,7 @@ pub fn dd_repository_entries(cfg: &Config, base_dir: &Path) -> Vec<DdRepositoryE
         .map(|repo| DdRepositoryEntry {
             name: scrub_secrets(&repo_name(repo.name.as_deref(), &repo.path), &secrets),
             path: anchor(base_dir, &repo.path),
+            authorship: None,
         })
         .collect()
 }
@@ -278,7 +294,11 @@ fn anchor(base: &Path, path: &Path) -> PathBuf {
 
 /// The display name for a repository: its configured name, else the directory
 /// basename (`config/mod.rs`'s own documented fallback).
-fn repo_name(configured: Option<&str>, path: &Path) -> String {
+/// `pub` (#5453/#6004): `commands::audit` needs the same name-fallback logic
+/// to match `commits.repository` when writing the per-repo authorship
+/// artifact — reusing this avoids a second, independently-driftable
+/// derivation of the same fallback.
+pub fn repo_name(configured: Option<&str>, path: &Path) -> String {
     match configured.map(str::trim).filter(|n| !n.is_empty()) {
         Some(name) => name.to_string(),
         None => path

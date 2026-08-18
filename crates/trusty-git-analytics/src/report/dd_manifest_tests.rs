@@ -61,6 +61,7 @@ fn maps_engagement_metadata() {
         vec![DdRepositoryEntry {
             name: "Northwind Web".to_string(),
             path: PathBuf::from("/src/northwind-web"),
+            authorship: None,
         }]
     );
 

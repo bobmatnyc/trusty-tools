@@ -210,6 +210,44 @@ pub enum ReportError {
         #[source]
         source: std::io::Error,
     },
+
+    /// A declared authorship artifact exists but could not be parsed
+    /// (#5453/#6004).
+    ///
+    /// Why: unlike [`ReportError::Ticketing`], this variant is never
+    /// propagated out of [`super::model::ReportModel::build`] as a hard
+    /// failure — a per-repository authorship load is fail-open (#5453's
+    /// "named gap, never a silently absent section" rule), so callers convert
+    /// this into a gap line rather than aborting the build. It stays a typed
+    /// error (rather than silently returning `None`) so the loader itself is
+    /// testable independent of that fail-open policy.
+    #[error("failed to parse authorship JSON at {path}: {source}")]
+    Authorship {
+        /// The authorship artifact path that failed to parse.
+        path: PathBuf,
+        /// The underlying serde_json error.
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// An authorship artifact parsed, but declares a schema major this build
+    /// does not read (#5453/#6004).
+    ///
+    /// Why: mirrors [`ReportError::TicketingSchema`]'s reasoning — tga and
+    /// trusty-review are versioned and installed independently.
+    #[error(
+        "authorship artifact at {path} declares schema_version {found:?}, which this build \
+         cannot read; it reads schema major {supported} (an empty value means the artifact \
+         carried no schema_version)"
+    )]
+    AuthorshipSchema {
+        /// The authorship artifact whose schema tag was refused.
+        path: PathBuf,
+        /// The `schema_version` the artifact declared; empty when absent.
+        found: String,
+        /// The schema major this build reads.
+        supported: u32,
+    },
 }
 
 /// Convenience `Result` alias for the report pipeline.

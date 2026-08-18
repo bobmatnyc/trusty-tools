@@ -11,6 +11,8 @@
 //! - [`models`] — aggregated data structures
 //! - [`period_trends`] — N-week period roll-up for contributor profiles (#558)
 pub mod aggregator;
+// #5453/#6004: ownership/bus-factor/trajectory figures the DD report renders.
+pub mod authorship;
 pub mod dd_manifest;
 pub mod drilldown;
 pub mod errors;
@@ -24,6 +26,7 @@ pub mod ticketed_stats;
 // #5405: the board-correlation figures the DD report renders.
 pub mod ticketing;
 
+pub use authorship::{build_authorship_summary, AuthorshipSummary, AUTHORSHIP_SCHEMA_VERSION};
 pub use dd_manifest::{
     build_dd_manifest, DdManifest, DdManifestError, DdManifestOptions, DdReportSection,
     DdRepositoryEntry,

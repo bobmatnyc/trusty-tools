@@ -38,7 +38,8 @@
 use crate::llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix};
 use crate::report::model::ReportModel;
 use crate::report::section_instructions::{
-    self, CODE_QUALITY_SUMMARY, EXECUTIVE_SUMMARY, FINDING_ELABORATION, SECURITY_SUMMARY, TOP_RISKS,
+    self, AUTHORSHIP_SUMMARY, CODE_QUALITY_SUMMARY, EXECUTIVE_SUMMARY, FINDING_ELABORATION,
+    SECURITY_SUMMARY, TOP_RISKS,
 };
 use crate::report::synthesize_digest::{
     build_split, gather_compact_findings, render_context_section, render_elaboration_section,
@@ -97,6 +98,11 @@ pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
                 "security_summary": {
                     "type": "string",
                     "description": "ONE paragraph characterising security posture from the lint-graded RED/AMBER findings ONLY — this is code-hygiene signal, not a SAST/CVE/secrets scan. Empty string if the data supports nothing."
+                },
+                // #5453/#6004: high-level authorship/key-person-risk narrative slot.
+                "authorship_summary": {
+                    "type": "string",
+                    "description": "ONE high-level paragraph on codebase health from an authorship perspective — trailing-12-month trajectory and key-person risk, grounded ONLY in the bus-factor/concentration/trajectory data provided. Not a data dump. Empty string if the data supports nothing."
                 },
                 "top_risks": {
                     "type": "array",
@@ -262,6 +268,11 @@ fn synthesis_system_prompt(
         .get(SECURITY_SUMMARY)
         .map(String::as_str)
         .unwrap_or_default();
+    // #5453/#6004: the high-level authorship/key-person-risk narrative slot.
+    let authorship = resolved
+        .get(AUTHORSHIP_SUMMARY)
+        .map(String::as_str)
+        .unwrap_or_default();
 
     let mut prompt = format!(
         r#"You are a senior technical due-diligence analyst writing the narrative sections of an acquisition-grade report from pre-computed repository analysis data.
@@ -291,7 +302,8 @@ Populate the structured response:
 - `top_risks`: {risks}
 - `findings`: {elaboration}
 - `code_quality_summary`: {code_quality}
-- `security_summary`: {security}"#
+- `security_summary`: {security}
+- `authorship_summary`: {authorship}"#
     );
 
     if retry_concise {
@@ -392,6 +404,28 @@ fn build_digest(model: &ReportModel) -> String {
             ));
         } else {
             msg.push_str("- No metrics available for this application.\n");
+        }
+        // #5453/#6004: the authorship_summary slot has no other route to real
+        // data — model.ticketing's precedent plumbs a figure to the TEMPLATE
+        // but never the PROMPT (issue #5453), which starves the narrative of
+        // anything to ground itself in. Fed here, not into the findings
+        // digest, since it is its own section, not a Top-Risks input.
+        if let Some(a) = &repo.authorship {
+            msg.push_str(&format!(
+                "- Authorship: {} distinct author(s), bus factor {}, top author {:.0}% of \
+                 touches, single-author subsystems: {}\n",
+                a.distinct_authors,
+                a.bus_factor,
+                a.top_author_share_pct,
+                if a.single_author_subsystems.is_empty() {
+                    "none".to_string()
+                } else {
+                    a.single_author_subsystems.join(", ")
+                }
+            ));
+            if let Some(trend) = a.trajectory_summary() {
+                msg.push_str(&format!("- Authorship trajectory: {trend}\n"));
+            }
         }
         msg.push('\n');
     }

@@ -173,6 +173,7 @@ fn fixture_model(findings: Vec<MetricFinding>) -> ReportModel {
             local_path: None,
             scan: None,
             metrics: Some(metrics),
+            authorship: None,
         }],
         gaps: Vec::new(),
         synthesis: None,
@@ -303,6 +304,8 @@ fn synthesis_schema_shape() {
     // schema value as executive_summary.
     assert!(props["code_quality_summary"].is_object());
     assert!(props["security_summary"].is_object());
+    // #5453: same for the authorship narrative slot.
+    assert!(props["authorship_summary"].is_object());
     assert!(props["top_risks"].is_object());
     assert!(props["findings"].is_object());
     assert_eq!(props["top_risks"]["maxItems"], 5);
@@ -330,6 +333,8 @@ fn schema_contract_statement_lists_every_field_name() {
         // value, so these must be named alongside executive_summary.
         "code_quality_summary",
         "security_summary",
+        // #5453: same for the authorship narrative slot.
+        "authorship_summary",
         "top_risks",
         "findings",
         "description",
@@ -366,6 +371,8 @@ fn schema_contract_statement_reaches_system_prompt() {
     // system prompt text, not just `response_format`.
     assert!(req.system.contains("code_quality_summary"));
     assert!(req.system.contains("security_summary"));
+    // #5453: same for the authorship narrative slot.
+    assert!(req.system.contains("authorship_summary"));
     assert!(req.system.contains("top_risks"));
     assert!(req.system.contains("findings"));
 }
@@ -526,13 +533,15 @@ async fn synthesize_happy_path_injects() {
 }
 
 /// Why: regression for the rebase seam between #6009/#6014's whitelist
-/// normalizer and #6004's two new narrative slots — a normalizer whitelist
-/// keyed only off the pre-#6004 field set silently drops
-/// `code_quality_summary`/`security_summary` as "unrecognized" even though
-/// both the schema and `RawSynthesis` declare them.
-/// What: a full-shape response carrying both new fields, grounded in figures
-/// present in the fixture model; asserts both survive parse → normalize →
-/// guardrail into `Synthesis`, and that no drop note was recorded for either.
+/// normalizer and the three narrative slots #6004/#5453 added on top of it —
+/// a normalizer whitelist keyed only off the pre-#6004 field set silently
+/// drops `code_quality_summary`/`security_summary`/`authorship_summary` as
+/// "unrecognized" even though both the schema and `RawSynthesis` declare
+/// them.
+/// What: a full-shape response carrying all three new fields, grounded in
+/// figures present in the fixture model; asserts each survives parse →
+/// normalize → guardrail into `Synthesis`, and that no drop note was
+/// recorded for any of them.
 /// Test: this test itself.
 #[tokio::test]
 async fn synthesize_happy_path_injects_new_narrative_fields() {
@@ -541,6 +550,7 @@ async fn synthesize_happy_path_injects_new_narrative_fields() {
       "executive_summary": "The 8,200 LoC Rust codebase spans 120 files and 640 functions with one critical security gap.",
       "code_quality_summary": "The 8,200 LoC codebase spans 120 files, a moderate footprint.",
       "security_summary": "640 functions were assessed; one RED finding stands out.",
+      "authorship_summary": "120 files were assessed for authorship concentration.",
       "top_risks": [],
       "findings": []
     }"#
@@ -562,9 +572,13 @@ async fn synthesize_happy_path_injects_new_narrative_fields() {
         result.security_summary.as_deref(),
         Some("640 functions were assessed; one RED finding stands out.")
     );
+    assert_eq!(
+        result.authorship_summary.as_deref(),
+        Some("120 files were assessed for authorship concentration.")
+    );
     assert!(
         result.notes.is_empty(),
-        "neither new field is unrecognized or unverified: {:?}",
+        "none of the three new fields is unrecognized or unverified: {:?}",
         result.notes
     );
 }
@@ -767,6 +781,7 @@ fn code_quality_summary_guardrail_rejects_unverified_figure() {
         executive_summary: String::new(),
         code_quality_summary: "Complexity sits at 9999 on average.".to_string(),
         security_summary: String::new(),
+        authorship_summary: String::new(),
         top_risks: vec![super::RiskRow {
             description: "moderate".to_string(),
             severity: "AMBER".to_string(),
@@ -916,6 +931,7 @@ fn status_lines_render_banners() {
     let syn = Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         notes: vec!["synthesis: rejected (unverified figure) in top-risk row 1: 42".to_string()],
         ..Default::default()
     };
@@ -979,10 +995,10 @@ async fn synthesize_recovers_executive_summary_from_markdown_fallback() {
         result.findings.is_empty(),
         "prose is never reconstructed into findings"
     );
-    // #6004: the markdown fallback recovers executive_summary ONLY — the two
-    // new narrative slots are absent from this response shape entirely, so
-    // they stay `None` (the reporter's honesty-marker path), same as
-    // top_risks/findings above.
+    // #6004/#5453: the markdown fallback recovers executive_summary ONLY —
+    // the three new narrative slots are absent from this response shape
+    // entirely, so they stay `None` (the reporter's honesty-marker path),
+    // same as top_risks/findings above.
     assert!(
         result.code_quality_summary.is_none(),
         "the markdown fallback never recovers code_quality_summary"
@@ -990,6 +1006,10 @@ async fn synthesize_recovers_executive_summary_from_markdown_fallback() {
     assert!(
         result.security_summary.is_none(),
         "the markdown fallback never recovers security_summary"
+    );
+    assert!(
+        result.authorship_summary.is_none(),
+        "the markdown fallback never recovers authorship_summary"
     );
     assert!(
         result.notes.is_empty(),

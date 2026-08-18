@@ -29,10 +29,12 @@ use tga::core::db::Database;
 // #5823: the relay that carries the sweep's stage events to a parent process.
 use tga::core::progress::{ProgressBus, ProgressEvent, Stage, StageRelay};
 use tga::report::dd_manifest::{
-    build_dd_manifest, configured_secrets, dd_repository_entries, DdManifestOptions,
+    build_dd_manifest, configured_secrets, dd_repository_entries, repo_name, DdManifestOptions,
 };
 // #5405: the board-correlation figures the DD report renders.
 use tga::report::build_ticketing_summary;
+// #5453/#6004: per-repository ownership/bus-factor/trajectory figures.
+use tga::report::build_authorship_summary;
 use trusty_common::credentials::scrub_secrets;
 
 /// Arguments for `tga audit`.
@@ -241,7 +243,7 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     };
 
     gaps.push(DATA_HANDLING_NOTE.to_string());
-    let manifest = build_dd_manifest(
+    let mut manifest = build_dd_manifest(
         &config,
         &DdManifestOptions {
             title: args.resolved_title(),
@@ -252,6 +254,33 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
             ticketing,
         },
     )?;
+
+    // #5453/#6004: one authorship artifact per repository, written beside the
+    // manifest. A per-repository failure is a named gap on the MANIFEST
+    // itself (DOC-67 §9's "named gap, never a silent one" rule) rather than
+    // an aborted run — the report's Authorship section degrades to that gap
+    // for exactly the repositories it could not compute.
+    let mut authorship_gaps: Vec<String> = Vec::new();
+    for (i, (entry, repo_cfg)) in manifest
+        .repositories
+        .iter_mut()
+        .zip(&config.repositories)
+        .enumerate()
+    {
+        let repository = repo_name(repo_cfg.name.as_deref(), &repo_cfg.path);
+        match authorship_artifact(db, &output, &repository, i) {
+            Ok(path) => entry.authorship = Some(path),
+            Err(e) => authorship_gaps.push(scrub_secrets(
+                &format!(
+                    "Authorship ({}): could not write the authorship artifact ({e:#}). The \
+                     report states no authorship/key-person signal for this application.",
+                    entry.name
+                ),
+                &configured_secrets(&config),
+            )),
+        }
+    }
+    manifest.report.gaps.extend(authorship_gaps);
 
     let manifest_path = output.join(MANIFEST_FILE);
     std::fs::write(&manifest_path, manifest.to_toml()?)?;
@@ -344,6 +373,34 @@ fn ticketing_artifact(
     let summary = build_ticketing_summary(db.connection())?;
     std::fs::write(output.join(TICKETING_FILE), summary.to_json()?)?;
     Ok(Some(PathBuf::from(TICKETING_FILE)))
+}
+
+/// Write one repository's authorship figures beside the manifest (#5453/#6004).
+///
+/// Why: mirrors [`ticketing_artifact`]'s shape, but per-repository — `commits.
+/// repository` distinguishes repositories within tga's single-database-per-
+/// engagement audit flow, so authorship is computed with a `WHERE repository =
+/// ?` filter rather than a second database.
+/// What: `index` names the file uniquely (`authorship-{index}.json`) since two
+/// repositories can share a display name. The path returned is
+/// manifest-relative, matching every other artifact this command writes.
+/// Test: `tests::{authorship_artifact_is_written_per_repository,
+/// a_failed_authorship_write_is_a_named_gap}`.
+///
+/// # Errors
+///
+/// Propagates the database read and the file write; the caller turns either
+/// into a named gap rather than a failed run.
+fn authorship_artifact(
+    db: &Database,
+    output: &Path,
+    repository: &str,
+    index: usize,
+) -> anyhow::Result<PathBuf> {
+    let summary = build_authorship_summary(db.connection(), repository)?;
+    let filename = format!("authorship-{index}.json");
+    std::fs::write(output.join(&filename), summary.to_json()?)?;
+    Ok(PathBuf::from(filename))
 }
 
 /// Invoke `trusty-review report` and report what it produced.

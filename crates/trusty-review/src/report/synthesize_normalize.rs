@@ -44,10 +44,12 @@ type FieldTable = &'static [(&'static str, &'static [&'static str])];
 /// before `serde_json::from_value`, so a narrative slot absent from this
 /// table is silently dropped as "unrecognized" even though `RawSynthesis`
 /// and [`super::synthesize_prompt::synthesis_schema`] both declare it.
+/// #5453: `authorship_summary` joins the same list for the same reason.
 const TOP_LEVEL_FIELDS: FieldTable = &[
     ("executive_summary", &[]),
     ("code_quality_summary", &[]),
     ("security_summary", &[]),
+    ("authorship_summary", &[]),
     ("top_risks", &[]),
     ("findings", &[]),
 ];
