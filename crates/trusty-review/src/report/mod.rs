@@ -39,6 +39,9 @@ pub mod section_instructions;
 pub mod synthesize;
 pub mod synthesize_digest;
 pub mod synthesize_guard;
+// #6009 shape 3: whitelist-based synonym normalization, used only by
+// `synthesize::parse_raw` — not part of the public report API.
+pub(crate) mod synthesize_normalize;
 pub mod synthesize_prompt;
 pub mod template;
 // #5405: the board-correlation figures tga hands over beside the manifest.

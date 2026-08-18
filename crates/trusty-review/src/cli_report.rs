@@ -248,7 +248,7 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
     // command the recovery path.
     eprintln!("[trusty-review report] Synthesis — calling LLM provider...");
     let budget = resolve_budget(&args, &manifest);
-    let synthesis = run_synthesis(&config, &mut model, budget)
+    let synthesis = run_synthesis(&config, &mut model, budget, &args.out)
         .await
         .with_context(|| {
             format!(
@@ -503,6 +503,7 @@ async fn run_synthesis(
     config: &ReviewConfig,
     model: &mut ReportModel,
     budget: Budget,
+    out_dir: &Path,
 ) -> Result<Synthesis> {
     let role = &config.role_models.reviewer;
     let provider = build_provider(&role.model, &role.provider, config)
@@ -518,13 +519,18 @@ async fn run_synthesis(
             inv.repos.len()
         );
         apply_investigation(model, &inv);
+        // #6009: capture the raw response next to the report output on an
+        // unparseable-response failure, so a future occurrence is diagnosable
+        // without spending another live call to find out what the model sent.
         let mut synthesis = Synthesizer::new(provider, role.model.clone())
+            .with_raw_capture_dir(out_dir)
             .synthesize(model)
             .await?;
         merge_investigation_prose(&mut synthesis, &inv);
         Ok(synthesis)
     } else {
         Ok(Synthesizer::new(provider, role.model.clone())
+            .with_raw_capture_dir(out_dir)
             .synthesize(model)
             .await?)
     }
