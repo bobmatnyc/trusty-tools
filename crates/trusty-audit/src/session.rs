@@ -616,6 +616,13 @@ impl Session {
     /// access check, and [`registry::register`] owns the write — including the
     /// lock that stops two concurrent `add` runs discarding each other's target.
     ///
+    /// #5982: what is written is the target validation ANSWERED with, not the
+    /// one parsed from argv. `linear:<team-id>` names a readable team and is not
+    /// a key the sweep can collect against, so validation resolves it to the
+    /// team key while it already has Linear's team list in hand. The
+    /// [`Registration`] reports that same resolved target, so an operator who
+    /// typed an id is shown what was actually registered.
+    ///
     /// #5979: the config is REQUIRED here, where it used to be optional. It is
     /// the file a target is now declared in, so an absent one is
     /// [`AuditError::NoEngagementConfig`] rather than a registration that lands
@@ -647,7 +654,9 @@ impl Session {
         // other `add` for this engagement behind one unreachable site.
         // `register` re-reads the config, so the append is decided against the
         // snapshot current at write time.
-        validate::validate(&target, Some(&config), self.repo_probe).await?;
+        // #5982: what gets persisted is what validation resolved, not what was
+        // typed — a Linear team id would otherwise be stored and never collect.
+        let target = validate::validate(&target, Some(&config), self.repo_probe).await?;
         let inserted = self
             .under_registry_lock({
                 let (target, config_path) = (target.clone(), self.config_path.clone());

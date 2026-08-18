@@ -42,7 +42,7 @@
 use serde::Serialize;
 
 use crate::config::BoardCredentials;
-use crate::registry::{BoardProvider, Target};
+use crate::registry::{self, BoardProvider, Target};
 
 /// The variable the JIRA API token reaches the child under.
 pub const ENV_JIRA_TOKEN: &str = "TRUSTY_AUDIT_JIRA_TOKEN";
@@ -150,7 +150,10 @@ impl Boards {
 /// registered. Linear teams accumulate into one section, because tga's
 /// `linear.team_keys` is a list. A SECOND JIRA project is a gap: tga's
 /// `jira.project_key` is a single value, so the extra board would otherwise be
-/// silently dropped.
+/// silently dropped. A Linear team the sweep cannot match — the key is not a
+/// team key [`registry::is_linear_team_key`] recognises — is a gap for the same
+/// reason: it would otherwise reach `team_keys`, match no issue, and be reported
+/// as a covered board that happened to be quiet (#5982).
 /// Test: `super::boards_tests`.
 pub fn resolve(targets: &[Target], credentials: &BoardCredentials) -> Boards {
     let mut resolved = Boards::default();
@@ -174,6 +177,11 @@ pub fn resolve(targets: &[Target], credentials: &BoardCredentials) -> Boards {
             },
             BoardProvider::Linear => match credentials.linear.as_ref() {
                 None => resolved.gaps.push(unconfigured(target, *provider)),
+                // #5982: a key tga's matcher can never match collects nothing,
+                // and a silent nothing reads as a team with no issues.
+                Some(_) if !registry::is_linear_team_key(key) => {
+                    resolved.gaps.push(uncollectable_linear(target));
+                }
                 Some(_) => linear_teams.push(key.clone()),
             },
         }
@@ -194,6 +202,19 @@ fn unconfigured(target: &Target, provider: BoardProvider) -> String {
     )
 }
 
+/// The gap for a Linear board stored as something no issue can carry.
+///
+/// #5982 reached this state through registration, which accepted a team id and
+/// wrote it down; that half is fixed at the source now. This stays because the
+/// file outlives the fix — a target registered by id before it is still on disk,
+/// and a run that skipped it silently is the failure this line replaces.
+fn uncollectable_linear(target: &Target) -> String {
+    format!(
+        "{target} was not audited — `tga audit` matches Linear issues by team key (the `ENG` in \
+         `ENG-1234`), and that is a team id; re-register it as `linear:<TEAM-KEY>` (#5982)"
+    )
+}
+
 fn second_jira(target: &Target) -> String {
     format!(
         "{target} was not audited — `tga audit` takes one JIRA project per run, and another was \
@@ -209,6 +230,9 @@ mod boards_tests {
 
     const JIRA_TOKEN: &str = "jira-token-do-not-write-me-down";
     const LINEAR_KEY: &str = "lin_api_do-not-write-me-down";
+
+    /// A Linear team id, in the shape the API returns one. See #5982.
+    const TEAM_ID: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
 
     fn board(spec: &str) -> Target {
         registry::parse(Some(TargetKind::Board), spec).expect("parses")
@@ -267,6 +291,33 @@ mod boards_tests {
         let linear = resolved.linear.expect("a configured Linear board");
         assert_eq!(linear.team_keys, vec!["ENG".to_owned(), "FE".to_owned()]);
         assert!(resolved.gaps.is_empty(), "{:?}", resolved.gaps);
+    }
+
+    /// A team id is what #5982 names: `crate::validate` accepted one, and tga
+    /// compares `team_keys` against the text before the hyphen in `ENG-1234`,
+    /// where a UUID never appears. The id used to reach `team_keys` and the run
+    /// reported a covered board that contributed nothing — indistinguishable
+    /// from a team with no issues.
+    #[test]
+    fn a_registered_team_id_is_a_gap_rather_than_a_team_that_collects_nothing() {
+        let resolved = resolve(&[board(&format!("linear:{TEAM_ID}"))], &both());
+        assert!(resolved.linear.is_none(), "{:?}", resolved.linear);
+        assert_eq!(resolved.gaps.len(), 1, "{:?}", resolved.gaps);
+        assert!(resolved.gaps[0].contains(TEAM_ID), "{:?}", resolved.gaps);
+        assert!(resolved.gaps[0].contains("#5982"), "{:?}", resolved.gaps);
+    }
+
+    /// The gap costs the teams around it nothing: a stale id alongside a real
+    /// team key leaves that team collecting exactly as it did.
+    #[test]
+    fn a_team_id_does_not_displace_the_team_keys_that_do_collect() {
+        let resolved = resolve(
+            &[board("linear:ENG"), board(&format!("linear:{TEAM_ID}"))],
+            &both(),
+        );
+        let linear = resolved.linear.clone().expect("ENG still collects");
+        assert_eq!(linear.team_keys, vec!["ENG".to_owned()]);
+        assert_eq!(resolved.gaps.len(), 1, "{:?}", resolved.gaps);
     }
 
     /// `jira.project_key` is one value, so the second project has nowhere to go.
