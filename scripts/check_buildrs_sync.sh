@@ -19,10 +19,12 @@
 #
 # What: Extracts the text between each family's BEGIN/END markers from every
 # member's build.rs and asserts the members of a family are byte-for-byte
-# identical. Exits 0 on success, 1 on any mismatch with a diff.
+# identical. Then asserts every crate in scripts/ui-bundle-manifest.tsv re-stamps
+# its bundle after building it (#5936 — see check_restamp below). Exits 0 on
+# success, 1 on any mismatch with a diff.
 #
 # Test: Run `bash scripts/check_buildrs_sync.sh` from the workspace root.
-# Expected output: one "in sync" line per family.
+# Expected output: one "in sync" line per family, plus one "ui-restamp" line.
 
 set -euo pipefail
 
@@ -90,7 +92,63 @@ check_family() {
     fi
 }
 
+# Assert every crate that ships a committed UI bundle chains a re-stamp to its
+# UI build.
+#
+# Why: each of those crates sets `build.emptyOutDir` in its vite.config.js, so
+# `pnpm run build` clears the bundle directory — deleting the committed
+# ui-source-hash.txt that scripts/check-ui-bundle-freshness.sh reads. Only
+# scripts/stamp-ui-bundle.sh writes it back, and nothing chained the two, so an
+# ordinary `cargo build` staged the deletion (#5936). A fifth bundle-shipping
+# crate added without the call reintroduces the trap in one sibling only, which
+# is exactly the asymmetry this check exists to catch.
+#
+# What: reads scripts/ui-bundle-manifest.tsv — the list of crates that commit a
+# bundle — and requires each one's build.rs to call restamp_ui_bundle(). Fails
+# closed: inspecting zero rows is a failure, not a pass.
+check_restamp() {
+    local manifest="$WORKSPACE_ROOT/scripts/ui-bundle-manifest.tsv"
+    local crate rest buildrs checked=0
+
+    if [[ ! -f "$manifest" ]]; then
+        echo "ERROR: expected file not found: scripts/ui-bundle-manifest.tsv" >&2
+        FAILED=1
+        return
+    fi
+
+    while IFS=$'\t' read -r crate rest; do
+        [[ -z "$crate" || "$crate" == \#* ]] && continue
+        buildrs="$WORKSPACE_ROOT/crates/$crate/build.rs"
+        if [[ ! -f "$buildrs" ]]; then
+            echo "FAIL: ${crate} commits a UI bundle but has no build.rs to re-stamp it." >&2
+            FAILED=1
+            continue
+        fi
+        # Drop the definition line first. Every crate carries `fn
+        # restamp_ui_bundle(` inside the shared canonical block, so a bare grep
+        # matches on all four whether or not any of them CALLS it — a gate that
+        # cannot fail. What must be present is an indented call site.
+        if ! grep -v '^fn restamp_ui_bundle(' "$buildrs" | grep -q 'restamp_ui_bundle('; then
+            echo "FAIL: crates/${crate}/build.rs never calls restamp_ui_bundle()." >&2
+            echo "  emptyOutDir deletes ${crate}'s committed ui-source-hash.txt on every" >&2
+            echo "  build; without the re-stamp that deletion is staged silently (#5936)." >&2
+            echo "  To fix: call restamp_ui_bundle() after the UI build succeeds." >&2
+            FAILED=1
+            continue
+        fi
+        checked=$((checked + 1))
+    done < "$manifest"
+
+    if [[ "$checked" -eq 0 ]]; then
+        echo "ERROR: ui-restamp inspected zero manifest rows — refusing to report a pass." >&2
+        FAILED=1
+        return
+    fi
+    echo "ui-restamp: ${checked} bundle-shipping crate(s) re-stamp after their UI build."
+}
+
 check_family "daemon" "" "${DAEMON_FILES[@]}"
 check_family "tauri-ui" "TAURI UI " "${TAURI_UI_FILES[@]}"
+check_restamp
 
 exit "$FAILED"

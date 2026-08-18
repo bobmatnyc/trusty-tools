@@ -11,8 +11,10 @@
 //! shells out to `make release-prep`. If `make` is unavailable or the target
 //! fails, falls back to the canonical pnpm build pipeline (shared with
 //! trusty-memory / trusty-analyze / trusty-console per issue #987) and then
-//! copies `ui/dist → ui-dist`. If pnpm is also absent, writes a placeholder
-//! `ui-dist/index.html` so `include_dir!` still compiles.
+//! copies `ui/dist → ui-dist` and re-stamps `ui-dist/ui-source-hash.txt`
+//! (#5936 — `make release-prep` stamps via `sync-ui`; this fallback did not).
+//! If pnpm is also absent, writes a placeholder `ui-dist/index.html` so
+//! `include_dir!` still compiles.
 //!
 //! NOTE: The core UI-build logic (SKIP_UI_BUILD guard, pnpm detection,
 //! install+build pipeline, placeholder fallback) is intentionally kept
@@ -79,9 +81,15 @@ fn main() {
          falling back to direct pnpm build."
     );
     let tmp_dist = ui_dir.join("dist");
-    build_svelte_ui(&ui_dir, &tmp_dist, "trusty-search");
+    let built = build_svelte_ui(&ui_dir, &tmp_dist, "trusty-search");
     if tmp_dist.join("index.html").exists() {
         copy_dir_all(&tmp_dist, &dist_dir);
+        // #5936: `make release-prep` stamps via `sync-ui`, so only this fallback
+        // needs it — and only after the mirror, when ui-dist/ holds the bundle
+        // the stamp is a claim about.
+        if built {
+            restamp_ui_bundle(&crate_root, "trusty-search");
+        }
     } else {
         ensure_placeholder(&dist_dir, "trusty-search");
     }
@@ -127,10 +135,12 @@ fn copy_dir_all(src: &Path, dst: &Path) {
 /// identical logic without a published build-helper crate (#987).
 /// What: Checks SKIP_UI_BUILD, detects pnpm/npm, runs install + build inside
 /// `ui_dir`, writes a placeholder on any failure so the Rust build still
-/// completes even without the JS toolchain.
+/// completes even without the JS toolchain. Returns `true` only when Vite
+/// actually rebuilt the bundle, which is the caller's signal to re-stamp —
+/// see `restamp_ui_bundle` (#5936).
 /// Test: `SKIP_UI_BUILD=1 cargo check` short-circuits; `cargo build` with pnpm
 /// installed populates `dist_dir/index.html` with real Vite output.
-fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
+fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) -> bool {
     // Step 1: honour explicit skip (CI / `cargo publish --verify`).
     if std::env::var("SKIP_UI_BUILD").as_deref() == Ok("1") {
         if !dist_dir.join("index.html").exists() {
@@ -141,14 +151,14 @@ fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
             );
             ensure_placeholder(dist_dir, crate_name);
         }
-        return;
+        return false;
     }
 
     // Step 2: no `ui/package.json` means we are inside an extracted tarball
     // that already shipped the dist — nothing to build.
     if !ui_dir.join("package.json").exists() {
         ensure_placeholder(dist_dir, crate_name);
-        return;
+        return false;
     }
 
     // Step 3: detect package manager (pnpm preferred, npm fallback).
@@ -158,7 +168,7 @@ fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
              build (set SKIP_UI_BUILD=1 to silence, or install pnpm)."
         );
         ensure_placeholder(dist_dir, crate_name);
-        return;
+        return false;
     };
 
     // Step 4a: install — prefer frozen lockfile when pnpm-lock.yaml exists.
@@ -177,7 +187,7 @@ fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
     if !install_ok {
         println!("cargo:warning={crate_name}: `{pm} install` failed — embedding placeholder UI.");
         ensure_placeholder(dist_dir, crate_name);
-        return;
+        return false;
     }
 
     // Step 4b: build.
@@ -190,6 +200,48 @@ fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
     if !build_ok {
         println!("cargo:warning={crate_name}: `{pm} run build` failed — embedding placeholder UI.");
         ensure_placeholder(dist_dir, crate_name);
+        return false;
+    }
+    true
+}
+
+/// Rewrite the bundle's `ui-source-hash.txt` after Vite has rebuilt it.
+///
+/// Why: every bundle-shipping crate sets `build.emptyOutDir` in its
+/// `vite.config.js`, so `pnpm run build` clears the output directory — which
+/// deletes the committed stamp that `scripts/check-ui-bundle-freshness.sh`
+/// reads. Nothing chained the rebuild to a re-stamp, so an ordinary
+/// `cargo build` left the stamp staged for deletion and it rode into unrelated
+/// commits (#5936). The polarity is the reverse of the obvious guess: a host
+/// with no pnpm never reaches the build and never deletes anything.
+/// What: shells out to `scripts/stamp-ui-bundle.sh <crate>`, the one writer of
+/// that file. A no-op when the script is unreachable — a published crate
+/// tarball has no `scripts/` and already ships a stamped bundle.
+/// Test: `scripts/check_buildrs_sync.sh` requires every crate in
+/// `scripts/ui-bundle-manifest.tsv` to call this; the CI gate
+/// `scripts/check-ui-bundle-freshness.sh` fails STAMP-MISSING if it stops
+/// running.
+fn restamp_ui_bundle(crate_root: &Path, crate_name: &str) {
+    let Ok(repo_root) = crate_root.join("..").join("..").canonicalize() else {
+        return;
+    };
+    let script = repo_root.join("scripts").join("stamp-ui-bundle.sh");
+    if !script.exists() {
+        return;
+    }
+    let ok = Command::new("bash")
+        .arg(&script)
+        .arg("--repo")
+        .arg(&repo_root)
+        .arg(crate_name)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        println!(
+            "cargo:warning={crate_name}: UI bundle rebuilt but re-stamping failed — \
+             run `bash scripts/stamp-ui-bundle.sh {crate_name}` before committing."
+        );
     }
 }
 

@@ -7,6 +7,12 @@
 # CI whenever a family's copies drift apart. See scripts/check_buildrs_sync.sh
 # for the two families' differing failure semantics.
 #
+# The same script also asserts that every crate committing a UI bundle re-stamps
+# it after building (#5936): Vite's emptyOutDir deletes the bundle's
+# ui-source-hash.txt on every build, and only a restamp_ui_bundle() call in
+# build.rs puts it back. scripts/ui-bundle-manifest.tsv is a trigger path so a
+# new bundle-shipping crate cannot land without that check running.
+#
 # Pure text extraction/diff — no Rust toolchain or build needed, so this runs
 # as its own lightweight job (matches line-cap.yml / sld-lint.yml's checkout
 # style/auth).
@@ -25,6 +31,7 @@ on:
       - "crates/trusty-agents/ui/src-tauri/build.rs"
       - "crates/trusty-audit/ui/src-tauri/build.rs"
       - "scripts/check_buildrs_sync.sh"
+      - "scripts/ui-bundle-manifest.tsv"
       - ".github/workflows/buildrs-sync.yml"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
@@ -44,6 +51,7 @@ on:
       - "crates/trusty-agents/ui/src-tauri/build.rs"
       - "crates/trusty-audit/ui/src-tauri/build.rs"
       - "scripts/check_buildrs_sync.sh"
+      - "scripts/ui-bundle-manifest.tsv"
       - ".github/workflows/buildrs-sync.yml"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
