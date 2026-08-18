@@ -225,11 +225,17 @@ the only way the check can exist. Also expect the operational consequence:
 adding a required context wedges every open PR that predates the job, so plan
 to `update-branch` all of them once branch protection picks it up.
 
-🟡 **`gh pr merge --admin` bypasses nothing on this repo.** The working account is
-push-only (`admin: false`), so the flag is silently ineffective. `gh`'s own refusal
-message offers `--admin` as the remedy — following that suggestion is a dead end,
-not a fix. A PR merges when every required context passes on the PR's own head
-— `strict: false` means the base does not have to be current too.
+🟡 **`gh pr merge --admin` is not confirmed harmless here — don't reach for
+it.** The account is NOT push-only: `gh api repos/bobmatnyc/trusty-tools --jq
+'.permissions'` returns `{"admin":true,"maintain":true,"pull":true,"push":true,
+"triage":true}` for `bobmatnyc`, the repo owner — this file's push-only/
+`admin: false` claim was disproved once already in an earlier session and is
+corrected here for the second time. `gh`'s own source (`cli/cli`,
+`pkg/cmd/pr/merge/merge.go`) codes `allowsAdminOverride` `true` for both
+`BLOCKED` and `BEHIND`, so the flag is not the silent no-op this file claimed.
+Still do not use it: every required context passing on the PR's own head
+remains the bar — `strict: false` means the base does not have to be current
+too.
 
 ### Baseline failures — the Rust specifics
 
