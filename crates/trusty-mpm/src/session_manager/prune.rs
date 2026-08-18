@@ -8,14 +8,13 @@
 //! per-session [`SessionManager::decommission`] internals (tmux kill + workspace
 //! removal + tombstone). It lives in its own file so [`super::manager`] stays under
 //! the 500-SLOC production cap (mirroring [`super::adopt`]).
-//! What: [`PruneFilter`] (which records a prune targets), [`PruneAction`] /
-//! [`PrunedSession`] / [`PruneOutcome`] (what a prune did or WOULD do under
-//! `dry_run`), and an inherent `impl SessionManager` block adding
+//! What: an inherent `impl SessionManager` block adding
 //! [`SessionManager::decommission_all_ephemeral`] and the general
-//! [`SessionManager::prune_managed`].
+//! [`SessionManager::prune_managed`]. The result and filter types those return —
+//! [`PruneFilter`], [`PruneAction`], [`PrunedSession`], [`PruneOutcome`] — live in
+//! `prune_types.rs` and are re-exported here, so `prune::PruneFilter` still
+//! resolves.
 //! Test: `prune_*` in `super::tests`.
-
-use std::fmt;
 
 use chrono::{Duration, Utc};
 use tracing::{error, info, warn};
@@ -26,6 +25,13 @@ use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::worktree_safety::{
     DirtyWorktree, DirtyWorktreePolicy, dirt_blocks_removal, git_worktree_list_agrees, inspect_dirt,
 };
+
+#[path = "prune_types.rs"]
+mod types;
+
+// Re-exported so `prune::PruneFilter` and friends keep resolving after the
+// #5912 split — no call site moved.
+pub use types::{PruneAction, PruneFilter, PruneOutcome, PrunedSession};
 
 /// Maximum age an EPHEMERAL session may reach before the auto-reaper tears it
 /// down — default 24 hours (#1508).
@@ -153,196 +159,6 @@ fn canonicalize_failure_streaks() -> &'static std::sync::Mutex<CanonicalizeFailu
         .get_or_init(|| std::sync::Mutex::new(CanonicalizeFailureStreaks::default()))
 }
 
-/// Which managed-session records a prune targets (#1508).
-///
-/// Why: one teardown tool must serve BOTH the ephemeral-cleanup case (tear down
-/// every test session) AND the legacy-purge case (clear the 239 stale
-/// stopped/decommissioned records that predate the `ephemeral` flag). Modelling
-/// the target as a closed enum keeps the safety rule — never touch a RUNNING
-/// (`Active`/`Provisioning`) record unless explicitly forced — in one place.
-/// What: [`Ephemeral`](PruneFilter::Ephemeral) selects `ephemeral == true`
-/// non-terminal records; [`Stopped`](PruneFilter::Stopped) selects `Stopped`
-/// records; [`Decommissioned`](PruneFilter::Decommissioned) and
-/// [`Deleted`](PruneFilter::Deleted) select existing tombstones (for compaction
-/// only); [`All`](PruneFilter::All) selects every NON-running record (ephemeral,
-/// stopped, errored, decommissioned, and deleted).
-/// Test: `prune_filter_parse_round_trip`, and the per-filter `prune_*` tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PruneFilter {
-    /// Only sessions tagged `ephemeral == true` (test/throwaway sessions).
-    Ephemeral,
-    /// Only `Stopped` sessions (runtime gone, workspace still on disk).
-    Stopped,
-    /// Only `Decommissioned` tombstones — compacted (removed) from the store.
-    Decommissioned,
-    /// Only `Deleted` tombstones (`--deleted--`) — compacted (removed) from the
-    /// store. The permanent-removal path for soft-deleted records (#2012).
-    Deleted,
-    /// Every NON-running record: ephemeral, stopped, errored, decommissioned,
-    /// and deleted.
-    All,
-}
-
-impl PruneFilter {
-    /// Parse a CLI/wire string into a [`PruneFilter`].
-    ///
-    /// Why: the CLI `--state` flag, the HTTP body, and the MCP tool all accept the
-    /// same lowercase spellings; centralising the parse keeps them consistent and
-    /// rejects typos with a single actionable message.
-    /// What: maps `ephemeral`/`stopped`/`decommissioned`/`all` (case-insensitive,
-    /// trimmed) to the matching variant; anything else is an `Err` naming the
-    /// supported values.
-    /// Test: `prune_filter_parse_round_trip` (covers both the round-trip and the
-    /// garbage-rejection case).
-    pub fn parse(raw: &str) -> Result<Self, String> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "ephemeral" => Ok(Self::Ephemeral),
-            "stopped" => Ok(Self::Stopped),
-            "decommissioned" => Ok(Self::Decommissioned),
-            "deleted" => Ok(Self::Deleted),
-            "all" => Ok(Self::All),
-            other => Err(format!(
-                "unknown prune filter `{other}` (expected: ephemeral | stopped | decommissioned | deleted | all)"
-            )),
-        }
-    }
-
-    /// The canonical lowercase name of this filter.
-    ///
-    /// Why: responses echo the filter back so callers can confirm what ran.
-    /// What: the inverse of [`parse`](Self::parse).
-    /// Test: `prune_filter_parse_round_trip`.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Ephemeral => "ephemeral",
-            Self::Stopped => "stopped",
-            Self::Decommissioned => "decommissioned",
-            Self::Deleted => "deleted",
-            Self::All => "all",
-        }
-    }
-}
-
-impl fmt::Display for PruneFilter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// What a prune did (or WOULD do under `dry_run`) to a single record (#1508).
-///
-/// Why: `decommission` (tear down a live/stopped session) and `remove` (drop an
-/// existing tombstone from the store) are semantically distinct outcomes; the
-/// caller wants to know which happened per session so a dry-run report is precise.
-/// A THIRD outcome exists since the decommission-side dirty-worktree guard: a
-/// record can be tombstoned while its in-project worktree is deliberately left
-/// on disk because it held unsaved work. Before this variant existed,
-/// `prune_managed` discarded the `bool` half of `decommission`'s
-/// `(SessionRecord, bool)` return, so `tm sessions prune --state stopped`
-/// printed the identical `decommissioned` line whether the worktree was
-/// removed or silently retained — the refusal was invisible at the one
-/// surface an operator actually reads.
-/// What: [`Decommissioned`](PruneAction::Decommissioned) — killed runtime +
-/// removed workspace (or the workspace was already gone/never SM-owned) +
-/// tombstoned; [`DecommissionedWorktreeRetained`](PruneAction::DecommissionedWorktreeRetained)
-/// — tombstoned, but the worktree held unsaved work and was deliberately NOT
-/// removed (its path is echoed back on [`PrunedSession::retained_workspace_path`]);
-/// [`Removed`](PruneAction::Removed) — an existing `Decommissioned`/`Deleted`
-/// tombstone was deleted from the store (compaction).
-/// Test: asserted by `decommission_all_ephemeral_ignores_non_ephemeral` (the
-/// `Decommissioned` action), `prune_decommissioned_compacts` (the `Removed`
-/// action), and `prune_reports_dirty_worktree_retained` (the new variant).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PruneAction {
-    /// The session was torn down (runtime killed, workspace removed, tombstoned).
-    Decommissioned,
-    /// The session was tombstoned, but its in-project worktree held unsaved
-    /// work and was deliberately NOT removed — see
-    /// `worktree_safety::inspect_dirt`. The worktree remains on disk; its path
-    /// is echoed on `PrunedSession::retained_workspace_path`.
-    DecommissionedWorktreeRetained,
-    /// An existing tombstone was deleted from the store (compaction).
-    Removed,
-}
-
-impl PruneAction {
-    /// The canonical lowercase name of this action (for wire/log rendering).
-    ///
-    /// Why: HTTP/MCP responses and the CLI dry-run render the action per row.
-    /// What: `Decommissioned` → `"decommissioned"`,
-    /// `DecommissionedWorktreeRetained` → `"decommissioned_worktree_retained"`,
-    /// `Removed` → `"removed"`.
-    /// Test: `prune_outcome_serializes`.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Decommissioned => "decommissioned",
-            Self::DecommissionedWorktreeRetained => "decommissioned_worktree_retained",
-            Self::Removed => "removed",
-        }
-    }
-}
-
-/// One record a prune touched (or would touch), with enough identity to report.
-///
-/// Why: a dry-run must show the operator EXACTLY which sessions are in scope —
-/// id, tmux name, and prior state — before anything is destroyed.
-/// What: the session id, tmux name, the state the record was in, and the
-/// [`PruneAction`] applied (or that would be applied under `dry_run`).
-/// Test: `prune_dry_run_reports_without_mutating`,
-/// `prune_reports_dirty_worktree_retained`.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PrunedSession {
-    /// Managed session id (UUID string).
-    pub id: String,
-    /// tmux session name.
-    pub tmux_name: String,
-    /// The lifecycle state the record was in before the prune.
-    pub state: String,
-    /// What the prune did (or would do under `dry_run`).
-    pub action: PruneAction,
-    /// The workspace path left on disk when `action` is
-    /// [`PruneAction::DecommissionedWorktreeRetained`]; `None` for every other
-    /// action (including a clean `Decommissioned`, whose workspace was
-    /// removed and therefore has no on-disk path left to report).
-    ///
-    /// Why: the previous version of this struct had no way to tell a caller
-    /// WHERE the retained work is — `decommission` itself now keeps
-    /// `workspace_path` on a retained record for exactly this reason (see
-    /// `decommission_with_root`'s tombstone comment), so this field just
-    /// surfaces that same path at the prune report.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retained_workspace_path: Option<std::path::PathBuf>,
-}
-
-/// The result of a prune: which sessions were (or would be) affected (#1508).
-///
-/// Why: the CLI, HTTP, and MCP surfaces all need a structured, serializable
-/// summary that works for BOTH a real run and a `dry_run` preview.
-/// What: `dry_run` (true → nothing was mutated), the targeted `filter`, and the
-/// per-session [`PrunedSession`] list. `count()` is the total affected.
-/// Test: `prune_outcome_serializes`, `prune_dry_run_reports_without_mutating`.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PruneOutcome {
-    /// True when this was a preview — no record was killed, removed, or tombstoned.
-    pub dry_run: bool,
-    /// The filter that selected the affected records.
-    pub filter: String,
-    /// Every session affected (or that would be affected under `dry_run`).
-    pub sessions: Vec<PrunedSession>,
-}
-
-impl PruneOutcome {
-    /// Number of sessions affected (or that would be affected).
-    ///
-    /// Why: callers log/print "pruned N sessions" without re-deriving the length.
-    /// What: returns `self.sessions.len()`.
-    /// Test: `decommission_all_ephemeral_ignores_non_ephemeral` (asserts the count).
-    pub fn count(&self) -> usize {
-        self.sessions.len()
-    }
-}
-
 /// Whether a record is currently RUNNING (must not be auto-torn-down) — a REAL
 /// liveness probe, not a persisted-state check (#2022).
 ///
@@ -392,7 +208,7 @@ pub(super) fn is_running(record: &SessionRecord, tmux: &dyn ManagedTmuxDriver) -
 /// the shape of #5897 itself.
 /// What: `Decommissioned | Deleted`.
 /// Test: `prune_decommissioned_compacts`, `prune_deleted_compacts`,
-/// `prune_keeps_the_slot_of_a_record_reactivated_after_the_snapshot`.
+/// `prune_keeps_the_record_and_slot_of_a_session_reactivated_after_the_snapshot`.
 fn is_tombstone(record: &SessionRecord) -> bool {
     matches!(
         record.state,
@@ -650,9 +466,16 @@ impl SessionManager {
                     // `-- deleted --` forever and `NUM` climbs, the opposite of
                     // what prune advertises.
                     let names = names.get_or_insert_with(super::decommission::worktree_dir_names);
-                    if let Err(e) = self.compact_and_release_slot(&record, names).await {
-                        warn!(id = %record.id, "prune: compaction failed: {e}; skipping");
-                        continue;
+                    match self.compact_and_release_slot(&record, names).await {
+                        Ok(true) => {}
+                        // #5912: the record stopped being a tombstone inside the
+                        // window, so nothing was compacted. Reporting `Removed`
+                        // for a session still in the store would be a lie.
+                        Ok(false) => continue,
+                        Err(e) => {
+                            warn!(id = %record.id, "prune: compaction failed: {e}; skipping");
+                            continue;
+                        }
                     }
                 } else {
                     match self.decommission(&record.id, caller).await {
@@ -731,9 +554,15 @@ impl SessionManager {
     /// What the re-read is actually for is `state`, not `workspace_path`.
     /// [`SessionManager::mark_reactivated`] revives a `Decommissioned` record in
     /// place, needs no tmux, and can land anywhere in that window — so a record
-    /// targeted as a tombstone can be a LIVE session by the time its number would
-    /// be handed back, which is the silent reuse #3034 exists to prevent, and a
-    /// hazard this path introduces: before #5897 prune freed no slot at all.
+    /// targeted as a tombstone can be a LIVE session by the time prune reaches it.
+    /// Two things then ride on that one reload (#5912). Handing its number back is
+    /// the silent reuse #3034 exists to prevent, and a hazard this path introduces:
+    /// before #5897 prune freed no slot at all. Deleting its record is worse and
+    /// predates the slot work — `self.get(id)` starts answering `SessionNotFound`
+    /// for a session that is live and running, which breaks hook correlation and
+    /// `tm session status`, and `numbered_snapshot` renders the live session as a
+    /// `-- deleted --` phantom. So the reload gates the removal and the release
+    /// together; a record that is no longer a tombstone keeps both.
     /// `workspace_path` cannot move under this guard by contrast — its only
     /// production writers are `set_workspace` (always on an id `spawn_managed`
     /// minted moments earlier) and `decommission`, which since #4344 blanks it
@@ -747,34 +576,48 @@ impl SessionManager {
     /// Reusing retention's predicate rather than restating it is what keeps the
     /// two paths from drifting apart again.
     ///
-    /// Accepted consequence: a kept slot leaves a `-- deleted --` row. That is
-    /// correct under this design — the record is gone from the store, so the row
-    /// is a slot the retention sweep frees once the worktree goes.
+    /// Accepted consequence, and it applies to the workspace-protection arm only:
+    /// compacting a record whose worktree is still on disk leaves a `-- deleted --`
+    /// row, because that arm does remove the record and keep the number. The
+    /// retention sweep frees that slot once the worktree goes. The non-tombstone
+    /// arm removes nothing, so it leaves no such row.
     ///
     /// What: takes the store write lock ONCE, reloads so an out-of-process write
-    /// is visible, reads the record, removes it, and drops the lock — so the body
-    /// judged below is the body that was removed. Then keeps the slot if the
-    /// store no longer held the record at all, no longer held it as a tombstone,
-    /// or `workspace_needs_protection` says its workspace still looks live;
-    /// otherwise releases. A record holding no slot (never listed, so never
-    /// observed) releases nothing — already `release`'s no-op case.
+    /// is visible, and reads the record — then that one body decides everything.
+    /// If the store no longer holds the record, or no longer holds it as a
+    /// tombstone, the record and the slot are both kept and the lock drops
+    /// untouched. Otherwise the record is removed under the same acquisition, so
+    /// the body judged is the body removed, and the slot then releases unless
+    /// `workspace_needs_protection` says its workspace still looks live. A record
+    /// holding no slot (never listed, so never observed) releases nothing —
+    /// already `release`'s no-op case.
+    ///
+    /// Returns whether the record was actually compacted, so the caller can omit
+    /// a still-live session from the outcome instead of reporting
+    /// [`PruneAction::Removed`] for a record still in the store (#5912).
     /// Test: `prune_compaction_releases_the_slot`,
     /// `prune_compaction_keeps_the_slot_when_the_worktree_is_still_on_disk`,
-    /// `prune_keeps_the_slot_of_a_record_reactivated_after_the_snapshot`.
+    /// `prune_keeps_the_record_and_slot_of_a_session_reactivated_after_the_snapshot`.
     async fn compact_and_release_slot(
         &self,
         snapshot: &SessionRecord,
         names: &trusty_common::workspace_layout::WorktreeDirNames,
-    ) -> Result<(), ManagedError> {
+    ) -> Result<bool, ManagedError> {
         let mut store = self.store.write().await;
         store.reload_if_changed().await?;
         let current = store.cached_get(&snapshot.id).ok();
+        // #5912: the reload decides the REMOVAL too, not just the release. A
+        // record that is no longer a tombstone keeps both.
+        let Some(record) = current.filter(is_tombstone) else {
+            drop(store);
+            info!(
+                id = %snapshot.id,
+                "prune: kept the record and its slot — the store holds no tombstone for it"
+            );
+            return Ok(false);
+        };
         store.remove(&snapshot.id).await?;
         drop(store);
-        let Some(record) = current.filter(is_tombstone) else {
-            info!(id = %snapshot.id, "prune: kept the slot — the store holds no tombstone for it");
-            return Ok(());
-        };
         if super::retention::workspace_needs_protection(
             record.workspace_path.as_deref(),
             names,
@@ -785,12 +628,12 @@ impl SessionManager {
                 "prune: compacted the record but kept its slot — its workspace still looks \
                  like a live session worktree"
             );
-            return Ok(());
+            return Ok(true);
         }
         if let Some(slot) = self.slots.write().await.release(&record.id) {
             info!(id = %record.id, slot, "prune: freed the compacted record's slot");
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Remove a single decommissioned tombstone from the store (#1508).
