@@ -458,3 +458,27 @@ fn caveat_confirmed_and_skipped_are_unqualified() {
         "must carry the recorded reason: {unverifiable}"
     );
 }
+
+/// #4459: `is_unverified` is what `unverified_count` counts, so it must answer
+/// for every variant — a verifier that judged the finding (`Confirmed` /
+/// `Refuted`) and one that was never asked (`Skipped`) are not unverified;
+/// everything else is.
+#[test]
+fn is_unverified_covers_every_unable_to_verify_outcome() {
+    assert!(!VerifyOutcome::Confirmed.is_unverified());
+    assert!(!VerifyOutcome::Refuted.is_unverified());
+    assert!(!VerifyOutcome::Skipped.is_unverified());
+    assert!(
+        VerifyOutcome::ErrorRefuted {
+            error_class: "Transport".to_string()
+        }
+        .is_unverified()
+    );
+    assert!(VerifyOutcome::TruncationRefuted.is_unverified());
+    assert!(
+        VerifyOutcome::Unverifiable {
+            reason: "unreachable".to_string()
+        }
+        .is_unverified()
+    );
+}

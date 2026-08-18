@@ -30,7 +30,7 @@ use tracing::{error, info, warn};
 use crate::{
     config::ReviewConfig,
     integrations::github::{AuthStrategy, GithubClient, RunMode, post_pr_review},
-    models::ReviewResult,
+    models::{Finding, ReviewResult},
     pipeline::{
         output::{print_review_result, write_review_log},
         trigger::{TriggerDecision, effective_dry_run},
@@ -168,6 +168,23 @@ pub fn decide_action(
     }
 }
 
+/// Count the findings nothing rendered a judgment on (#4459).
+///
+/// Why: both canonical exits — `finalize_review` here and `abort_dry` in
+/// `runner_helpers` — owe the caller the same number, and two copies of the
+/// predicate would drift the moment a `VerifyOutcome` variant is added.
+/// What: counts findings whose recorded outcome answers true to
+/// `VerifyOutcome::is_unverified`. A finding with no outcome at all is NOT
+/// counted — it was never a verification candidate, the same state as
+/// `Skipped`.
+/// Test: `unverified_count_matches_the_unverified_findings`.
+pub(crate) fn count_unverified(findings: &[Finding]) -> usize {
+    findings
+        .iter()
+        .filter(|f| f.verified.as_ref().is_some_and(|v| v.is_unverified()))
+        .count()
+}
+
 /// Context the runner passes to `finalize_review` for the post path.
 ///
 /// Why: posting needs the PR coordinates, the run mode (to select the auth
@@ -217,6 +234,9 @@ pub async fn finalize_review(
     // completed-review exit point (covers both the unified and map-reduce
     // paths, which both funnel through `finalize_run` → here).
     result.findings_count = result.findings.len();
+    // #4459: same rationale one field over — report how many findings nothing
+    // verified, so a review whose verifier was unreachable does not read clean.
+    result.unverified_count = count_unverified(&result.findings);
 
     // #4044: the narrative summary was written BEFORE the verification round on
     // both paths, so it can still cite a finding the verifier refuted as a merge
@@ -336,6 +356,34 @@ async fn post_live(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{Effort, VerifyOutcome};
+
+    /// #4459: the count reports every finding nothing rendered a judgment on,
+    /// and nothing else — a judged finding and one that was never a candidate
+    /// both stay out of it.
+    #[test]
+    fn unverified_count_matches_the_unverified_findings() {
+        let mk = |outcome: Option<VerifyOutcome>| {
+            let mut f = Finding::new("src/a.rs", "logic", "a bug", "fix it", 0.9, Effort::Medium);
+            f.verified = outcome;
+            f
+        };
+        let findings = vec![
+            mk(Some(VerifyOutcome::Confirmed)),
+            mk(Some(VerifyOutcome::Refuted)),
+            mk(Some(VerifyOutcome::Skipped)),
+            mk(None),
+            mk(Some(VerifyOutcome::ErrorRefuted {
+                error_class: "AccessDenied".to_string(),
+            })),
+            mk(Some(VerifyOutcome::TruncationRefuted)),
+            mk(Some(VerifyOutcome::Unverifiable {
+                reason: "unreachable after 3 attempt(s)".to_string(),
+            })),
+        ];
+        assert_eq!(count_unverified(&findings), 3);
+        assert_eq!(count_unverified(&[]), 0);
+    }
 
     // ── Footer rendering ──────────────────────────────────────────────────────
 
