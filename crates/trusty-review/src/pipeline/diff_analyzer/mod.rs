@@ -18,11 +18,13 @@
 //!
 //! Test: `diff_analyzer_stages_a_b_integration`, `diff_analyzer_drops_lockfile`.
 
+pub mod diff_parser;
 pub mod file_filter;
 pub mod hunk_classifier;
 pub mod hunk_filter;
 pub mod models;
 
+pub use diff_parser::{ParsedDiff, UnparsedSection, parse_diff_files, parse_diff_files_detailed};
 pub use file_filter::{FileFilter, FilterConfig};
 pub use hunk_classifier::HunkClassifier;
 pub use hunk_filter::HunkFilter;
@@ -30,7 +32,7 @@ pub use models::{DroppedFile, FilteredDiff, FilteredFile, FilteredHunk};
 
 use std::sync::Arc;
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::llm::LlmProvider;
 
@@ -85,15 +87,32 @@ impl DiffAnalyzer {
         let original_byte_size = raw_diff.len();
 
         // Parse the raw diff into (path, status, patch) triples.
-        let parsed = parse_diff_files(raw_diff);
+        let ParsedDiff {
+            files: parsed,
+            unparsed,
+        } = parse_diff_files_detailed(raw_diff);
         debug!(file_count = parsed.len(), "parsed diff into files");
+        // #4458: content the parser could not attribute to a file is reported
+        // rather than dropped in silence — a shrinking file list is how the
+        // collapse stayed invisible in production.
+        if !unparsed.is_empty() {
+            let unparsed_lines: usize = unparsed.iter().map(|s| s.line_count).sum();
+            warn!(
+                unparsed_sections = unparsed.len(),
+                unparsed_lines,
+                first = %unparsed[0].header,
+                "diff content could not be attributed to a file"
+            );
+        }
 
         // Stage A: file-level filter.
         let file_filter = FileFilter::new(self.config.clone());
         let (mut kept_files, dropped_files) = file_filter.apply(&parsed);
         info!(
+            parsed = parsed.len(),
             kept = kept_files.len(),
             dropped = dropped_files.len(),
+            unparsed_sections = unparsed.len(),
             "Stage A complete"
         );
 
@@ -161,54 +180,6 @@ impl DiffAnalyzer {
             filtered_byte_size,
         }
     }
-}
-
-// ─── Diff parser ──────────────────────────────────────────────────────────────
-
-/// Parse a unified diff string into `(path, status, patch)` triples.
-///
-/// Why: Stage A needs per-file structured data; the raw diff is a flat string.
-/// What: scans for `diff --git` lines to split files; reads `+++`/`---` headers
-/// for paths; treats the remainder as the patch string.
-/// Test: `parse_diff_files_basic`, `parse_diff_files_new_file`.
-pub fn parse_diff_files(diff: &str) -> Vec<(String, String, String)> {
-    let mut files = Vec::new();
-    let mut current_path: Option<String> = None;
-    let mut current_status = "modified".to_string();
-    let mut current_patch = String::new();
-
-    for line in diff.lines() {
-        if line.starts_with("diff --git ") {
-            // Flush previous file.
-            if let Some(path) = current_path.take() {
-                files.push((path, current_status.clone(), current_patch.clone()));
-                current_patch.clear();
-            }
-            current_status = "modified".to_string();
-        } else if let Some(rest) = line.strip_prefix("+++ b/") {
-            let path = rest.trim().to_string();
-            if path != "/dev/null" && !path.is_empty() {
-                current_path = Some(path);
-            }
-        } else if line.starts_with("+++ /dev/null") {
-            // Deleted file — path already captured from --- line; status = removed.
-            current_status = "removed".to_string();
-        } else if line.starts_with("--- /dev/null") || line.starts_with("new file mode") {
-            current_status = "added".to_string();
-        } else if line.starts_with("deleted file mode") {
-            current_status = "removed".to_string();
-        } else if line.starts_with("rename to ") {
-            current_status = "renamed".to_string();
-        } else if current_path.is_some() {
-            current_patch.push_str(line);
-            current_patch.push('\n');
-        }
-    }
-    // Flush last file.
-    if let Some(path) = current_path {
-        files.push((path, current_status, current_patch));
-    }
-    files
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -290,21 +261,43 @@ diff --git a/src/api.rs b/src/api.rs\n\
         );
     }
 
-    #[test]
-    fn parse_diff_files_basic() {
-        let files = parse_diff_files(SAMPLE_DIFF);
-        assert_eq!(files.len(), 2);
-        let paths: Vec<&str> = files.iter().map(|(p, _, _)| p.as_str()).collect();
-        assert!(paths.contains(&"Cargo.lock"));
-        assert!(paths.contains(&"src/auth.rs"));
-    }
+    /// #4458: a diff whose files are separated only by `---`/`+++` pairs must
+    /// reach Stage A as N files, not as one file holding every file's hunks.
+    #[tokio::test]
+    async fn diff_analyzer_keeps_every_file_of_a_marker_less_diff() {
+        let diff = "\
+--- a/package-lock.json\n\
++++ b/package-lock.json\n\
+@@ -1,1 +1,1 @@\n\
+-\"version\": \"1\"\n\
++\"version\": \"2\"\n\
+--- a/src/alpha.rs\n\
++++ b/src/alpha.rs\n\
+@@ -1,1 +1,1 @@\n\
+-fn alpha() {}\n\
++fn alpha(cfg: &Config) {}\n\
+--- a/src/beta.rs\n\
++++ b/src/beta.rs\n\
+@@ -1,1 +1,1 @@\n\
+-fn beta() {}\n\
++fn beta(cfg: &Config) {}\n\
+";
+        let analyzer = DiffAnalyzer::default();
+        let result = analyzer.analyze(diff).await;
 
-    #[test]
-    fn parse_diff_files_new_file() {
-        let diff = "diff --git a/new.rs b/new.rs\nnew file mode 100644\n--- /dev/null\n+++ b/new.rs\n@@ -0,0 +1 @@\n+fn new() {}\n";
-        let files = parse_diff_files(diff);
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].0, "new.rs");
-        assert_eq!(files[0].1, "added");
+        assert_eq!(
+            result.files.len() + result.dropped_files.len(),
+            3,
+            "all three files must reach Stage A; kept={:?} dropped={:?}",
+            result.files.iter().map(|f| &f.filename).collect::<Vec<_>>(),
+            result
+                .dropped_files
+                .iter()
+                .map(|f| &f.path)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(result.dropped_files[0].path, "package-lock.json");
+        let kept: Vec<&str> = result.files.iter().map(|f| f.filename.as_str()).collect();
+        assert_eq!(kept, vec!["src/alpha.rs", "src/beta.rs"]);
     }
 }
