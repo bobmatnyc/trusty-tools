@@ -21,9 +21,37 @@
 //!   finding out an hour into a sweep, which is the failure this exists to
 //!   remove.
 //!
+//! ## Where the targets live (#5979)
+//!
+//! Owner ruling, 2026-08-18: `engagement.toml` DECLARES the targets, and
+//! `state/`[`REGISTRY_FILE`] is a working copy rebuilt from it. Hand someone the
+//! config and they have the key, the models and the scope — everything but the
+//! clones. Before this the two facts lived apart: the config sat in the
+//! recipient's directory and the target set sat inside the working directory,
+//! alongside clones and tool binaries.
+//!
+//! Three consequences, each with a function that holds it:
+//!
+//! - [`engagement_targets`] is the one read. A config that declares a set wins;
+//!   a config that declares none — including no config at all — falls back to
+//!   the working copy, which is how an engagement registered before #5979 keeps
+//!   every target it had. `targets = []` is a DECLARATION of zero and does not
+//!   fall back.
+//! - [`register`] and [`deregister`] write the CONFIG, then mirror the result
+//!   into the working copy. That order is the fail-closed one: a config write
+//!   that fails leaves both files untouched, so nothing can report a target as
+//!   registered that the authoritative file does not carry.
+//! - The config is written through [`crate::workdir::write_private_atomically`],
+//!   so it keeps mode 0600. It carries the OpenRouter key, and a registration is
+//!   now one of the paths that rewrites it.
+//!
+//! Nothing in the config replaces the working copy's `count` guard, and nothing
+//! needs to. See [`REGISTRY_FILE`] for what protects each file.
+//!
 //! What: [`Target`], the two things that can be registered; [`Registry`], the
-//! set and its `state/`[`REGISTRY_FILE`] persistence; and [`parse`], the one
-//! place a command-line spec becomes a target.
+//! set and its `state/`[`REGISTRY_FILE`] persistence; [`engagement_targets`],
+//! the authoritative read; and [`parse`], the one place a command-line spec
+//! becomes a target.
 //!
 //! ## Relationship to the selection file
 //!
@@ -37,22 +65,52 @@
 //! Test: `super::registry_tests`.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use trusty_common::file_lock::with_exclusive_lock;
 
 use crate::clone;
+use crate::config::{self, EngagementConfig};
 use crate::error::AuditError;
 use crate::run;
 use crate::workdir::{self, Area, WorkDir};
 
-/// File under `state/` holding the registered audit targets.
+/// File under `state/` holding the engagement's targets as a working copy.
+///
+/// Since #5979 this is DERIVED from `engagement.toml` rather than edited: it is
+/// rebuilt from the config on every write, and read only when the config
+/// declares no target set at all (see [`engagement_targets`]).
 ///
 /// The same two obligations as [`crate::run::SELECTION_FILE`]: `count` is
 /// declared ahead of the entries, and the file is written by rename
 /// ([`workdir::write_atomically`]). A `count` that disagrees with the entries is
 /// [`AuditError::TruncatedRegistry`], never a smaller set.
+///
+/// ## What protects the config's target list (#5979)
+///
+/// No `count`, and that is a decision rather than an omission. Three things
+/// stand in its place, and one thing argues against adding it:
+///
+/// - Every write goes through [`crate::workdir::write_private_atomically`],
+///   which creates a uniquely-named temporary with `O_EXCL` and renames it into
+///   place. A reader observes the whole previous file or the whole new one —
+///   there is no torn intermediate for a count to detect.
+/// - [`crate::config::with_targets`] parses the rendered text back through
+///   [`EngagementConfig::from_toml`] BEFORE the rename, so a substitution that
+///   would produce an unloadable config fails without touching the file.
+/// - `toml` renders `[[targets]]` ahead of `[tools]`, whose four pins are all
+///   required. A truncation that loses the tail of the target list also loses a
+///   required table, so the config refuses to load rather than reading as a
+///   smaller-but-complete engagement. `config_tests::the_target_list_is_rendered_ahead_of_the_required_pins`
+///   is what keeps that true.
+///
+/// Against: `engagement.toml` is the file a recipient reads and edits — that
+/// readability is the transparency premise of the whole handoff (#5473). A
+/// `count` they have to keep in step by hand turns adding one line to their own
+/// file into an engagement that refuses to load, which is worse than the tear it
+/// would guard. The working copy has no such reader, which is why it keeps its
+/// count unchanged.
 ///
 /// ```toml
 /// # <work-dir>/state/audit-targets.toml
@@ -417,45 +475,82 @@ impl Registry {
     }
 }
 
-/// Append `target` to the registry, serialised against every other writer.
+/// The engagement's targets: what the config declares, or the working copy.
 ///
-/// Why: #5822. [`Registry::load`] → [`Registry::insert`] → [`Registry::save`] is
-/// a read-modify-write, and nothing made it indivisible. Two `taudit add` runs
-/// against one working directory each load the same snapshot, each append their
-/// own target, and the later save discards the earlier one's — with both
-/// reporting success. [`workdir::write_atomically`] does not close that: it
-/// makes one write untearable, not a load-mutate-save atomic.
-/// What: runs the whole critical section under
+/// Why: #5979 makes `engagement.toml` authoritative, and an operator who
+/// registered ten repositories yesterday must not find zero today. The two
+/// states a config can be in are therefore different answers, not one:
+///
+/// - `Some(declared)` — this file has said what the engagement covers, and that
+///   is the answer. `Some(&[])` included: an operator who removed their last
+///   target declared zero, and resurrecting the old working copy there would
+///   undo the removal they just made.
+/// - `None`, which covers a config written before #5979 AND no config at all —
+///   nothing has ever declared a set, so `state/`[`REGISTRY_FILE`] is adopted.
+///   That is the migration: an upgrading engagement keeps every target it had,
+///   and the first [`register`] or [`deregister`] persists the adopted set into
+///   the config, after which the config answers on its own.
+///
+/// The registry disagreeing with the config is expected rather than an error —
+/// a working copy left by an earlier run is exactly what a declared set
+/// supersedes.
+/// What: a plain read. Nothing is written here, so reporting state never mutates
+/// an engagement.
+/// Test: `super::registry_tests::an_undeclared_config_adopts_the_existing_registry`,
+/// `super::registry_tests::a_declared_empty_list_is_not_a_missing_one`,
+/// `super::registry_tests::a_declared_list_supersedes_a_stale_working_copy`.
+///
+/// # Errors
+///
+/// Whatever [`Registry::load`] fails with, on the adoption path only.
+pub fn engagement_targets(
+    config: Option<&EngagementConfig>,
+    work: &WorkDir,
+) -> Result<Vec<Target>, AuditError> {
+    match config.and_then(EngagementConfig::declared_targets) {
+        Some(declared) => Ok(declared.to_vec()),
+        None => Ok(Registry::load(work)?.targets().to_vec()),
+    }
+}
+
+/// Declare `target` in the engagement config, serialised against every writer.
+///
+/// Why: #5822 for the lock, #5979 for the file. The read-modify-write moved from
+/// `state/audit-targets.toml` to `engagement.toml` and is no less a
+/// read-modify-write for having moved: two `taudit add` runs against one
+/// engagement each load the same snapshot, each append their own target, and the
+/// later save discards the earlier one's while both report success.
+/// [`crate::workdir::write_private_atomically`] does not close that — it makes
+/// one write untearable, not a load-mutate-save atomic.
+/// What: the whole critical section under
 /// [`trusty_common::file_lock::with_exclusive_lock`], the workspace's one
-/// implementation of it — extracted for this exact failure after
-/// `trusty-search`'s `indexes.toml` lost updates the same way (#5344). Returns
-/// whether this call is the one that appended; `false` means another writer had
-/// registered the same target first, which is the ordinary idempotent no-op.
-/// Test: `super::registry_tests::concurrent_registrations_keep_every_target`.
+/// implementation of it (#5344), now guarding the config. Returns whether this
+/// call is the one that appended; `false` means another writer had registered
+/// the same target first, which is the ordinary idempotent no-op.
+/// Test: `super::registry_tests::concurrent_registrations_keep_every_target`,
+/// `super::registry_tests::a_registration_keeps_the_config_owner_only`.
 ///
 /// Callers validate BEFORE calling this. Validation reaches the network under a
 /// 30-second ceiling, and the lock is not reentrant — holding it across a
-/// request would stall every other `add` in the working directory behind one
-/// unreachable site. Re-reading the file here is what keeps that safe: the
-/// append is decided against the snapshot that is current at write time, not
-/// the one the caller validated against.
+/// request would stall every other `add` for this engagement behind one
+/// unreachable site. Re-reading the config here is what keeps that safe: the
+/// append is decided against the snapshot that is current at write time, not the
+/// one the caller validated against.
 ///
 /// # Errors
 ///
 /// [`AuditError::RegistryLock`] when the lock cannot be taken — never a
-/// bypass — plus whatever [`Registry::load`] and [`Registry::save`] fail with.
-pub fn register(work: &WorkDir, target: &Target) -> Result<bool, AuditError> {
-    locked(work, || {
-        let mut registry = Registry::load(work)?;
-        if !registry.insert(target.clone()) {
-            return Ok(false);
-        }
-        registry.save(work)?;
-        Ok(true)
+/// bypass — [`AuditError::NoEngagementConfig`] when there is no config to
+/// declare anything in, plus whatever [`update`] fails with.
+pub fn register(config_path: &Path, work: &WorkDir, target: &Target) -> Result<bool, AuditError> {
+    locked(config_path, || {
+        update(config_path, work, |registry| {
+            registry.insert(target.clone())
+        })
     })
 }
 
-/// Drop `target` from the registry, under the same lock [`register`] takes.
+/// Drop `target` from the engagement config, under the lock [`register`] takes.
 ///
 /// Why: a removal is the same read-modify-write, so an unserialised one loses a
 /// concurrent add just as readily (#5822).
@@ -466,24 +561,79 @@ pub fn register(work: &WorkDir, target: &Target) -> Result<bool, AuditError> {
 /// # Errors
 ///
 /// The same set as [`register`].
-pub fn deregister(work: &WorkDir, target: &Target) -> Result<bool, AuditError> {
-    locked(work, || {
-        let mut registry = Registry::load(work)?;
-        if !registry.remove(target) {
-            return Ok(false);
-        }
-        registry.save(work)?;
-        Ok(true)
+pub fn deregister(config_path: &Path, work: &WorkDir, target: &Target) -> Result<bool, AuditError> {
+    locked(config_path, || {
+        update(config_path, work, |registry| registry.remove(target))
     })
 }
 
-/// Run `f` holding the registry's exclusive lock.
+/// One read-modify-write over the engagement's target set. Caller holds the lock.
 ///
-/// The lock guards [`Registry::path`] through its `.lock` sidecar, so it
-/// survives the rename [`Registry::save`] publishes with.
-fn locked<T>(work: &WorkDir, f: impl FnOnce() -> Result<T, AuditError>) -> Result<T, AuditError> {
-    let path = Registry::path(work);
-    with_exclusive_lock(&path, f).map_err(|source| AuditError::RegistryLock { path, source })?
+/// Why: the fail-closed order is the whole content of this function, so it is
+/// written once rather than twice (#5979). The config is published FIRST and the
+/// working copy mirrored SECOND, so a config write that fails leaves both files
+/// exactly as they were — "the config write failed but the target looks
+/// registered" is unreachable, in either file. A mirror write that fails is
+/// still an error the caller sees; the config is authoritative by then, and the
+/// next read rebuilds the mirror.
+/// What: reads the config as TEXT as well as parsing it, because
+/// [`crate::config::with_targets`] substitutes over the operator's own file
+/// rather than re-rendering one from the schema — that is what keeps a
+/// registration from dropping a field a newer generator added.
+/// Test: `super::registry_tests::a_config_that_cannot_be_written_registers_nothing`,
+/// `super::registry_tests::registering_without_a_config_is_refused`.
+///
+/// # Errors
+///
+/// [`AuditError::NoEngagementConfig`] when the config is absent,
+/// [`AuditError::Read`] for any other read failure, [`AuditError::Parse`] or
+/// [`AuditError::Render`] from the substitution, and [`AuditError::WorkDir`]
+/// when either file cannot be published.
+fn update(
+    config_path: &Path,
+    work: &WorkDir,
+    mutate: impl FnOnce(&mut Registry) -> bool,
+) -> Result<bool, AuditError> {
+    let text = match std::fs::read_to_string(config_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AuditError::NoEngagementConfig {
+                path: config_path.to_path_buf(),
+            });
+        }
+        Err(source) => {
+            return Err(AuditError::Read {
+                path: config_path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let config = EngagementConfig::from_toml(&text, config_path)?;
+    let mut registry = Registry {
+        targets: engagement_targets(Some(&config), work)?,
+    };
+    if !mutate(&mut registry) {
+        return Ok(false);
+    }
+    let rendered = config::with_targets(&text, registry.targets(), config_path)?;
+    // 0600: the file this now rewrites carries the OpenRouter key (#5868).
+    workdir::write_private_atomically(config_path, &rendered)?;
+    registry.save(work)?;
+    Ok(true)
+}
+
+/// Run `f` holding the engagement config's exclusive lock.
+///
+/// The lock guards `config_path` through its `.lock` sidecar, so it survives the
+/// rename [`crate::workdir::write_private_atomically`] publishes with.
+fn locked<T>(
+    config_path: &Path,
+    f: impl FnOnce() -> Result<T, AuditError>,
+) -> Result<T, AuditError> {
+    with_exclusive_lock(config_path, f).map_err(|source| AuditError::RegistryLock {
+        path: config_path.to_path_buf(),
+        source,
+    })?
 }
 
 /// The repository selection `crate::clone` wrote, when there is one.
@@ -564,6 +714,37 @@ mod registry_tests {
             provider,
             key: key.to_owned(),
         }
+    }
+
+    /// An engagement config that declares no targets — the state every case
+    /// here starts from unless it says otherwise.
+    const ENGAGEMENT: &str = r#"
+openrouter_key = "sk-or-v1-not-a-real-key"
+instructions = "Assess the last 52 weeks."
+
+[tools]
+tga = "2.9.4"
+trusty-search = "0.47.0"
+trusty-analyze = "0.9.2"
+trusty-review = "0.15.1"
+"#;
+
+    /// Write [`ENGAGEMENT`] beside the working directory and hand back its path.
+    fn engagement_in(dir: &std::path::Path) -> PathBuf {
+        let path = dir.join("engagement.toml");
+        std::fs::write(&path, ENGAGEMENT).expect("seed an engagement config");
+        path
+    }
+
+    /// What the engagement config declares, by id, in declaration order.
+    fn declared_ids(config_path: &std::path::Path) -> Vec<String> {
+        EngagementConfig::load(config_path)
+            .expect("the config reads")
+            .declared_targets()
+            .expect("the config declares a set")
+            .iter()
+            .map(Target::id)
+            .collect()
     }
 
     /// The owner named schema repositories specifically, because that is the
@@ -707,20 +888,31 @@ mod registry_tests {
     fn concurrent_registrations_keep_every_target() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
+        let config = engagement_in(tmp.path());
 
         race(&work, |work, n| {
             assert!(
-                register(work, &repo(&format!("acme/repo-{n:02}"))).expect("a racing add succeeds"),
+                register(&config, work, &repo(&format!("acme/repo-{n:02}")))
+                    .expect("a racing add succeeds"),
                 "acme/repo-{n:02} was reported as already registered"
             );
         });
 
         let mut expected: Vec<String> = (0..WRITERS).map(|n| format!("acme/repo-{n:02}")).collect();
         expected.sort();
+        // #5979: the CONFIG is what must be complete — it is what the sweep
+        // reads. The working copy is asserted alongside it, because a mirror
+        // that fell behind is a mirror nothing rebuilt.
+        let mut declared = declared_ids(&config);
+        declared.sort();
+        assert_eq!(
+            declared, expected,
+            "a concurrently-registered target was discarded from the engagement"
+        );
         assert_eq!(
             registered_ids(&work),
             expected,
-            "a concurrently-registered target was discarded"
+            "the working copy did not track the engagement"
         );
     }
 
@@ -730,24 +922,30 @@ mod registry_tests {
     fn a_removal_holds_the_same_lock_an_add_does() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
-        let mut seeded = Registry::default();
-        for n in 0..WRITERS {
-            seeded.insert(repo(&format!("acme/repo-{n:02}")));
-        }
-        seeded.save(&work).expect("writes");
+        let config = engagement_in(tmp.path());
+        let seeded: Vec<Target> = (0..WRITERS)
+            .map(|n| repo(&format!("acme/repo-{n:02}")))
+            .collect();
+        std::fs::write(
+            &config,
+            config::with_targets(ENGAGEMENT, &seeded, &config).expect("declares"),
+        )
+        .expect("seed the declared set");
 
         race(&work, |work, n| {
             assert!(
-                deregister(work, &repo(&format!("acme/repo-{n:02}"))).expect("a racing remove"),
+                deregister(&config, work, &repo(&format!("acme/repo-{n:02}")))
+                    .expect("a racing remove"),
                 "acme/repo-{n:02} was reported as not registered"
             );
         });
 
         assert!(
-            registered_ids(&work).is_empty(),
+            declared_ids(&config).is_empty(),
             "a concurrent removal was undone: {:?}",
-            registered_ids(&work)
+            declared_ids(&config)
         );
+        assert!(registered_ids(&work).is_empty());
     }
 
     /// Registering the same target from every writer at once: exactly one call
@@ -756,16 +954,264 @@ mod registry_tests {
     fn only_one_racing_writer_claims_a_duplicate_registration() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let work = work_in(tmp.path());
+        let config = engagement_in(tmp.path());
         let appended = std::sync::atomic::AtomicUsize::new(0);
 
         race(&work, |work, _| {
-            if register(work, &repo("acme/api")).expect("a racing add succeeds") {
+            if register(&config, work, &repo("acme/api")).expect("a racing add succeeds") {
                 appended.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         });
 
         assert_eq!(appended.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(declared_ids(&config), vec!["acme/api"]);
         assert_eq!(registered_ids(&work), vec!["acme/api"]);
+    }
+
+    /// 🔴 #5979's migration, stated as the case that produced it: an operator
+    /// registered ten repositories before this change, so the working copy holds
+    /// them and their config declares nothing. Every read must still answer ten.
+    #[test]
+    fn an_undeclared_config_adopts_the_existing_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let config_path = engagement_in(tmp.path());
+        let mut legacy = Registry::default();
+        for n in 0..10 {
+            legacy.insert(repo(&format!("acme/repo-{n}")));
+        }
+        legacy.save(&work).expect("the pre-#5979 registry");
+
+        let config = EngagementConfig::load(&config_path).expect("loads");
+        assert_eq!(config.declared_targets(), None, "nothing is declared yet");
+        assert_eq!(
+            engagement_targets(Some(&config), &work)
+                .expect("reads")
+                .len(),
+            10,
+            "an upgraded engagement must not read as empty"
+        );
+
+        // The first write persists the adopted set, after which the config
+        // answers on its own.
+        assert!(register(&config_path, &work, &repo("acme/eleventh")).expect("registers"));
+        let declared = declared_ids(&config_path);
+        assert_eq!(declared.len(), 11, "{declared:?}");
+        assert_eq!(declared[10], "acme/eleventh");
+        assert_eq!(declared[0], "acme/repo-0");
+    }
+
+    /// The other half of that decision: an operator who removed their last
+    /// target declared ZERO, and the old working copy must not resurrect it.
+    #[test]
+    fn a_declared_empty_list_is_not_a_missing_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let config_path = engagement_in(tmp.path());
+        let mut stale = Registry::default();
+        stale.insert(repo("acme/deleted"));
+        stale.save(&work).expect("a stale working copy");
+
+        std::fs::write(
+            &config_path,
+            config::with_targets(ENGAGEMENT, &[], &config_path).expect("declares zero"),
+        )
+        .expect("write");
+
+        let config = EngagementConfig::load(&config_path).expect("loads");
+        assert_eq!(config.declared_targets(), Some(&[][..]));
+        assert!(
+            engagement_targets(Some(&config), &work)
+                .expect("reads")
+                .is_empty(),
+            "a declared-empty engagement adopted a deleted target"
+        );
+    }
+
+    /// A working copy left by an earlier run is expected, not an error: the
+    /// declared set supersedes it without complaint, and the next write rebuilds
+    /// the mirror.
+    #[test]
+    fn a_declared_list_supersedes_a_stale_working_copy() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let config_path = engagement_in(tmp.path());
+        let mut stale = Registry::default();
+        stale.insert(repo("acme/from-last-week"));
+        stale.save(&work).expect("a stale working copy");
+
+        std::fs::write(
+            &config_path,
+            config::with_targets(ENGAGEMENT, &[repo("acme/api")], &config_path).expect("declares"),
+        )
+        .expect("write");
+
+        let config = EngagementConfig::load(&config_path).expect("loads");
+        assert_eq!(
+            engagement_targets(Some(&config), &work)
+                .expect("reads")
+                .iter()
+                .map(Target::id)
+                .collect::<Vec<_>>(),
+            vec!["acme/api"]
+        );
+
+        assert!(register(&config_path, &work, &repo("acme/web")).expect("registers"));
+        assert_eq!(
+            registered_ids(&work),
+            vec!["acme/api", "acme/web"],
+            "the mirror was not rebuilt from the declared set"
+        );
+    }
+
+    /// 🔴 The file a registration now rewrites carries the OpenRouter key, so it
+    /// must come back at 0600 — not at whatever the process umask allows.
+    ///
+    /// Seeded at 0644 on purpose: the assertion has to prove this write NARROWS
+    /// the file, not that it happened to inherit a mode from somewhere.
+    #[cfg(unix)]
+    #[test]
+    fn a_registration_keeps_the_config_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let config = engagement_in(tmp.path());
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        assert!(register(&config, &work, &repo("acme/api")).expect("registers"));
+        let mode = std::fs::metadata(&config)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+
+        // And the credential survived the substitution — a registration that
+        // dropped the key would leave the engagement unable to run.
+        let text = std::fs::read_to_string(&config).expect("read");
+        assert!(text.contains("sk-or-v1-not-a-real-key"), "{text}");
+
+        assert!(deregister(&config, &work, &repo("acme/api")).expect("removes"));
+        let mode = std::fs::metadata(&config)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "a removal widened it: {:o}",
+            mode & 0o777
+        );
+    }
+
+    /// 🔴 The fail-open arm. A config that cannot be published must leave BOTH
+    /// files as they were — "the config write failed but the target looks
+    /// registered" is the shape this ordering exists to rule out.
+    ///
+    /// The write is made to fail by making the config's directory unwritable, so
+    /// the temporary file cannot be created. The `.lock` sidecar is created
+    /// FIRST: without it the lock itself cannot be opened and the refusal
+    /// arrives as [`AuditError::RegistryLock`], which proves a different arm
+    /// than the one under test. Skipped as root, for whom mode bits are
+    /// advisory.
+    #[cfg(unix)]
+    #[test]
+    fn a_config_that_cannot_be_written_registers_nothing() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // SAFETY: `geteuid` reads this process's own effective uid and writes
+        // through no pointer.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let held = tmp.path().join("held");
+        std::fs::create_dir(&held).expect("mkdir");
+        let config = engagement_in(&held);
+        let before = std::fs::read_to_string(&config).expect("read");
+        std::fs::write(trusty_common::file_lock::lock_path(&config), b"").expect("seed the lock");
+        std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+
+        let err = register(&config, &work, &repo("acme/api"))
+            .expect_err("an unwritable engagement must not read as a registration");
+        assert!(matches!(err, AuditError::WorkDir { .. }), "{err:?}");
+
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("read"),
+            before,
+            "the engagement was modified by a failed write"
+        );
+        assert!(
+            !Registry::path(&work).exists(),
+            "the working copy claims a target the engagement does not declare"
+        );
+
+        // Let the tempdir clean up after itself.
+        std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod back");
+    }
+
+    /// 🔴 There is nowhere to declare a target without an engagement, so this is
+    /// a refusal rather than a write to the working copy — which nothing now
+    /// treats as authoritative.
+    #[test]
+    fn registering_without_a_config_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let missing = tmp.path().join("engagement.toml");
+
+        for outcome in [
+            register(&missing, &work, &repo("acme/api")),
+            deregister(&missing, &work, &repo("acme/api")),
+        ] {
+            let err = outcome.expect_err("no engagement, nothing to declare");
+            let AuditError::NoEngagementConfig { path } = &err else {
+                panic!("expected NoEngagementConfig, got {err:?}");
+            };
+            assert_eq!(path, &missing);
+            assert!(err.to_string().contains("nothing was registered"), "{err}");
+        }
+        assert!(!Registry::path(&work).exists());
+        assert!(!missing.exists(), "a refusal must not create a config");
+    }
+
+    /// A config that is present and malformed is not an absent one: a write
+    /// that would overwrite a hand-edited engagement is refused instead.
+    #[test]
+    fn a_malformed_config_is_not_overwritten_by_a_registration() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let config = tmp.path().join("engagement.toml");
+        std::fs::write(&config, "this is not toml = = =").expect("write");
+
+        let err = register(&config, &work, &repo("acme/api"))
+            .expect_err("a malformed engagement must not be rewritten");
+        assert!(matches!(err, AuditError::Parse { .. }), "{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("read"),
+            "this is not toml = = ="
+        );
+    }
+
+    /// Absence of a config is absence of a declaration, so a directory that is
+    /// not an engagement still reports whatever working copy it has.
+    #[test]
+    fn no_config_at_all_reads_the_working_copy() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let mut legacy = Registry::default();
+        legacy.insert(board(BoardProvider::Linear, "ENG"));
+        legacy.save(&work).expect("writes");
+
+        assert_eq!(
+            engagement_targets(None, &work)
+                .expect("reads")
+                .iter()
+                .map(Target::id)
+                .collect::<Vec<_>>(),
+            vec!["linear:ENG"]
+        );
     }
 
     #[test]

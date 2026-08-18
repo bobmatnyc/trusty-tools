@@ -635,6 +635,29 @@ pub enum AuditError {
         found: usize,
     },
 
+    /// A target was named, and there is no engagement to declare it in.
+    ///
+    /// Why: #5979 makes `engagement.toml` the file that says what an engagement
+    /// covers, so there is nowhere to record a target until one exists. The
+    /// alternative — writing the working copy and calling it registered — is the
+    /// split this change removes, and it would report success over a file the
+    /// sweep no longer treats as authoritative.
+    ///
+    /// A cold-start launch writes the config before it asks for a target
+    /// (#5970), so reaching this means `taudit add` was run directly in a
+    /// directory that is not an engagement yet.
+    /// What: names the path that was looked for and the command that creates it.
+    /// Nothing was written.
+    /// Test: `crate::registry::registry_tests::registering_without_a_config_is_refused`.
+    #[error(
+        "there is no engagement config at {path}, so there is nothing to register a target in. \
+         Run `trusty-audit` in this directory to set one up first; nothing was registered"
+    )]
+    NoEngagementConfig {
+        /// Where the config was expected.
+        path: PathBuf,
+    },
+
     /// The registry's read-modify-write could not be serialised.
     ///
     /// Why: #5822 — registering and removing a target both load
