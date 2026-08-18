@@ -30,7 +30,12 @@
 //! [`run::boards`] owns that split. A board with no credential in the engagement
 //! config is still a gap, and still reported rather than dropped.
 //!
-//! The registry is read ONCE per [`audit`], in the materialize phase. The gaps
+//! Since #5979 the target set comes from `engagement.toml` rather than from
+//! `state/audit-targets.toml`, which is now a working copy rebuilt from it.
+//! [`crate::registry::engagement_targets`] owns that precedence; nothing else
+//! in this module changed.
+//!
+//! The target set is read ONCE per [`audit`], in the materialize phase. The gaps
 //! that reach the return package and the board sections that reach each child
 //! come out of that single read: [`split_targets`] resolves, and [`collect`]
 //! forwards the result to [`run::sweep_with_boards`] rather than loading the
@@ -76,11 +81,11 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::clone::{self, CloneOptions, CloneReport};
-use crate::config::{BoardCredentials, EngagementConfig};
+use crate::config::EngagementConfig;
 use crate::error::AuditError;
 use crate::package::{self, ReturnPackage};
 use crate::progress::{Operation, Progress, UnitOutcome};
-use crate::registry::{Registry, Target};
+use crate::registry::{self, Target};
 use crate::run::{self, RunOptions, RunReport, RunStatus};
 use crate::tools::{self, InstalledTool};
 use crate::workdir::WorkDir;
@@ -227,7 +232,7 @@ pub async fn audit(
     // span an engagement's worth of wall clock and the registry is a file
     // another terminal can edit.
     let (repos, boards) =
-        split_targets(work, &config.boards).map_err(|e| stopped(Phase::Materialize, e))?;
+        split_targets(work, config).map_err(|e| stopped(Phase::Materialize, e))?;
     let mut gaps = boards.gaps.clone();
     let acquired = materialize(work, &repos, progress)
         .await
@@ -304,18 +309,20 @@ async fn install(
 /// `super::chain_tests::a_board_removed_after_the_chain_resolved_it_still_reaches_the_child`.
 fn split_targets(
     work: &WorkDir,
-    credentials: &BoardCredentials,
+    config: &EngagementConfig,
 ) -> Result<(Vec<String>, run::boards::Boards), AuditError> {
-    let registry = Registry::load(work)?;
-    let repos = registry
-        .targets()
+    // #5979: the config declares the set; the working copy is the fallback for
+    // an engagement that has not declared one yet.
+    let targets = registry::engagement_targets(Some(config), work)?;
+    let repos = targets
         .iter()
         .filter_map(|target| match target {
             Target::Repo { name_with_owner } => Some(name_with_owner.clone()),
             Target::Board { .. } => None,
         })
         .collect();
-    Ok((repos, run::boards::resolve(registry.targets(), credentials)))
+    let boards = run::boards::resolve(&targets, &config.boards);
+    Ok((repos, boards))
 }
 
 /// Phase 2 — turn what is registered into checkouts the sweep can read.
@@ -452,7 +459,7 @@ mod chain_tests {
 
     use super::*;
     use crate::progress::{ProgressUpdate, Recorder};
-    use crate::registry::{self, TargetKind};
+    use crate::registry::{Registry, TargetKind};
     use crate::run::{RepoResult, SelectedRepo};
     use crate::session::{Outcome, Session};
     use crate::tools::RequiredTool;
@@ -720,6 +727,45 @@ trusty-review = "0.15.1"
         targets.save(work).expect("writes");
     }
 
+    /// 🔴 #5979: the sweep's targets come from the ENGAGEMENT. A config that
+    /// declares a repository and a board reaches [`split_targets`] even with an
+    /// empty working copy — which is what makes `engagement.toml` portable, and
+    /// the working copy derived.
+    ///
+    /// Against `87b55c367` `split_targets` read only the working copy, so both
+    /// assertions come back empty.
+    #[test]
+    fn the_engagement_declares_what_the_chain_audits() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = WorkDir::new(tmp.path().join("work"));
+        Registry::default()
+            .save(&work)
+            .expect("an empty working copy");
+
+        let declared = crate::config::with_targets(
+            &format!(
+                "{CONFIG}\n[boards.jira]\nurl = \"https://acme.atlassian.net\"\n\
+                 email = \"auditor@acme.example\"\ntoken = \"jira-token-never-on-disk\"\n"
+            ),
+            &[
+                registry::parse(Some(TargetKind::Repo), "acme/api").expect("parses"),
+                registry::parse(Some(TargetKind::Board), "jira:ACME").expect("parses"),
+            ],
+            Path::new("engagement.toml"),
+        )
+        .expect("declares");
+        let config =
+            EngagementConfig::from_toml(&declared, Path::new("engagement.toml")).expect("parses");
+
+        let (repos, boards) = split_targets(&work, &config).expect("splits");
+        assert_eq!(repos, vec!["acme/api"]);
+        assert!(boards.gaps.is_empty(), "{:?}", boards.gaps);
+        assert!(
+            boards.jira.is_some(),
+            "the declared board reached the child"
+        );
+    }
+
     /// An engagement carrying the JIRA credential the registered board needs.
     fn config_with_jira() -> EngagementConfig {
         let text = format!(
@@ -807,7 +853,7 @@ trusty-review = "0.15.1"
         let config = config_with_jira();
 
         // Phase 2's half of `audit`: the one resolution, stating no gap.
-        let (_repos, boards) = split_targets(&work, &config.boards).expect("splits");
+        let (_repos, boards) = split_targets(&work, &config).expect("splits");
         assert!(boards.gaps.is_empty(), "{:?}", boards.gaps);
 
         // The window: install and every clone happen here, and a concurrent

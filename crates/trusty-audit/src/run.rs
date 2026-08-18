@@ -472,7 +472,12 @@ where
     let boards = match resolved {
         Some(boards) => boards,
         None => {
-            owned = boards::resolve(registry::Registry::load(work)?.targets(), &config.boards);
+            // #5979: the engagement config declares the targets; the working
+            // copy answers only for an engagement that has declared none.
+            owned = boards::resolve(
+                &registry::engagement_targets(Some(config), work)?,
+                &config.boards,
+            );
             &owned
         }
     };
