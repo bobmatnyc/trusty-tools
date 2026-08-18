@@ -313,6 +313,11 @@ pub fn exit_code(outcome: &Outcome) -> i32 {
 // past the 500-SLOC production cap. Re-exported, so `crate::cli::render` stays
 // the name every caller and test already uses.
 pub mod credential;
+// #5970: a launch in a directory with no `engagement.toml` creates one instead
+// of registering targets against an engagement that does not exist. Beside
+// `credential` for the same reason: it prompts, and a prompt is a front-end
+// concern the library must never acquire.
+pub mod bootstrap;
 // #5885: the launch walks the operator into registration rather than naming a
 // command for them to run next. Beside `credential` because both are prompts,
 // and a prompt is a front-end concern the library must never acquire.

@@ -716,6 +716,73 @@ pub enum AuditError {
         root: PathBuf,
     },
 
+    /// The key was entered, and the engagement config it belongs in could not be
+    /// written.
+    ///
+    /// Why: the fail-open shape this variant exists to rule out (#5970). A cold
+    /// start that carried on here would hold the recipient's key in memory for
+    /// one process, run an hours-long sweep on it, and leave nothing behind — so
+    /// the next launch asks again and no engagement was ever set up. The launch
+    /// stops instead, and says which file it could not write.
+    /// What: names the path and keeps the underlying [`AuditError::WorkDir`]
+    /// failure. Never quotes the key, which is why the message can say what it
+    /// says about it.
+    /// Test: `crate::cli::bootstrap::bootstrap_tests::a_config_that_cannot_be_written_stops_the_launch`.
+    #[error(
+        "the engagement config at {path} could not be written, so nothing was set up and \
+         the key you entered was NOT saved; fix that path and run `trusty-audit` again: {source}"
+    )]
+    EngagementNotCreated {
+        /// The config that could not be written.
+        path: PathBuf,
+        /// What the write failed with. Boxed — `AuditError` inside itself.
+        #[source]
+        source: Box<AuditError>,
+    },
+
+    /// A cold start could not learn which version of a tool to pin.
+    ///
+    /// Why: #5970's cold start records the version of each tool it resolved into
+    /// `engagement.toml`, and that file is the pin from then on. A resolution
+    /// that failed must not be papered over with a guess — a guessed version is
+    /// the #5454 version skew with a config file vouching for it. So the launch
+    /// stops before anything is written.
+    /// What: names the tool whose release list could not be read.
+    /// Test: `crate::tools::tool_tests::an_unresolvable_pin_names_the_tool`.
+    #[error(
+        "cannot determine which version of {tool} to pin — its release list could not be \
+         read; no engagement was created: {source}"
+    )]
+    PinsUnresolved {
+        /// The crate whose latest release could not be resolved.
+        tool: &'static str,
+        /// The underlying lookup failure.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// A pinned tool cannot be installed on this machine.
+    ///
+    /// Why: the preflight #5970 added exists so a recipient learns this before
+    /// committing to a multi-tool download, and learns WHICH tool. Reported as a
+    /// refusal rather than a warning for the same reason every other install-side
+    /// variant is: a set that is missing one tool cannot run a sweep, and a sweep
+    /// over three of four tools is the degraded success #5454 cost us.
+    /// What: names the tool and keeps `trusty-installer`'s structured
+    /// [`trusty_installer::download::pinned::PinnedError`], which already states
+    /// whether the pin is unpublished, the host unsupported, or the release list
+    /// unreachable — three problems with three different remedies. Boxed for the
+    /// `clippy::result_large_err` reason [`AuditError::Install`] documents.
+    /// Test: `crate::tools::tool_tests::a_tool_that_cannot_be_installed_is_refused_by_name`.
+    #[error("{tool} cannot be installed on this machine: {source}")]
+    ToolNotInstallable {
+        /// The crate that cannot be installed.
+        tool: &'static str,
+        /// Why, verbatim from the installer.
+        #[source]
+        source: Box<trusty_installer::download::pinned::PinnedError>,
+    },
+
     /// A capability this scaffold declares but does not yet implement.
     ///
     /// Why: a half-built capability must fail closed rather than silently
