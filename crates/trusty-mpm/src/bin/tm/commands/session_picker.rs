@@ -83,7 +83,8 @@ pub(crate) enum PickerDecision {
     /// no-op. Never empty — an unusable name resolves to
     /// [`Self::UnusableName`] instead.
     ///
-    /// `isolation` is [`LaunchIsolation::OwnWorktree`] only when the operator
+    /// `isolation` is [`super::picker_launch_new::LaunchIsolation::OwnWorktree`]
+    /// only when the operator
     /// typed `--worktree`; ADR-0037 decision 1 makes that explicit request the
     /// one input deciding placement.
     LaunchNew(LaunchNewRequest),

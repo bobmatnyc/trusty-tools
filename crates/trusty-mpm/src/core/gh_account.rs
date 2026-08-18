@@ -666,7 +666,7 @@ pub fn resolve_gh_account_env(
 /// here so every call site gets the warning for free.
 /// Test: `resolve_gh_account_env_for_registry_no_origin_is_empty`
 /// (`gh_account_spawn_env_tests.rs`); the registry-matching step is
-/// separately, directly tested via [`find_pinned_gh_account`] below.
+/// separately, directly tested via `find_pinned_gh_identity` below.
 pub async fn resolve_gh_account_env_for_registry(
     registry: &crate::project::ProjectRegistry,
     cwd: &std::path::Path,
