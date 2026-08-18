@@ -167,3 +167,125 @@ fn the_card_ends_a_sentence_rather_than_trailing_a_colon() {
     );
     assert!(last.ends_with('.'), "the card ends mid-sentence: {last:?}");
 }
+
+/// The named verb is what a script, a CI job and the E2E harness run, and
+/// #5502's own reachability table mandates that spelling — so it must print the
+/// card and exit even with a terminal attached (#5896 review).
+///
+/// It is checked here rather than only as a unit test because the unit-level
+/// mistake was precisely a rule stated one layer too late: `Cli::to_command`
+/// collapses `taudit` and `taudit guided` onto the same value, so an assertion
+/// over `Command` could not have caught this.
+#[test]
+fn the_named_guided_verb_prints_the_card_and_exits() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work = tmp.path().join("trusty-audit-work");
+
+    // No `setsid`: this child KEEPS whatever terminal the test runner has, so
+    // the verb is the only thing that can be deciding.
+    let out = Command::new(TAUDIT)
+        .args(["guided", "--work-dir"])
+        .arg(&work)
+        .arg("--config")
+        .arg(tmp.path().join("engagement.toml"))
+        .current_dir(tmp.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("`taudit guided` exits");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("Working directory:"), "{stdout}");
+    assert!(
+        !stdout.contains("press Enter when done"),
+        "`taudit guided` reached the registration prompt:\n{stdout}"
+    );
+}
+
+/// A launch backgrounded with `&` must print the card, not stop silently
+/// (#5896 review).
+///
+/// `trusty-audit &` still opens `/dev/tty` for WRITE, so the terminal probe
+/// succeeded and the first READ raised SIGTTIN — whose default action stops the
+/// job, with nothing printed and no diagnostic to say why. `DevTty::open` now
+/// refuses a terminal this process is in a background group of.
+///
+/// The child is put in its own process group with `setpgid(0, 0)` while keeping
+/// the runner's controlling terminal, which is exactly the shape `&` produces.
+/// It SKIPS when the runner has no controlling terminal — in CI there is
+/// nothing to be in the background of, and both the defect and the fix behave
+/// identically. The wait is bounded rather than blocking, because the failure
+/// mode under test is a process that stops rather than one that exits.
+#[test]
+fn a_backgrounded_launch_prints_the_card_rather_than_stopping() {
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .is_err()
+    {
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work = tmp.path().join("trusty-audit-work");
+
+    let mut command = Command::new(TAUDIT);
+    command
+        .arg("--work-dir")
+        .arg(&work)
+        .arg("--config")
+        .arg(tmp.path().join("engagement.toml"))
+        .current_dir(tmp.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // SAFETY: `setpgid` is async-signal-safe and this hook runs in the forked
+    // child before `exec`, moving only the child into its own process group.
+    unsafe {
+        command.pre_exec(|| match libc::setpgid(0, 0) {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+
+    let mut child = command.spawn().expect("taudit spawns");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let exited = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(status) => break Some(status),
+            None if std::time::Instant::now() >= deadline => break None,
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    };
+
+    let Some(status) = exited else {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!(
+            "a backgrounded launch never exited — it was stopped by SIGTTIN on a \
+             read it should never have attempted"
+        );
+    };
+
+    let out = child.wait_with_output().expect("output");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("Working directory:"), "{stdout}");
+    assert!(
+        !stdout.contains("press Enter when done"),
+        "a backgrounded launch reached the registration prompt:\n{stdout}"
+    );
+}
