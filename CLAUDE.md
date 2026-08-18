@@ -147,6 +147,17 @@ merge attempt: every documented check was green, and `gh pr merge` refused
 anyway with "the base branch policy prohibits the merge." That error names no
 check, so it never points back at the stale list as the cause.
 
+🟡 **Why `trusty-agents-ui clippy` and `trusty-audit-ui clippy` exist as
+separate jobs.** The required `Clippy` job runs `--workspace --all-targets`
+but excludes the Tauri UI crates (`ci.yml:32-42`) because they need
+WebKit2GTK; dedicated per-crate jobs compile them instead. Before
+2026-08-18 those dedicated jobs ran but were not required, so a gate that
+runs without being required is not a gate: [#5929](https://github.com/bobmatnyc/trusty-tools/pull/5929)
+merged with `trusty-audit-ui clippy` red, and `main` failed
+`cargo check --workspace` for hours
+([#5935](https://github.com/bobmatnyc/trusty-tools/issues/5935), fixed by
+`15dca258`).
+
 🔴 **`Rust tests (pre-publish gate)` — the eight shards — does not run on pull
 requests.** It runs ~9.6 minutes per shard, roughly 3x the entire required set,
 and it is not a required context, so on a PR it is skipped outright rather than
