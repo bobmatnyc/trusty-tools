@@ -13,3 +13,11 @@ Fixed
 - An unparseable synthesis response is now persisted (scrubbed) next to the
   report output as `synthesis-unparseable-response.txt` so a future
   occurrence is diagnosable without spending another live provider call.
+- Report synthesis no longer hard-fails a due-diligence run when a provider
+  returns valid top-level JSON but drifts `top_risks` field names — a live
+  capture used `risk` for `description` and `applications` for `apps`, and
+  omitted `severity`/`cost` entirely. Those field names are now accepted as
+  aliases, and an omitted `severity`/`cost` defaults to unset rather than
+  failing the whole response; the rendered report shows `not stated in
+  source data` for a defaulted severity/cost — never a fabricated band or
+  figure.

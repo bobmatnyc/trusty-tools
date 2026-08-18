@@ -866,3 +866,79 @@ async fn capture_dir_persists_raw_response_on_parse_failure() {
         "the captured file must hold the verbatim (scrubbed) response"
     );
 }
+
+// ── #6009 shape 2: drifted `top_risks` field names ──────────────────────────
+
+/// Verbatim (structure and field names unchanged) reconstruction of the live
+/// capture at `synthesis-unparseable-response.txt` (#6009 shape 2): valid
+/// top-level JSON, but every `top_risks` item uses `risk` instead of
+/// `description` and `applications` instead of `apps`, and omits
+/// `severity`/`cost` entirely.
+fn shape2_capture_response() -> String {
+    r#"{
+  "executive_summary": "Due diligence of 00-bobmatnyc-trusty-tools surfaced 27 AMBER findings and no RED findings.",
+  "top_risks": [
+    {
+      "risk": "Plaintext secrets at rest across credential, OAuth, and MCP config stores, with world-readable fallback on non-unix targets; broad remediation across multiple modules to move to encryption/keyring-backed storage.",
+      "applications": "00-bobmatnyc-trusty-tools"
+    },
+    {
+      "risk": "Unauthenticated API on the default loopback bind reachable by any local process including browser pages hitting 127.0.0.1; moderate effort to enforce auth by default.",
+      "applications": "00-bobmatnyc-trusty-tools"
+    },
+    {
+      "risk": "Non-atomic memory writes — vector mutation and metadata commit as separate transactions with no rollback, and non-atomic move_segment that can duplicate records — risking silent data corruption; significant effort to introduce transactional guarantees.",
+      "applications": "00-bobmatnyc-trusty-tools"
+    },
+    {
+      "risk": "Pervasive silent error suppression in credential reads, config parsing, and memory recall collapsing failures to None/defaults/empty results; moderate effort to surface and log failure paths.",
+      "applications": "00-bobmatnyc-trusty-tools"
+    },
+    {
+      "risk": "Scalability constraints in the memory subsystem — per-session redb+usearch files accumulating unbounded handles, single mutex serializing all segment writes, blocking flock in async context, and uncached config re-reads per prompt; moderate refactoring effort under load.",
+      "applications": "00-bobmatnyc-trusty-tools"
+    }
+  ],
+  "findings": []
+}"#
+    .to_string()
+}
+
+/// Why: #6009 shape 2 — before the `RiskRow` `#[serde(alias)]`/`#[serde(default)]`
+/// fix, this exact live capture failed `serde_json::from_str::<RawSynthesis>`
+/// because every `top_risks` item used `risk`/`applications` instead of
+/// `description`/`apps` and omitted `severity`/`cost` entirely, so the whole
+/// response was classified `Unparseable` even though it was valid top-level
+/// JSON with real, verifiable risk content. RED against pre-fix `RiskRow`
+/// (missing field errors on `description`/`severity`/`cost`/`apps`), GREEN
+/// after.
+/// What: parses the verbatim capture and asserts all 5 rows recover their
+/// drifted-name fields (`description` from `risk`, `apps` from
+/// `applications`) while `severity`/`cost` default to `""` — never a
+/// fabricated band or figure.
+/// Test: this test itself.
+#[test]
+fn parse_raw_recovers_shape2_field_name_drift() {
+    let raw =
+        super::parse_raw(&shape2_capture_response()).expect("shape-2 field drift must still parse");
+    assert_eq!(raw.top_risks.len(), 5, "all 5 captured rows must survive");
+    assert_eq!(
+        raw.top_risks[0].description,
+        "Plaintext secrets at rest across credential, OAuth, and MCP config stores, with world-readable fallback on non-unix targets; broad remediation across multiple modules to move to encryption/keyring-backed storage.",
+        "`risk` must alias onto `description`"
+    );
+    assert_eq!(
+        raw.top_risks[0].apps, "00-bobmatnyc-trusty-tools",
+        "`applications` must alias onto `apps`"
+    );
+    for (i, row) in raw.top_risks.iter().enumerate() {
+        assert_eq!(
+            row.severity, "",
+            "row {i}: an omitted severity must default to empty, never be fabricated"
+        );
+        assert_eq!(
+            row.cost, "",
+            "row {i}: an omitted cost must default to empty, never be fabricated"
+        );
+    }
+}

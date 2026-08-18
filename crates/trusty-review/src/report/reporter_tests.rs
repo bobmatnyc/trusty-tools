@@ -1377,6 +1377,47 @@ fn reporter_collapses_empty_top_risks() {
     assert!(!md.contains("{{risk_rank}}"));
 }
 
+/// Why: #6009 shape 2 — a live capture's `top_risks` rows omitted
+/// `severity`/`cost` entirely, and `RiskRow` now defaults each to `""`
+/// (`synthesize.rs`) rather than failing the whole response. The reporter
+/// must render that honestly — `not stated in source data` — never a blank
+/// cell (which could read as "no severity") and never an invented band or
+/// figure.
+/// What: attaches a `Synthesis` with one top-risk row carrying real
+/// `description`/`apps` but empty `severity`/`cost`, and asserts the rendered
+/// row's severity/cost cells carry [`HONESTY_MARKER`] while the real fields
+/// still render.
+/// Test: this test itself.
+#[test]
+fn reporter_renders_defaulted_top_risk_severity_honestly() {
+    use crate::report::synthesize::{RiskRow, Synthesis};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    model.synthesis = Some(Synthesis {
+        executive_summary: Some("Summary.".to_string()),
+        top_risks: vec![RiskRow {
+            description: "Plaintext secrets at rest".to_string(),
+            severity: String::new(),
+            cost: String::new(),
+            apps: "00-bobmatnyc-trusty-tools".to_string(),
+        }],
+        findings: vec![],
+        notes: vec![],
+    });
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("Plaintext secrets at rest"));
+    assert!(md.contains("00-bobmatnyc-trusty-tools"));
+    assert!(
+        md.contains(&format!("| 1 | Plaintext secrets at rest ⁽ⁱ⁾ | {HONESTY_MARKER} | {HONESTY_MARKER} | 00-bobmatnyc-trusty-tools |")),
+        "a defaulted severity/cost must render as the honesty marker, never blank or fabricated: {md}"
+    );
+}
+
 /// Why: live-QA wave-2 defect #5 — the per-language LoC breakdown was computed
 /// (both by the scanner and from an external metrics file) but only language
 /// NAMES reached the rendered Profile table; the actual split (the useful

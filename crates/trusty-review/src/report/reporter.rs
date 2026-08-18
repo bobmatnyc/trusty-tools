@@ -366,9 +366,18 @@ fn build_scope(model: &ReportModel) -> Scope {
 /// synthesized rows render (previously the template hard-capped at 3/5 fixed
 /// placeholder rows, silently dropping any beyond the cap — #2373); with zero
 /// top risks no block is pushed and the section collapses via omit-empty.
+/// #6009 shape 2: a live capture omitted `severity`/`cost` entirely, and
+/// [`RiskRow`](super::synthesize::RiskRow) now defaults each to `""` rather
+/// than failing the whole response — `risk_severity`/`risk_cost` are left
+/// UNSET (never set to `""`) when empty, so the fill engine's own honesty
+/// rule renders `not stated in source data` instead of a blank table cell
+/// that could be misread as "no severity/cost", matching the precedent
+/// `reporter_fill.rs::set_executive_summary` already uses for the
+/// deterministic path's `risk_cost`.
 /// Test: `reporter_tests.rs::{reporter_injects_synthesis_prose,
 /// reporter_tags_top_risks_as_inferred, reporter_renders_all_top_risk_rows,
-/// reporter_collapses_empty_top_risks}`.
+/// reporter_collapses_empty_top_risks,
+/// reporter_renders_defaulted_top_risk_severity_honestly}`.
 fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis) {
     if let Some(exec) = &syn.executive_summary {
         root.set(
@@ -384,8 +393,12 @@ fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis
             "risk_description",
             tag(risk.description.clone(), Provenance::Inferred),
         );
-        row.set("risk_severity", risk.severity.clone());
-        row.set("risk_cost", tag(risk.cost.clone(), Provenance::Inferred));
+        if !risk.severity.is_empty() {
+            row.set("risk_severity", risk.severity.clone());
+        }
+        if !risk.cost.is_empty() {
+            row.set("risk_cost", tag(risk.cost.clone(), Provenance::Inferred));
+        }
         row.set("risk_apps", risk.apps.clone());
         root.push_block("top_risk_row", row);
     }

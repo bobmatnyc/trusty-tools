@@ -127,15 +127,36 @@ pub enum SynthesisError {
 }
 
 /// One synthesized top-risk table row (rationale for the Top Risks table).
+///
+/// Why: #6009 shape 2 — a live capture against `anthropic/claude-opus-4.8`
+/// returned valid top-level JSON, but every `top_risks` item used drifted
+/// field names (`risk` for `description`, `applications` for `apps`) and
+/// omitted `severity`/`cost` entirely, so `serde_json::from_str::<RawSynthesis>`
+/// failed on the whole response and the run was classified `Unparseable` even
+/// though the risk content itself was present and verifiable.
+/// What: `description`/`apps` accept the drifted names via `#[serde(alias)]`
+/// (still SERIALIZED under their canonical names — the JSON twin on
+/// [`ReportModel`] is unaffected). `severity`/`cost` default to `""` when the
+/// provider omits them; the reporter renders an empty value as the honesty
+/// marker (`not stated in source data`), never a fabricated band or figure —
+/// see `reporter.rs::inject_synthesis_summary`.
+/// Test: `synthesize_tests.rs::parse_raw_recovers_shape2_field_name_drift`,
+/// `reporter_tests.rs::reporter_renders_defaulted_top_risk_severity_honestly`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskRow {
     /// Risk description.
+    #[serde(alias = "risk")]
     pub description: String,
-    /// Severity band (`RED`/`AMBER`).
+    /// Severity band (`RED`/`AMBER`), or `""` when the provider omitted it
+    /// (#6009 shape 2) — never fabricated.
+    #[serde(default)]
     pub severity: String,
-    /// Qualitative cost/effort framing.
+    /// Qualitative cost/effort framing, or `""` when the provider omitted it
+    /// (#6009 shape 2) — never fabricated.
+    #[serde(default)]
     pub cost: String,
     /// Affected application(s).
+    #[serde(alias = "applications")]
     pub apps: String,
 }
 
@@ -431,11 +452,17 @@ struct RawSynthesis {
 /// mean inventing fields the model never actually populated, which is exactly
 /// what this parser must not do).  `None` when none of the three yields
 /// anything, so a response that is not even this fallback shape is still
-/// rejected as [`SynthesisError::Unparseable`].
+/// rejected as [`SynthesisError::Unparseable`].  A FOURTH shape (#6009 shape
+/// 2) needs no fallback tier of its own: a live capture returned valid
+/// top-level JSON but drifted `top_risks` field names (`risk`/`applications`
+/// for `description`/`apps`, `severity`/`cost` omitted) — [`RiskRow`]'s
+/// `#[serde(alias)]`/`#[serde(default)]` attributes absorb that at the first
+/// (direct-object) tier, so it never falls through to here.
 /// Test: `synthesize_tests.rs::{synthesize_happy_path_injects,
 /// synthesize_malformed_json_fails_closed,
 /// synthesize_recovers_executive_summary_from_markdown_fallback,
-/// synthesize_markdown_fallback_rejects_response_with_no_heading}`.
+/// synthesize_markdown_fallback_rejects_response_with_no_heading,
+/// parse_raw_recovers_shape2_field_name_drift}`.
 fn parse_raw(text: &str) -> Option<RawSynthesis> {
     let body = text.trim();
     if body.starts_with('{')
