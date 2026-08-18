@@ -70,7 +70,10 @@ const CHECKING_TOOLS: &str = "\nChecking the pinned tools";
 /// module writes lands at the config-file level, ABOVE them — so binding the two
 /// together would make a config value follow a constant it deliberately
 /// outranks, and #5971 is converting that constant into a tier lookup this path
-/// must not silently inherit.
+/// must not silently inherit. The two carry the SAME id today — #5970 moved the
+/// built-in default to Opus 4.8 as well, so the ruling reaches auditor-supplied
+/// configs too — and that agreement is a coincidence of values, not a reason to
+/// collapse them back into one.
 /// What: an OpenRouter model id, confirmed present in
 /// `GET https://openrouter.ai/api/v1/models` on 2026-08-18. Never derive a
 /// sibling id from this one's shape — OpenRouter's naming is not a pattern to

@@ -65,18 +65,24 @@ pub const ENV_SUMMARIZER_MODEL: &str = "TRUSTY_REVIEW_SUMMARIZER_MODEL";
 /// The provider name `trusty-review`'s `Provider: FromStr` accepts for OpenRouter.
 pub const PROVIDER_OPENROUTER: &str = "openrouter";
 
-/// Reviewer model — the highest-quality call in the pipeline, so Sonnet-class.
+/// Reviewer model — the audit's judging call, so the Opus analysis tier.
 ///
-/// Why: matches the role/cost split `trusty-review` already uses for Bedrock
-/// (Sonnet reviewer, Haiku verifier and summarizer), so switching provider does
-/// not silently change the quality tier as well.
+/// Why: owner ruling, 2026-08-18 — for `trusty-audit` the analysis tier is Opus
+/// 4.8. It was `anthropic/claude-sonnet-4.6`, which paired this crate's judging
+/// call with the Sonnet-class split `trusty-review` uses for Bedrock. This
+/// constant is the BOTTOM of `trusty-review`'s precedence chain (CLI flag >
+/// environment > config file > built-in), so it decides only for an engagement
+/// config that names no `[models]` table — which is the auditor-supplied
+/// handoff, the common case. Leaving it would have applied the ruling to
+/// configs `crate::cli::bootstrap` writes and to nothing else (#5970).
 /// What: OpenRouter names Anthropic models `anthropic/claude-<tier>-<major>.<minor>`
 /// — a DOT, not a dash. Verified against `GET https://openrouter.ai/api/v1/models`
-/// on 2026-08-13, which lists `anthropic/claude-sonnet-4.6` and no dashed
-/// `-4-6` form. The dashed spelling in `trusty-agents` is that crate's own
+/// on 2026-08-18, which lists `anthropic/claude-opus-4.8` and no dashed
+/// `-4-8` form. The dashed spelling in `trusty-agents` is that crate's own
 /// convention and is not an OpenRouter slug; sending it produces the HTTP 400
 /// `is not a valid model ID` this constant exists to avoid.
-pub const DEFAULT_REVIEWER_MODEL: &str = "anthropic/claude-sonnet-4.6";
+/// Test: `super::inference_tests::a_config_with_no_models_table_judges_on_opus`.
+pub const DEFAULT_REVIEWER_MODEL: &str = "anthropic/claude-opus-4.8";
 
 /// Verifier model — short, high-volume calls, so the cheapest Haiku tier.
 ///
@@ -294,9 +300,62 @@ trusty-review = "0.15.1"
                 "{slug} uses the dashed spelling; OpenRouter names versions with a dot"
             );
         }
-        assert!(DEFAULT_REVIEWER_MODEL.contains("sonnet"));
+        // #5970: the reviewer is the analysis tier, per the owner's ruling of
+        // 2026-08-18. It was `sonnet` until then.
+        assert!(DEFAULT_REVIEWER_MODEL.contains("opus"));
         assert!(DEFAULT_VERIFIER_MODEL.contains("haiku"));
         assert!(DEFAULT_SUMMARIZER_MODEL.contains("haiku"));
+    }
+
+    /// 🔴 The default path, asserted as LITERALS.
+    ///
+    /// Owner ruling, 2026-08-18: for `trusty-audit` the analysis tier is Opus
+    /// 4.8. An engagement config with no `[models]` table — the auditor-supplied
+    /// handoff, and the common case — resolves through the built-in constants,
+    /// so this is the path the ruling reaches only via [`DEFAULT_REVIEWER_MODEL`].
+    ///
+    /// It is distinct from `the_defaults_select_openrouter_and_all_three_roles`
+    /// above, which compares the pairs to those same constants and therefore
+    /// passes whatever they happen to say — including a Bedrock
+    /// `us.anthropic.…` profile id named against an OpenRouter endpoint, which
+    /// fails at call time rather than at compile time. Only a literal catches
+    /// that. Same reason
+    /// `crate::cli::bootstrap::bootstrap_tests::the_written_config_names_the_ruled_models`
+    /// spells its ids out; that test covers the config-file layer, this one the
+    /// built-in layer underneath it.
+    #[test]
+    fn a_config_with_no_models_table_judges_on_opus() {
+        let config = config_from(CONFIG);
+        assert_eq!(
+            config.models,
+            ModelPins::default(),
+            "the fixture must name no models"
+        );
+
+        let env = pairs(&config);
+        assert_eq!(
+            env.get(ENV_PROVIDER).map(String::as_str),
+            Some("openrouter")
+        );
+        assert_eq!(
+            env.get(ENV_REVIEWER_MODEL).map(String::as_str),
+            Some("anthropic/claude-opus-4.8"),
+            "an auditor-supplied config must judge on Opus 4.8: {env:?}"
+        );
+        assert_eq!(
+            env.get(ENV_VERIFIER_MODEL).map(String::as_str),
+            Some("anthropic/claude-haiku-4.5"),
+            "{env:?}"
+        );
+        assert_eq!(
+            env.get(ENV_SUMMARIZER_MODEL).map(String::as_str),
+            Some("anthropic/claude-haiku-4.5"),
+            "{env:?}"
+        );
+        assert!(
+            env.values().all(|v| !v.starts_with("us.anthropic.")),
+            "a Bedrock inference-profile id must never reach an OpenRouter run: {env:?}"
+        );
     }
 
     #[test]
