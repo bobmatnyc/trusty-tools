@@ -554,9 +554,30 @@ pub struct WarmBootSummary {
     /// `warm_boot_degraded` so monitors can detect scan-timeout degradation
     /// without tailing logs, distinguishing it from a healthy empty index.
     pub indexes_skipped_timeout: usize,
+    /// Number of registered indexes warm-boot excluded because the #767
+    /// allowlist union does not approve their root (or the hard denylist
+    /// refuses it).
+    ///
+    /// Why (#5926): these indexes stay in `indexes.toml` and simply never enter
+    /// the in-memory registry, so every other counter here reads clean. A boot
+    /// that dropped 103 of 121 registered indexes reported `indexes_skipped_tcc:
+    /// 0` alongside a "< 80% of prior" error whose remedy text was re-granting
+    /// Full Disk Access — the one explanation the counters ruled out. This
+    /// counter is the machine-readable form of the cause, and a monitor can tell
+    /// an allowlist decision from a permissions failure without reading logs.
+    /// What: counted by `retain_approved_entries`; any non-zero value forces
+    /// `warm_boot_degraded`. An index kept because the allowlist was UNREADABLE
+    /// is not counted — nothing was excluded there.
+    /// Test: `warmboot_summary_unapproved_sets_degraded_flag` in
+    /// `commands/prior_index_count.rs`;
+    /// `warmboot_counts_every_entry_the_allowlist_excluded` in
+    /// `commands/start/restore.rs`.
+    pub indexes_skipped_unapproved: usize,
     /// `true` when any of the following hold:
     /// - `indexes_skipped_tcc > 0` (TCC / FDA denial)
     /// - `indexes_skipped_timeout > 0` (scan timeout — issue #1091)
+    /// - `indexes_skipped_unapproved > 0` (the allowlist gate excluded a
+    ///   registered index — #5926)
     /// - `indexes_corpus_failed > 0` (a registered index's corpus/lane failed
     ///   to open — issue #1870)
     /// - `indexes_loaded` is less than 80% of the prior-known count

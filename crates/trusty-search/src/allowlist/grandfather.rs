@@ -9,13 +9,30 @@
 //! preserves exactly what was already there and nothing more: the pass adds no
 //! root the daemon was not already serving.
 //!
-//! What: [`grandfather_existing_indexes`] runs ONLY when `allowlist.toml` is
-//! absent — the operator's own file, including one they emptied on purpose, is
-//! never rewritten and a removed root is never resurrected. Each registered
-//! root is re-checked against the hard denylist before it is written, so a
-//! sensitive root that slipped in before the gate existed is dropped here
-//! rather than laundered into an approval. Every decision is logged: approvals
-//! at `info`, denials at `warn`.
+//! What: [`grandfather_existing_indexes`] runs once per install and is keyed on
+//! the durable `.grandfathered` stamp, NOT on whether `allowlist.toml` exists.
+//! Every registered root the allowlist union does not already approve is added,
+//! whether the file was absent or merely incomplete. Each root is re-checked
+//! against the hard denylist first, so a sensitive root that slipped in before
+//! the gate existed is dropped rather than laundered into an approval. Every
+//! decision is logged: approvals at `info`, denials at `warn`.
+//!
+//! # The distinction the stamp draws (#5926)
+//!
+//! Two absences look identical in `allowlist.toml` and mean opposite things:
+//!
+//! - **Never approved because the gate is new.** Before #5686 nothing read this
+//!   file at registration time, so its contents were a partial record of
+//!   `index add` calls, never a policy. A root missing from it was not refused —
+//!   it was never asked about.
+//! - **Explicitly de-approved.** After the pass has run, the file IS the policy,
+//!   and a root the operator removed must stay removed.
+//!
+//! The stamp separates them: it is written only by a pass that has had its turn,
+//! so its absence means no de-approval decision can have been recorded yet.
+//! Keying on `allowlist.toml`'s existence instead is what dropped 103 of 121
+//! registered indexes from warm boot on an upgrade whose allowlist file already
+//! held ~24 hand-added entries (#5926).
 //!
 //! Test: `grandfather_tests.rs`.
 
@@ -32,40 +49,48 @@ use super::{AllowlistConfig, AllowlistEntry};
 /// Test: `grandfather_seeds_registered_roots`, `grandfather_skips_denied_roots`.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct GrandfatherOutcome {
-    /// Roots written into the freshly created allowlist.
+    /// Roots added to the allowlist — created or merged into an existing file.
     pub seeded: Vec<std::path::PathBuf>,
     /// Roots refused by the hard denylist, with the denial reason.
     pub denied: Vec<(std::path::PathBuf, String)>,
-    /// True when the pass did not run because `allowlist.toml` already exists.
-    pub skipped_existing: bool,
+    /// True when the pass did not run because the `.grandfathered` stamp says
+    /// it has already had its turn on this install.
+    ///
+    /// #5926: this used to mean "did not run because `allowlist.toml` exists",
+    /// which conflated a file the gate had never read with a curated policy.
+    pub skipped_already_done: bool,
 }
 
-/// Seed a missing `allowlist.toml` from the daemon's own index registry.
+/// Seed the allowlist from the daemon's own index registry, once per install.
 ///
 /// Why: see the module doc — this is what keeps switching on default-deny from
-/// silently un-indexing a working install.
-/// What: no-op (with `skipped_existing`) when the allowlist file already
+/// silently un-indexing a working install, and #5926 is what happens when the
+/// trigger is the allowlist file's existence instead of the stamp.
+/// What: no-op (with `skipped_already_done`) once the `.grandfathered` stamp
 /// exists. Otherwise reads `registry_path` (`indexes.toml`), drops roots the
-/// hard denylist refuses, drops roots the project registry already approves
-/// (writing them would duplicate an approval that has its own lifecycle), and
-/// writes the remainder as explicit entries. Writes nothing when the registry
-/// is empty, so a genuinely fresh install stays at default-deny with no file.
+/// hard denylist refuses, drops roots the allowlist union already approves
+/// (explicit entry, project registry, provisioned worktree, or containment),
+/// and adds the remainder as explicit entries — creating `allowlist.toml` when
+/// it is absent, merging into it when it is present but incomplete. Writes
+/// nothing when the registry is empty, so a genuinely fresh install stays at
+/// default-deny with no file.
 /// Test: `grandfather_seeds_registered_roots`, `grandfather_skips_denied_roots`,
-/// `grandfather_noop_when_allowlist_exists`, `grandfather_noop_on_fresh_install`.
+/// `grandfather_seeds_roots_missing_from_a_partial_allowlist`,
+/// `grandfather_noop_once_the_stamp_exists`, `grandfather_noop_on_fresh_install`.
 pub fn grandfather_existing_indexes(
     paths: &AllowlistPaths,
     registry_path: &Path,
 ) -> anyhow::Result<GrandfatherOutcome> {
     let allowlist_file = paths.allowlist_file();
     let stamp = stamp_path(&allowlist_file);
-    // #767: "the allowlist file is missing" is NOT on its own evidence that the
-    // pass has never run. Deleting `allowlist.toml` is a plausible "reset to
-    // default-deny" gesture, and without a durable stamp the next start would
-    // re-seed every registered root as a standing approval — undoing exactly
-    // what the operator just did. Both conditions must hold.
-    if allowlist_file.exists() || stamp.exists() {
+    // #5926: the stamp is the ONLY trigger. `allowlist.toml` existing is not
+    // evidence the pass has run — before #5686 no gate read that file, so a
+    // pre-upgrade copy is a partial record of `index add` calls rather than a
+    // policy. Deleting the file after the pass ran IS a "reset to default-deny"
+    // gesture, and the stamp is what makes that stick.
+    if stamp.exists() {
         return Ok(GrandfatherOutcome {
-            skipped_existing: true,
+            skipped_already_done: true,
             ..Default::default()
         });
     }
@@ -100,14 +125,31 @@ pub fn grandfather_existing_indexes(
         return Ok(GrandfatherOutcome::default());
     }
 
-    let project_roots: Vec<std::path::PathBuf> =
-        super::sources::project_roots(&paths.project_paths_file())
-            .iter()
-            .map(|p| super::canonicalise(p))
-            .collect();
+    let existed = allowlist_file.exists();
+    // #5926: merging means starting from what is already there. A file that
+    // cannot be PARSED is not a file we may overwrite — that would discard the
+    // operator's approvals over a syntax error. Leave it and the stamp alone so
+    // the next boot retries once they have fixed it; warm-boot separately keeps
+    // every entry while the allowlist is unreadable, so nothing is un-indexed
+    // in the meantime.
+    let mut cfg = if existed {
+        match AllowlistConfig::load_from(&allowlist_file) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(
+                    "allowlist: {} exists but could not be parsed ({e:#}) — the one-time \
+                     grandfather pass is NOT marked done and will retry once the file \
+                     parses. Nothing was written and no approval was lost (#5926)",
+                    allowlist_file.display()
+                );
+                return Ok(GrandfatherOutcome::default());
+            }
+        }
+    } else {
+        AllowlistConfig::default()
+    };
 
     let mut outcome = GrandfatherOutcome::default();
-    let mut cfg = AllowlistConfig::default();
     for entry in entries {
         let root = super::canonicalise(&entry.root_path);
         // #767: a root registered before the gate existed is still re-checked —
@@ -116,9 +158,25 @@ pub fn grandfather_existing_indexes(
             outcome.denied.push((root, reason));
             continue;
         }
-        if project_roots.contains(&root) {
-            continue;
+        // #5926: ask the union exactly the question warm-boot asks, so the set
+        // written here is precisely the set warm-boot would otherwise drop. An
+        // Err means the union could not be evaluated; skip the root rather than
+        // guess.
+        match super::sources::resolve_allow_source(&root, paths) {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "allowlist: could not resolve an approval source for {} ({e:#}) — \
+                     leaving it out of the grandfather pass (#5926)",
+                    root.display()
+                );
+                continue;
+            }
         }
+        // `resolve_allow_source` reads the file from disk, so a root added
+        // earlier in THIS loop is not visible to it. Two registered entries for
+        // the same root would otherwise be added twice.
         if cfg.contains(&root) {
             continue;
         }
@@ -132,26 +190,54 @@ pub fn grandfather_existing_indexes(
         outcome.seeded.push(root);
     }
 
-    // #767: create-new, not save-over. `exists()` above and a plain write here
-    // are a check-then-write: an `index add` racing this pass between the two
-    // would be clobbered by the seed. `create_new(true)` makes the concurrent
-    // writer win — we lose the seed rather than lose their approval, and the
-    // stamp below still records that the pass has had its turn.
-    match create_new_toml(&allowlist_file, &cfg) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            tracing::info!(
-                "allowlist: {} appeared while the grandfather pass was running — \
-                 keeping that file and discarding the seed (#767)",
-                allowlist_file.display()
-            );
-            write_stamp(&stamp);
-            return Ok(GrandfatherOutcome {
-                skipped_existing: true,
-                ..Default::default()
-            });
+    // Nothing to add: an allowlist that already covers every registered root
+    // must not be rewritten at all. Stamp and stop.
+    if outcome.seeded.is_empty() {
+        write_stamp(&stamp);
+        return Ok(outcome);
+    }
+
+    if existed {
+        // Merge path. Read-modify-write over an existing file, the same shape
+        // `add_to_allowlist` / `remove_from_allowlist` already use, so a racing
+        // CLI write has the same (unchanged) exposure it always had.
+        cfg.save_to(&allowlist_file)?;
+    } else {
+        // #767: create-new, not save-over. `exists()` above and a plain write
+        // here are a check-then-write, and `save_to` renames over whatever is
+        // there — an `index add` racing this pass between the two would be
+        // silently discarded. `create_new(true)` is what detects the race.
+        match create_new_toml(&allowlist_file, &cfg) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // #5926: merge into the file that appeared rather than
+                // discarding the seed. Discarding it was safe while the pass
+                // only ever ran on a fresh install; now the seed is the
+                // migration, so throwing it away costs exactly the indexes this
+                // pass exists to keep — and one `index add` landing in the
+                // window would be enough to trigger it.
+                tracing::info!(
+                    "allowlist: {} appeared while the grandfather pass was running — \
+                     merging the seed into it rather than discarding either (#5926)",
+                    allowlist_file.display()
+                );
+                let mut raced = AllowlistConfig::load_from(&allowlist_file)?;
+                outcome.seeded.retain(|root| !raced.contains(root));
+                for root in &outcome.seeded {
+                    raced.upsert(AllowlistEntry {
+                        path: root.clone(),
+                        name: None,
+                        exclude: Vec::new(),
+                        extensions: Vec::new(),
+                        skip_kg: false,
+                    });
+                }
+                if !outcome.seeded.is_empty() {
+                    raced.save_to(&allowlist_file)?;
+                }
+            }
+            Err(e) => return Err(e.into()),
         }
-        Err(e) => return Err(e.into()),
     }
     write_stamp(&stamp);
 
@@ -170,9 +256,10 @@ pub fn grandfather_existing_indexes(
         );
     }
     tracing::info!(
-        "allowlist: first-run grandfather pass wrote {} entr{} to {} \
+        "allowlist: one-time grandfather pass {} {} entr{} in {} \
          ({} refused by the sensitive-path denylist). Review it with \
          `trusty-search index list` and prune what you do not want indexed.",
+        if existed { "merged" } else { "wrote" },
         outcome.seeded.len(),
         if outcome.seeded.len() == 1 {
             "y"
@@ -193,7 +280,7 @@ pub fn grandfather_existing_indexes(
 /// both and a genuinely fresh install has neither.
 /// What: `<allowlist.toml's dir>/.grandfathered`.
 /// Test: `grandfather_does_not_reseed_after_the_allowlist_is_deleted`.
-fn stamp_path(allowlist_file: &Path) -> std::path::PathBuf {
+pub(super) fn stamp_path(allowlist_file: &Path) -> std::path::PathBuf {
     match allowlist_file.parent() {
         Some(dir) => dir.join(".grandfathered"),
         None => std::path::PathBuf::from(".grandfathered"),
@@ -228,8 +315,9 @@ delete this file to let it seed again\n",
 /// a concurrent `index add` — the rename would silently discard that approval.
 /// `create_new(true)` is what makes the other writer win instead.
 /// What: serialises to TOML, then opens with `create_new(true)` and writes.
-/// Test: `grandfather_yields_to_a_concurrently_created_allowlist`.
-fn create_new_toml(path: &Path, cfg: &AllowlistConfig) -> std::io::Result<()> {
+/// Test: `grandfather_merges_with_a_concurrently_created_allowlist`,
+/// `create_new_toml_refuses_an_existing_file`.
+pub(super) fn create_new_toml(path: &Path, cfg: &AllowlistConfig) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;

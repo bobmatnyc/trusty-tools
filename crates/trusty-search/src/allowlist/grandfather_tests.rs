@@ -32,6 +32,15 @@ fn fixture(dir: &Path) -> AllowlistPaths {
         .with_project_paths(dir.join("projects.json"))
 }
 
+/// Stand in for a prior boot that already ran the pass (#5926).
+fn write_stamp_for(paths: &AllowlistPaths) {
+    let stamp = super::grandfather::stamp_path(&paths.allowlist_file());
+    if let Some(dir) = stamp.parent() {
+        std::fs::create_dir_all(dir).expect("create stamp dir");
+    }
+    std::fs::write(&stamp, b"test").expect("write stamp");
+}
+
 /// Write an `indexes.toml` in the daemon registry format.
 fn write_registry(path: &Path, roots: &[(&str, &Path)]) {
     let entries: Vec<PersistedIndex> = roots
@@ -88,10 +97,16 @@ fn grandfather_skips_denied_roots() {
     );
 }
 
-/// An existing allowlist is never rewritten — including one the operator
-/// emptied deliberately. Re-seeding would resurrect roots they just removed.
+/// Once the pass has run, an emptied allowlist stays empty. Re-seeding would
+/// resurrect roots the operator just removed.
+///
+/// #5926: this used to seed the fixture with a bare allowlist file and no
+/// stamp, which asserted the defect — the pass keyed on the file's existence,
+/// so any pre-gate `allowlist.toml` blocked the migration and warm-boot then
+/// dropped every registered root the file did not happen to list. The stamp is
+/// what makes a removal a DECISION, so the fixture writes it.
 #[test]
-fn grandfather_noop_when_allowlist_exists() {
+fn grandfather_noop_once_the_stamp_exists() {
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = fixture(dir.path());
     let registry = dir.path().join("indexes.toml");
@@ -100,15 +115,138 @@ fn grandfather_noop_when_allowlist_exists() {
     AllowlistConfig::default()
         .save_to(&paths.allowlist_file())
         .expect("write empty allowlist");
+    write_stamp_for(&paths);
 
     let outcome = grandfather_existing_indexes(&paths, &registry).expect("grandfather");
-    assert!(outcome.skipped_existing);
+    assert!(outcome.skipped_already_done);
     assert!(outcome.seeded.is_empty());
 
     let cfg = AllowlistConfig::load_from(&paths.allowlist_file()).expect("load");
     assert!(
         cfg.entries.is_empty(),
         "an emptied allowlist must stay empty: {cfg:?}"
+    );
+}
+
+/// The #5926 regression: a PARTIAL pre-upgrade `allowlist.toml` must not block
+/// the migration.
+///
+/// Why: on the reporting box the file already held ~24 hand-added entries while
+/// `indexes.toml` held 121 registrations, and the pass ran only when the file
+/// was absent. It skipped, and warm-boot's `retain_approved_entries` then
+/// excluded the 103 roots nothing had approved — `warm-boot DEGRADED: only
+/// 11/37 indexes loaded` with `skipped_tcc: 0`. Against the pre-fix code this
+/// test fails with `skipped_already_done: true` and an empty `seeded`.
+#[test]
+fn grandfather_seeds_roots_missing_from_a_partial_allowlist() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = fixture(dir.path());
+    let registry = dir.path().join("indexes.toml");
+    let known = safe_root("partial-known");
+    let missing_a = safe_root("partial-missing-a");
+    let missing_b = safe_root("partial-missing-b");
+    write_registry(
+        &registry,
+        &[("known", &known), ("a", &missing_a), ("b", &missing_b)],
+    );
+    // The operator's pre-gate file: one of the three roots, added by hand.
+    let mut existing = AllowlistConfig::default();
+    existing.upsert(super::AllowlistEntry {
+        path: known.clone(),
+        name: None,
+        exclude: Vec::new(),
+        extensions: Vec::new(),
+        skip_kg: false,
+    });
+    existing
+        .save_to(&paths.allowlist_file())
+        .expect("write partial allowlist");
+
+    let outcome = grandfather_existing_indexes(&paths, &registry).expect("grandfather");
+    assert_eq!(
+        outcome.seeded,
+        vec![missing_a.clone(), missing_b.clone()],
+        "a partial pre-gate allowlist must be completed, not treated as curated: {outcome:?}"
+    );
+
+    let cfg = AllowlistConfig::load_from(&paths.allowlist_file()).expect("load");
+    for root in [&known, &missing_a, &missing_b] {
+        assert!(
+            cfg.contains(root),
+            "every registered root must survive the upgrade: {root:?} missing from {cfg:?}"
+        );
+    }
+}
+
+/// A root removed AFTER the pass ran stays removed on the next boot.
+///
+/// Why: this is the other half of #5926 and the constraint the fix must not
+/// break. "Never approved because the gate is new" and "explicitly de-approved"
+/// must not collapse into one another — the stamp is the only thing separating
+/// them, so a second pass over a pruned file must add nothing back.
+#[test]
+fn grandfather_does_not_resurrect_a_root_removed_after_the_pass_ran() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = fixture(dir.path());
+    let registry = dir.path().join("indexes.toml");
+    let kept = safe_root("deapprove-kept");
+    let removed = safe_root("deapprove-removed");
+    write_registry(&registry, &[("kept", &kept), ("removed", &removed)]);
+
+    let first = grandfather_existing_indexes(&paths, &registry).expect("first pass");
+    assert_eq!(first.seeded, vec![kept.clone(), removed.clone()]);
+
+    // The operator prunes one root — a deliberate de-approval, under a gate
+    // that has already had its turn.
+    crate::allowlist::remove_from_allowlist(&removed, Some(&paths.allowlist_file()))
+        .expect("remove");
+
+    let second = grandfather_existing_indexes(&paths, &registry).expect("second pass");
+    assert!(second.skipped_already_done, "{second:?}");
+    let cfg = AllowlistConfig::load_from(&paths.allowlist_file()).expect("load");
+    assert!(cfg.contains(&kept));
+    assert!(
+        !cfg.contains(&removed),
+        "a deliberate de-approval must survive the next boot: {cfg:?}"
+    );
+}
+
+/// An `allowlist.toml` that does not parse is left alone and does NOT burn the
+/// one-time pass.
+///
+/// Why: the merge path is a read-modify-write, so a file it cannot read is a
+/// file it must not overwrite — writing the seed on top would discard every
+/// approval the operator had. Warm-boot separately keeps every entry while the
+/// allowlist is unreadable, so nothing is un-indexed while this waits.
+#[test]
+fn grandfather_leaves_an_unparseable_allowlist_alone_and_retries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = fixture(dir.path());
+    let registry = dir.path().join("indexes.toml");
+    let root = safe_root("corrupt-allowlist");
+    write_registry(&registry, &[("a", &root)]);
+    std::fs::write(paths.allowlist_file(), "not toml [[[").expect("write");
+
+    let first = grandfather_existing_indexes(&paths, &registry).expect("first pass");
+    assert!(
+        first.seeded.is_empty() && !first.skipped_already_done,
+        "{first:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(paths.allowlist_file()).expect("read"),
+        "not toml [[[",
+        "the operator's file must be untouched"
+    );
+
+    // They fix the syntax; the pass must still be available.
+    AllowlistConfig::default()
+        .save_to(&paths.allowlist_file())
+        .expect("rewrite");
+    let second = grandfather_existing_indexes(&paths, &registry).expect("second pass");
+    assert_eq!(
+        second.seeded,
+        vec![root],
+        "the pass must retry after an unparseable file, not be permanently burned"
     );
 }
 
@@ -121,7 +259,7 @@ fn grandfather_noop_on_fresh_install() {
     let registry = dir.path().join("indexes.toml");
 
     let outcome = grandfather_existing_indexes(&paths, &registry).expect("grandfather");
-    assert!(outcome.seeded.is_empty() && !outcome.skipped_existing);
+    assert!(outcome.seeded.is_empty() && !outcome.skipped_already_done);
     assert!(
         !paths.allowlist_file().exists(),
         "no allowlist file should be created for a fresh install"
@@ -171,7 +309,7 @@ fn grandfather_does_not_reseed_after_the_allowlist_is_deleted() {
     std::fs::remove_file(paths.allowlist_file()).expect("delete allowlist");
 
     let second = grandfather_existing_indexes(&paths, &registry).expect("second pass");
-    assert!(second.skipped_existing, "{second:?}");
+    assert!(second.skipped_already_done, "{second:?}");
     assert!(second.seeded.is_empty(), "{second:?}");
     assert!(
         !paths.allowlist_file().exists(),
@@ -196,7 +334,7 @@ fn grandfather_does_not_stamp_when_the_registry_cannot_be_read() {
 
     let first = grandfather_existing_indexes(&paths, &registry).expect("first pass");
     assert!(
-        first.seeded.is_empty() && !first.skipped_existing,
+        first.seeded.is_empty() && !first.skipped_already_done,
         "{first:?}"
     );
     assert!(
@@ -224,25 +362,29 @@ fn grandfather_stamps_even_on_a_fresh_install() {
     let registry = dir.path().join("indexes.toml");
 
     let first = grandfather_existing_indexes(&paths, &registry).expect("first pass");
-    assert!(first.seeded.is_empty() && !first.skipped_existing);
+    assert!(first.seeded.is_empty() && !first.skipped_already_done);
 
     let root = safe_root("fresh-stamped");
     write_registry(&registry, &[("a", &root)]);
     let second = grandfather_existing_indexes(&paths, &registry).expect("second pass");
     assert!(
-        second.skipped_existing,
+        second.skipped_already_done,
         "the stamp must block a later seed: {second:?}"
     );
 }
 
-/// An allowlist created concurrently wins; the seed is discarded rather than
-/// clobbering it.
+/// A concurrently created allowlist and the seed both survive.
 ///
 /// Why: `exists()` then `save_to` is a check-then-write, and `save_to` renames
 /// over whatever is there — so an `index add` landing inside that window would
-/// be silently lost. `create_new(true)` inverts which side loses.
+/// be silently lost. `create_new(true)` detects the race.
+///
+/// #5926: on detection the pass now MERGES rather than discarding the seed.
+/// Discarding was safe while the pass only ran on a fresh install; now the seed
+/// IS the migration, so throwing it away costs exactly the registered indexes
+/// this pass exists to keep, and one `index add` in the window would do it.
 #[test]
-fn grandfather_yields_to_a_concurrently_created_allowlist() {
+fn grandfather_merges_with_a_concurrently_created_allowlist() {
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = fixture(dir.path());
     let registry = dir.path().join("indexes.toml");
@@ -252,7 +394,7 @@ fn grandfather_yields_to_a_concurrently_created_allowlist() {
 
     // Stand in for the racing writer: the file exists by the time the pass
     // would write it. The `exists()` pre-check and the write are the two ends
-    // of the window; this asserts the WRITE end refuses.
+    // of the window; this asserts what the WRITE end does.
     let mut raced = AllowlistConfig::default();
     raced.upsert(super::AllowlistEntry {
         path: raced_root.clone(),
@@ -266,15 +408,37 @@ fn grandfather_yields_to_a_concurrently_created_allowlist() {
         .expect("racing write");
 
     let outcome = grandfather_existing_indexes(&paths, &registry).expect("pass");
-    assert!(outcome.seeded.is_empty(), "{outcome:?}");
+    assert_eq!(outcome.seeded, vec![seeded_root.clone()], "{outcome:?}");
 
     let cfg = AllowlistConfig::load_from(&paths.allowlist_file()).expect("load");
     assert!(
         cfg.contains(&raced_root),
-        "the racing approval must survive"
+        "the racing approval must survive: {cfg:?}"
     );
     assert!(
-        !cfg.contains(&seeded_root),
-        "the seed must not clobber the racing writer"
+        cfg.contains(&seeded_root),
+        "the seed must survive too: {cfg:?}"
+    );
+}
+
+/// `create_new_toml` is what detects the race above — it must refuse an
+/// existing file rather than renaming over it.
+///
+/// Why: the test above exercises the merge that follows detection, and would
+/// still pass if `create_new_toml` silently overwrote instead. This pins the
+/// detection itself.
+#[test]
+fn create_new_toml_refuses_an_existing_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("allowlist.toml");
+    std::fs::write(&path, "# someone else's file\n").expect("write");
+
+    let err = super::grandfather::create_new_toml(&path, &AllowlistConfig::default())
+        .expect_err("must refuse");
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "{err:?}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        "# someone else's file\n",
+        "the existing file must be untouched"
     );
 }
