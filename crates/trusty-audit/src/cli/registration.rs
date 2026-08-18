@@ -286,7 +286,7 @@ pub async fn register_targets(
 /// count taken from the lines would tell the operator two repositories will be
 /// cloned. Returning the lines rather than printing them is what lets the
 /// no-terminal launch print the same text to stderr (`main.rs`).
-/// Test: `super::registration_tests::a_targets_file_registers_without_prompting`,
+/// Test: `super::registration_tests::a_targets_file_registers_without_prompting_for_each_target`,
 /// `super::registration_tests::a_refused_line_does_not_stop_the_rest_of_the_file`.
 ///
 /// # Errors
