@@ -19,6 +19,8 @@
 #   msrv     – cargo check --workspace (toolchain 1.94, SKIP_UI_BUILD=1)
 #   agents-ui – cargo clippy -p trusty-agents-ui (stable, WebKit2GTK-enabled runner)
 #   audit-ui – cargo clippy + test -p trusty-audit-ui (same runner shape, #5477)
+#   mpm-gui  – cargo clippy + test -p trusty-mpm-gui (same runner shape, #5934)
+#   code-gui – cargo clippy + test -p trusty-code-gui (same runner shape, #5934)
 #   embedder-cuda-check – cargo check -p trusty-common --features embedder-cuda
 #                         (issue #3508: compile-check the deadlock-safety
 #                         invariant test that is otherwise never compiled)
@@ -36,15 +38,18 @@
 # --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui
 # on every workspace-wide cargo invocation.
 #
-# UNLIKE trusty-mpm-gui and trusty-code-gui, trusty-agents-ui gets a DEDICATED
-# `agents-ui` job (#3053) — and trusty-audit-ui an `audit-ui` job (#5477) built
-# on the same shape — that installs the WebKit2GTK toolchain and runs
-# `cargo clippy -p trusty-agents-ui --all-targets -- -D warnings`, so the crate
-# is genuinely build- and lint-verified in CI rather than merely excluded. That
-# job stubs a minimal `crates/trusty-agents/ui/dist/index.html` (gitignored)
-# because `tauri::generate_context!()` requires the `frontendDist` path to
-# exist at compile time; a placeholder is sufficient to compile- and
-# lint-verify the Rust side without pulling node/pnpm into CI.
+# Each of the four gets a DEDICATED job that installs the WebKit2GTK toolchain
+# and runs `cargo clippy -p <crate> --all-targets -- -D warnings`, so exclusion
+# from the headless jobs never means the crate goes uncompiled: `agents-ui`
+# (#3053), `audit-ui` (#5477), and `mpm-gui` / `code-gui` (#5934). The last two
+# closed a real hole — until #5934 the only CI touching trusty-mpm-gui and
+# trusty-code-gui was the frontend-only `UI checks` matrix, so a Rust signature
+# change reached main uncompiled (#5935).
+#
+# Every one of those jobs stubs a minimal `index.html` at the crate's
+# `frontendDist` (a gitignored `dist/`) because `tauri::generate_context!()`
+# requires that path to exist at compile time; a placeholder is sufficient to
+# compile- and lint-verify the Rust side without pulling node/pnpm into CI.
 #
 # SKIP_UI_BUILD=1 is set globally: the four crates with build.rs Svelte
 # pipelines (trusty-search, trusty-memory, trusty-analyze, trusty-agents) skip
@@ -1397,6 +1402,162 @@ jobs:
         run: cargo test -p trusty-audit-ui
 
   # --------------------------------------------------------------------------
+  # mpm-gui: build- and lint-verify the fleet dashboard's Tauri desktop shell
+  # (crates/trusty-mpm-gui, package `trusty-mpm-gui`). Issue #5934.
+  #
+  # Same shape and same reasons as `agents-ui` and `audit-ui` above. Before
+  # this job, trusty-mpm-gui was excluded from every headless workspace job and
+  # had no dedicated job either, so its only CI coverage was the frontend-only
+  # `UI checks (trusty-mpm-gui)` leg — which never invokes cargo. A Rust
+  # signature change therefore reached main uncompiled: PR #5929 added a
+  # parameter to `WorkDir::resolve`, and main failed `cargo check --workspace`
+  # for hours (#5935, fixed by 15dca258).
+  #
+  # `tauri::generate_context!()` embeds `frontendDist` ("ui/dist") at compile
+  # time and hard-errors when it is absent; `ui/dist` is a gitignored build
+  # artefact, so a placeholder index.html is stubbed before clippy. The crate's
+  # build.rs writes an equivalent placeholder under SKIP_UI_BUILD=1, so the stub
+  # step is redundant today. It stays because it keeps all four Tauri jobs the
+  # same shape, and because this job then survives a change to that build.rs.
+  # --------------------------------------------------------------------------
+  mpm-gui:
+    name: trusty-mpm-gui clippy
+    needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING. `!cancelled()`
+    # overrides the implicit success() so a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install stable toolchain with clippy
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install Tauri system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: mpm-gui
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Stub the frontendDist so tauri::generate_context!() can embed it.
+      # SKIP_UI_BUILD=1 below stops build.rs looking for pnpm.
+      - name: Stub frontend dist for generate_context!
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          mkdir -p crates/trusty-mpm-gui/ui/dist
+          printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-mpm-gui</title></head><body></body></html>\n' \
+            > crates/trusty-mpm-gui/ui/dist/index.html
+
+      - name: cargo clippy -p trusty-mpm-gui --all-targets -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SKIP_UI_BUILD: "1"
+        run: cargo clippy -p trusty-mpm-gui --all-targets -- -D warnings
+
+      # The crate has no tests today, so this asserts nothing yet. It is here so
+      # that tests added later actually run — clippy --all-targets only compiles
+      # the test target, it never executes it.
+      - name: cargo test -p trusty-mpm-gui
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SKIP_UI_BUILD: "1"
+        run: cargo test -p trusty-mpm-gui
+
+  # --------------------------------------------------------------------------
+  # code-gui: build- and lint-verify the tcode client's Tauri desktop shell
+  # (crates/trusty-code-gui, package `trusty-code-gui`). Issue #5934.
+  #
+  # Same shape and same gap as `mpm-gui` directly above. This crate does have
+  # tests — `default_daemon_url_matches_tcode_default_http_port` pins its
+  # compiled-in DEFAULT_DAEMON_URL against trusty-code's own DEFAULT_HTTP_PORT,
+  # the drift that caused #3364 — so running them is what keeps that guard live.
+  # --------------------------------------------------------------------------
+  code-gui:
+    name: trusty-code-gui clippy
+    needs: [changes]
+    # #4179: see the identical note on `mpm-gui` above.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install stable toolchain with clippy
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install Tauri system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: code-gui
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Stub the frontendDist so tauri::generate_context!() can embed it.
+      # SKIP_UI_BUILD=1 below stops build.rs looking for pnpm.
+      - name: Stub frontend dist for generate_context!
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          mkdir -p crates/trusty-code-gui/ui/dist
+          printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-code-gui</title></head><body></body></html>\n' \
+            > crates/trusty-code-gui/ui/dist/index.html
+
+      - name: cargo clippy -p trusty-code-gui --all-targets -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SKIP_UI_BUILD: "1"
+        run: cargo clippy -p trusty-code-gui --all-targets -- -D warnings
+
+      - name: cargo test -p trusty-code-gui
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          SKIP_UI_BUILD: "1"
+        run: cargo test -p trusty-code-gui
+
+  # --------------------------------------------------------------------------
   # embedder-cuda-check: compile-check the `embedder-cuda` feature (issue
   # #3508). The deadlock-safety invariant test
   # (ort_intra_threads_default_pinned_under_cuda_feature,
@@ -1854,6 +2015,8 @@ jobs:
         msrv,
         agents-ui,
         audit-ui,
+        mpm-gui,
+        code-gui,
         embedder-cuda-check,
         ui-checks,
         search-daemon-smoke,
@@ -1875,6 +2038,8 @@ jobs:
             msrv=${{ needs.msrv.result }}
             agents-ui=${{ needs['agents-ui'].result }}
             audit-ui=${{ needs['audit-ui'].result }}
+            mpm-gui=${{ needs['mpm-gui'].result }}
+            code-gui=${{ needs['code-gui'].result }}
             embedder-cuda-check=${{ needs.changes.outputs.embedder_cuda_relevant != 'false' && needs['embedder-cuda-check'].result || 'success' }}
             ui-checks=${{ needs['ui-checks'].result }}
             search-daemon-smoke=${{ needs['search-daemon-smoke'].result }}

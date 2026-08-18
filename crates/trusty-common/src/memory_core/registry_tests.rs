@@ -315,7 +315,7 @@ async fn palace_payloads_survive_registry_restart() {
     assert!(
         drawers
             .iter()
-            .any(|d| d.content.contains("quokka") && d.tags.contains(&"wildlife".to_string())),
+            .any(|d| d.content().contains("quokka") && d.tags.contains(&"wildlife".to_string())),
         "persisted drawer content must survive restart; got {drawers:?}"
     );
 }
@@ -806,7 +806,10 @@ async fn evict_idle_then_reopen_preserves_recall() {
     let before = recall_with_default_embedder(&handle, "quokka", 5)
         .await
         .expect("pre-evict recall");
-    let before_contents: Vec<String> = before.iter().map(|r| r.drawer.content.clone()).collect();
+    let before_contents: Vec<String> = before
+        .iter()
+        .map(|r| r.drawer.content().to_string())
+        .collect();
     assert!(
         before_contents.iter().any(|c| c.contains("quokka")),
         "sanity: pre-evict recall must find the drawer"
@@ -834,7 +837,10 @@ async fn evict_idle_then_reopen_preserves_recall() {
     let after = recall_with_default_embedder(&reopened, "quokka", 5)
         .await
         .expect("post-reopen recall");
-    let after_contents: Vec<String> = after.iter().map(|r| r.drawer.content.clone()).collect();
+    let after_contents: Vec<String> = after
+        .iter()
+        .map(|r| r.drawer.content().to_string())
+        .collect();
     assert_eq!(
         before_contents, after_contents,
         "recall after idle-evict + rehydrate must match pre-eviction results"

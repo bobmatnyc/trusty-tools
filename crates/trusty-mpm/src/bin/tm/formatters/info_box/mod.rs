@@ -347,30 +347,14 @@ pub(crate) fn abbreviate_home(path: &str) -> String {
 ///
 /// Why: the lock file is cheaper than an HTTP probe and tells us the daemon
 /// address before we decide whether to fire the probe.
-/// What: parses `addr = "..."` and `pid = N`; on Unix validates the PID with
-/// `kill(pid, 0)`; returns `None` when the lock file is absent or PID is stale.
-/// Test: covered indirectly by the welcome-panel render tests.
+/// What: delegates to `core::daemon_identity::read_lock`, which rejects a
+/// record that does not carry the trusty-mpm product magic and one whose PID is
+/// no longer alive. #1731: this was the crate's third hand-rolled lock parser,
+/// and the panel would show an address taken from any TOML file at that path.
+/// Test: covered indirectly by the welcome-panel render tests; the record rules
+/// are covered in `trusty_mpm::core::daemon_identity`.
 fn read_lock_addr() -> Option<String> {
-    let path = trusty_mpm::core::lock_file_path();
-    let content = std::fs::read_to_string(&path).ok()?;
-    let mut addr: Option<String> = None;
-    let mut pid: Option<u32> = None;
-    for line in content.lines() {
-        if let Some(v) = line.strip_prefix("addr = ") {
-            addr = Some(v.trim_matches('"').to_string());
-        }
-        if let Some(v) = line.strip_prefix("pid = ") {
-            pid = v.trim().parse().ok();
-        }
-    }
-    #[cfg(unix)]
-    if let Some(p) = pid
-        && unsafe { libc::kill(p as libc::pid_t, 0) } != 0
-    {
-        return None;
-    }
-    let _ = pid;
-    addr
+    trusty_mpm::core::daemon_identity::read_lock().map(|lock| lock.addr)
 }
 
 // ── Two-panel compositor bridge ───────────────────────────────────────────────

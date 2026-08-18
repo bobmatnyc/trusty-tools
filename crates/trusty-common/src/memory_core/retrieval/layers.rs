@@ -162,21 +162,13 @@ pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
 
     if !handle.identity.is_empty() {
         // Synthesize a Drawer for the identity so RecallResult stays uniform.
-        let identity_drawer = Drawer {
-            id: Uuid::nil(),
-            room_id: Uuid::nil(),
-            content: handle.identity.clone(),
-            importance: 1.0,
-            source_file: None,
-            created_at: chrono::Utc::now(),
-            tags: Vec::new(),
-            last_accessed_at: None,
-            access_count: 0,
-            drawer_type: DrawerType::UserFact,
-            expires_at: None,
-            completed_at: None,
-            fact_key: None,
-        };
+        // #5902: built through `Drawer::new` rather than as a struct literal so
+        // the derived `content_hash` is computed from the identity text, and so a
+        // future field cannot be silently omitted here.
+        let mut identity_drawer = Drawer::new(Uuid::nil(), handle.identity.clone());
+        identity_drawer.id = Uuid::nil();
+        identity_drawer.importance = 1.0;
+        identity_drawer.drawer_type = DrawerType::UserFact;
         out.push(RecallResult {
             drawer: identity_drawer,
             score: 1.0,

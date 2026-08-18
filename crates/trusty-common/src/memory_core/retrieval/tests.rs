@@ -58,7 +58,7 @@ async fn l2_returns_relevant_drawer() {
     let drawer_id = drawer.id;
 
     let vecs = embedder
-        .embed_batch(std::slice::from_ref(&drawer.content))
+        .embed_batch(std::slice::from_ref(&drawer.content().to_string()))
         .await
         .unwrap();
     handle
@@ -115,7 +115,7 @@ async fn l2_room_filter_excludes_other_rooms() {
 
     for d in [&backend_drawer, &frontend_drawer] {
         let vecs = embedder
-            .embed_batch(std::slice::from_ref(&d.content))
+            .embed_batch(std::slice::from_ref(&d.content().to_string()))
             .await
             .unwrap();
         handle
@@ -199,7 +199,7 @@ async fn cli_remember_and_recall() {
         .await
         .unwrap();
     assert!(
-        results.iter().any(|r| r.drawer.content.contains("tokio")),
+        results.iter().any(|r| r.drawer.content().contains("tokio")),
         "expected to recall the tokio drawer; got {results:?}"
     );
 }
@@ -474,7 +474,7 @@ async fn cli_list_filters_by_room() {
         1,
         "expected exactly 1 backend drawer, got {backend_only:?}"
     );
-    assert!(backend_only[0].content.contains("backend"));
+    assert!(backend_only[0].content().contains("backend"));
 }
 
 /// Why: Confirm the recall_log wiring actually fires events end-to-end.
@@ -494,7 +494,7 @@ async fn recall_logs_events_when_log_present() {
     let drawer = Drawer::new(room_id, "Rust is a systems programming language");
     let drawer_id = drawer.id;
     let vecs = embedder
-        .embed_batch(std::slice::from_ref(&drawer.content))
+        .embed_batch(std::slice::from_ref(&drawer.content().to_string()))
         .await
         .unwrap();
     handle
@@ -824,7 +824,7 @@ async fn retrieve_l2_tag_boost_raises_rank() {
     assert!(
         uuid_prefix_eq(results[0].drawer.id, id_tagged),
         "tagged drawer should rank first; got {:?}",
-        results[0].drawer.content
+        results[0].drawer.content()
     );
 }
 
@@ -1193,7 +1193,7 @@ async fn expired_drawer_is_excluded_from_l2() {
     let expired_id = expired.id;
 
     let vecs = embedder
-        .embed_batch(std::slice::from_ref(&expired.content))
+        .embed_batch(std::slice::from_ref(&expired.content().to_string()))
         .await
         .unwrap();
     handle
@@ -1333,7 +1333,7 @@ async fn recall_ranks_by_similarity_over_importance() {
                 r.layer,
                 r.drawer.importance,
                 r.score,
-                &r.drawer.content[..r.drawer.content.len().min(40)]
+                &r.drawer.content()[..r.drawer.content().len().min(40)]
             ))
             .collect::<Vec<_>>()
     );
@@ -1357,21 +1357,12 @@ fn rescore_l1_by_similarity_patches_scores() {
     let room_id = uuid::Uuid::new_v4();
 
     // L0 identity entry (must remain untouched).
-    let identity_drawer = Drawer {
-        id: Uuid::nil(),
-        room_id: Uuid::nil(),
-        content: "identity".into(),
-        importance: 1.0,
-        source_file: None,
-        created_at: chrono::Utc::now(),
-        tags: Vec::new(),
-        last_accessed_at: None,
-        access_count: 0,
-        drawer_type: crate::memory_core::palace::DrawerType::UserFact,
-        expires_at: None,
-        completed_at: None,
-        fact_key: None,
-    };
+    // #5902: built through `Drawer::new` so the derived `content_hash` is
+    // computed rather than hand-written, matching how `layers.rs` synthesizes it.
+    let mut identity_drawer = Drawer::new(Uuid::nil(), "identity");
+    identity_drawer.id = Uuid::nil();
+    identity_drawer.importance = 1.0;
+    identity_drawer.drawer_type = crate::memory_core::palace::DrawerType::UserFact;
 
     // L1 drawer that appears in the similarity map.
     let mut matched = Drawer::new(room_id, "matched drawer");
@@ -1518,7 +1509,7 @@ async fn seed_two_rooms(
     let (backend_id, frontend_id) = (backend.id, frontend.id);
     for d in [&backend, &frontend] {
         let vecs = embedder
-            .embed_batch(std::slice::from_ref(&d.content))
+            .embed_batch(std::slice::from_ref(&d.content().to_string()))
             .await
             .unwrap();
         handle
@@ -1591,7 +1582,7 @@ async fn l3_without_a_room_filter_returns_every_room() {
     );
     let drawer_id = drawer.id;
     let vecs = embedder
-        .embed_batch(std::slice::from_ref(&drawer.content))
+        .embed_batch(std::slice::from_ref(&drawer.content().to_string()))
         .await
         .unwrap();
     handle
@@ -1802,7 +1793,7 @@ fn list_drawers_keeps_the_newest_drawer_within_an_importance_tie() {
         listed[0].id,
         newest,
         "an importance tie must be broken by recency, so the newest drawer leads; got {:?}",
-        listed.iter().map(|d| &d.content).collect::<Vec<_>>()
+        listed.iter().map(|d| d.content()).collect::<Vec<_>>()
     );
 }
 
@@ -1882,7 +1873,7 @@ fn refresh_l1_keeps_the_newest_drawers_within_an_importance_tie() {
         handle
             .l1_drawers
             .iter()
-            .map(|d| &d.content)
+            .map(|d| d.content())
             .collect::<Vec<_>>()
     );
     // Ids are 1..=20 ascending with age, so the newest 15 are ids 6..=20.
@@ -1924,7 +1915,7 @@ async fn wing_scoped_recall_returns_only_that_wing() {
     let pm_id = pm.id;
     for d in [&eng, &pm] {
         let vecs = embedder
-            .embed_batch(std::slice::from_ref(&d.content))
+            .embed_batch(std::slice::from_ref(&d.content().to_string()))
             .await
             .unwrap();
         handle
@@ -1979,7 +1970,7 @@ async fn unscoped_recall_is_unchanged_by_wings() {
     let pm_id = pm.id;
     for d in [&eng, &pm] {
         let vecs = embedder
-            .embed_batch(std::slice::from_ref(&d.content))
+            .embed_batch(std::slice::from_ref(&d.content().to_string()))
             .await
             .unwrap();
         handle
@@ -2083,7 +2074,7 @@ async fn wing_scoped_deep_recall_returns_only_that_wing() {
     let pm_id = pm.id;
     for d in [&eng, &pm] {
         let vecs = embedder
-            .embed_batch(std::slice::from_ref(&d.content))
+            .embed_batch(std::slice::from_ref(&d.content().to_string()))
             .await
             .unwrap();
         handle

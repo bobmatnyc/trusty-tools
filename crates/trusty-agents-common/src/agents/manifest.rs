@@ -61,10 +61,10 @@ pub const MANIFEST_FILE: &str = ".trusty-mpm-manifest.json";
 /// `Corrupt` covers every non-`NotFound` outcome since #5626, not only a
 /// malformed or truncated document: `EACCES` on an unsearchable parent and a
 /// transient `EIO` leave ownership exactly as undetermined as a torn JSON
-/// document does, and the refusals downstream —
-/// [`crate::agents::quarantine::sweep_locked`]'s `CorruptLedger` above all —
-/// are the correct response to both. The variant's payload names the path and
-/// the underlying failure, so an operator still sees which one it was.
+/// document does, and the refusals downstream — `quarantine::sweep_locked`'s
+/// `CorruptLedger` above all — are the correct response to both. The variant's
+/// payload names the path and the underlying failure, so an operator still sees
+/// which one it was.
 /// Test: `manifest_load_corrupt_returns_corrupt`,
 /// `manifest_load_unreadable_returns_corrupt`.
 #[derive(Debug)]
@@ -355,9 +355,9 @@ impl AgentManifest {
     /// #5626: the `Err(_) => Ok(default)` arm this replaces made that reasoning
     /// hold for a malformed document only. An `EACCES` on the ledger — or a
     /// stale handle, or a transient `EIO` — took the benign arm and defeated
-    /// [`crate::agents::quarantine::sweep_locked`]'s `CorruptLedger` refusal
-    /// without a word, at which point a file the real ledger records as
-    /// user-owned reads as untracked and can be renamed to `.md.disabled`.
+    /// `quarantine::sweep_locked`'s `CorruptLedger` refusal without a word, at
+    /// which point a file the real ledger records as user-owned reads as
+    /// untracked and can be renamed to `.md.disabled`.
     ///
     /// What: reads `<target_dir>/.trusty-mpm-manifest.json`. `ErrorKind::NotFound`
     /// alone returns `ManifestLoad::Ok(default)`; a valid document returns

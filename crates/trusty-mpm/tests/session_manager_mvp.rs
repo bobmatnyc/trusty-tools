@@ -1329,8 +1329,10 @@ fn cli_prune_idle_unreachable_exit_code() {
     let fake_home = tempfile::tempdir().expect("create temp home");
     let lock_dir = fake_home.path().join(".trusty-mpm");
     std::fs::create_dir_all(&lock_dir).expect("create .trusty-mpm under fake HOME");
+    // #1731: the record must carry the trusty-mpm product magic, or the reader
+    // rejects it as another product's same-named file.
     let lock_content = format!(
-        "addr = \"http://127.0.0.1:1\"\npid = {}\n",
+        "product = \"trusty-mpm\"\naddr = \"http://127.0.0.1:1\"\npid = {}\n",
         std::process::id()
     );
     std::fs::write(lock_dir.join("daemon.lock"), &lock_content).expect("write fake daemon.lock");

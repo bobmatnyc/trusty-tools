@@ -847,18 +847,125 @@ async fn session_resume_zombie_active_tmux_absent_reconciles_and_restarts() {
 }
 
 /// #2457: a 404 from `decommission` on a nonexistent id must propagate as
-/// `Err` — `prune.rs`'s bulk loop relies on this via `?`.
+/// `Err` — `prune.rs`'s bulk sweep records that `Err` as a failed row, and a
+/// softened 404 would make a raced session read as a clean teardown.
+///
+/// #5913 moved the mapping into the shared transport
+/// (`DaemonClient::decommission_managed_session`) when both entry points
+/// converged onto one implementation; this test is what holds it there.
+///
+/// Two ids, because they take different daemon branches. `nonexistent-id` does
+/// not parse as a UUID and comes back 400 — which is what this test asserted
+/// before #5913, so it never once exercised a 404. A well-formed id absent from
+/// the store is the real 404, and the friendly message proves the mapping (not
+/// `error_for_status`'s generic status text) produced it.
 #[tokio::test]
 async fn session_decommission_not_found_errors() {
     let url = spawn_test_daemon().await;
     let client = reqwest::Client::new();
+
     let err = session_decommission(&client, &url, "nonexistent-id".to_string())
         .await
-        .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
+        .expect_err("a malformed id must be a hard failure, not a silent Ok(())");
     assert!(
         err.to_string().contains("nonexistent-id"),
-        "error should name the missing id: {err}"
+        "error should name the rejected id: {err}"
     );
+
+    let absent = "11111111-2222-3333-4444-555555555555";
+    let err = session_decommission(&client, &url, absent.to_string())
+        .await
+        .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
+    assert_eq!(
+        err.to_string(),
+        format!("managed session '{absent}' not found"),
+        "the 404 mapping must survive: prune's sweep counts this Err as a failed row"
+    );
+}
+
+/// Serve a canned decommission response, plus the list route the routed entry
+/// point resolves against.
+///
+/// Why: the `workspace_removed: None` arm means "a daemon old enough to send no
+/// verdict at all", which the current daemon can never produce — a canned
+/// response is the only way to drive it. Using the same stub for all three
+/// verdicts keeps the two entry points reading byte-identical input.
+/// What: `GET /api/v1/sessions/managed` returns one summary carrying
+/// [`STUB_ID`]; `POST .../{id}/decommission` returns that summary flattened with
+/// the requested verdict and no `workspace_path_was` (so neither path shells out
+/// to git). Returns the base URL.
+/// Test: `decommission_entry_points_agree_on_every_verdict`.
+async fn spawn_decommission_stub(workspace_removed: Option<bool>) -> String {
+    use axum::routing::{get, post};
+
+    let list = serde_json::json!({
+        "sessions": [{ "id": STUB_ID, "name": "tm-5913", "state": "active" }]
+    });
+    let outcome = serde_json::json!({
+        "id": STUB_ID,
+        "name": "tm-5913",
+        "state": "decommissioned",
+        "workspace_removed": workspace_removed,
+        "workspace_path_was": serde_json::Value::Null,
+    });
+
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/sessions/managed",
+            get(move || std::future::ready(axum::Json(list.clone()))),
+        )
+        .route(
+            "/api/v1/sessions/managed/{id}/decommission",
+            post(move || std::future::ready(axum::Json(outcome.clone()))),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app).into_future());
+    format!("http://{addr}")
+}
+
+/// The managed id both entry points target against [`spawn_decommission_stub`].
+const STUB_ID: &str = "11111111-2222-3333-4444-555555555555";
+
+/// #5913: both decommission entry points must report the same thing for the same
+/// daemon response, across all three `workspace_removed` verdicts.
+///
+/// The bulk sweep used to reach the endpoint through its own hand-rolled POST,
+/// which is how #5899's wording divergence survived undetected. They now share
+/// one implementation, and this holds them to one observable result: the bulk
+/// path's line (via [`super::session_decommission_line`], the string
+/// `session_decommission` prints) compared against the routed path's line (via
+/// `render_cli`). A future change to either path that the other does not get
+/// fails here.
+#[tokio::test]
+async fn decommission_entry_points_agree_on_every_verdict() {
+    use trusty_mpm::client::{CommandExecutor, TrustyCommand};
+
+    for verdict in [Some(true), Some(false), None] {
+        let url = spawn_decommission_stub(verdict).await;
+        let client = reqwest::Client::new();
+
+        let bulk = super::session_decommission_line(&client, &url, STUB_ID)
+            .await
+            .unwrap_or_else(|e| panic!("verdict {verdict:?}: bulk path failed: {e}"));
+        let routed = super::super::managed_route::render_cli(
+            &CommandExecutor::with_client(client.clone(), url.clone())
+                .execute(TrustyCommand::ManagedDecommission {
+                    target: STUB_ID.to_string(),
+                })
+                .await,
+        );
+
+        assert_eq!(
+            bulk, routed,
+            "verdict {verdict:?}: the two entry points disagree"
+        );
+        assert_eq!(
+            bulk,
+            super::super::managed_route::decommission_message(STUB_ID, verdict),
+            "verdict {verdict:?}: neither path may invent its own wording"
+        );
+    }
 }
 
 /// #2457: a 404 from `activity` on a nonexistent id must propagate as `Err`.

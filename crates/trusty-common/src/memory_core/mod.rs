@@ -17,6 +17,9 @@
 
 pub mod analytics;
 pub mod community;
+// #5902: the ONE content-hash entry point for memory bodies, plus the versioned
+// normalization contract two machines must agree on to converge.
+pub mod content_hash;
 pub mod decay;
 pub mod dream;
 pub mod embed;
@@ -29,6 +32,9 @@ pub mod registry;
 pub mod retrieval;
 pub mod room_identity;
 pub mod semantic_consolidation;
+// #5902: palace-targeted JSONL export/import keyed on the content hash — the
+// primitive the cross-machine git workflow is built on.
+pub mod share;
 pub mod store;
 pub mod timeouts;
 // ADR-0027 T9: pure wing identity (canonical keys, UUIDv5 minting). No I/O —
@@ -36,6 +42,9 @@ pub mod timeouts;
 pub mod wing_identity;
 
 pub use community::{KnowledgeGap, find_communities};
+pub use content_hash::{
+    CONTENT_HASH_VERSION, ContentHash, memory_content_hash, normalize_for_hash,
+};
 pub use palace::{Drawer, DrawerType, Palace, PalaceId, Room, RoomType, Wing};
 pub use registry::PalaceRegistry;
 pub use retrieval::PalaceHandle;
@@ -43,5 +52,9 @@ pub use room_identity::{DEFAULT_WING_ID, canonical_room_key, mint_room_id, room_
 pub use semantic_consolidation::{
     ConsolidationAction, ConsolidationResult, MockInference, OllamaInference, OpenRouterInference,
     SemanticConsolidationConfig, SemanticConsolidator, inference_available,
+};
+pub use share::{
+    ImportOutcome, ImportSummary, SHARE_FORMAT_VERSION, SharedMemoryRecord, export_palace_jsonl,
+    export_palace_records, import_palace_jsonl, import_palace_records, supersede_drawer,
 };
 pub use wing_identity::{DEFAULT_WING_LABEL, canonical_wing_key, mint_wing_id};

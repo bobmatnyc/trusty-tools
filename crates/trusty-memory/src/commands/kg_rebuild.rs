@@ -629,7 +629,7 @@ async fn rebuild_one(state: &AppState, palace_id: &str) -> Result<PalaceRebuildS
         let room = room_id_to_label(d.room_id);
         let triples = extract_triples(&ExtractInput {
             drawer_id: d.id,
-            content: &d.content,
+            content: d.content(),
             tags: &d.tags,
             room: room.as_deref(),
         });
