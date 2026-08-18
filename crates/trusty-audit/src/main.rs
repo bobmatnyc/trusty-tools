@@ -21,8 +21,7 @@ use clap::Parser;
 use trusty_audit::cli::{self, Cli};
 use trusty_audit::config::EngagementConfig;
 use trusty_audit::progress::terminal::TerminalProgress;
-use trusty_audit::run::RunOptions;
-use trusty_audit::session::{Command, Session};
+use trusty_audit::session::Session;
 use trusty_audit::workdir::{WORKDIR_ENV, WorkDir};
 
 // #5495: installing the pinned tools downloads, so `execute` is async and this
@@ -58,7 +57,11 @@ async fn main() -> Result<()> {
     // prompt uses it (#5868) — under `curl … | sh` stdin is the pipe carrying
     // the script, so it is never the thing to ask on. No terminal means no
     // interactive path and the launch prints the card it always did.
-    let mut terminal = cli::registration::is_interactive(&command)
+    //
+    // #5896 review: the PARSED CLI decides, not the `Command`. `to_command`
+    // maps both a bare launch and `trusty-audit guided` onto `Command::Guided`,
+    // so asking the command made the named verb block on a prompt.
+    let mut terminal = cli::registration::is_interactive(&cli)
         .then(cli::credential::DevTty::open)
         .and_then(Result::ok);
 
@@ -67,20 +70,20 @@ async fn main() -> Result<()> {
     // Tauri shell calls, and it has no terminal to ask on. The source is
     // reported on stderr because stdout carries the report.
     //
-    // #5885: the interactive launch resolves the key the SWEEP needs, before
-    // registration, so the operator answers key → targets → run in that order
-    // rather than being stopped for a credential after naming their targets.
-    let resolving_for = match terminal {
-        Some(_) => Command::Run(RunOptions::default()),
-        None => command.clone(),
+    // #5896 review: an interactive launch resolves NOTHING here. Resolving for
+    // the sweep up front gave the read-only launch `CredentialNeed::Required`,
+    // so a bare `trusty-audit` against a config with a blank key exited non-zero
+    // at `CredentialNotEntered` after three mismatched retypes without ever
+    // printing the status card. The key is resolved below, once the operator has
+    // agreed to the sweep that needs it.
+    let credential = match terminal {
+        Some(_) => None,
+        None => cli::credential::resolve_for(&command, &config_path)?,
     };
-    let credential = cli::credential::resolve_for(&resolving_for, &config_path)?;
-    if let Some(resolved) = &credential {
-        eprintln!("{}", resolved.source().describe());
-    }
+    report_source(credential.as_ref());
 
     let mut session = Session::new(work)
-        .with_config_path(config_path)
+        .with_config_path(config_path.clone())
         .with_credential(credential.map(cli::credential::Resolved::into_key))
         .with_auto_install(!cli.no_install)
         .with_progress(std::sync::Arc::new(TerminalProgress::to_stderr()));
@@ -92,7 +95,19 @@ async fn main() -> Result<()> {
     // several times — registration, then the guided flow, then the sweep. What
     // it returns is the last outcome, which is what stdout carries.
     let outcome = match &mut terminal {
-        Some(tty) => cli::registration::guided_at_the_terminal(&session, tty).await?,
+        Some(tty) => match cli::registration::guided_at_the_terminal(&session, tty).await? {
+            cli::registration::Launch::Reported(outcome) => *outcome,
+            cli::registration::Launch::SweepConfirmed => {
+                let sweep = cli::registration::confirmed_sweep();
+                let credential = cli::credential::resolve_for(&sweep, &config_path)?;
+                report_source(credential.as_ref());
+                session
+                    .clone()
+                    .with_credential(credential.map(cli::credential::Resolved::into_key))
+                    .execute(sweep)
+                    .await?
+            }
+        },
         None => session.execute(command).await?,
     };
     print!("{}", cli::render(&outcome));
@@ -110,4 +125,15 @@ async fn main() -> Result<()> {
     // `process::exit` does not flush Rust's stdout buffer.
     std::io::Write::flush(&mut std::io::stdout()).context("cannot write the report")?;
     std::process::exit(code);
+}
+
+/// Name which source supplied the credential, on stderr. Never the value.
+///
+/// Called at both resolution points since #5896's review split them — the
+/// non-interactive one before the session is built, and the interactive one
+/// after the operator agrees to the sweep.
+fn report_source(credential: Option<&cli::credential::Resolved>) {
+    if let Some(resolved) = credential {
+        eprintln!("{}", resolved.source().describe());
+    }
 }

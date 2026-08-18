@@ -174,6 +174,24 @@ pub trait Tty {
     ///
     /// Whatever writing to the terminal failed with.
     fn say(&mut self, line: &str) -> io::Result<()>;
+
+    /// Discard anything typed ahead that no read has consumed yet.
+    ///
+    /// Why: a terminal in canonical mode queues typing that arrives before the
+    /// program asks for it. The registration loop (#5885) ends when the
+    /// operator presses Enter on an empty line, and the very next prompt gates
+    /// an hours-long unattended sweep that spends the client's inference
+    /// credential — so an operator who double-taps Enter to finish adding
+    /// targets has the second newline answer a question they never read.
+    /// What: implementations drop the pending input queue. Called immediately
+    /// before a prompt whose default answer commits to something expensive; a
+    /// prompt that only costs a retry does not need it.
+    /// Test: `super::super::registration::registration_tests::the_sweep_prompt_discards_typeahead_first`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever discarding the terminal's input queue failed with.
+    fn discard_typeahead(&mut self) -> io::Result<()>;
 }
 
 /// The process's controlling terminal, reached through `/dev/tty`.
@@ -209,10 +227,56 @@ impl DevTty {
     /// # Errors
     ///
     /// Whatever opening `/dev/tty` failed with — `ENXIO` or `ENOENT` when the
-    /// process has no controlling terminal.
+    /// process has no controlling terminal — and `ENOTTY` when this process is
+    /// not in the terminal's foreground group. See [`DevTty::in_foreground`].
     pub fn open() -> io::Result<Self> {
         let out = std::fs::OpenOptions::new().write(true).open(Self::PATH)?;
+        Self::refuse_a_background_terminal(&out)?;
         Ok(Self { out })
+    }
+
+    /// Whether a terminal whose foreground group is `terminal` may be read by a
+    /// process in group `ours`.
+    ///
+    /// Why: opening `/dev/tty` for WRITE succeeds from a background job, so the
+    /// probe above is not on its own evidence that anyone can be asked. A
+    /// background process that READS the controlling terminal raises SIGTTIN,
+    /// whose default action STOPS the process — `trusty-audit &` from an
+    /// interactive shell went silent with nothing printed and no diagnostic.
+    /// What: the two groups agree. Split out as a pure function so the
+    /// comparison's direction is a test rather than a reading of the `unsafe`
+    /// block that supplies its arguments.
+    /// Test: `super::credential_tests::a_background_process_group_is_not_promptable`.
+    fn in_foreground(terminal: i32, ours: i32) -> bool {
+        terminal == ours
+    }
+
+    /// Refuse `out` when this process is in a background group of it.
+    ///
+    /// `ENOTTY` rather than a new error variant: `main` already treats a failed
+    /// [`DevTty::open`] as "there is nobody to ask" and prints the status card,
+    /// which is exactly the behaviour a backgrounded launch should get.
+    #[cfg(unix)]
+    fn refuse_a_background_terminal(out: &std::fs::File) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: `tcgetpgrp` reads the foreground group of a terminal through
+        // a live descriptor this call borrows, and `getpgrp` reads this
+        // process's own group. Neither writes through a pointer, and neither
+        // can fail in a way that leaves state to unwind.
+        let (terminal, ours) = unsafe { (libc::tcgetpgrp(out.as_raw_fd()), libc::getpgrp()) };
+        if terminal == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        if Self::in_foreground(terminal, ours) {
+            return Ok(());
+        }
+        Err(io::Error::from_raw_os_error(libc::ENOTTY))
+    }
+
+    /// No controlling-terminal job control to consult off unix.
+    #[cfg(not(unix))]
+    fn refuse_a_background_terminal(_out: &std::fs::File) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -242,6 +306,30 @@ impl Tty for DevTty {
         use std::io::Write as _;
         writeln!(self.out, "{line}")?;
         self.out.flush()
+    }
+
+    /// `tcflush(TCIFLUSH)` on the controlling terminal.
+    ///
+    /// A READ handle is opened for it, for the same reason [`Tty::read_line`]
+    /// opens one: the handle this struct holds is write-only, and the input
+    /// queue being discarded belongs to the terminal rather than to any one
+    /// descriptor, so a fresh `/dev/tty` reaches the same queue.
+    #[cfg(unix)]
+    fn discard_typeahead(&mut self) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let tty = std::fs::File::open(Self::PATH)?;
+        // SAFETY: `tcflush` acts on a live descriptor owned by `tty` for the
+        // duration of the call and writes through no pointer.
+        if unsafe { libc::tcflush(tty.as_raw_fd(), libc::TCIFLUSH) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// No POSIX terminal input queue to discard off unix.
+    #[cfg(not(unix))]
+    fn discard_typeahead(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -523,6 +611,25 @@ trusty-review = "0.15.1"
             self.shown.push(line.to_owned());
             Ok(())
         }
+
+        /// Nothing in this module discards typeahead — the credential prompt's
+        /// default answer is another prompt, not an hours-long sweep. The
+        /// registration loop's fake is what records the call (#5885).
+        fn discard_typeahead(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A launch backgrounded with `&` still opens `/dev/tty` for write, so the
+    /// open on its own is not evidence anyone can be asked. Reading it from a
+    /// background group raises SIGTTIN and stops the job silently.
+    #[test]
+    fn a_background_process_group_is_not_promptable() {
+        assert!(DevTty::in_foreground(4242, 4242));
+        assert!(
+            !DevTty::in_foreground(4242, 4243),
+            "a process outside the terminal's foreground group must not be asked"
+        );
     }
 
     fn config_path() -> &'static Path {
