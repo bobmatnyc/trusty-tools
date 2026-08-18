@@ -172,7 +172,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
-    /// [DEPRECATED] Alias of `sessions` (#2116) — use `tm sessions <verb>`.
+    /// \[DEPRECATED\] Alias of `sessions` (#2116) — use `tm sessions <verb>`.
     ///
     /// Why: `tm session` was the canonical spelling from #1916 until #2116
     /// promoted `sessions` to a sibling top-level plural alongside `tm projects`.
@@ -192,7 +192,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
-    /// [INTERNAL] Spawn a program with macOS TCC responsibility disclaimed
+    /// \[INTERNAL\] Spawn a program with macOS TCC responsibility disclaimed
     /// (issue #2997) — not for direct use.
     ///
     /// Why: trusty-mpm's managed sessions launch `claude` by typing a shell
@@ -206,7 +206,7 @@ pub(crate) enum Command {
     /// `disclaimed_status` seam), making `claude` its OWN responsible process so
     /// the tccd walk stops at Claude Code's stable code identity instead of the
     /// tmux server. Hidden because it is an internal launch shim
-    /// ([`crate::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND`]), never a
+    /// (`crate::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND`), never a
     /// user-facing verb.
     /// What: spawns `argv[0]` with `argv[1..]` via
     /// [`trusty_mpm::core::spawn_disclaim::disclaimed_status`] (inherited stdio),

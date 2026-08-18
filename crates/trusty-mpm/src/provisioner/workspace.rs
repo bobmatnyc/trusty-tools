@@ -187,7 +187,7 @@ pub struct RealGitBackend {
 }
 
 impl RealGitBackend {
-    /// Construct a backend bound to a resolved per-project [`GitIdentity`]
+    /// Construct a backend bound to a resolved per-project [`GitIdentity`](crate::core::git_identity::GitIdentity)
     /// (#2184).
     ///
     /// Why: the daemon's `spawn_managed` path resolves ONE identity per spawn
@@ -953,22 +953,18 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
             // a hardcoded port.
             let memory_url =
                 trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
-            let override_value = trusty_common::palace_override_from_env();
-            match trusty_common::derive_palace_id(
-                &workspace_path,
-                Some(repo_url),
-                override_value.as_deref(),
-            ) {
-                Some(palace_id) => {
+            match super::identity_seed::identity_seed_palace(&workspace_path, repo_url) {
+                Ok(palace_id) => {
                     super::identity_seed::seed_identity_prompt_fact_blocking(
                         &memory_url,
                         &palace_id,
                     );
                 }
-                None => {
+                Err(e) => {
                     tracing::debug!(
                         session = %session_id,
-                        "identity-seed: skipping — no palace could be derived for this workspace"
+                        error = %e,
+                        "identity-seed: skipping — no palace could be resolved for this workspace"
                     );
                 }
             }

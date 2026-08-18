@@ -444,7 +444,7 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// ordering requires the signal and the kill to be separate steps — so this is
     /// the signal-only half, letting an async caller insert a `tokio::time::sleep`
     /// grace window between it and `kill_session` (see
-    /// [`SessionManager::graceful_terminate_runtime`] for the CLI stop/decommission
+    /// [`SessionManager::graceful_terminate_runtime`](crate::session_manager::SessionManager::graceful_terminate_runtime) for the CLI stop/decommission
     /// path). `graceful_stop` composes this with an immediate kill for the
     /// batched, one-grace-window-for-all shutdown path.
     /// What: SIGTERMs the known `claude_pid` via `nix::signal::kill` (unix only);

@@ -11,7 +11,6 @@ trusty-tools/               # workspace root
 │   │                        # consolidated mcp/rpc/embedder/symgraph/memory-core/
 │   │                        # tickets/monitor-tui modules behind feature flags
 │   ├── trusty-embedderd/    # fastembed wrapper — sidecar daemon for trusty-search
-│   ├── trusty-bm25-daemon/  # BM25 index daemon — sidecar for trusty-memory
 │   ├── trusty-gworkspace/   # Google Workspace client (Calendar, Tasks, Drive)
 │   ├── trusty-cto-db/       # SQLite CTO database (rusqlite-backed)
 │   ├── tc-services/         # service-layer adapters: CTO DB, Granola, GWorkspace
@@ -51,7 +50,6 @@ Detailed implementation information for each crate lives in its own documentatio
 
 - **trusty-common** — see `crates/trusty-common/README.md` and `docs/trusty-common/`
 - **trusty-embedderd** — see `crates/trusty-embedderd/README.md` and `docs/trusty-embedderd/` (fastembed sidecar daemon)
-- **trusty-bm25-daemon** — see `crates/trusty-bm25-daemon/README.md` and `docs/trusty-bm25-daemon/` (BM25 index sidecar)
 - **trusty-memory** — see `crates/trusty-memory/README.md` and `docs/trusty-memory/` (storage engine lives in `trusty-common`'s `memory-core` feature)
 - **trusty-search** — see `crates/trusty-search/README.md` and **`docs/trusty-search/`** (primary worked example with regression testing, research, sessions)
 - **trusty-analyze** — see `crates/trusty-analyze/README.md` and `docs/trusty-analyze/`

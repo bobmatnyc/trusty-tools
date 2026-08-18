@@ -17,14 +17,36 @@
 #   mechanical so a release doesn't depend on someone re-deriving the
 #   dependency graph by hand under time pressure.
 #
-# What: runs `cargo metadata` once, computes a topological order over every
-#   PUBLISHABLE workspace crate (i.e. not `publish = false`) using internal
-#   (workspace-to-workspace) dependency edges only, then runs
+# What: runs `cargo metadata --all-features` once, computes a topological
+#   order over every PUBLISHABLE workspace crate (i.e. not `publish = false`)
+#   using internal (workspace-to-workspace) dependency edges only, then runs
 #   `cargo publish --dry-run -p <crate>` for each crate in that order —
 #   dependencies always before dependents. Any single dry-run failure stops
 #   the run immediately (fail fast: a downstream crate's dry-run failing
 #   because an upstream sibling isn't live yet is exactly the class of bug
 #   this script exists to catch before a real publish).
+#
+# Graph completeness (#5358) — the order is only as safe as the graph it is
+#   computed from, and `cargo publish` resolves MORE than a default build does:
+#
+#   * FEATURES: `--all-features` is required. Plain `cargo metadata` resolves
+#     default features only, so an optional/feature-gated sibling edge is
+#     absent from `resolve` entirely. `trusty-analyze` reaches `trusty-review`
+#     only through its optional, `review`-gated dependency
+#     (crates/trusty-analyze/Cargo.toml), so that edge was invisible and the
+#     printed order put `trusty-analyze` BEFORE `trusty-review` — the 2026-08-10
+#     release failure this issue records.
+#   * KINDS: dependency kind is deliberately NOT filtered. `resolve`'s flat
+#     per-node `dependencies` list is the union of normal, build, and dev
+#     edges, and all three must already be live on crates.io — `cargo publish`
+#     resolves a full lockfile for the packaged crate, dev-dependencies
+#     included (`trusty-mpm` depends on `trusty-review` as a dev-dependency
+#     ONLY, and still cannot be published before it). Narrowing to normal
+#     edges via `deps[].dep_kinds` would reintroduce this same defect.
+#
+#   There is deliberately no fallback to a feature-less resolve if
+#   `--all-features` fails: `set -e` stopping loudly beats silently ordering a
+#   release off an incomplete graph, which is what this guard exists to prevent.
 #
 # Usage:
 #   scripts/publish-dry-run-order.sh              # every publishable crate, in order
@@ -86,7 +108,9 @@ done
 TMP_METADATA="$(mktemp "${TMPDIR:-/tmp}/publish-dry-run-order.metadata.XXXXXX.json")"
 trap 'rm -f "${TMP_METADATA}"' EXIT
 
-cargo metadata --format-version=1 --locked >"${TMP_METADATA}"
+# #5358: --all-features, or optional/feature-gated sibling edges are missing
+# from `resolve` and a crate gets ordered before a sibling it really needs.
+cargo metadata --format-version=1 --locked --all-features >"${TMP_METADATA}"
 
 ORDER="$(python3 - "${TMP_METADATA}" "${FILTER[@]}" <<'PYEOF'
 import json
@@ -104,6 +128,12 @@ packages = {p["id"]: p for p in data["packages"] if p["id"] in members}
 publishable = {pid for pid, p in packages.items() if p.get("publish") is None}
 
 # Internal (workspace-to-workspace) dependency edges, keyed by package id.
+#
+# #5358: read the flat `dependencies` list, NOT `deps[].dep_kinds` — it is the
+# union of normal, build and dev edges, and `cargo publish` needs all three
+# resolvable against the live registry. Combined with the `--all-features`
+# metadata invocation above, this is the complete set of internal edges
+# `cargo publish` will resolve.
 resolve_nodes = {n["id"]: n for n in data["resolve"]["nodes"]}
 edges = {pid: set() for pid in publishable}
 for pid in publishable:
@@ -117,7 +147,16 @@ for pid in publishable:
 # Kahn's algorithm: repeatedly emit any publishable crate whose remaining
 # unemitted dependencies are all already emitted, breaking ties by name for
 # deterministic output.
-remaining = dict(edges)
+#
+# #5358: copy each edge SET, not just the outer dict. `dict(edges)` is shallow,
+# so the loop's `deps.difference_update(ready)` below emptied the very sets
+# `edges` holds — leaving every `edges[pid]` empty once the sort finished. The
+# `--list-only <crate>` closure walk further down reads `edges`, so it found no
+# transitive dependencies and emitted the requested crates alone. That is the
+# form release.yml's `publish-dry-run` job runs (one crate name, release.yml),
+# so the job dry-ran the tagged crate against whatever was already live and
+# checked none of its siblings.
+remaining = {pid: set(deps) for pid, deps in edges.items()}
 emitted = []
 name_of = {pid: packages[pid]["name"] for pid in publishable}
 while remaining:

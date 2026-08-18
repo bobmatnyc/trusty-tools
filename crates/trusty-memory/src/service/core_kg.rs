@@ -7,6 +7,7 @@
 //! verbatim from the original single impl.
 //! Test: covered by the corresponding `web::tests` / `service::tests`.
 
+use crate::kg_write::{CachePolicy, KgWriteError};
 use crate::{ActivityFilter, ActivitySource, DaemonEvent};
 use std::sync::Arc;
 use trusty_common::memory_core::dream::{DreamConfig, Dreamer, PersistedDreamStats};
@@ -62,24 +63,23 @@ impl MemoryService {
 
     /// Assert a triple in the KG.
     ///
-    /// #4888: this is the HTTP counterpart of the `kg_assert` MCP tool
-    /// (`POST /api/v1/palaces/{id}/kg`) and accepts an arbitrary predicate, so
-    /// it can write a hot predicate and must carry the same Tier S gate. It is
-    /// not a hypothetical path — `trusty-mpm`'s provisioner seeds its identity
-    /// fact through exactly this endpoint. A gate on the MCP tools alone would
-    /// read as protection while leaving the surface writable.
+    /// Assert a triple through `POST /api/v1/palaces/{id}/kg`.
+    ///
+    /// Why: #4888 — this accepts an arbitrary predicate, so it can write a hot
+    /// one and must carry the same Tier S gate as the MCP tool. Not a
+    /// hypothetical path: `trusty-mpm`'s provisioner seeds its identity fact
+    /// through exactly this endpoint. #5524 — it also owed the prompt-cache
+    /// rebuild and never ran it, so a hot fact written here was stored and then
+    /// invisible to every later turn until some unrelated write rebuilt the
+    /// cache.
+    /// What: delegates the whole admission → assert → refresh sequence to
+    /// [`crate::kg_write::assert_triple`]. The variant split is what lets this
+    /// keep answering 400 for a refused write and 500 for a failed one.
+    /// Test: `http_kg_assert_endpoint_refreshes_prompt_cache`,
+    /// `http_kg_assert_endpoint_rejects_over_long_tier_s_object` in
+    /// `web::tests::prompt_tests`.
     pub async fn kg_assert(&self, id: &str, body: KgAssertBody) -> ServiceResult<()> {
         let handle = self.open_handle(id)?;
-        // `_admission` holds the admission lock until after `kg.assert` below.
-        let _admission = crate::prompt_facts::check_tier_s_admission(
-            &self.state,
-            &handle,
-            &body.subject,
-            &body.predicate,
-            &body.object,
-        )
-        .await
-        .map_err(|e| ServiceError::bad_request(format!("{e:#}")))?;
         let triple = Triple {
             subject: body.subject,
             predicate: body.predicate,
@@ -89,11 +89,15 @@ impl MemoryService {
             confidence: body.confidence.unwrap_or(1.0),
             provenance: body.provenance,
         };
-        handle
-            .kg
-            .assert(triple)
+        // #5524: route through the shared entry point so the prompt-cache
+        // rebuild cannot be forgotten here again.
+        crate::kg_write::assert_triple(&self.state, &handle, triple, CachePolicy::Inline)
             .await
-            .map_err(|e| ServiceError::internal(format!("kg assert: {e:#}")))
+            .map(|_| ())
+            .map_err(|e| match e {
+                KgWriteError::Admission(inner) => ServiceError::bad_request(format!("{inner:#}")),
+                other => ServiceError::internal(format!("{other}")),
+            })
     }
 
     /// Close the one active triple `(subject, predicate, object)`, leaving
@@ -256,7 +260,7 @@ impl MemoryService {
     /// are degree-1 leaves and only 7.2% have degree >= 5, so a
     /// top-degree slice carries essentially all of the visible structure and
     /// everything else stays one click away.
-    /// What: runs [`KnowledgeGraph::top_degree_subgraph`] over the resident
+    /// What: runs `KnowledgeGraph::top_degree_subgraph` over the resident
     /// adjacency (O(V log V + E), no disk I/O) and pairs the result with the
     /// palace-wide totals the header needs to report honestly.
     /// Test: `kg_graph_seed_ranks_by_degree`, `kg_graph_seed_clamps_limit`.
@@ -286,7 +290,7 @@ impl MemoryService {
     /// Why: click-to-expand needs "what points AT this node", which no HTTP
     /// endpoint could answer — `kg_query` is a subject prefix scan. Bounding
     /// the hops keeps one click on a hub from pulling the whole palace.
-    /// What: delegates to [`KnowledgeGraph::expand_neighbors`]. `direction`
+    /// What: delegates to `KnowledgeGraph::expand_neighbors`. `direction`
     /// and `max_hops` are already validated/clamped by the HTTP layer; they
     /// are echoed back so the client can see what actually ran.
     /// Test: `kg_neighbors_returns_incoming_edges`, `kg_neighbors_clamps_max_hops`.
@@ -452,14 +456,37 @@ impl MemoryService {
     }
 
     // -----------------------------------------------------------------
-    // Internal helper — open a palace handle or return 404.
+    // Internal helper — open a palace handle, 404 only on a genuine absence.
     // -----------------------------------------------------------------
 
-    /// Open the named palace, returning `ServiceError::NotFound` on failure.
+    /// Open the named palace.
+    ///
+    /// Why (#5549, ADR-0045): this mapped every `open_palace` failure to
+    /// `NotFound`, which the HTTP layer renders as 404. A denied or transient
+    /// read of `palace.json`, undecodable metadata, an open-queue timeout, or a
+    /// redb write-lock conflict then all reported that the palace does not
+    /// exist — erasing at the caller the distinction `load_palace` draws, and
+    /// across a much wider surface than the two rename paths: every
+    /// `/api/v1/palaces/{id}/kg*` endpoint, the drawer CRUD routes, and
+    /// per-palace recall reach this one helper.
+    /// What: returns `ServiceError::NotFound` only when
+    /// `PalaceRegistry::open_error_is_absent` confirms the palace is genuinely
+    /// not there, and `ServiceError::Internal` (500) otherwise.
+    /// Test: `unreadable_palace_is_500_not_404_at_the_service_open_handle`,
+    /// `unstattable_palace_is_500_not_404_at_the_service_open_handle`,
+    /// `absent_palace_is_still_404_at_both_open_handles`.
     pub fn open_handle(&self, id: &str) -> ServiceResult<Arc<PalaceHandle>> {
         self.state
             .registry
             .open_palace(&self.state.data_root, &PalaceId::new(id))
-            .map_err(|e| ServiceError::not_found(format!("palace not found: {id} ({e:#})")))
+            .map_err(|e| {
+                // #5549: every open failure mapped to 404, so a palace that
+                // could not be read was reported as one that is not there.
+                if PalaceRegistry::open_error_is_absent(&e) {
+                    ServiceError::not_found(format!("palace not found: {id} ({e:#})"))
+                } else {
+                    ServiceError::internal(format!("palace could not be loaded: {id} ({e:#})"))
+                }
+            })
     }
 }

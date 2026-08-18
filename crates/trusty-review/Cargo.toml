@@ -1,6 +1,20 @@
 [package]
 name        = "trusty-review"
-version     = "0.15.0"
+# MINOR bump — 0.17.0 is already published, and this change edits `src/**`, so
+# the `PR version bump vs crates.io` gate (#4421) requires the bump here. MINOR
+# by the owner's standing decision; nothing in the public API changed, and the
+# three `report` types that broke at 0.17.0 now carry `#[non_exhaustive]`
+# (#5762), so field and variant additions stay non-breaking from here on.
+#
+# #4421: this PR (#5754) additionally converts config/mod.rs's module doc to
+# the inner `//!`-only standard — a doc-comment-only change, so it lands under
+# the 0.18.0 above with no further bump needed.
+#
+# #5886: PATCH bump — 0.18.0 is already published, and this PR edits
+# synthesize_prompt.rs's prompt text (adds a coverage-gaps instruction). No
+# public API changed; the `PR version bump vs crates.io` gate (#4421) still
+# requires the bump since `src/**` changed.
+version     = "0.18.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
@@ -87,7 +101,7 @@ clap         = { workspace = true }
 # `webhook-relay` (#5182): the console->target relay wire contract AND its
 # receive half — the durable inbox, the listener, and the hardened UDS bind
 # this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.
-trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay"] }
+trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay", "gh-cli"] }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console is
 # no longer bundled into trusty-review (single-owner-per-binary); the standalone
 # `trusty-console` crate is its sole producer.
@@ -110,21 +124,15 @@ aws-config             = { workspace = true }
 aws-types              = { workspace = true }
 aws-smithy-types       = { workspace = true }
 
-# ── Contributor profile pipeline (epic #558) ──────────────────────────────
-# tga: provides Database, IdentityResolver, AuthorPeriodSummary, diff_for_commit,
-# and query_author_period_trends — the data foundation for longitudinal profiling.
-# Optional: only required when the `profile` feature is enabled.
-tga = { workspace = true, optional = true }
-# rusqlite: needed for direct SQL queries in selector.rs (lookup_by_email etc.)
-# and diff_sampler.rs query helpers; uses the same bundled version as tga.
-# Optional: only required when the `profile` feature is enabled.
-rusqlite = { workspace = true, optional = true }
+# Why (#5466): `tga` and `rusqlite` were REMOVED with the contributor-profile
+# pipeline. Profiling is tga's domain now (`tga profile`), so the Cargo edge
+# runs tga -> trusty-review only, never back. See #5468.
 
 # ── Time (Instant for latency measurement) ─────────────────────────────────
 # std::time::Instant is sufficient; chrono is used for JWT iat/exp claims.
 
 [package.metadata.docs.rs]
-features = ["http-server", "mcp", "profile", "report"]
+features = ["http-server", "mcp", "report"]
 
 [features]
 # Why: mirrors trusty-analyze / trusty-common convention — axum + tower-http
@@ -137,7 +145,7 @@ features = ["http-server", "mcp", "profile", "report"]
 # service module, so downstream consumers can safely write:
 #   trusty-review = { features = ["http-server"] }
 # without a manifest change in a later stage.
-default     = ["http-server", "mcp", "profile", "report"]
+default     = ["http-server", "mcp", "report"]
 http-server = ["dep:axum", "dep:tower", "dep:tower-http", "trusty-common/axum-server"]
 # Why: gates the MCP stdio JSON-RPC service + the trusty-common MCP primitives
 #      behind an opt-in feature so library-only consumers do not pull in the
@@ -147,14 +155,9 @@ http-server = ["dep:axum", "dep:tower", "dep:tower-http", "trusty-common/axum-se
 #       and compiles the `src/mcp/` module.
 # Test: `cargo test -p trusty-review --features mcp` covers dispatch/tools tests.
 mcp         = ["trusty-common/mcp", "trusty-common/console-metrics", "http-server"]
-# Why: gates the contributor-profile pipeline (tga + rusqlite heavy deps) behind
-#      an opt-in feature so users who only need the core review pipeline can build
-#      without tga's git2 vendored + rusqlite compilation overhead.
-#      Default-on so `cargo install` and the standard binary include profiling.
-# What: enables `src/profile/`, the `profile` CLI subcommand, and the tga/rusqlite
-#       dependencies.
-# Test: `cargo test -p trusty-review` (default features) covers profile module tests.
-profile     = ["dep:tga", "dep:rusqlite"]
+# Why (#5466): the `profile` feature was REMOVED along with `src/profile/` and
+#      the `profile` subcommand. Contributor profiling lives in tga (`tga
+#      profile`, tga 2.19.0); see #5468.
 # Why: gates the deterministic technical-DD report generator (epic #2312 / M1
 #      #2313).  Default-on so `cargo install` ships the `report` subcommand out
 #      of the box.  Pulls in NO new external dependencies — the module reuses
@@ -171,9 +174,8 @@ tokio        = { workspace = true, features = ["test-util"] }
 tempfile     = { workspace = true }
 tower        = { workspace = true }
 axum         = { workspace = true }
-# git2: needed for profile tests that create temp git repos to exercise diff_for_commit.
-# rusqlite is in [dependencies] already (needed for selector.rs at runtime).
-git2         = { version = "0.20", default-features = false, features = ["vendored-libgit2", "https", "vendored-openssl"] }
+# Why (#5466): `git2` was REMOVED. Its only use was the profile diff-sampler
+# tests, which went with `src/profile/`.
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel test threads (used by selector resolve_db_path tests).
 serial_test  = { workspace = true }

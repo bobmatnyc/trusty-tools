@@ -54,9 +54,12 @@ impl HealthReport {
     /// to `degraded`. A `down` daemon is the running-but-broken failure signal; a
     /// `not_installed` member is a real gap in the resolved stable set (an
     /// operator after a failed install must NOT see green). Only a genuinely
-    /// `unknown` member (e.g. trusty-mpm, deliberately left unprobed — #4246) does
-    /// NOT degrade — its health is unprobeable, not absent. `stale` also stays
-    /// non-degrading (running, just below the version floor).
+    /// `unknown` member does NOT degrade — its health is undetermined, not
+    /// absent. `stale` also stays non-degrading (running, just below the version
+    /// floor). (#4925: trusty-mpm used to be this policy's one live example; it is
+    /// probed over HTTP now, so a stopped mpm degrades the verdict like any other
+    /// daemon. Whether an undetermined health should advance a green verdict at
+    /// all is #4847's open question and is untouched here.)
     /// Test: `tests::verdict_down_is_degraded`,
     /// `tests::verdict_not_installed_is_degraded`,
     /// `tests::verdict_unknown_is_ready`.
@@ -165,8 +168,10 @@ mod tests {
         assert_eq!(r.exit_code(), 2);
     }
 
-    /// Why: an `unknown` member (mpm) must NOT degrade the verdict — its health
-    /// is merely unprobeable via the standard contract, not absent.
+    /// Why: an `unknown` member must NOT degrade the verdict — its health is
+    /// merely undetermined, not absent. (#4925: the `trusty-mpm` name is now just
+    /// a label on a hand-written row; mpm itself is probed and no longer reports
+    /// `unknown`. The POLICY under test is unchanged and still live.)
     /// What: one unknown member → `ready`, exit 0. A mix of unknown + healthy
     /// also stays ready, proving unknown never falsely degrades.
     /// Test: This is the test.

@@ -76,7 +76,7 @@ pub struct AssetCounts {
     /// preserved, not unchanged, not failed. Reporting only those five would
     /// print zeros for it, which is precisely the silent skip this command
     /// exists to end.
-    /// What: the number of [`Shadow`] records for this destination, whatever
+    /// What: the number of `Shadow` records for this destination, whatever
     /// the winning tier. A deliberate user-tier or project-tier override lands
     /// here too and is correct; the note the report carries alongside names the
     /// ACTIONABLE subset separately.

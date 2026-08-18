@@ -2,18 +2,20 @@
 //!
 //! Why: DOC-67 §7 (resolved Q1/Q6) requires that `tga audit` and the TUI's
 //! "Run Audit" button drive the SAME sweep, and that neither re-sequences the
-//! eight subcommands itself. A library function is the only shape that serves
+//! subcommands itself. A library function is the only shape that serves
 //! both: `tga audit` cannot depend on ratatui or a terminal (§2, one-shot,
 //! non-interactive), and the TUI cannot depend on clap having parsed anything.
 //! What: [`SweepOptions`] and [`run_full_sweep`], which call the existing
-//! `crate::commands::*::run` functions in dependency order and record each
-//! one's outcome instead of propagating it.
+//! `crate::commands::*::run` functions in dependency order — plus the
+//! correlation pass (#5405) — and record each one's outcome instead of
+//! propagating it.
 //! Test: `super::tests`.
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::collect::collector::{FetchOutcome, PerRepoFetch};
+use crate::collect::correlate::correlate_commits;
 use crate::commands::args::{ClassifyArgs, CollectArgs, ReportArgs};
 use crate::commands::deployments::DeploymentsCollectArgs;
 use crate::commands::incidents::IncidentsCollectArgs;
@@ -28,12 +30,12 @@ use super::stage::{AuditSweepStats, StaleFetch, SweepStage};
 
 /// How many stages [`run_full_sweep`] drives.
 ///
-/// Why: the per-stage start event says "stage 3 of 8", and that denominator has
+/// Why: the per-stage start event says "stage 3 of 9", and that denominator has
 /// to come from one place or it drifts the next time a stage is added.
-/// What: `8`.
+/// What: `9` — the eight subcommands plus the correlation pass (#5405).
 /// Test: `super::tests::sweep_runs_every_stage_in_order_and_survives_failures`
 /// asserts the sweep records exactly this many outcomes.
-pub(crate) const TOTAL_STAGES: usize = 8;
+pub(crate) const TOTAL_STAGES: usize = 9;
 
 /// The knobs `tga audit` (or a TUI action) hands the sweep.
 ///
@@ -64,14 +66,14 @@ pub struct SweepOptions {
 /// button and `tga audit` execute byte-identical sequencing instead of two
 /// drifting copies.
 ///
-/// What: runs collect → classify → jira sync → deployments → incidents → dora
-/// → pr-metrics → report by calling each subcommand's own `run`, recording
-/// every outcome into an [`AuditSweepStats`]. No stage result is propagated
-/// with `?`, so no stage can abort the run. `--allow-stale` is applied to
-/// collection as a fixed default (§9) — not an operator choice.
+/// What: runs collect → correlate → classify → jira sync → deployments →
+/// incidents → dora → pr-metrics → report by calling each subcommand's own
+/// `run`, recording every outcome into an [`AuditSweepStats`]. No stage result
+/// is propagated with `?`, so no stage can abort the run. `--allow-stale` is
+/// applied to collection as a fixed default (§9) — not an operator choice.
 ///
 /// `progress`, when supplied, receives a [`Stage::Audit`] start event before
-/// each of the eight stages and a completed/failed event after it, with
+/// each of the nine stages and a completed/failed event after it, with
 /// [`SweepStage::as_str`] as the target — so a ten-minute sweep is observable
 /// even though seven of the eight subcommands have no instrumentation of their
 /// own (#5361). The collection stage additionally gets the SAME bus handed to
@@ -130,6 +132,16 @@ pub async fn run_full_sweep(
     // succeeded, and a succeeded stage produces no gap line of its own.
     let result = record_stale_fetches(&mut stats, result);
     finish(progress, &mut stats, SweepStage::Collect, t, result);
+
+    // #5405: the commit ↔ board-item join, which until now ran only from `tga
+    // tui`. It sits immediately after collection because every production
+    // writer of `work_items` runs inside that stage (ADO and Linear), so this
+    // is the earliest point at which the join sees a complete board.
+    let t = begin(progress, &stats, SweepStage::Correlate);
+    let result = correlate_commits(db.connection_mut(), &collect_bus)
+        .map(|outcome| tracing::info!(summary = %outcome.summary(), "correlation pass finished"))
+        .map_err(anyhow::Error::from);
+    finish(progress, &mut stats, SweepStage::Correlate, t, result);
 
     let t = begin(progress, &stats, SweepStage::Classify);
     let args = ClassifyArgs {

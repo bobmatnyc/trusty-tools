@@ -21,6 +21,10 @@
 //! Test: `parse_*` unit tests cover SSH/HTTPS, with/without `.git`, trailing
 //! slashes, nested groups, owner-less and empty inputs; `derive_*` is covered by
 //! the `derive_github_path_reads_origin` test against a real temp git repo.
+//!
+//! [`GithubPath`]: crate::github_path::GithubPath
+//! [`parse_github_path`]: crate::github_path::parse_github_path
+//! [`derive_github_path`]: crate::github_path::derive_github_path
 
 use std::path::Path;
 use std::process::Command;

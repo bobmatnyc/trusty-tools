@@ -2,15 +2,17 @@
 
 Native chat-channel MCP servers (chat-as-tools) for the Trusty suite.
 
-One crate, one module per channel. Today only **Slack** exists (module
-[`slack`](src/slack/), binary `slack-mcp`); a future Telegram channel slots in
-as a sibling `telegram` module + `telegram-mcp` binary without a new crate. See
-epic #2636 and ADR-0014.
+One crate, one module per channel. **Slack** ([`slack`](src/slack/), binary
+`slack-mcp`) is the working channel. A sibling `telegram` module and
+`telegram-mcp` binary exist as a scaffold — the handshake answers but every
+tool call returns a `not-yet-implemented` MCP error (#2641), so do not register
+it expecting a working connector. See epic #2636 and ADR-0014.
 
-> **Status: live.** All 19 tools below make real Slack Web API calls. Slack
-> authentication and HTTP-client hardening (401/429) are wired (issue #2638);
-> the original nine tool bodies landed in #2639/#2640, and epic #3611 added ten
-> more for parity with the claude.ai Slack connector (issues #3612-#3618).
+> **Status: Slack is live.** All 22 tools below make real Slack Web API calls.
+> Slack authentication and HTTP-client hardening (401/429) are wired (issue
+> #2638); the original nine tool bodies landed in #2639/#2640, epic #3611 added
+> ten more for parity with the claude.ai Slack connector (issues #3612-#3618),
+> and three markdown-aware canvas tools followed.
 > `slack_send_message_draft` (claude.ai's 20th tool) is **not** implemented —
 > Slack has no public API to create an editable message draft.
 
@@ -24,27 +26,50 @@ This installs the `slack-mcp` binary into `~/.cargo/bin`.
 
 ## Quick Start
 
-1. **Wire into Claude Code** (or any MCP client):
+1. **Wire into Claude Code** (or any MCP client). Inside a trusty-mpm-managed
+   environment, register it with `tm mcp add` — that writes the tm-owned config
+   dir every managed session reads, which a plain `claude mcp add` cannot
+   target:
+
+   ```sh
+   tm mcp add slack-mcp -- slack-mcp
+   tm mcp list                       # confirm what is registered
+   ```
+
+   Outside tm, declare it by hand:
 
    ```jsonc
    // ~/.claude.json
    {
      "mcpServers": {
-       "slack": {
+       "slack-mcp": {
          "command": "slack-mcp"
        }
      }
    }
    ```
 
+   **The name you choose is the tool prefix.** Registered as `slack-mcp`, the
+   tools arrive as `mcp__slack-mcp__slack_send_message` and so on; registered as
+   `slack`, they arrive as `mcp__slack__*`. The crate name and the binary name
+   do not decide it — the map key does. Pick one name and keep it, because agent
+   instructions that name a prefix go stale when it changes.
+
 2. **Handshake and every tool are live today.** `initialize` and `tools/list`
    return real responses, and every `tools/call` makes a real Slack Web API
    call through the authenticated `BaseClient`.
 
+3. **Set the tokens.** Registering the server does not authenticate it. Without
+   `SLACK_BOT_TOKEN` (and `SLACK_USER_TOKEN` for `slack_search_messages`),
+   `tools/list` still answers but every live call fails — see
+   [Configuration](#configuration).
+
 ## Slack tool surface
 
-19 chat-as-tools operations, all live. Schemas are authoritative — see
-[`src/slack/tools.rs`](src/slack/tools.rs).
+22 chat-as-tools operations, all live. Schemas are authoritative — see
+[`src/slack/tools.rs`](src/slack/tools.rs) and
+[`src/slack/tool_schemas_canvas.rs`](src/slack/tool_schemas_canvas.rs); the
+`TOOL_NAMES` constant in the former is the complete list.
 
 | Tool | Purpose | Required OAuth scope(s) |
 |------|---------|--------------------------|
@@ -67,6 +92,9 @@ This installs the `slack-mcp` binary into `~/.cargo/bin`.
 | `slack_read_file`            | Read a file's metadata and (text files only) content | `files:read` |
 | `slack_search_emojis`        | Search custom emoji by name (client-side filter — no `emoji.search`) | `emoji:read` |
 | `slack_search_users`         | Search users by name/real name/email (client-side filter — no non-admin `users.search`) | `users:read` |
+| `slack_canvas_create`        | Create a canvas seeded with markdown; with `channel_id` it becomes the channel's canvas and members inherit edit access | **`canvases:write`** |
+| `slack_canvas_lookup_sections` | Look up section ids within a canvas, filtered by heading type and/or contained text; returns ids only, never content | **`canvases:read`** |
+| `slack_canvas_push`          | Translate CommonMark to canvas markdown and append it, or replace the canvas's header-delimited sections (non-atomic) | **`canvases:write`** (+ **`canvases:read`** for `replace_all`) |
 
 **Bold** scopes (`canvases:read`, `canvases:write`) are new as of epic #3611 —
 a Slack app that only had the original nine tools' scopes will need these

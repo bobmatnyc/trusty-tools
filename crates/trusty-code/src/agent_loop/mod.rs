@@ -33,6 +33,8 @@
 //! Test: `agent_loop::tests` — stubbed two-turn flow, turn-cap abort, recoverable
 //! tool-error continuation, usage accrual, sink notification order, cancellation,
 //! plus an `#[ignore]`-gated live test.
+//!
+//! [`AgentLoop::run_with_transcript`]: crate::agent_loop::AgentLoop::run_with_transcript
 
 mod cadence;
 mod compaction;

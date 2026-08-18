@@ -1,4 +1,5 @@
-//! Unified harness event envelope, bus, and filter (Wave 3 Phase 0; ADR-0005).
+//! Unified harness event envelope, bus, and filter (Wave 3 Phase 0; epic #830,
+//! refs #833; ADR-0005).
 //!
 //! Why: The three harnesses (`trusty-agents`, `trusty-mpm`, `trusty-code`) each
 //!      grew their own ad-hoc event streaming. Wave 3 unifies them on one
@@ -236,7 +237,9 @@ mod tests {
 
     #[test]
     fn event_line_prefix_is_stable() {
-        assert_eq!(EVENT_LINE_PREFIX, "__HARNESS_EVENT__ ");
+        // #5129: this is the value tcode and tagent write to stderr, and the
+        // one the harness-understanding assets tell the SM to watch for.
+        assert_eq!(EVENT_LINE_PREFIX, "__OMPM_EVENT__ ");
     }
 
     #[test]

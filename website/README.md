@@ -28,6 +28,24 @@ pnpm dev        # http://localhost:5173
 pnpm `9.15.9`, pinned in `packageManager` to match the seven UI packages under
 `crates/*/ui/`.
 
+`pnpm test` runs in CI as `.github/workflows/website-tests.yml` (#5200), on
+Node 20 with Chromium installed for the mobile-overflow smoke test. It is a
+separate workflow rather than a leg on `ci.yml`'s `ui-checks` matrix because
+`scripts/detect-docs-only.sh` buckets `website/**` as docs-only, and every
+`ui-checks` step is gated on `docs_only != 'true'` — a leg there would skip on
+exactly the PRs it exists to check.
+
+### `pnpm.overrides` — do not remove without checking Dependabot
+
+Three transitive pins in `package.json`. Each exists to hold a security floor
+no direct dependency reaches on its own, so dropping one reopens an alert.
+
+| Override          | Why                                                                                                                                                                                                                                                                                                                 |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cookie ^0.7.2`   | GHSA-pxg6-pf52-xh8x. SvelteKit still declares `cookie ^0.6.0` and resolves 0.6.0; kit [#13037](https://github.com/sveltejs/kit/pull/13037) stopped overriding the default decoder precisely so consumers can raise this themselves. Bumping SvelteKit does not fix it — 2.6.2 moved to `^0.7.0` and 2.6.3 reverted. |
+| `nanoid ^3.3.18`  | GHSA-2v37-7h3g-55p8. Reached only through `postcss`, which floors it at `^3.3.11`.                                                                                                                                                                                                                                  |
+| `postcss ^8.4.31` | GHSA-fxqj-rqcc-2cmp / GHSA-r28c-9q8g-f849. Currently satisfied without the pin; it is a floor guard, not a correction.                                                                                                                                                                                              |
+
 ## Vercel project settings
 
 Three settings must be configured on the Vercel project. Only the first is

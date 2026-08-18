@@ -29,4 +29,4 @@ mod tests;
 
 pub use explore::{ExpandDirection, SeedNode};
 pub use graph::KnowledgeGraph;
-pub use types::{KgEdge, Triple};
+pub use types::{AdjacencyDesync, KgEdge, Triple};

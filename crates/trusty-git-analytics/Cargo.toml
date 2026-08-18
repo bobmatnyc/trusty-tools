@@ -1,6 +1,17 @@
 [package]
 name = "tga"
-version = "2.17.0"
+# #5219: MINOR bump from the published 3.0.0, required in-PR by the #4421 gate
+# because `src/**` changed under an already-published version. The change is
+# breaking for external library consumers — `PmTicket`, `GithubConfig` and
+# `JiraConfig` each gain a field and `#[non_exhaustive]` — so standard SemVer
+# would put it at MAJOR. Minor is a standing owner decision, reaffirmed after
+# that was pointed out; `preflight-publish.sh` CHECK 5 will demand the major and
+# needs a deliberate override at release.
+#
+# #5250: the preceding 2.20.0 → 3.0.0 was MAJOR. `AgenticMode` gained an
+# `Unknown` variant AND `#[non_exhaustive]`; both break an exhaustive downstream
+# `match`. Superseded the #4421 patch bump that carried 2.19.0 → 2.20.0.
+version = "3.1.0"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
@@ -39,7 +50,13 @@ path = "src/main.rs"
 # so tga does not grow a second copy of the raw-mode dance. It turns on
 # ratatui + crossterm in trusty-common at the SAME workspace versions tga pins
 # below — one ratatui major in the build graph.
-trusty-common = { workspace = true, features = ["cli-help", "update-check", "config-cli", "monitor-tui"] }
+# `inference-client` (#5464) is what `profile::batch_reviewer::PeriodReviewer`
+# sends its period-review call through — the workspace's one inference entry
+# point, so contributor profiling reaches a model without tga taking a Cargo
+# edge to trusty-review. `config-cli` already implied it transitively; naming it
+# here makes the dependency the profile transport relies on explicit rather than
+# a side effect of the `config` subcommand staying mounted.
+trusty-common = { workspace = true, features = ["cli-help", "update-check", "config-cli", "inference-client", "monitor-tui"] }
 # Async runtime
 tokio = { workspace = true }
 # IANA timezone database: JQL date literals are evaluated in the JIRA
@@ -87,6 +104,11 @@ reqwest = { workspace = true }
 rayon = "1"
 # Date/time
 chrono = { workspace = true }
+# Per-user data directory. #5463: `profile::selector::resolve_db_path` falls
+# back to `<data-dir>/tga/tga.db`, which is `~/Library/Application Support` on
+# macOS and `~/.local/share` on Linux — a distinction a bare `$HOME` join would
+# get wrong on one of the two.
+dirs = { workspace = true }
 # Error handling
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -101,6 +123,12 @@ tracing-subscriber = { workspace = true }
 # Progress bars — workspace entry already declares 0.17 (#5197 drive-by:
 # the local pin duplicated the workspace table).
 indicatif = { workspace = true }
+# #5823: the cross-process progress wire format `trusty-audit` parses back.
+# Both ends name `trusty_progress::relay` rather than each spelling the grammar,
+# so the format cannot drift between producer and consumer. It brings no new
+# transitive weight — its only dependencies are indicatif (already here) and
+# thiserror.
+trusty-progress = { workspace = true }
 # TUI (#5197): `tga tui`. Pinned to the workspace versions (ratatui 0.29 /
 # crossterm 0.28) that trusty-common's `monitor-tui` feature also uses —
 # NOT the 0.30/0.29 pair in `crates/trusty-tui`, which would put two ratatui
@@ -143,6 +171,10 @@ criterion = { workspace = true }
 tracing-test = "0.2"
 # Temporary files for rule-loader tests
 tempfile = { workspace = true }
+# #5463: the `TGA_DB` resolution tests in `profile::selector` mutate the
+# environment, which is process-global — `#[serial]` keeps them off the other
+# test threads for the duration.
+serial_test = { workspace = true }
 
 [[bench]]
 name = "tga_bench"

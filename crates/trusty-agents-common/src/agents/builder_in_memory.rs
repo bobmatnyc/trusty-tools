@@ -1,21 +1,21 @@
 //! In-memory `extends:`-chain composition — no filesystem required.
 //!
-//! Why: [`builder::compose_agent`] is filesystem-coupled: it scans a
+//! Why: [`builder::compose_agent`](crate::agents::builder::compose_agent) is filesystem-coupled: it scans a
 //! `source_dir` for `*.md` files before resolving `extends:`. trusty-code
 //! wants to bundle a curated subset of trusty-mpm's agents as
 //! `include_str!`-embedded assets (issue #2958, epic #2892 Slice E) — those
 //! bytes never touch disk, so there is no `source_dir` to scan. Rather than
 //! forking the chain-walk (cycle detection, depth limiting, base-first
-//! ordering, frontmatter merge) into a second copy, [`builder::resolve`] and
-//! [`builder::render_composed`] were generalised over the
-//! `pub(crate)` [`builder::SourceLookup`] trait (Slice E1) so this module
+//! ordering, frontmatter merge) into a second copy, [`builder::resolve`](crate::agents::builder::resolve) and
+//! [`builder::render_composed`](crate::agents::builder::render_composed) were generalised over the
+//! `pub(crate)` [`builder::SourceLookup`](crate::agents::builder::SourceLookup) trait (Slice E1) so this module
 //! only has to supply a new, disk-free implementation of that one seam.
 //! What: [`InMemorySources`] is a case-folded `name -> markdown content`
 //! map, built via [`build_in_memory_source_map`] from `(name, content)`
 //! pairs (e.g. `include_str!` consts). [`compose_agent_in_memory`] resolves
 //! an `extends:` chain — including chains through BASE-* templates — entirely
 //! against that map and returns the same composed-document shape
-//! [`builder::compose_agent`] does for the fs path, with identical behavior
+//! [`builder::compose_agent`](crate::agents::builder::compose_agent) does for the fs path, with identical behavior
 //! for identical content (verified by
 //! `fs_and_in_memory_compose_are_byte_equivalent`, below).
 //! Test: `cargo test -p trusty-agents-common agents::builder_in_memory`
@@ -30,13 +30,13 @@ use super::builder::{AgentBuildError, SourceLookup, render_composed, resolve};
 
 /// A case-folded, in-memory index of agent name -> raw markdown content.
 ///
-/// Why: mirrors [`builder::SourceMap`]'s case-insensitive resolution
+/// Why: mirrors [`builder::SourceMap`](crate::agents::builder::SourceMap)'s case-insensitive resolution
 /// (`BASE-QA.md` on disk vs. an `extends: base-qa` reference) but for
 /// embedded assets that have no filesystem path — e.g. trusty-code's
 /// `include_str!`-embedded tm agent `.md` bytes. Without case-folding, an
 /// embedded `BASE-QA.md` asset registered under its uppercase stem would
 /// fail to resolve `extends: base-qa`, even though the fs path handles this
-/// transparently via [`builder::build_source_map`].
+/// transparently via [`builder::build_source_map`](crate::agents::builder::build_source_map).
 /// What: wraps a `HashMap<String, String>` keyed by lowercased name. Never
 /// constructed directly by external callers in the common case — use
 /// [`build_in_memory_source_map`] — but [`InMemorySources::insert`] is
@@ -62,9 +62,9 @@ impl InMemorySources {
     /// Why: `extends:` values are conventionally lowercase
     /// (`extends: base-qa`) while BASE template assets are conventionally
     /// named with an uppercase stem (`BASE-QA.md`, `BASE-QA` as a bare
-    /// name); case-folding on insert (matching [`builder::build_source_map`]'s
+    /// name); case-folding on insert (matching [`builder::build_source_map`](crate::agents::builder::build_source_map)'s
     /// case-folding on scan) lets either spelling resolve the other.
-    /// [`builder::build_source_map`] also strips the `.md` filename
+    /// [`builder::build_source_map`](crate::agents::builder::build_source_map) also strips the `.md` filename
     /// extension via `Path::file_stem` before indexing — a caller here that
     /// registers embedded assets by their original filename (e.g.
     /// `"BASE-QA.md"`, the natural key if the asset list is generated from
@@ -127,13 +127,13 @@ where
 
 /// Resolve `name`'s `extends:` chain against `sources` and return the
 /// composed Markdown document — the disk-free counterpart of
-/// [`builder::compose_agent`].
+/// [`builder::compose_agent`](crate::agents::builder::compose_agent).
 ///
 /// Why: issue #2958 (epic #2892 Slice E) needs `extends:` resolved against
 /// trusty-code's embedded asset map instead of a `source_dir` on disk, so a
 /// fresh tcode project can ship a real agent roster with zero filesystem
-/// dependency. Reuses [`builder::resolve`] (the generic chain walk) and
-/// [`builder::render_composed`] (the merge/join tail) rather than
+/// dependency. Reuses [`builder::resolve`](crate::agents::builder::resolve) (the generic chain walk) and
+/// [`builder::render_composed`](crate::agents::builder::render_composed) (the merge/join tail) rather than
 /// duplicating either — the only new code here is [`InMemorySources`]'s
 /// [`SourceLookup`] implementation.
 /// What: walks `name`'s `extends:` chain base-first via `sources`, merges
@@ -142,7 +142,7 @@ where
 /// the same [`AgentBuildError`] variants the fs path does — `NotFound` for a
 /// name absent from `sources`, `Cycle`/`DepthExceeded` for a malformed chain,
 /// `FrontmatterParse` for malformed frontmatter in any chain member — since
-/// both paths share [`builder::resolve`] and `builder::split_frontmatter`.
+/// both paths share [`builder::resolve`](crate::agents::builder::resolve) and `builder::split_frontmatter`.
 /// Test: `compose_in_memory_single_level`,
 /// `compose_in_memory_multi_level_base_chain`,
 /// `compose_in_memory_missing_source_errors`, `in_memory_cycle_detection`,

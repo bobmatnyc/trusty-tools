@@ -23,7 +23,7 @@ use crate::formatters::banner::{
 /// the session would otherwise be permanently orphaned, filling the host tmux
 /// with leaked managed (`tm-*`/`tmpm-*`) sessions (#1815).
 /// What: on `drop` while armed, runs `tmux kill-session -t <name>` best-effort
-/// (ignores errors, since the session may already be gone). [`disarm`] turns
+/// (ignores errors, since the session may already be gone). `disarm` turns
 /// `drop` into a no-op; call it before returning `Ok(())` so a session that
 /// the user successfully attached to persists for future re-attachment.
 /// Test: verified by `cargo test -p trusty-mpm --bin tm`; the before/after
@@ -97,14 +97,23 @@ impl Drop for LaunchSessionGuard {
 /// (`tm launch --worktree`). Without it the session runs in the project's own
 /// checkout and no clone is made — the sentence above about the live checkout
 /// never being touched describes the `--worktree` branch only.
+///
+/// `launch_dir` says whether `dir` is an operator cwd still to be resolved or a
+/// placement the caller already made; see
+/// [`super::managed_workspace::LaunchDir`]. Two of the three callers here reach
+/// this function with placement already decided, and resolving it again
+/// relocates their session.
 /// Test: `cli_parses_launch`, `cli_parses_launch_with_dir`,
-/// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`.
+/// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`;
+/// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`
+/// covers the composed fallback path.
 pub(crate) async fn launch(
     client: &reqwest::Client,
     url: &str,
     dir: Option<String>,
     style: Option<String>,
     worktree: bool,
+    launch_dir: super::managed_workspace::LaunchDir,
 ) -> anyhow::Result<()> {
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
     let live_path = resolve_dir(dir)?;
@@ -117,7 +126,10 @@ pub(crate) async fn launch(
     // 2. Derive the GitHub identity from the origin remote.
     //    Managed sessions REQUIRE a parseable GitHub remote (#1590). A missing or
     //    unparseable remote is an immediate error that points the user to `tm connect`.
+    //    #4734: a git failure gets its own error — telling the operator to run
+    //    `tm connect` because there is "no remote" would be false advice.
     let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&live_path)
+        .map_err(|e| anyhow::anyhow!(e))?
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no git origin remote found in '{live_workdir}'\n\
@@ -188,6 +200,7 @@ pub(crate) async fn launch(
         &project_dir,
         &live_path,
         worktree,
+        launch_dir,
         &session_uuid,
     )
     .await?;

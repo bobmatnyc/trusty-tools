@@ -211,7 +211,7 @@ fn regenerated_paths_includes_managed_agent() {
     let tmp = crate::test_support::hermetic_temp_dir();
     write_agent_manifest(tmp.path(), &["engineer.md"]);
 
-    let paths = regenerated_scaffold_paths(tmp.path());
+    let paths = regenerated_scaffold_paths(tmp.path()).unwrap();
     assert!(paths.contains(".claude/agents/engineer.md"));
 }
 
@@ -223,7 +223,7 @@ fn regenerated_paths_includes_skill_entry_and_references() {
         &["tm-doctor", "tm-doctor/references/checklist.md"],
     );
 
-    let paths = regenerated_scaffold_paths(tmp.path());
+    let paths = regenerated_scaffold_paths(tmp.path()).unwrap();
     assert!(paths.contains(".claude/skills/tm-doctor/SKILL.md"));
     assert!(paths.contains(".claude/skills/tm-doctor/references/checklist.md"));
 }
@@ -232,7 +232,7 @@ fn regenerated_paths_includes_skill_entry_and_references() {
 fn regenerated_paths_includes_all_output_styles() {
     let tmp = crate::test_support::hermetic_temp_dir();
 
-    let paths = regenerated_scaffold_paths(tmp.path());
+    let paths = regenerated_scaffold_paths(tmp.path()).unwrap();
     for style in crate::core::bundle::OUTPUT_STYLES {
         assert!(
             paths.contains(&format!(".claude/output-styles/{}", style.file_name)),

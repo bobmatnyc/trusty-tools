@@ -524,6 +524,95 @@ async fn execute_managed_adopt_requires_cwd() {
     }
 }
 
+/// #5899: `ManagedDecommission` must carry the daemon's workspace verdict into
+/// [`CommandResult::ManagedLifecycle`] — for a workspace it deleted AND for one it
+/// left alone.
+///
+/// The verdict was computed and sent correctly all along; the executor lost it,
+/// because the response decoded into a summary type with no field for it. This runs
+/// the real daemon route so a key rename daemon-side fails here rather than
+/// deserializing quietly to `None`.
+///
+/// `$HOME` is redirected for the duration: the daemon's removal path applies a
+/// containment guard against the configured workspace root, so a tm-owned workspace
+/// anywhere else would be refused and the removal arm would prove nothing. Serial,
+/// because that redirect is process-wide.
+#[tokio::test]
+#[serial_test::serial]
+async fn executor_decommission_reports_daemon_workspace_verdict() {
+    use crate::runtime::RuntimeKind;
+    use crate::session_manager::ManagedSessionId;
+
+    /// Restores `$HOME` even if an assertion below panics mid-loop.
+    struct HomeGuard(Option<String>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialized via `#[serial_test::serial]`.
+            match self.0 {
+                Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = HomeGuard(std::env::var("HOME").ok());
+    // SAFETY: serialized via `#[serial_test::serial]`; restored by the guard.
+    unsafe { std::env::set_var("HOME", home.path()) };
+    let workspace_root = trusty_common::workspace_layout::resolve_workspace_root(None);
+
+    for owned in [true, false] {
+        let (state, url) = spawn_test_daemon().await;
+        let id = ManagedSessionId::new();
+        let ws = workspace_root.join(format!("tm-5899-{id}"));
+        std::fs::create_dir_all(&ws).expect("create seeded workspace");
+        state
+            .session_manager()
+            .await
+            .create_with_id(
+                id,
+                "regression: #5899 executor verdict".to_string(),
+                Some(ws.clone()),
+                None,
+                Some(ws.clone()),
+                None,
+                None,
+                RuntimeKind::default(),
+                false,
+                owned,
+            )
+            .await
+            .expect("seed session");
+
+        let result = CommandExecutor::new(url)
+            .execute(TrustyCommand::ManagedDecommission {
+                target: id.to_string(),
+            })
+            .await;
+        match result {
+            CommandResult::ManagedLifecycle {
+                action,
+                workspace_removed,
+                ..
+            } => {
+                assert_eq!(action, "decommissioned");
+                assert_eq!(
+                    workspace_removed,
+                    Some(owned),
+                    "owned={owned}: the executor must forward the daemon's verdict"
+                );
+                assert_eq!(
+                    ws.exists(),
+                    !owned,
+                    "owned={owned}: the verdict must match the filesystem"
+                );
+            }
+            other => panic!("expected ManagedLifecycle, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+}
+
 #[tokio::test]
 async fn pair_request_returns_code() {
     let (_state, url) = spawn_test_daemon().await;

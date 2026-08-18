@@ -374,7 +374,7 @@ pub async fn proxy_summary(
 /// `api::router`) keeps this cohesive TELUI-6 cluster self-contained and lets
 /// `api::router` compose it with a single `.merge`. Every route here binds the
 /// same [`DaemonState`] the parent router carries, so merging is state-preserving.
-/// What: returns a [`Router`] with the focus/unfocus/message/summary handlers
+/// What: returns a `Router` with the focus/unfocus/message/summary handlers
 /// wired, ready to `.merge` into the daemon router before `.with_state`.
 /// Test: exercised end-to-end by `tests/proxy_routes.rs` (the routes reach the
 /// daemon exactly as before this extraction).

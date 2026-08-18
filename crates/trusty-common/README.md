@@ -45,9 +45,7 @@ trusty-common = { version = "0.8", features = ["axum-server", "mcp", "rpc", "emb
 | `symgraph-parser` | Full symbol graph: tree-sitter grammars, `SymbolGraph`, emitter, editor |
 | `symgraph-server` | HTTP server frontend for the symbol graph (implies `symgraph-parser`) |
 | `bm25` | Zero-dependency BM25 lexical index + code-aware tokenizer (issue #156) |
-| `bm25-client` | UDS JSON-RPC client for the per-palace `trusty-bm25-daemon` subprocess |
 | `memory-core` | Memory Palace storage engine — HNSW (`hnsw_rs`), redb metadata + KG, dream cycle (formerly `trusty-memory-core`) |
-| `memory-core-kuzu` | Read-only Kùzu graph-DB integration on top of `memory-core` |
 | `tickets` | Unified ticketing MCP server (GitHub / JIRA / Linear backends; formerly `trusty-tickets`) |
 | `monitor-tui` | ratatui + crossterm dashboard TUI for the trusty-search/trusty-memory daemons (formerly `trusty-monitor-tui`) |
 | `cli-help` | Declarative help-config parsing (serde_yaml + strsim + indexmap) |
@@ -265,6 +263,27 @@ cargo test -p trusty-common --features axum-server,mcp,rpc,symgraph
 # Test embedder (ONNX-backed tests are #[ignore] by default)
 cargo test -p trusty-common --features embedder -- --include-ignored
 ```
+
+### `cargo test -p trusty-common` names its features, always (#4901)
+
+`default = []`, so a feature-less test run compiles none of the 25+ gated
+modules. It used to run 328 of the crate's ~2062 tests and exit 0 — including
+with a `memory_core` file that did not compile, which is how PR #4899 reported
+a green gate before the correct code existed. `build.rs` now detects that build
+and `src/lib.rs` turns it into a `compile_error!`, so the feature-less form
+fails instead of passing. `cargo build` / `cargo check` and every consumer crate
+are unaffected: the guard is `cfg(test)`-scoped.
+
+| What you changed | Command |
+|---|---|
+| `memory_core` | `cargo test -p trusty-common --features memory-core,embedder-test-support` |
+| any other gated module | `cargo test -p trusty-common --features <feature>` |
+| only unconditional modules (`port`, `slug`, `chat`, …) | `cargo test -p trusty-common --features unconditional-only` |
+
+`--all-features` is not an option here: `embedder-bundled-ort`,
+`embedder-load-dynamic` and `embedder-cuda` are mutually exclusive at the
+`ort-sys` level. Whole-crate coverage comes from `cargo test --workspace`,
+where feature unification pulls in what the consumers enable.
 
 ## Migration Notes
 

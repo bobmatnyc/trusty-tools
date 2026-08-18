@@ -104,8 +104,10 @@ pub fn scope_admits(allowed: &Option<HashSet<Uuid>>, room_id: Uuid) -> bool {
 /// What: resolves the wing to its room set BEFORE taking the drawer read guard
 /// — that resolution is a redb read transaction, and holding the lock across
 /// I/O would stall every writer on the palace for its duration — then applies
-/// the same tag filter, importance sort, and truncation `list_drawers` uses.
-/// Test: `wing_scope_returns_only_that_wings_drawers`.
+/// the same tag filter, `drawer_listing_order` ranking, and truncation
+/// `list_drawers` uses.
+/// Test: `wing_scope_returns_only_that_wings_drawers`,
+/// `list_drawers_in_wing_keeps_the_newest_drawer_within_an_importance_tie`.
 pub fn list_drawers_in_wing(
     handle: &PalaceHandle,
     wing_id: Uuid,
@@ -124,11 +126,9 @@ pub fn list_drawers_in_wing(
         .cloned()
         .collect();
     drop(drawers);
-    filtered.sort_by(|a, b| {
-        b.importance
-            .partial_cmp(&a.importance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // #4836: shares `list_drawers`' comparator so the two listers cannot drift
+    // on what a `limit` cuts.
+    filtered.sort_by(super::types::drawer_listing_order);
     filtered.truncate(limit);
     filtered
 }

@@ -369,7 +369,7 @@ impl CreatorInfo {
     ///
     /// Why (MEDIUM 1, DOC-53 §3.1): a hand-written claim drawer already
     /// carries `ws:<name>` in its caller-supplied tags by convention (the
-    /// claim-drawer shape); [`merge_into`] would then append a *second*,
+    /// claim-drawer shape); `merge_into` would then append a *second*,
     /// identical `ws:<name>` (and, since the caller-supplied workstream and
     /// the auto-stamped one are the same value, an identical
     /// `creator:workstream=<name>` too if the caller happened to write that

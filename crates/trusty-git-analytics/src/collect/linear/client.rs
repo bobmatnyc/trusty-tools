@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use reqwest::Client;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use trusty_common::credentials::scrub_secrets;
 
 use crate::collect::errors::{CollectError, Result};
 use crate::core::config::LinearConfig;
@@ -21,6 +22,12 @@ const USER_AGENT_VALUE: &str = "trusty-git-analytics/0.1";
 
 /// Linear GraphQL endpoint.
 const LINEAR_GRAPHQL_URL: &str = "https://api.linear.app/graphql";
+
+/// Characters of a Linear-authored payload carried into operator-visible text.
+///
+/// Linear's auth rejection is under 300 bytes; the cap only stops a large
+/// HTML error page from being pasted into `stats.errors` or a warn log.
+const MAX_ERROR_BODY_CHARS: usize = 500;
 
 /// A Linear issue fetched from the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,10 +49,47 @@ pub struct LinearIssue {
 }
 
 /// Async Linear GraphQL client.
-#[derive(Debug)]
+///
+/// `Debug` is implemented by hand, not derived — see the impl below (#5733).
 pub struct LinearClient {
     client: Client,
     api_key: String,
+    /// GraphQL endpoint every request is sent to.
+    ///
+    /// Always [`LINEAR_GRAPHQL_URL`] in production. Tests override it via
+    /// [`LinearClient::with_endpoint`] so a mock server can answer, which is
+    /// what makes the #5665 auth-failure arm assertable without a live key.
+    endpoint: String,
+}
+
+/// What [`LinearClient`]'s `Debug` prints in place of the API key.
+const REDACTED_API_KEY: &str = "<redacted>";
+
+/// Redacting `Debug`: the derived one printed `api_key` verbatim (#5733).
+///
+/// Why: a derived `Debug` puts the live key into every `{:?}` of the client —
+/// a `tracing` field, an `anyhow` context, a panic message. No call site did
+/// that when this was written, so the fix is by construction: the type can no
+/// longer disclose the key, and a future call site needs no audit.
+/// What: renders `endpoint`, the field worth debugging, and replaces `api_key`
+/// with [`REDACTED_API_KEY`] — no prefix, no length, nothing derived from the
+/// value. The mask is unconditional because `LinearConfig::api_key` is an
+/// unvalidated `Option<String>` and nothing checks the key's shape: a
+/// fingerprint helper that echoes a head — such as
+/// [`trusty_common::credentials::redact_secret`], which returns the first four
+/// characters of any input longer than four — discloses four characters of
+/// real entropy for a key that is not `lin_`-prefixed. A guarantee that holds
+/// only for well-formed keys is not one this path can state. The `reqwest`
+/// client carries no credential (the key goes on a per-request header) and is
+/// dropped as noise; `finish_non_exhaustive` marks the elision.
+/// Test: `debug_never_renders_the_api_key`.
+impl std::fmt::Debug for LinearClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinearClient")
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &REDACTED_API_KEY)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LinearClient {
@@ -68,16 +112,46 @@ impl LinearClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(CollectError::Http)?;
-        Ok(Self { client, api_key })
+        Ok(Self {
+            client,
+            api_key,
+            endpoint: LINEAR_GRAPHQL_URL.to_string(),
+        })
+    }
+
+    /// Build a client that talks to `endpoint` instead of Linear itself.
+    ///
+    /// Test-only seam (#5665): the HTTP status arm of [`Self::fetch_issue`] is
+    /// only reachable through a server that answers non-2xx, and asserting it
+    /// against the live API would need a revoked key in CI.
+    #[cfg(test)]
+    fn with_endpoint(config: &LinearConfig, endpoint: impl Into<String>) -> Result<Self> {
+        Ok(Self {
+            endpoint: endpoint.into(),
+            ..Self::new(config)?
+        })
     }
 
     /// Fetch a single Linear issue by identifier (e.g. "ENG-123").
     ///
-    /// Returns `Ok(None)` if the issue is not found or access is denied.
+    /// Why: `Ok(None)` is the answer to "does this issue exist", and callers
+    /// act on it by moving to the next identifier. A failed call has no answer
+    /// to that question, so it must not share the return value (#5665).
+    /// What: `Ok(None)` means Linear replied successfully and the issue is not
+    /// there — HTTP 200 with `data.issue: null`, or a 200 carrying GraphQL
+    /// errors. Every non-2xx status is an `Err`, including the 401 an invalid
+    /// API key produces.
+    /// Test: `fetch_issue_errors_on_auth_failure`,
+    /// `fetch_issue_errors_on_server_failure`,
+    /// `fetch_issue_returns_none_for_absent_issue`,
+    /// `graphql_errors_are_scrubbed_before_they_reach_the_log`.
     ///
     /// # Errors
     ///
-    /// Returns [`CollectError::Http`] on transport-level failures.
+    /// - [`CollectError::LinearApi`] on any non-2xx response, carrying the
+    ///   status and Linear's body.
+    /// - [`CollectError::Http`] on transport-level failures and on a response
+    ///   body that is not JSON.
     pub async fn fetch_issue(&self, identifier: &str) -> Result<Option<LinearIssue>> {
         let query = format!(
             r#"query {{
@@ -97,7 +171,7 @@ impl LinearClient {
 
         let resp = self
             .client
-            .post(LINEAR_GRAPHQL_URL)
+            .post(&self.endpoint)
             .header("Authorization", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -105,23 +179,30 @@ impl LinearClient {
             .await
             .map_err(CollectError::Http)?;
 
-        if !resp.status().is_success() {
-            tracing::warn!(
-                status = %resp.status(),
-                identifier = %identifier,
-                "Linear API non-success"
-            );
-            return Ok(None);
+        // #5665: a non-2xx is a failed call, never an absent issue.
+        let status = resp.status();
+        if !status.is_success() {
+            // The status is the finding; a body that will not read is not
+            // worth losing it over, so an unreadable body degrades to empty.
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CollectError::LinearApi {
+                status: status.as_u16(),
+                identifier: identifier.to_string(),
+                message: redacted_body_excerpt(&body, &self.api_key),
+            });
         }
 
         let json: serde_json::Value = resp.json().await.map_err(CollectError::Http)?;
 
         // GraphQL errors are returned with 200 OK; check for errors array.
-        if let Some(errors) = json.get("errors").and_then(|v| v.as_array()) {
-            if !errors.is_empty() {
+        if let Some(errors) = json.get("errors") {
+            if errors.as_array().is_some_and(|a| !a.is_empty()) {
+                // #5733: Linear authored this array, so it can quote the key
+                // back — scrub before it reaches an operator's stderr.
+                let detail = redacted_body_excerpt(&errors.to_string(), &self.api_key);
                 tracing::warn!(
                     identifier = %identifier,
-                    errors = ?errors,
+                    errors = %detail,
                     "Linear GraphQL errors"
                 );
                 return Ok(None);
@@ -174,17 +255,27 @@ impl LinearClient {
 
     /// Fetch all issues referenced in the given commit messages.
     ///
-    /// Deduplicates issue IDs across messages. Non-fatal: issues that fail
-    /// to fetch are logged as warnings and skipped.
+    /// Why: this used to return a bare `Vec` and log fetch failures at warn
+    /// level, so an invalid API key produced an empty vec that read exactly
+    /// like "no commit referenced a Linear issue" (#5665).
+    /// What: deduplicates issue IDs across messages, optionally filtered by
+    /// `team_filter` (matched case-insensitively against the prefix before the
+    /// `-`), then fetches each one. An identifier Linear does not have is
+    /// skipped; the first fetch that *fails* stops the walk and returns its
+    /// error, because an auth or transport failure applies to the whole run —
+    /// continuing only spends hundreds of doomed requests to reach the same
+    /// answer.
+    /// Test: `fetch_referenced_issues_propagates_auth_failure`,
+    /// `fetch_referenced_issues_skips_absent_issues`.
     ///
-    /// If `team_filter` is non-empty, only issues whose team key (the prefix
-    /// before the `-`) matches one of the provided keys (case-insensitive) are
-    /// fetched.
+    /// # Errors
+    ///
+    /// Propagates the first error from [`Self::fetch_issue`].
     pub async fn fetch_referenced_issues(
         &self,
         messages: &[&str],
         team_filter: &[String],
-    ) -> Vec<LinearIssue> {
+    ) -> Result<Vec<LinearIssue>> {
         let mut seen = HashSet::new();
         let mut all_ids: Vec<String> = Vec::new();
         for msg in messages {
@@ -209,13 +300,12 @@ impl LinearClient {
 
         let mut issues = Vec::new();
         for id in &ids {
-            match self.fetch_issue(id).await {
-                Ok(Some(issue)) => issues.push(issue),
-                Ok(None) => tracing::debug!("Linear issue not found: {id}"),
-                Err(e) => tracing::warn!("Failed to fetch Linear issue {id}: {e}"),
+            match self.fetch_issue(id).await? {
+                Some(issue) => issues.push(issue),
+                None => tracing::debug!("Linear issue not found: {id}"),
             }
         }
-        issues
+        Ok(issues)
     }
 
     /// Persist a batch of [`LinearIssue`] rows into the `linear_issues` table.
@@ -269,6 +359,42 @@ pub fn store_linear_issues(db: &Database, issues: &[LinearIssue]) -> crate::core
         count += 1;
     }
     Ok(count)
+}
+
+/// A credential-free excerpt of a Linear-authored response payload, capped at
+/// [`MAX_ERROR_BODY_CHARS`] characters.
+///
+/// Why: the payload is text this process did not author, and it reaches an
+/// operator either through `stats.errors` (the non-2xx body) or through
+/// `tracing::warn!` (the 200-with-GraphQL-errors array, #5733). A provider that
+/// echoes the submitted key back ("your key `lin_api_…` is invalid") would put
+/// a live credential in both. Both paths route here so the guard lands once.
+/// What: scrubs `api_key` out of the raw body through
+/// [`trusty_common::credentials::scrub_secrets`] FIRST, then trims and
+/// truncates — the #5239 ordering. Truncating first would cut a credential
+/// that straddles the boundary into a prefix the scrubber can no longer match,
+/// leaving a partial secret behind. Scrubbing and truncation are one function
+/// with the key as a required argument, so no call site can get the order
+/// wrong. The cap applies to the scrubbed text, so `[REDACTED]` being longer
+/// than what it replaces cannot push the excerpt over budget.
+/// Test: `redacted_body_excerpt_scrubs_before_truncating`,
+/// `redacted_body_excerpt_clips_long_input`,
+/// `redacted_body_excerpt_keeps_short_input`,
+/// `an_api_key_echoed_in_the_error_body_never_reaches_the_message`,
+/// `graphql_errors_are_scrubbed_before_they_reach_the_log`.
+///
+/// This removes the one credential this client holds. Per `scrub_secrets`'s own
+/// contract the result is lower-risk, not proven secret-free: a key under
+/// `MIN_SCRUBBABLE_SECRET_CHARS` (8) is skipped, and a credential the process
+/// does not hold — one Linear quotes from its own side — passes through.
+fn redacted_body_excerpt(body: &str, api_key: &str) -> String {
+    // #5239: scrub the full body, THEN cut.
+    let clean = scrub_secrets(body, &[api_key]);
+    let trimmed = clean.trim();
+    match trimmed.char_indices().nth(MAX_ERROR_BODY_CHARS) {
+        Some((idx, _)) => format!("{}…", &trimmed[..idx]),
+        None => trimmed.to_string(),
+    }
 }
 
 /// Thin local alias so existing call-sites in this module require no changes.
@@ -417,7 +543,354 @@ mod tests {
         assert!(db.schema_version().expect("version") >= 2);
     }
 
+    /// A credential-shaped key, long enough to clear `scrub_secrets`'
+    /// eight-character floor. Fake — matches Linear's `lin_api_` prefix only so
+    /// the fixture reads like the real thing.
+    const FAKE_API_KEY: &str = "lin_api_averyrealisticlookingkey0123456789";
+
+    #[test]
+    fn redacted_body_excerpt_keeps_short_input() {
+        assert_eq!(
+            redacted_body_excerpt("  {\"errors\":[]}  ", FAKE_API_KEY),
+            "{\"errors\":[]}"
+        );
+    }
+
+    #[test]
+    fn redacted_body_excerpt_clips_long_input() {
+        let out = redacted_body_excerpt(&"x".repeat(MAX_ERROR_BODY_CHARS + 50), FAKE_API_KEY);
+        assert_eq!(out.chars().count(), MAX_ERROR_BODY_CHARS + 1);
+        assert!(out.ends_with('…'));
+    }
+
+    /// The #5239 ordering, pinned: the key straddles the truncation boundary.
+    /// Scrub-then-truncate removes it whole. Truncate-then-scrub would cut it
+    /// into a prefix no scrubber can match and leave that fragment in the
+    /// operator's terminal.
+    #[test]
+    fn redacted_body_excerpt_scrubs_before_truncating() {
+        let pad = "x".repeat(MAX_ERROR_BODY_CHARS - 30);
+        let body = format!("{pad}{FAKE_API_KEY} trailing detail");
+
+        let out = redacted_body_excerpt(&body, FAKE_API_KEY);
+
+        assert!(!out.contains(FAKE_API_KEY), "whole key survived: {out}");
+        assert!(
+            !out.contains(&FAKE_API_KEY[..30]),
+            "a prefix of the key survived the cut — truncation ran first: {out}"
+        );
+        assert!(out.contains("[REDACTED]"), "key was not scrubbed: {out}");
+    }
+
+    /// Endpoint used by [`client_holding`]. Distinct from every key fixture, so
+    /// a "did the key survive" assertion cannot be satisfied by this instead.
+    const PROBE_ENDPOINT: &str = "http://endpoint.invalid/graphql";
+
+    /// Build a client holding `key` verbatim.
+    ///
+    /// Bypasses [`LinearClient::new`], which rejects an empty key — that arm is
+    /// why the empty case is otherwise unreachable, and `Debug` lives on the
+    /// type rather than on the constructor.
+    fn client_holding(key: &str) -> LinearClient {
+        LinearClient {
+            client: Client::new(),
+            api_key: key.to_string(),
+            endpoint: PROBE_ENDPOINT.to_string(),
+        }
+    }
+
+    /// The #5733 regression. `LinearClient` derived `Debug` over `api_key`, so
+    /// any `{:?}` of the client — a tracing field, an `anyhow` context, a panic
+    /// message — printed the live Linear key. Nothing formatted the client at
+    /// the time, which made the exposure latent rather than absent: it lived in
+    /// the type, so the next call site to debug-format one would have leaked
+    /// without touching this file.
+    ///
+    /// The shapes matter because nothing validates the key's format:
+    /// `LinearConfig::api_key` is a plain `Option<String>`. A masking rule that
+    /// echoed a fixed-length head would be safe only for `lin_`-prefixed keys
+    /// and would disclose real entropy for the rest, so the table covers a key
+    /// with no recognisable prefix, keys at and under a head length, and empty.
+    #[test]
+    fn debug_never_renders_the_api_key() {
+        // No single-character key here: `rendered` contains the mask and the
+        // endpoint, so a one-letter needle trips `contains` against those and
+        // fails a correct mask. Same trap `redact_secret`'s own contract test
+        // documents. Two characters is the shortest honest case.
+        let cases: &[(&str, &str)] = &[
+            (FAKE_API_KEY, "the lin_-prefixed key production expects"),
+            (
+                "9f3Kq7Zt2Wm4Bx8Lv6Nc1Rd5Ph0Sj",
+                "no prefix: entropy up front",
+            ),
+            ("ab7Q", "exactly a four-character head"),
+            ("x9", "shorter than a head"),
+            ("", "empty — unreachable via new(), guarded anyway"),
+        ];
+
+        for (key, why) in cases {
+            let client = client_holding(key);
+            let compact = format!("{client:?}");
+            let pretty = format!("{client:#?}");
+
+            for rendered in [&compact, &pretty] {
+                if !key.is_empty() {
+                    assert!(
+                        !rendered.contains(key),
+                        "{why}: the whole key reached Debug output: {rendered}"
+                    );
+                    // A head-echoing mask would pass the check above and still
+                    // disclose the first characters, which is the #5733 gap.
+                    let head: String = key.chars().take(4).collect();
+                    assert!(
+                        !rendered.contains(&head),
+                        "{why}: a leading fragment of the key survived: {rendered}"
+                    );
+                }
+                assert!(
+                    rendered.contains(REDACTED_API_KEY),
+                    "{why}: the key field was not masked: {rendered}"
+                );
+                assert!(
+                    rendered.contains("endpoint.invalid"),
+                    "{why}: redaction must not cost the endpoint, the field \
+                     worth debugging: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// The other half of #5733: Linear answers 200 with an `errors` array, and
+    /// that array is text this process did not author. A provider that quotes
+    /// the submitted key back put it on an operator's stderr on every such
+    /// response — not a rare path. `Ok(None)` stays the answer (#5665); only
+    /// the logging changes.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn graphql_errors_are_scrubbed_before_they_reach_the_log() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [{
+                    "message": format!("API key {FAKE_API_KEY} lacks the read scope")
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let got = mock_client(&server.uri())
+            .fetch_issue("ENG-1")
+            .await
+            .expect("a 200 carrying GraphQL errors is still a successful call");
+        assert!(got.is_none(), "the #5665 control flow is deliberately kept");
+
+        assert!(
+            !logs_contain(FAKE_API_KEY),
+            "the key reached the operator's terminal"
+        );
+        assert!(logs_contain("[REDACTED]"), "the key was not scrubbed");
+        assert!(
+            logs_contain("lacks the read scope"),
+            "redaction must not cost the reader Linear's diagnosis"
+        );
+    }
+
+    /// Build a client pointed at `endpoint`, holding [`FAKE_API_KEY`].
+    fn mock_client(endpoint: &str) -> LinearClient {
+        let cfg = LinearConfig {
+            api_key: Some(FAKE_API_KEY.into()),
+            ..Default::default()
+        };
+        LinearClient::with_endpoint(&cfg, endpoint).expect("client builds")
+    }
+
+    /// Linear's verbatim 401 body for a key it rejects, captured from
+    /// `POST https://api.linear.app/graphql` with an invalid key.
+    const AUTH_ERROR_BODY: &str = r#"{"errors":[{"message":"Authentication required, not authenticated","extensions":{"type":"authentication error","code":"AUTHENTICATION_ERROR","statusCode":401,"userPresentableMessage":"You need to authenticate to access this operation."}}]}"#;
+
+    /// The #5665 regression: a rejected API key must not answer the question
+    /// "does this issue exist". Before the fix this returned `Ok(None)`, which
+    /// every caller reads as "issue absent", so a run against an invalid key
+    /// wrote zero rows and exited 0 with nothing in the summary.
+    #[tokio::test]
+    async fn fetch_issue_errors_on_auth_failure() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_raw(AUTH_ERROR_BODY, "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let err = mock_client(&server.uri())
+            .fetch_issue("ENG-1")
+            .await
+            .expect_err("a 401 must not read as an absent issue");
+
+        match err {
+            CollectError::LinearApi {
+                status,
+                identifier,
+                message,
+            } => {
+                assert_eq!(status, 401);
+                assert_eq!(identifier, "ENG-1");
+                assert!(
+                    message.contains("You need to authenticate"),
+                    "Linear's own diagnosis must survive into the error: {message}"
+                );
+            }
+            other => panic!("expected LinearApi, got {other:?}"),
+        }
+    }
+
+    /// A provider that quotes the rejected key back must not put it in the
+    /// operator's terminal. `stats.errors` is printed to stderr by
+    /// `commands::collect`, so this body reaches a human — it did not before
+    /// #5665, which is what makes the scrub load-bearing now.
+    #[tokio::test]
+    async fn an_api_key_echoed_in_the_error_body_never_reaches_the_message() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let echoing_body = format!(
+            r#"{{"errors":[{{"message":"API key {FAKE_API_KEY} is not valid for this workspace"}}]}}"#
+        );
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_raw(echoing_body, "application/json"))
+            .mount(&server)
+            .await;
+
+        let err = mock_client(&server.uri())
+            .fetch_issue("ENG-1")
+            .await
+            .expect_err("a 401 must surface");
+        let rendered = err.to_string();
+
+        assert!(
+            !rendered.contains(FAKE_API_KEY),
+            "the key reached the error message: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED]"),
+            "the key was not scrubbed: {rendered}"
+        );
+        assert!(
+            rendered.contains("is not valid for this workspace"),
+            "redaction must not cost the reader Linear's diagnosis: {rendered}"
+        );
+    }
+
+    /// The same arm for a server-side failure — a 500 is no more an absent
+    /// issue than a 401 is.
+    #[tokio::test]
+    async fn fetch_issue_errors_on_server_failure() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_raw("upstream down", "text/plain"))
+            .mount(&server)
+            .await;
+
+        let err = mock_client(&server.uri())
+            .fetch_issue("ENG-1")
+            .await
+            .expect_err("a 500 must surface");
+        assert!(
+            matches!(err, CollectError::LinearApi { status: 500, .. }),
+            "expected a 500 LinearApi, got {err:?}"
+        );
+    }
+
+    /// The other side of the boundary: an issue Linear genuinely does not
+    /// have still returns `Ok(None)`, so a commit mentioning a non-Linear
+    /// `ABC-123` string does not fail the run.
+    #[tokio::test]
+    async fn fetch_issue_returns_none_for_absent_issue() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "issue": null }
+            })))
+            .mount(&server)
+            .await;
+
+        let got = mock_client(&server.uri())
+            .fetch_issue("ENG-404")
+            .await
+            .expect("an absent issue is a successful answer");
+        assert!(got.is_none());
+    }
+
+    /// The batch walk must carry the failure out to the pipeline rather than
+    /// returning an empty vec that is indistinguishable from "no references".
+    #[tokio::test]
+    async fn fetch_referenced_issues_propagates_auth_failure() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_raw(AUTH_ERROR_BODY, "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let err = mock_client(&server.uri())
+            .fetch_referenced_issues(&["ENG-1: work", "FE-2: more"], &[])
+            .await
+            .expect_err("an invalid key must reach the caller");
+        assert!(
+            matches!(err, CollectError::LinearApi { status: 401, .. }),
+            "expected a 401 LinearApi, got {err:?}"
+        );
+        assert_eq!(
+            server.received_requests().await.map(|r| r.len()),
+            Some(1),
+            "the walk stops at the first failure instead of retrying every id"
+        );
+    }
+
+    /// Absent issues stay non-fatal: the walk skips them and returns the
+    /// issues it did resolve.
+    #[tokio::test]
+    async fn fetch_referenced_issues_skips_absent_issues() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "issue": null }
+            })))
+            .mount(&server)
+            .await;
+
+        let issues = mock_client(&server.uri())
+            .fetch_referenced_issues(&["ENG-1 and FE-2"], &[])
+            .await
+            .expect("absent issues are not a failure");
+        assert!(issues.is_empty());
+    }
+
     /// Live integration test — only runs when `LINEAR_API_KEY` env var is set.
+    ///
+    /// The assertion is the #5665 closure condition: against a revoked key
+    /// this must FAIL. It used to pass, because a 401 arrived as `Ok(None)` —
+    /// the same value a genuinely absent `ENG-1` returns.
     #[tokio::test]
     async fn fetch_issue_live() {
         let key = match std::env::var("LINEAR_API_KEY") {
@@ -433,7 +906,10 @@ mod tests {
         };
         let client = LinearClient::new(&config).expect("client");
         let result = client.fetch_issue("ENG-1").await;
-        assert!(result.is_ok(), "fetch should not error: {:?}", result);
-        println!("Result: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "fetch must not error — a revoked key lands here: {result:?}"
+        );
+        println!("Result: {result:?}");
     }
 }

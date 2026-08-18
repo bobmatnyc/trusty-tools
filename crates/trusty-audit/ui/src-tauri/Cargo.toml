@@ -1,0 +1,48 @@
+[package]
+name = "trusty-audit-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Tauri 2 desktop shell for the trusty-audit auditor client"
+# #5483 keeps the auditor client off crates.io — the delivery path is a signed
+# .app, not `cargo install`. The shell inherits that, and an explicit licence
+# alongside it keeps `cargo deny check licenses` quiet (the trusty-agents-ui
+# precedent, where its absence was the only licence error in a 1220-crate graph).
+publish = false
+license.workspace = true
+
+[[bin]]
+name = "trusty-audit-ui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Pinned to match the workspace's three other Tauri apps. Not a
+# `[workspace.dependencies]` entry, because those three do not use one either.
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+tokio = { workspace = true }
+# #5935: `WorkDir::resolve` takes a `home: Option<&Path>` (#5929) so its
+# default can land under `~/.trusty-tools/trusty-audit/work` rather than
+# beside the cwd. Same dependency `trusty-audit`'s own `main.rs` uses to
+# supply it, for the same reason.
+dirs = { workspace = true }
+# The auditor client itself. DOC-68 §11: this shell is a view over
+# `Session::execute` and calls it IN-PROCESS — no HTTP endpoint, no `taudit`
+# subprocess. Capabilities live in `session::Command`, never here.
+trusty-audit = { workspace = true }
+
+[dev-dependencies]
+# Real directories for the guided-flow mapping tests — the same dependency
+# `trusty-audit` itself uses for the same reason.
+tempfile = { workspace = true }
+# Asserting the wire shape the TypeScript in `ui/src/lib/session.ts` mirrors.
+# Tauri serialises the command's return value with serde_json, so the field
+# names and the enum tagging are a contract between two languages that no
+# compiler checks — `guided_serialises_to_the_shape_the_window_reads` does.
+serde_json = { workspace = true }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

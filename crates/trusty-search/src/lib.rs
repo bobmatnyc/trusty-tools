@@ -10,6 +10,12 @@
 //! Test: `cargo build --lib` succeeds; `cargo test` runs integration tests
 //! that import `trusty_search::core::*`.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball, so
+// a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. This crate is at zero; deny keeps it there rather
+// than letting the ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 pub mod allowlist;
 pub mod config;
 pub mod core;

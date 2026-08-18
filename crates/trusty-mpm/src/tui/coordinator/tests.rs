@@ -1500,6 +1500,7 @@ fn render_result_renders_lifecycle() {
         name: "tmpm-red".to_string(),
         state: "Stopped".to_string(),
         action: "stopped".to_string(),
+        workspace_removed: None,
     });
     let text = line_text(&lines[0]);
     assert!(text.starts_with('✓'), "{text}");

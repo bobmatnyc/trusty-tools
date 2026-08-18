@@ -27,7 +27,9 @@ const IDENTITY_TXT: &str = "identity.txt";
 /// distinguish missing metadata from genuine I/O failure.
 /// What: Wraps `std::io::Error` and `serde_json::Error` plus a "not found"
 /// variant for missing metadata files.
-/// Test: `load_palace_missing_returns_not_found` (implicit via roundtrip test).
+/// Test: `load_palace_missing_returns_not_found` pins which absences earn
+/// `NotFound`; `load_palace_propagates_an_unstattable_palace_json` pins that an
+/// undeterminable one earns `Io` instead.
 #[derive(Debug, Error)]
 pub enum PalaceStoreError {
     #[error("io error at {path}: {source}")]
@@ -145,11 +147,22 @@ impl PalaceStore {
     /// Why: Re-opening a palace requires reconstructing its `Palace` struct
     /// before we can wire up storage handles.
     /// What: Reads `palace.json`, deserializes into `Palace`. Returns
-    /// `NotFound` if the file is missing.
-    /// Test: `palace_store_roundtrip` confirms fields survive a save+load.
+    /// `NotFound` only when the file is genuinely absent; a probe that cannot
+    /// determine whether it is there propagates the underlying error instead
+    /// (ADR-0045). That distinction matters to `list_palaces`, whose caller
+    /// contract treats `NotFound` as "skip this one" — so a denial coerced to
+    /// `NotFound` here drops a real palace out of the listing the destructive
+    /// passes act on.
+    /// Test: `palace_store_roundtrip` confirms fields survive a save+load;
+    /// `load_palace_missing_returns_not_found` pins the benign arm and
+    /// `load_palace_propagates_an_unstattable_palace_json` the error arm.
     pub fn load_palace(data_dir: &Path) -> Result<Palace> {
         let target = data_dir.join(PALACE_JSON);
-        if !target.exists() {
+        // #5549: `exists()` reported a stat we are denied as "no metadata here".
+        let present = target
+            .try_exists()
+            .map_err(|e| PalaceStoreError::io(target.clone(), e))?;
+        if !present {
             return Err(PalaceStoreError::NotFound(target));
         }
         let bytes = std::fs::read(&target).map_err(|e| PalaceStoreError::io(target.clone(), e))?;
@@ -245,6 +258,33 @@ impl PalaceStore {
         Ok(palaces)
     }
 
+    /// Whether `<data_dir>/palace.json` is present, distinguishing "absent"
+    /// from "cannot tell".
+    ///
+    /// Why (issue #4911): an open-or-create caller must only create when the
+    /// palace is genuinely absent. `create_palace` rewrites `palace.json`
+    /// unconditionally, so creating against a palace that merely could not be
+    /// OPENED destroys its `created_at`. Callers were each spelling this probe
+    /// as `data_dir.join("palace.json").exists()`, which carries the #5549 /
+    /// ADR-0045 defect in the direction that loses data: a stat we are DENIED
+    /// reports `false`, so an unreadable palace reads as absent and gets
+    /// overwritten. One entry point keeps that reasoning in a single place.
+    /// What: `try_exists()` on the metadata path. `Ok(false)` means genuinely
+    /// absent; `Ok(true)` means present; `Err` means the probe itself failed
+    /// and the caller must NOT infer absence from it.
+    /// Test: `metadata_present_distinguishes_absent_from_present`. The caller
+    /// contract this exists for is covered cross-crate, in
+    /// `crates/trusty-mpm/src/core/sm/memory_tests.rs`, by
+    /// `ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_palace`
+    /// — named in prose because `scripts/check_test_pointers.sh` resolves a
+    /// cited name only within the citing crate.
+    pub fn metadata_present(data_dir: &Path) -> Result<bool> {
+        let target = data_dir.join(PALACE_JSON);
+        target
+            .try_exists()
+            .map_err(|e| PalaceStoreError::io(&target, e))
+    }
+
     /// Persist the identity (L0) text for a palace.
     ///
     /// Why: L0 identity is read on every palace open; storing it as a plain
@@ -271,6 +311,12 @@ impl PalaceStore {
     /// `None` is exercised by `load_identity_missing_returns_none`.
     pub fn load_identity(data_dir: &Path) -> Result<Option<String>> {
         let target = data_dir.join(IDENTITY_TXT);
+        // intentional fail-open (ADR-0045 decision 4): `exists()` reads a
+        // denied stat as "absent" here as everywhere, and that is the safe
+        // direction for this one. The only consumer treats `None` as "no
+        // identity yet" and falls back to a default prompt, so the worst case
+        // is a thinner prompt — nothing destructive, enumerating, or
+        // operator-reporting branches on this answer.
         if !target.exists() {
             return Ok(None);
         }
@@ -598,6 +644,146 @@ mod tests {
                 assert_eq!(path, target, "the error must name the undecodable file");
             }
             other => panic!("expected a Json error naming the broken palace, got {other:?}"),
+        }
+    }
+
+    /// Why (#5549): `load_palace`'s own guard was `target.exists()`, which is
+    /// `fs::metadata(..).is_ok()`, so a `palace.json` we are forbidden to stat
+    /// returned `NotFound` — the one error `list_palaces` treats as benign and
+    /// skips. The palace dropped out of the listing the destructive passes act
+    /// on, one layer beneath the per-entry guard #5545 hardened, and no caller
+    /// could tell "no palace here" from "could not find out whether there is
+    /// one".
+    /// What: strips the palace's own directory to mode 000, so the directory
+    /// still stats while stat of the `palace.json` inside it is denied — the
+    /// probe fails, and it fails at this call site rather than in a caller.
+    /// Asserts the denial arrives as `Io` and specifically NOT as `NotFound`;
+    /// the direction is the point, not merely that some error came back.
+    /// Test: This test.
+    #[cfg(unix)]
+    #[test]
+    fn load_palace_propagates_an_unstattable_palace_json() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let data_dir = tmp.path().join("alpha");
+        PalaceStore::save_palace(&make_palace("alpha", &data_dir)).unwrap();
+
+        assert!(
+            PalaceStore::load_palace(&data_dir).is_ok(),
+            "the palace must load cleanly before its directory is locked"
+        );
+
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Declared after `tmp` so it drops first: the mode is restored before
+        // `TempDir` tries to delete the tree, including while unwinding from a
+        // failed assertion below.
+        let _restore = RestoreMode(data_dir.clone());
+
+        // Root bypasses the mode bits outright, and some filesystems ignore
+        // them, so confirm the denial actually took hold. A vacuous pass on a
+        // fail-open guard is worse than no test at all.
+        let target = data_dir.join(PALACE_JSON);
+        match std::fs::metadata(&target) {
+            Ok(_) => panic!(
+                "cannot exercise #5549: stat of {} still succeeds with its parent at \
+                 mode 000. Run this suite as a non-root user on a filesystem that honours \
+                 POSIX permission bits.",
+                target.display()
+            ),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "expected the locked palace dir to deny stat of its metadata, got {e}"
+            ),
+        }
+
+        let err = PalaceStore::load_palace(&data_dir)
+            .expect_err("a palace.json that cannot be stat'd must not load");
+
+        match err {
+            PalaceStoreError::Io { path, source } => {
+                assert_eq!(path, target, "the error must name the metadata file");
+                assert_eq!(
+                    source.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "the denial must survive into the error, got {source}"
+                );
+            }
+            PalaceStoreError::NotFound(p) => panic!(
+                "a palace whose metadata cannot be stat'd was reported as absent at {} — \
+                 that is the #5549 coercion, and `list_palaces` skips silently on it",
+                p.display()
+            ),
+            other => panic!("expected an Io error carrying the denial, got {other:?}"),
+        }
+    }
+
+    /// Why (#5549): the guard above must not turn a genuine absence into an
+    /// error. `NotFound` keeps its benign behaviour (ADR-0045 decision 3) —
+    /// `list_palaces` skips on it, and a first run against a data root that
+    /// holds no palace yet is normal, so making absence loud has a wider blast
+    /// radius than the bug being fixed.
+    /// What: asserts both absence shapes still read as `NotFound`: a directory
+    /// that exists but holds no `palace.json`, and a directory that is not
+    /// there at all. Uses no permission bits, so it exercises the arm under any
+    /// uid.
+    /// Test: This test.
+    /// Why (issue #4911): this probe is what an open-or-create caller branches
+    /// on before it may run `create_palace`, and `create_palace` rewrites
+    /// `palace.json`. Only a definite `Ok(false)` may authorise that, so the
+    /// two definite answers have to be right.
+    /// What: asserts `Ok(false)` for a directory holding no `palace.json` and
+    /// for a directory that does not exist, and `Ok(true)` once metadata is
+    /// saved. The denied-stat arm is not exercised here — it needs permission
+    /// bits and is uid-dependent; `try_exists` is the primitive that carries it.
+    /// Test: This test.
+    #[test]
+    fn metadata_present_distinguishes_absent_from_present() {
+        let tmp = tempdir().unwrap();
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(
+            !PalaceStore::metadata_present(&empty).expect("probe succeeds"),
+            "a directory with no palace.json holds no metadata"
+        );
+
+        let missing = tmp.path().join("does-not-exist");
+        assert!(
+            !PalaceStore::metadata_present(&missing).expect("probe succeeds"),
+            "a missing directory holds no metadata"
+        );
+
+        let palace = Palace {
+            id: PalaceId::new("probe"),
+            name: "Probe".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: tmp.path().join("probe"),
+        };
+        PalaceStore::save_palace(&palace).unwrap();
+        assert!(
+            PalaceStore::metadata_present(&palace.data_dir).expect("probe succeeds"),
+            "a saved palace must report its metadata as present"
+        );
+    }
+
+    #[test]
+    fn load_palace_missing_returns_not_found() {
+        let tmp = tempdir().unwrap();
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        match PalaceStore::load_palace(&empty).expect_err("a dir with no palace.json is absent") {
+            PalaceStoreError::NotFound(p) => assert_eq!(p, empty.join(PALACE_JSON)),
+            other => panic!("expected NotFound for a palace-less directory, got {other:?}"),
+        }
+
+        let missing = tmp.path().join("does-not-exist");
+        match PalaceStore::load_palace(&missing).expect_err("a missing dir is absent") {
+            PalaceStoreError::NotFound(p) => assert_eq!(p, missing.join(PALACE_JSON)),
+            other => panic!("expected NotFound for a missing directory, got {other:?}"),
         }
     }
 }

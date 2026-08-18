@@ -27,39 +27,31 @@
 
 use super::{start_session, start_session_in_place};
 
-/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
-/// identical pattern in `trusty_mpm::core::session_launch::tests::EnvVarGuard`
-/// and siblings (the `tm` binary is a SEPARATE crate target from the
-/// `trusty-mpm` lib, so `pub(crate) mod test_support` in the lib is not
-/// visible here — each target needs its own copy).
-///
-/// Why (#3965): `start_session_in_place` calls the REAL
-/// `session_launch::prepare_session(fw, path)`, which seeds
-/// `$HOME/.claude.json` via the REAL process `$HOME` — a DIFFERENT
-/// resolution path from the `fw` parameter this test already isolates via
-/// `FrameworkPaths::under(tmp_home.path())`. Pairs with
-/// `#[serial_test::serial]`.
-/// Test: used by `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`.
-struct HomeGuard(Option<String>);
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        // SAFETY: paired with `#[serial_test::serial]` — no other thread
-        // reads/writes the environment concurrently.
-        match self.0 {
-            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-    }
-}
-
-/// Point `$HOME` at `home` for the duration of the caller's scope. Callers
-/// MUST be `#[serial_test::serial]` — see [`HomeGuard`].
-fn set_home(home: &std::path::Path) -> HomeGuard {
-    let prior = std::env::var("HOME").ok();
-    // SAFETY: serialized via `#[serial_test::serial]`.
-    unsafe { std::env::set_var("HOME", home) };
-    HomeGuard(prior)
-}
+// #5544: there is no `$HOME` guard here any more. The two tests below used to
+// repoint the process's `$HOME` at a tempdir behind `#[serial]`, because
+// `prepare_session` reached the real `~/.claude.json` and `~/.claude/settings.json`
+// through `dirs::home_dir()` — a resolution path the `fw` parameter they already
+// isolated with `FrameworkPaths::under(tempdir)` had no say over.
+//
+// The home is now a PARAMETER: `prepare_session_with_home` takes it, and
+// `start_session_in_place` threads it through. Production passes
+// `dirs::home_dir()`, byte-identical to before under every framework root.
+//
+// 🔴 Do NOT "simplify" this by resolving the home from `fw` instead.
+// `FrameworkPaths::claude_home_dir()` still exists and looks like the obvious
+// answer; it is not. `for_managed_project` rewrites `claude_agents`, which that
+// accessor derives from, so for every managed session it returns the WORKSPACE —
+// which drops an untracked `.claude.json` into the operator's repo and points the
+// global hook cleanup at a file that does not exist. A missing file is success by
+// contract, so nothing reports it. That defect shipped twice in this PR's review
+// and cost two rounds; the parameter is what makes it unreachable.
+//
+// The env write had to go rather than be serialised: `cargo test` runs a
+// target's tests as threads in ONE process, so `$HOME` was repointed for every
+// sibling for the duration, and `#[serial]` excludes only other `#[serial]`
+// tests. `prepare_session_does_not_seed_the_workspace_on_the_managed_path` and
+// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`
+// (`core::session_launch::tests`) are the regression tests for the escape.
 
 /// Run `git <args>` in `dir`, panicking with full context on failure.
 ///
@@ -170,16 +162,23 @@ async fn session_start_dispatches_managed_new_for_github_repo() {
 /// POST — proving `prepare_session` still ran in place.
 /// Test: this function IS the test.
 #[tokio::test]
-#[serial_test::serial]
 async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable() {
     let tmp_home = tempfile::TempDir::new().expect("tmp home");
-    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
-    let _home = set_home(tmp_home.path());
     let target = tempfile::TempDir::new().expect("tmp target dir");
     let fw = trusty_mpm::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let client = reqwest::Client::new();
-    let result = start_session_in_place(&client, UNREACHABLE_URL, target.path(), &fw).await;
+    // #5544: the home is INJECTED. Production passes `dirs::home_dir()`; this
+    // passes the same tempdir `fw` is rooted at, which is what lets the test
+    // stop repointing the process's `$HOME`.
+    let result = start_session_in_place(
+        &client,
+        UNREACHABLE_URL,
+        target.path(),
+        &fw,
+        Some(tmp_home.path()),
+    )
+    .await;
 
     // Preserves the original in-place `Start` behavior: a daemon-unreachable
     // `POST /sessions` propagates as a hard `Err` via `?`.
@@ -369,10 +368,7 @@ async fn session_start_posts_the_same_wire_shape_bare_tm_guided_default_sends() 
 /// unreachable daemon URL, and asserts (1) an error naming the directory and
 /// (2) that nothing was written into it.
 #[tokio::test]
-#[serial_test::serial]
 async fn session_start_refuses_a_non_git_directory() {
-    let tmp_home = tempfile::TempDir::new().expect("tmp home");
-    let _home = set_home(tmp_home.path());
     let tmp = tempfile::TempDir::new().expect("tmp dir");
     let plain = tmp.path();
 
@@ -444,8 +440,12 @@ fn session_start_accepts_a_git_directory() {
 /// entire subject). `repo_url` is a non-directory string, so
 /// `needs_first_run_clone` short-circuits without touching the filesystem.
 /// Test: `launch_new_session_and_attach_sends_the_name_hint`,
-/// `launch_new_session_and_attach_omits_name_hint_when_unnamed`.
-async fn capture_guided_launch_body(name_hint: Option<&str>) -> serde_json::Value {
+/// `launch_new_session_and_attach_omits_name_hint_when_unnamed`,
+/// `launch_new_session_and_attach_requests_a_worktree_when_asked`.
+async fn capture_guided_launch_body(
+    name_hint: Option<&str>,
+    isolation: crate::commands::picker_launch_new::LaunchIsolation,
+) -> serde_json::Value {
     let (captured, url) = spawn_capturing_managed_spawn_server_answering(
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
     )
@@ -456,6 +456,7 @@ async fn capture_guided_launch_body(name_hint: Option<&str>) -> serde_json::Valu
         &url,
         "https://example.invalid/owner/repo.git",
         name_hint,
+        isolation,
     )
     .await;
     assert!(
@@ -479,7 +480,11 @@ async fn capture_guided_launch_body(name_hint: Option<&str>) -> serde_json::Valu
 /// What: captures the real POST body for `Some("auth")`.
 #[tokio::test]
 async fn launch_new_session_and_attach_sends_the_name_hint() {
-    let body = capture_guided_launch_body(Some("auth")).await;
+    let body = capture_guided_launch_body(
+        Some("auth"),
+        crate::commands::picker_launch_new::LaunchIsolation::SessionCheckout,
+    )
+    .await;
     assert_eq!(
         body.get("name_hint"),
         Some(&serde_json::Value::String("auth".to_string())),
@@ -497,7 +502,11 @@ async fn launch_new_session_and_attach_sends_the_name_hint() {
 /// then that the rest of the body is unchanged.
 #[tokio::test]
 async fn launch_new_session_and_attach_omits_name_hint_when_unnamed() {
-    let body = capture_guided_launch_body(None).await;
+    let body = capture_guided_launch_body(
+        None,
+        crate::commands::picker_launch_new::LaunchIsolation::SessionCheckout,
+    )
+    .await;
     assert!(
         body.get("name_hint").is_none(),
         "the unnamed launch must omit name_hint entirely, not send null: {body}"
@@ -511,6 +520,35 @@ async fn launch_new_session_and_attach_omits_name_hint_when_unnamed() {
             "force_new": true,
             "background": true,
         }),
-        "the unnamed request's wire shape must be unchanged by #4965"
+        "the unnamed request's wire shape must be unchanged by #4965 or #5773"
+    );
+}
+
+/// #5773: `n <name> --worktree` must put the isolation request on the wire
+/// under the key the daemon reads (`worktree`), as a JSON `true`.
+///
+/// Why: the picker's launch-new path built a body with no `worktree` key at
+/// all, so `SpawnRequest`'s `#[serde(default)]` decoded `false` and
+/// `spawn_managed_routed` took the main-checkout branch for every picker
+/// launch — the operator had no way to reach the worktree branch that
+/// `tm launch --worktree` reaches. Sending it under a different spelling would
+/// be silently ignored the same way.
+///
+/// FAILS BEFORE THIS CHANGE: the body carried no `worktree` key at all.
+/// What: captures the real POST body for an isolation-requesting launch. The
+/// default path's absence of the key is pinned by
+/// `launch_new_session_and_attach_omits_name_hint_when_unnamed`'s equality
+/// assertion above.
+#[tokio::test]
+async fn launch_new_session_and_attach_requests_a_worktree_when_asked() {
+    let body = capture_guided_launch_body(
+        Some("auth"),
+        crate::commands::picker_launch_new::LaunchIsolation::OwnWorktree,
+    )
+    .await;
+    assert_eq!(
+        body.get("worktree"),
+        Some(&serde_json::Value::Bool(true)),
+        "an isolation request must send worktree: true: {body}"
     );
 }

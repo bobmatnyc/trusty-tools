@@ -10,7 +10,7 @@
 //! every operation through this one enum.
 //! What: [`TrustyCommand`] enumerates every remote-management action. UI crates
 //! convert their own native command representation into a `TrustyCommand` and
-//! hand it to the executor. The command catalog ([`super::catalog`]) is the
+//! hand it to the executor. The command catalog ([`super::catalog`](mod@crate::client::catalog)) is the
 //! single source of truth for the names, aliases, and help prose; this enum is
 //! the typed target each catalog entry maps to.
 //! Test: `cargo test -p trusty-mpm` covers the executor and the catalog parity;
@@ -284,7 +284,7 @@ pub enum TrustyCommand {
 /// The `/help` text listing every command.
 ///
 /// Why: a single source of truth for the help body shared by every UI; it is
-/// rendered from the [`super::catalog`] registry so it can never drift from the
+/// rendered from the [`super::catalog`](mod@crate::client::catalog) registry so it can never drift from the
 /// typed command set.
 /// What: returns the catalog-rendered multi-line help string.
 /// Test: `super::catalog::tests` asserts the catalog covers every command.

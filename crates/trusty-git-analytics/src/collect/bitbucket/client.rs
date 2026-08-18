@@ -47,7 +47,9 @@ const RETRY_BASE_MS: u64 = 1000;
 ///
 /// Bearer wins when both modes are populated — repo / workspace access
 /// tokens supersede legacy App Passwords.
-#[derive(Debug, Clone)]
+// #5770: no `Debug` derive, deliberately — both variants carry a live
+// Bitbucket credential, and nothing formats one, so the derive was pure risk.
+#[derive(Clone)]
 enum BbAuth {
     /// `Authorization: Bearer <token>` (workspace or repository access token).
     Bearer(String),
@@ -465,6 +467,11 @@ fn map_pr(pr: BbPullRequest, repository: &str) -> PullRequest {
         merged_at,
         commit_shas,
         fetched_at: Utc::now().to_rfc3339(),
+        // #5734: Bitbucket's list payload does carry `source.branch.name` and
+        // `description`, but neither is deserialized yet. `None` states that
+        // this provider makes no claim, rather than asserting an empty branch.
+        head_ref: None,
+        body_ticket_id: None,
     }
 }
 
@@ -513,11 +520,6 @@ impl PrProvider for BitbucketClient {
     }
 }
 
-/// Why: keeps `client.rs` under the 500-line file cap; all Bitbucket client
-/// unit tests live in the sibling `tests.rs` file.
-/// What: `#[path]` overrides Rust's default resolution so a `mod tests;`
-/// inside a file module points to the sibling file rather than a subdirectory.
-/// Test: see `tests.rs` for the full suite.
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;

@@ -132,7 +132,14 @@ pub fn build_adapters(config: &Config) -> Vec<Box<dyn PmAdapter>> {
 
     if let Some(cfg) = config.azure_devops_config() {
         let client = crate::collect::azdo::AzureDevOpsClient::new(cfg.clone());
-        out.push(Box::new(AzureDevOpsAdapter::new(client)));
+        // #5219: the ADO adapter now serves the collection pipeline, so it must
+        // honour `pm.azure_devops.ticket_regex` the way the writer it replaced
+        // did — otherwise migrating the pipeline would silently kill that
+        // setting.
+        out.push(Box::new(AzureDevOpsAdapter::with_ticket_regex(
+            client,
+            Some(&cfg.ticket_regex),
+        )));
     }
 
     out

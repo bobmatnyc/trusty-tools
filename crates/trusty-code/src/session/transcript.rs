@@ -39,6 +39,42 @@ use crate::agent_loop::{GoalSlot, GoalSource};
 use crate::mode::HarnessMode;
 use crate::perf::TokenUsage;
 use crate::run_task::TurnRecord;
+use crate::session::memory_sink::MemoryFailureCategory;
+
+/// Per-session durable-memory degradation status (#2425).
+///
+/// Why: the turn recorder is fail-open by design — a failed `chat_turn_append`
+/// or `memory_remember` is logged and dropped so the turn still completes. That
+/// makes a session whose durable history is silently thinning indistinguishable
+/// from a healthy one at the operator surface. This is the retained counterpart
+/// to those per-turn warnings: `session.get_transcript` reports how much of the
+/// session's history failed to land.
+/// What: `total_failed_turns` counts every degraded turn for the session's
+/// lifetime; `consecutive_failed_turns` is the current streak and resets to `0`
+/// on the next durable turn; `latest_failure_category`/`latest_failure_at`
+/// describe the most recent degradation in LOGICAL turn order, not arrival
+/// order. `unrecorded_outcomes` counts outcomes that could not be folded in at
+/// all (see [`super::registry`]'s `record_memory_durability`) — a non-zero
+/// value means the three counters above UNDER-report.
+/// Every field is `#[serde(default)]`, so a transcript serialised before #2425
+/// still deserialises.
+/// Test: `registry_tests::memory_durability_retains_counts_resets_streak_and_warns_at_one_and_three`,
+/// `registry_tests::outcome_beyond_the_reorder_bound_is_counted_as_unrecorded`,
+/// `transcript::tests::old_transcript_json_defaults_memory_durability_status`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryDurabilityStatus {
+    #[serde(default)]
+    pub total_failed_turns: u64,
+    #[serde(default)]
+    pub consecutive_failed_turns: u32,
+    #[serde(default)]
+    pub latest_failure_category: Option<MemoryFailureCategory>,
+    #[serde(default)]
+    pub latest_failure_at: Option<DateTime<Utc>>,
+    /// Outcomes discarded before they reached the counters above (#2425).
+    #[serde(default)]
+    pub unrecorded_outcomes: u64,
+}
 
 /// A serialisable snapshot of one occupied goal slot, as
 /// `TranscriptRecord.goals` and `session.get_goals` (#2350) expose it.
@@ -109,6 +145,9 @@ pub struct TranscriptRecord {
     pub compaction_events: u32,
     #[serde(default)]
     pub goals: Vec<GoalSlotRecord>,
+    /// (#2425) Durable-memory degradation status for this session.
+    #[serde(default)]
+    pub memory_durability: MemoryDurabilityStatus,
 }
 
 #[cfg(test)]
@@ -129,6 +168,7 @@ mod tests {
             mode: None,
             compaction_events: 7,
             goals: vec![],
+            memory_durability: MemoryDurabilityStatus::default(),
         };
 
         let json = serde_json::to_value(&record).expect("serialize");
@@ -136,5 +176,24 @@ mod tests {
 
         let round_tripped: TranscriptRecord = serde_json::from_value(json).expect("deserialize");
         assert_eq!(round_tripped.compaction_events, 7);
+    }
+
+    /// (#2425) A transcript serialised before `memory_durability` existed must
+    /// still deserialise — the field is additive, so every `#[serde(default)]`
+    /// on it has to hold for the nested struct as well as the outer one.
+    #[test]
+    fn old_transcript_json_defaults_memory_durability_status() {
+        let old = serde_json::json!({
+            "session_id": "s-1",
+            "turns": [],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0,
+                      "cache_read_tokens": 0, "cache_creation_tokens": 0},
+            "cost_usd": null,
+            "mode": null,
+            "compaction_events": 0,
+            "goals": []
+        });
+        let record: TranscriptRecord = serde_json::from_value(old).expect("old transcript");
+        assert_eq!(record.memory_durability, MemoryDurabilityStatus::default());
     }
 }

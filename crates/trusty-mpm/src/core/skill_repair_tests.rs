@@ -85,7 +85,11 @@ fn repair_rewrites_drifted_and_verifies() {
 
     // And the manifest was updated, so the file is tm-owned again rather than
     // reading as frozen on the next audit.
-    assert!(SkillManifest::load(&dest).checksum_matches("tm-workflow", "v2"));
+    assert!(
+        SkillManifest::load(&dest)
+            .unwrap()
+            .checksum_matches("tm-workflow", "v2")
+    );
 }
 
 /// #4622 review HIGH-1: a drifted REFERENCE FILE must be repaired at its own

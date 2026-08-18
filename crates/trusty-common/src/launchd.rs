@@ -14,6 +14,8 @@
 //! Test: `render_plist` output is asserted in unit tests (pure string
 //! generation). `install`/`bootstrap`/`bootout` shell out and are exercised
 //! manually by downstream `setup` commands.
+//!
+//! [`LaunchdConfig`]: crate::launchd::LaunchdConfig
 #![cfg(target_os = "macos")]
 
 use std::path::PathBuf;
@@ -91,12 +93,12 @@ pub struct LaunchdConfig {
     /// `NumberOfFiles` written into both `SoftResourceLimits` and
     /// `HardResourceLimits` plist dicts. `None` suppresses both dicts
     /// (useful for agents that do not open many files). New agents should
-    /// leave this as [`Some(LAUNCHD_FD_LIMIT)`] (the default via
-    /// [`LaunchdConfig::new`]).
+    /// leave this as `Some(LAUNCHD_FD_LIMIT)` (the default via
+    /// `LaunchdConfig::new`).
     pub fd_limit: Option<u32>,
     /// `WorkingDirectory`, when the agent needs one. `None` omits the key.
     ///
-    /// #4868: exists so a regenerated unit can carry forward a
+    /// #4919: exists so a regenerated unit can carry forward a
     /// `WorkingDirectory` the installed one had. Before install started
     /// overwriting the live plist this was invisible; now dropping it would be
     /// a silent behaviour change on every upgrade.
@@ -213,7 +215,7 @@ impl LaunchdConfig {
             crate::shutdown::TERMINATION_GRACE_SECS
         ));
 
-        // #4868: carried forward from the installed unit when it had one.
+        // #4919: carried forward from the installed unit when it had one.
         if let Some(wd) = &self.working_directory {
             s.push_str("  <key>WorkingDirectory</key>\n");
             s.push_str(&format!("  <string>{}</string>\n", xml_escape(wd)));

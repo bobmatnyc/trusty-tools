@@ -16,7 +16,7 @@
 //! `crate::events::SessionEventEnvelope`s (§12.1.5: default 1000, oldest
 //! dropped first), and a map of live attachments (`connection_id` ->
 //! `oneshot::Sender<()>` used by `detach` to stop that connection's
-//! forwarder task). [`Self::record`] is the ONE place that assigns `seq`
+//! forwarder task). `Self::record` is the ONE place that assigns `seq`
 //! (under the same lock that pushes the ring buffer entry), so replay and
 //! every subsequent live event share one gap-free, strictly increasing
 //! sequence — see `crate::events`'s module docs for the full envelope
@@ -49,7 +49,7 @@ use crate::perf::TokenUsage;
 use crate::run_task::TurnRecord;
 
 use super::model::{Session, SessionStatus};
-use super::transcript::TranscriptRecord;
+use super::transcript::MemoryDurabilityStatus;
 
 /// Default ring-buffer capacity per session (vision spec §12, 11.5).
 ///
@@ -108,6 +108,12 @@ struct SessionEntry {
     /// reused for the life of the session (see `memory_sink` module docs for
     /// why its background drain task must outlive any single run).
     memory_sink: Option<Arc<super::memory_sink::TurnMemorySink>>,
+    /// (#2425) Retained durable-memory degradation status, as
+    /// `session.get_transcript` reports it.
+    memory_durability: MemoryDurabilityStatus,
+    /// (#2425) Bounded logical-order projection folding the sink's detached and
+    /// synchronous outcomes into `memory_durability`.
+    memory_outcomes: super::memory_outcome_reconciler::MemoryOutcomeReconciler,
     /// (DOC-39 §5.6 Slice D) The most recently recorded `IndexReadiness`
     /// probe for this session — last-writer-wins, overwritten by every new
     /// `record_index_readiness` call. `None` until the session's first probe
@@ -123,6 +129,11 @@ struct SessionEntry {
     /// sub-agent loop never emits one), so `session.get_context_budget` can
     /// distinguish "never recorded" from an all-zero snapshot.
     context_budget: Option<ContextBudgetSnapshot>,
+    /// (issue #3948) This session's retained working-context low-water mark
+    /// and sample count, folded in by every `record_context_budget` call.
+    /// Kept beside `context_budget` rather than inside it so the latest
+    /// point-in-time snapshot stays a pure last-writer-wins value.
+    context_floor: super::registry_context_floor::ContextFloorState,
     /// (DOC-39 §5.4) Live per-agent roster, in first-seen order — the
     /// AUTHORITATIVE state `session.get_agents` reads (see
     /// `session::registry::agents`'s module docs). Updated by [`Self::record`]
@@ -332,8 +343,11 @@ impl SessionRegistry {
                     cost_usd: None,
                     pm_transcript: None,
                     memory_sink: None,
+                    memory_durability: MemoryDurabilityStatus::default(),
+                    memory_outcomes: Default::default(),
                     readiness: None,
                     context_budget: None,
+                    context_floor: super::registry_context_floor::ContextFloorState::default(),
                     agents: Vec::new(),
                     search_audit: VecDeque::new(),
                 },
@@ -855,47 +869,6 @@ impl SessionRegistry {
         }
     }
 
-    /// `session.get_transcript`: fetch the stored run record for a session
-    /// (#2058).
-    ///
-    /// Why: [`Self::set_run_outcome`] populates the storage; this is its read
-    /// counterpart — the M1 cut-line's "inspect transcript" verb. A never-run
-    /// session is a valid, empty transcript, not an error: `SessionEntry`'s
-    /// `transcript`/`usage`/`cost_usd` fields already default to
-    /// empty/zero/`None` at `create` time, so returning them unconditionally
-    /// (once the session itself is confirmed to exist) is correct with no
-    /// extra branching.
-    /// What: `Err(session_not_found)` if `id` is unknown; otherwise a clone of
-    /// whatever is currently stored, wrapped in a self-describing
-    /// [`TranscriptRecord`]. Never recomputes cost or usage — exposes exactly
-    /// what [`Self::set_run_outcome`] last stored. `compaction_events` (#2349)
-    /// reads `entry.pm_transcript`'s own cumulative counter — `0` when the
-    /// session has never run (`pm_transcript` still `None`).
-    /// Test: `registry_tests::get_transcript_returns_stored_record`,
-    /// `registry_tests::get_transcript_on_never_run_session_is_empty`,
-    /// `registry_tests::get_transcript_unknown_session_errors`,
-    /// `registry_tests::get_transcript_reports_compaction_events`,
-    /// `registry_tests::get_transcript_round_trips_goal_state`.
-    pub fn get_transcript(&self, id: &str) -> Result<TranscriptRecord, RpcError> {
-        let sessions = self.lock();
-        let entry = sessions
-            .get(id)
-            .ok_or_else(|| RpcError::session_not_found(id))?;
-        Ok(TranscriptRecord {
-            session_id: id.to_string(),
-            turns: entry.transcript.clone(),
-            usage: entry.usage,
-            cost_usd: entry.cost_usd,
-            mode: entry.session.mode,
-            compaction_events: entry
-                .pm_transcript
-                .as_ref()
-                .map(Transcript::compaction_events)
-                .unwrap_or(0),
-            goals: goal_ops::goal_records(entry),
-        })
-    }
-
     /// `task.run`: persist the resolved `HarnessMode` onto the session
     /// (#2059).
     ///
@@ -1083,6 +1056,11 @@ mod events;
 /// the same 500-SLOC-cap reason as `events` above.
 #[path = "registry_memory_sink.rs"]
 mod memory_sink_ext;
+
+/// #2058's `session.get_transcript` projection, split out into its own file
+/// for the same 500-SLOC-cap reason as `events` above.
+#[path = "registry_transcript.rs"]
+mod transcript_ops;
 
 /// #2350 operator-facing goal-slot plumbing (`session.set_goal`/
 /// `clear_goal`/`get_goals`), split out into its own file for the same

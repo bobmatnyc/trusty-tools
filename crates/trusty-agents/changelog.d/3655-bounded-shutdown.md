@@ -1,0 +1,3 @@
+Fixed
+
+- `tagent` exits after the REPL loop ends even when a background task is stuck in a syscall. `main` was `#[tokio::main]`, whose runtime drop waits on the blocking pool with no ceiling, so the startup code-index watcher blocking on an unreachable embedding-model cache left the process alive forever after printing `Bye.` — which is what timed out all seven `plain_cli_repl` integration tests. Both launchers now go through `trusty_agents::run_to_completion`, which bounds shutdown at 5s and warns when that grace is consumed, and `build_file_watcher` constructs its `CodeStore`/`FastEmbedder` on the blocking pool instead of pinning a runtime worker ([#3655](https://github.com/bobmatnyc/trusty-tools/issues/3655))

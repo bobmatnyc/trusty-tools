@@ -233,7 +233,7 @@ async fn upsert_drawer_then_load_drawers_round_trips() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].id, d.id);
     assert_eq!(loaded[0].room_id, room_id);
-    assert_eq!(loaded[0].content, "the cold-start drawer");
+    assert_eq!(loaded[0].content(), "the cold-start drawer");
     assert!((loaded[0].importance - 0.83).abs() < 1e-5);
     assert_eq!(loaded[0].tags, vec!["alpha".to_string(), "beta".into()]);
     assert_eq!(loaded[0].source_file, Some(PathBuf::from("/tmp/source.md")));
@@ -275,12 +275,12 @@ async fn upsert_drawer_replaces_existing_row() {
     let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).unwrap();
     let mut d = Drawer::new(Uuid::new_v4(), "original");
     kg.upsert_drawer(&d).await.unwrap();
-    d.content = "updated".into();
+    d.set_content("updated");
     d.importance = 0.95;
     kg.upsert_drawer(&d).await.unwrap();
     let loaded = kg.load_drawers().unwrap();
     assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].content, "updated");
+    assert_eq!(loaded[0].content(), "updated");
     assert!((loaded[0].importance - 0.95).abs() < 1e-5);
 }
 
@@ -722,4 +722,222 @@ async fn expand_neighbors_unknown_entity_is_empty() {
         .unwrap();
     assert!(nodes.is_empty());
     assert!(triples.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// #5424: a poisoned adjacency lock must not mask a committed retraction.
+// ---------------------------------------------------------------------------
+
+/// Poison `kg`'s adjacency lock deterministically.
+///
+/// Why (#5424): the bug only shows up once `self.adj.write()` fails, and the
+/// only way a `std::sync::RwLock` gets there is a panic that unwinds through a
+/// live guard. Timing or sleeps cannot produce that reliably; a thread that
+/// takes the guard and panics produces it every run.
+/// What: spawns a thread, takes the write guard, panics, and joins. The panic
+/// hook is swapped for a no-op across the join so the deliberate panic does not
+/// print into an otherwise-clean test run — the hook is global, so a concurrent
+/// test panicking in that window loses its message but still fails.
+/// Test: used by `retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted`
+/// and `cascade_delete_after_poisoned_adjacency_is_distinguishable_from_never_deleted`.
+fn poison_adjacency(kg: &KnowledgeGraph) {
+    let adj = kg.adj.clone();
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let joined = std::thread::spawn(move || {
+        let _guard = adj
+            .write()
+            .expect("adjacency must be healthy before poisoning");
+        panic!("#5424: deliberate panic to poison the adjacency lock");
+    })
+    .join();
+    std::panic::set_hook(previous_hook);
+    assert!(joined.is_err(), "the poisoning thread must have panicked");
+    assert!(
+        kg.adj.read().is_err(),
+        "the adjacency lock must be poisoned after that panic"
+    );
+}
+
+/// Seed `room:General contains {drawer:a, drawer:b, drawer:c}`.
+async fn poison_fixture() -> (tempfile::TempDir, KnowledgeGraph) {
+    let dir = tempdir().unwrap();
+    let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).unwrap();
+    for object in ["drawer:a", "drawer:b", "drawer:c"] {
+        kg.assert(Triple {
+            subject: "room:General".into(),
+            predicate: "contains".into(),
+            object: object.into(),
+            valid_from: Utc::now(),
+            valid_to: None,
+            confidence: 1.0,
+            provenance: None,
+        })
+        .await
+        .unwrap();
+    }
+    (dir, kg)
+}
+
+/// Why (#5424): `retract_triple` commits to redb and only then syncs the
+/// adjacency. When that sync fails the row is already durable, but the caller
+/// used to see a bare `Err` and a retry used to see `Ok(0)` — the exact
+/// reading of "there was nothing to retract". "It did not happen" and "it
+/// happened and we cannot see it" need opposite remediations.
+/// What: poisons the lock, retracts one live object, and checks that storage
+/// closed the row, that the error names the committed row, and that a retry
+/// refuses instead of reporting a plausible `0`.
+/// Test: this test.
+#[tokio::test]
+async fn retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted() {
+    let (_dir, kg) = poison_fixture().await;
+    poison_adjacency(&kg);
+
+    let err = kg
+        .retract_triple("room:General", "contains", "drawer:b")
+        .await
+        .expect_err("a poisoned adjacency must not report success");
+
+    // Storage is authoritative and it committed: drawer:b is gone from redb.
+    let mut objects: Vec<String> = kg
+        .query_active("room:General")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.object)
+        .collect();
+    objects.sort();
+    assert_eq!(
+        objects,
+        vec!["drawer:a".to_string(), "drawer:c".to_string()],
+        "the retraction committed — storage no longer holds drawer:b"
+    );
+
+    // The retry is where the old shape lied: redb has nothing left to close,
+    // so it answered Ok(0) — indistinguishable from "that fact was never here".
+    let retry = kg
+        .retract_triple("room:General", "contains", "drawer:b")
+        .await;
+    assert!(
+        retry.is_err(),
+        "a retry against a desynced handle must refuse, not report a plausible 0"
+    );
+
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("COMMITTED"),
+        "the error must say the write already committed, got: {text}"
+    );
+}
+
+/// Why (#5424): `cascade_delete_by_drawer` has the identical
+/// commit-then-sync shape, and its caller (`PalaceHandle::forget`) only logs
+/// the error — so a masked commit there silently leaves the caller believing
+/// no triples were cascaded.
+/// What: poisons the lock, cascades a drawer subject, and checks storage
+/// closed the rows while the error names them.
+/// Test: this test.
+#[tokio::test]
+async fn cascade_delete_after_poisoned_adjacency_is_distinguishable_from_never_deleted() {
+    let dir = tempdir().unwrap();
+    let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).unwrap();
+    let drawer_id = Uuid::new_v4();
+    let subject = format!("drawer:{drawer_id}");
+    for predicate in ["mentions", "cites"] {
+        kg.assert(Triple {
+            subject: subject.clone(),
+            predicate: predicate.into(),
+            object: "topic:rust".into(),
+            valid_from: Utc::now(),
+            valid_to: None,
+            confidence: 1.0,
+            provenance: None,
+        })
+        .await
+        .unwrap();
+    }
+    poison_adjacency(&kg);
+
+    let err = kg
+        .cascade_delete_by_drawer(drawer_id)
+        .await
+        .expect_err("a poisoned adjacency must not report success");
+
+    assert!(
+        kg.query_active(&subject).await.unwrap().is_empty(),
+        "the cascade committed — storage holds no active triple for the drawer"
+    );
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("COMMITTED"),
+        "the error must say the write already committed, got: {text}"
+    );
+
+    let retry = kg.cascade_delete_by_drawer(drawer_id).await;
+    assert!(
+        retry.is_err(),
+        "a retry against a desynced handle must refuse, not report a plausible 0"
+    );
+}
+
+/// Why (#5424): the string a human reads is not enough for a caller that has
+/// to branch — a retry loop needs to know how many rows the failed call made
+/// durable, and a health surface needs to know the handle is stale.
+/// What: poisons the lock, retracts, and downcasts the error to
+/// `AdjacencyDesync` to read the committed count; then checks the follow-up
+/// mutation is refused as `HandleStale` naming that earlier commit, and that
+/// the refusal stopped before storage.
+/// Test: this test.
+#[tokio::test]
+async fn poisoned_adjacency_error_downcasts_with_the_committed_row_count() {
+    use super::types::AdjacencyDesync;
+
+    let (_dir, kg) = poison_fixture().await;
+    assert!(!kg.adjacency_desynced());
+    poison_adjacency(&kg);
+
+    let err = kg
+        .retract_triple("room:General", "contains", "drawer:b")
+        .await
+        .expect_err("a poisoned adjacency must not report success");
+    assert_eq!(
+        err.downcast_ref::<AdjacencyDesync>(),
+        Some(&AdjacencyDesync::CommittedButStale {
+            operation: "retract_triple",
+            committed: 1,
+            cause: "adjacency lock poisoned",
+        }),
+        "the caller must be able to read the committed row count off the error"
+    );
+    assert!(kg.adjacency_desynced(), "the desync must be sticky");
+
+    // Every later mutation refuses, naming the write that already landed.
+    let refused = kg
+        .assert(Triple {
+            subject: "room:General".into(),
+            predicate: "contains".into(),
+            object: "drawer:d".into(),
+            valid_from: Utc::now(),
+            valid_to: None,
+            confidence: 1.0,
+            provenance: None,
+        })
+        .await
+        .expect_err("a desynced handle must refuse further mutations");
+    assert_eq!(
+        refused.downcast_ref::<AdjacencyDesync>(),
+        Some(&AdjacencyDesync::HandleStale {
+            operation: "assert",
+            earlier_operation: "retract_triple",
+            earlier_committed: 1,
+        })
+    );
+    assert!(
+        kg.query_active("room:General")
+            .await
+            .unwrap()
+            .iter()
+            .all(|t| t.object != "drawer:d"),
+        "the refused assert must not have reached storage"
+    );
 }

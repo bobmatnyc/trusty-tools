@@ -13,19 +13,22 @@ fn test_query_classifier_smoke() {
 
 #[test]
 fn test_bm25_smoke() {
-    use trusty_search::core::bm25::Bm25Index;
-    let mut idx = Bm25Index::new();
+    // #5828: `add_document` / `score` are the shared scorer's slot-index API,
+    // which trusty-search never calls, so `CodeBm25Index` does not expose them.
+    use trusty_common::bm25::BM25Index;
+    let mut idx = BM25Index::new();
     idx.add_document(0, "rust async tokio search");
     idx.add_document(1, "python django web framework");
     let s = idx.score("rust tokio", 0);
     assert!(s > 0.0);
 }
 
-// ── Bm25Index boundary / property tests ──────────────────────────────────────
+// ── CodeBm25Index boundary / property tests ──────────────────────────────────────
 //
-// `core::bm25` is a pure re-export (`BM25Index as Bm25Index`), so the unit
-// tests that exercise its constructor surface live here in the integration
-// harness, which already imports via `trusty_search::core::bm25::Bm25Index`.
+// These exercise the `CodeBm25Index` wrapper (#5828) through the crate's
+// public API — the same corpus/scoring assertions they made against the
+// re-exported scorer before, now proving the wrapper's delegation preserves
+// them. Unit-level wrapper coverage lives in `src/core/bm25.rs`.
 
 /// Default top-k cap used by the boundary tests below.
 const TOP_K: usize = 10;
@@ -34,8 +37,8 @@ const TOP_K: usize = 10;
 /// documents to rank.
 #[test]
 fn bm25_empty_corpus_returns_no_results() {
-    use trusty_search::core::bm25::Bm25Index;
-    let idx = Bm25Index::new();
+    use trusty_search::core::bm25::CodeBm25Index;
+    let idx = CodeBm25Index::new();
     let results = idx.score_query_all("rust tokio", TOP_K);
     assert!(
         results.is_empty(),
@@ -47,8 +50,8 @@ fn bm25_empty_corpus_returns_no_results() {
 /// return that document with a positive score.
 #[test]
 fn bm25_single_doc_matching_term_scores_positive() {
-    use trusty_search::core::bm25::Bm25Index;
-    let mut idx = Bm25Index::new();
+    use trusty_search::core::bm25::CodeBm25Index;
+    let mut idx = CodeBm25Index::new();
     idx.upsert_document("doc-a", "rust async programming tokio runtime");
     let results = idx.score_query_all("rust async", TOP_K);
     assert!(
@@ -69,8 +72,8 @@ fn bm25_single_doc_matching_term_scores_positive() {
 /// does not depend on tie-break sort order.
 #[test]
 fn bm25_higher_term_frequency_scores_higher_or_equal() {
-    use trusty_search::core::bm25::Bm25Index;
-    let mut idx = Bm25Index::new();
+    use trusty_search::core::bm25::CodeBm25Index;
+    let mut idx = CodeBm25Index::new();
     // "search" appears once in doc-low, five times in doc-high.
     idx.upsert_document("doc-low", "search is useful");
     idx.upsert_document("doc-high", "search search search search search engine");

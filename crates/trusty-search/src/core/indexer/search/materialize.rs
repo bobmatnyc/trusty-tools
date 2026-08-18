@@ -26,8 +26,11 @@ impl CodeIndexer {
     /// serves bytes from the OS page cache rather than the heap.
     /// What: builds lookup sets for HNSW and BM25 hit IDs, then for each of
     /// the top-k `(id, score)` pairs picks a `match_reason` and emits a
-    /// `CodeChunk` via `raw_to_code_chunk`.
-    /// Test: covered by every search integration test.
+    /// `CodeChunk` via `raw_to_code_chunk`. Returns the chunks alongside the
+    /// number of ids that had no row — see the drop block below.
+    /// Test: covered by every search integration test;
+    /// `search_handler_meta_reports_rows_dropped_when_the_corpus_has_no_matching_row`
+    /// in `service::server::tests_search` pins the count.
     pub(super) async fn materialize_search_results(
         &self,
         all: Vec<(String, f32)>,
@@ -36,7 +39,7 @@ impl CodeIndexer {
         kg_ids: &HashSet<String>,
         branch_files: Option<&HashSet<String>>,
         query: &SearchQuery,
-    ) -> Vec<CodeChunk> {
+    ) -> (Vec<CodeChunk>, usize) {
         let in_hnsw: HashSet<&String> = hnsw_results.iter().map(|(id, _)| id).collect();
         let in_bm25: HashSet<&String> = bm25_results.iter().map(|(id, _)| id).collect();
 
@@ -44,9 +47,24 @@ impl CodeIndexer {
         let top_k_ids: Vec<String> = top_k.iter().map(|(id, _)| id.clone()).collect();
         let chunks = self.fetch_chunks_for_ids(&top_k_ids).await;
         let mut out = Vec::with_capacity(top_k.len());
+        let mut unresolved = 0_usize;
         for (id, score) in top_k {
             let Some(raw) = chunks.get(&id) else {
-                tracing::trace!("fused id {id} not in corpus — likely race; skipping");
+                // The id ranked into the top-k but `fetch_chunks_for_ids`
+                // returned no row for it. Two causes reach here and this frame
+                // cannot tell them apart: the chunk was removed while the query
+                // ran, or the durable read failed one frame up
+                // (`lanes::fetch_chunks_for_ids` warns, then falls back to an
+                // in-memory map that is empty after idle eviction — in which
+                // case EVERY id lands here and the caller sees an empty result
+                // set for a healthy index). The old text asserted "likely
+                // race", which is exactly wrong in the second case.
+                unresolved += 1;
+                tracing::debug!(
+                    index_id = %self.index_id,
+                    chunk_id = %id,
+                    "search: no corpus row for fused id — dropping it from the results"
+                );
                 continue;
             };
             let match_reason = compute_match_reason(
@@ -66,6 +84,27 @@ impl CodeIndexer {
             }
             out.push(chunk);
         }
-        out
+        if unresolved > 0 {
+            // #2203: a warn plus a Prometheus counter, matching how the
+            // out-of-root drop reports itself in `service::server::search`.
+            // Every caller of `search` gets this signal; only the HTTP handler
+            // gets the per-query count in `meta.dropped`.
+            metrics::counter!(
+                "trusty_search_dropped_unresolved_corpus_total",
+                "index_id" => self.index_id.clone(),
+            )
+            .increment(unresolved as u64);
+            tracing::warn!(
+                index_id = %self.index_id,
+                dropped = unresolved,
+                returned = out.len(),
+                "search: dropped {unresolved} of {} ranked result(s) — the corpus \
+                 returned no row for them. A non-zero count means the durable read \
+                 failed (see the preceding fetch_chunks_for_ids warning) or the \
+                 chunks were removed mid-query; it is never normal.",
+                unresolved + out.len(),
+            );
+        }
+        (out, unresolved)
     }
 }

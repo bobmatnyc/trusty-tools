@@ -284,8 +284,9 @@ impl GitWorktreeFixture {
             - super::worktree_ownership::OWNERLESS_GRACE
             - chrono::Duration::minutes(1);
         let payload = serde_json::to_vec(&super::worktree_ownership::WorktreeSentinel {
-            owner_session_id: ManagedSessionId::new(),
+            owner_session_id: Some(ManagedSessionId::new()),
             created_at: aged,
+            agent: None,
         })
         .expect("fixture: serialize sentinel");
         std::fs::write(
@@ -293,6 +294,30 @@ impl GitWorktreeFixture {
             payload,
         )
         .expect("fixture: write sentinel");
+    }
+
+    /// Stamp `wt` with an AGENT ownership sentinel naming `agent_id` (#5661).
+    ///
+    /// Why: the merged-PR reclaim gate keys on the agent the sentinel names, so
+    /// a test of that gate needs a real `#[4311]`-shaped payload on disk rather
+    /// than a hand-rolled JSON blob that could drift from the parser.
+    /// What: writes a [`super::worktree_ownership::WorktreeSentinel::for_agent`]
+    /// payload through the module's own serializer and returns the owner it
+    /// recorded, so a test can hand the same value to its liveness probe.
+    /// Test: `classify_blocks_a_live_agents_worktree`,
+    /// `classify_allows_a_finished_agents_merged_worktree`.
+    pub(crate) fn stamp_agent_sentinel(
+        wt: &Path,
+        agent_id: &str,
+    ) -> super::worktree_ownership::AgentWorktreeOwner {
+        let owner = super::worktree_ownership::AgentWorktreeOwner {
+            agent_id: agent_id.to_string(),
+            delegation_id: crate::core::agent::DelegationId::new(),
+            parent_session_id: crate::core::session::SessionId::new(),
+        };
+        super::worktree_ownership::write_agent_sentinel(wt, owner.clone())
+            .expect("fixture: write agent sentinel");
+        owner
     }
 
     /// Add a nested git worktree of the SAME repo INSIDE `parent`, at

@@ -13,6 +13,11 @@
 //! and publishes a fresh [`FleetMetrics`] snapshot for the `/metrics` endpoint.
 //! Test: `super::tests` covers config parsing, metrics derivation, the per-tick
 //! sweep (including an N-session fleet), and the HTTP handlers.
+//!
+//! [`Supervisor`]: crate::supervisor::Supervisor
+//! [`poller::run_tick`]: crate::supervisor::poller::run_tick
+//! [`SupervisorRunStats`]: crate::supervisor::SupervisorRunStats
+//! [`FleetMetrics`]: crate::supervisor::FleetMetrics
 
 pub mod config;
 pub mod metrics;

@@ -11,6 +11,8 @@
 //! [`dashboard`] and [`client`] modules so the logic is unit-testable.
 //! Test: `cargo test -p trusty-mpm-tui` covers chat/session formatting and the
 //! client; `trusty-mpm tui` launches the live dashboard.
+//!
+//! [`dashboard`]: crate::tui::dashboard
 
 pub mod client;
 pub mod coordinator;

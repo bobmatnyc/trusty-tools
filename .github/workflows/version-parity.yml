@@ -164,6 +164,23 @@ jobs:
         if: steps.gate.outputs.run_check == 'true'
         run: bash scripts/check_scan_floor_selftest.sh pr_version_bump
 
+      # Publish-ORDER selftest (issue #5358). Different question from this
+      # job's own gate — not "is this version already live" but "would we
+      # upload a crate before a sibling it needs" — and it lives here because
+      # this is the only PR-triggered, unconditionally-run job on the
+      # publish-safety side. Its own workflow cannot host it:
+      # release.yml's `publish-dry-run` job fires on `*-v*` tags only, and
+      # pre-publish.yml states in its header that it deliberately does not run
+      # on pull_request. A selftest nothing invokes on a PR is #5501's defect,
+      # so it goes where PRs actually reach it.
+      #
+      # Cheap enough to sit in a required job: pure shell plus python3 against
+      # a checked-in cargo-metadata fixture, no cargo, no network, well under
+      # a second. It never runs `cargo publish` — every case is --list-only.
+      - name: Publish-order selftest (optional + dev dep edges must order first)
+        if: steps.gate.outputs.run_check == 'true'
+        run: bash scripts/publish-dry-run-order_selftest.sh
+
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
       # `base.sha` snapshot. checkout leaves refs/remotes/origin/<base> at
       # whatever it fetched; re-fetching pins it to the live tip so the merge
@@ -204,6 +221,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: version-parity
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota, and this
+          # repo was over it — see the note on the test-shard cache in ci.yml.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run version-parity guard
         run: bash scripts/check-version-parity.sh

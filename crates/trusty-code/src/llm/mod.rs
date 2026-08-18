@@ -35,6 +35,10 @@
 //! HTTP round-trip in `tests/inference_shared_adapter_e2e.rs`. `cargo test -p
 //! trusty-code -- --include-ignored` additionally runs the live
 //! `live_openrouter_call`/`live_fireworks_call`/`live_bedrock_call` tests.
+//!
+//! [`OpenAiCompatClient`]: crate::llm::OpenAiCompatClient
+//! [`BedrockChatClient`]: crate::llm::BedrockChatClient
+//! [`DispatchingLlmClient`]: crate::llm::DispatchingLlmClient
 
 mod bedrock;
 mod client;

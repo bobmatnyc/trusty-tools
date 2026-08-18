@@ -61,7 +61,11 @@
 //! Test: `memory_sink::tests::*`.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -76,6 +80,81 @@ use crate::memory_envelope::call_tool_wrapped;
 /// policy below kicks in.
 /// Test: `memory_sink::tests::enqueue_drops_newest_when_queue_full`.
 pub const QUEUE_CAPACITY: usize = 50;
+
+/// Which half of the dual-write degraded, as the retained per-session status
+/// reports it (#2425).
+///
+/// Why: "the durable history is thinning" is not actionable on its own — an
+/// operator needs to know whether the daemon is unreachable, the palace is
+/// missing, a content gate rejected the write, or the local queue overflowed,
+/// because those have different remedies. This is a CLOSED vocabulary rather
+/// than the underlying error string precisely so it can be retained and
+/// reported without carrying daemon-controlled text into the operator surface.
+/// What: one variant per failure site in [`drain`]/[`write_turn`]/
+/// [`TurnMemorySink::enqueue`]. Serialises `snake_case`.
+/// Test: `memory_sink::tests::queue_full_and_closed_drain_are_immediate_failures`,
+/// `registry_tests::memory_degradation_event_is_redacted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryFailureCategory {
+    /// The target palace could not be probed or created (#2424).
+    PalaceEnsure,
+    /// `chat_turn_append` returned an RPC error.
+    ChatTurnAppend,
+    /// `memory_remember` returned an RPC error.
+    MemoryRemember,
+    /// `memory_remember` returned `status=skipped` despite `force: true` (#2363).
+    MemoryRememberSkipped,
+    /// The bounded queue was full, so the newest turn was dropped.
+    QueueFull,
+    /// The drain task was gone, so the turn was dropped.
+    DrainClosed,
+}
+
+/// The durability verdict for exactly one queued turn (#2425).
+///
+/// Why: durability is defined over QUEUED-TURN order, but outcomes do not
+/// arrive in that order — a queue-full failure is reported synchronously by
+/// [`TurnMemorySink::enqueue`] while accepted turns finish later in the
+/// detached drain. `sequence` is what lets the consumer put them back in
+/// logical order (see `memory_outcome_reconciler`).
+/// What: `sequence` is assigned by `enqueue` from a monotonic per-sink
+/// counter, so it is dense and gap-free across both reporting paths.
+/// Test: `memory_sink::tests::queue_full_and_closed_drain_are_immediate_failures`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemoryTurnOutcome {
+    Durable {
+        sequence: u64,
+    },
+    Degraded {
+        sequence: u64,
+        category: MemoryFailureCategory,
+        at: DateTime<Utc>,
+    },
+}
+
+/// Sink-side hook that reports each turn's durability verdict (#2425).
+///
+/// Why: the sink must stay a leaf — it knows nothing about sessions or the
+/// registry — but the retained status has to live on the session. An observer
+/// inverts that dependency so `registry_memory_sink` installs the coupling and
+/// the sink keeps its existing shape.
+/// What: called once per queued turn, on whichever thread produced the verdict
+/// (the caller's for a synchronous `enqueue` failure, the drain task's
+/// otherwise). Implementations MUST NOT block or panic — see
+/// `RegistryMemoryDurabilityObserver` for the fail-open contract.
+/// Test: `memory_sink::tests::queue_full_and_closed_drain_are_immediate_failures`,
+/// `memory_sink::tests::dropping_sink_releases_detached_drain_observer`.
+pub(crate) trait MemoryDurabilityObserver: Send + Sync {
+    fn observe(&self, outcome: MemoryTurnOutcome);
+}
+
+/// The observer a sink built without one gets — the pre-#2425 behaviour.
+struct NoopMemoryDurabilityObserver;
+
+impl MemoryDurabilityObserver for NoopMemoryDurabilityObserver {
+    fn observe(&self, _outcome: MemoryTurnOutcome) {}
+}
 
 /// Whether a sink is entitled to bring its target palace into EXISTENCE
 /// (#4638).
@@ -108,6 +187,8 @@ pub enum PalaceCreation {
 /// One user-prompt/assistant-response turn queued for durable dual-write.
 #[derive(Debug, Clone)]
 struct QueuedTurn {
+    /// (#2425) Dense, monotonic position in this sink's queued-turn order.
+    sequence: u64,
     session_id: String,
     prompt: String,
     response: String,
@@ -132,6 +213,10 @@ pub struct TurnMemorySink {
     palace: String,
     /// Whether this sink may bring `palace` into existence (#4638).
     creation: PalaceCreation,
+    /// (#2425) Where each turn's durability verdict is reported.
+    observer: Arc<dyn MemoryDurabilityObserver>,
+    /// (#2425) Assigns each enqueued turn its `QueuedTurn::sequence`.
+    next_sequence: AtomicU64,
 }
 
 impl TurnMemorySink {
@@ -141,6 +226,18 @@ impl TurnMemorySink {
     /// Test: `memory_sink::tests::enqueue_drain_happy_path`.
     pub fn new(base_url: String, palace: String, creation: PalaceCreation) -> Self {
         Self::with_capacity(base_url, palace, QUEUE_CAPACITY, creation)
+    }
+
+    /// Same as [`Self::new`], reporting each turn's durability verdict to
+    /// `observer` (#2425).
+    /// Test: `registry_tests::memory_durability_retains_counts_resets_streak_and_warns_at_one_and_three`.
+    pub(crate) fn new_observed(
+        base_url: String,
+        palace: String,
+        creation: PalaceCreation,
+        observer: Arc<dyn MemoryDurabilityObserver>,
+    ) -> Self {
+        Self::with_capacity_observed(base_url, palace, QUEUE_CAPACITY, creation, observer)
     }
 
     /// Same as [`Self::new`] with an explicit queue capacity — tests use a
@@ -165,13 +262,46 @@ impl TurnMemorySink {
         capacity: usize,
         creation: PalaceCreation,
     ) -> Self {
+        Self::with_capacity_observed(
+            base_url,
+            palace,
+            capacity,
+            creation,
+            Arc::new(NoopMemoryDurabilityObserver),
+        )
+    }
+
+    /// Same as [`Self::with_capacity`], reporting each turn's durability
+    /// verdict to `observer` (#2425).
+    ///
+    /// Why: the drain task needs its own handle on the observer because it
+    /// outlives no-one but the sink — the sink holds the sender half, so the
+    /// task ends (and releases its `Arc`) when the sink drops.
+    /// What: clones the `Arc` into the spawned [`drain`] and keeps one on the
+    /// sink for [`Self::enqueue`]'s synchronous failure paths.
+    /// Test: `memory_sink::tests::dropping_sink_releases_detached_drain_observer`.
+    pub(crate) fn with_capacity_observed(
+        base_url: String,
+        palace: String,
+        capacity: usize,
+        creation: PalaceCreation,
+        observer: Arc<dyn MemoryDurabilityObserver>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(capacity);
-        tokio::spawn(drain(base_url.clone(), palace.clone(), creation, rx));
+        tokio::spawn(drain(
+            base_url.clone(),
+            palace.clone(),
+            creation,
+            rx,
+            Arc::clone(&observer),
+        ));
         Self {
             tx,
             base_url,
             palace,
             creation,
+            observer,
+            next_sequence: AtomicU64::new(1),
         }
     }
 
@@ -230,7 +360,11 @@ impl TurnMemorySink {
         prompt: impl Into<String>,
         response: impl Into<String>,
     ) {
+        // #2425: the sequence is assigned here, on the ONE path every turn
+        // takes, so the two reporting paths below share one dense ordering.
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let turn = QueuedTurn {
+            sequence,
             session_id: session_id.into(),
             prompt: prompt.into(),
             response: response.into(),
@@ -238,10 +372,30 @@ impl TurnMemorySink {
         match self.tx.try_send(turn) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
-                warn!("turn_recorder: queue full (capacity reached) — dropping newest turn");
+                warn!(
+                    failure_category = "queue_full",
+                    tool = "turn_recorder",
+                    status = "dropped",
+                    "turn_recorder: queue full (capacity reached) — dropping newest turn"
+                );
+                self.observer.observe(MemoryTurnOutcome::Degraded {
+                    sequence,
+                    category: MemoryFailureCategory::QueueFull,
+                    at: Utc::now(),
+                });
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                warn!("turn_recorder: drain task gone — dropping turn");
+                warn!(
+                    failure_category = "drain_closed",
+                    tool = "turn_recorder",
+                    status = "dropped",
+                    "turn_recorder: drain task gone — dropping turn"
+                );
+                self.observer.observe(MemoryTurnOutcome::Degraded {
+                    sequence,
+                    category: MemoryFailureCategory::DrainClosed,
+                    at: Utc::now(),
+                });
             }
         }
     }
@@ -280,6 +434,7 @@ async fn drain(
     palace: String,
     creation: PalaceCreation,
     mut rx: mpsc::Receiver<QueuedTurn>,
+    observer: Arc<dyn MemoryDurabilityObserver>,
 ) {
     let mut palace_ensured = false;
     while let Some(turn) = rx.recv().await {
@@ -295,9 +450,14 @@ async fn drain(
                 "turn_recorder: dropping turn — palace absent and auto-create \
                  withheld for an ephemeral project root (#4638)"
             );
+            observer.observe(MemoryTurnOutcome::Degraded {
+                sequence: turn.sequence,
+                category: MemoryFailureCategory::PalaceEnsure,
+                at: Utc::now(),
+            });
             continue;
         }
-        write_turn(&base_url, &palace, &turn).await;
+        observer.observe(write_turn(&base_url, &palace, &turn).await);
     }
 }
 
@@ -349,10 +509,15 @@ async fn ensure_palace(base_url: &str, palace: &str, creation: PalaceCreation) -
             info!(palace = %palace, "turn_recorder: created missing palace (#2424)");
             true
         }
-        Err(e) => {
+        // #2425: the daemon's error text is server-controlled and can be
+        // arbitrarily long or carry a credential-shaped preview of the
+        // rejected content, so the default warning names the failure
+        // CATEGORY instead. See `write_turn` for the same treatment.
+        Err(_error) => {
             warn!(
-                palace = %palace,
-                error = %e,
+                failure_category = "palace_ensure",
+                tool = "palace_create",
+                status = "rpc_error",
                 "turn_recorder: palace ensure failed (fail-open, will retry next turn)"
             );
             false
@@ -391,21 +556,34 @@ async fn ensure_palace(base_url: &str, palace: &str, creation: PalaceCreation) -
 /// `tracing::warn!` and swallowed, matching
 /// `resolve_memory_base_url_or_unreachable`'s fail-open contract (mirrored
 /// here, not reused directly, since `base_url` is already resolved by the
-/// caller of [`TurnMemorySink::new`]).
+/// caller of [`TurnMemorySink::new`]). (#2425) It RETURNS the turn's verdict
+/// rather than propagating anything: `Degraded` with the first failed half's
+/// category if either call failed, `Durable` otherwise. The default warnings
+/// name that category and DELIBERATELY omit the daemon's own error text and
+/// `reason` string, both of which are server-controlled and can quote rejected
+/// content back — including the credential preview #2520's secret gate refused
+/// to store. The daemon's own logs keep that text; this warning does not.
 /// Test: `memory_sink::tests::enqueue_drain_happy_path`,
 /// `memory_sink::tests::write_turn_is_fail_open_on_unreachable_daemon`,
-/// `memory_sink::tests::write_turn_warns_on_skipped_status`.
-async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) {
+/// `memory_sink::tests::write_turn_warns_on_skipped_status`,
+/// `memory_sink::tests::partial_dual_write_counts_once_as_failed_turn`,
+/// `memory_sink::tests::default_memory_warnings_redact_server_payloads_in_subprocess`.
+async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) -> MemoryTurnOutcome {
+    // #2425: the FIRST failure wins the reported category — a turn that lost
+    // both halves is still exactly one degraded turn, not two.
+    let mut failure = None;
     let append_params = json!({
         "palace": palace,
         "session_id": turn.session_id,
         "prompt": turn.prompt,
         "response": turn.response,
     });
-    if let Err(e) = call_tool_wrapped(base_url, "chat_turn_append", append_params).await {
+    if let Err(_error) = call_tool_wrapped(base_url, "chat_turn_append", append_params).await {
+        failure = Some(MemoryFailureCategory::ChatTurnAppend);
         warn!(
-            session_id = %turn.session_id,
-            error = %e,
+            failure_category = "chat_turn_append",
+            tool = "chat_turn_append",
+            status = "rpc_error",
             "turn_recorder: chat_turn_append failed (fail-open)"
         );
     }
@@ -419,63 +597,71 @@ async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) {
     match call_tool_wrapped(base_url, "memory_remember", remember_params).await {
         Ok(result) => {
             if result.get("status").and_then(|v| v.as_str()) == Some("skipped") {
-                let reason = result
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
+                // #2425: `reason` is server-controlled and quotes the rejected
+                // content back — for the secret-detection gate (#2520) that is
+                // a preview of the very credential the gate refused to store.
+                failure.get_or_insert(MemoryFailureCategory::MemoryRememberSkipped);
                 warn!(
-                    session_id = %turn.session_id,
-                    reason = %reason,
+                    failure_category = "memory_remember_skipped",
+                    tool = "memory_remember",
+                    status = "skipped",
                     "turn_recorder: memory_remember returned status=skipped despite force=true \
                      (#2363) — session recall surface may be thinning"
                 );
             }
         }
-        Err(e) => {
+        Err(_error) => {
+            failure.get_or_insert(MemoryFailureCategory::MemoryRemember);
             warn!(
-                session_id = %turn.session_id,
-                error = %e,
+                failure_category = "memory_remember",
+                tool = "memory_remember",
+                status = "rpc_error",
                 "turn_recorder: memory_remember failed (fail-open)"
             );
         }
     }
+
+    match failure {
+        Some(category) => MemoryTurnOutcome::Degraded {
+            sequence: turn.sequence,
+            category,
+            at: Utc::now(),
+        },
+        None => MemoryTurnOutcome::Durable {
+            sequence: turn.sequence,
+        },
+    }
 }
 
-/// Derive the palace id for a project directory (#2345).
+/// Resolve the palace id for a project directory (#2345).
 ///
-/// Why: mirrors `trusty_common::catchup`'s own (private-to-that-module)
-/// `derive_palace_id_for` convention exactly, so a session's turns land in
-/// the SAME palace `catchup::pm_catchup_context` reads its digest from — the
-/// PM's own catch-up section and the turn recorder's writes must agree on
-/// "which palace is this project." Both this function and
-/// `trusty_common::catchup::derive_palace_id_for` previously carried their
-/// OWN copy of a 4th, unslugified `file_name()` fallback for when
-/// `derive_palace_id` returned `None`; since each copy re-derived the
-/// fallback from its own local `project_dir` handle, the two could in
-/// principle diverge (and could leak a storage-unsafe, unslugified token as
-/// a palace id) — see issue #1772. Both call sites now share the exact same
-/// terminal behavior — a fixed, non-derived placeholder — so `derive_palace_id`
-/// remains the single source of truth for every real precedence level.
-/// What: probes `git config --get remote.origin.url` from `project_dir`,
-/// then calls `trusty_common::derive_palace_id` (explicit override env ->
-/// git owner/repo slug -> parent/dir slug), falling back to the fixed
-/// literal `"unknown-project"` (never a directory-derived value) when all
-/// three yield `None`.
-/// Test: `memory_sink::tests::derive_palace_id_for_project_falls_back_to_dirname`.
-pub fn derive_palace_id_for_project(project_dir: &Path) -> String {
-    let remote = std::process::Command::new("git")
-        .arg("-C")
-        .arg(project_dir)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let override_val = trusty_common::palace_override_from_env();
-    trusty_common::derive_palace_id(project_dir, remote.as_deref(), override_val.as_deref())
-        .unwrap_or_else(|| "unknown-project".to_string())
+/// Why: mirrors `trusty_common::catchup`'s own `derive_palace_id_for`
+/// convention exactly, so a session's turns land in the SAME palace
+/// `catchup::pm_catchup_context` reads its digest from — the PM's own catch-up
+/// section and the turn recorder's writes must agree on "which palace is this
+/// project."
+///
+/// This used to answer `"unknown-project"` on any failure. That literal is
+/// SHARED: two projects that both fail resolution get the same id, and
+/// `SessionRegistry::memory_sink_for` grants a durable project root
+/// [`PalaceCreation::Allowed`], so the recorder auto-created one palace under
+/// the placeholder and posted both projects' real prompts and responses into it
+/// (#5811). While the only failure was "no identity at all" that was rare;
+/// routing through `palace_resolve` added three pin-trust failures to the same
+/// branch, so a typo in one committed pin was enough to reach it. The error is
+/// returned instead, and the caller declines to record.
+/// What: delegates to `trusty_common::palace_resolve::resolve_palace` — env
+/// override, then the committed pin, then the git `owner/repo` slug, then the
+/// `parent/dir` slug of the main worktree root.
+/// Test: `memory_sink::tests::derive_palace_id_for_project_falls_back_to_dirname`,
+/// `memory_sink::tests::malformed_pin_is_an_error_not_the_shared_placeholder`.
+pub fn derive_palace_id_for_project(
+    project_dir: &Path,
+) -> Result<String, trusty_common::palace_resolve::PalaceResolveError> {
+    // #5811: this probed the remote itself and called the PURE three-level
+    // core, so a tcode session's turns landed in the derived palace even when
+    // the project committed a pin naming a different one.
+    trusty_common::palace_resolve::resolve_palace(project_dir).map(|resolution| resolution.id)
 }
 
 #[cfg(test)]

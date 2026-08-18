@@ -189,6 +189,35 @@ pub async fn worktree_enabled_for_project(
     worktree_enabled_for_origin(registry, origin).await
 }
 
+/// Does a dispatched agent in this project get a worktree of its own (#5814)?
+///
+/// Why: ADR-0048 decision 1 grants one to every dispatched writer standing in a
+/// main checkout, and the decision is mechanical — `tm hook --pm-guard` never
+/// reads the dispatch prompt, so a project whose workflow wants no isolation had
+/// no way to say so. Isolation buys separation between concurrent writers and
+/// between build states; a writing or documentation repo has neither pressure,
+/// and pays instead in edits stranded in a tree the operator never looks at.
+///
+/// What: reads the project's committed `.trusty-mpm.toml` and answers its
+/// `agent_worktree` key; `true` when the key, the file, or a readable file is
+/// absent. It deliberately consults NO registry layer — `projects.json` carries
+/// #3455's `worktree` flag, which ADR-0044 decision 6 narrowed to the
+/// daemon-unreachable provisioning fallback, and letting that machine-global
+/// record reach this decision would resurrect the double duty ADR-0037 removed.
+/// A malformed or unreadable file resolves to `true` through
+/// [`load_or_report`], so no failure can strip a project of isolation it had
+/// before this key existed.
+/// Test: `agent_worktree_defaults_true_without_a_config`,
+/// `agent_worktree_opt_out_is_honoured`,
+/// `agent_worktree_malformed_config_keeps_isolation`,
+/// `agent_worktree_is_independent_of_the_session_worktree_key`.
+pub fn dispatched_agent_worktree_enabled(project_dir: &Path) -> bool {
+    // #5814: absent, undecided, or unreadable all mean "keep ADR-0048's grant".
+    load_or_report(project_dir)
+        .and_then(|cfg| cfg.agent_worktree)
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 #[path = "worktree_policy_tests.rs"]
 mod tests;

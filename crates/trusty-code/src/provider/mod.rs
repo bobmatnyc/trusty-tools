@@ -17,6 +17,24 @@
 //! [`DEFAULT_CONTEXT_WINDOW`] constant.
 //! Test: submodule `tests` in each file; routing/adapter coverage in
 //! `routing.rs` and `adapter.rs`.
+//!
+//! [`Provider`]: crate::provider::Provider
+//! [`ToolChoice`]: crate::provider::ToolChoice
+//! [`OpenRouterProvider`]: crate::provider::OpenRouterProvider
+//! [`BedrockProvider`]: crate::provider::BedrockProvider
+//! [`FireworksProvider`]: crate::provider::FireworksProvider
+//! [`TogetherProvider`]: crate::provider::TogetherProvider
+//! [`AtlasCloudProvider`]: crate::provider::AtlasCloudProvider
+//! [`provider_for`]: crate::provider::provider_for
+//! [`resolve_model`]: crate::provider::resolve_model
+//! [`DEFAULT_MODEL`]: crate::provider::DEFAULT_MODEL
+//! [`resolve_max_tokens`]: crate::provider::resolve_max_tokens
+//! [`DEFAULT_MAX_TOKENS`]: crate::provider::DEFAULT_MAX_TOKENS
+//! [`resolve_deadline_secs`]: crate::provider::resolve_deadline_secs
+//! [`DEFAULT_RUN_DEADLINE_SECS`]: crate::provider::DEFAULT_RUN_DEADLINE_SECS
+//! [`RUN_DEADLINE_ENV_VAR`]: crate::provider::RUN_DEADLINE_ENV_VAR
+//! [`resolve_context_window`]: crate::provider::resolve_context_window
+//! [`DEFAULT_CONTEXT_WINDOW`]: crate::provider::DEFAULT_CONTEXT_WINDOW
 
 mod adapter;
 mod atlascloud;

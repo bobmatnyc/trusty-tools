@@ -12,8 +12,9 @@
 //!
 //! What: marker parsing (`<!-- BEGIN GENERATED: <id> -->` …
 //! `<!-- END GENERATED: <id> -->`), a deterministic MCP-tool-table renderer,
-//! and [`assert_region`] / [`sync_region`], which check the region or — with
-//! `UPDATE_DOCS=1` in the environment — rewrite it in place.
+//! and [`crate::docgen::assert_region`] / [`crate::docgen::sync_region`], which
+//! check the region or — with `UPDATE_DOCS=1` in the environment — rewrite it
+//! in place.
 //!
 //! Test: `crates/trusty-common/src/docgen/tests.rs`, plus the three consumer
 //! tests `crates/{trusty-search,trusty-memory,trusty-analyze}/tests/generated_docs.rs`.

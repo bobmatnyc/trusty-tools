@@ -67,10 +67,10 @@ pub(super) struct HealthResponse {
     /// What: the same `QUEUE_DEPTH` gauge `defer_embed_queue` maintains,
     /// fleet-wide rather than per index. Additive field; every existing
     /// consumer parses this response with optional/ignored unknown fields.
-    /// Test: none dedicated yet — `tests_stall.rs`'s `HealthResponse`
-    /// fixtures set this field to a literal `0` without exercising the live
-    /// `reindex::deferred_embed_queue_depth()` wiring end to end. This is a
-    /// coverage gap, not a claim of tested behavior; see #5523.
+    /// Test: `health_reports_the_deferred_embed_queue_depth_end_to_end` in
+    /// `tests_stall` — drives a real queued job through
+    /// `spawn_deferred_embed_pass` and asserts `/health` reports it, both
+    /// enqueued and drained.
     pub(super) deferred_embed_queue_depth: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) update_available: Option<String>,
@@ -134,7 +134,8 @@ pub(super) struct HealthResponse {
     /// `status: ok`, `warm_boot_degraded: false`, `indexes_loaded: 222/222`.
     /// Every existing health signal was structurally blind to it:
     /// `indexes` and `warmboot_summary.indexes_loaded` count registered SLOTS,
-    /// not populated ones; `indexes_corpus_failed` only fires on
+    /// not populated ones; `indexes_stage_failed` (`indexes_corpus_failed`
+    /// before #5927) only fires on
     /// `stages.any_failed()`, and a stuck index has no `Failed` lane at all —
     /// it is indefinitely, falsely, "walking". Operators had no signal to poll.
     /// What: computed live in the same single registry scan as
@@ -149,6 +150,29 @@ pub(super) struct HealthResponse {
     /// `health_does_not_flag_a_walked_index_as_stuck` in
     /// `tests_health_degraded`.
     pub(super) indexes_stuck_empty: usize,
+    /// Issue #5336: count of registered indexes whose lexical walk STARTED and
+    /// was then abandoned — the stage still says `InProgress` (rendered
+    /// `"walking"`) but no task is driving the index.
+    ///
+    /// Why: #4680's `indexes_stuck_empty` deliberately only fires when no walk
+    /// ever started, so an index whose walk began and died — the reindex task
+    /// panicked, was cancelled, or returned early — was counted by neither. It
+    /// is indistinguishable, on every other field of this response and on
+    /// `GET /indexes/:id/status`, from an index that is genuinely mid-reindex:
+    /// same stage, same `lifecycle_status`, same empty `search_capabilities`.
+    /// Nothing completes it and nothing retries it, so it stays that way for
+    /// the daemon's lifetime with no signal to poll.
+    /// What: computed live in the same single registry scan as
+    /// `indexes_stuck_empty`, from
+    /// [`crate::service::warm_boot::index_is_stuck_mid_walk`]. The two
+    /// predicates partition the `InProgress` lexical lane on `walk_started`, so
+    /// an index is counted by at most one of them. Non-zero forces the
+    /// top-level `status` to `"degraded"`. This SURFACES the condition; nothing
+    /// recovers from it — see the predicate's doc for why.
+    /// Test: `health_reports_degraded_for_an_abandoned_mid_walk_index` and
+    /// `health_does_not_flag_an_in_flight_reindex_as_stuck_mid_walk` in
+    /// `tests_health_degraded`.
+    pub(super) indexes_stuck_mid_walk: usize,
     /// Issue #4839: registered indexes that actually hold chunks
     /// (`chunk_count > 0`), as opposed to `indexes` /
     /// `warmboot_summary.indexes_loaded`, which count registration SLOTS.
@@ -521,12 +545,21 @@ pub(super) async fn health_handler(
     // already calling `/health` — no new background task) and recompute.
     // See `recompute_warm_boot_degraded` for exactly what does/doesn't heal.
     let current_defer_embed_epoch = crate::service::reindex::deferred_embed_completion_epoch();
-    let last_seen_defer_embed_epoch = state.last_seen_defer_embed_epoch.swap(
-        current_defer_embed_epoch,
-        std::sync::atomic::Ordering::AcqRel,
-    );
+    let last_seen_defer_embed_epoch = state
+        .last_seen_defer_embed_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
     if current_defer_embed_epoch != last_seen_defer_embed_epoch {
-        recompute_warm_boot_degraded(&state);
+        // #5633: consume the drain edge only once the scan behind it was
+        // conclusive. Committing the epoch after an inconclusive scan spends
+        // the one trigger this recompute gets, which is what made it a
+        // one-shot with no re-scan; leaving it armed costs a cheap re-derive
+        // on the next poll and lets a contended handle resolve itself.
+        if recompute_warm_boot_degraded(&state) {
+            state.last_seen_defer_embed_epoch.store(
+                current_defer_embed_epoch,
+                std::sync::atomic::Ordering::Release,
+            );
+        }
     }
     // Issue #873: surface the warm-boot summary so a post-`cargo install` FDA
     // regression (`indexes:2` instead of `~102`) is visible without tailing logs.
@@ -611,13 +644,20 @@ pub(super) async fn health_handler(
     // #4680: count indexes whose lexical stage still owes work but that no walk
     // has ever touched — the state every other health signal was blind to.
     let mut indexes_stuck_empty = 0usize;
+    // #5336: the complement — a walk that started and was then abandoned.
+    let mut indexes_stuck_mid_walk = 0usize;
     // #4839: registration is not population. Folded into the SAME scan, from
     // the durable corpus rather than the in-memory map (which reads 0 after
     // idle eviction and would report a healthy index as empty).
     let mut indexes_populated = 0usize;
     let mut indexes_empty = 0usize;
     let mut total_chunks = 0u64;
-    let indexes_corpus_failed = state
+    // #5927: the count that actually answers "did a corpus fail to open?".
+    // Read from `CodeIndexer::corpus_open_failed` rather than inferred from
+    // the stage lanes, so it can never disagree with the per-index
+    // `corpus_open_failure` block on `GET /indexes/:id/status`.
+    let mut indexes_corpus_failed = 0usize;
+    let indexes_stage_failed = state
         .registry
         .list_handles()
         .iter()
@@ -673,6 +713,11 @@ pub(super) async fn health_handler(
                             indexes_empty += 1;
                         }
                     }
+                } else {
+                    // #5927: the same branch that already excludes this index
+                    // from the population counts is where the corpus-failure
+                    // count belongs — one read of the flag, one meaning.
+                    indexes_corpus_failed += 1;
                 }
             }
             match handle.stages.try_read() {
@@ -689,11 +734,22 @@ pub(super) async fn health_handler(
                     // — a contended walk-diagnostics read undercounts this poll
                     // only, and the next 2 s poll re-scans.
                     if let Ok(diag) = handle.walk_diagnostics.try_read() {
+                        let walk_started = diag.last_walk_started_at.is_some();
                         if crate::service::warm_boot::index_is_stuck_unwalked(
                             stages.lexical.status,
-                            diag.last_walk_started_at.is_some(),
+                            walk_started,
                         ) {
                             indexes_stuck_empty += 1;
+                        }
+                        // #5336: the walk started and nothing is driving this
+                        // index any more — a frozen `"walking"` claim, not a
+                        // live reindex.
+                        if crate::service::warm_boot::index_is_stuck_mid_walk(
+                            stages.lexical.status,
+                            walk_started,
+                            crate::service::reindex::index_task_in_flight(&handle.id),
+                        ) {
+                            indexes_stuck_mid_walk += 1;
                         }
                     }
                     stages.any_failed()
@@ -710,8 +766,14 @@ pub(super) async fn health_handler(
         })
         .count();
     warmboot_summary.indexes_corpus_failed = indexes_corpus_failed;
+    warmboot_summary.indexes_stage_failed = indexes_stage_failed;
     warmboot_summary.indexes_health_scan_skipped = indexes_health_scan_skipped;
-    if indexes_corpus_failed > 0 {
+    // #5927: OR both counts. `indexes_stage_failed` alone reproduces the exact
+    // pre-#5927 condition (a corpus-open failure fails every lane, so it is
+    // already counted there), and `indexes_corpus_failed` is folded in as a
+    // backstop for a corpus failure recorded after warm-boot stage derivation,
+    // where nothing would have re-marked the lanes.
+    if indexes_stage_failed > 0 || indexes_corpus_failed > 0 {
         // Fold into the single machine-readable warm-boot health flag external
         // monitors already poll, so #1870 rides the existing degraded channel.
         warmboot_summary.warm_boot_degraded = true;
@@ -756,13 +818,13 @@ pub(super) async fn health_handler(
     // so a total silent search outage (all-lanes-Failed corpus) still read as
     // healthy. Downgrade to `"degraded"` when at least one registered index has
     // a failed lane so a simple `status != "ok"` gate catches it. The healthy
-    // path is unchanged (`indexes_corpus_failed == 0` → `"ok"`).
+    // path is unchanged (`indexes_stage_failed == 0` → `"ok"`).
     // Issue #3408: also downgrade when a watcher was refused for a
     // network-mounted root — the daemon is not silently broken, but it is
     // running with a real capability gap that the same `status != "ok"`
     // monitors should catch.
     // Issue #3706: fold in the FULL `warm_boot_degraded` flag rather than only
-    // `indexes_corpus_failed`. `warm_boot_degraded` (see its doc comment in
+    // `indexes_stage_failed`. `warm_boot_degraded` (see its doc comment in
     // `state.rs`) already aggregates FOUR conditions — TCC/FDA denial, scan
     // timeout, corpus-open failure, and mass index loss (< 80% of prior) —
     // but only the corpus-open-failure case was previously reflected in the
@@ -770,7 +832,7 @@ pub(super) async fn health_handler(
     // purely from a TCC denial, a scan timeout, or a mass index loss still
     // reported `status: "ok"`, which is exactly what `warmboot_summary.
     // warm_boot_degraded` was supposed to make impossible to miss. Since
-    // `indexes_corpus_failed` is already OR'd into `warm_boot_degraded` above
+    // `indexes_stage_failed` is already OR'd into `warm_boot_degraded` above
     // (and by `recompute_warm_boot_degraded`), checking `warm_boot_degraded`
     // alone is a strict superset of the old condition — no case that used to
     // report `"degraded"` stops doing so.
@@ -781,9 +843,13 @@ pub(super) async fn health_handler(
     // #4125: an embedder that permanently failed to reach the backend it was
     // configured for (or fell back off it) is the same class of capability gap
     // as #3408's refused watcher — see `embedder_capability_degraded` above.
+    // #5336: an abandoned mid-walk index is the same outage as #4680's
+    // never-walked one — the lexical lane serves nothing and no one is coming to
+    // fix it — so it rides the same channel.
     let overall_status = if warmboot_summary.warm_boot_degraded
         || indexes_watcher_network_degraded > 0
         || indexes_stuck_empty > 0
+        || indexes_stuck_mid_walk > 0
         || embedder_capability_degraded
     {
         "degraded"
@@ -818,6 +884,8 @@ pub(super) async fn health_handler(
         indexes_component_catch_up_in_progress,
         indexes_embed_pool_missing,
         indexes_stuck_empty,
+        // #5336: the abandoned-mid-walk complement of the counter above.
+        indexes_stuck_mid_walk,
         // #4839: registered vs. populated, plus the fleet-wide corpus size.
         indexes_populated,
         indexes_empty,
@@ -863,24 +931,44 @@ pub(super) async fn health_handler(
 /// `recompute_does_not_flag_an_in_progress_tail_job_as_degraded`.
 ///
 /// What: re-derives `warm_boot_degraded` as `degraded_by_tcc ||
-/// degraded_by_timeout || degraded_by_count || any_stage_failed`, where the
+/// degraded_by_unapproved || degraded_by_timeout || degraded_by_count ||
+/// any_stage_failed`, where the
 /// first three reuse the ORIGINAL boot-time counters (`indexes_skipped_tcc`,
+/// `indexes_skipped_unapproved` — #5926, a boot-time allowlist exclusion that
+/// nothing at runtime can heal, for the same reason the TCC counter cannot —
 /// `indexes_skipped_timeout`, and a fresh `registry.list_handles().len()`
 /// vs. `prior_index_count` comparison — live rather than the frozen
 /// boot-time `total`, since new indexes can register between boot and
 /// drain) and `any_stage_failed` is a live scan for any handle with
 /// `stages.any_failed() == true` (the identical predicate `/health` already
-/// uses for `indexes_corpus_failed`). Persists the result back into
+/// uses for `indexes_stage_failed`). Persists the result back into
 /// `state.warmboot_summary` (not just a per-request clone) and logs the
 /// old -> new transition.
+///
+/// Returns whether the scan was CONCLUSIVE — i.e. every handle's `stages` was
+/// readable (#5633). A contended handle proves nothing about that index, so an
+/// inconclusive scan preserves the previous flag instead of clearing it, and the
+/// caller leaves the drain edge armed so the next poll re-derives.
 /// Test: `warm_boot_degraded_recomputes_to_false_once_catch_up_drains_cleanly`,
 /// `warm_boot_degraded_recompute_keeps_a_genuinely_failed_embed_degraded`,
-/// `recompute_does_not_flag_an_in_progress_tail_job_as_degraded` in
+/// `recompute_does_not_flag_an_in_progress_tail_job_as_degraded`,
+/// `recompute_does_not_clear_degraded_when_a_stages_read_is_contended`,
+/// `recompute_reports_whether_its_scan_was_conclusive` in
 /// `tests_health_degraded.rs`.
-pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) {
-    let (degraded_by_tcc, old) = match state.warmboot_summary.lock() {
-        Ok(summary) => (summary.indexes_skipped_tcc > 0, summary.warm_boot_degraded),
-        Err(_) => return,
+pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) -> bool {
+    // #5926: `indexes_skipped_unapproved` is read alongside the TCC counter and
+    // for the same reason — both are boot-time facts that a deferred-embed drain
+    // cannot heal. An index the allowlist excluded never entered the registry,
+    // so nothing this recompute scans can observe it; without this term the
+    // first drain after boot would clear a degraded signal while 103 registered
+    // indexes stayed unserved.
+    let (degraded_by_tcc, degraded_by_unapproved, old) = match state.warmboot_summary.lock() {
+        Ok(summary) => (
+            summary.indexes_skipped_tcc > 0,
+            summary.indexes_skipped_unapproved > 0,
+            summary.warm_boot_degraded,
+        ),
+        Err(_) => return false,
     };
     // #4250: this used to read the FROZEN boot-time `indexes_skipped_timeout`,
     // on the stated premise that "a scan timeout genuinely CANNOT heal without
@@ -897,16 +985,52 @@ pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) {
         .load(std::sync::atomic::Ordering::Relaxed);
     let handles = state.registry.list_handles();
     let degraded_by_count = prior_count > 0 && handles.len() < prior_count * 4 / 5;
-    let any_stage_failed = handles
-        .iter()
-        .any(|h| h.stages.try_read().map(|s| s.any_failed()).unwrap_or(false));
-    let new = degraded_by_tcc || degraded_by_timeout || degraded_by_count || any_stage_failed;
+    // #5633: separate what the scan PROVED from what it could not read. The
+    // `/health` poll above folds a contended `try_read` into "did not fail" and
+    // says why that is safe there — "the next 2 s poll re-scans". Nothing
+    // re-scans behind THIS one: it is edge-triggered on the catch-up queue's
+    // drain and it WRITES the sticky flag, so the same undercount clears a real
+    // degraded signal until the daemon restarts. tokio's `RwLock` is fair, so a
+    // merely QUEUED writer already fails `try_read` — and `reindex/defer_embed.rs`
+    // and `reindex/stages.rs` take `stages.write()` on exactly the handles this
+    // recompute's own trigger has been moving.
+    let mut any_stage_failed = false;
+    let mut unreadable = 0usize;
+    for handle in handles.iter() {
+        match handle.stages.try_read() {
+            Ok(stages) => any_stage_failed |= stages.any_failed(),
+            Err(_) => unreadable += 1,
+        }
+    }
+    let conclusive = unreadable == 0;
+    // An unreadable handle blocks only the CLEARING of the flag — the direction
+    // that discards evidence. It never manufactures a failure: a clean scan
+    // still clears, and a proven failure still sets. Defaulting the other way
+    // would be this same defect with the sign flipped.
+    let new = degraded_by_tcc
+        || degraded_by_unapproved
+        || degraded_by_timeout
+        || degraded_by_count
+        || any_stage_failed
+        || (!conclusive && old);
 
     if let Ok(mut summary) = state.warmboot_summary.lock() {
         summary.warm_boot_degraded = new;
     }
 
-    if new != old {
+    // Report WHY, not just the value: "nothing failed" and "N handles could not
+    // be read" must not reach an operator as the same line.
+    if !conclusive {
+        tracing::warn!(
+            unreadable,
+            handles = handles.len(),
+            warm_boot_degraded = new,
+            "warm_boot_degraded recompute could not read {unreadable} handle(s)' stages \
+             (lock contended) — the scan proves nothing about those indexes, so the \
+             previous value is preserved rather than cleared, and the drain edge stays \
+             armed for the next poll (#5633)"
+        );
+    } else if new != old {
         tracing::info!(
             "warm_boot_degraded recompute (deferred-embed catch-up drained): {old} -> {new}"
         );
@@ -915,6 +1039,7 @@ pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) {
             "warm_boot_degraded recompute (deferred-embed catch-up drained): unchanged at {new}"
         );
     }
+    conclusive
 }
 
 /// Request body for `POST /upgrade` (issue #537).

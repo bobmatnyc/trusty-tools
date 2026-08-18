@@ -174,7 +174,7 @@ pub(crate) async fn chat_handler(
 
             if let Ok(hits) = recall_with_default_embedder(&handle, &body.message, 5).await {
                 for r in hits.iter().take(5) {
-                    context.push_str(&format!("- (L{}) {}\n", r.layer, r.drawer.content));
+                    context.push_str(&format!("- (L{}) {}\n", r.layer, r.drawer.content()));
                 }
             }
         }

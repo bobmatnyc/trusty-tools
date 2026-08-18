@@ -400,7 +400,8 @@ fn every_bundled_non_base_agent_reaches_the_roster() {
     // `agent_with_a_base_role_but_no_base_filename_stays_in_the_roster`
     // asserts at the scanner level — one guards the shipped files, the
     // other guards the rule, and #4589 needed both.
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/agents");
+    let assets =
+        std::path::Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR).to_path_buf();
 
     let mut expected: Vec<String> = fs::read_dir(&assets)
         .expect("bundled agent assets dir")
@@ -714,4 +715,169 @@ fn a_plain_value_beginning_with_an_angle_bracket_is_not_a_block_scalar() {
     assert!(!is_block_scalar_header("> quoted prose"));
     assert!(!is_block_scalar_header("|pipe|table|"));
     assert!(!is_block_scalar_header("sonnet"));
+}
+
+// ── #5544: a truncated roster must be loud, not merely short ─────────────
+//
+// Every one of these was silent before the fix: an unreadable agent file was
+// dropped by a bare `else { continue }`, an unreadable tier returned an empty
+// `Vec` a caller could not distinguish from an absent tier, and neither reached
+// the composed prompt in any form. Each test below fails against the pre-fix
+// commit for that reason.
+
+/// Make `path` unreadable, returning `false` when the platform or the caller's
+/// privileges make that impossible (root ignores the mode bits).
+fn deny_read(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::set_permissions(path, fs::Permissions::from_mode(0o000)).is_err() {
+            return false;
+        }
+        // Root bypasses the mode bits entirely; verify the denial took effect
+        // rather than asserting a guarantee the environment did not give us.
+        fs::read_to_string(path).is_err() || fs::read_dir(path).is_err()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+#[test]
+fn an_unreadable_agent_file_is_reported_not_silently_dropped() {
+    // The sharpest fail-open branch: a file that exists but cannot be read used
+    // to leave the roster exactly one agent short with no log, no error, and no
+    // trace in the composed prompt — indistinguishable from an agent that was
+    // never deployed.
+    let tmp = TempDir::new().unwrap();
+    write_agent(tmp.path(), "engineer", "---\nname: engineer\n---\n\n# E\n");
+    write_agent(tmp.path(), "qa", "---\nname: qa\n---\n\n# Q\n");
+    let locked = tmp.path().join("qa.md");
+    if !deny_read(&locked) {
+        eprintln!("skipping: cannot deny read on this platform/privilege level");
+        return;
+    }
+
+    let scan = scan_agents_reporting(tmp.path());
+
+    assert_eq!(
+        scan.agents
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["engineer"],
+        "the unreadable agent is still absent from the roster (fail-open)"
+    );
+    assert_eq!(
+        scan.unreadable,
+        vec![locked.clone()],
+        "but the loss must be REPORTED, not absorbed into a short list"
+    );
+
+    // And it must reach the artifact a PM actually reads.
+    let section = roster_section_from_dirs(&[tmp.path().to_path_buf()])
+        .expect("a roster with one agent renders a section");
+    assert!(
+        section.contains(ROSTER_INCOMPLETE_MARKER),
+        "the composed delegation section must declare itself incomplete; got:\n{section}"
+    );
+    assert!(
+        section.contains("qa.md"),
+        "the banner must name the path that was lost; got:\n{section}"
+    );
+}
+
+#[test]
+fn an_unreadable_tier_directory_is_reported_not_silently_dropped() {
+    // A tier that fails to enumerate for any reason other than "not found"
+    // returned an empty `Vec`, byte-identical to an absent tier, so the union
+    // silently shrank by however many agents only that tier carried.
+    let present = TempDir::new().unwrap();
+    write_agent(
+        present.path(),
+        "engineer",
+        "---\nname: engineer\n---\n\n# E\n",
+    );
+    let denied = TempDir::new().unwrap();
+    write_agent(
+        denied.path(),
+        "ticketing",
+        "---\nname: ticketing\n---\n\n# T\n",
+    );
+    if !deny_read(denied.path()) {
+        eprintln!("skipping: cannot deny read on this platform/privilege level");
+        return;
+    }
+
+    let scan =
+        roster_from_dirs_reporting(&[present.path().to_path_buf(), denied.path().to_path_buf()]);
+
+    assert_eq!(scan.agents.len(), 1, "only the readable tier contributes");
+    assert_eq!(
+        scan.unreadable,
+        vec![denied.path().to_path_buf()],
+        "the unreadable TIER must be named, not collapsed into 'empty'"
+    );
+
+    // Restore so TempDir's drop can clean up.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(denied.path(), fs::Permissions::from_mode(0o700));
+    }
+}
+
+#[test]
+fn a_roster_that_is_empty_because_reads_failed_still_renders_a_section() {
+    // "Nothing is deployed" and "nothing could be read" must not collapse into
+    // the same answer. Pre-fix both produced `None`, which reverts the prompt to
+    // the bundled 8-row asset with no signal that a real roster was lost.
+    let tmp = TempDir::new().unwrap();
+    write_agent(tmp.path(), "engineer", "---\nname: engineer\n---\n\n# E\n");
+    if !deny_read(tmp.path()) {
+        eprintln!("skipping: cannot deny read on this platform/privilege level");
+        return;
+    }
+
+    let section = roster_section_from_dirs(&[tmp.path().to_path_buf()]);
+
+    let section = section.expect("an unreadable tier must NOT degrade silently to None");
+    assert!(
+        section.contains(ROSTER_INCOMPLETE_MARKER),
+        "got:\n{section}"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700));
+    }
+}
+
+#[test]
+fn roster_section_from_dirs_is_none_when_nothing_is_deployed() {
+    // The genuinely-unprovisioned case keeps its previous behaviour: no agents,
+    // no losses, no section — the bundled asset alone.
+    assert!(roster_section_from_dirs(&[PathBuf::from("/nonexistent/agents")]).is_none());
+    assert!(roster_section_from_dirs(&[]).is_none());
+}
+
+#[test]
+fn generate_authority_is_unchanged_when_nothing_was_lost() {
+    // The banner must cost nothing on the healthy path — every existing prompt
+    // fixture depends on this being byte-identical.
+    let agents = vec![AgentSummary {
+        name: "qa".to_string(),
+        role: "qa".to_string(),
+        description: None,
+        model: Some("sonnet".to_string()),
+        extends_chain: vec!["qa".to_string()],
+    }];
+    assert_eq!(
+        generate_authority_reporting(&agents, &[]),
+        generate_authority(&agents)
+    );
+    assert!(!generate_authority(&agents).contains(ROSTER_INCOMPLETE_MARKER));
 }

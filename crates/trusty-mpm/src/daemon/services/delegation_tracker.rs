@@ -100,10 +100,15 @@ use crate::core::agent::{
     Delegation, DelegationId, DelegationSource, DelegationStatus, ModelTier, TOOL_RESPONSE_KEYS,
     is_subagent_dispatch_tool,
 };
-use crate::core::dispatch_isolation::dispatch_isolation;
+use crate::core::dispatch_isolation::{dispatch_isolation, isolation_separates_working_tree};
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
+use crate::session_manager::worktree_ownership::{
+    AgentWorktreeOwner, SentinelOwner, read_sentinel_owner, write_agent_sentinel,
+};
+
+use crate::session_manager::worktree_ownership::is_harness_agent_worktree;
 
 /// How long after an `agent_delegate` call an observed dispatch may be treated
 /// as the *same* delegation.
@@ -138,6 +143,11 @@ pub fn observe(state: &DaemonState, session: SessionId, event: HookEvent, payloa
         // Hot path: the overwhelming majority of PreToolUse events are ordinary
         // tools. Bail on the tool-name compare before touching any state.
         HookEvent::PreToolUse => {
+            // #4311: a SUBAGENT's own tool call is the only event that names the
+            // tree the harness gave it. Costs one `payload.get("agent_id")` on
+            // the hot path — the same class as the tool-name compare below — and
+            // writes only when the answer changed.
+            register_agent_worktree(state, session, payload);
             if dispatch_tool(payload).is_some() {
                 on_dispatch(state, session, payload);
             }
@@ -194,6 +204,232 @@ fn usable_agent_id(response: &Value) -> Option<&str> {
     field(response, "agentId")
 }
 
+/// Record the working tree a subagent is actually running in (#4311).
+///
+/// Why: trusty-mpm creates no agent worktrees (ADR-0044 decision 4), so it
+/// cannot know the path at dispatch time — the harness chooses it. Without the
+/// path the tree has no owner, and an owner-unknown worktree is one ADR-0020
+/// correctly forbids anything from removing. That is the whole reason 56
+/// unowned trees accumulated under `.claude/worktrees` by the 2026-07-29 count.
+///
+/// The agent reports its own path, and it is the only party that can. Claude
+/// Code stamps `agent_id` into every hook payload a SUBAGENT emits (the same
+/// marker `pm_guard_fanout` reads to tell a subagent from the PM) and `tm hook`
+/// already forwards it, alongside the `cwd` that hook process is standing in.
+/// For an isolated agent that cwd IS the harness worktree. Nothing is created,
+/// nothing is relocated, and no new hook is installed — this reads an event the
+/// daemon already receives and discards.
+/// What: matches `payload.agent_id` against the `agent_id` `on_launched`
+/// learned, and writes `payload.cwd` to that delegation's `worktree_path`.
+/// Writes nothing when the cwd equals the DISPATCHER's `cwd` — that subagent
+/// inherited the caller's tree, so there is no child tree to own — and nothing
+/// when the value is already recorded, which is what keeps this off the hot
+/// path after the first tool call.
+///
+/// It is retried on every subagent tool call rather than run once, because the
+/// first one can lose a race: `agent_id` is taught only by the dispatch's
+/// `PostToolUse`, that hook is installed `async: true`, and until it lands there
+/// is no record to match against. A registration that misses simply happens on
+/// the next call.
+///
+/// # The sentinel is written FIRST, and a failed write registers nothing
+///
+/// The in-memory record is what grants
+/// [`super::agent_worktree_reap`] authority to run `git worktree remove
+/// --force` on that path. The sentinel is the only evidence of that authority
+/// that survives a daemon restart (`daemon::state::core` initialises the
+/// delegation map empty and never loads one), so registering after a failed
+/// write would grant deletion authority whose durable record does not exist —
+/// the fail-OPEN branch, and the exact shape of the bug this whole change
+/// closes: a worktree that silently becomes unattributable.
+///
+/// So the order is write-then-register, and a write failure declines the
+/// registration. That is affordable precisely because this function is
+/// retried on every subagent tool call: a transient failure self-heals on the
+/// next one at no extra cost. Declining leaves the tree owner-UNKNOWN, which
+/// is the pre-#4311 state and is never auto-deleted by anything — fail-closed
+/// in both directions. It is never fatal to the hook: [`observe`] is
+/// observational and must never affect the tool verdict, so the failure is
+/// logged at `error!` and the hook returns normally.
+///
+/// # `cwd` is agent-controlled, so two gates stand in front of the write
+///
+/// The `cwd` here is `std::env::current_dir()` of the `tm hook` process
+/// (`core::standalone::misc`), which is wherever the agent last `cd`-ed. It is
+/// not a path trusty-mpm chose, and an agent that visits its own main checkout,
+/// `/private/tmp`, or a peer's worktree reports that instead. Writing there
+/// would truncate whatever sentinel already sat at that path and retarget the
+/// reap at a directory the agent merely walked through.
+///
+/// So [`is_harness_agent_worktree`] must accept the path — the identical
+/// predicate [`super::agent_worktree_reap::reap_worktree`] uses as its own gate,
+/// reused rather than restated so the write and the delete cannot disagree
+/// about what a worktree is — AND the path's existing sentinel must be either
+/// absent/unparsable ([`SentinelOwner::Unknown`], nothing to overwrite) or
+/// already this same agent's. Anything else refuses and logs, exactly like the
+/// write-failure arm below.
+/// Test: `subagent_tool_call_registers_its_worktree`,
+/// `subagent_sharing_the_dispatchers_tree_registers_nothing`,
+/// `an_unknown_agent_id_registers_nothing`,
+/// `a_failed_sentinel_write_registers_no_worktree`,
+/// `a_cwd_outside_the_harness_store_gets_no_sentinel`,
+/// `a_cwd_owned_by_another_agent_is_never_overwritten`,
+/// `a_cwd_owned_by_a_managed_session_is_never_overwritten`.
+/// Why this agent may NOT claim `cwd` as its worktree, or `None` if it may.
+///
+/// Why: the `cwd` a subagent reports is `std::env::current_dir()` of its own
+/// `tm hook` process, so it follows wherever the agent `cd`-ed. It is a value
+/// the agent controls, and a claim on it grants the reaper authority to delete
+/// that directory. Four independent claims must all hold, and each answers a
+/// question the others cannot.
+/// What: `Some(reason)` refuses and is logged; `None` proceeds to the write.
+///
+/// 1. **Shape** — [`is_harness_agent_worktree`], the identical predicate
+///    [`super::agent_worktree_reap::reap_worktree`] gates on, imported rather
+///    than restated so the write and the delete cannot disagree about what a
+///    worktree is. Rejects a main checkout, a scratchpad, a nested path.
+/// 2. **Project** — the store this path sits in must be the store of the
+///    DISPATCHING session's own checkout. Claim 1 has already established the
+///    path is `<X>/.claude/worktrees/<name>`, so `<X>` is the checkout owning
+///    that store; the dispatcher's `cwd` must be `<X>` or sit under it. Under
+///    [ADR-0037](../../../../../docs/adr/0037-pm-placement-precedence-main-checkout-by-default.md)
+///    a PM is normally in the main checkout, which IS `<X>`, and under
+///    [ADR-0036](../../../../../docs/adr/0036-all-worktrees-are-siblings-under-claude-worktrees.md)
+///    a PM working from a worktree is a flat sibling beneath the same `<X>` —
+///    both normal placements pass. This is deliberately LEXICAL rather than a
+///    `harness_root_for` call: that resolves through `git rev-parse`, and this
+///    runs inside the synchronous `PreToolUse` budget. The lexical form refuses
+///    a superset (a PM in a different checkout of the same project), which is
+///    the fail-closed direction.
+/// 3. **Sentinel** — the path's existing sentinel must be absent/unparsable or
+///    already this same agent's. `fs::write` truncates, so without this an
+///    agent reporting a peer's tree erases that peer's ownership record, after
+///    which the peer's tree reaps on the wrong agent's exit and the peer's own
+///    exit reaps nothing.
+/// 4. **Registration** — no OTHER non-terminal delegation may already record
+///    this path. Claim 3 cannot see a peer worktree that carries no sentinel,
+///    which is every directory in the store until they acquire one; this claim
+///    covers exactly that case from the daemon's own live state, and is the
+///    write-side mirror of the reap's in-use gate.
+///
+/// Residual, stated: a sentinel-LESS peer whose delegation was also lost to a
+/// daemon restart is invisible to claims 3 and 4 both. Such a directory is
+/// unattributed and unregistered, so nothing else can reclaim it either; the
+/// exposure closes as worktrees acquire sentinels.
+///
+/// A convention that WOULD close it — the harness names each tree
+/// `agent-<agent_id>`, which holds for all 16 such directories on this machine
+/// — is deliberately not used. Nothing in this codebase or in any contract with
+/// Claude Code establishes that name, so a harness rename would silently stop
+/// every registration rather than failing visibly.
+/// Test: `a_cwd_outside_the_harness_store_gets_no_sentinel`,
+/// `a_cwd_in_another_projects_store_is_refused`,
+/// `a_cwd_owned_by_another_agent_is_never_overwritten`,
+/// `a_cwd_owned_by_a_managed_session_is_never_overwritten`,
+/// `a_cwd_another_live_delegation_holds_is_refused`,
+/// `an_agent_may_rewrite_its_own_sentinel`.
+fn claim_refused(
+    state: &DaemonState,
+    session: SessionId,
+    agent_id: &str,
+    cwd: &std::path::Path,
+) -> Option<String> {
+    if !is_harness_agent_worktree(cwd) {
+        return Some("it is not a `.claude/worktrees/<name>` leaf".to_string());
+    }
+    // `<X>/.claude/worktrees/<name>` — three parents up is `<X>`, the checkout
+    // that owns the store. Claim 1 guarantees the first two exist.
+    let store_owner = cwd
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)?;
+    let dispatcher_cwd = state
+        .delegations_for(session)
+        .into_iter()
+        .find(|d| d.agent_id.as_deref() == Some(agent_id))
+        .and_then(|d| d.cwd);
+    match dispatcher_cwd {
+        Some(dispatch_from) if dispatch_from.starts_with(store_owner) => {}
+        Some(dispatch_from) => {
+            return Some(format!(
+                "its store belongs to {}, but the dispatching session works from {} — an \
+                 agent may not claim a worktree in another project's store",
+                store_owner.display(),
+                dispatch_from.display()
+            ));
+        }
+        // No recorded dispatcher cwd is no proof of a shared project.
+        None => {
+            return Some(
+                "the dispatching delegation records no working directory, so nothing \
+                 establishes this store belongs to its project"
+                    .to_string(),
+            );
+        }
+    }
+    match read_sentinel_owner(cwd) {
+        SentinelOwner::Unknown => {}
+        SentinelOwner::Agent(existing, _) if existing.agent_id == agent_id => {}
+        occupied => return Some(format!("{occupied:?} already owns it")),
+    }
+    if let Some(holder) = state.all_delegations().into_iter().find(|d| {
+        !d.status.is_terminal()
+            && d.agent_id.as_deref() != Some(agent_id)
+            && d.worktree_path.as_deref() == Some(cwd)
+    }) {
+        return Some(format!(
+            "agent {} is still running and already registers it",
+            holder.agent_id.as_deref().unwrap_or("<unknown>")
+        ));
+    }
+    None
+}
+
+fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Value) {
+    let Some(agent_id) = field(payload, "agent_id") else {
+        return;
+    };
+    let Some(cwd) = field(payload, "cwd").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let Some(id) = state.find_delegation(session, |d| {
+        d.agent_id.as_deref() == Some(agent_id)
+            && d.worktree_path.as_deref() != Some(cwd.as_path())
+            && d.cwd.as_deref() != Some(cwd.as_path())
+    }) else {
+        return;
+    };
+    if let Some(refusal) = claim_refused(state, session, agent_id, &cwd) {
+        tracing::warn!(
+            agent_id,
+            cwd = %cwd.display(),
+            "delegation: not claiming this worktree — {refusal} (#4311)"
+        );
+        return;
+    }
+    let owner = AgentWorktreeOwner {
+        agent_id: agent_id.to_string(),
+        delegation_id: id,
+        parent_session_id: session,
+    };
+    if let Err(e) = write_agent_sentinel(&cwd, owner) {
+        tracing::error!(
+            agent_id,
+            worktree = %cwd.display(),
+            "delegation: could not write the agent worktree's ownership sentinel ({e}); \
+             leaving the tree unregistered and owner-unknown rather than granting a reap \
+             authority nothing on disk records — retried on this agent's next tool call (#4311)"
+        );
+        return;
+    }
+    tracing::info!(
+        agent_id,
+        worktree = %cwd.display(),
+        "delegation: registered the agent worktree its dispatch was granted (#4311)"
+    );
+    state.mutate_delegation(id, |d| d.worktree_path = Some(cwd.clone()));
+}
+
 /// `PreToolUse` on a dispatch tool: a subagent is starting now.
 ///
 /// Why: this is the moment tracking must record a *live* child, so a PM with
@@ -208,6 +444,76 @@ fn usable_agent_id(response: &Value) -> Option<&str> {
 /// `dedups_declaration_and_observation`, `duplicate_pre_tool_use_is_idempotent`,
 /// `pre_tool_use_records_declared_isolation`.
 fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
+    let _guard = state.dispatch_record_guard();
+    on_dispatch_locked(state, session, payload);
+}
+
+/// Correct an existing delegation's `isolation`, or create the record (#5769).
+///
+/// Why: `tm hook --pm-guard` rewrites an unisolated dispatch made from a main
+/// checkout into an isolated one (ADR-0048 decision 1), but [`on_dispatch`]
+/// observes the ORIGINAL payload, so the record read `isolation: None` — naming
+/// an agent that had just been moved into its own worktree as a live writer in
+/// the shared checkout. Decision 10 then denies a `git merge` or `git rebase`
+/// there on that record,
+/// for the six hours of `RUNNING_STALE_AFTER_SECS`, which blocks the release
+/// flow's fast-forward of the main checkout.
+///
+/// It is an UPSERT and not a second call to [`observe`] for two reasons read
+/// from this file. [`on_dispatch`] returns early when a delegation with the same
+/// `tool_use_id` already exists, so an `observe`-based grant would correct
+/// nothing whenever the tracker's hook won the race — and the two hooks fire on
+/// the same event, so which one wins is not decidable here. And the route the
+/// guard would otherwise post to re-derives eligibility and rejects an isolated
+/// dispatch by design. So isolation must be written over whatever landed first,
+/// which makes the two arrival orders converge instead of one of them deciding.
+/// What: with the dispatch-record lock held, sets `isolation` on the delegation
+/// carrying `payload.tool_use_id`, or creates the record from this payload when
+/// none exists — in which case the tracker's own later hook is a no-op on
+/// `tool_use_id` and the granted isolation survives.
+///
+/// Two payloads record NOTHING and return `false`, and both rules live HERE
+/// rather than in the caller. One with no `tool_use_id`: without that key the
+/// record could not be found again, so creating one would leave a second,
+/// unisolated record beside the tracker's — the phantom duplicated rather than
+/// removed. And one whose `isolation` does not
+/// [`isolation_separates_working_tree`]: this function's whole purpose is to
+/// erase a record that names a writer as sharing the checkout, so writing a
+/// non-separating mode over a correct record would write the very phantom it
+/// exists to remove. The route that calls this re-derives the same test to
+/// decide eligibility; keeping it in the writer as well means a second caller,
+/// or a refactor of that route, cannot reach the write without it.
+/// Test: `a_grant_and_the_tracker_converge_in_either_order`,
+/// `record_granted_isolation_refuses_a_non_separating_mode`.
+pub fn record_granted_isolation(state: &DaemonState, session: SessionId, payload: &Value) -> bool {
+    let Some(tool_use_id) = field(payload, "tool_use_id") else {
+        return false;
+    };
+    let declared = dispatch_isolation(payload.get("input"));
+    if !isolation_separates_working_tree(declared) {
+        return false;
+    }
+    let Some(isolation) = declared.map(str::to_string) else {
+        return false;
+    };
+    let _guard = state.dispatch_record_guard();
+    if let Some(id) =
+        state.find_delegation(session, |d| d.tool_use_id.as_deref() == Some(tool_use_id))
+    {
+        state.mutate_delegation(id, |d| d.isolation = Some(isolation.clone()));
+        return true;
+    }
+    on_dispatch_locked(state, session, payload);
+    true
+}
+
+/// [`on_dispatch`] with the dispatch-record lock already held.
+///
+/// Why: [`record_granted_isolation`] holds that lock across its own
+/// find-then-insert and then falls through to this body, so the locking cannot
+/// live here — it would be a second, non-reentrant acquisition of a
+/// `parking_lot::Mutex`, which deadlocks rather than failing.
+fn on_dispatch_locked(state: &DaemonState, session: SessionId, payload: &Value) {
     let input = payload.get("input");
     let agent = input
         .and_then(|i| i.get("subagent_type"))

@@ -464,6 +464,83 @@ fn managed_session_summary_deserializes() {
     assert!(s.source_id.is_none());
 }
 
+/// #5899: the decommission response's workspace verdict must survive the client
+/// round-trip, and an absent verdict must stay distinguishable from `false`.
+///
+/// The keys asserted here are `daemon::managed_routes::DecommissionResponse`'s own
+/// serde output — the flattened summary plus `workspace_removed` /
+/// `workspace_path_was`. Before this type existed the body was decoded into
+/// [`ManagedSessionSummary`], which has nowhere for either field to land, so serde
+/// dropped both and the CLI had nothing left to report.
+#[test]
+fn decommission_outcome_round_trips_daemon_response() {
+    let removed = serde_json::json!({
+        "id": "00000000-0000-0000-0000-000000000001",
+        "name": "tmpm-brave-otter",
+        "state": "decommissioned",
+        "workspace_path": serde_json::Value::Null,
+        "workspace_removed": true,
+        "workspace_path_was": "/tmp/base/.worktrees/abc",
+    });
+    let o: ManagedDecommissionOutcome = serde_json::from_value(removed).unwrap();
+    assert_eq!(o.summary.id, "00000000-0000-0000-0000-000000000001");
+    assert_eq!(o.summary.state, "decommissioned");
+    assert_eq!(o.workspace_removed, Some(true));
+    assert_eq!(
+        o.workspace_path_was.as_deref(),
+        Some("/tmp/base/.worktrees/abc")
+    );
+
+    // The error arm: the daemon says it removed nothing.
+    let kept = serde_json::json!({
+        "id": "x", "name": "n", "state": "decommissioned", "workspace_removed": false
+    });
+    let o: ManagedDecommissionOutcome = serde_json::from_value(kept).unwrap();
+    assert_eq!(o.workspace_removed, Some(false));
+    assert!(o.workspace_path_was.is_none());
+
+    // An older daemon that reports no verdict must NOT read as `false`, which
+    // would assert "still on disk" the client cannot know.
+    let silent = serde_json::json!({"id": "x", "name": "n", "state": "decommissioned"});
+    let o: ManagedDecommissionOutcome = serde_json::from_value(silent).unwrap();
+    assert_eq!(o.workspace_removed, None);
+}
+
+/// #5899: a field the daemon adds later must be retained, not silently dropped.
+///
+/// This is the class of bug, not just the instance: the client discarded
+/// `workspace_removed` because its target type had no field for it, and serde says
+/// nothing when that happens. Unmodelled keys now land in `unrecognized`, where the
+/// executor logs them and this test can see them.
+#[test]
+fn decommission_outcome_keeps_unmodelled_daemon_fields() {
+    let body = serde_json::json!({
+        "id": "x",
+        "name": "n",
+        "state": "decommissioned",
+        "workspace_removed": false,
+        "workspace_removal_error": "worktree holds uncommitted work",
+    });
+    let o: ManagedDecommissionOutcome = serde_json::from_value(body).unwrap();
+    assert_eq!(o.workspace_removed, Some(false));
+    assert_eq!(
+        o.unrecognized
+            .get("workspace_removal_error")
+            .and_then(|v| v.as_str()),
+        Some("worktree holds uncommitted work"),
+        "an unmodelled daemon field must be retained, not dropped: {:?}",
+        o.unrecognized
+    );
+    // Fields the client DOES model are consumed by their own fields, so they must
+    // not also show up as unrecognized.
+    for modelled in ["id", "name", "state", "workspace_removed"] {
+        assert!(
+            !o.unrecognized.contains_key(modelled),
+            "{modelled} is modelled and must not be collected as unrecognized"
+        );
+    }
+}
+
 /// #2595: `unresumable` must round-trip when present, and default `false`
 /// (never spuriously flag a session dead) when an older daemon omits it.
 #[test]

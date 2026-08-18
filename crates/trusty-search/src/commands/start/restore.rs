@@ -72,6 +72,101 @@ async fn collect_colocated_for_warmboot(
     collect_colocated_entries(seen_ids, seen_root_paths, colocated_inaccessible).await
 }
 
+/// Drop warm-boot entries whose root the #767 allowlist no longer approves.
+///
+/// Why: de-allowlisting must actually stop indexing. A root left in
+/// `indexes.toml` is re-registered on every boot and its file watcher keeps it
+/// current, so without this filter "remove it from the allowlist" would only
+/// block NEW registrations while the existing one carried on indefinitely.
+/// What: keeps an entry when the allowlist union approves its `root_path`,
+/// drops it otherwise with a `warn` naming the root and the remedy.
+///
+/// Two deliberate asymmetries with the create-time gate:
+///
+/// - The denylist applied here is
+///   [`crate::allowlist::is_denied_allowing_sensitive_path`], not the strict
+///   variant. A registered entry ALREADY passed `validate_root_path`, possibly
+///   via `allow_sensitive_path: true` — which is how a bake-off root under
+///   `/var/folders` legitimately gets indexed. Re-applying the strict form at
+///   boot would revoke, on the next restart, an approval the caller explicitly
+///   asked for. The credential and home-directory checks are never relaxed.
+/// - An allowlist that cannot be READ keeps every entry. That is a different
+///   failure from one that denies: un-indexing the whole fleet because a TOML
+///   file got corrupted would be a self-inflicted outage.
+///
+/// The on-disk data is untouched either way; approving the root again restores
+/// it on the next boot.
+/// Test: `warmboot_drops_unapproved_entries`,
+/// `warmboot_keeps_entries_when_allowlist_unreadable`,
+/// `warmboot_counts_every_entry_the_allowlist_excluded`.
+fn retain_approved_entries(
+    entries: Vec<PersistedIndex>,
+    paths: &crate::allowlist::AllowlistPaths,
+) -> RetainOutcome {
+    let mut excluded = 0usize;
+    let kept = entries
+        .into_iter()
+        .filter(|entry| {
+            // Canonicalise ONCE and use it for both checks. Every other gate
+            // runs on the canonical form (`validate_root_path` canonicalises
+            // before either check), so testing the raw stored path here would
+            // let a symlinked root answer differently than it does at creation.
+            let canonical = crate::service::warm_boot::canonicalize_best_effort(&entry.root_path);
+            if let Some(reason) = crate::allowlist::is_denied_allowing_sensitive_path(&canonical) {
+                tracing::warn!(
+                    id = %entry.id,
+                    root = %canonical.display(),
+                    %reason,
+                    "warm-boot: skipping index — its root is on the hard denylist (#767)"
+                );
+                excluded += 1;
+                return false;
+            }
+            match crate::allowlist::sources::resolve_allow_source(&canonical, paths) {
+                Ok(Some(_)) => true,
+                Ok(None) => {
+                    tracing::warn!(
+                        id = %entry.id,
+                        root = %entry.root_path.display(),
+                        "warm-boot: skipping index — its root is not approved for indexing. \
+                         This is an ALLOWLIST decision, not a permissions problem: approve it \
+                         with `trusty-search index add <path>` (#767, #5926)"
+                    );
+                    excluded += 1;
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        id = %entry.id,
+                        root = %entry.root_path.display(),
+                        "warm-boot: allowlist unreadable ({e:#}) — keeping this index rather \
+                         than un-indexing the fleet over a config-file error (#767)"
+                    );
+                    true
+                }
+            }
+        })
+        .collect();
+    RetainOutcome { kept, excluded }
+}
+
+/// What [`retain_approved_entries`] kept, and how many entries it dropped.
+///
+/// Why (#5926): the drop count used to exist only as one `warn` line per entry.
+/// Nothing read it, so a boot that excluded 103 of 121 registered indexes
+/// surfaced on `/health` as `skipped_tcc: 0` plus a generic "< 80% of prior"
+/// error whose remedy text was re-granting Full Disk Access — an explanation the
+/// counters themselves contradicted. Returning the count is what lets
+/// `WarmBootSummary::indexes_skipped_unapproved` name the real cause.
+/// What: the surviving entries plus the number excluded by the denylist or by
+/// the allowlist union. An entry kept because the allowlist was UNREADABLE is
+/// not counted — nothing was excluded in that case.
+/// Test: `warmboot_counts_every_entry_the_allowlist_excluded`.
+struct RetainOutcome {
+    kept: Vec<PersistedIndex>,
+    excluded: usize,
+}
+
 /// Restore every index recorded in `indexes.toml` and in colocated roots by
 /// re-registering it on the in-memory registry.
 ///
@@ -168,6 +263,15 @@ pub(super) async fn restore_indexes(
     // `prune_and_persist_dedup_outcome` can self-heal `indexes.toml` — pruning
     // the losing rows (otherwise re-discovered/re-warned/re-dropped forever)
     // and persisting the merged survivor config so it survives future boots.
+    // #767: an entry in `indexes.toml` is a record of a PAST approval, not a
+    // standing one. Without this filter, pruning a root from `allowlist.toml`
+    // would not stop it being indexed — warm-boot would re-register it and its
+    // file watcher would keep it current, so the acceptance criterion "removing
+    // it stops indexing" would hold for `POST /indexes` and fail on restart.
+    let retained = retain_approved_entries(all_entries, &state.allowlist_paths);
+    let indexes_skipped_unapproved = retained.excluded;
+    let all_entries = retained.kept;
+
     let dedup_outcome =
         crate::service::warm_boot::dedup_entries_by_corpus_path_verbose(all_entries);
     prune_and_persist_dedup_outcome(&dedup_outcome);
@@ -360,6 +464,7 @@ pub(super) async fn restore_indexes(
         total_skipped_tcc,
         total_skipped_timeout,
         indexes_lazy,
+        indexes_skipped_unapproved,
     );
 
     // #4087 review follow-up: a panicked restore is real breakage. It is never
@@ -501,8 +606,11 @@ async fn salvage_missing_root_entries(
     // `read_dir` + `canonicalize`, not async work.
     let all_entries = crate::service::persistence::load_index_registry().unwrap_or_default();
     let started = std::time::Instant::now();
+    // #767: adopting a relocated root registers, watches, and PERSISTS it with
+    // no operator action, so the candidate set is gated like `POST /indexes`.
+    let allowlist_paths = state.allowlist_paths.clone();
     let candidates = match tokio::task::spawn_blocking(move || {
-        collect_relocation_candidates(&all_entries, &grant)
+        collect_relocation_candidates(&all_entries, &grant, &allowlist_paths)
     })
     .await
     {
@@ -702,5 +810,181 @@ mod tests {
         );
         let canonical_root = real_root.path().canonicalize().unwrap();
         assert_eq!(results[0].root_path, canonical_root);
+    }
+
+    /// A warm-boot entry whose root the allowlist no longer approves is
+    /// dropped, so de-allowlisting actually stops indexing (#767).
+    ///
+    /// Why: `indexes.toml` records a PAST approval. Without this filter a
+    /// pruned root would be re-registered on every boot and its watcher would
+    /// keep it current forever — the gate would hold only for new roots.
+    #[test]
+    fn warmboot_drops_unapproved_entries() {
+        let fx = tempfile::tempdir().expect("tempdir");
+        let approved_dir = tempfile::Builder::new()
+            .prefix("ts-warmboot-approved")
+            .tempdir_in(dirs::home_dir().expect("home"))
+            .expect("tempdir");
+        let approved = approved_dir.path().canonicalize().expect("canonicalize");
+        let paths = crate::allowlist::AllowlistPaths::default()
+            .with_allowlist(fx.path().join("allowlist.toml"))
+            .with_project_paths(fx.path().join("projects.json"));
+        crate::allowlist::add_to_allowlist(
+            crate::allowlist::AllowlistEntry {
+                path: approved.clone(),
+                name: None,
+                exclude: Vec::new(),
+                extensions: Vec::new(),
+                skip_kg: false,
+            },
+            Some(&paths.allowlist_file()),
+        )
+        .expect("seed allowlist");
+
+        // A SIBLING of the approved root, not a descendant: containment
+        // deliberately approves anything inside an approved root, so only an
+        // unrelated path proves the filter is doing anything.
+        let unrelated = tempfile::Builder::new()
+            .prefix("ts-warmboot-unrelated")
+            .tempdir_in(dirs::home_dir().expect("home"))
+            .expect("tempdir");
+        let kept = PersistedIndex::new("kept", approved.clone());
+        let dropped = PersistedIndex::new(
+            "dropped",
+            unrelated.path().canonicalize().expect("canonicalize"),
+        );
+        let out = retain_approved_entries(vec![kept, dropped], &paths);
+        assert_eq!(out.kept.len(), 1, "{:?}", out.kept);
+        assert_eq!(out.kept[0].id, "kept");
+        assert_eq!(out.excluded, 1, "the drop must be counted, not only logged");
+    }
+
+    /// Every entry the allowlist excluded is counted, so `/health` can name the
+    /// cause instead of leaving a "< 80% of prior" error to imply a TCC denial.
+    ///
+    /// Why (#5926): the exclusion existed only as one `warn` line per entry.
+    /// A boot that dropped 103 of 121 registered indexes reported
+    /// `skipped_tcc: 0` and an error whose remedy was re-granting Full Disk
+    /// Access — the one explanation its own counters ruled out. Against the
+    /// pre-fix code this test does not compile, because the drop count had no
+    /// representation to assert on.
+    #[test]
+    fn warmboot_counts_every_entry_the_allowlist_excluded() {
+        let fx = tempfile::tempdir().expect("tempdir");
+        let paths = crate::allowlist::AllowlistPaths::default()
+            .with_allowlist(fx.path().join("allowlist.toml"))
+            .with_project_paths(fx.path().join("projects.json"));
+        // An empty (but readable) allowlist: nothing is approved, so every
+        // entry is excluded by the union rather than by the denylist.
+        crate::allowlist::AllowlistConfig::default()
+            .save_to(&paths.allowlist_file())
+            .expect("write empty allowlist");
+
+        let entries: Vec<PersistedIndex> = (0..3)
+            .map(|i| {
+                let dir = tempfile::Builder::new()
+                    .prefix("ts-warmboot-count")
+                    .tempdir_in(dirs::home_dir().expect("home"))
+                    .expect("tempdir");
+                let root = dir.path().canonicalize().expect("canonicalize");
+                // Keep the tempdir alive for the length of the call.
+                std::mem::forget(dir);
+                PersistedIndex::new(format!("e{i}"), root)
+            })
+            .collect();
+
+        let out = retain_approved_entries(entries, &paths);
+        assert!(out.kept.is_empty(), "{:?}", out.kept);
+        assert_eq!(
+            out.excluded, 3,
+            "every excluded entry must be counted so the summary can report the cause"
+        );
+    }
+
+    /// The #5926 end-to-end shape: an upgrade whose `allowlist.toml` already
+    /// exists but is incomplete must not cost the operator their indexes.
+    ///
+    /// Why: this is the sequence the daemon runs at boot — the grandfather pass,
+    /// then `retain_approved_entries` over the same registry. Against the
+    /// pre-fix code the pass returns `skipped_existing` without writing
+    /// anything, and this assertion fails with 1 of 3 entries surviving, which
+    /// is the reported `only 11/37 indexes loaded` in miniature.
+    #[test]
+    fn a_partial_pre_gate_allowlist_does_not_cost_indexes_on_upgrade() {
+        let fx = tempfile::tempdir().expect("tempdir");
+        let paths = crate::allowlist::AllowlistPaths::default()
+            .with_allowlist(fx.path().join("allowlist.toml"))
+            .with_project_paths(fx.path().join("projects.json"));
+        let registry_path = fx.path().join("indexes.toml");
+
+        let roots: Vec<std::path::PathBuf> = (0..3)
+            .map(|_| {
+                let dir = tempfile::Builder::new()
+                    .prefix("ts-upgrade-partial")
+                    .tempdir_in(dirs::home_dir().expect("home"))
+                    .expect("tempdir");
+                let root = dir.path().canonicalize().expect("canonicalize");
+                std::mem::forget(dir);
+                root
+            })
+            .collect();
+        let entries: Vec<PersistedIndex> = roots
+            .iter()
+            .enumerate()
+            .map(|(i, root)| PersistedIndex::new(format!("e{i}"), root.clone()))
+            .collect();
+        crate::service::persistence::save_index_registry_at(&registry_path, &entries)
+            .expect("write registry");
+
+        // The pre-upgrade file: one of the three roots, hand-added before the
+        // gate read this file at all.
+        let mut existing = crate::allowlist::AllowlistConfig::default();
+        existing.upsert(crate::allowlist::AllowlistEntry {
+            path: roots[0].clone(),
+            name: None,
+            exclude: Vec::new(),
+            extensions: Vec::new(),
+            skip_kg: false,
+        });
+        existing
+            .save_to(&paths.allowlist_file())
+            .expect("write partial allowlist");
+
+        crate::allowlist::grandfather_existing_indexes(&paths, &registry_path)
+            .expect("grandfather");
+
+        let out = retain_approved_entries(entries, &paths);
+        assert_eq!(
+            out.excluded, 0,
+            "an upgrade must not silently un-index a registered root: {:?}",
+            out.kept
+        );
+        assert_eq!(out.kept.len(), 3, "{:?}", out.kept);
+    }
+
+    /// An unreadable allowlist keeps every entry. Un-indexing the whole fleet
+    /// because a config file got corrupted would be a self-inflicted outage —
+    /// a policy that cannot be read is a different failure from one that says
+    /// "no" (#767).
+    #[test]
+    fn warmboot_keeps_entries_when_allowlist_unreadable() {
+        let fx = tempfile::tempdir().expect("tempdir");
+        let paths = crate::allowlist::AllowlistPaths::default()
+            .with_allowlist(fx.path().join("allowlist.toml"))
+            .with_project_paths(fx.path().join("projects.json"));
+        std::fs::write(paths.allowlist_file(), "not toml [[[").expect("write");
+
+        let entry = PersistedIndex::new("kept", std::path::PathBuf::from("/srv/whatever"));
+        let out = retain_approved_entries(vec![entry], &paths);
+        assert_eq!(
+            out.kept.len(),
+            1,
+            "a corrupt allowlist must not un-index: {:?}",
+            out.kept
+        );
+        assert_eq!(
+            out.excluded, 0,
+            "nothing was excluded, so nothing must be counted as excluded"
+        );
     }
 }

@@ -4,7 +4,7 @@
 //! deliberately `crossterm`-free vocabulary so `ReplEvent` (and every
 //! `TuiEngine` consumer) never needs the `crossterm` dependency — only the
 //! terminal layer itself does. This module is that one translation point:
-//! [`spawn_key_reader`] in [`crate::run`] calls [`translate_key_event`]
+//! [`spawn_key_reader`](crate::spawn_key_reader) in [`crate::run`](mod@crate::run) calls [`translate_key_event`]
 //! exactly once, at the moment a real `crossterm::event::KeyEvent` comes off
 //! the blocking reader thread, so every line of code past that point (the
 //! shared event loop, both `TuiEngine` implementations, and eventually the
@@ -31,7 +31,7 @@ use crate::event::{KeyCode, KeyInput, KeyModifiers};
 /// happen there rather than downstream.
 /// What: delegates to [`translate_key_code`] and [`translate_modifiers`];
 /// kept as a thin combinator so each half is independently unit-testable.
-/// Test: [`tests::translate_key_event_combines_code_and_modifiers`].
+/// Test: `tests::translate_key_event_combines_code_and_modifiers`.
 pub fn translate_key_event(ev: KeyEvent) -> KeyInput {
     KeyInput {
         code: translate_key_code(ev.code),

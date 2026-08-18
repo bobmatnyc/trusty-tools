@@ -24,7 +24,7 @@
 //! ## Factory
 //!
 //! [`build_adapters`] instantiates every PM adapter that is configured in the
-//! supplied [`Config`]. Adapters whose config is absent or invalid are simply
+//! supplied [`Config`](crate::core::config::Config). Adapters whose config is absent or invalid are simply
 //! skipped (with a `tracing::warn!`) so the caller does not have to know which
 //! integrations are enabled.
 
@@ -57,14 +57,37 @@ pub enum PmSource {
 }
 
 impl PmSource {
-    /// Stable, lowercase string label suitable for logs, DB rows, and report
+    /// Stable, lowercase display label for logs, error messages, and report
     /// columns.
+    ///
+    /// This is NOT the `work_items.source` value — see
+    /// [`work_item_source`](Self::work_item_source), which differs for
+    /// Azure DevOps.
     pub fn as_str(&self) -> &'static str {
         match self {
             PmSource::Jira => "jira",
             PmSource::GitHub => "github",
             PmSource::Linear => "linear",
             PmSource::AzureDevOps => "azure_devops",
+        }
+    }
+
+    /// The `work_items.source` tag rows from this system are written under.
+    ///
+    /// Why: #5219 routes four providers through one writer, and the database
+    /// vocabulary is not [`as_str`](Self::as_str)'s. `sql/0005_work_items.sql:8`
+    /// fixes the set at `'azdo' | 'jira' | 'github' | 'linear'`, and DOC-70 §11
+    /// reuses it as the provider tag of its `{provider, id}` board selection —
+    /// so Azure DevOps rows must stay `azdo` while its display label stays
+    /// `azure_devops`. Writing `azure_devops` would orphan every ADO row
+    /// already in a user's database.
+    /// What: identical to [`as_str`](Self::as_str) except for
+    /// [`PmSource::AzureDevOps`], which maps to `"azdo"`.
+    /// Test: `work_item_source_keeps_the_azdo_database_tag`.
+    pub fn work_item_source(&self) -> &'static str {
+        match self {
+            PmSource::AzureDevOps => "azdo",
+            other => other.as_str(),
         }
     }
 }
@@ -76,7 +99,12 @@ impl PmSource {
 /// The full upstream JSON is preserved verbatim in [`PmTicket::raw`] so callers
 /// that need backend-specific fields (e.g. JIRA custom fields) don't have to
 /// re-fetch.
+///
+/// `#[non_exhaustive]` since #5219, which added [`PmTicket::project`]. Four
+/// providers now share this shape, so a fifth field is a matter of time and
+/// each one would otherwise be a SemVer-major break for a published crate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PmTicket {
     /// Canonical ticket identifier as reported by the PM system
     /// (e.g. `"PROJ-123"`, `"#42"`, `"AB#7"`).
@@ -92,6 +120,13 @@ pub struct PmTicket {
     pub labels: Vec<String>,
     /// Web URL to the ticket in the PM system, if known.
     pub url: Option<String>,
+    /// Board / project this ticket belongs to, if the system exposes one.
+    ///
+    /// #5219: this lands in `work_items.project`, which DOC-70's board axis
+    /// filters on. Only Azure DevOps fills it today (`System.TeamProject`);
+    /// the other three leave it `None` rather than writing something that is
+    /// not a project — see the Linear note in `linear_pipeline`.
+    pub project: Option<String>,
     /// Source PM system this ticket originated from.
     pub source: PmSource,
     /// Raw upstream payload — preserved for forward compatibility and for
@@ -389,6 +424,7 @@ impl PmAdapter for JiraAdapter {
                     ticket_type: issue.issue_type,
                     labels: Vec::new(),
                     url: None,
+                    project: None,
                     source: PmSource::Jira,
                     raw,
                 }))
@@ -482,6 +518,7 @@ impl PmAdapter for GitHubAdapter {
                     ticket_type: "issue".into(),
                     labels,
                     url: Some(url),
+                    project: None,
                     source: PmSource::GitHub,
                     raw,
                 }))
@@ -568,6 +605,7 @@ impl PmAdapter for LinearAdapter {
                     } else {
                         Some(issue.url)
                     },
+                    project: None,
                     source: PmSource::Linear,
                     raw,
                 }))
@@ -598,17 +636,74 @@ impl PmAdapter for LinearAdapter {
 
 /// PM adapter wrapping [`crate::collect::azdo::AzureDevOpsClient`].
 ///
-/// Work-item fetching is gated behind ADO Phase 6; until then,
-/// `fetch_ticket` returns `Ok(None)`. `health_check` uses the
-/// `GET _apis/connectionData` probe that already exists.
+/// `health_check` uses the `GET _apis/connectionData` probe that already
+/// exists. [`fetch_tickets`](PmAdapter::fetch_tickets) is overridden to use
+/// ADO's native `workitemsbatch` endpoint (#5219).
 pub struct AzureDevOpsAdapter {
     inner: crate::collect::azdo::AzureDevOpsClient,
+    /// Optional user-supplied detection regex (`pm.azure_devops.ticket_regex`).
+    /// When `None`, the adapter falls back to the shared default `AB#N` pattern.
+    ticket_regex: Option<Regex>,
+}
+
+/// Parse an ADO reference — `AB#123` or bare `123` — into its numeric ID.
+///
+/// Returns `None` for anything else, which the adapter reports as
+/// `Ok(None)`: a string that is not an ADO ID is authoritatively not an ADO
+/// work item, not a transport failure.
+fn azdo_numeric_id(ticket_id: &str) -> Option<u32> {
+    ticket_id.trim_start_matches("AB#").parse().ok()
+}
+
+/// Normalize one [`crate::collect::azdo::AzdoWorkItem`] into a [`PmTicket`].
+///
+/// The `id` is canonicalized to `AB#<n>` — the form
+/// [`crate::collect::ticket::extract_ticket_id`] produces, so
+/// [`crate::collect::correlate_commits`] can match a stored row against a
+/// commit's ticket key.
+fn azdo_work_item_to_ticket(w: crate::collect::azdo::AzdoWorkItem) -> PmTicket {
+    let raw = serde_json::json!({
+        "id": w.id,
+        "title": w.title,
+        "state": w.state,
+        "workItemType": w.work_item_type,
+        "tags": w.tags,
+        "teamProject": w.team_project,
+        "url": w.url,
+    });
+    PmTicket {
+        id: format!("AB#{}", w.id),
+        title: w.title,
+        status: w.state,
+        ticket_type: w.work_item_type,
+        labels: w.tags,
+        url: w.url,
+        project: Some(w.team_project),
+        source: PmSource::AzureDevOps,
+        raw,
+    }
 }
 
 impl AzureDevOpsAdapter {
-    /// Construct from an existing [`crate::collect::azdo::AzureDevOpsClient`].
+    /// Construct from an existing [`crate::collect::azdo::AzureDevOpsClient`]
+    /// using the default `AB#N` detection regex.
     pub fn new(inner: crate::collect::azdo::AzureDevOpsClient) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            ticket_regex: None,
+        }
+    }
+
+    /// Construct from a client and an optional user-supplied detection regex.
+    /// See [`JiraAdapter::with_ticket_regex`] for semantics.
+    pub fn with_ticket_regex(
+        inner: crate::collect::azdo::AzureDevOpsClient,
+        pattern: Option<&str>,
+    ) -> Self {
+        Self {
+            inner,
+            ticket_regex: compile_user_regex("azure_devops", pattern),
+        }
     }
 }
 
@@ -623,36 +718,13 @@ impl PmAdapter for AzureDevOpsAdapter {
     }
 
     async fn fetch_ticket(&self, ticket_id: &str) -> Result<Option<PmTicket>, PmError> {
-        // ADO IDs come in two flavors: bare integers (`123`) or `AB#123`.
-        // Strip the `AB#` prefix when present so callers can pass either.
-        let numeric = ticket_id.trim_start_matches("AB#");
-        let id: u32 = match numeric.parse() {
-            Ok(n) => n,
-            Err(_) => return Ok(None),
+        let id = match azdo_numeric_id(ticket_id) {
+            Some(n) => n,
+            None => return Ok(None),
         };
 
         match self.inner.get_work_items(&[id]).await {
-            Ok(items) => Ok(items.into_iter().next().map(|w| {
-                let raw = serde_json::json!({
-                    "id": w.id,
-                    "title": w.title,
-                    "state": w.state,
-                    "workItemType": w.work_item_type,
-                    "tags": w.tags,
-                    "teamProject": w.team_project,
-                    "url": w.url,
-                });
-                PmTicket {
-                    id: format!("AB#{}", w.id),
-                    title: w.title,
-                    status: w.state,
-                    ticket_type: w.work_item_type,
-                    labels: w.tags,
-                    url: w.url,
-                    source: PmSource::AzureDevOps,
-                    raw,
-                }
-            })),
+            Ok(items) => Ok(items.into_iter().next().map(azdo_work_item_to_ticket)),
             // Defensive: any residual NotImplemented variants in the future
             // should degrade gracefully rather than fail the pipeline.
             Err(crate::collect::azdo::AzdoError::NotImplemented { .. }) => Ok(None),
@@ -660,8 +732,62 @@ impl PmAdapter for AzureDevOpsAdapter {
         }
     }
 
+    /// Batch-fetch via ADO's native `workitemsbatch` endpoint.
+    ///
+    /// Why: #5219 routes the collection pipeline through this trait, and the
+    /// default implementation would issue one POST per referenced ID. The
+    /// legacy writer this replaces fetched in chunks of 200
+    /// ([`crate::collect::azdo::AzureDevOpsClient::get_work_items`] does the
+    /// chunking), which is the difference between a handful of requests and
+    /// thousands on a large corpus.
+    /// What: parses every reference to a numeric ID, issues one batched call,
+    /// then re-emits the results in the caller's order — the trait's contract
+    /// is positional. A whole-batch error is reported for every requested ID,
+    /// so the caller sees the failure rather than an empty success. ADO's
+    /// `errorPolicy=omit` drops unresolvable IDs from the response, and those
+    /// come back as `Ok(None)` — an authoritative not-found.
+    /// Test: `azdo_batch_fetch_preserves_request_order`.
+    async fn fetch_tickets(&self, ticket_ids: &[&str]) -> Vec<Result<Option<PmTicket>, PmError>> {
+        let parsed: Vec<Option<u32>> = ticket_ids.iter().map(|s| azdo_numeric_id(s)).collect();
+        let ids: Vec<u32> = parsed.iter().filter_map(|p| *p).collect();
+        if ids.is_empty() {
+            return ticket_ids.iter().map(|_| Ok(None)).collect();
+        }
+
+        let fetched = match self.inner.get_work_items(&ids).await {
+            Ok(items) => items,
+            Err(crate::collect::azdo::AzdoError::NotImplemented { .. }) => Vec::new(),
+            Err(e) => {
+                // One failed batch means none of these IDs was resolved. Every
+                // caller position gets the error so nothing reads as not-found.
+                let message = azdo_err_to_pm(e).to_string();
+                return ticket_ids
+                    .iter()
+                    .map(|_| {
+                        Err(PmError::Other {
+                            system: "azure_devops".into(),
+                            message: message.clone(),
+                        })
+                    })
+                    .collect();
+            }
+        };
+
+        let mut by_id: std::collections::HashMap<u32, PmTicket> = fetched
+            .into_iter()
+            .map(|w| (w.id, azdo_work_item_to_ticket(w)))
+            .collect();
+        parsed
+            .into_iter()
+            .map(|p| Ok(p.and_then(|id| by_id.remove(&id))))
+            .collect()
+    }
+
     fn detect_ticket_refs(&self, text: &str) -> Vec<String> {
-        extract_unique(azdo_ref_re(), text)
+        match &self.ticket_regex {
+            Some(re) => extract_user_regex(re, text),
+            None => extract_unique(azdo_ref_re(), text),
+        }
     }
 
     async fn health_check(&self) -> Result<(), PmError> {

@@ -7,6 +7,12 @@
 //! dispatch.
 //! Test: `cargo test -p trusty-mpm` runs the full suite in `tests.rs`.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 mod cli;
 mod cli_manager;
 mod commands;
@@ -28,6 +34,7 @@ use commands::{
     hooks::clean as hooks_clean,
     install::install,
     launch::{connect, launch},
+    managed_workspace::LaunchDir,
     manager::manager,
     memory::memory,
     misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status, validate},
@@ -122,6 +129,11 @@ mod tests_manager;
 #[cfg(test)]
 #[path = "tests_project_trust_tests.rs"]
 mod tests_project_trust;
+
+// #5544: the mechanical guard that keeps `$HOME` writers out of this target.
+#[cfg(test)]
+#[path = "env_isolation_tests.rs"]
+mod env_isolation_tests;
 
 /// Lazy-loaded help configuration for "did you mean?" suggestions (issue #216).
 ///
@@ -494,7 +506,9 @@ async fn main() -> anyhow::Result<()> {
             dir,
             style,
             worktree,
-        }) => launch(&client, &url, dir, style, worktree).await,
+            // `--dir` (or the process cwd) is the operator's, not a resolved
+            // placement: ADR-0037's rule applies here and only here (#5836).
+        }) => launch(&client, &url, dir, style, worktree, LaunchDir::OperatorCwd).await,
         Some(Command::Connect { dir }) => connect(&client, &url, dir).await,
         Some(Command::Attach { target, json }) => attach_cmd(&client, &url, &target, json).await,
         Some(Command::Optimizer { action }) => optimizer(&client, &url, action).await,
@@ -690,11 +704,11 @@ async fn main() -> anyhow::Result<()> {
 
 /// Dispatch a `tm watch poll|listen` invocation to its handler.
 ///
-/// Why: keeps `main`'s match arm thin by folding the flattened [`WatchArgs`] into
+/// Why: keeps `main`'s match arm thin by folding the flattened `WatchArgs` into
 /// the [`commands::watch`] entry points in one place, mapping the shared CLI flags
 /// onto the module's `RawWatchArgs` and the safety-gate booleans.
 /// What: builds a `RawWatchArgs` from the parsed flags and calls
-/// [`commands::watch::poll`] or [`commands::watch::listen`] accordingly, threading
+/// [`commands::watch::poll`] or [`commands::watch::listen`](mod@crate::commands::watch::listen) accordingly, threading
 /// the `--execute`/`--dry-run` safety flags and the spawn runtime through.
 /// Test: the resolution/safety logic is unit-tested in `commands::watch::tests`;
 /// CLI parsing in `tests.rs` (`cli_parses_watch_*`).

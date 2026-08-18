@@ -31,14 +31,14 @@
 
 **`trusty-review` — Report Rendering & Synthesis Layer** (new module)
 
-- **New module:** `src/report/` (mirrors `src/profile/`'s shape: types → template loader → synthesizer → reporter)
+- **New module:** `src/report/` (mirrors the shape `src/profile/` used before contributor profiling moved to `tga profile` in 0.16.0 — see [#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468): types → template loader → synthesizer → reporter)
 - **Responsibilities:**
   1. Load templated report skeletons from disk (template override via XDG, fallback to `include_str!()` bundled defaults)
   2. Fill placeholders (`{{field}}`) and repeatable blocks (`<!-- BEGIN … / END … -->`) from trusty-analyze metrics
   3. Synthesize prose (executive summary, findings descriptions, business-impact narratives) — initially via LLM, later deterministic for fully-templated sections
   4. Render markdown + JSON dual output (markdown for human reading, JSON for downstream tooling)
 - **Template Loader Pattern:** Clone `VoiceLoader` (`src/voice/loader.rs`): XDG config directory (`~/.trusty-review/templates/`) is checked first; if not found, use bundled default via `include_str!()`.
-- **Feature Gate:** Cargo feature `report`, **default-on** (mirrors the `profile` gate). It pulls in no new external dependencies (toml/serde/serde_json/regex/chrono/tempfile/dirs are already present), so the gate is purely for module/subcommand opt-out, not dependency weight; disable with `--no-default-features`.
+- **Feature Gate:** Cargo feature `report`, **default-on** (mirrored the now-removed `profile` gate's pattern). It pulls in no new external dependencies (toml/serde/serde_json/regex/chrono/tempfile/dirs are already present), so the gate is purely for module/subcommand opt-out, not dependency weight; disable with `--no-default-features`.
 - **CLI sketch:** `trusty-review report --manifest <file> [--template <name>] [--out <dir>]` (see [CLI & Configuration](#cli--configuration)).
 
 ### Section → Data Source Mapping

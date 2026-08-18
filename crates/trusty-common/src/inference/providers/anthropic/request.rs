@@ -26,7 +26,7 @@ use crate::inference::types::{ChatRequest, ToolChoice, ToolDefinition};
 
 /// Convert a neutral [`ChatRequest`] into an Anthropic `/v1/messages` body.
 ///
-/// Why: the adapter's [`super::AnthropicAdapter::chat`] must POST the exact
+/// Why: the adapter's [`super::AnthropicAdapter::chat`](crate::chat) must POST the exact
 /// Anthropic wire shape; keeping the translation a pure function makes every
 /// structural rule (system hoist, role remap, cache markers, required
 /// `max_tokens`) unit-testable without a socket.

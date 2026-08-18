@@ -27,7 +27,7 @@
 //! derivation via [`name_from_dir`]/[`leaf_slug_from_dir`]; and the
 //! serial-numbered [`build_managed_session_name`]/[`build_session_name`] pair
 //! that is now the primary entry point for `tm session new`. The sibling
-//! [`dedupe`] submodule (issue #3692) holds the auto-suffix-on-collision
+//! `dedupe` submodule (issue #3692) holds the auto-suffix-on-collision
 //! primitive shared by every OTHER name-allocation site (`rename`,
 //! `adopt_existing`, and `create`'s final safety net) — split out to keep
 //! this file under its own 500-SLOC production cap.
@@ -35,6 +35,13 @@
 //! format, serial
 //! allocation (including gap-reuse and exhaustion), and that legacy prefixes
 //! remain recognized by [`is_managed_session_name`].
+//!
+//! [`is_managed_session_name`]: crate::session_naming::is_managed_session_name
+//! [`name_from_uuid`]: crate::session_naming::name_from_uuid
+//! [`name_from_dir`]: crate::session_naming::name_from_dir
+//! [`leaf_slug_from_dir`]: crate::session_naming::leaf_slug_from_dir
+//! [`build_managed_session_name`]: crate::session_naming::build_managed_session_name
+//! [`build_session_name`]: crate::session_naming::build_session_name
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -97,7 +104,7 @@ pub const LEGACY_PREFIX_FULL: &str = "trusty-mpm-";
 /// names carrying a managed prefix are ever eligible for reaping. Centralising
 /// the check keeps ALL THREE prefix generations (current `tm-`, #1789-era
 /// `tmpm-`, and pre-#1789 `trusty-mpm-`) in one place shared with
-/// [`crate::core::external_session::SessionOrigin::classify`], so a daemon
+/// [`crate::core::external_session::SessionOrigin::classify`](crate::memory_core::filter::classify), so a daemon
 /// upgrade never orphans or mis-classifies a session created under an older
 /// scheme.
 /// What: returns `true` when `name` starts with [`PREFIX`] (`tm-`),

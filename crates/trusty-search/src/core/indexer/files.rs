@@ -110,7 +110,8 @@ impl CodeIndexer {
     /// Why: [`Self::enumerate_chunks`] loads every chunk and re-sorts the whole
     /// corpus on every page request — O(N log N) per page — which times out
     /// (and 502s behind a proxy) at deep offsets on large indexes
-    /// (`offset=304000`). When a durable [`CorpusStore`] is wired, this method
+    /// (`offset=304000`). When a durable [`CorpusStore`](crate::core::corpus::CorpusStore)
+    /// is wired, this method
     /// instead seeks straight to the cursor in redb's `chunk_id`-keyed B-tree
     /// and reads one page: O(log N) + O(page) per call, so a forward scan over
     /// the whole corpus is O(N) total rather than O(N²/page). Indexers without
@@ -307,6 +308,31 @@ impl CodeIndexer {
         chunks.get(chunk_id).map(|c| c.content.clone())
     }
 
+    /// Chunk ids the corpus currently holds for `file_path`.
+    ///
+    /// Why: the corpus is the authority on which of a file's chunks exist, and
+    /// three callers need that answer — the two removal paths below, and
+    /// `service::watch_loop`'s error arm after a partial commit (#100), where
+    /// the set the watcher computed from the file's text and the set that
+    /// actually landed can differ. Deriving it from the corpus means a caller
+    /// cleaning up cannot miss a chunk that is really there.
+    /// What: rehydrates an idle-evicted map, then scans the corpus for chunks
+    /// whose `file` field equals `file_path`. Linear in corpus size, same as
+    /// the removal paths it replaces.
+    /// Test: `partial_commit_at_cap_then_delete_leaves_no_orphan_chunks` and
+    /// `partial_commit_at_cap_then_edit_replaces_the_landed_chunk` in
+    /// `tests/watcher_chunk_cap_orphans_100.rs`; the removal paths by
+    /// `prune_deleted_files_cleans_staging_corpus` in `service::reindex::tests`.
+    pub(crate) async fn chunk_ids_for_file(&self, file_path: &str) -> Vec<String> {
+        self.ensure_chunks_loaded().await;
+        let chunks = self.chunks.read().await;
+        chunks
+            .values()
+            .filter(|c| c.file == file_path)
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
     /// Remove every chunk belonging to a file and its entity list WITHOUT
     /// triggering a symbol-graph rebuild (issue #848 prune pass).
     ///
@@ -322,15 +348,7 @@ impl CodeIndexer {
     /// Test: covered by `prune_deleted_files_cleans_staging_corpus` in
     /// `service::reindex::tests`.
     pub(crate) async fn remove_file_no_kg_rebuild(&self, file_path: &str) -> Result<usize> {
-        self.ensure_chunks_loaded().await;
-        let ids: Vec<String> = {
-            let chunks = self.chunks.read().await;
-            chunks
-                .values()
-                .filter(|c| c.file == file_path)
-                .map(|c| c.id.clone())
-                .collect()
-        };
+        let ids = self.chunk_ids_for_file(file_path).await;
         let removed = ids.len();
         self.remove_chunks_from_stores(&ids).await;
         self.entities.write().await.remove(file_path);
@@ -346,17 +364,9 @@ impl CodeIndexer {
     /// `FileWatcher` rename/remove events) needs to drop all of a file's
     /// chunks at once. Returns the number of chunks removed.
     pub async fn remove_file(&self, file_path: &str) -> Result<usize> {
-        // Rehydrate so an idle-evicted map still yields the file's chunk ids to
-        // remove (the redb delete below is keyed by those ids).
-        self.ensure_chunks_loaded().await;
-        let ids: Vec<String> = {
-            let chunks = self.chunks.read().await;
-            chunks
-                .values()
-                .filter(|c| c.file == file_path)
-                .map(|c| c.id.clone())
-                .collect()
-        };
+        // `chunk_ids_for_file` rehydrates an idle-evicted map first, so the
+        // redb delete below still sees the ids it is keyed by.
+        let ids = self.chunk_ids_for_file(file_path).await;
         let removed = ids.len();
         self.remove_chunks_from_stores(&ids).await;
         self.entities.write().await.remove(file_path);

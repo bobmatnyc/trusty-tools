@@ -18,6 +18,8 @@
 //! Test: `#[path = "memory_tests.rs"] mod tests` — palace idempotency, scoped
 //! remember→recall round-trip, scope isolation, restart survival, and the
 //! "never writes to a non-SM palace" guard.
+//!
+//! [`SmMemory`]: crate::core::sm::memory::SmMemory
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,6 +31,7 @@ use trusty_common::memory_core::retrieval::{
     PalaceHandle, RecallResult, RememberOptions, recall_deep_with_default_embedder,
     recall_with_default_embedder,
 };
+use trusty_common::memory_core::store::PalaceStore;
 
 use super::config::SmMemoryConfig;
 
@@ -171,14 +174,18 @@ impl SmMemory {
     /// What: returns the cached handle if registered (fast path). Otherwise
     /// tries `open_palace` first — which succeeds whenever `palace.json` is
     /// already on disk, including the case where a concurrent creator just
-    /// finished writing it. If the open fails (the normal first-run case: no
-    /// metadata yet), it falls back to `create_palace`, which is itself
-    /// idempotent (`create_dir_all` + an atomic `palace.json` rename), so two
-    /// racing creators both succeed and the registry de-duplicates by id. Both
-    /// branches are scoped entirely to `self.palace_id` — no other id is
-    /// reachable. Any final failure is wrapped in [`SmMemoryError::Palace`].
+    /// finished writing it. Only when the open fails AND
+    /// [`PalaceStore::metadata_present`] definitively reports no `palace.json`
+    /// does it fall back to `create_palace`, which is itself idempotent
+    /// (`create_dir_all` + an atomic `palace.json` rename), so two racing
+    /// creators both succeed and the registry de-duplicates by id. A palace
+    /// that exists but cannot be opened propagates the open error (#4911)
+    /// rather than being recreated over. Both branches are scoped entirely to
+    /// `self.palace_id` — no other id is reachable. Any final failure is
+    /// wrapped in [`SmMemoryError::Palace`].
     /// Test: `palace_create_is_idempotent`, `writes_target_only_the_sm_palace`,
-    /// `ensure_palace_falls_back_to_open_when_palace_already_exists`.
+    /// `ensure_palace_falls_back_to_open_when_palace_already_exists`,
+    /// `ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_palace`.
     fn ensure_palace(&self) -> SmMemoryResult<Arc<PalaceHandle>> {
         if let Some(handle) = self.registry.get(&self.palace_id) {
             return Ok(handle);
@@ -188,8 +195,23 @@ impl SmMemory {
         // TOCTOU window. `open_palace` resolves the common "already on disk"
         // case (including a concurrent creator that has finished); only when it
         // fails do we attempt the idempotent create.
-        if let Ok(handle) = self.registry.open_palace(&self.data_root, &self.palace_id) {
-            return Ok(handle);
+        let open_err = match self.registry.open_palace(&self.data_root, &self.palace_id) {
+            Ok(handle) => return Ok(handle),
+            Err(source) => source,
+        };
+
+        // #4911: a failed open is not proof the palace is absent — only a
+        // definitively missing `palace.json` is. Creating against a palace that
+        // exists but could not be READ rewrites its metadata and destroys
+        // `created_at` before failing on the same unreadable store anyway.
+        // Fail closed: anything other than a definite `Ok(false)` — present, or
+        // a probe we could not complete — propagates the open error instead.
+        let palace_dir = self.data_root.join(self.palace_id.as_str());
+        if !matches!(PalaceStore::metadata_present(&palace_dir), Ok(false)) {
+            return Err(SmMemoryError::Palace {
+                palace: self.palace_id.to_string(),
+                source: open_err,
+            });
         }
 
         let palace = Palace {

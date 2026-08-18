@@ -46,14 +46,15 @@
 mod support;
 
 use std::collections::HashSet;
-use std::process::Command;
 use std::time::Duration;
 
-use serde_json::json;
+use chrono::Utc;
+use serde_json::{Value, json};
 use support::{
     StdioSession, assert_envelopes_contiguous, find_session_event, open_sse, parse_sse_frames,
     project_with_agents, read_sse_until,
 };
+use trusty_code::events::{Event, SessionEventEnvelope};
 
 /// The exact, deterministic ordered event-kind sequence a standard
 /// `TCODE_MOCK_LLM=echo` `task.run` produces, from `session.create` through
@@ -86,6 +87,13 @@ use support::{
 /// race as a contract. The readiness event's own content/state mapping is
 /// pinned by `session::registry::registry_tests::record_index_readiness_*`
 /// instead; see `filter_async_kinds`.
+///
+/// `log` is absent for the same reason (#5895): this suite runs on a tempdir
+/// project root, so every turn's durable-memory write is dropped (#4638) and
+/// the detached drain task reports the degradation out of band. Neither its
+/// position nor its count is sequenced against the run — see
+/// `filter_async_kinds` for the mechanism, and
+/// `assert_memory_degradation_logs_well_formed` for what IS asserted about it.
 ///
 /// (tcode streaming epic #3696, Gap A, Slice 1) Two `agent_message_delta`
 /// entries were added by that slice: the delegated engineer's own final
@@ -128,17 +136,150 @@ const BASELINE_EVENT_KINDS: &[&str] = &[
 /// Drop event kinds that are asynchronous BY CONSTRUCTION and therefore have
 /// no deterministic position in the stream.
 ///
-/// Why: `index_readiness` comes from the detached index-warming thread, so it
-/// can legitimately land anywhere relative to the run — including after
-/// `session_done`. Asserting an exact ordered sequence that included it would
-/// be flaky by design. Filtering it here keeps the baseline a statement about
-/// the run's DETERMINISTIC lifecycle spine while letting the async event exist.
-/// What: returns `kinds` minus every async kind.
+/// Why: both kinds below reach the stream from a detached task that nothing
+/// sequences against the session lifecycle, so pinning either into an ordered
+/// baseline would encode a race as a contract.
+///
+/// `index_readiness` comes from the detached index-warming thread, so it can
+/// legitimately land anywhere relative to the run — including after
+/// `session_done`.
+///
+/// `log` (#2425, emitted since #5895) carries the per-turn durable-memory
+/// degradation warning. This suite's project root is a tempdir, so palace
+/// auto-create is withheld (`PalaceCreation::Forbidden`, #4638) and every turn
+/// takes the drop path in `session::memory_sink::drain` — a detached
+/// `tokio::spawn`ed task. Its POSITION is unsequenced, and its COUNT varies
+/// independently of that: `session::memory_outcome_reconciler` warns at
+/// consecutive-failure thresholds `[1, 3]`, so one call can emit two warnings
+/// when a run spans both, while a read loop that closes on `session_done`
+/// before the drain reports sees none. Pinning it at any fixed position would
+/// convert a hard failure into an intermittent one.
+///
+/// What: returns `kinds` minus every async kind, keeping the baseline a
+/// statement about the run's DETERMINISTIC lifecycle spine. The dropped events
+/// still exist and are still asserted — `index_readiness` content by
+/// `session::registry::registry_tests::record_index_readiness_*`, and `log`
+/// content unordered by [`assert_memory_degradation_logs_well_formed`].
 fn filter_async_kinds<'a>(kinds: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
     kinds
         .into_iter()
-        .filter(|k| *k != "index_readiness")
+        .filter(|k| !matches!(*k, "index_readiness" | "log"))
         .collect()
+}
+
+/// Assert every `log` envelope in `envelopes` is a well-formed durable-memory
+/// degradation warning — unordered, and tolerant of any count including zero.
+///
+/// Why: [`filter_async_kinds`] drops `log` from the ordered baseline, which on
+/// its own would discard #5895's coverage entirely. This keeps the assertion on
+/// the part of the event that IS deterministic — its level and its message
+/// vocabulary — while being structurally incapable of failing on the two things
+/// that genuinely vary, how many warnings landed inside the read window and
+/// where. Every count-sensitive or position-sensitive form of this check is a
+/// latent flake; see [`filter_async_kinds`] for why.
+/// What: zero `log` events passes — a reachable memory daemon keeps the session
+/// durable, and the read loop can also close before the detached drain reports.
+/// Any that DID land must be `level == "warn"` and open with the closed
+/// `MemoryFailureCategory::PalaceEnsure` vocabulary, the only category a
+/// tempdir-rooted run can produce (`session::registry_memory_sink`). A
+/// regression that changed the level, the category, or the message shape fails
+/// here. Both fields are read from the envelope's nested `event` payload, which
+/// is where `Event::Log` puts them; `kind` is the only field
+/// `SessionEventEnvelope` lifts to the top level (#5911).
+/// Test: called by `m1_cutline_full_scenario_over_stdio` and
+/// `m1_cutline_full_scenario_over_http`, and pinned without a daemon by
+/// `degradation_log_events_never_move_the_ordered_baseline`.
+fn assert_memory_degradation_logs_well_formed(envelopes: &[Value]) {
+    for envelope in envelopes.iter().filter(|e| e["kind"] == "log") {
+        // #5911: `level`/`message` are `Event::Log`'s own fields, so they live
+        // under the envelope's nested `event` payload. `kind` is the only one
+        // duplicated to the top level (`SessionEventEnvelope`).
+        let payload = &envelope["event"];
+        assert_eq!(
+            payload["level"], "warn",
+            "the only log event this run can emit is the #2425 degradation \
+             warning, which is warn-level: {envelope}"
+        );
+        let message = payload["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a log event always carries a string message: {envelope}"));
+        assert!(
+            message.starts_with("durable memory degraded: category=PalaceEnsure "),
+            "a tempdir-rooted run's only log event is the PalaceEnsure \
+             degradation warning (#4638): {envelope}"
+        );
+    }
+}
+
+/// The CI condition the live scenarios cannot be relied on to produce: a `log`
+/// event landing inside the read window (#5895).
+///
+/// Why: the degradation warning only appears when the memory daemon cannot
+/// serve the session's palace, which is CI's environment and not necessarily a
+/// developer's — on a machine with a reachable daemon both scenario tests
+/// observe zero `log` events, so a green run there says nothing about the case
+/// that turned `main` red. This pins the two helpers' contract directly and
+/// deterministically, with no daemon and no timing involved.
+/// What: splices zero, one, and two warnings into the baseline stream at the
+/// front, the middle, and past `session_done` — the counts the reconciler's
+/// `[1, 3]` thresholds can emit and the positions an unsequenced detached task
+/// can deliver them at — and asserts the filtered spine is the baseline every
+/// time. The `PalaceEnsure` token comes from the production enum, so a rename
+/// there fails here rather than silently weakening
+/// [`assert_memory_degradation_logs_well_formed`]. The warning envelopes are
+/// SERIALISED from `SessionEventEnvelope`/`Event::Log` for the same reason
+/// (#5911): the first version of this test hand-wrote them as flat `json!`
+/// objects with `level`/`message` at the top level, which is not the wire shape,
+/// so it agreed with a helper that read the wrong path and CI stayed red. A
+/// production-derived fixture cannot drift from the envelope it stands in for.
+/// Test: this test.
+#[test]
+fn degradation_log_events_never_move_the_ordered_baseline() {
+    let category = format!(
+        "{:?}",
+        trusty_code::session::MemoryFailureCategory::PalaceEnsure
+    );
+    // #5911: built by SERIALISING the production envelope, never hand-written as
+    // a flat `json!`. A hand-written fixture states the test author's belief about
+    // the wire shape; this one states the shape itself, so a helper that reads the
+    // wrong path fails here instead of only in CI.
+    let warning = |consecutive: u32| {
+        serde_json::to_value(SessionEventEnvelope::new(
+            "s1".to_string(),
+            0,
+            Utc::now(),
+            Event::Log {
+                session_id: "s1".to_string(),
+                level: "warn".to_string(),
+                message: format!(
+                    "durable memory degraded: category={category} total_failed_turns=2 \
+                     consecutive_failed_turns={consecutive}"
+                ),
+            },
+        ))
+        .expect("a SessionEventEnvelope always serialises")
+    };
+    let spine: Vec<Value> = BASELINE_EVENT_KINDS
+        .iter()
+        .map(|k| json!({"kind": k, "session_id": "s1"}))
+        .collect();
+
+    for warnings in [vec![], vec![warning(1)], vec![warning(1), warning(3)]] {
+        for offset in [0, spine.len() / 2, spine.len()] {
+            let mut events = spine.clone();
+            for (i, w) in warnings.iter().enumerate() {
+                events.insert(offset + i, w.clone());
+            }
+            let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+            assert_eq!(
+                filter_async_kinds(kinds),
+                BASELINE_EVENT_KINDS,
+                "{} warning(s) spliced at offset {offset} must not move the baseline",
+                warnings.len()
+            );
+            assert_memory_degradation_logs_well_formed(&events);
+        }
+    }
 }
 
 /// The exact transcript role sequence the standard mock script produces —
@@ -196,14 +337,21 @@ async fn m1_cutline_full_scenario_over_stdio() {
         attach_resp["error"].is_null(),
         "session.attach failed: {attach_resp}"
     );
-    let mut kinds: Vec<String> = attach_resp["result"]["events"]
+    // Retain whole envelopes, not just their `kind`: the ordered baseline reads
+    // the kinds, and `assert_memory_degradation_logs_well_formed` reads the
+    // level/message of the async `log` events the baseline filters out.
+    let mut events: Vec<Value> = attach_resp["result"]["events"]
         .as_array()
         .expect("attach must return a replay events array")
-        .iter()
-        .map(|e| e["kind"].as_str().unwrap().to_string())
-        .collect();
+        .clone();
+    let kinds = |events: &[Value]| -> Vec<String> {
+        events
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap().to_string())
+            .collect()
+    };
     assert_eq!(
-        kinds,
+        kinds(&events),
         vec!["session_started", "session_status_changed"],
         "session.create's own replay-visible event prefix"
     );
@@ -228,30 +376,35 @@ async fn m1_cutline_full_scenario_over_stdio() {
     // Step 4: receive lifecycle/tool/session events in real time until the
     // session reaches a terminal state — a bounded read loop, never a sleep.
     let mut iterations = 0;
-    while !kinds.iter().any(|k| k == "session_done") {
+    while !events.iter().any(|e| e["kind"] == "session_done") {
         iterations += 1;
         assert!(
             iterations < 30,
-            "gave up waiting for session_done after {iterations} read rounds; kinds so far: {kinds:?}"
+            "gave up waiting for session_done after {iterations} read rounds; kinds so far: {:?}",
+            kinds(&events)
         );
         let lines = daemon.read_lines(20).await;
         assert!(
             !lines.is_empty(),
-            "timed out waiting for more events; kinds so far: {kinds:?}"
+            "timed out waiting for more events; kinds so far: {:?}",
+            kinds(&events)
         );
         for line in &lines {
             if let Some(envelope) = find_session_event(line, &session_id) {
-                kinds.push(envelope["kind"].as_str().unwrap().to_string());
+                events.push(envelope);
             }
         }
     }
 
     // ── REGRESSION BASELINE: exact ordered event-kind sequence ──────────
+    let observed = kinds(&events);
     assert_eq!(
-        filter_async_kinds(kinds.iter().map(String::as_str)),
+        filter_async_kinds(observed.iter().map(String::as_str)),
         BASELINE_EVENT_KINDS,
         "event-kind sequence regressed from the pinned baseline"
     );
+    // The `log` events the baseline filters out still owe their content (#5895).
+    assert_memory_degradation_logs_well_formed(&events);
 
     // Step 5: reach terminal `finished` status.
     let status_resp = daemon
@@ -391,8 +544,8 @@ async fn m1_cutline_full_scenario_over_http() {
     let (first_seq, last_seq) = assert_envelopes_contiguous(&frames);
     assert_eq!(first_seq, 1);
     // `seq` is assigned to EVERY recorded event, including any async
-    // `index_readiness` that happened to land inside this window — so pin
-    // contiguity against what was actually streamed rather than against the
+    // `index_readiness` or `log` that happened to land inside this window — so
+    // pin contiguity against what was actually streamed rather than against the
     // deterministic baseline's length (see `filter_async_kinds`).
     assert_eq!(
         last_seq as usize,
@@ -404,6 +557,8 @@ async fn m1_cutline_full_scenario_over_http() {
         kinds, BASELINE_EVENT_KINDS,
         "HTTP transport's event-kind sequence must match the SAME baseline as STDIO"
     );
+    // The `log` events the baseline filters out still owe their content (#5895).
+    assert_memory_degradation_logs_well_formed(&frames);
     drop(sse);
 
     let status_resp = post(3, "session.status", json!({"session_id": session_id})).await;
@@ -566,7 +721,7 @@ async fn m1_cutline_cancel_path() {
 #[test]
 fn m1_cutline_replay_via_thin_cli() {
     let project = project_with_agents();
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "run-task",
             "pm",

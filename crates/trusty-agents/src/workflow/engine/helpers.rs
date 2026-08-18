@@ -12,10 +12,65 @@
 //! into `out_dir`; `copy_dir_all` is a symlink-refusing recursive copy.
 //! Test: `post_code_reconciles_files_from_project_root`,
 //! `post_plan_relocates_assignments_json_from_git_root`,
-//! `reconcile_code_outputs_against_divergent_dirs` in `executor`'s test module.
+//! `reconcile_code_outputs_against_divergent_dirs` in `executor`'s test module;
+//! the undeterminable-probe arms (#5551) in
+//! `executor::tests::relocate_fail_closed`.
 
 use crate::agents::AgentConfig;
 use crate::workflow::config::{Assignments, safe_join};
+
+/// #5551: Filesystem-presence probe used by every relocation gate here.
+///
+/// Why: These helpers ask "is the destination already there?" before renaming
+/// or copying over it and then deleting the source. The question has three
+/// answers — present, absent, and *undeterminable* — and the live trigger for
+/// the third is a transient `EIO`/`ETIMEDOUT`/`ESTALE` on a network mount,
+/// which no real-filesystem fixture can produce on demand. Routing every probe
+/// through this trait is what makes the error arm reachable from a test.
+/// What: `try_exists` mirrors `tokio::fs::try_exists` exactly — `NotFound` is a
+/// definite answer and comes back as `Ok(false)`; only an unanswerable probe
+/// yields `Err`.
+/// Test: `reconcile_against_aborts_when_destination_probe_is_undeterminable`
+/// and its siblings in `executor::tests::relocate_fail_closed`.
+#[async_trait::async_trait]
+pub(crate) trait ExistsProbe: Send + Sync {
+    async fn try_exists(&self, path: &std::path::Path) -> std::io::Result<bool>;
+}
+
+/// The real-filesystem probe; every production call path uses this one.
+pub(crate) struct FsExistsProbe;
+
+#[async_trait::async_trait]
+impl ExistsProbe for FsExistsProbe {
+    async fn try_exists(&self, path: &std::path::Path) -> std::io::Result<bool> {
+        tokio::fs::try_exists(path).await
+    }
+}
+
+/// #5551: Name the path an undeterminable probe was asked about, preserving
+/// the underlying `ErrorKind` so a caller can still tell EIO from ELOOP.
+fn undeterminable(path: &std::path::Path, e: std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        e.kind(),
+        format!(
+            "presence of {} could not be determined ({e}); refusing to relocate over it",
+            path.display()
+        ),
+    )
+}
+
+/// #5551: Fail the whole pass when any item was left unrelocated because its
+/// presence was undeterminable, so a caller cannot read the summary as clean.
+fn unresolved_result(op: &str, unresolved: Vec<String>) -> std::io::Result<()> {
+    if unresolved.is_empty() {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "{op}: {} path(s) left unrelocated because their presence could not be determined: {}",
+        unresolved.len(),
+        unresolved.join(", ")
+    )))
+}
 
 /// #160: Max age of a stray `assignments.json` at the project root that we
 /// will still treat as belonging to the just-finished plan phase. Anything
@@ -39,35 +94,6 @@ pub(crate) fn agent_uses_claude_code(agent_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// #123: After the code phase, move files that the code agent (claude-code
-/// runner) wrote to the project root into `out_dir`.
-///
-/// Why: Even with `current_dir(out_dir)` and `--add-dir out_dir`, the claude
-/// CLI occasionally anchors relative `write_file` paths to the git repo root
-/// (its inherited CWD). The QA agent runs pytest against `out_dir` (or the
-/// `{{project_dir}}` discovered inside it), so files at the project root are
-/// invisible to QA and produce false-negative test failures. This routine
-/// reads `assignments.json` from `out_dir`, and for each listed path that is
-/// (a) missing in `out_dir` and (b) present at the project root with a recent
-/// mtime, moves it into `out_dir`.
-/// What: Best-effort. Skips silently when no `assignments.json` is present
-/// (legacy monolithic path), when the project root cannot be read, or when
-/// individual moves fail. Recency check uses the same 10-minute window as
-/// `POST_PLAN_RELOCATION_MAX_AGE` to avoid picking up stale leftovers.
-/// Test: `post_code_reconciles_files_from_project_root` exercises the move.
-async fn reconcile_code_outputs_from_project_root(
-    out_dir: &std::path::Path,
-) -> std::io::Result<()> {
-    let project_root = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::debug!(error = %e, "reconcile_code_outputs: cannot read CWD");
-            return Ok(());
-        }
-    };
-    reconcile_code_outputs_from(&project_root, out_dir).await
-}
-
 /// #222: Reconcile code outputs against an explicit code target.
 ///
 /// Why: When `--project-dir` is set, generated files belong in `code_dir`,
@@ -77,18 +103,14 @@ async fn reconcile_code_outputs_from_project_root(
 /// What: Loads `assignments.json` from `assignments_dir`; for each listed
 /// file, if it's missing in `code_target` but present at the git project
 /// root (CWD) with a recent mtime, moves it into `code_target`. When
-/// `assignments_dir == code_target` (legacy mode) delegates to the
-/// pre-#222 `reconcile_code_outputs_from_project_root`.
-/// Test: Indirect — covered by the existing
-/// `post_code_reconciles_files_from_project_root` path when paths align;
-/// the divergent path is exercised by manual smoke for `--project-dir .`.
+/// `assignments_dir == code_target` (legacy mode) delegates to
+/// [`reconcile_code_outputs_from`].
+/// Test: `reconcile_code_outputs_against_divergent_dirs`,
+/// `reconcile_against_aborts_when_destination_probe_is_undeterminable`.
 pub(crate) async fn reconcile_code_outputs_against(
     assignments_dir: &std::path::Path,
     code_target: &std::path::Path,
 ) -> std::io::Result<()> {
-    if assignments_dir == code_target {
-        return reconcile_code_outputs_from_project_root(code_target).await;
-    }
     let project_root = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => {
@@ -96,6 +118,29 @@ pub(crate) async fn reconcile_code_outputs_against(
             return Ok(());
         }
     };
+    reconcile_code_outputs_against_from(&project_root, assignments_dir, code_target, &FsExistsProbe)
+        .await
+}
+
+/// Testable inner routine for [`reconcile_code_outputs_against`], with the
+/// project root and the presence probe supplied explicitly.
+///
+/// Why: The outer function reads the project root from the process-wide CWD
+/// and always probes the real filesystem, so neither the divergent-directory
+/// layout nor the undeterminable-probe arm is reachable from a test without
+/// this seam.
+/// What: Same behavior as the outer function; `probe` answers every
+/// destination/stray presence question.
+/// Test: `reconcile_against_aborts_when_destination_probe_is_undeterminable`.
+pub(crate) async fn reconcile_code_outputs_against_from(
+    project_root: &std::path::Path,
+    assignments_dir: &std::path::Path,
+    code_target: &std::path::Path,
+    probe: &dyn ExistsProbe,
+) -> std::io::Result<()> {
+    if assignments_dir == code_target {
+        return reconcile_code_outputs_from(project_root, code_target, probe).await;
+    }
     let assignments = match Assignments::load(assignments_dir) {
         Some(a) => a,
         None => {
@@ -107,18 +152,34 @@ pub(crate) async fn reconcile_code_outputs_against(
         }
     };
     let mut moved = 0usize;
+    let mut unresolved: Vec<String> = Vec::new();
     for wave in &assignments.waves {
         for file in &wave.files {
             let dest = match safe_join(code_target, &file.path) {
                 Some(p) => p,
                 None => continue,
             };
-            if tokio::fs::try_exists(&dest).await.unwrap_or(false) {
-                continue;
+            // #5551: an undeterminable destination probe would otherwise read
+            // as "absent" and rename the stray over a real generated output.
+            match probe.try_exists(&dest).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::error!(error = %undeterminable(&dest, e), "aborting this file's relocation");
+                    unresolved.push(file.path.clone());
+                    continue;
+                }
             }
             let stray = project_root.join(&file.path);
-            if !tokio::fs::try_exists(&stray).await.unwrap_or(false) {
-                continue;
+            // #5551: a failed stray probe is not a clean skip — account for it.
+            match probe.try_exists(&stray).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    tracing::error!(error = %undeterminable(&stray, e), "aborting this file's relocation");
+                    unresolved.push(file.path.clone());
+                    continue;
+                }
             }
             // When code_target effectively == project_root (e.g.
             // `--project-dir .`), the file is already where it belongs.
@@ -127,9 +188,15 @@ pub(crate) async fn reconcile_code_outputs_against(
             {
                 continue;
             }
+            // #5551: an unstattable stray is not a clean skip either — the
+            // recency gate cannot be evaluated, so the file goes unaccounted.
             let meta = match tokio::fs::metadata(&stray).await {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::error!(error = %undeterminable(&stray, e), "aborting this file's relocation");
+                    unresolved.push(file.path.clone());
+                    continue;
+                }
             };
             let is_recent = meta
                 .modified()
@@ -146,7 +213,10 @@ pub(crate) async fn reconcile_code_outputs_against(
             if let Err(rename_err) = tokio::fs::rename(&stray, &dest).await {
                 tracing::debug!(error = %rename_err, "rename failed; copy+delete");
                 tokio::fs::copy(&stray, &dest).await?;
-                let _ = tokio::fs::remove_file(&stray).await;
+                if let Err(e) = tokio::fs::remove_file(&stray).await {
+                    tracing::debug!(error = %e, path = %stray.display(),
+                        "could not remove stray file after copy");
+                }
             }
             tracing::warn!(
                 from = %stray.display(),
@@ -156,13 +226,14 @@ pub(crate) async fn reconcile_code_outputs_against(
             moved += 1;
         }
     }
-    if moved > 0 {
+    if moved > 0 || !unresolved.is_empty() {
         tracing::info!(
             moved,
+            unresolved = unresolved.len(),
             "reconcile_code_outputs_against: relocated files into code_dir"
         );
     }
-    Ok(())
+    unresolved_result("reconcile_code_outputs_against", unresolved)
 }
 
 /// Testable inner routine for `reconcile_code_outputs_from_project_root`.
@@ -178,6 +249,7 @@ pub(crate) async fn reconcile_code_outputs_against(
 pub(crate) async fn reconcile_code_outputs_from(
     project_root: &std::path::Path,
     out_dir: &std::path::Path,
+    probe: &dyn ExistsProbe,
 ) -> std::io::Result<()> {
     let assignments = match Assignments::load(out_dir) {
         Some(a) => a,
@@ -192,6 +264,7 @@ pub(crate) async fn reconcile_code_outputs_from(
 
     let mut moved = 0usize;
     let mut skipped_recent = 0usize;
+    let mut unresolved: Vec<String> = Vec::new();
     for wave in &assignments.waves {
         for file in &wave.files {
             // #114: Refuse to act on any path that escapes out_dir, even if
@@ -207,24 +280,40 @@ pub(crate) async fn reconcile_code_outputs_from(
                     continue;
                 }
             };
-            if tokio::fs::try_exists(&dest).await.unwrap_or(false) {
+            // #5551: an undeterminable destination probe would otherwise read
+            // as "absent" and rename the stray over a real generated output.
+            match probe.try_exists(&dest).await {
                 // Happy path — claude-code wrote it where we expected.
-                continue;
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::error!(error = %undeterminable(&dest, e), "aborting this file's relocation");
+                    unresolved.push(file.path.clone());
+                    continue;
+                }
             }
 
             // Misroute candidate: same relative path under the project root.
             let stray = project_root.join(&file.path);
-            if !tokio::fs::try_exists(&stray).await.unwrap_or(false) {
-                continue;
+            // #5551: a failed stray probe is not a clean skip — account for it.
+            match probe.try_exists(&stray).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    tracing::error!(error = %undeterminable(&stray, e), "aborting this file's relocation");
+                    unresolved.push(file.path.clone());
+                    continue;
+                }
             }
 
             // Recency gate: only move if mtime is recent enough to plausibly
             // belong to the just-finished code phase.
             let meta = match tokio::fs::metadata(&stray).await {
                 Ok(m) => m,
+                // #5551: same as above — record it rather than skipping silently.
                 Err(e) => {
-                    tracing::debug!(error = %e, path = %stray.display(),
-                        "reconcile_code_outputs: stat failed");
+                    tracing::error!(error = %undeterminable(&stray, e), "aborting this file's relocation");
+                    unresolved.push(file.path.clone());
                     continue;
                 }
             };
@@ -268,14 +357,15 @@ pub(crate) async fn reconcile_code_outputs_from(
         }
     }
 
-    if moved > 0 || skipped_recent > 0 {
+    if moved > 0 || skipped_recent > 0 || !unresolved.is_empty() {
         tracing::info!(
             moved = moved,
             skipped_too_old = skipped_recent,
+            unresolved = unresolved.len(),
             "reconcile_code_outputs: post-code reconciliation summary"
         );
     }
-    Ok(())
+    unresolved_result("reconcile_code_outputs", unresolved)
 }
 
 pub(crate) async fn relocate_plan_outputs_from_project_root(
@@ -288,7 +378,7 @@ pub(crate) async fn relocate_plan_outputs_from_project_root(
             return Ok(());
         }
     };
-    relocate_plan_outputs_from(&project_root, out_dir).await
+    relocate_plan_outputs_from(&project_root, out_dir, &FsExistsProbe).await
 }
 
 /// Testable inner routine: same behavior as
@@ -299,15 +389,26 @@ pub(crate) async fn relocate_plan_outputs_from_project_root(
 pub(crate) async fn relocate_plan_outputs_from(
     project_root: &std::path::Path,
     out_dir: &std::path::Path,
+    probe: &dyn ExistsProbe,
 ) -> std::io::Result<()> {
     let out_asg = out_dir.join("assignments.json");
-    if tokio::fs::try_exists(&out_asg).await.unwrap_or(false) {
+    // #5551: `assignments.json` is the plan manifest the code phase and QA
+    // read; an undeterminable probe must never unblock overwriting it.
+    if probe
+        .try_exists(&out_asg)
+        .await
+        .map_err(|e| undeterminable(&out_asg, e))?
+    {
         // Happy path — plan-agent wrote it where we expected. Nothing to do.
         return Ok(());
     }
 
     let root_asg = project_root.join("assignments.json");
-    let root_asg_exists = tokio::fs::try_exists(&root_asg).await.unwrap_or(false);
+    // #5551: a failed source probe is not "nothing misrouted".
+    let root_asg_exists = probe
+        .try_exists(&root_asg)
+        .await
+        .map_err(|e| undeterminable(&root_asg, e))?;
     if !root_asg_exists {
         // Nothing misrouted. plan-agent just didn't produce assignments.json
         // at all — the code phase's existing "legacy monolithic" fallback
@@ -355,8 +456,16 @@ pub(crate) async fn relocate_plan_outputs_from(
     // Also relocate stubs/ if the plan-agent put it at the project root.
     let root_stubs = project_root.join("stubs");
     let out_stubs = out_dir.join("stubs");
-    if tokio::fs::try_exists(&root_stubs).await.unwrap_or(false)
-        && !tokio::fs::try_exists(&out_stubs).await.unwrap_or(false)
+    // #5551: both probes gate a rename whose ENOTEMPTY fallback merge-copies
+    // over `out_stubs` and then `remove_dir_all`s the whole source tree.
+    if probe
+        .try_exists(&root_stubs)
+        .await
+        .map_err(|e| undeterminable(&root_stubs, e))?
+        && !probe
+            .try_exists(&out_stubs)
+            .await
+            .map_err(|e| undeterminable(&out_stubs, e))?
     {
         // Only relocate if recent, using directory mtime as a proxy.
         let stubs_meta = tokio::fs::metadata(&root_stubs).await?;
@@ -370,10 +479,12 @@ pub(crate) async fn relocate_plan_outputs_from(
             if let Err(e) = tokio::fs::rename(&root_stubs, &out_stubs).await {
                 // Cross-device or non-empty-target; try recursive copy.
                 tracing::debug!(error = %e, "stubs rename failed, copying recursively");
-                if let Err(copy_err) = copy_dir_all(&root_stubs, &out_stubs) {
-                    tracing::warn!(error = %copy_err, "failed to copy stubs/ from project root");
-                } else {
-                    let _ = std::fs::remove_dir_all(&root_stubs);
+                // #5551: a failed copy left the "relocated" WARN below to fire
+                // anyway, reporting a move that did not happen.
+                copy_dir_all(&root_stubs, &out_stubs)?;
+                if let Err(e) = std::fs::remove_dir_all(&root_stubs) {
+                    tracing::debug!(error = %e, path = %root_stubs.display(),
+                        "could not remove stray stubs/ after copy");
                 }
             }
             tracing::warn!(

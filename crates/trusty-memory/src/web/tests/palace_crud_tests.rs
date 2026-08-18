@@ -267,6 +267,99 @@ async fn update_palace_name_returns_not_found_for_missing_id() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// Restore a directory's mode on drop, including while unwinding.
+///
+/// Why: the denial test below strips a palace directory to mode 000. The
+/// fixture's tempdir is deliberately leaked, so a mode-000 directory left
+/// behind by a failed assertion is a permanent undeletable leak rather than a
+/// transient one.
+#[cfg(unix)]
+struct RestoreMode(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// Why (#5549): hardening `load_palace` to distinguish absent from
+/// undeterminable buys nothing if the caller flattens the distinction again.
+/// `update_palace_name_typed` mapped EVERY `PalaceStoreError` through
+/// `ServiceError::not_found`, so a palace whose `palace.json` could not be
+/// stat'd was reported to the HTTP client as 404 — "this palace does not
+/// exist" — for a denial or a transient `EIO` that established no such thing.
+/// What: creates a palace, strips its directory to mode 000 so stat of the
+/// metadata inside is denied, and PATCHes it. Asserts the response is 500 and
+/// specifically NOT 404. Panics rather than passing vacuously if the denial
+/// does not take hold.
+/// Test: This test itself.
+#[cfg(unix)]
+#[tokio::test]
+async fn update_palace_name_reports_an_unstattable_palace_as_internal() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let state = test_state();
+    let palace_dir = state.data_root.join("locked-palace");
+    let app = router().with_state(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"name": "locked-palace"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    std::fs::set_permissions(&palace_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let _restore = RestoreMode(palace_dir.clone());
+
+    // Root bypasses the mode bits outright, and some filesystems ignore them,
+    // so confirm the denial actually took hold. A vacuous pass on a fail-open
+    // guard is worse than no test at all.
+    let target = palace_dir.join("palace.json");
+    match std::fs::metadata(&target) {
+        Ok(_) => panic!(
+            "cannot exercise #5549: stat of {} still succeeds with its parent at mode 000. \
+             Run this suite as a non-root user on a filesystem that honours POSIX \
+             permission bits.",
+            target.display()
+        ),
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected the locked palace dir to deny stat of its metadata, got {e}"
+        ),
+    }
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/palaces/locked-palace")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"name": "New Display Name"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "a palace whose metadata cannot be stat'd was reported as absent — that is the \
+         #5549 coercion re-created one crate up, at the caller"
+    );
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
 /// Why: The operator TUI's MEMORY tab reads `node_count`, `edge_count`,
 /// `community_count`, and `is_compacting` straight off the
 /// `/api/v1/palaces` payload. If any of those fields disappear or change

@@ -82,6 +82,12 @@ output."
 
 **A running agent's scope is fixed.** New work is a new agent, or it waits.
 
+**A brief carries findings, evidence and constraints — not the implementation
+mechanism.** State what must be TRUE; the agent that reads the code decides how.
+Relay a reviewer's suggested fix as a suggestion to VERIFY, never an instruction.
+Write each acceptance criterion so a wrong implementation FAILS it — before
+stating one, ask what would pass it and still be wrong.
+
 Anything beyond that — sizing a task, the retry protocol, file ownership across
 concurrent dispatches, `isolation: "worktree"`, cross-workstream claim drawers,
 per-agent model overrides and the cost model, the full trigger→agent table:
@@ -173,6 +179,22 @@ merge, cleanup, and the ticketing↔version-control handoff: call
 `Skill(skill="tm-workflow")`. Creating an issue or any issue-lifecycle decision:
 call `Skill(skill="tm-ticketing")`. A specialist has not loaded either — put what
 the delegation needs into the brief.
+
+## Messages Are Pointers
+
+A cross-session message is a POINTER, not a document. Long-form content —
+findings, evidence, rationale, tables, defect analysis — goes in an issue or PR
+comment, routed as above; the message links to it.
+
+The reason is durability, not brevity. A message lands in one session's context,
+is never indexed, and dies with that session, so no third party and no later
+session can find it again. An issue or PR comment is addressable by URL,
+searchable, and visible to every session and to the user. A long message stores
+content where it cannot be recovered — the length is the symptom, the misfiling
+is the defect.
+
+A message is a few lines: state the fact, link the artifact. "trusty-memory
+0.23.0's release run failed, tap stuck at 0.18.0 — details in #NNNN."
 
 ## Customization Surface (ONE surface per artifact type)
 
@@ -328,9 +350,11 @@ and the line number is verified before linking.
 
 ## Before Push
 
-A credential scan by `security` over `git diff origin/main HEAD` is mandatory
-before any `git push`, and blocks the push on a hit. The branch protection it
-sits inside, and the review and changelog gates:
+A credential scan by `security` over `git diff origin/main...HEAD` is mandatory
+before any `git push`, and blocks the push on a hit. Three-dot, because it diffs
+from the merge base — two-dot reports files DELETED from `main` since your branch
+point as your own additions, burying a real secret in another PR's noise. The
+branch protection it sits inside, and the review and changelog gates:
 `Skill(skill="tm-workflow")`.
 
 ## Opportunistic Fixes
@@ -498,17 +522,36 @@ with `curl`/`lsof`/`ps`/`netstat`.
 - `mcp__trusty-memory__memory_recall` before any research or delegation;
   `memory_remember` / `memory_note` to store findings immediately.
 - `mcp__trusty-search__search` before Read/Grep. **Omit `index_id`** — your
-  `.mcp.json` pins this session to its own index, and a guessed id fails with
-  `404 unknown index` (#1373).
-- `mcp__trusty-search__search_health` for liveness, not a shell command.
+  `.mcp.json` pins this session to its own index, and index resolution is
+  pinned-first (#5213): an explicit `index_id` wins, otherwise the pin is
+  used, and only an unpinned session with no id fans out across every index.
+  If you must pass an explicit id, call `list_indexes` first rather than
+  guess — an unresolvable id still fails with `404 unknown index` (#1373).
+- `mcp__trusty-search__search_health` for liveness, not a shell command — it
+  returns `Ok` even when the daemon is down, so branch on `healthy`, not on
+  the call succeeding.
 
 Full per-tool tables: `Skill(skill="tm-tool-usage-guide")`. A tool missing from
 your loaded list is not unavailable — load its schema with `ToolSearch` first.
 
-**External connectors — native-first (soft preference), not a block (ADR-0014):**
-prefer `mcp__gworkspace-mcp__*` over the `mcp__claude_ai_G*` family and
-`mcp__slack-mcp__*` over `mcp__claude_ai_Slack__*`; the hosted connectors stay
-available as fallback.
+**External connectors — native-first (soft preference), not a block (ADR-0014).**
+Google Workspace and Slack ship as crates in THIS workspace, and both are
+OPT-IN: an operator registers them with `tm mcp add`, so a session that has
+neither is behaving normally. Do not diagnose their absence, and never go
+hunting the machine for a similarly-named third-party package — these two are
+the implementations of record.
+
+| Connector | Crate | Binary | Hosted fallback |
+|---|---|---|---|
+| Google Workspace | `crates/trusty-gworkspace` | `trusty-gworkspace-mcp` | `mcp__claude_ai_G*` |
+| Slack | `crates/trusty-channels` | `slack-mcp` | `mcp__claude_ai_Slack__*` |
+
+Prefer the native server wherever one is registered. Its tool prefix is the NAME
+it was registered under, which the operator chose — read `tm mcp list` or your
+own tool listing rather than assuming a prefix. Registered is also not the same
+as working — each needs its own credentials, and `trusty-gworkspace-mcp doctor`
+names what Google Workspace is missing. Setup and tool inventories live in each
+crate's `README.md`; registration in `Skill(skill="tm-cli-operations")`.
 
 ## Framework-Guaranteed Conventions (Non-Overridable)
 

@@ -8,7 +8,7 @@
 //! recall / dream events, search reindex / disk stats). Lives behind the
 //! `monitor-tui` feature so non-TUI consumers do not pull ratatui / crossterm.
 //! What: a [`ListItem`] trait both [`super::dashboard::PalaceRow`] and
-//! [`super::dashboard::IndexRow`] implement; a [`SortKey`] trait plus the
+//! [`super::dashboard::IndexRow`] implement; a `SortKey` trait plus the
 //! three-variant [`ThreeWaySortKey`] enum (callers pass a label array so the
 //! third variant can read as "Vectors" or "Chunks"); a [`ListFocus`] enum
 //! replacing the per-TUI focus duplicates; the [`ALL_SENTINEL`] /

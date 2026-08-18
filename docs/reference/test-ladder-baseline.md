@@ -28,6 +28,28 @@ Why `cargo test --workspace` is absent from rungs 1–3, and the "scope down,
 never scope away" line that constrains picking a lower rung, are stated with the
 ladder itself in [`CLAUDE.md`](../../CLAUDE.md) — not repeated here.
 
+### `-p <crate>` is only a gate when the crate's default features compile the code
+
+Every `-p <crate>` cell above assumes the crate's default feature set compiles
+what you changed. `trusty-common` declares `default = []` and gates 25+ modules,
+so `cargo test -p trusty-common` used to run 328 of the crate's ~2062 tests and
+exit 0 — a green that covered neither `memory_core` nor `uds` nor `sld`, and
+held even when a `memory_core` file did not compile (#4901; PR #4899 shipped on
+that green). Since #4901 that form is a `compile_error!` instead. Substitute
+these wherever a rung says `cargo test -p trusty-common`:
+
+| What you changed | Command |
+|---|---|
+| `memory_core` | `cargo test -p trusty-common --features memory-core,embedder-test-support` |
+| any other gated module | `cargo test -p trusty-common --features <feature>` |
+| only unconditional modules | `cargo test -p trusty-common --features unconditional-only` |
+
+The same shape exists wherever a non-default feature gates real code —
+`trusty-common`'s `codex-config` is enabled by no crate in the workspace, so even
+`cargo clippy --workspace` never compiles it and CI lints it in a dedicated step
+(#5264). Before reading a crate-scoped green as a gate, check whether the module
+you edited is behind a `#[cfg(feature = …)]` the command did not enable.
+
 ## The Three Stages in Cargo Terms
 
 `Skill(skill="tm-workflow")` ("Test Scope Widens by Stage") sets the framework
@@ -96,13 +118,20 @@ places it at the publish boundary; rungs 4–6 are named there only because they
 are the rungs that reach that boundary. A rung-4 PR does not owe a workspace test
 run to merge.
 
-**Branch protection follows from this.** The CI `Rust tests (pre-publish gate)`
-job is a pre-build / pre-publish gate, not a pre-merge one, and it is not among
-`main`'s required status contexts — the authoritative, current list is always
-`gh api repos/bobmatnyc/trusty-tools/branches/main/protection --jq
-'.required_status_checks.contexts'`, not a copy enumerated here. Merges proceed
-with `Rust tests (pre-publish gate)` still pending; a **failing** check blocks
-at every stage.
+**The pipeline follows from this.** The CI `Rust tests (pre-publish gate)` job is
+a pre-build / pre-publish gate, not a pre-merge one, and it is not among `main`'s
+required status contexts — the authoritative, current list is always `gh api
+repos/bobmatnyc/trusty-tools/branches/main/protection --jq
+'.required_status_checks.contexts'`, not a copy enumerated here. It no longer runs
+on pull requests at all: it runs on every push to `main`, and on demand via
+`workflow_dispatch` (Actions → CI → "Run workflow"). `preflight-publish.sh` CHECK 1
+refuses to publish any commit that is not `origin/main`, so the tree that gets
+published is always a tree the shards have run against.
+
+**A failing check still blocks at every stage.** Deferring *when* the workspace
+suite runs changes nothing about what a red one means. On `main` a failure opens
+or updates the `ci-red-main` tracking issue via `ci.yml`'s `notify-main-failure`
+job and fails the run.
 
 🔴 **Scoping down by stage is a claim you must be able to prove**, exactly as
 scoping down by rung is. It is never licence to make a red gate green by
@@ -124,7 +153,8 @@ disputed results. Agent-to-PM reporting keeps raw output in all cases
 
 | Gate | Where | Why it fails independent of your branch |
 |---|---|---|
-| The `trusty-search` filesystem-watcher tests (~6; the set drifts) | `crates/trusty-search/src/service/watch_loop.rs`, `watcher.rs`, `watcher_manager.rs` | FSEvents delivery depends on host state, so this row goes stale — **re-measure, do not assume**. Green on 2026-08-11 at `8e6ca079d`: `service::watch*` 20/20 runs in isolation, `--lib` 1582 passed / 0 failed, full-crate green under 16 CPU spinners. #4731's 2026-08-03 failure was real and no watcher source file has changed since, so the host moved, not the code — these can go red again. If they do: the mechanism is a lost one-shot write (a single save landing before OS watch registration finishes is never redelivered), and the remedy is `await_condition_resaving` from `tests/corpus_open_quarantine_4122.rs`. Detail on #4731 |
+| The `trusty-search` filesystem-watcher tests (~6; the set drifts) | `crates/trusty-search/src/service/watch_loop.rs`, `watcher.rs`, `watcher_manager.rs` | **Retired as a known-environmental row by #4731** — the six tests no longer carry the timing assumption that produced it. They wait on their condition and re-apply the save once per debounce window (`service::watch_test_support`), so a save lost to an FSEvents queue overflow is retried rather than stranding a fixed 2–3 s deadline. A red run here is now a real signal: file it. One correction to what this row used to say: the earlier candidate mechanism — a save landing *before* OS watch registration finishes — does not apply, because `notify` 6.1.1's FSEvents backend does not return from `watch()` until after `FSEventStreamStart`. The actual loss path is an FSEvents queue overflow: it sets `MustScanSubDirs` on an event whose path is a DIRECTORY to rescan rather than the file that changed, `notify` attaches that directory path (`fsevent.rs` `callback_impl` calls `add_path` on every translated event, Rescan included), `notify-debouncer-mini`'s `DebouncedEvent` keeps only path and kind so `Flag::Rescan` is discarded, and the watcher sees an ordinary modify of a directory — dropped at the consumer's `is_dir()` guard. The specific save is never learned |
+| `create_index_cannot_register_while_a_delete_is_tearing_the_id_down` | `crates/trusty-search/src/service/server/tests_3049.rs:522` | Races an async index-DELETE teardown against a subsequent CREATE. Measured on `origin/main` at commit `f87f55377`: 5 pass / 1 fail over 6 runs. Failure assertion: `once teardown is done the recreate is an ordinary create and must succeed`, `left: 500`, `right: 200`. CI reproduced both outcomes on identical head SHA `1e62da13d` (run `31577687366` failed, run `31577755214` succeeded). The `500` status is the create hitting a conflict because teardown has not yet released the index id; `200` is expected once it has |
 | `execute_doctor_against_test_daemon` | `crates/trusty-mpm/src/client/executor/tests.rs` | It takes 9–13 s against a 10 s client timeout, so it loses on timing alone under any load |
 | `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet` | `crates/trusty-mpm/src/` (test-only) | Parallel-run race on `$HOME` mutation between tests. Fails 3 of 5 runs on a clean baseline worktree with no branch changes. Passes under `-- --test-threads=1` |
 | `safe_session_cwd_replaces_home_and_missing` | `crates/trusty-mpm/src/` (test-only) | Same `$HOME`-mutation race as `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet`, same evidence run (5 runs: 3 failed, 2 passed), same remedy (`-- --test-threads=1`) |
@@ -141,14 +171,26 @@ parallel test runs is not evidence your branch broke something. Re-run with
 it goes green, the failure was isolation-specific, not a correctness defect.
 Isolation races in this crate are pre-existing and documented above.
 
-🔴 **The correct response is to prove your diff touches zero files in those
-crates — never to `#[ignore]`, `cfg`-gate, or `--exclude` them.** The proof is a
-path list, and empty output is the evidence; paste it in the PR:
+🔴 **The correct response is to prove the failure is pre-existing — never to
+`#[ignore]`, `cfg`-gate, or `--exclude` a failing test.** If the failing crate
+depends on nothing you changed, an empty path list proves it. Otherwise —
+across a dependency edge such as `trusty-search` on `trusty-common` — that
+path list can come back empty while the branch is still guilty, and the valid
+proof is reproducing the failure on `origin/main` (step 2 below; the
+shared-crate caveat is at step 5). When the path list is the applicable proof,
+paste it in the PR:
 
+<!-- Load-bearing order: keep both branches above this block — moving the
+     block ahead of them re-opens the #5594 misreading. -->
 ```bash
 git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
                                            crates/trusty-mpm/src/client/
 ```
+
+`create_index_cannot_register_while_a_delete_is_tearing_the_id_down` above is a
+worked example of that `origin/main` reproduction, measured directly on
+`origin/main` (documented by
+[#5607](https://github.com/bobmatnyc/trusty-tools/pull/5607)).
 
 ## Telling A Pre-Existing Red From One You Caused — Crate-Scoped Confirmation
 
@@ -165,9 +207,10 @@ git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
 3. **Serialize before blaming isolation:** `-- --test-threads=1`. If it still
    fails serialized, parallel interference is not the explanation and "flaky
    under load" is the wrong diagnosis.
-4. **Check the path evidence:** `git diff --name-only origin/main...HEAD`. If the
-   failing crate does not appear there, and you did not touch a shared library it
-   depends on, the red is not yours.
+4. **Check the path evidence:** if the failing crate depends on nothing you
+   changed, an empty `git diff --name-only origin/main...HEAD` for it means the
+   red is not yours; otherwise an empty diff proves nothing — see the
+   shared-crate caveat next.
 5. 🔴 **The shared-crate caveat:** a green `cargo test -p <your-crate>` does
    **not** clear you when you changed `trusty-common`, `trusty-embedderd`, or any
    other shared library. A red in a *dependent* crate is yours until rung 4 of

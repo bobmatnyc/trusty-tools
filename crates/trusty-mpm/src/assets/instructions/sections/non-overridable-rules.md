@@ -40,8 +40,11 @@ with `curl`/`lsof`/`ps`/`netstat`.
 - `mcp__trusty-memory__memory_recall` before any research or delegation;
   `memory_remember` / `memory_note` to store findings immediately.
 - `mcp__trusty-search__search` before Read/Grep. **Omit `index_id`** — your
-  `.mcp.json` pins this session to its own index, and a guessed id fails with
-  `404 unknown index` (#1373).
+  `.mcp.json` pins this session to its own index, and index resolution is
+  pinned-first (#5213): an explicit `index_id` wins, otherwise the pin is
+  used, and only an unpinned session with no id fans out across every index.
+  If you must pass an explicit id, call `list_indexes` first rather than
+  guess — an unresolvable id still fails with `404 unknown index` (#1373).
 - `mcp__trusty-search__search_health` for liveness, not a shell command — it
   returns `Ok` even when the daemon is down, so branch on `healthy`, not on
   the call succeeding.
@@ -49,7 +52,21 @@ with `curl`/`lsof`/`ps`/`netstat`.
 Full per-tool tables: `Skill(skill="tm-tool-usage-guide")`. A tool missing from
 your loaded list is not unavailable — load its schema with `ToolSearch` first.
 
-**External connectors — native-first (soft preference), not a block (ADR-0014):**
-prefer `mcp__gworkspace-mcp__*` over the `mcp__claude_ai_G*` family and
-`mcp__slack-mcp__*` over `mcp__claude_ai_Slack__*`; the hosted connectors stay
-available as fallback.
+**External connectors — native-first (soft preference), not a block (ADR-0014).**
+Google Workspace and Slack ship as crates in THIS workspace, and both are
+OPT-IN: an operator registers them with `tm mcp add`, so a session that has
+neither is behaving normally. Do not diagnose their absence, and never go
+hunting the machine for a similarly-named third-party package — these two are
+the implementations of record.
+
+| Connector | Crate | Binary | Hosted fallback |
+|---|---|---|---|
+| Google Workspace | `crates/trusty-gworkspace` | `trusty-gworkspace-mcp` | `mcp__claude_ai_G*` |
+| Slack | `crates/trusty-channels` | `slack-mcp` | `mcp__claude_ai_Slack__*` |
+
+Prefer the native server wherever one is registered. Its tool prefix is the NAME
+it was registered under, which the operator chose — read `tm mcp list` or your
+own tool listing rather than assuming a prefix. Registered is also not the same
+as working — each needs its own credentials, and `trusty-gworkspace-mcp doctor`
+names what Google Workspace is missing. Setup and tool inventories live in each
+crate's `README.md`; registration in `Skill(skill="tm-cli-operations")`.

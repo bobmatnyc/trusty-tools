@@ -63,8 +63,11 @@ submodules to respect the 500-line cap (`mod.rs` facade + `lifecycle.rs` +
   (`Utc::now()`) automatically. `publish` is best-effort (ignores `SendError`
   when there are no subscribers) and returns the assigned `seq`.
 - `emit` = `publish` + one NDJSON stderr line prefixed with the public
-  `EVENT_LINE_PREFIX = "__HARNESS_EVENT__ "`. The line formatting is factored
-  into `format_event_line` so it is unit-testable without capturing real stderr.
+  `EVENT_LINE_PREFIX`. The line formatting is factored into `format_event_line`
+  so it is unit-testable without capturing real stderr. The constant read
+  `"__HARNESS_EVENT__ "` as landed; #5129 changed it to `"__OMPM_EVENT__ "` —
+  the value trusty-code and trusty-agents were already writing — and made both
+  crates re-export it instead of declaring their own.
 - A lagged-receiver helper `recv_with_lag` that translates
   `broadcast::error::RecvError::Lagged(n)` into a public typed `Lag { skipped }`
   notice (returned as the `Err` arm of an inner `Result`) and resumes the stream

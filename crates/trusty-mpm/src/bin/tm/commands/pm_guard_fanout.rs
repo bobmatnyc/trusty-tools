@@ -13,7 +13,7 @@
 //! real MCP access. `PreToolUse` is the one seam that can deny a single named
 //! tool without touching anything else.
 //!
-//! What: [`evaluate_subagent_fanout`] denies [`SUBAGENT_DISPATCH_TOOLS`]
+//! What: [`evaluate_subagent_fanout`] denies `SUBAGENT_DISPATCH_TOOLS`
 //! (`Task` and `Agent` — both, since Claude Code renamed the tool between
 //! releases) when, and only when, the calling session is itself a subagent.
 //! [`caller_is_subagent`] answers that from two automatic, spawner/harness-set
@@ -38,7 +38,7 @@
 //! "not a subagent" for that reason, and no future signal may invert it.
 //!
 //! `SendMessage` is never denied under any circumstance — it is not a member
-//! of [`SUBAGENT_DISPATCH_TOOLS`], and it is how a blocked agent reports back
+//! of `SUBAGENT_DISPATCH_TOOLS`, and it is how a blocked agent reports back
 //! to the PM and gets resumed. Denying it would strand the very agent this
 //! guard redirects.
 //!
@@ -81,7 +81,7 @@ pub(crate) const FANOUT_DENY_REASON: &str = "Subagent fan-out denied (#4784): th
 /// unit-testable without env mutation, which races across test threads. The
 /// marker resolution lives next door in [`caller_is_subagent`].
 /// What: `Some(`[`FANOUT_DENY_REASON`]`)` when `tool_name` is a
-/// [`SUBAGENT_DISPATCH_TOOLS`] member AND `caller_is_subagent` is true;
+/// `SUBAGENT_DISPATCH_TOOLS` member AND `caller_is_subagent` is true;
 /// `None` (ALLOW) otherwise — which covers the PM's own dispatch, every
 /// non-dispatch tool including `SendMessage`, and the indeterminate case.
 /// Test: `denies_dispatch_tools_from_a_subagent`,

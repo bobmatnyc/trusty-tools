@@ -265,7 +265,7 @@ fn the_old_cache_comparison_reports_clean_on_the_same_inputs() {
     )
     .unwrap();
 
-    let old = crate::core::skill_staleness::stale_skills(cache.path(), dest.path());
+    let old = crate::core::skill_staleness::stale_skills(cache.path(), dest.path()).unwrap();
     println!("OLD (cache vs manifest)       -> {old:?}");
 
     let reference = reference_of(&[("tm-workflow", "v2 describes the JSON manifest")]);

@@ -18,6 +18,12 @@
 //! Test: Compile-tested by the workspace build; the facade's plugin seam is
 //!       covered by `agent_plugin_lookup_returns_matching_plugin`.
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 /// Re-export the harness adapter framework from trusty-agents-common.
 ///
 /// Why: Moved to trusty-agents-common in Wave 1 (issue #862, refs #830/#832) so
@@ -166,6 +172,13 @@ pub use tools::agent_plugin::install_plugins;
 /// Re-export `run` at the crate root so launchers can call
 /// `trusty_agents::run().await` without referencing the `runtime` module.
 pub use runtime::run;
+
+/// Re-export the bounded-shutdown launcher (#3655) so a `main.rs` is one line.
+///
+/// Why: prefer this over driving [`run`] from `#[tokio::main]` — the attribute
+/// drops the runtime with an unbounded wait, which lets one wedged background
+/// task make the process un-exitable.
+pub use runtime::run_to_completion;
 
 /// Re-exports of items that internal modules historically referenced as
 /// `crate::AgentConfig` and `crate::default_bundled_config_dir`.

@@ -7,13 +7,17 @@
 //! of bugs. This module is the single shared implementation.
 //!
 //! What: pure-ish helpers — directory scanning, idempotent JSON upsert, atomic
-//! writes with backup, and Claude Code hook merging. No global state.
+//! writes with backup, and Claude Code hook merging. The one piece of process
+//! state is [`staging_stamp`]'s counter, which exists so two concurrent writers
+//! cannot pick the same staging filename (#4077).
 //!
-//! Test: `cargo test -p trusty-common` covers `mcp_server_entry` shape,
-//! `merge_hook_entries` idempotency, and `discover_claude_settings` skip-dir
-//! behaviour. Filesystem-touching tests are `#[ignore]`.
+//! Test: `cargo test -p trusty-common --features unconditional-only` covers
+//! `mcp_server_entry` shape, `merge_hook_entries` idempotency, and
+//! `discover_claude_settings` skip-dir behaviour. Filesystem-touching tests are
+//! `#[ignore]`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
@@ -155,11 +159,35 @@ pub fn mcp_server_entry(command: &str, args: &[&str]) -> Value {
 /// Why: a crash or `^C` mid-write must never leave a half-written settings
 /// file — that would brick the user's Claude Code config. Writing to a temp
 /// file then renaming makes the swap atomic on every supported OS.
-/// What: serialises `value` to pretty JSON; if `path` already exists it is
-/// first copied to `<path>.bak`; the JSON is written to `<path>.tmp`; finally
-/// `<path>.tmp` is renamed onto `path`. Parent directories are created if
-/// missing.
-/// Test: `write_json_atomic_creates_and_backs_up` (`#[ignore]`, real fs).
+///
+/// Why the staging names are per-call (issue #4077): they used to be the FIXED
+/// `<path>.tmp` and `<path>.bak`, which every writer of `path` shared. Two
+/// concurrent writers then truncated and filled the SAME `<path>.tmp`, and
+/// whichever renamed first published whatever bytes were in it at that instant
+/// — the other writer's payload, or half of it. That is durable torn-file
+/// corruption of the exact file this function exists to protect, and it is not
+/// confined to one process: `tm launch` seeds `~/.claude.json` from the CLI
+/// while the daemon seeds it from its own, so no in-process mutex can cover it.
+/// The backup carried the same defect one line up — two `fs::copy` calls into
+/// one `<path>.bak` interleave into a torn backup, destroying the recovery
+/// artifact at the moment it is needed.
+///
+/// What: serialises `value` to pretty JSON, then publishes through per-call
+/// staging paths — `<path>.bak.<pid>.<seq>` renamed onto `<path>.bak` (skipped
+/// when `path` does not yet exist), and `<path>.tmp.<pid>.<seq>` renamed onto
+/// `path`. Parent directories are created if missing. Every writer therefore
+/// fills a name no other live writer can hold, and `rename` publishes one
+/// writer's COMPLETE bytes; a reader of `path` sees one writer's payload or
+/// the other's, never a splice. Concurrent writers can still LOSE an update —
+/// serialising a read-modify-write cycle is the caller's job (`trusty-mpm`'s
+/// `core::claude_json_guard` does it in-process) — but they can no longer
+/// corrupt. A staged file is removed if its own write or rename fails, so a
+/// failed call leaves `path` byte-for-byte as it was and drops no litter.
+/// Test: `write_json_atomic_creates_and_backs_up` (`#[ignore]`, real fs),
+/// `concurrent_writers_never_publish_a_torn_file` (#4077),
+/// `concurrent_writers_never_tear_the_backup` (#4077),
+/// `failed_rename_leaves_destination_and_no_staging_file`,
+/// `staging_paths_are_unique_per_call`.
 pub fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -171,18 +199,81 @@ pub fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
     let serialized =
         serde_json::to_string_pretty(value).context("serialize JSON for atomic write")?;
 
+    // #4077: stage under a name no other live writer can hold, then rename.
+    let stamp = staging_stamp();
+
     if path.exists() {
         let backup = backup_path(path);
-        std::fs::copy(path, &backup)
-            .with_context(|| format!("back up {} to {}", path.display(), backup.display()))?;
+        let staged = append_extension(path, &format!("bak.{stamp}"));
+        stage_then_publish(&staged, &backup, |dest| {
+            std::fs::copy(path, dest).map(|_| ())
+        })
+        .with_context(|| format!("back up {} to {}", path.display(), backup.display()))?;
     }
 
-    let tmp = tmp_path(path);
-    std::fs::write(&tmp, serialized.as_bytes())
-        .with_context(|| format!("write temp file {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} onto {}", tmp.display(), path.display()))?;
-    Ok(())
+    let staged = append_extension(path, &format!("tmp.{stamp}"));
+    stage_then_publish(&staged, path, |dest| {
+        std::fs::write(dest, serialized.as_bytes())
+    })
+    .with_context(|| format!("atomically write {}", path.display()))
+}
+
+/// Fill `staged` via `fill`, then rename it onto `dest`, removing `staged` if
+/// either step fails.
+///
+/// Why (issue #4077): the rename is what makes the publish atomic, and the
+/// removal is what keeps per-call staging names from turning every failed
+/// write into permanent litter in the operator's home directory. Both callers
+/// in [`write_json_atomic`] need exactly this sequence, and a copy of it in
+/// each is how the two would drift.
+/// What: calls `fill(staged)`, then `rename(staged, dest)`. On either error the
+/// staged file is removed best-effort (its own removal failure is not worth
+/// masking the real error) and the original error is returned, leaving `dest`
+/// untouched. The context names the stage that actually failed — a fill error
+/// never reached the publish, so reporting it as "publish X onto Y" pointed a
+/// reader at a rename that was never attempted.
+/// Test: `concurrent_writers_never_publish_a_torn_file`,
+/// `failed_write_leaves_no_staging_file` (fill branch),
+/// `failed_rename_leaves_destination_and_no_staging_file` (rename branch).
+fn stage_then_publish(
+    staged: &Path,
+    dest: &Path,
+    fill: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let filled = fill(staged);
+    let reached_publish = filled.is_ok();
+    let result = filled.and_then(|()| std::fs::rename(staged, dest));
+    if result.is_err() {
+        let _ = std::fs::remove_file(staged);
+    }
+    result.with_context(|| {
+        if reached_publish {
+            format!("publish {} onto {}", staged.display(), dest.display())
+        } else {
+            format!("fill staging file {}", staged.display())
+        }
+    })
+}
+
+/// A suffix unique to this call among every live writer on the machine.
+///
+/// Why (issue #4077): uniqueness must hold across THREADS and across
+/// PROCESSES, because the racing writers are `tm launch` and the daemon as
+/// often as they are two tokio tasks. The pid separates processes; the counter
+/// separates calls within one process and, unlike a wall-clock reading, cannot
+/// repeat under a coarse timer. A leftover staging file from a crashed process
+/// whose pid is later reused is harmless: the new writer truncates it, fills it
+/// completely, and renames — the collision that matters is only between two
+/// writers that are both live, and pid plus counter makes that impossible.
+/// What: `<process id>.<monotonically increasing counter>`.
+/// Test: `staging_paths_are_unique_per_call`.
+fn staging_stamp() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}.{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// Idempotently upsert a single entry into the `mcpServers` object of a JSON
@@ -349,11 +440,6 @@ fn quarantine_path_with_stamp(path: &Path, stamp: &str) -> PathBuf {
 /// Path of the backup file written before an atomic JSON write: `<path>.bak`.
 fn backup_path(path: &Path) -> PathBuf {
     append_extension(path, "bak")
-}
-
-/// Path of the temp file used during an atomic JSON write: `<path>.tmp`.
-fn tmp_path(path: &Path) -> PathBuf {
-    append_extension(path, "tmp")
 }
 
 /// Append `suffix` to a path's file name, preserving the existing extension
@@ -568,7 +654,290 @@ mod tests {
     fn append_extension_preserves_original() {
         let p = Path::new("/tmp/.claude/settings.json");
         assert_eq!(backup_path(p), Path::new("/tmp/.claude/settings.json.bak"));
-        assert_eq!(tmp_path(p), Path::new("/tmp/.claude/settings.json.tmp"));
+        assert_eq!(
+            append_extension(p, "tmp.7.0"),
+            Path::new("/tmp/.claude/settings.json.tmp.7.0")
+        );
+    }
+
+    /// Why (#4077): the fixed `<path>.tmp` was what two writers collided on.
+    /// Two calls must never compute the same staging name, and the name must
+    /// still be a sibling of the target so the publish is a same-filesystem
+    /// rename rather than a copy.
+    #[test]
+    fn staging_paths_are_unique_per_call() {
+        let p = Path::new("/tmp/.claude/settings.json");
+        let first = append_extension(p, &format!("tmp.{}", staging_stamp()));
+        let second = append_extension(p, &format!("tmp.{}", staging_stamp()));
+
+        assert_ne!(
+            first, second,
+            "two writers must never stage through the same filename"
+        );
+        assert_eq!(first.parent(), p.parent(), "staging must stay a sibling");
+        assert_eq!(second.parent(), p.parent(), "staging must stay a sibling");
+    }
+
+    /// Why (#4077): with per-call staging names, a failed publish that left its
+    /// staged file behind would litter the operator's home with one dead file
+    /// per failure instead of reusing one.
+    #[test]
+    fn failed_write_leaves_no_staging_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = dir.path();
+        let dest = dir.join("settings.json");
+        let staged = dir.join("settings.json.tmp.test");
+
+        let err = stage_then_publish(&staged, &dest, |p| {
+            std::fs::write(p, b"partial")?;
+            Err(std::io::Error::other("simulated fill failure"))
+        })
+        .expect_err("a failing fill must propagate");
+
+        assert!(
+            !staged.exists(),
+            "the staged file must be removed when the publish fails: {err}"
+        );
+        assert!(
+            !dest.exists(),
+            "a failed publish must not create the target"
+        );
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("fill staging file"),
+            "a fill failure must not be reported as a publish that never happened: {chain}"
+        );
+    }
+
+    /// Why: `stage_then_publish` promises the staged file is removed on EITHER
+    /// failure, and `write_json_atomic` promises a failed call leaves its target
+    /// byte-for-byte as it was. Only the fill-fails branch was covered; this is
+    /// the other one — fill SUCCEEDS and the rename fails.
+    ///
+    /// The failure is forced structurally, not by timing: `<path>.bak` is
+    /// planted as a non-empty DIRECTORY, and renaming a non-directory onto a
+    /// directory is required to fail by POSIX (`EISDIR` here, `ENOTDIR` on some
+    /// platforms) and fails on Windows too. So `fs::copy` fills the staged
+    /// backup, the rename onto `<path>.bak` cannot succeed, and the error
+    /// propagates before the target is ever touched. No sleep, no race, no
+    /// dependence on file permissions or on the test's uid.
+    #[test]
+    fn failed_rename_leaves_destination_and_no_staging_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = dir.path();
+        let path = dir.join("settings.json");
+
+        write_json_atomic(&path, &json!({ "v": 1 })).expect("seed target");
+        let before = std::fs::read(&path).expect("read seeded target");
+
+        // Occupy `<path>.bak` with a non-empty directory: the backup publish
+        // fills its staging file, then cannot rename onto this.
+        let backup = backup_path(&path);
+        std::fs::create_dir(&backup).expect("plant backup directory");
+        std::fs::write(backup.join("occupant"), b"not a backup").expect("occupy it");
+
+        let err = write_json_atomic(&path, &json!({ "v": 2 }))
+            .expect_err("a rename that cannot succeed must propagate");
+
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("publish ") && chain.contains(" onto "),
+            "a rename failure must name the publish stage: {chain}"
+        );
+
+        assert_eq!(
+            std::fs::read(&path).expect("target must survive"),
+            before,
+            "a failed publish must leave the target byte-for-byte unchanged"
+        );
+
+        let leftovers: Vec<String> = std::fs::read_dir(dir)
+            .expect("list scratch dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("settings.json.bak.") || n.starts_with("settings.json.tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed publish must remove its own staging file, left: {leftovers:?}"
+        );
+
+        assert_eq!(
+            std::fs::read(backup.join("occupant")).expect("occupant must survive"),
+            b"not a backup",
+            "the rename destination must be untouched by the failed publish"
+        );
+    }
+
+    /// A writer's payload: `writer` and `pad` are consistent only WITHIN one
+    /// writer's own value, so any splice of two writers either fails to parse
+    /// or fails the cross-field equality check. Padded to ~4 KB so filling the
+    /// staging file is not one atomic syscall's worth of bytes.
+    fn racing_payload(writer: usize) -> Value {
+        json!({ "writer": writer, "pad": "x".repeat(4096) })
+    }
+
+    /// Read `path` and classify it: `None` while it does not exist yet, `Some`
+    /// of whether the bytes are exactly one writer's complete payload.
+    fn observe_intact(path: &Path) -> Option<bool> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            return Some(false); // a splice that is not even valid JSON
+        };
+        let intact = value["writer"]
+            .as_u64()
+            .is_some_and(|w| value == racing_payload(w as usize));
+        Some(intact)
+    }
+
+    /// Why (#4077): the defect is a TORN file, so the only proof is real
+    /// writers contending on one path while a reader watches. Two directions
+    /// are asserted — every write must SUCCEED, and every snapshot a reader
+    /// ever observes must be exactly one writer's complete payload, never a
+    /// splice. Watching throughout rather than only at the end is what catches
+    /// the tear itself: the pre-fix code publishes a temp file another writer
+    /// truncated, and the corrupt state is transient.
+    ///
+    /// Writers record failures instead of panicking so the storm runs to
+    /// completion and the reader gets its evidence; the counts are asserted
+    /// afterwards. Pre-fix, BOTH counters are non-zero.
+    ///
+    /// Reliability: 8 writers × 60 rounds = 480 contended publishes, watched by
+    /// 2 readers spinning continuously. Every observed pre-fix run failed on
+    /// both counters; see the PR body for the raw output. NOT `#[ignore]`d
+    /// despite touching the filesystem — the module's other fs tests are, but a
+    /// regression test for a corruption class that CI never runs proves
+    /// nothing, and this one is a hermetic `tempdir` finishing in ~0.05s.
+    #[test]
+    fn concurrent_writers_never_publish_a_torn_file() {
+        const WRITERS: usize = 8;
+        const READERS: usize = 2;
+        const ROUNDS: usize = 60;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        // Seed so readers never race the very first creation.
+        write_json_atomic(&path, &racing_payload(0)).expect("seed write");
+
+        let write_failures = AtomicU64::new(0);
+        let torn_reads = AtomicU64::new(0);
+        let done = std::sync::atomic::AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            for _ in 0..READERS {
+                let (path, torn_reads, done) = (&path, &torn_reads, &done);
+                scope.spawn(move || {
+                    while !done.load(Ordering::Relaxed) {
+                        if observe_intact(path) == Some(false) {
+                            torn_reads.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+            let writers: Vec<_> = (0..WRITERS)
+                .map(|writer| {
+                    let (path, write_failures) = (&path, &write_failures);
+                    scope.spawn(move || {
+                        for _ in 0..ROUNDS {
+                            if write_json_atomic(path, &racing_payload(writer)).is_err() {
+                                write_failures.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            // Join the WRITERS explicitly, then release the readers. Letting
+            // the scope join everything would deadlock — the readers only stop
+            // when `done` is set, and the scope sets nothing.
+            for handle in writers {
+                handle.join().expect("a writer thread must not panic");
+            }
+            done.store(true, Ordering::Relaxed);
+        });
+
+        assert_eq!(
+            torn_reads.load(Ordering::Relaxed),
+            0,
+            "a reader observed .claude.json as a splice of two writers — concurrent \
+             writers shared a staging file (issue #4077)"
+        );
+        assert_eq!(
+            write_failures.load(Ordering::Relaxed),
+            0,
+            "concurrent atomic writes failed — two writers collided on one staging \
+             filename (issue #4077)"
+        );
+        assert_eq!(
+            observe_intact(&path),
+            Some(true),
+            "the final .claude.json is not any single writer's complete payload"
+        );
+    }
+
+    /// Why (#4077): `<path>.bak` was published by a bare `fs::copy` into a
+    /// shared fixed name, so two writers interleaved into a torn BACKUP — the
+    /// recovery artifact corrupted exactly when it is needed. Same storm and
+    /// same watched-snapshot assertion as the sibling test, aimed at the backup.
+    #[test]
+    fn concurrent_writers_never_tear_the_backup() {
+        const WRITERS: usize = 8;
+        const READERS: usize = 2;
+        const ROUNDS: usize = 60;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let backup = backup_path(&path);
+
+        // Two seed writes: the first creates the target, the second creates the
+        // backup, so every racing write takes the backup branch and the readers
+        // never race the backup's first creation.
+        write_json_atomic(&path, &racing_payload(0)).expect("seed target");
+        write_json_atomic(&path, &racing_payload(0)).expect("seed backup");
+
+        let torn_reads = AtomicU64::new(0);
+        let done = std::sync::atomic::AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            for _ in 0..READERS {
+                let (backup, torn_reads, done) = (&backup, &torn_reads, &done);
+                scope.spawn(move || {
+                    while !done.load(Ordering::Relaxed) {
+                        if observe_intact(backup) == Some(false) {
+                            torn_reads.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+            let writers: Vec<_> = (0..WRITERS)
+                .map(|writer| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        for _ in 0..ROUNDS {
+                            // Errors are the sibling test's assertion; here the
+                            // storm only has to keep the backup churning.
+                            let _ = write_json_atomic(path, &racing_payload(writer));
+                        }
+                    })
+                })
+                .collect();
+            for handle in writers {
+                handle.join().expect("a writer thread must not panic");
+            }
+            done.store(true, Ordering::Relaxed);
+        });
+
+        assert_eq!(
+            torn_reads.load(Ordering::Relaxed),
+            0,
+            "a reader observed .claude.json.bak as a splice of two writers — concurrent \
+             backups shared one destination (issue #4077)"
+        );
+        assert_eq!(
+            observe_intact(&backup),
+            Some(true),
+            "the final backup is not any single writer's complete payload"
+        );
     }
 
     #[test]

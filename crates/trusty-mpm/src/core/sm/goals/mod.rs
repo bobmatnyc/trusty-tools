@@ -18,6 +18,12 @@
 //! Test: each submodule carries its own `*_tests.rs`; together they cover id
 //! stability, progress recompute, the verification gate, palace→cache rebuild
 //! equality, and palace-unavailable fallback.
+//!
+//! [`model`]: crate::core::sm::goals::model
+//! [`error`]: crate::core::sm::goals::error
+//! [`memory`]: crate::core::sm::goals::memory
+//! [`cache`]: crate::core::sm::goals::cache
+//! [`store::SmGoalStore`]: crate::core::sm::goals::store::SmGoalStore
 
 pub mod cache;
 pub mod error;

@@ -25,7 +25,7 @@ Otherwise every library consumer pulls in the full axum + tower stack.
 
 🟡 **Editing a shared crate without propagating changes** — modifying
 `trusty-common` (or its consolidated `symgraph` / `embedder` / `mcp` modules),
-`trusty-embedderd`, or `trusty-bm25-daemon` can silently break dependents. Always run `cargo check` (workspace-wide) and
+or `trusty-embedderd` can silently break dependents. Always run `cargo check` (workspace-wide) and
 `cargo test -p <consumer>` for every crate that imports the edited library.
 
 🟡 **Skipping proportional documentation on new public items** — clippy does
@@ -52,6 +52,19 @@ installed, the build script fails loudly. Install pnpm or set
 🟡 **`[patch.crates-io]` only works at the workspace root** — do not add
 `[patch]` tables inside individual crate `Cargo.toml` files; Cargo ignores
 them. All patches must live in the root `Cargo.toml`.
+
+🟡 **`default-features` cannot be disabled on a member manifest when the
+dependency is `{ workspace = true }`** — the `[workspace.dependencies]` entry
+owns `default-features`; writing `default-features = false` on the member is
+ignored if the workspace entry omits the key. Cargo warns rather than
+failing, today:
+```
+warning: `default-features` is ignored for trusty-review, since `default-features`
+was not specified for `workspace.dependencies.trusty-review`, this could become
+a hard error in the future
+```
+Put `default-features = false` on the root `[workspace.dependencies]` entry
+instead. Caught on [#5611](https://github.com/bobmatnyc/trusty-tools/pull/5611).
 
 🔴 **Growing a file past its SLOC cap instead of splitting** — the compiler does
 not stop you, but continued feature additions make the module harder to review,

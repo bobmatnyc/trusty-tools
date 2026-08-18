@@ -34,7 +34,8 @@ pub struct MemoryPolicy {
     pub embedding_cache: usize,
     pub max_batch_size: usize,
     /// Provider-specific batch-size cap applied **only** when the CoreML
-    /// execution provider is active. See [`DEFAULT_COREML_BATCH_SIZE`] for
+    /// execution provider is active. See
+    /// [`DEFAULT_COREML_BATCH_SIZE`](crate::core::memory_policy::DEFAULT_COREML_BATCH_SIZE) for
     /// motivation. The reindex pipeline reads this and uses it in place of
     /// `max_batch_size` whenever the live embedder reports `CoreML`.
     pub coreml_batch_size: usize,

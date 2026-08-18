@@ -334,7 +334,7 @@ impl FrameworkPaths {
     ///
     /// Why: the instruction merge pipeline refers to this file as
     /// `framework_instructions_path`; providing the alias keeps call sites
-    /// readable without renaming the established [`framework_instructions`]
+    /// readable without renaming the established `framework_instructions`
     /// accessor.
     /// What: delegates to [`framework_instructions`](Self::framework_instructions).
     /// Test: `framework_instructions_path_matches_accessor`.

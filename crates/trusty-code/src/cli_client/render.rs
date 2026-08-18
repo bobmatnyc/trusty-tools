@@ -443,6 +443,7 @@ mod tests {
             mode: Some(crate::mode::HarnessMode::DailyDriver),
             compaction_events: 0,
             goals: vec![],
+            memory_durability: crate::session::MemoryDurabilityStatus::default(),
         };
         let out = render_transcript_human(&record);
         assert!(out.contains("pm"));
@@ -461,6 +462,7 @@ mod tests {
             mode: None,
             compaction_events: 0,
             goals: vec![],
+            memory_durability: crate::session::MemoryDurabilityStatus::default(),
         };
         let out = render_transcript_human(&record);
         assert!(out.contains("s-1"));

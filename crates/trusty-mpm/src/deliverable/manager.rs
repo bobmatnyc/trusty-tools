@@ -10,8 +10,8 @@
 //! [`MilestoneStore`], each in an `Arc<RwLock<…>>`. `upsert_*`/`get_*`/`*_by_project`
 //! are cheap, independently-locked primitives for create/read paths (no race
 //! hazard — creates use a fresh id, reads are eventually-consistent by design).
-//! [`update_deliverable_with`](Self::update_deliverable_with) and
-//! [`update_milestone_with`](Self::update_milestone_with) are the atomic
+//! `update_deliverable_with` and
+//! `update_milestone_with` are the atomic
 //! read-validate-mutate-persist seam PATCH handlers MUST use (#2395 review HIGH):
 //! they hold ONE write-lock guard across the whole sequence so no other task can
 //! observe or clobber the intermediate state. The §10.3 transition CHECK itself

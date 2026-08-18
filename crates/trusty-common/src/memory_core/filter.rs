@@ -1080,6 +1080,178 @@ fn is_segmented_identifier(token: &str) -> bool {
     segments.iter().all(|s| is_human_word_segment(s))
 }
 
+/// Longest unbroken alphabetic run a `/`-segment may carry and still read as a
+/// path segment rather than an encoded run.
+///
+/// Why (issue #4977): the charset a path segment is drawn from is the charset an
+/// encoded blob is drawn from, so charset alone cannot separate them and neither
+/// can case — an ALL-UPPERCASE segment is `REQUEST_CHANGES` and is also
+/// `XXXXXXXXXXXXXXXXXXXXXXXX`, the tail of the webhook URL
+/// `real_secrets_still_blocked_after_4312_charset_gate` requires to stay flagged.
+/// Length is what separates them: a path segment's words are words, and words
+/// end.
+/// What: inclusive maximum; a segment carrying a longer alphabetic run is not a
+/// path segment. Tied to [`SECRET_MIN_LEN`] because that is already this
+/// module's statement of "shorter than this cannot be a credential" — the
+/// longest ordinary English word a URL slug carries (`internationalization`, 20)
+/// sits exactly at the boundary and is admitted.
+/// Test: `slash_bearing_base64_blobs_are_blocked`,
+/// `bare_github_urls_are_not_flagged`.
+const MAX_PATH_WORD_LEN: usize = SECRET_MIN_LEN;
+
+/// Length of the longest unbroken ASCII-alphabetic run in `s`.
+///
+/// Why: see [`MAX_PATH_WORD_LEN`] — the discriminator between a path segment and
+/// an encoded run at the one point where case and charset both fail.
+/// What: one pass, digits and punctuation break the run.
+/// Test: `slash_bearing_base64_blobs_are_blocked`.
+fn longest_alpha_run(s: &str) -> usize {
+    let (mut longest, mut cur) = (0usize, 0usize);
+    for c in s.chars() {
+        if c.is_ascii_alphabetic() {
+            cur += 1;
+            longest = longest.max(cur);
+        } else {
+            cur = 0;
+        }
+    }
+    longest
+}
+
+/// A "word segment" for slash/equals splitting: non-empty, containing only ASCII
+/// alphanumerics plus the minimal punctuation set legitimate structural tokens
+/// carry.
+///
+/// Why each admitted character is admitted:
+///   `-`  hyphen in slug/version segments (`prose-summary`, `v0.6.0`)
+///   `_`  underscore in snake_case identifiers
+///   `.`  dot in file extensions and semver (`synthesis.rs`, `v0.6.0`)
+///   `>`  the lone `>` that arrives as the LHS of `>=2-medium->REQUEST_CHANGES`
+///   `:`  Rust/module path separator inside a slash-path segment, e.g.
+///        `client/http_client/error.rs::response_or_body_error` (issue #2442).
+/// All other characters (`<`, `!`, `@`, `#`, `~`) are excluded — none appears in
+/// the paths, slugs, or `key=value` tokens this gate needs to admit.
+/// What: charset predicate only; it constrains what characters a segment is made
+/// of, never how they are arranged. [`is_readable_path_segment`] is what asks the
+/// second question.
+/// Test: `structural_tokens_are_not_flagged`, `key_equals_slashpath_not_flagged`.
+fn is_word_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '>' | ':'))
+}
+
+/// True when `seg` reads as one segment of a path or URL — a slug, a directory
+/// name, a filename, an issue number — rather than as a run of encoded bytes.
+///
+/// Why (issue #4977, the EIGHTH recurrence, and the first in the losing
+/// direction): [`is_word_segment`] alone decided this, and it is a charset test.
+/// Every `/`-separated run of a standard-base64 blob is pure alphanumeric, so
+/// every such blob satisfied it and branch (b) of [`is_structural_token`]
+/// exempted the whole token before the base64 branch of [`looks_like_secret`]
+/// could see it. Measured over a 300k-sample corpus: 70,736 misses, 96.4% of them
+/// `/`-bearing base64 — a larger detection gap than every false-positive round in
+/// this file's history combined. The absolute miss rate for standard base64 was
+/// 20–25%.
+///
+/// What the four arms are for, and why none alone is enough:
+/// - **pure digits** — `/issues/5511`, `/projects/19`. No case or word structure
+///   to test, and a digits-only run carries no alphabet, so no encoder alphabet
+///   can be expressed in it (the same argument [`is_issue_number_list`] makes).
+/// - **[`is_human_word_segment`]** — case uniformity. Admits `verdict`,
+///   `prose-summary`, `REQUEST_CHANGES`, `gpt-5.4-mini-20260317`. This is the
+///   permissive arm: an all-lowercase run of any shape rides in on it, which is
+///   why the all-lowercase URL-path secret pinned in
+///   `real_secrets_still_blocked_after_4312_charset_gate` stays missed.
+/// - **[`is_symbol_path_segment`]** — CamelCase word structure, for the ordinary
+///   path segments case uniformity declines: `MyComponent.tsx`, `Bm25Index`,
+///   `README.md`. Without it, tightening branch (b) would have made every
+///   CamelCase filename in a path a false positive — the ninth recurrence,
+///   shipped in the same change as the eighth.
+/// - **[`is_symbol_path`]** — a `::`-joined symbol path standing as one segment,
+///   `error.rs::response_or_body_error` (issue #2442).
+///
+/// Why the recursion into [`looks_like_secret`] is bounded, stated because a
+/// reader will rely on it: a segment reaching this function was produced by
+/// splitting on `/`, so it contains no `/`. Branch (b) requires one, and
+/// [`is_ordinary_url`] requires `://`, so neither can fire on the way back down.
+/// Depth is 2, always. What it buys: an ALL-UPPERCASE segment passes the case arm
+/// (that arm cannot tell `REQUEST_CHANGES` from `AKIAIOSFODNN7EXAMPLE`), and the
+/// recursion is what catches a provider key parked in a URL path.
+/// Test: `slash_bearing_base64_blobs_are_blocked`,
+/// `bare_github_urls_are_not_flagged`, `structural_tokens_are_not_flagged`,
+/// `recurrence_corpus_has_no_false_positives`.
+fn is_readable_path_segment(seg: &str) -> bool {
+    if !is_word_segment(seg) || longest_alpha_run(seg) > MAX_PATH_WORD_LEN {
+        return false;
+    }
+    if seg.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    // #4977: a segment that is itself a credential is never a path segment.
+    if looks_like_secret(seg) {
+        return false;
+    }
+    is_human_word_segment(seg) || is_symbol_path_segment(seg) || is_symbol_path(seg)
+}
+
+/// True when every `/`-separated segment of `s` reads as a path segment.
+///
+/// Why it is a named helper: the `=` branch of [`is_structural_token`] validates
+/// a `key=path/to/value` RHS with it without re-entering that function, keeping
+/// the check one level deep.
+/// What: requires at least one `/` and every segment passing
+/// [`is_readable_path_segment`] (which rejects the empty segment a doubled or
+/// trailing `/` produces).
+/// Test: `key_equals_slashpath_not_flagged`, `slash_bearing_base64_blobs_are_blocked`.
+fn is_slash_path(s: &str) -> bool {
+    s.contains('/') && s.split('/').all(is_readable_path_segment)
+}
+
+/// True when `token` is an ordinary URL — one that carries no credential in its
+/// userinfo and whose every authority/path segment reads as a path segment.
+///
+/// Why (issue #5513): a bare GitHub issue or PR link is the single most common
+/// URL shape in this project's checkpoints, and it was rejected on the write path
+/// whenever its path carried a digit — which every issue and PR number is. The
+/// `://` puts a `/` in the token, so [`looks_like_secret`]'s base64 branch owns
+/// it; branch (b) of [`is_structural_token`] could not rescue it because the
+/// empty segment between the two slashes of `://` fails every segment test; and
+/// the `has_upper || has_digit` entropy floor was then satisfied by the issue
+/// number. A rejected write is a durable fact that never exists, so this failed
+/// closed on data, not just on ergonomics.
+///
+/// Why the exemption is decomposition rather than a blanket "a bare URL is not a
+/// credential": #4312 recorded that blanket rule as unsafe and it still is — a
+/// userinfo-free URL can carry the secret in its PATH, which is exactly the
+/// webhook shape `real_secrets_still_blocked_after_4312_charset_gate` requires to
+/// stay flagged. Decomposing the URL and asking the same question of every
+/// segment separates the two: `…/issues/5511` is a path all the way down,
+/// `…/services/T00000000/B00000000/XXXX…` is not.
+///
+/// What: requires a `scheme://`, no `user:pass@` userinfo
+/// ([`is_url_credential_shaped`]), a non-empty remainder, and every non-empty
+/// `/`-separated segment of that remainder passing [`is_readable_path_segment`].
+/// Empty segments are skipped rather than rejected so `file:///Users/masa/x` and
+/// a trailing slash both decompose.
+/// Test: `bare_github_urls_are_not_flagged`,
+/// `url_path_secrets_are_still_blocked`, `url_shaped_prose_is_not_flagged`.
+fn is_ordinary_url(token: &str) -> bool {
+    let Some((scheme, rest)) = token.split_once("://") else {
+        return false;
+    };
+    let scheme_ok = !scheme.is_empty()
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if !scheme_ok || rest.is_empty() || is_url_credential_shaped(token) {
+        return false;
+    }
+    rest.split('/')
+        .filter(|s| !s.is_empty())
+        .all(is_readable_path_segment)
+}
+
 /// True when `token` is a structured path/slug/key=value/compound-identifier
 /// that should NOT be treated as a base64 blob or mixed-case credential.
 ///
@@ -1094,27 +1266,45 @@ fn is_segmented_identifier(token: &str) -> bool {
 /// This function recognises those structural shapes and short-circuits the
 /// two dangerous branches in `looks_like_secret`.
 ///
-/// How the branches divide the work (issue #4739, amended #4898): the `+` guard
-/// returns first and decides `+`-bearing tokens on its own via
-/// [`is_plus_joined_word_phrase`]. Branches (a) and (b) then fire only on tokens
-/// carrying `=` or `/`, so they are the ones that can rescue a token from the
-/// base64 branch. Branch (c) is reachable only after all of `+`, `=` and `/` are
-/// ruled out, i.e. only for tokens on which `has_b64_sym` is false, so it serves
-/// the mixed-case branch exclusively. That partition is why a fix to (c) cannot
-/// loosen base64 detection.
-/// What: returns `true` for `+`-bearing tokens that are `+`-joined word phrases
-/// (checked first, and the only way a `+` token can be structural); (a)
-/// `=`-containing tokens where the LHS is a word segment and the RHS is itself
-/// structural (a word segment OR a slash-path), checked before the slash-path
-/// branch so that tokens like `key=path/to/value` are decomposed at `=` first;
-/// (b) slash-path tokens where every `/`-segment is word-like; or (c)
-/// `-`/`_`/`.`-segmented compound identifiers where each segment is a single
-/// human-readable word.
+/// How the branches divide the work (issue #4739, amended #4898 and #5513): the
+/// URL guard returns first, so a token carrying `://` is decomposed as a URL and
+/// never reaches the rest. The `+` guard is next and decides `+`-bearing tokens
+/// on its own via [`is_plus_joined_word_phrase`]. Branches (a) and (b) then fire
+/// only on tokens carrying `=` or `/`, so they are the ones that can rescue a
+/// token from the base64 branch. Branch (c) is reachable only after all of `+`,
+/// `=` and `/` are ruled out, i.e. only for tokens on which `has_b64_sym` is
+/// false, so it serves the mixed-case branch exclusively. That partition is why a
+/// fix to (c) cannot loosen base64 detection.
+///
+/// What every branch that admits a `/` now shares (issue #4977): one per-segment
+/// predicate, [`is_readable_path_segment`]. Branch (b) used to ask a charset
+/// question, which every `/`-separated run of a base64 blob answers `yes`; the
+/// URL guard asks the same question of the same segments, so the loosening #5513
+/// asks for and the tightening #4977 asks for are one decision made in one place
+/// rather than two exemptions drifting apart.
+/// What: returns `true` for (0) a userinfo-free URL whose every authority/path
+/// segment reads as a path segment ([`is_ordinary_url`], checked first);
+/// `+`-bearing tokens that are `+`-joined word phrases (checked next, and the
+/// only way a `+` token can be structural); (a) `=`-containing tokens where the
+/// LHS is a word segment and the RHS is itself structural (a word segment OR a
+/// slash-path), checked before the slash-path branch so that tokens like
+/// `key=path/to/value` are decomposed at `=` first; (b) slash-path tokens where
+/// every `/`-segment reads as a path segment; or (c) `-`/`_`/`.`-segmented
+/// compound identifiers where each segment is a single human-readable word.
 /// Test: `structural_tokens_are_not_flagged`, `base64_blob_is_blocked`,
 /// `key_equals_slashpath_not_flagged` (issue #1676 regression tests),
 /// `dotted_capitalised_filenames_are_not_flagged` (issue #4739),
-/// `three_4898_reproductions_are_not_flagged` (issue #4898).
+/// `three_4898_reproductions_are_not_flagged` (issue #4898),
+/// `slash_bearing_base64_blobs_are_blocked` (issue #4977),
+/// `bare_github_urls_are_not_flagged`, `url_path_secrets_are_still_blocked`
+/// (issue #5513).
 fn is_structural_token(token: &str) -> bool {
+    // #5513: a URL is decomposed at `://` and `/` and decided segment by
+    // segment, before the `+` guard so `mongodb+srv://host/db` is read as a URL.
+    // A `user:pass@` URL is not ordinary and falls through to the heuristics.
+    if is_ordinary_url(token) {
+        return true;
+    }
     // #4898: a `+`-bearing token is decided here and nowhere else — it is
     // structural only when it reads as a `+`-joined word phrase. Keeping the
     // early return (rather than letting `+` tokens fall through to branches (a)
@@ -1123,36 +1313,6 @@ fn is_structural_token(token: &str) -> bool {
     // `foo=<base64-with-plus>` on the strength of the `foo` alone.
     if token.contains('+') {
         return is_plus_joined_word_phrase(token);
-    }
-    // A "word segment" for slash/equals splitting: non-empty, contains only
-    // ASCII alphanumeric chars plus the minimal set of punctuation that
-    // appears in legitimate structural tokens:
-    //   `-`  — hyphen in slug/version segments (`prose-summary`, `v0.6.0`)
-    //   `_`  — underscore in snake_case identifiers
-    //   `.`  — dot in file extensions and semver (`synthesis.rs`, `v0.6.0`)
-    //   `>`  — needed for the `>` in `>=2-medium->REQUEST_CHANGES` which
-    //           arrives as the LHS of the `=` split (i.e. the lone `>` char).
-    //   `:`  — Rust/module path separator (`::`) inside a slash-path segment,
-    //           e.g. `client/http_client/error.rs::response_or_body_error`
-    //           (issue #2442 real-world false positive: a source-location
-    //           reference, not a credential). A lone or doubled `:` never
-    //           appears in base64/credential alphabets, so admitting it does
-    //           not widen the entropy-heuristic bypass meaningfully — a
-    //           colon-bearing "path segment" still has to pass the slash-path
-    //           structural shape to be exempted at all.
-    // All other chars (`<`, `!`, `@`, `#`, `~`) are excluded — none
-    // appear in paths, slugs, or key=value tokens we need to allow, and
-    // admitting them would unnecessarily widen the bypass surface.
-    fn is_word_segment(s: &str) -> bool {
-        !s.is_empty()
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '>' | ':'))
-    }
-    // True when every `/`-separated segment of `s` is a word segment.
-    // Extracted as a named helper so the `=` branch can use it for the RHS
-    // without re-entering `is_structural_token` (one-level bounded check).
-    fn is_slash_path(s: &str) -> bool {
-        s.contains('/') && s.split('/').all(is_word_segment)
     }
     // (a) key=value / semver-operator shape — checked BEFORE slash-path so
     // that tokens containing BOTH `=` and `/` (e.g.
@@ -1179,16 +1339,28 @@ fn is_structural_token(token: &str) -> bool {
             if is_word_segment(lhs) && (is_word_segment(rhs) || is_slash_path(rhs)) {
                 return true;
             }
+            // #4977: the OR fallback below must not rescue a `/`-bearing RHS
+            // that `is_slash_path` just declined — `key=<base64-with-slashes>`
+            // is branch (b)'s blob wearing a `key=` prefix, and a word-shaped
+            // LHS was enough to exempt it.
+            if rhs.contains('/') {
+                return false;
+            }
             // Fall back to the original OR for semver-operator tokens like
             // `>=value` where the LHS may be a bare `>` and the RHS drives
             // the structural signal.
             return is_word_segment(lhs) || is_word_segment(rhs);
         }
     }
-    // (b) Path/slug shape: all `/`-separated segments are word-like.
+    // (b) Path/slug shape: every `/`-separated segment reads as a path segment.
     // Covers `verdict/grade/prose-summary`, `org/repo`, file paths.
+    //
+    // #4977: the per-segment test is `is_readable_path_segment`, not the bare
+    // charset test it used to be — every `/`-separated run of a standard-base64
+    // blob is pure alphanumeric, so the charset test exempted one in five of
+    // them before the base64 branch could see them.
     if token.contains('/') {
-        return token.split('/').all(is_word_segment);
+        return token.split('/').all(is_readable_path_segment);
     }
     // #5043: a `::`-joined symbol path is decided before branch (c), whose
     // case-uniformity rule a CamelCase segment can never satisfy.
@@ -1416,11 +1588,17 @@ fn is_plausible_b64_charset(token: &str) -> bool {
 /// these incidentally, never by design. Real webhook tokens are near-universally
 /// mixed-case or digit-bearing and stay caught; see the known-miss assertion in
 /// `real_secrets_still_blocked_after_4312_charset_gate`.
+/// Second consumer since #5513: [`is_ordinary_url`] uses this predicate in the
+/// opposite polarity — a URL that IS credential-shaped is not an ordinary URL and
+/// gets no exemption. Widening this predicate therefore now widens flagging in
+/// one place and narrows the URL exemption in another; both move the same way, so
+/// a change here still cannot silently lose a connection string.
 /// What: returns `true` iff `token` contains `://` and the text between it and
 /// the first following `@` contains a `:`.
 /// Test: `four_4312_acceptance_cases_are_not_flagged`,
 /// `url_shaped_prose_is_not_flagged`,
-/// `real_secrets_still_blocked_after_4312_charset_gate`.
+/// `real_secrets_still_blocked_after_4312_charset_gate`,
+/// `url_path_secrets_are_still_blocked`.
 fn is_url_credential_shaped(token: &str) -> bool {
     // #4312: `scheme://user:pass@host` only — a bare URL carries no userinfo.
     let Some((_, after_scheme)) = token.split_once("://") else {

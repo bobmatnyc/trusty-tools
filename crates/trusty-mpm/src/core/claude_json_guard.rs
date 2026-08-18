@@ -1,12 +1,12 @@
-//! Process-wide mutual exclusion for read-modify-write cycles on the
-//! operator's `~/.claude.json`.
+//! Process-wide mutual exclusion for read-modify-write cycles on a
+//! `.claude.json`.
 //!
 //! Why (issue #4072): two independent seeders in this crate perform an
 //! unsynchronised load → mutate → store cycle against the SAME
 //! `~/.claude.json` file —
 //! [`crate::core::home_trust_seed::preseed_home_trust`] (workspace trust +
 //! renderer-upsell dismissal) and
-//! [`crate::core::session_launch::settings::preseed_workspace_trust`]
+//! `crate::core::session_launch::settings::preseed_workspace_trust`
 //! (workspace trust + `enabledMcpjsonServers` approval). Both run inside the
 //! daemon, which provisions and spawns sessions CONCURRENTLY: the workspace
 //! provisioner calls the former and then, via `prepare_session`, the latter,
@@ -27,29 +27,44 @@
 //! on PRs #4057 and #4067).
 //!
 //! What: [`lock`] hands out a guard on one process-wide mutex. Every seeder
-//! that read-modify-writes `~/.claude.json` holds it across the WHOLE cycle
-//! (read, mutate, write), never just the write. The guard is deliberately not
-//! keyed by path: both seeders always target the single `~/.claude.json` of
-//! whatever `$HOME` resolves to right now, so one global lock is exactly the
-//! granularity needed and is immune to two callers disagreeing about the path.
+//! that read-modify-writes a `.claude.json` holds it across the WHOLE cycle
+//! (read, mutate, write), never just the write. Four callers hold it: the two
+//! `~/.claude.json` seeders named above, plus
+//! [`crate::core::mcp_config::seed_builtin_servers`] and
+//! [`crate::core::standalone::trust_seed::preseed_managed_trust`] (#4076),
+//! which both target `<claude_config_dir>/.claude.json`.
+//!
+//! The guard is deliberately not keyed by path, and now covers TWO distinct
+//! files rather than one. That is still the right granularity: a path key
+//! would let two callers that spell the same file differently — `$HOME`
+//! resolved at different moments, a symlinked config dir — take different
+//! locks and race anyway, and the cost of over-serialising is a few
+//! microseconds on a once-per-session path.
 //!
 //! SCOPE: this is an in-process lock. It does not (and is not meant to)
 //! serialise two separate `tm` processes racing the same file — that needs an
-//! OS file lock and has never been observed; the daemon is the only writer
-//! that concurrently seeds. Every write also goes through
-//! `trusty_common::claude_config::write_json_atomic`, so even a cross-process
-//! race can only ever lose an update, never leave a torn file behind.
+//! OS file lock. `tm launch` seeds from the CLI process while the daemon seeds
+//! from its own, so such a race is real, and its consequence is a LOST UPDATE:
+//! one process's `projects.<workspace>` entry silently overwritten by the
+//! other's. It is not a torn file. Every write goes through
+//! `trusty_common::claude_config::write_json_atomic`, which since #4077 stages
+//! through a per-call filename and publishes by `rename`, so a reader always
+//! sees one writer's complete bytes. Before #4077 that claim was false — the
+//! shared fixed `<path>.tmp` meant a cross-process race COULD publish a torn
+//! file, and this comment asserted otherwise.
 //!
 //! Test: `concurrent_seeds_preserve_every_workspace_entry` and
 //! `concurrent_home_and_workspace_seeds_preserve_both_entries`, in
-//! `tests_claude_json_concurrency_4072`.
+//! `tests_claude_json_concurrency_4072`;
+//! `concurrent_managed_seeds_preserve_every_workspace_entry` (#4076), in
+//! `core::standalone::trust_seed`'s tests.
 
 use std::sync::{Mutex, MutexGuard};
 
-/// The one process-wide `~/.claude.json` read-modify-write mutex.
+/// The one process-wide `.claude.json` read-modify-write mutex.
 static CLAUDE_JSON_LOCK: Mutex<()> = Mutex::new(());
 
-/// Acquire the process-wide `~/.claude.json` read-modify-write lock.
+/// Acquire the process-wide `.claude.json` read-modify-write lock.
 ///
 /// Why: see the module doc — holding this across a seeder's whole load →
 /// mutate → store cycle is what makes two concurrent seeds merge instead of
@@ -62,7 +77,8 @@ static CLAUDE_JSON_LOCK: Mutex<()> = Mutex::new(());
 /// unrelated seeder panic into a permanently un-seedable config for the rest
 /// of the process's life.
 /// Test: `concurrent_seeds_preserve_every_workspace_entry`,
-/// `concurrent_home_and_workspace_seeds_preserve_both_entries`.
+/// `concurrent_home_and_workspace_seeds_preserve_both_entries`,
+/// `concurrent_managed_seeds_preserve_every_workspace_entry`.
 pub(crate) fn lock() -> MutexGuard<'static, ()> {
     CLAUDE_JSON_LOCK
         .lock()

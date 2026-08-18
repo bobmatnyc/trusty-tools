@@ -250,7 +250,23 @@ pub fn find_stale_mpm_skills(claude_skills_dir: &Path) -> Vec<StaleSkill> {
         return Vec::new();
     }
 
-    let manifest = SkillManifest::load(claude_skills_dir);
+    // #5626: this list is a DELETE list, and the ledger is the primary origin
+    // proof. On the empty default an unreadable ledger sent every candidate to
+    // `frozen_content_checksum`, which can confirm on its own — so a permission
+    // error could authorise removing a directory. Refusing to nominate anything
+    // is the safe direction here; there is nothing to lose by scanning again
+    // later.
+    let manifest = match SkillManifest::load(claude_skills_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(
+                dir = %claude_skills_dir.display(),
+                error = %e,
+                "skill ownership ledger unreadable — nominating no stale skills for removal"
+            );
+            return Vec::new();
+        }
+    };
 
     FORMER_TRUSTY_MPM_SKILLS
         .iter()
@@ -422,7 +438,7 @@ mod tests {
     /// [`is_confirmed_trusty_mpm_origin`] since #1905's fork-model fix.
     fn write_confirmed_trusty_mpm_skill(claude_skills_dir: &Path, name: &str, content: &str) {
         write_skill_with_content(claude_skills_dir, name, content);
-        let mut manifest = SkillManifest::load(claude_skills_dir);
+        let mut manifest = SkillManifest::load(claude_skills_dir).unwrap();
         manifest.managed.insert(
             name.to_string(),
             SkillManifestEntry {

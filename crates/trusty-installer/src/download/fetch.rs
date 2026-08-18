@@ -9,7 +9,7 @@
 //! tarball, and verifies the digest. [`extract_binaries`] unpacks all regular
 //! files from the tarball into a temp dir. [`place_binaries`] atomically renames
 //! each extracted binary into the destination directory. These are composed by the
-//! higher-level [`download_prebuilt`] orchestrator in `mod.rs`.
+//! higher-level `download_prebuilt` orchestrator in `mod.rs`.
 //!
 //! Test: `tests` cover SHA-256 verify (match + tampered → error) and extraction
 //! (multi-binary archive). Real network calls are `#[ignore]`-tagged.

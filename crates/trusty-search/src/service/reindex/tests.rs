@@ -2475,3 +2475,15 @@ async fn reindex_producer_panic_does_not_report_complete() {
         "anything polling status must see the failure, not just an SSE subscriber"
     );
 }
+
+// #4356: `reindex_refuses_walk_over_file_budget` and
+// `reindex_budget_is_inclusive_at_the_boundary` lived here, along with the
+// `MaxIndexFilesEnvGuard` that set `TRUSTY_MAX_INDEX_FILES=1` process-wide for
+// the length of a whole reindex. Every non-serial test in this module drives a
+// reindex of its own, and each one reads that variable through
+// `IndexBudget::from_env()` — so the guard's window could refuse their walks as
+// over-budget. `#[serial]` does not order them against the non-serial majority,
+// and `setenv` can tear a concurrent `getenv` regardless (#3769). Both tests now
+// live in `tests/index_budget_env.rs`, its own test BINARY and therefore its own
+// process, so this binary has no writer of that variable. See that file's module
+// docs.

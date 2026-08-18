@@ -154,8 +154,12 @@ pub fn effective_from_env() -> bool {
 /// Why: the console may write `true`/`false` while an operator may set the env
 /// to `1`; one parser keeps both forms consistent.
 /// What: case-insensitive match against `1`, `true`, `yes`, `on`.
+///
+/// Visibility (#5784): `pub(crate)` so
+/// [`crate::core::host_state_gate`]'s opt-in reads the same spellings rather
+/// than adding a fourth truthy parser to this crate.
 /// Test: `parse_truthy_accepts_known_tokens`.
-fn parse_truthy(s: &str) -> bool {
+pub(crate) fn parse_truthy(s: &str) -> bool {
     matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 

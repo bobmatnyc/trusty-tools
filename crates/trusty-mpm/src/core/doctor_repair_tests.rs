@@ -259,3 +259,186 @@ fn legacy_sources_is_empty_on_a_clean_home() {
     let tmp = tempfile::tempdir().unwrap();
     assert!(refuse_legacy_sources(tmp.path()).is_empty());
 }
+
+// ── #5866: the output-style repair ──────────────────────────────────────────
+
+/// Deploy every bundled style into `<home>/.claude/output-styles/`.
+fn deploy_styles(home: &Path) {
+    crate::core::output_style_deployer::deploy_output_styles(&home.join(".claude")).unwrap();
+}
+
+/// The path of one bundled style under `<home>/.claude/output-styles/`.
+fn style_path(home: &Path, index: usize) -> PathBuf {
+    home.join(".claude")
+        .join("output-styles")
+        .join(crate::core::bundle::OUTPUT_STYLES[index].file_name)
+}
+
+/// The remedy string and the repair that honours it must not drift apart.
+#[test]
+fn output_style_remedy_names_the_fix_command() {
+    assert_eq!(OUTPUT_STYLE_REMEDY, "tm doctor --fix --yes");
+    assert!(
+        !OUTPUT_STYLE_REMEDY.contains("tm install"),
+        "#5866: `tm install` has no output-style step"
+    );
+}
+
+#[test]
+fn output_style_repair_is_empty_when_in_sync() {
+    let home = tempfile::tempdir().unwrap();
+    deploy_styles(home.path());
+    assert!(
+        repair_output_style(home.path(), RepairMode::DryRun).is_empty(),
+        "an in-sync tier produces no step, so `--fix` prints nothing about it"
+    );
+}
+
+#[test]
+fn output_style_repair_plans_the_drifted_file() {
+    let home = tempfile::tempdir().unwrap();
+    deploy_styles(home.path());
+    let target = style_path(home.path(), 0);
+    fs::write(&target, "stale text").unwrap();
+
+    let steps = repair_output_style(home.path(), RepairMode::DryRun);
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].check, "output_style_staleness");
+    assert_eq!(steps[0].path, target);
+    assert_eq!(steps[0].status, StepStatus::Planned);
+}
+
+#[test]
+fn output_style_repair_dry_run_writes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    deploy_styles(home.path());
+    let target = style_path(home.path(), 0);
+    fs::write(&target, "stale text").unwrap();
+
+    repair_output_style(home.path(), RepairMode::DryRun);
+
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "stale text",
+        "a dry run must leave the file exactly as it found it"
+    );
+}
+
+/// The repair reports from DISK, and it fixes an absent file too — the state
+/// `check_output_style`'s own remedy string pointed at `tm install` for.
+#[test]
+fn output_style_repair_applies_and_reports_from_disk() {
+    let home = tempfile::tempdir().unwrap();
+    deploy_styles(home.path());
+    let drifted = style_path(home.path(), 0);
+    let missing = style_path(home.path(), 1);
+    fs::write(&drifted, "stale text").unwrap();
+    fs::remove_file(&missing).unwrap();
+
+    let steps = repair_output_style(home.path(), RepairMode::Apply);
+
+    assert_eq!(steps.len(), 2, "{steps:?}");
+    assert!(
+        steps.iter().all(RepairStep::changed),
+        "both a drifted and an absent style must be written: {steps:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&drifted).unwrap(),
+        crate::core::bundle::OUTPUT_STYLES[0].content
+    );
+    assert_eq!(
+        fs::read_to_string(&missing).unwrap(),
+        crate::core::bundle::OUTPUT_STYLES[1].content
+    );
+    assert!(
+        repair_output_style(home.path(), RepairMode::DryRun).is_empty(),
+        "the repair must actually clear the finding it reported"
+    );
+}
+
+/// A write that succeeded must report as a write, whatever a sibling did.
+///
+/// Why (#5866): the repair took the deploy's whole-batch `Err` as every step's
+/// status, so one unreadable style made a DIFFERENT style read `Failed` after
+/// being correctly rewritten to bundled content on disk. That is #5865's
+/// complaint — a report that contradicts the disk, leaving an operator re-running
+/// `tm doctor --fix` against a status that will not move — reintroduced by the
+/// #5866 fix.
+/// What: drifts `OUTPUT_STYLES[0]`, makes `OUTPUT_STYLES[1]` unreadable, applies
+/// the repair, and asserts the drifted step is `Applied` with bundled content on
+/// disk while only the unreadable one is refused.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn one_unreadable_style_does_not_fail_a_sibling_that_was_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    deploy_styles(home.path());
+    let drifted = style_path(home.path(), 0);
+    let blocked = style_path(home.path(), 1);
+    fs::write(&drifted, "stale text").unwrap();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&blocked).is_ok() {
+        eprintln!("skipping: cannot deny read on this platform/privilege level");
+        return;
+    }
+
+    let steps = repair_output_style(home.path(), RepairMode::Apply);
+    let _ = fs::set_permissions(&blocked, fs::Permissions::from_mode(0o600));
+
+    let drifted_step = steps
+        .iter()
+        .find(|s| s.path == drifted)
+        .unwrap_or_else(|| panic!("the drifted style must produce a step: {steps:?}"));
+    assert_eq!(
+        drifted_step.status,
+        StepStatus::Applied { backup: None },
+        "a style that was rewritten must report as written: {steps:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&drifted).unwrap(),
+        crate::core::bundle::OUTPUT_STYLES[0].content,
+        "and the report must match what is on disk"
+    );
+
+    let blocked_step = steps
+        .iter()
+        .find(|s| s.path == blocked)
+        .unwrap_or_else(|| panic!("the unreadable style must produce a step: {steps:?}"));
+    assert!(
+        matches!(blocked_step.status, StepStatus::Refused(_)),
+        "the unreadable style owns its own outcome: {steps:?}"
+    );
+    assert!(
+        !steps
+            .iter()
+            .any(|s| matches!(s.status, StepStatus::Failed(_))),
+        "no step may inherit a sibling's failure: {steps:?}"
+    );
+}
+
+/// Fail-open guard: a read failure is not evidence of staleness, so the repair
+/// refuses rather than overwriting a file it could not inspect.
+#[cfg(unix)]
+#[test]
+fn output_style_repair_refuses_an_unreadable_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    deploy_styles(home.path());
+    let target = style_path(home.path(), 0);
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&target).is_ok() {
+        eprintln!("skipping: cannot deny read on this platform/privilege level");
+        return;
+    }
+
+    let steps = repair_output_style(home.path(), RepairMode::Apply);
+    let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o600));
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Refused(_)),
+        "an unreadable file must be refused, never overwritten: {steps:?}"
+    );
+    assert!(!steps[0].changed());
+}

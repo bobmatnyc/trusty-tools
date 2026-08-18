@@ -161,11 +161,6 @@ fn signable_binaries_table_is_pinned() {
             ("tagent", AGENTS_SET, "com.trusty.tagent"),
             ("trusty-memory", MEMORY_SET, "com.trusty.trusty-memory"),
             (
-                "trusty-bm25-daemon",
-                MEMORY_SET,
-                "com.trusty.trusty-bm25-daemon"
-            ),
-            (
                 "trusty-memory-mcp-bridge",
                 MEMORY_SET,
                 "com.trusty.trusty-memory-mcp-bridge"
@@ -176,31 +171,24 @@ fn signable_binaries_table_is_pinned() {
 }
 
 /// Why (owner ruling 2026-08-06): `cargo install --path crates/trusty-memory`
-/// installs THREE binaries and #2721 is the recorded lesson that signing only
-/// the primary one leaves the rest ad-hoc while the prompt keeps recurring.
-/// Order matters for the same reason it does for `MPM_SET`: `first()` is the
-/// binary any guidance text names.
-/// What: Asserts `MEMORY_SET` resolves to `trusty-memory`,
-/// `trusty-bm25-daemon`, and `trusty-memory-mcp-bridge` in that order, each
-/// with its canonical `com.trusty.<binary>` identifier.
+/// installs more than one binary and #2721 is the recorded lesson that signing
+/// only the primary one leaves the rest ad-hoc while the prompt keeps
+/// recurring. Order matters for the same reason it does for `MPM_SET`:
+/// `first()` is the binary any guidance text names.
+/// What: Asserts `MEMORY_SET` resolves to `trusty-memory` and
+/// `trusty-memory-mcp-bridge` in that order, each with its canonical
+/// `com.trusty.<binary>` identifier. #5329 dropped the third entry,
+/// `trusty-bm25-daemon` — that binary is no longer built or installed.
 /// Test: This is the test.
 #[test]
 fn binaries_for_set_covers_memory() {
     assert_eq!(
         binaries_for_set(MEMORY_SET),
-        vec![
-            "trusty-memory",
-            "trusty-bm25-daemon",
-            "trusty-memory-mcp-bridge"
-        ]
+        vec!["trusty-memory", "trusty-memory-mcp-bridge"]
     );
     assert_eq!(
         codesign_identifier("trusty-memory"),
         "com.trusty.trusty-memory"
-    );
-    assert_eq!(
-        codesign_identifier("trusty-bm25-daemon"),
-        "com.trusty.trusty-bm25-daemon"
     );
     assert_eq!(
         codesign_identifier("trusty-memory-mcp-bridge"),

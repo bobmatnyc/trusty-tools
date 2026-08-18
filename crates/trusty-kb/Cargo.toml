@@ -9,6 +9,31 @@ description = "Deterministic personal-knowledge-base markdown-tree maintainer, e
 keywords = ["mcp", "knowledge-base", "markdown", "frontmatter", "deterministic"]
 categories = ["command-line-utilities", "development-tools"]
 homepage = "https://github.com/bobmatnyc/trusty-tools"
+# NOT PUBLISHED, and deliberately so. This crate has never been uploaded to
+# crates.io and is still in-progress, so claiming the permanent `trusty-kb`
+# name for a store whose schema is still moving buys nothing and cannot be
+# undone — a crates.io name is never released back.
+#
+# THE COST, STATED PLAINLY. `cargo publish` requires a `version` on every
+# non-dev dependency and refuses a crate that depends on an unpublishable one.
+# `trusty-agents` depends on this crate from PRODUCTION code — the whole
+# `src/tools/okg/` tool family plus `src/stores/{index_feed,binding,status}.rs`
+# — not from tests, so this line is what keeps `trusty-agents` unpublishable.
+# That is a disclosure, not a regression: `trusty-agents` has never been on
+# crates.io, and it already cannot publish, because `trusty-kb` 0.1.0 does not
+# exist there for its `version = "0.1.0"` requirement to resolve against.
+#
+# Moving the dependency to `[dev-dependencies]` is NOT an option —
+# dev-dependencies need no version to publish, but the usage here is
+# production. Publishing `trusty-agents` needs a separate decision: publish
+# `trusty-kb` after all, or vendor the store into `trusty-agents`.
+#
+# Note this also settles, in the other direction, the standing rule recorded
+# against `trusty-agents-common` in ../trusty-agents/Cargo.toml — "the
+# `trusty-agents` crate must NOT depend on `publish = false` agent crates".
+# It now does. That rule was written to keep a cargo cycle out of a
+# publishable crate; `trusty-agents` is not publishable today regardless.
+publish = false
 
 # Library half: the pure, unit-testable store + schema + converter engine.
 # The MCP dispatch seam (`dispatch_with`) is public so tests can drive every

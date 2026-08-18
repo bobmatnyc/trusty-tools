@@ -59,7 +59,7 @@ pub(super) async fn content_prune_pass(
         if drawer.drawer_type.is_protected() {
             continue;
         }
-        if is_low_quality_content(&drawer.content, min_words) {
+        if is_low_quality_content(drawer.content(), min_words) {
             victims.push(drawer.id);
         }
     }
@@ -179,7 +179,7 @@ pub(super) async fn dedup_pass(
         .await
         .map_err(|e| e.context("acquire shared embedder for dream dedup"))?;
 
-    let contents: Vec<String> = snapshot.iter().map(|d| d.content.clone()).collect();
+    let contents: Vec<String> = snapshot.iter().map(|d| d.content().to_string()).collect();
     let vectors = embedder
         .embed_batch(&contents)
         .await
@@ -344,8 +344,14 @@ pub struct RoomConsolidationStats {
 /// `SemanticConsolidator`.
 /// Test: exercised via `dream_cycle_semantic_consolidation_no_inference`
 /// (`Ok(None)` path), `dream_cycle_semantic_consolidation_invalid_model_disables_once`
-/// (`Err` path), and the production daemon.
-fn build_consolidator_from_config(
+/// (`Err` path), and the production daemon; the env-tier read itself is pinned
+/// by `dream::tests::dedup_only_config_ignores_an_ambient_openrouter_key`.
+///
+/// `pub(super)` only so that last test can call it directly — reaching it
+/// through `dream_cycle` cannot distinguish "no backend was built" from "a
+/// backend was built and its network call failed", which is the whole
+/// distinction that test exists to pin. Still private to `dream`.
+pub(super) fn build_consolidator_from_config(
     config: &DreamConfig,
 ) -> Result<Option<Arc<SemanticConsolidator>>> {
     if !config.semantic.enabled {
@@ -458,16 +464,18 @@ pub(super) async fn record_provenance_and_collect_superseded(
     superseded_ids: &mut Vec<Uuid>,
 ) {
     for &orig_id in originals {
-        let triple = crate::memory_core::store::kg::Triple {
-            subject: format!("drawer:{orig_id}"),
-            predicate: "superseded_by".to_string(),
-            object: format!("drawer:{canonical_id}"),
-            valid_from: chrono::Utc::now(),
-            valid_to: None,
-            confidence: 1.0,
-            provenance: Some("dream:semantic_consolidation".to_string()),
-        };
-        match handle.kg.assert(triple).await {
+        // #5902: routed through the shared writer so the share path and this one
+        // assert the same edge with the same shape. The #1713 rule — an original
+        // joins `superseded_ids` only on a durable write — stays here, because
+        // only this caller evicts.
+        match crate::memory_core::share::assert_superseded_by(
+            &handle.kg,
+            orig_id,
+            canonical_id,
+            "dream:semantic_consolidation",
+        )
+        .await
+        {
             Ok(()) => superseded_ids.push(orig_id),
             Err(e) => {
                 tracing::warn!(

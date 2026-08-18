@@ -650,7 +650,7 @@ impl CatalogHashes {
     /// identical short-circuit to [`detect_staleness`]'s original
     /// never-synced check; otherwise computes both maps. Under `cfg(test)`,
     /// every call (regardless of outcome) is appended to
-    /// [`COMPUTE_CALL_LOG`] before either branch runs.
+    /// `COMPUTE_CALL_LOG` before either branch runs.
     /// Test: `catalog_hashes_compute_is_unknown_without_either_source`,
     /// `stale_assets_for_many_computes_catalog_exactly_once_per_source_pair`.
     pub fn compute(catalog_agents: &Path, catalog_skills: &Path) -> Self {
@@ -798,9 +798,9 @@ pub fn detect_staleness(
 /// It performs NO network sync: it compares the already-synced catalog checkout
 /// (gated upstream by the TTL) against the already-deployed manifests, so it is
 /// cheap enough for the health hot path.
-/// What: resolves the effective [`HarnessManifest`] for `project_dir` (the
+/// What: resolves the effective [`HarnessManifest`](crate::core::manifest::HarnessManifest) for `project_dir` (the
 /// project override layer; pass the framework root for the daemon-wide baseline),
-/// materializes the [`HarnessPlan`] to learn the catalog source dirs + selection
+/// materializes the [`HarnessPlan`](crate::core::manifest::HarnessPlan) to learn the catalog source dirs + selection
 /// predicates, loads the deployed [`AgentManifest`]/[`SkillManifest`] from
 /// `~/.claude/`, and runs [`detect_staleness`]. When the plan's content sources
 /// are *bundled* (the default manifest) the catalog dirs do not exist, so the
@@ -823,7 +823,22 @@ pub fn detect_for_framework(
     let agents_dir = fw.agent_deploy_dir();
     let skills_dir = fw.claude_skills_dir();
     let deployed_agents = AgentManifest::load(&agents_dir);
-    let deployed_skills = SkillManifest::load(&skills_dir);
+    // #5626: same rule as `session_assets` — a ledger this read could not
+    // establish leaves staleness `unknown`, never fresh.
+    let deployed_skills = match SkillManifest::load(&skills_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                dir = %skills_dir.display(),
+                error = %e,
+                "skill ownership ledger unreadable — catalog staleness is undetermined"
+            );
+            return StalenessReport {
+                unknown: true,
+                ..StalenessReport::default()
+            };
+        }
+    };
 
     detect_staleness(
         &plan.agent_source,

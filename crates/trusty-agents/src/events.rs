@@ -30,8 +30,13 @@ use tokio::sync::broadcast;
 /// channel that already carries `__OMPM_PROGRESS__` (the legacy 2s-poll
 /// path) avoids inventing yet another IPC mechanism.
 /// What: Match by exact byte prefix; payload after the space is one JSON
-/// object decodable as `Event`.
-pub const EVENT_LINE_PREFIX: &str = "__OMPM_EVENT__ ";
+/// object decodable as `Event`. Re-exported, not declared — the marker is a
+/// cross-crate wire format with exactly one declaration, in
+/// `trusty_agents_common::events`.
+/// Test: `tests::event_line_prefix_is_stable`.
+// #5129: a per-crate copy of this marker is what let the documented value
+// drift off the emitted one; a re-export makes that divergence unwritable.
+pub use trusty_agents_common::events::EVENT_LINE_PREFIX;
 
 /// Capacity of the broadcast channel. Larger than `bus`'s 256 because event
 /// volume is much higher (every PM thought, every agent line). 1024 keeps
@@ -182,7 +187,7 @@ pub enum Event {
 
     // -- Persona (workflow) --
     /// #196: emitted once per workflow run when a persona is detected from the
-    /// task text. Lets the UI surface "running in [hacker] mode" before any
+    /// task text. Lets the UI surface "running in \[hacker\] mode" before any
     /// phases execute, so users immediately see why the pipeline shape may
     /// differ from the default.
     PersonaDetected {

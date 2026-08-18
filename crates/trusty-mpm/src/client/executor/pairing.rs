@@ -18,7 +18,7 @@ impl CommandExecutor {
     /// Confirm a pairing code on behalf of a specific chat.
     ///
     /// Why: `POST /pair/confirm` needs the confirming chat's id, which is not
-    /// carried by [`crate::TrustyCommand::Pair`]; the bot adapter supplies it here.
+    /// carried by [`crate::TrustyCommand::Pair`](crate::client::TrustyCommand::Pair); the bot adapter supplies it here.
     /// What: calls the daemon's confirm endpoint and maps the result to
     /// [`CommandResult::PairSuccess`] or [`CommandResult::Error`].
     /// Test: `pair_confirm_unknown_code_errors`.

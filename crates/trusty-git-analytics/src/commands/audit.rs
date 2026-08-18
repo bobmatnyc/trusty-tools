@@ -18,6 +18,7 @@ use clap::Args;
 
 use anyhow::Context as _;
 use tga::audit::{
+    ensure_analyze_daemon, ensure_repositories_indexed, ensure_search_daemon, index_gap_lines,
     require_inference_credential, require_rendered_report_carries_synthesis,
     require_review_supports_required_inference, resolve_review_binary, run_full_sweep,
     run_review_report, sweep_gap_lines, AuditSweepStats, SweepOptions, SweepStage,
@@ -25,7 +26,14 @@ use tga::audit::{
 };
 use tga::core::config::Config;
 use tga::core::db::Database;
-use tga::report::dd_manifest::{build_dd_manifest, configured_secrets, DdManifestOptions};
+// #5823: the relay that carries the sweep's stage events to a parent process.
+use tga::core::progress::{ProgressBus, ProgressEvent, Stage, StageRelay};
+use tga::report::dd_manifest::{
+    build_dd_manifest, configured_secrets, dd_repository_entries, DdManifestOptions,
+};
+// #5405: the board-correlation figures the DD report renders.
+use tga::report::build_ticketing_summary;
+use trusty_common::credentials::scrub_secrets;
 
 /// Arguments for `tga audit`.
 ///
@@ -109,7 +117,14 @@ const DEFAULT_OUTPUT_DIR: &str = "audit-output";
 /// order here is exactly the second implementation DOC-67 §5 forbids, and it
 /// would drift from the TUI's "Run Audit" path.
 /// What: creates the output directory, prints the engagement header, calls
-/// [`run_full_sweep`], then prints one line per stage.
+/// [`run_full_sweep`], prints one line per stage, indexes every repository the
+/// report is about to be built from (#5670), and renders.
+///
+/// The indexing pass sits between the sweep and the manifest for two reasons:
+/// clone-on-demand (#5215) is what guarantees a repository is on disk, so it
+/// cannot run earlier; and a repository that would not index owes a Gaps &
+/// Caveats line, which the manifest carries, so it cannot run later. It never
+/// fails the run — see [`ensure_repositories_indexed`].
 ///
 /// Exit status is `Ok` whenever the sweep completed, even with failed stages —
 /// DOC-67 §9's one-shot rule makes a failed stage a *named gap*, not a reason
@@ -123,9 +138,9 @@ const DEFAULT_OUTPUT_DIR: &str = "audit-output";
 ///
 /// # Errors
 ///
-/// Propagates a missing inference credential and a failure to create the output
-/// directory — both whole-run preconditions. A stage failure is reported, not
-/// propagated.
+/// Propagates a missing inference credential, an unstartable `trusty-search` or
+/// `trusty-analyze` daemon (#5670), and a failure to create the output directory
+/// — all whole-run preconditions. A stage failure is reported, not propagated.
 pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::Result<()> {
     // #5454: the report's narrative now requires inference, so a missing
     // credential is checked before ANY work — ahead of the output directory and
@@ -138,6 +153,21 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     // renderer is ordinary — and that renderer produces exactly the report this
     // ticket abolished, while exiting 0.
     require_review_supports_required_inference()?;
+
+    // #5670: link 1 of the prerequisite chain, and it must precede the analyze
+    // preflight below — `trusty-analyze serve` exits at its own trusty-search
+    // check, and an analyze daemon that is already up answers `503 degraded` for
+    // as long as trusty-search is unreachable, which the analyze probe reads as
+    // no daemon at all. Reordering these two makes the analyze preflight refuse
+    // every run on a machine whose trusty-search is down.
+    ensure_search_daemon().await?;
+
+    // #5670: the fourth whole-run precondition. Nothing started `trusty-analyze`,
+    // and DOC-67 §8 sources the findings table, the complexity distribution and
+    // the health factors from it alone — so a machine without the daemon
+    // produced a report with those three sections empty, and exited 0. This
+    // starts it, and refuses the run when it cannot.
+    ensure_analyze_daemon().await?;
 
     let output = args
         .output
@@ -157,7 +187,11 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
         output: Some(output.clone()),
         weeks: args.weeks,
     };
-    let stats = run_full_sweep(&config, db, &options, None).await?;
+    // #5823: a parent that spawned this process gets the sweep's per-stage
+    // events on stderr. Off unless it asked (`TRUSTY_PROGRESS_RELAY`), so a
+    // hand-run `tga audit` behaves exactly as before.
+    let relay = StageRelay::from_env();
+    let stats = run_full_sweep(&config, db, &options, relay.bus()).await?;
     print_stage_report(&stats);
 
     // #5236: the manifest is the whole tga→trusty-review seam. It carries the
@@ -170,6 +204,42 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     // against the same needles the manifest builder uses.
     let secrets = configured_secrets(&config);
     let mut gaps = sweep_gap_lines(&stats, &secrets);
+
+    // #5236: the renderer resolves a relative repository path against the
+    // MANIFEST's directory, not ours; anchoring here is what keeps it pointed at
+    // the checkout tga actually collected from.
+    let base_dir = std::env::current_dir().unwrap_or_default();
+
+    // #5670: index each repository before the renderer looks for its index.
+    // After the sweep, because clone-on-demand (#5215) is what puts a repository
+    // on disk, and before the manifest is built, because a repository that could
+    // not be indexed owes a gap line and the manifest is where gap lines go.
+    // #5823: the two post-sweep phases are minutes each (indexing walks every
+    // checkout; the render calls an LLM), so a parent watching only the sweep
+    // would see the display stop and the process keep running.
+    let phase = announce(relay.bus(), PHASE_INDEX);
+    let indexed = ensure_repositories_indexed(&dd_repository_entries(&config, &base_dir)).await;
+    finish_phase(relay.bus(), phase);
+    gaps.extend(index_gap_lines(&indexed, &secrets));
+
+    // #5405: the board-correlation figures the report renders. A write failure
+    // is named in Gaps & Caveats rather than aborting — DOC-67 §9's rule that an
+    // unassessed dimension is stated, never silently absent.
+    let ticketing = match ticketing_artifact(&stats, db, &output) {
+        Ok(path) => path,
+        Err(e) => {
+            gaps.push(scrub_secrets(
+                &format!(
+                    "Ticketing correlation: the sweep linked commits to board items, but the \
+                     figures could not be written to {TICKETING_FILE} ({e:#}). The report states \
+                     no board coverage for this run."
+                ),
+                &secrets,
+            ));
+            None
+        }
+    };
+
     gaps.push(DATA_HANDLING_NOTE.to_string());
     let manifest = build_dd_manifest(
         &config,
@@ -178,10 +248,8 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
             analyst: args.analyst.clone(),
             client: args.client.clone(),
             gaps,
-            // #5236: the renderer resolves a relative repository path against
-            // the MANIFEST's directory, not ours; anchoring here is what keeps
-            // it pointed at the checkout tga actually collected from.
-            base_dir: std::env::current_dir().unwrap_or_default(),
+            base_dir,
+            ticketing,
         },
     )?;
 
@@ -189,11 +257,94 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     std::fs::write(&manifest_path, manifest.to_toml()?)?;
     println!("\nManifest: {}", manifest_path.display());
 
-    render_report(&manifest_path, &output).await
+    let phase = announce(relay.bus(), PHASE_RENDER);
+    let rendered = render_report(&manifest_path, &output).await;
+    match &rendered {
+        Ok(()) => finish_phase(relay.bus(), phase),
+        Err(e) => fail_phase(relay.bus(), phase, format!("{e:#}")),
+    }
+    // #5823: the relay's task is joined before returning, so the last verdict
+    // reaches the parent rather than racing this function's return.
+    relay.finish().await;
+    rendered
+}
+
+/// Target name for the post-sweep repository-indexing phase (#5823).
+const PHASE_INDEX: &str = "index repositories";
+
+/// Target name for the post-sweep report render (#5823).
+const PHASE_RENDER: &str = "render report";
+
+/// Tell a watching parent that `phase` began, and hand back its name.
+///
+/// Why: [`run_full_sweep`] announces its own nine stages, but the two phases
+/// after it have no instrumentation at all — and the render is the slowest step
+/// of the whole command. Returning the name keeps the start and the finish from
+/// drifting apart at the call site.
+/// What: emits a [`Stage::Audit`] start event when the relay is on; a no-op
+/// otherwise.
+/// Test: `crate::audit::tests::the_post_sweep_phases_are_announced`.
+fn announce(progress: Option<&ProgressBus>, phase: &'static str) -> &'static str {
+    if let Some(bus) = progress {
+        bus.emit(ProgressEvent::started(Stage::Audit, phase, Some(1)));
+    }
+    phase
+}
+
+/// Report that `phase` finished.
+fn finish_phase(progress: Option<&ProgressBus>, phase: &'static str) {
+    if let Some(bus) = progress {
+        bus.emit(ProgressEvent::completed(Stage::Audit, phase, 1));
+    }
+}
+
+/// Report that `phase` failed, with the reason the caller is about to return.
+fn fail_phase(progress: Option<&ProgressBus>, phase: &'static str, reason: String) {
+    if let Some(bus) = progress {
+        bus.emit(ProgressEvent::failed(Stage::Audit, phase, reason));
+    }
 }
 
 /// Filename of the DD manifest written into the audit's output directory.
 const MANIFEST_FILE: &str = "manifest.toml";
+
+/// Filename of the ticketing artifact, beside the manifest (#5405).
+const TICKETING_FILE: &str = "ticketing.json";
+
+/// Write the run's board-correlation figures beside the manifest.
+///
+/// Why (#5405): the sweep synced `work_items` and joined them to `commits`, and
+/// the DD report read none of it. This is the artifact that carries those
+/// figures across the tga→trusty-review process boundary.
+/// What: returns the manifest-relative path when the correlation stage
+/// succeeded and the file was written, and `None` when that stage failed — in
+/// which case its own gap line already names the omission, so writing figures
+/// from a half-run join would be worse than stating there are none. The path is
+/// relative because trusty-review resolves it against the MANIFEST's directory.
+/// Test: `tests::a_failed_correlation_stage_writes_no_ticketing_artifact`,
+/// `tests::a_succeeded_correlation_stage_writes_the_artifact`.
+///
+/// # Errors
+///
+/// Propagates the database read and the file write; the caller turns either
+/// into a named gap rather than a failed run.
+fn ticketing_artifact(
+    stats: &AuditSweepStats,
+    db: &Database,
+    output: &Path,
+) -> anyhow::Result<Option<PathBuf>> {
+    let correlated = stats
+        .outcomes
+        .iter()
+        .any(|o| o.stage == SweepStage::Correlate && !o.status.is_failure());
+    if !correlated {
+        return Ok(None);
+    }
+
+    let summary = build_ticketing_summary(db.connection())?;
+    std::fs::write(output.join(TICKETING_FILE), summary.to_json()?)?;
+    Ok(Some(PathBuf::from(TICKETING_FILE)))
+}
 
 /// Invoke `trusty-review report` and report what it produced.
 ///
@@ -343,8 +494,43 @@ mod tests {
     use std::time::Instant;
 
     use tga::audit::{AuditSweepStats, StaleFetch, SweepStage};
+    use tga::core::db::Database;
 
     use super::write_stage_report;
+    use super::{announce, fail_phase, finish_phase, PHASE_INDEX, PHASE_RENDER};
+    use tga::core::progress::{Outcome, ProgressBus};
+
+    /// Why (#5823): [`run_full_sweep`] announces its nine stages, but the two
+    /// phases after it — indexing every checkout, then an LLM-backed render —
+    /// had no instrumentation at all, so a parent's display would stop while
+    /// the process kept running for minutes.
+    /// What: both phases emit a start, and their verdict reaches the bus with
+    /// the reason attached when they fail.
+    /// Test: this is the test.
+    #[test]
+    fn the_post_sweep_phases_are_announced() {
+        let bus = ProgressBus::new();
+        let phase = announce(Some(&bus), PHASE_INDEX);
+        finish_phase(Some(&bus), phase);
+        let phase = announce(Some(&bus), PHASE_RENDER);
+        fail_phase(Some(&bus), phase, "the renderer exited 1".to_string());
+
+        let events = bus.drain();
+        let targets: Vec<&str> = events.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(
+            targets,
+            vec![PHASE_INDEX, PHASE_INDEX, PHASE_RENDER, PHASE_RENDER]
+        );
+        assert_eq!(events[1].outcome, Some(Outcome::Completed));
+        assert_eq!(
+            events[3].outcome.as_ref().and_then(Outcome::reason),
+            Some("the renderer exited 1")
+        );
+        // A relay that is off costs nothing and says nothing.
+        announce(None, PHASE_INDEX);
+        finish_phase(None, PHASE_INDEX);
+        fail_phase(None, PHASE_RENDER, "ignored".to_string());
+    }
 
     /// Proves DOC-67 §9's "named gap, never a silent skip" obligation at the
     /// rendering layer: a failed stage prints `FAILED` (not silently `ok`) on
@@ -444,6 +630,52 @@ mod tests {
         assert!(
             stale_row.contains("ok (2 stale)"),
             "the row must count the repositories that fell back: {stale_row}"
+        );
+    }
+
+    /// #5405: the artifact is written only on the strength of a correlation
+    /// stage that actually succeeded. A failed one leaves `None`, so the
+    /// manifest declares nothing and the report states the absence instead of
+    /// rendering figures from a half-completed join.
+    #[test]
+    fn a_failed_correlation_stage_writes_no_ticketing_artifact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("tga.db")).expect("open db");
+
+        let mut stats = AuditSweepStats::default();
+        stats.record(
+            SweepStage::Correlate,
+            Instant::now(),
+            Err(anyhow::anyhow!("database is locked")),
+        );
+
+        let path = super::ticketing_artifact(&stats, &db, dir.path()).expect("no hard failure");
+        assert_eq!(path, None, "a failed correlation stage declares nothing");
+        assert!(
+            !dir.path().join(super::TICKETING_FILE).exists(),
+            "no artifact may be written for a failed correlation stage"
+        );
+    }
+
+    /// #5405: the other direction — a succeeded stage writes the file and
+    /// returns the MANIFEST-RELATIVE path, because trusty-review resolves it
+    /// against the manifest's directory rather than tga's working directory.
+    #[test]
+    fn a_succeeded_correlation_stage_writes_the_artifact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("tga.db")).expect("open db");
+
+        let mut stats = AuditSweepStats::default();
+        stats.record(SweepStage::Correlate, Instant::now(), Ok(()));
+
+        let path = super::ticketing_artifact(&stats, &db, dir.path()).expect("write");
+        assert_eq!(path, Some(std::path::PathBuf::from(super::TICKETING_FILE)));
+
+        let written = std::fs::read_to_string(dir.path().join(super::TICKETING_FILE))
+            .expect("artifact written");
+        assert!(
+            written.contains("\"commits\"") && written.contains("\"work_items\""),
+            "the artifact must carry the board counts: {written}"
         );
     }
 }

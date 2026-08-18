@@ -127,6 +127,18 @@
 #   14 pins that a NEARER pre-release still loses to the last stable release;
 #   15 pins that a skip caused by the exclusion names the version it refused.
 #
+#   Cases 23-24 pin the CRATE-exclusion arm
+#   (scripts/semver-checks-crate-exclusions.tsv). A skip list stops protecting
+#   silently — the day something depends on the excluded crate's library, the row
+#   is wrong and nothing says so — so the gate re-checks the premise on every
+#   run:
+#     23. honoured        — trusty-mpm is a recorded skip naming the file it came
+#                           from, and NO comparison is attempted.
+#     24. premise died    — a workspace crate depends on the excluded one, so the
+#                           skip is REFUSED (exit 3) and the dependent is named.
+#   Case 8 is the other half: a non-excluded crate still runs a full clean
+#   comparison with the real exclusions file in place.
+#
 # Usage:  bash scripts/check_semver_selftest.sh
 # Exit:   0 when every case behaves; 1 (naming the case) when one does not.
 #
@@ -329,8 +341,21 @@ chmod +x "${STUB_DIR}/cargo"
 
 # The stub crate must be publishable, have a lib target, and — since #5296 — sit
 # at a version that admits BOTH a same-minor predecessor (so cases 5-8 land in
-# the normal PASS/FAIL arm) and a lower-minor one (so case 11 lands in the
-# already-breaking INVENTORY arm). That means patch > 0 and minor > 0.
+# the normal PASS/FAIL arm) and a predecessor whose bump to it is already
+# BREAKING (so cases 11, 12, 18 and 21 land in the INVENTORY arm). That means
+# patch > 0 and minor > 0.
+#
+# WHICH PREDECESSOR IS BREAKING DEPENDS ON THE MAJOR (#5690). Under Cargo's 0.x
+# rule a lower MINOR is breaking, but only while the major is 0; for a 1.x+ crate
+# a lower minor is an ordinary `minor` release and the inventory arm is never
+# reached. This picker hardcoded the 0.x form, which was invisible while
+# trusty-common (0.33.1) won the preference below. #5717 moved it to 0.34.0,
+# patch == 0 dropped it from the candidate list, and the fallback picked tga
+# 2.19.1 — a 2.x crate, whose 2.18.0 baseline classifies `minor`. All four
+# inventory cases then failed, blaming the gate for a harness assumption.
+# Build the breaking predecessor from the same rule release_type applies:
+# drop the major when there is one, otherwise drop the minor.
+#
 # trusty-common is preferred for continuity with the captured fixtures; any
 # qualifying crate works, and none qualifying is a loud failure rather than a
 # quietly degraded run.
@@ -351,7 +376,10 @@ for p in json.load(sys.stdin)["packages"]:
         continue
     if y == 0 or z == 0:
         continue
-    cands.append((p["name"], p["version"], "%d.%d.%d" % (x, y, z - 1), "%d.%d.0" % (x, y - 1)))
+    # #5690: a lower minor is breaking only under the 0.x rule. For a 1.x+ crate
+    # the breaking position is the major, so drop that instead.
+    breaking = "%d.0.0" % (x - 1) if x > 0 else "0.%d.0" % (y - 1)
+    cands.append((p["name"], p["version"], "%d.%d.%d" % (x, y, z - 1), breaking))
 cands.sort()
 preferred = [c for c in cands if c[0] == "trusty-common"] or cands
 if preferred:
@@ -361,14 +389,31 @@ if preferred:
 set -- $PICK
 STUB_CRATE="${1:-}"
 STUB_VERSION="${2:-}"
-STUB_PREV="${3:-}"      # same minor, patch below  -> a PATCH release
-STUB_OLD_MINOR="${4:-}" # lower minor             -> a MAJOR release under 0.x
+STUB_PREV="${3:-}"     # same minor, patch below -> a PATCH release
+STUB_BREAKING="${4:-}" # major dropped (0.x: minor) -> already a MAJOR release
 if [[ -z "$STUB_CRATE" || -z "$STUB_VERSION" || -z "$STUB_PREV" ]]; then
   echo "SELF-TEST FAIL: no publishable lib crate with minor>0 and patch>0 in this workspace;" >&2
   echo "                cases 5-11 cannot construct a baseline. Pick a crate by hand." >&2
   exit 1
 fi
-echo "stub crate: ${STUB_CRATE} v${STUB_VERSION} (prev ${STUB_PREV}, older minor ${STUB_OLD_MINOR})"
+echo "stub crate: ${STUB_CRATE} v${STUB_VERSION} (prev ${STUB_PREV}, breaking base ${STUB_BREAKING})"
+
+# The inventory cases below are only reached when the gate classifies
+# STUB_BREAKING -> STUB_VERSION as `major`, so check it against the gate's own
+# rule rather than assuming the construction above still matches it. #5690: when
+# it silently stopped matching, four cases failed with messages naming the GATE
+# ("the gate skipped instead of listing what the release breaks"), which is the
+# wrong file to go looking in. release_type is lifted out of the gate BY PATTERN
+# so this reads the shipped definition; case 22 exercises it directly.
+eval "$(awk '/^release_type\(\) \{/,/^\}/' "$GATE")"
+STUB_BREAKING_RTYPE="$(release_type "$STUB_BREAKING" "$STUB_VERSION")"
+if [[ "$STUB_BREAKING_RTYPE" != "major" ]]; then
+  echo "SELF-TEST FAIL: harness setup, not the gate — ${STUB_CRATE} ${STUB_BREAKING} -> ${STUB_VERSION}" >&2
+  echo "                classifies '${STUB_BREAKING_RTYPE}', so cases 11, 12, 18 and 21 would exercise the" >&2
+  echo "                PASS/FAIL arm instead of the INVENTORY arm they assert on. Fix the breaking-baseline" >&2
+  echo "                construction in the stub-crate picker above (#5690)." >&2
+  exit 1
+fi
 
 # name  fixture  stub-rc  expected-exit  must-contain  must-NOT-contain ("-" = none)
 TAB="$(printf '\t')"
@@ -485,8 +530,8 @@ fi
 # --- 11. Already-breaking bump: an INVENTORY, not a skip, and advisory — the
 #         listed breaks are permitted by the bump, so the gate stays green.
 rc=0
-out="$(gate_with_index "${STUB_OLD_MINOR}" "${STUB_OLD_MINOR}=break.out:100")" || rc=$?
-if [[ "$out" != *"INVENTORY ${STUB_CRATE}: ${STUB_OLD_MINOR} -> ${STUB_VERSION}"* ]]; then
+out="$(gate_with_index "${STUB_BREAKING}" "${STUB_BREAKING}=break.out:100")" || rc=$?
+if [[ "$out" != *"INVENTORY ${STUB_CRATE}: ${STUB_BREAKING} -> ${STUB_VERSION}"* ]]; then
   fail_case "inventory/already-breaking: the gate skipped instead of listing what the release breaks (#5297)" "$out"
 elif [[ "$rc" -ne 0 ]]; then
   fail_case "inventory/already-breaking: the inventory is advisory and must not fail the gate (exit ${rc})" "$out"
@@ -501,7 +546,7 @@ fi
 # --- 12. The inventory itself could not run. Still advisory — but it must say
 #         so, or "no inventory" would read as "inventory clean".
 rc=0
-out="$(gate_with_index "${STUB_OLD_MINOR}" "${STUB_OLD_MINOR}=build-error.out:101")" || rc=$?
+out="$(gate_with_index "${STUB_BREAKING}" "${STUB_BREAKING}=build-error.out:101")" || rc=$?
 if [[ "$rc" -ne 0 ]]; then
   fail_case "inventory/blind: a failed advisory run must not block an already-permitted release (exit ${rc})" "$out"
 elif [[ "$out" != *"NO INVENTORY ${STUB_CRATE}"* ]]; then
@@ -519,7 +564,7 @@ fi
 #         against vX" from a run that examined nothing — the advisory half of the
 #         same false pass. It must land in the blind arm instead.
 rc=0
-out="$(gate_with_index "${STUB_OLD_MINOR}" "${STUB_OLD_MINOR}=all-skipped.out:0")" || rc=$?
+out="$(gate_with_index "${STUB_BREAKING}" "${STUB_BREAKING}=all-skipped.out:0")" || rc=$?
 if [[ "$rc" -ne 0 ]]; then
   fail_case "inventory/zero-checks: an advisory run must not block an already-permitted release (exit ${rc})" "$out"
 elif [[ "$out" == *"no breaking changes found"* ]]; then
@@ -536,7 +581,7 @@ fi
 #         half of PR #5458 verbatim: a completed run with 4 real failures that
 #         the gate announced as "exited 100 without completing a run".
 rc=0
-out="$(gate_with_index "${STUB_OLD_MINOR}" "${STUB_OLD_MINOR}=break-colored.out:100")" || rc=$?
+out="$(gate_with_index "${STUB_BREAKING}" "${STUB_BREAKING}=break-colored.out:100")" || rc=$?
 if [[ "$rc" -ne 0 ]]; then
   fail_case "inventory/coloured: an advisory run over coloured output must stay green (exit ${rc})" "$out"
 elif [[ "$out" == *"NO INVENTORY ${STUB_CRATE}"* ]]; then
@@ -619,8 +664,9 @@ fi
 # No crate in this workspace declares 0.0.z, so the end-to-end arms cannot reach
 # it. The function is lifted out of the gate BY PATTERN rather than copied here,
 # so this case exercises the shipped definition and not a stale duplicate of it.
+# That lift now happens at the stub-crate pick above, which needs the same
+# function to check its own breaking baseline (#5690).
 # ===========================================================================
-eval "$(awk '/^release_type\(\) \{/,/^\}/' "$GATE")"
 
 # baseline  current  expected
 RELEASE_TYPE_CASES="0.0.5 0.0.6 major
@@ -642,6 +688,67 @@ while read -r rt_base rt_cur rt_want; do
   fi
 done <<<"$RELEASE_TYPE_CASES"
 [[ "$rt_failed" -eq 0 ]] && pass_case "release_type calls every 0.0.z bump major, and still ranks 0.x/1.x correctly (#5440)"
+
+# ===========================================================================
+# 23-24. Crate exclusions, and the guard that keeps one from going silent.
+#
+# scripts/semver-checks-crate-exclusions.tsv skips a crate that has no LIBRARY
+# consumer to protect — trusty-mpm is installed as the `tm` binary, and a binary
+# user gets a whole new executable, so its library API compatibility protects
+# nobody. That is a claim about consumption, and a skip list is exactly the shape
+# that stops protecting silently: the day something depends on the excluded
+# crate's library, the row is wrong and nothing says so.
+#
+#   23. the exclusion is honoured — a recorded skip, and NO comparison attempted.
+#   24. the premise has died — a workspace crate depends on the excluded one, so
+#       the skip is REFUSED (exit 3) and the dependent is named. Uses
+#       trusty-agents-common, which trusty-agents, trusty-code and trusty-mpm all
+#       depend on, against a fixture exclusions file; it fails the moment the
+#       dependent check is deleted.
+#
+# Neither case reaches the network or cargo-semver-checks: the exclusion arm runs
+# before the registry probe, which is also why an exclusion cannot be satisfied
+# by a run that timed out.
+#
+# Case 8 above is the other half — a NON-excluded crate still runs a full clean
+# comparison with the real exclusions file in place, so an exclusion that leaked
+# to every crate fails there.
+# ===========================================================================
+
+# --- 23. trusty-mpm is excluded on main, and the skip attempts no comparison.
+rc=0
+out="$(cd "$REPO_ROOT" && bash "$GATE" --crate trusty-mpm 2>&1)" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "exclusion/honoured: an excluded crate must be a recorded skip (exit ${rc})" "$out"
+elif [[ "$out" != *"SKIP trusty-mpm"* || "$out" != *"semver-checks-crate-exclusions.tsv"* ]]; then
+  fail_case "exclusion/honoured: the skip did not name the crate and the file it came from" "$out"
+elif [[ "$out" == *"CHECK trusty-mpm:"* ]]; then
+  fail_case "exclusion/honoured: the gate compared a crate it had already excluded" "$out"
+else
+  pass_case "an excluded crate is skipped with its reason, and nothing is compared"
+fi
+
+# --- 24. An exclusion whose premise has died refuses the skip.
+EXCL_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/semver-selftest-excl.XXXXXX")"
+printf '# fixture\ntrusty-agents-common\tfixture row: this crate HAS workspace dependents\n' \
+  > "$EXCL_FIXTURE"
+rc=0
+out="$(cd "$REPO_ROOT" && SEMVER_GATE_CRATE_EXCLUSIONS="$EXCL_FIXTURE" \
+  bash "$GATE" --crate trusty-agents-common 2>&1)" || rc=$?
+rm -f "$EXCL_FIXTURE"
+if [[ "$rc" -eq 0 ]]; then
+  fail_case "exclusion/premise-died: the gate exited 0 over an exclusion that no longer holds — a silent coverage hole" "$out"
+elif [[ "$rc" -ne 3 ]]; then
+  fail_case "exclusion/premise-died: expected exit 3 (no verdict); got ${rc}" "$out"
+elif [[ "$out" != *"EXCLUSION NO LONGER HOLDS"* ]]; then
+  fail_case "exclusion/premise-died: exited 3 without naming the dead exclusion, so it may be failing for an unrelated reason" "$out"
+elif [[ "$out" != *"trusty-code"* ]]; then
+  fail_case "exclusion/premise-died: refused the skip without naming a dependent" "$out"
+elif [[ "$out" == *"SKIP trusty-agents-common"* ]]; then
+  fail_case "exclusion/premise-died: granted the skip anyway" "$out"
+else
+  pass_case "an exclusion contradicted by a workspace dependency refuses the skip (exit 3)"
+fi
 
 rm -rf "$STUB_DIR"
 

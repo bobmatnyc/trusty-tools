@@ -149,7 +149,7 @@ impl CodeIndexer {
 
     /// Begin staged HNSW persistence for a reindex (issue #3970).
     ///
-    /// Why: flips [`PersistState::reindexing`] so every subsequent
+    /// Why: flips `PersistState::reindexing` so every subsequent
     /// [`Self::spawn_incremental_persist`] checkpoint redirects to the
     /// staging path a caller resolves separately (see
     /// `service::reindex::hnsw_swap::begin_staged_hnsw_swap`) instead of the
@@ -197,7 +197,7 @@ impl CodeIndexer {
     /// ABORTED reindex, by definition still partial — straight to the LIVE
     /// path, reproducing #3970 through a race the direct-write fix alone
     /// does not close. Callers must await this BEFORE clearing the flag.
-    /// What: polls [`PersistState::in_flight`] / [`PersistState::dirty`]
+    /// What: polls `PersistState::in_flight` / `PersistState::dirty`
     /// until both are `false` — `in_flight` is set exactly once before a
     /// task is spawned and cleared exactly once, at the very end of that
     /// task's coalescing loop, never mid-loop (see

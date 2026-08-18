@@ -88,7 +88,7 @@ pub struct ClaudeMpmSession {
 /// Why: callers (the resume bridge) want a single "best guess" session for a
 /// given project without iterating all files themselves.
 /// What: resolves the latest snapshot in `<project_dir>/.claude-mpm/sessions/`
-/// via the shared [`session_log`] fallback chain — the append-only
+/// via the shared [`session_log`](crate::catchup::session_log) fallback chain — the append-only
 /// `sessions-log.jsonl` first, then the legacy `LATEST-SESSION.txt` pointer,
 /// then the newest `session-*.json` by mtime — and parses it. Returns `Ok(None)`
 /// when no sessions exist.

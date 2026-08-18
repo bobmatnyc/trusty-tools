@@ -6,69 +6,34 @@
 //! mock embedder, and `shared_embedder_initialized()` is monotonic, so a seed
 //! anywhere in the process would move the read test off the embedder-warming
 //! path it depends on. Two binaries, one fixture.
-//! What: daemon-binary discovery, the lane's env gate, and an `Aliased`
-//! fixture that creates the canonical palace, registers the alias, and asserts
-//! the redirect fires before a test starts.
+//! What: the lane's env gate plus an `Aliased` fixture that creates the
+//! canonical palace, registers the alias, and asserts the redirect fires before
+//! a test starts.
+//!
+//! #5329 deleted this fixture's daemon-binary discovery. It existed because the
+//! supervisor located `trusty-bm25-daemon` as a sibling of `current_exe()`,
+//! which for an integration test is the test binary under `target/*/deps/` — so
+//! the fixture had to find the real build output, pin
+//! `TRUSTY_BM25_DAEMON_BIN` at it, and panic when no daemon had been built.
+//! There is no binary to find now, so arming the lane is one env var.
 //! Test: used by `bm25_alias_recall.rs` and `bm25_alias_write.rs`.
-
-use std::path::PathBuf;
 
 use trusty_common::memory_core::palace::{Palace, PalaceId};
 use trusty_common::palace_alias::PalaceAliasStore;
 use trusty_memory::AppState;
 
-/// Resolve the freshly-built `trusty-bm25-daemon` binary.
+/// Turn the lexical lane on.
 ///
-/// Why: the supervisor discovers the daemon as a sibling of `current_exe()`,
-/// which for an integration test is the test binary under `target/*/deps/`.
-/// Pointing `TRUSTY_BM25_DAEMON_BIN` at the real build output sidesteps that.
-/// What: honours the env var if already set, else walks up from the test
-/// binary looking for the daemon next to it or one level up.
-/// Test: this is the test bootstrap.
-fn discover_daemon_binary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("TRUSTY_BM25_DAEMON_BIN") {
-        let pb = PathBuf::from(p);
-        if pb.is_file() {
-            return Some(pb);
-        }
-    }
-    let exe = std::env::current_exe().ok()?;
-    let mut p = exe.as_path();
-    while let Some(parent) = p.parent() {
-        let candidate = parent.join("trusty-bm25-daemon");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        let candidate = parent.join("..").join("trusty-bm25-daemon");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        p = parent;
-    }
-    None
-}
-
-/// Turn the lane on and pin the supervisor's locator at the built daemon.
-///
-/// Why: a missing binary used to be a silent skip, which reads as a pass. These
-/// tests are about a lane that fails quietly, so their bootstrap must not.
-/// What: panics with the build command when the daemon is absent; otherwise
-/// sets `TRUSTY_BM25_DAEMON=1`, pins `TRUSTY_BM25_DAEMON_BIN`, and clears
-/// `TRUSTY_BM25_EXTERNAL` so the real supervisor runs.
+/// Why: these tests are about a lane that fails quietly, so their bootstrap
+/// must not itself become a silent skip.
+/// What: sets `TRUSTY_BM25_DAEMON=1` — the gate that keeps its daemon-era name
+/// for compatibility (#5329).
 /// Test: this is the test bootstrap.
 fn arm_lane() {
-    let binary = discover_daemon_binary().expect(
-        "trusty-bm25-daemon binary not found — build it first \
-         (`cargo build -p trusty-memory --bin trusty-bm25-daemon`) or set \
-         TRUSTY_BM25_DAEMON_BIN=<path>",
-    );
     // SAFETY: test-only env mutation. Every test in a given binary sets the
-    // same three values, so a concurrent sibling cannot observe a different
-    // lane state.
+    // same value, so a concurrent sibling cannot observe a different lane state.
     unsafe {
-        std::env::set_var("TRUSTY_BM25_DAEMON_BIN", &binary);
         std::env::set_var("TRUSTY_BM25_DAEMON", "1");
-        std::env::remove_var("TRUSTY_BM25_EXTERNAL");
     }
 }
 
@@ -93,15 +58,16 @@ impl Aliased {
         arm_lane();
         let tmp = tempfile::tempdir().expect("tempdir");
         let data_root = tmp.path().to_path_buf();
-        // Short names: the socket path must stay inside `sun_path` (~104
-        // bytes) and macOS `$TMPDIR` already spends about half of it.
+        // Short names are no longer a `sun_path` requirement (#5329 removed the
+        // socket); the pid suffix still keeps the two fixtures' palace ids
+        // distinct per process.
         let suffix = format!("{tag}{:x}", std::process::id() & 0xffff);
         let canonical = format!("c{suffix}");
         let alias = format!("a{suffix}");
 
-        let state = AppState::new(data_root.clone()).with_bm25_client_from_env();
+        let state = AppState::new(data_root.clone()).with_bm25_lane_from_env();
         assert!(
-            state.bm25_client.is_some() && state.bm25_supervisor.is_some(),
+            state.bm25_lane().is_some(),
             "the lexical lane must be armed, or this test proves nothing"
         );
 
@@ -146,10 +112,10 @@ impl Aliased {
         }
     }
 
-    /// Reap the daemons this fixture's supervisor started.
+    /// Flush the lane's snapshots and stop its ticker.
     pub async fn shutdown(&self) {
-        if let Some(sup) = self.state.bm25_supervisor.as_ref() {
-            sup.shutdown().await;
+        if let Some(lane) = self.state.bm25_lane() {
+            lane.shutdown().await;
         }
     }
 }

@@ -1,0 +1,8 @@
+Fixed
+
+- Bundled-agent reprovision no longer destroys a locally-edited file after the first time ([#4461](https://github.com/bobmatnyc/trusty-tools/issues/4461))
+  - The backup was written only when `<file>.stale.bak` did not already exist. So the first reprovision archived a hand-edit, and every reprovision after that overwrote the file and skipped the backup because one was already sitting there. A second edit-then-reprovision cycle lost the work with no error, no warning, and no recoverable copy — which is how a `cto-assistant` tool grant was destroyed on 2026-07-31.
+  - The backup path now carries the SHA-256 digest of the bytes being archived: `<file>.stale.<digest>.bak`. Two different contents can never target the same path, so no pass can clobber another's backup — the property the fixed name was protecting — and every divergence stays recoverable.
+  - What bounds the set: one file per distinct content ever overwritten at that path. An untouched file is never overwritten and never archived, and re-archiving identical bytes resolves to the path already there, so repeated `tagent agents repair` runs add nothing. The set grows only with real divergences, never with the number of reprovisions. Nothing prunes it — every entry is content a human may still need.
+  - Each archive now logs a `WARN` naming the file and its backup, so a refresh that discarded local content is distinguishable from one that refreshed a pristine file.
+  - Existing `<file>.stale.bak` files from earlier versions are left alone. Both agent listers already skip `*.bak`, so the new names never surface as bogus agents.

@@ -1,7 +1,7 @@
 //! Per-turn file-change budget for `tm hook --pm-guard` (Bob's directive,
 //! 2026-07-17; see issue #2918).
 //!
-//! Why: prior to this, a PM direct source-code edit ([`super::pm_guard::SOURCE_EDIT_REASON`])
+//! Why: prior to this, a PM direct source-code edit (`super::pm_guard::SOURCE_EDIT_REASON`)
 //! or shell-based file edit ([`super::pm_guard_bash::SHELL_EDIT_REASON`]) was an
 //! absolute, always-deny prohibition — forcing a full Task/Agent delegation
 //! round-trip even for a trivial one-line fix. Bob's directive relaxes this to

@@ -21,7 +21,7 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tokio::process::Command;
+use trusty_common::gh::{GhCommand, GhOutput};
 
 /// Maximum accepted length for any single LLM-supplied operand.
 ///
@@ -142,10 +142,6 @@ pub(super) fn enum_arg(field: &str, raw: &str, accepted: &[&str]) -> Result<Stri
     ))
 }
 
-/// Guidance appended when the `gh` binary cannot be spawned at all.
-const GH_MISSING_HINT: &str =
-    "The GitHub CLI must be installed and authenticated (`gh auth login`) for this tool to work.";
-
 /// Run `gh` with a fully pre-validated argv and return its output verbatim.
 ///
 /// Why: #4170's acceptance criterion is "tool output is legible and unfiltered
@@ -155,83 +151,70 @@ const GH_MISSING_HINT: &str =
 /// pending); treating that as a tool failure would make the single most
 /// useful CI primitive report `is_error` on every red or in-flight PR, which
 /// is precisely the state an orchestrator calls it to observe.
-/// What: Delegates to [`run_program`] with `"gh"` and the missing-binary hint.
-/// Test: `run_gh_surfaces_the_cli_state_legibly`.
+/// What: spawns via trusty-common's single `gh` entry point (#5475) rooted at
+/// `root`, then maps the outcome with [`map_gh_outcome`].
+/// Test: `run_gh_surfaces_the_cli_state_legibly` (environment-tolerant); the
+/// outcome mapping itself is pinned deterministically by `map_gh_outcome_*`.
 pub(super) async fn run_gh(
-    root: &Path,
-    args: &[String],
-    tolerate_nonzero: bool,
-) -> crate::tools::traits::ToolResult {
-    run_program("gh", GH_MISSING_HINT, root, args, tolerate_nonzero).await
-}
-
-/// Spawn `program` with a fixed argv and map its outcome onto a `ToolResult`.
-///
-/// Why: Split out of [`run_gh`] so the two behaviours that actually matter —
-/// non-zero-exit TOLERANCE and the missing-binary message — are testable
-/// deterministically on any POSIX host, without requiring `gh` to be installed
-/// and authenticated in CI. A test that can only ever skip proves nothing, and
-/// the tolerance rule is the one piece of logic here whose regression would be
-/// invisible (every red PR would silently start reading as a tool failure).
-/// What: Runs `program <args>` with `current_dir(root)`, never a shell. On
-/// success returns stdout (or a "no output" note when the program printed
-/// nothing). On non-zero exit returns an error carrying stderr — unless
-/// `tolerate_nonzero`, in which case stdout+stderr and the exit status are
-/// returned as a SUCCESS payload. A spawn failure appends `hint`.
-/// Test: `run_program_tolerates_a_nonzero_exit_when_asked`,
-/// `run_program_reports_a_nonzero_exit_as_an_error_by_default`,
-/// `run_program_reports_a_missing_binary_with_the_hint`,
-/// `run_program_notes_empty_output`.
-pub(super) async fn run_program(
-    program: &str,
-    hint: &str,
     root: &Path,
     args: &[String],
     tolerate_nonzero: bool,
 ) -> crate::tools::traits::ToolResult {
     use crate::tools::traits::ToolResult;
 
-    let rendered = args.join(" ");
-    let output = match Command::new(program)
-        .args(args)
-        .current_dir(root)
-        .output()
-        .await
-    {
-        Ok(o) => o,
-        Err(e) => {
-            return ToolResult::err(format!("failed to run '{program} {rendered}': {e}. {hint}"));
+    match GhCommand::new(args).cwd(root).output().await {
+        Ok(out) => map_gh_outcome(&out, tolerate_nonzero),
+        // #5475: the entry point already classifies a missing binary and its
+        // Display carries the `gh auth login` hint, so no local hint string.
+        Err(e) => ToolResult::err(format!("failed to run 'gh {}': {e}", args.join(" "))),
+    }
+}
+
+/// Map a completed `gh` run onto a `ToolResult` (pure).
+///
+/// Why: split from the spawn so the two behaviours that actually matter —
+/// non-zero-exit TOLERANCE and the empty-output note — are pinned
+/// deterministically, with no `gh` install and no subprocess at all. A test
+/// that can only ever skip proves nothing, and the tolerance rule is the one
+/// piece of logic whose regression would be invisible (every red PR would
+/// silently start reading as a tool failure).
+/// What: zero exit with output -> that stdout; zero exit with no output -> a
+/// "no output" note; non-zero -> an error carrying stderr (or stdout when
+/// stderr is blank), unless `tolerate_nonzero`, in which case the exit status
+/// and both streams are returned as a SUCCESS payload.
+/// Test: `map_gh_outcome_tolerates_a_nonzero_exit_when_asked`,
+/// `map_gh_outcome_reports_a_nonzero_exit_as_an_error_by_default`,
+/// `map_gh_outcome_notes_empty_output`.
+pub(super) fn map_gh_outcome(
+    out: &GhOutput,
+    tolerate_nonzero: bool,
+) -> crate::tools::traits::ToolResult {
+    use crate::tools::traits::ToolResult;
+
+    let exit = out
+        .code
+        .map_or_else(|| "signal".to_string(), |c| c.to_string());
+    if out.success {
+        if out.stdout.trim().is_empty() {
+            return ToolResult::ok(format!("gh {}: no output", out.args));
         }
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    if output.status.success() {
-        if stdout.trim().is_empty() {
-            return ToolResult::ok(format!("{program} {rendered}: no output"));
-        }
-        return ToolResult::ok(stdout);
+        return ToolResult::ok(out.stdout.clone());
     }
     if tolerate_nonzero {
         // The exit status IS the answer here; report it alongside the output
         // rather than discarding either.
         return ToolResult::ok(format!(
-            "{program} {rendered} (exit {})\n{stdout}{stderr}",
-            output
-                .status
-                .code()
-                .map_or_else(|| "signal".to_string(), |c| c.to_string())
+            "gh {} (exit {exit})\n{}{}",
+            out.args, out.stdout, out.stderr
         ));
     }
     ToolResult::err(format!(
-        "{program} {rendered} failed (exit {}): {}",
-        output
-            .status
-            .code()
-            .map_or_else(|| "signal".to_string(), |c| c.to_string()),
-        if stderr.trim().is_empty() {
-            stdout.trim()
+        "gh {} failed (exit {exit}): {}",
+        out.args,
+        if out.stderr.trim().is_empty() {
+            out.stdout.trim()
         } else {
-            stderr.trim()
+            out.stderr.trim()
         }
     ))
 }

@@ -55,11 +55,16 @@ pub(super) fn session_tools() -> Vec<Value> {
     vec![
         tool(
             "session_new",
-            "Spawn a new managed Claude Code (or trusty-code) session in an \
-             isolated, freshly-provisioned workspace cloned from `repo_url` at \
-             `ref`. The daemon creates the tmux host, deploys agents/skills, and \
-             launches the harness with the given `task`. Returns the new managed \
-             session id, tmux name, workspace path, lifecycle state, and the \
+            "Spawn a new managed Claude Code (or trusty-code) session for \
+             `repo_url` at `ref`. A LOCAL `repo_url` — an absolute path to an \
+             existing directory — runs the session on that main checkout \
+             itself (ADR-0037); only a remote URL is cloned into a \
+             freshly-provisioned workspace. A main-checkout session may write \
+             documents and configuration only, and the writers it dispatches \
+             are given their own worktrees (ADR-0044, ADR-0048). The daemon \
+             creates the tmux host, deploys agents/skills, and launches the \
+             harness with the given `task`. Returns the new managed session id, \
+             tmux name, workspace path, lifecycle state, and the \
              `tmux attach-session` command.",
             json!({
                 "type": "object",
@@ -293,7 +298,20 @@ pub(super) fn session_tools() -> Vec<Value> {
              listed with `format`, `paused_at` and `summary` only — its \
              `source_file`, `tmux_window`, `in_progress`, `next_steps` and \
              `git_context` are withheld, so the digest cannot hand you the \
-             means to adopt another session's state (#5386).",
+             means to adopt another session's state (#5386). \
+             `sessions` is a bounded PAGE — the whole response is fitted to a \
+             size a caller can read in one tool result — ordered with the \
+             sessions you own first, then newest-first, so page 0 carries what \
+             a resume reads. `sessions_total` says how many matched, \
+             `sessions_offset` where this page starts, and \
+             `sessions_next_offset` the value to pass back as \
+             `sessions_offset` for the remainder (null on the last page). \
+             Whenever anything was withheld — sessions, commits or drawers — \
+             `truncated` is true and `truncation_notice` says what and how to \
+             retrieve it, so a short page never reads as a complete one. \
+             `over_budget` is the separate case where nothing was withheld but \
+             one record is larger than a whole page: it ships intact and \
+             `page_bytes` says how big the page got (#5557).",
             json!({
                 "type": "object",
                 "properties": {
@@ -315,7 +333,12 @@ pub(super) fn session_tools() -> Vec<Value> {
                     },
                     "full": {
                         "type": "boolean",
-                        "description": "Ignore the watermark and return full history instead of just activity since the last catch-up. Defaults to false."
+                        "description": "Ignore the watermark and return full history instead of just activity since the last catch-up. Defaults to false. Full history is paged, not dropped — walk `sessions_next_offset` to read all of it."
+                    },
+                    "sessions_offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Index into the ordered session list this page starts at. Defaults to 0, the page a resume wants — it holds the sessions you own. Pass the previous response's `sessions_next_offset` to continue; when that field is null you have the whole history. The offset is POSITIONAL into a list rebuilt from disk on every call, so a snapshot paused between two calls shifts the indexes and a later page can repeat a record you already have — de-duplicate by `source_file` or `paused_at` if that matters to you (#5557)."
                     }
                 },
                 "required": ["project_dir"],

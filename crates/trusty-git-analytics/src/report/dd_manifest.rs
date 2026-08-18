@@ -83,6 +83,11 @@ pub struct DdManifestOptions {
     pub client: Option<String>,
     /// Gaps & Caveats lines for areas this run could not assess.
     pub gaps: Vec<String>,
+    /// Ticketing artifact filename, relative to the manifest (#5405).
+    ///
+    /// `None` when the sweep's correlation stage failed and no artifact was
+    /// written; see [`DdReportSection::ticketing`].
+    pub ticketing: Option<PathBuf>,
     /// Directory a relative `RepositoryConfig.path` is relative to.
     ///
     /// Why: tga resolves a relative repository path against the process's
@@ -130,6 +135,23 @@ pub struct DdReportSection {
     /// Named unassessed areas; omitted from the TOML when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<String>,
+    /// Path to the run's ticketing artifact, relative to this manifest (#5405).
+    ///
+    /// Why: the board-correlation figures are database-wide, not per
+    /// repository, so they belong to the `[report]` section rather than to a
+    /// `[[repositories]]` entry. Routing them through `RepositoryEntry.metrics`
+    /// instead would be actively wrong: that field's "declared metrics always
+    /// win" precedence would block the live `--analyze` fetch for the repository
+    /// carrying it.
+    /// What: the filename [`crate::report::ticketing`] wrote beside this
+    /// manifest, or `None` when the correlation stage failed — in which case the
+    /// failure already reached `gaps` as a named stage failure, so the report
+    /// states the absence rather than rendering a silently missing section.
+    /// Omitted from the TOML when absent, which is what an older trusty-review
+    /// (and a hand-written manifest) sees.
+    /// Test: `super::dd_manifest_tests::round_trips_through_the_review_schema`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticketing: Option<PathBuf>,
 }
 
 /// One audited repository.
@@ -199,14 +221,7 @@ pub fn build_dd_manifest(
     let secrets = configured_secrets(cfg);
     let clean = |s: &str| scrub_secrets(s, &secrets);
 
-    let repositories = cfg
-        .repositories
-        .iter()
-        .map(|repo| DdRepositoryEntry {
-            name: clean(&repo_name(repo.name.as_deref(), &repo.path)),
-            path: anchor(&opts.base_dir, &repo.path),
-        })
-        .collect();
+    let repositories = dd_repository_entries(cfg, &opts.base_dir);
 
     Ok(DdManifest {
         report: DdReportSection {
@@ -214,9 +229,37 @@ pub fn build_dd_manifest(
             analyst: opts.analyst.as_deref().map(&clean),
             client: opts.client.as_deref().map(&clean),
             gaps: opts.gaps.iter().map(|g| clean(g)).collect(),
+            // #5405: a filename this crate chose, never operator text — so it
+            // carries no credential to scrub.
+            ticketing: opts.ticketing.clone(),
         },
         repositories,
     })
+}
+
+/// The `[[repositories]]` entries for one audit run.
+///
+/// Why: #5670 — `tga audit` indexes each repository before the renderer asks for
+/// it, and the index id trusty-review looks up is derived from the checkout path
+/// in THIS list. Sharing the mapping rather than re-deriving it beside the caller
+/// is what makes the two agree by construction: index an anchored path the
+/// manifest does not carry, or under a name the manifest does not use, and the
+/// run indexes repositories nobody ever queries while still rendering hollow
+/// sections.
+/// What: one entry per configured repository, in config order, with the same
+/// name fallback and the same base-dir anchoring [`build_dd_manifest`] emits,
+/// scrubbed against the same needles. Pure: no I/O, no clock, no environment.
+/// Test: `super::dd_manifest_tests::names_fall_back_to_the_directory_basename`,
+/// and `crate::audit::tests::index_ids_match_the_manifest_paths_the_renderer_reads`.
+pub fn dd_repository_entries(cfg: &Config, base_dir: &Path) -> Vec<DdRepositoryEntry> {
+    let secrets = configured_secrets(cfg);
+    cfg.repositories
+        .iter()
+        .map(|repo| DdRepositoryEntry {
+            name: scrub_secrets(&repo_name(repo.name.as_deref(), &repo.path), &secrets),
+            path: anchor(base_dir, &repo.path),
+        })
+        .collect()
 }
 
 /// Anchor a possibly-relative repository path to `base`.

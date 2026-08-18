@@ -106,8 +106,8 @@ fn default_dry_run() -> bool {
 /// directories. This endpoint removes them safely, never touching a directory
 /// that belongs to an active session.
 /// What: collects active workspace paths and the managed workspace root, then
-/// delegates to [`SessionManager::prune_orphaned_worktrees`]. Returns
-/// `{ dry_run, paths: ["..."], owner_unknown_paths: ["..."], skipped_dirty: [...] }`
+/// delegates to [`SessionManager::prune_orphaned_worktrees`](crate::session_manager::SessionManager::prune_orphaned_worktrees). Returns
+/// `{ dry_run, paths, owner_unknown_paths, agent_owned_paths, skipped_dirty }`
 /// (#3649 added the second field: worktrees conservatively skipped because
 /// their ownership sentinel had no resolvable owner — never auto-deleted,
 /// surfaced here for operator review; #4091 adds the third: worktrees skipped
@@ -183,6 +183,16 @@ pub async fn prune_worktrees_route(
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
+            // #4311: attributed to a dispatched agent — owned, and reclaimed by
+            // that agent's exit rather than this sweep. Reported because these
+            // arrived in `owner_unknown_paths` before they carried a
+            // sentinel, and losing them from the response would trade a
+            // "cannot reclaim" line for silence.
+            let agent_owned_paths: Vec<String> = outcome
+                .agent_owned
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
             // #2919: the merged-PR pass runs only on the explicit opt-in, and
             // only ever in Report mode under `dry_run`. It re-reads the
             // in-use set itself via `in_use_workspace_paths` above, which was
@@ -199,6 +209,13 @@ pub async fn prune_worktrees_route(
                 // CURRENT set, not one snapshotted before a survey that takes
                 // minutes. `None` (the store could not be read) refuses.
                 let mgr_for_probe = state.session_manager().await.clone();
+                // #5661: the sweep's other gates read SESSION records, and a
+                // dispatched agent has none — which is how this path deleted
+                // three live agents' worktrees. The delegation registry is the
+                // only place an agent's liveness is resolved from real
+                // `SubagentStop` signals, so it is read here and handed to the
+                // classifier as a probe rather than as a captured list.
+                let state_for_agents = Arc::clone(&state);
                 match tokio::task::spawn_blocking(move || {
                     let in_use_now = move || -> Option<Vec<std::path::PathBuf>> {
                         // `None` means "could not be determined", which REFUSES
@@ -221,7 +238,13 @@ pub async fn prune_worktrees_route(
                                 .collect(),
                         )
                     };
-                    reclaim_merged_pr_worktrees(&root, &in_use_now, mode)
+                    let agent_state = move |owner: &crate::session_manager::worktree_ownership::AgentWorktreeOwner| {
+                        crate::daemon::services::agent_worktree_reap::delegation_state_for_agent(
+                            &state_for_agents,
+                            &owner.agent_id,
+                        )
+                    };
+                    reclaim_merged_pr_worktrees(&root, &in_use_now, &agent_state, mode)
                 })
                 .await
                 {
@@ -250,6 +273,7 @@ pub async fn prune_worktrees_route(
                 "dry_run": req.dry_run,
                 "paths": paths,
                 "owner_unknown_paths": owner_unknown_paths,
+                "agent_owned_paths": agent_owned_paths,
                 "skipped_dirty": outcome.skipped_dirty,
                 "merged_prs": merged,
             }))

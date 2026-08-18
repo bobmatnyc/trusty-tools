@@ -26,20 +26,46 @@
 //! A false DENY lands on the PM and halts every dispatch in the system; a false
 //! ALLOW merely reproduces the behaviour that shipped before this module. So
 //! [`agent_mutates_files`] answers `true` only for an agent this binary ships
-//! and can positively identify as engineer-tier — an unknown name, a custom
+//! and can positively identify as file-mutating — an unknown name, a custom
 //! project agent, a renamed agent, or an unparseable frontmatter all answer
 //! `false` and the dispatch proceeds.
 //!
-//! Why engineer-tier and not "every agent that could conceivably write": the
-//! narrower set is what keeps the guard from false-denying the ordinary
-//! workflow. A `version-control` agent opening a PR, a `documentation` agent
-//! editing a doc, or an `ops` agent running a build all touch files, but they
-//! routinely need to see the engineer's work in the shared tree — denying them
-//! for lack of an isolated worktree would block the normal delivery chain to
-//! prevent a race they are not the documented trigger for. The documented
-//! incident is two concurrent engineers, and that is what this classifies.
+//! What the classifier covers, and why not more: an agent counts when its own
+//! bundled definition tells it to write to the tree it is dispatched into.
+//! #4480 shipped engineer-tier alone on the theory that the adjacent tiers need
+//! to see the engineer's work in the shared tree; #5650 found that reasoning
+//! backwards for three of them. `documentation` creates and reorganises files,
+//! `git mv`s them, and commits; `version-control` branches, commits, and pushes;
+//! `qa` writes test files. Wanting to read the engineer's work does not make
+//! writing alongside it safe — a `documentation` agent dispatched next to a
+//! `rust-engineer`, both unisolated, is the same single-HEAD collision the module
+//! exists to stop, and it passed with no deny at all until #5650.
+//!
+//! A dispatch that only reads — research, code analysis, adversarial review,
+//! ticketing — still answers `false` and still parallelises freely. That is where
+//! the line sits now: writes, not proximity to writes.
+//!
+//! **The fail-open direction is scoped to the shared-tree race, not to the
+//! main checkout (ADR-0048).** Everything above is #4480's calculus, and it
+//! still governs [`agent_mutates_files`] and [`shares_the_callers_tree`]. It
+//! does NOT govern a session standing in a project's MAIN CHECKOUT, where
+//! ADR-0044 forbids source writes outright: there an unknown agent is the exact
+//! reported harm — a custom or renamed agent answers `false` here and would
+//! keep writing to the tree three sessions share. So
+//! [`requires_own_worktree_in_main_checkout`] reads the same bundle through
+//! [`agent_write_risk`] and treats `Unknown` as a writer. The two directions do
+//! not conflict because the costs are not symmetric between them: in a worktree
+//! a false deny halts dispatch and a false allow costs nothing new, while in a
+//! main checkout a false allow corrupts another session's branch and a false
+//! deny costs one worktree.
 //!
 //! Test: the `#[cfg(test)]` suite below.
+//!
+//! [`isolation_separates_working_tree`]: crate::core::dispatch_isolation::isolation_separates_working_tree
+//! [`agent_mutates_files`]: crate::core::dispatch_isolation::agent_mutates_files
+//! [`shares_the_callers_tree`]: crate::core::dispatch_isolation::shares_the_callers_tree
+//! [`agent_write_risk`]: crate::core::dispatch_isolation::agent_write_risk
+//! [`requires_own_worktree_in_main_checkout`]: crate::core::dispatch_isolation::requires_own_worktree_in_main_checkout
 
 use serde_json::Value;
 use trusty_agents_common::agents::metadata::agent_metadata_from_str;
@@ -63,14 +89,63 @@ pub const ISOLATING_DISPATCH_MODES: &[&str] = &["worktree", "remote"];
 ///
 /// Why: `role:` is the declared domain every bundled agent carries, so this is a
 /// property of the agent definition rather than a name-shaped guess that a
-/// rename would silently invalidate. The set is deliberately the engineer tier
-/// alone — see the module doc for why widening it trades a rare race for a
-/// common false deny.
+/// rename would silently invalidate. A role belongs here only when EVERY bundled
+/// agent declaring it writes files; a role with a read-only member is keyed by
+/// name in [`FILE_MUTATING_NAMES`] instead.
 /// What: matched case-sensitively against [`crate::core::agent_metadata::AgentMetadata::role`].
 /// `data-engineer` is listed explicitly because it declares that role rather
-/// than plain `engineer` while still extending `base-engineer`.
-/// Test: `engineer_tier_agents_mutate_files`, `non_engineer_agents_do_not`.
-const FILE_MUTATING_ROLES: &[&str] = &["engineer", "data-engineer"];
+/// than plain `engineer` while still extending `base-engineer`. `documentation`
+/// and `version-control` each have exactly one bundled agent, and both write —
+/// docs and `git mv`s for one, branches and commits for the other.
+/// Test: `engineer_tier_agents_mutate_files`, `file_writing_non_engineer_agents_mutate_files`,
+/// `non_engineer_agents_do_not`.
+// #5650: documentation and version-control demonstrably write files; omitting
+// them let two unisolated writers share one HEAD with no deny.
+const FILE_MUTATING_ROLES: &[&str] = &[
+    "engineer",
+    "data-engineer",
+    "documentation",
+    "version-control",
+];
+
+/// Bundled agent `name:`s that mutate files but whose `role:` cannot say so.
+///
+/// Why: this list is keyed on NAME rather than role, and that is deliberate —
+/// do not fold it back into [`FILE_MUTATING_ROLES`]. All four bundled agents
+/// declaring `role: qa` also declare `extends: base-qa`, but they do not agree
+/// about writing: `qa`, `web-qa`, and `api-qa` author test files, while
+/// `code-critic` is a pure reviewer that reads code and returns a verdict
+/// (`code-critic.md` — "You did not write this code"). Adding `qa` to the role
+/// list would classify `code-critic` as mutating and deny a review dispatched
+/// alongside an engineer, which is the ordinary workflow.
+/// What: matched case-sensitively against the agent's declared `name:`.
+/// Test: `file_writing_non_engineer_agents_mutate_files`,
+/// `code_critic_is_not_file_mutating`.
+// #5650: role: qa is not homogeneous — code-critic shares it and only reviews.
+const FILE_MUTATING_NAMES: &[&str] = &["qa", "web-qa", "api-qa"];
+
+/// Harness built-in agents that read but never write, and so ship in no bundle.
+///
+/// Why: `Explore` and `Plan` are Claude Code's own dispatch targets, not
+/// trusty-mpm artifacts, so [`agent_write_risk`]'s bundle scan cannot find them
+/// and answered [`AgentWriteRisk::Unknown`] — which
+/// [`requires_own_worktree_in_main_checkout`] treats as a writer and grants a
+/// worktree to. A granted worktree is cut from a COMMIT, so a reader dispatched
+/// into one reads a tree WITHOUT the session's uncommitted work and answers
+/// confidently about the wrong tree. For a writer that cost is a worktree; for a
+/// reader it is a wrong answer, which is why the Unknown-is-a-writer rule
+/// (ADR-0048 decision 3) must not reach them.
+///
+/// The list is exactly the built-ins whose published tool set excludes every
+/// write tool (`Edit`, `Write`, `NotebookEdit`). `general-purpose` is
+/// deliberately NOT here: it carries the full tool set, and in this project it
+/// is also the identity a failed named-agent dispatch degrades into (#4451), so
+/// a `general-purpose` delegation is routinely an engineer's work under another
+/// name. It stays `Unknown`, and stays isolated.
+/// What: matched case-sensitively, ahead of the bundle scan, so a bundled agent
+/// could never be shadowed by one of these names without also colliding on it.
+/// Test: `read_only_harness_builtins_are_not_isolated`.
+const READ_ONLY_HARNESS_AGENTS: &[&str] = &["Explore", "Plan"];
 
 /// The `extends:` base whose descendants are engineer-tier regardless of role.
 ///
@@ -104,18 +179,70 @@ pub fn isolation_separates_working_tree(isolation: Option<&str>) -> bool {
 /// added.
 /// What: scans the compiled-in bundle for the agent whose declared `name:`
 /// equals `agent`, and reports whether its `role:` is in
-/// [`FILE_MUTATING_ROLES`] or its `extends:` is [`FILE_MUTATING_BASE`]. A name
-/// this binary does not ship — a project-local or custom agent — answers
-/// `false`, the fail-open direction this module's doc commits to.
+/// [`FILE_MUTATING_ROLES`], its `extends:` is [`FILE_MUTATING_BASE`], or its
+/// name is in [`FILE_MUTATING_NAMES`]. A name this binary does not ship — a
+/// project-local or custom agent — answers `false`, the fail-open direction
+/// this module's doc commits to.
 ///
 /// No caching and no I/O: the bundle is a compile-time table of ~40 entries and
 /// this runs once per `Agent` dispatch, which is rare compared to ordinary tool
 /// calls. A process-lifetime cache would be global state for no measurable win.
-/// Test: `engineer_tier_agents_mutate_files`, `non_engineer_agents_do_not`,
+/// Test: `engineer_tier_agents_mutate_files`,
+/// `file_writing_non_engineer_agents_mutate_files`, `non_engineer_agents_do_not`,
 /// `unknown_agent_fails_open`.
 pub fn agent_mutates_files(agent: &str) -> bool {
+    agent_write_risk(agent) == AgentWriteRisk::Writes
+}
+
+/// What this binary can say about whether `agent` writes to its cwd.
+///
+/// Why: [`agent_mutates_files`] collapses two different answers into `false` —
+/// "this bundled agent reads only" and "this binary has never heard of this
+/// agent". #4480 was right to treat both as ALLOW, because its question was
+/// whether to halt a dispatch over a race. ADR-0044's question is different:
+/// may this agent write to a checkout other sessions are standing in? There,
+/// the two answers must diverge, so the classifier has to keep them apart
+/// before anything collapses them.
+/// What: `Writes` when the bundled definition says it writes, `ReadsOnly` when
+/// the bundled definition says it does not, `Unknown` for an empty name and for
+/// any name this binary does not ship — a custom project agent, a renamed
+/// agent, or an unparseable definition.
+/// Test: `write_risk_separates_unknown_from_read_only`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentWriteRisk {
+    /// The bundled definition declares an agent that writes files.
+    Writes,
+    /// The bundled definition declares an agent that only reads.
+    ReadsOnly,
+    /// Not a bundled agent this binary can classify at all.
+    Unknown,
+}
+
+/// Classify `agent` against the compiled-in bundle.
+///
+/// Why: one bundle scan feeding both policies, so the shared-tree race and the
+/// main-checkout boundary can never disagree about what an agent is.
+/// What: scans the compiled-in bundle for the agent whose declared `name:`
+/// equals `agent` and reports whether its `role:` is in [`FILE_MUTATING_ROLES`],
+/// its `extends:` is [`FILE_MUTATING_BASE`], or its name is in
+/// [`FILE_MUTATING_NAMES`]. A name not in the bundle is
+/// [`AgentWriteRisk::Unknown`], never `ReadsOnly` — the distinction the whole
+/// enum exists for.
+///
+/// No caching and no I/O: the bundle is a compile-time table of ~40 entries and
+/// this runs once per `Agent` dispatch, which is rare compared to ordinary tool
+/// calls. A process-lifetime cache would be global state for no measurable win.
+/// Test: `write_risk_separates_unknown_from_read_only`,
+/// `engineer_tier_agents_mutate_files`, `non_engineer_agents_do_not`,
+/// `read_only_harness_builtins_are_not_isolated`.
+pub fn agent_write_risk(agent: &str) -> AgentWriteRisk {
     if agent.is_empty() {
-        return false;
+        return AgentWriteRisk::Unknown;
+    }
+    // Checked before the bundle: these ship in no bundle at all, so the scan
+    // below can only ever answer `Unknown` for them. See the constant.
+    if READ_ONLY_HARNESS_AGENTS.contains(&agent) {
+        return AgentWriteRisk::ReadsOnly;
     }
     crate::core::bundle::ALL
         .iter()
@@ -127,12 +254,42 @@ pub fn agent_mutates_files(agent: &str) -> bool {
         })
         .map(|artifact| agent_metadata_from_str(artifact.contents))
         .find(|meta| meta.name.as_deref() == Some(agent))
-        .is_some_and(|meta| {
-            meta.role
+        .map_or(AgentWriteRisk::Unknown, |meta| {
+            let writes = meta
+                .role
                 .as_deref()
                 .is_some_and(|r| FILE_MUTATING_ROLES.contains(&r))
                 || meta.extends.as_deref() == Some(FILE_MUTATING_BASE)
+                // #5650: name-keyed because `role: qa` mixes writers with the
+                // read-only `code-critic`; see FILE_MUTATING_NAMES.
+                || FILE_MUTATING_NAMES.contains(&agent);
+            if writes {
+                AgentWriteRisk::Writes
+            } else {
+                AgentWriteRisk::ReadsOnly
+            }
         })
+}
+
+/// Must this dispatch get a working tree of its own before it may run in a
+/// project's main checkout (ADR-0048)?
+///
+/// Why: ADR-0044 makes the main checkout read-only except for documents and
+/// configuration, for the PM and for every agent it dispatches. An agent that
+/// might write therefore needs somewhere else to write, and the only somewhere
+/// else is its own worktree. The predicate is separate from
+/// [`shares_the_callers_tree`] because it answers a different question and
+/// resolves the indeterminate case the other way: this one has no concurrent
+/// sibling in it at all, so the FIRST unisolated writer is already a violation.
+/// What: `true` when the declared isolation does not
+/// [`isolation_separates_working_tree`] AND [`agent_write_risk`] is anything
+/// other than [`AgentWriteRisk::ReadsOnly`]. `Unknown` is included
+/// deliberately — see the module doc for why the fail-open direction does not
+/// carry across this boundary.
+/// Test: `main_checkout_isolation_is_required_for_writers_and_unknowns`.
+pub fn requires_own_worktree_in_main_checkout(agent: &str, isolation: Option<&str>) -> bool {
+    !isolation_separates_working_tree(isolation)
+        && agent_write_risk(agent) != AgentWriteRisk::ReadsOnly
 }
 
 /// The `subagent_type` an Agent-tool `tool_input` names, when it names one.
@@ -228,18 +385,40 @@ mod tests {
     }
 
     #[test]
+    fn file_writing_non_engineer_agents_mutate_files() {
+        // #5650: these five write files and got no isolation at all before it.
+        // `documentation` and `version-control` arrive by role; the three QA
+        // agents by name, because `role: qa` also covers `code-critic`.
+        for agent in ["documentation", "version-control", "qa", "web-qa", "api-qa"] {
+            assert!(
+                agent_mutates_files(agent),
+                "{agent} writes files and must classify as file-mutating"
+            );
+        }
+    }
+
+    #[test]
+    fn code_critic_is_not_file_mutating() {
+        // The trap FILE_MUTATING_NAMES exists to avoid. `code-critic` declares
+        // the same `role: qa` and `extends: base-qa` as the three QA writers,
+        // but it only reads code and returns a verdict. Widening by role would
+        // deny a review dispatched alongside the engineer it reviews.
+        assert!(
+            !agent_mutates_files("code-critic"),
+            "code-critic reviews and never writes; a role-based widen would misclassify it"
+        );
+    }
+
+    #[test]
     fn non_engineer_agents_do_not() {
-        // The read-only and adjacent tiers the PM dispatches in parallel
-        // routinely. Denying these would halt the ordinary workflow to prevent
-        // a race they are not the trigger for — see the module doc.
+        // The read-only tiers the PM dispatches in parallel routinely. Denying
+        // these would halt the ordinary workflow to prevent a race they are not
+        // the trigger for — see the module doc.
         for agent in [
             "research",
             "code-critic",
             "code-analyzer",
-            "qa",
             "security",
-            "documentation",
-            "version-control",
             "ticketing",
         ] {
             assert!(
@@ -260,6 +439,94 @@ mod tests {
                 "{agent:?} is not a bundled engineer-tier agent and must fail open"
             );
         }
+    }
+
+    #[test]
+    fn write_risk_separates_unknown_from_read_only() {
+        // The distinction `agent_mutates_files` collapses. `code-critic` is a
+        // bundled agent this binary positively knows does not write; the other
+        // three are names it has never seen. Both answer `false` there, and
+        // ADR-0048 needs them apart.
+        assert_eq!(agent_write_risk("rust-engineer"), AgentWriteRisk::Writes);
+        assert_eq!(agent_write_risk("code-critic"), AgentWriteRisk::ReadsOnly);
+        assert_eq!(agent_write_risk("research"), AgentWriteRisk::ReadsOnly);
+        for unknown in ["", "some-project-custom-agent", "Rust-Engineer"] {
+            assert_eq!(
+                agent_write_risk(unknown),
+                AgentWriteRisk::Unknown,
+                "{unknown:?} is not a bundled agent"
+            );
+        }
+    }
+
+    #[test]
+    fn main_checkout_isolation_is_required_for_writers_and_unknowns() {
+        // ADR-0048: in a main checkout the indeterminate case resolves toward
+        // isolation, the opposite of `shares_the_callers_tree`. A custom agent
+        // is exactly the writer that kept landing in the shared checkout.
+        for agent in ["rust-engineer", "documentation", "custom-agent", ""] {
+            assert!(
+                requires_own_worktree_in_main_checkout(agent, None),
+                "{agent:?} must not run unisolated in a main checkout"
+            );
+        }
+        // A positively-identified reader costs nothing to run in place.
+        for agent in ["research", "code-critic", "ticketing"] {
+            assert!(
+                !requires_own_worktree_in_main_checkout(agent, None),
+                "{agent} only reads and must not be forced into a worktree"
+            );
+        }
+        // Declared isolation is the whole remedy; it must satisfy the rule.
+        for mode in ["worktree", "remote"] {
+            assert!(!requires_own_worktree_in_main_checkout(
+                "rust-engineer",
+                Some(mode)
+            ));
+            assert!(!requires_own_worktree_in_main_checkout(
+                "custom-agent",
+                Some(mode)
+            ));
+        }
+    }
+
+    #[test]
+    fn read_only_harness_builtins_are_not_isolated() {
+        // #5769: `Explore` and `Plan` are Claude Code's own read-only dispatch
+        // targets and ship in no bundle, so they classified `Unknown` and were
+        // granted a worktree — which is cut from a COMMIT and therefore hides
+        // the session's uncommitted work from the very agent asked to read it.
+        for agent in READ_ONLY_HARNESS_AGENTS {
+            assert_eq!(
+                agent_write_risk(agent),
+                AgentWriteRisk::ReadsOnly,
+                "{agent}"
+            );
+            assert!(
+                !requires_own_worktree_in_main_checkout(agent, None),
+                "{agent} only reads and must read the session's own tree"
+            );
+        }
+        // `general-purpose` carries the full tool set and is also the identity a
+        // failed named-agent dispatch degrades into, so it stays a writer.
+        assert_eq!(agent_write_risk("general-purpose"), AgentWriteRisk::Unknown);
+        assert!(requires_own_worktree_in_main_checkout(
+            "general-purpose",
+            None
+        ));
+        // The read-only classification must not leak into #4480's question:
+        // these were already allowed to share a tree, and still are.
+        assert!(!shares_the_callers_tree("Explore", None));
+    }
+
+    #[test]
+    fn unknown_agents_diverge_between_the_two_policies() {
+        // The one assertion that pins ADR-0048's actual claim: the same unknown
+        // agent is ALLOWED to share a worktree's HEAD (#4480's fail-open) and
+        // REQUIRED to be isolated in a main checkout. If a later change makes
+        // these agree, one of the two decisions has been silently reversed.
+        assert!(!shares_the_callers_tree("custom-agent", None));
+        assert!(requires_own_worktree_in_main_checkout("custom-agent", None));
     }
 
     #[test]

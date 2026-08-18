@@ -29,8 +29,11 @@
 //! that stays the manifest-wide guarantee, and re-scrubbing an already-clean
 //! string is a no-op.
 
+use std::collections::BTreeMap;
+
 use trusty_common::credentials::scrub_secrets;
 
+use super::repo_index::RepoIndexStatus;
 use super::stage::{AuditSweepStats, StageStatus};
 
 /// Longest stage-failure message carried into the report, in characters.
@@ -115,6 +118,54 @@ pub fn sweep_gap_lines<S: AsRef<str>>(stats: &AuditSweepStats, secrets: &[S]) ->
     });
 
     failed_stages.chain(stale).collect()
+}
+
+/// One Gaps & Caveats line per distinct reason a repository could not be
+/// indexed (#5670).
+///
+/// Why: a repository trusty-search does not serve reaches the renderer's
+/// fail-open path — `AnalyzeGap::NotIndexed`, one generic line, exit 0 — and the
+/// operator learns only that the index was missing, never that the audit tried
+/// to build it and why that failed. DOC-67 §9's rule for a per-repository
+/// failure is exclude-and-name, so the cause is named here, beside the stage
+/// failures, in the same words the rest of the section uses.
+/// What: groups the failed outcomes by reason so one fault affecting an entire
+/// org is one line rather than two hundred, names the affected repositories in
+/// manifest order inside each line, and returns an empty vec when every
+/// repository is indexed. Reasons are scrubbed and excerpted by
+/// [`redacted_excerpt`] — a child's message is text this process did not author,
+/// and the manifest's own scrub cannot repair a credential cut in half here.
+/// Test: `super::tests::{one_repository_that_fails_to_index_does_not_stop_the_others,
+/// a_missing_search_binary_is_named_and_the_run_continues,
+/// index_gap_lines_are_empty_when_every_repository_is_served,
+/// a_credential_in_an_index_failure_never_reaches_the_gap_line}`.
+pub fn index_gap_lines<S: AsRef<str>>(
+    outcomes: &[super::repo_index::RepoIndexOutcome],
+    secrets: &[S],
+) -> Vec<String> {
+    // BTreeMap, not HashMap: two runs over the same state must produce
+    // byte-identical lines in the same order (DOC-67 §9).
+    let mut by_reason: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for outcome in outcomes {
+        if let RepoIndexStatus::Failed(reason) = &outcome.status {
+            by_reason
+                .entry(redacted_excerpt(reason, secrets))
+                .or_default()
+                .push(outcome.repo.clone());
+        }
+    }
+
+    by_reason
+        .into_iter()
+        .map(|(reason, repos)| {
+            format!(
+                "trusty-search could not index {} ({reason}) — those applications are described \
+                 from the repository scan alone. Their findings, complexity, and health factors \
+                 are not assessed, not clean.",
+                repos.join(", ")
+            )
+        })
+        .collect()
 }
 
 /// A single-line, credential-free excerpt of `msg`, capped at

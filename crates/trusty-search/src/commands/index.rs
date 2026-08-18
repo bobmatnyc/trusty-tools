@@ -70,6 +70,25 @@ pub async fn handle_index(
         );
     }
 
+    // 1b. #767: same shape for the opt-in gate. The daemon is authoritative
+    //    (`validate_root_path`), but starting it and building an indexer only
+    //    to be refused wastes ~seconds and buries the actionable message.
+    let allow_paths = crate::allowlist::AllowlistPaths::default();
+    // A denylist hit was already reported above; an unreadable allowlist is
+    // left to the daemon, which is the authority.
+    if let Ok(crate::allowlist::AllowlistVerdict::NotAllowlisted) =
+        crate::allowlist::check_path_with(&project_path, &allow_paths)
+    {
+        anyhow::bail!(
+            "indexing refused: '{}' is not approved for indexing (default-deny, #767)\n\
+             Approve it with:  trusty-search index add {}\n\
+             …or register it as a project with `tm`. Inspect what is approved \
+             with `trusty-search index list`.",
+            project_path.display(),
+            project_path.display(),
+        );
+    }
+
     // 2. Auto-start the daemon (issue #24: CPU-by-default on Apple Silicon
     //    avoids ~72 GB CoreML virtual-RSS spike that jetsam kills ~14s in).
     crate::commands::daemon_guard::ensure_daemon_running_for_indexing(&daemon_base_url()).await?;

@@ -58,14 +58,28 @@ fn scan(label: &'static str, dir: &Path, names: &[&str]) -> TierScan {
     TierScan {
         label,
         dir: dir.to_path_buf(),
-        found: names
-            .iter()
-            .map(|s| MisplacedAgent {
-                path: dir.join(format!("{s}.md")),
-                name: (*s).to_owned(),
-                class: TierResidentClass::ShadowsBundled,
-            })
-            .collect(),
+        outcome: TierOutcome::Scanned(
+            names
+                .iter()
+                .map(|s| MisplacedAgent {
+                    path: dir.join(format!("{s}.md")),
+                    name: (*s).to_owned(),
+                    class: TierResidentClass::ShadowsBundled,
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// Build a scan that could not run, for the #5626 undetermined-tier tests.
+fn unscannable(label: &'static str, dir: &Path) -> TierScan {
+    TierScan {
+        label,
+        dir: dir.to_path_buf(),
+        outcome: TierOutcome::Unscannable(format!(
+            "cannot scan agent tier {}: Permission denied (os error 13)",
+            dir.display()
+        )),
     }
 }
 
@@ -280,6 +294,48 @@ fn verdict_clean_is_ok() {
     let check = verdict(&[scan("project", &dir, &[])], &canonical);
     assert_eq!(check.status, CheckStatus::Ok);
     assert!(check.message.contains("/c/agents"), "{}", check.message);
+}
+
+#[test]
+fn verdict_unscannable_tier_is_warn() {
+    // #5626: the probe could not look, so it must not say it looked and found
+    // nothing. Pre-fix the same input produced `Ok` with "(scanned: <dir>)".
+    let dir = PathBuf::from("/w/.claude/agents");
+    let canonical = PathBuf::from("/c/agents");
+    let check = verdict(&[unscannable("project", &dir)], &canonical);
+    assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+    assert!(check.message.contains("UNDETERMINED"), "{}", check.message);
+}
+
+#[test]
+fn verdict_unscannable_tier_is_not_reported_as_scanned() {
+    // The `scanned:` list is a factual claim about which directories were read.
+    // A tier that failed belongs in the failure detail, never in that list.
+    let scanned_dir = PathBuf::from("/h/.claude/agents");
+    let failed_dir = PathBuf::from("/w/.claude/agents");
+    let canonical = PathBuf::from("/c/agents");
+    let check = verdict(
+        &[
+            scan("operator home", &scanned_dir, &[]),
+            unscannable("project", &failed_dir),
+        ],
+        &canonical,
+    );
+    let scanned_clause = check
+        .message
+        .split("Scanned: ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no Scanned: clause in {}", check.message));
+    assert!(
+        scanned_clause.contains("/h/.claude/agents"),
+        "the tier that WAS read must be listed: {}",
+        check.message
+    );
+    assert!(
+        !scanned_clause.contains("/w/.claude/agents"),
+        "the tier that failed must not be claimed as scanned: {}",
+        check.message
+    );
 }
 
 #[test]

@@ -12,6 +12,15 @@
 //! Test: each adapter carries its own unit tests; both are testable without a
 //! real tmux binary via a fake tmux driver. `RuntimeKind` parsing/serde is
 //! covered by `runtime_kind_*` tests in this module.
+//!
+//! [`RuntimeAdapter`]: crate::runtime::RuntimeAdapter
+//! [`RuntimeError`]: crate::runtime::RuntimeError
+//! [`RuntimeKind`]: crate::runtime::RuntimeKind
+//! [`build_adapter`]: crate::runtime::build_adapter
+//! [`ClaudeCodeAdapter`]: crate::runtime::ClaudeCodeAdapter
+//! [`TcodeAdapter`]: crate::runtime::TcodeAdapter
+//! [`build_inplace_resume_command`]: crate::runtime::build_inplace_resume_command
+//! [`InPlaceResumeCommand`]: crate::runtime::InPlaceResumeCommand
 
 mod claude_code;
 mod tcode;

@@ -76,7 +76,13 @@ pub enum ManifestError {
 /// and generic I/O; the CLI maps these to `anyhow` at the boundary.
 /// Test: `reporter_tests.rs` (I/O), `template.rs` tests (`TemplateNotFound`),
 /// `metrics.rs` tests (`Metrics`).
+///
+/// `#[non_exhaustive]` (#5762): every new failure mode this pipeline learns to
+/// name adds a variant, and three arrived between 0.16.0 and 0.17.0 alone. A
+/// downstream `match` must carry a `_` arm, which makes those additions a minor
+/// bump instead of a major one.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ReportError {
     /// A manifest-level failure (parse or validation).
     #[error(transparent)]
@@ -123,6 +129,76 @@ pub enum ReportError {
         /// The underlying serde_json error.
         #[source]
         source: serde_json::Error,
+    },
+
+    /// A metrics JSON parsed, but declares a schema major this build does not
+    /// read (#5747).
+    ///
+    /// Why: the producer of the artifact and this reader are separate binaries,
+    /// and every field of [`super::metrics::AnalyzeMetrics`] carries
+    /// `#[serde(default)]`. A renamed key in a later schema therefore parses to
+    /// zero and renders `0 lines of code` or an empty complexity distribution as
+    /// a stated fact in a client-facing due-diligence report. Refusing a major
+    /// this build cannot read routes that the same way an unparseable artifact
+    /// goes: a hard, named failure.
+    /// What: distinct from [`ReportError::Metrics`] because the remedy differs —
+    /// that one is a malformed file, this one is a version mismatch the operator
+    /// resolves by aligning the producer with this build. An artifact carrying
+    /// no `schema_version` at all never reaches this variant; see
+    /// [`super::metrics::load_metrics`] for why absent means v0 here and is a
+    /// refusal for the ticketing artifact.
+    #[error(
+        "metrics artifact at {path} declares schema_version {found:?}, which this build cannot \
+         read; it reads schema major {supported}"
+    )]
+    MetricsSchema {
+        /// The metrics artifact whose schema tag was refused.
+        path: PathBuf,
+        /// The `schema_version` the artifact declared; never empty.
+        found: String,
+        /// The schema major this build reads.
+        supported: u32,
+    },
+
+    /// A declared ticketing artifact exists but could not be parsed (#5405).
+    ///
+    /// Why: the manifest declared the file, so an unreadable one is a producer
+    /// bug — tga writes the key only after writing the file. Degrading to a
+    /// report with no board coverage would hide that bug behind a section that
+    /// merely looks unpopulated, which is the failure mode #5405 is about.
+    #[error("failed to parse ticketing JSON at {path}: {source}")]
+    Ticketing {
+        /// The ticketing artifact path that failed to parse.
+        path: PathBuf,
+        /// The underlying serde_json error.
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// A ticketing artifact parsed, but declares a schema major this build does
+    /// not read (#5405).
+    ///
+    /// Why: tga and trusty-review are versioned and installed independently, so
+    /// skew is the normal case, and every field of the artifact carries
+    /// `#[serde(default)]`. A renamed count therefore parses to zero and renders
+    /// `0 of 412 commit(s) reference tracked work` — confident, wrong, and
+    /// silent. Refusing an unrecognised major routes that the same way an
+    /// unparseable artifact goes: a hard, named failure.
+    /// What: distinct from [`ReportError::Ticketing`] because the remedy
+    /// differs — that one is a producer bug, this one is a version mismatch the
+    /// operator resolves by aligning the two binaries.
+    #[error(
+        "ticketing artifact at {path} declares schema_version {found:?}, which this build cannot \
+         read; it reads schema major {supported} (an empty value means the artifact carried no \
+         schema_version)"
+    )]
+    TicketingSchema {
+        /// The ticketing artifact whose schema tag was refused.
+        path: PathBuf,
+        /// The `schema_version` the artifact declared; empty when absent.
+        found: String,
+        /// The schema major this build reads.
+        supported: u32,
     },
 
     /// A filesystem I/O error while reading templates/metrics or writing output.

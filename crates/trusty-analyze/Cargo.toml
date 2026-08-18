@@ -1,6 +1,6 @@
 [package]
 name        = "trusty-analyze"
-version     = "0.9.0"
+version     = "0.9.1"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true
@@ -116,7 +116,12 @@ tokenizers = { workspace = true, optional = true }
 #      surface. Optional and OFF by default so `cargo install trusty-analyze`
 #      and the crates.io publish are unaffected (trusty-review need not be
 #      published). The `review` feature pulls it in with its `mcp` feature.
-trusty-review = { workspace = true, optional = true }
+# Why (#5466): `default-features = false`. Without it, `--features review`
+#      resolved trusty-review's whole DEFAULT set, so this crate silently
+#      compiled the contributor-profile pipeline — tga, rusqlite and a vendored
+#      libgit2 — with no source-code trigger anywhere in trusty-analyze. The
+#      `review` feature below names the one feature this crate actually needs.
+trusty-review = { workspace = true, optional = true, default-features = false }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-analyze (single-owner-per-binary); the
 # standalone `trusty-console` crate is its sole producer.

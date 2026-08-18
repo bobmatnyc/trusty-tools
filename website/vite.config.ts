@@ -23,7 +23,12 @@ export default defineConfig({
 				test: {
 					name: 'unit',
 					environment: 'jsdom',
-					include: ['src/**/*.test.ts']
+					include: ['src/**/*.test.ts'],
+					// #5200: the changelog tests parse the real six-crate corpus
+					// (11k lines and growing every release) under vitest's 5s
+					// default. Worst case measured 21.1s locally; a hosted runner
+					// is materially slower on CPU-bound parsing.
+					testTimeout: 120_000
 				}
 			},
 			{

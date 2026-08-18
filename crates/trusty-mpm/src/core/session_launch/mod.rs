@@ -397,7 +397,15 @@ pub fn prepare_session_with_repo_url(
     repo_url: Option<&str>,
 ) -> Result<PrepReport, PrepError> {
     let native = crate::core::output_style::claude_supports_native_output_style();
-    prepare_session_inner(fw, project_dir, None, native, repo_url, None)
+    prepare_session_inner(
+        fw,
+        project_dir,
+        None,
+        native,
+        repo_url,
+        None,
+        dirs::home_dir().as_deref(),
+    )
 }
 
 /// Prepare a session whose managed id is already known (#4832).
@@ -423,7 +431,15 @@ pub fn prepare_session_for_managed(
     session_id: &str,
 ) -> Result<PrepReport, PrepError> {
     let native = crate::core::output_style::claude_supports_native_output_style();
-    prepare_session_inner(fw, project_dir, None, native, repo_url, Some(session_id))
+    prepare_session_inner(
+        fw,
+        project_dir,
+        None,
+        native,
+        repo_url,
+        Some(session_id),
+        dirs::home_dir().as_deref(),
+    )
 }
 
 /// The deploy layout for a session whose harness is spawned with
@@ -553,6 +569,38 @@ pub fn prepare_session_with_style_and_native(
     explicit_style: Option<&str>,
     native_supported: bool,
 ) -> Result<PrepReport, PrepError> {
+    prepare_session_with_home(
+        fw,
+        project_dir,
+        explicit_style,
+        native_supported,
+        dirs::home_dir().as_deref(),
+    )
+}
+
+/// [`prepare_session_with_style_and_native`] with the USER-GLOBAL home supplied.
+///
+/// Why (#5544): `prepare_session` writes two files that belong to the user, not
+/// to the project — `~/.claude.json` and `~/.claude/settings.json`. A test
+/// driving the real pipeline therefore reached the developer's own home, and the
+/// only way to stop it was repointing the process's `$HOME` — a global write
+/// every sibling test in the same binary observes for its duration, which is the
+/// flake class #5544 tracks. The home cannot come off `FrameworkPaths`:
+/// `for_managed_project` relocates every `.claude/` path on it onto the
+/// workspace, so deriving it there sent both writes into the operator's repo.
+/// Passing it is the only shape that is correct under every root AND redirectable.
+/// What: identical to [`prepare_session_with_style_and_native`], which is this
+/// function with `dirs::home_dir()`. An absent or relative `home` declines the
+/// two user-global writes rather than guessing a location.
+/// Test: `prepare_session_does_not_seed_the_workspace_on_the_managed_path`,
+/// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`.
+pub fn prepare_session_with_home(
+    fw: &FrameworkPaths,
+    project_dir: &Path,
+    explicit_style: Option<&str>,
+    native_supported: bool,
+    home: Option<&Path>,
+) -> Result<PrepReport, PrepError> {
     prepare_session_inner(
         fw,
         project_dir,
@@ -560,6 +608,7 @@ pub fn prepare_session_with_style_and_native(
         native_supported,
         None,
         None,
+        home,
     )
 }
 
@@ -592,6 +641,11 @@ fn prepare_session_inner(
     native_supported: bool,
     repo_url: Option<&str>,
     session_id: Option<&str>,
+    // #5544: the USER-GLOBAL home. Not derivable from `fw` — the managed
+    // constructors relocate every `.claude/` path on it onto the workspace, so
+    // any accessor there answers a different question. Production passes
+    // `dirs::home_dir()`; only tests pass anything else.
+    home: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
     // Load the user config ONCE and thread it through both the manifest
     // resolution / catalog-root path AND the style resolution path below. Reading
@@ -940,14 +994,14 @@ fn prepare_session_inner(
     // user-scope declaration, so removing the approval removes the
     // name-squatting exploit #3918→#3950 kept re-opening rather than defusing it
     // once more. Non-fatal: a failure only means the operator sees the dialog.
-    if let Err(err) = preseed_workspace_trust_home(project_dir) {
+    if let Err(err) = preseed_workspace_trust_home(home, project_dir) {
         tracing::warn!("failed to pre-seed workspace trust: {err}");
     }
 
     // Remove the now-redundant global `trusty-memory` hook entries so they no
     // longer fire for every Claude Code session (including claude-mpm). The
     // project hooks above scope them to trusty-mpm sessions. Non-fatal.
-    if let Err(err) = remove_global_trusty_memory_hooks() {
+    if let Err(err) = remove_global_trusty_memory_hooks(home) {
         tracing::warn!("failed to remove global trusty-memory hooks: {err}");
     }
 
@@ -1189,5 +1243,36 @@ pub fn build_system_prompt_for_with_style_and_native(
         explicit_style,
         prompt,
         native_supported,
+    )
+}
+
+/// Build the launch prompt with the deployed-agent roster supplied by the caller.
+///
+/// Why (#5544): [`build_system_prompt_for`] rescans the three live agent tiers
+/// on every call — `<project>/.claude/agents`, `$CLAUDE_CONFIG_DIR/agents`, and
+/// `$HOME/.claude/agents`. Two successive calls can therefore disagree, so any
+/// test comparing this prompt against another composition of it is racing
+/// machine-global state, and it fails with a message indistinguishable from a
+/// genuine regression. The remedy is to give both sides ONE roster value, not
+/// to pin `$HOME` — pinning it is a PROCESS-GLOBAL write every sibling test in
+/// the same target can observe mid-scan, which is the flake class #5544 tracks.
+/// [`crate::core::instruction_overrides::resolve_pm_prompt_with_roster`] is the
+/// matching seam one layer down; this is its launch-site counterpart.
+/// What: identical to [`build_system_prompt_for`] except the rendered
+/// `## Delegation Authority` block comes from `roster` instead of a live scan.
+/// Callers build `roster` with
+/// [`crate::core::delegation_authority::roster_section_from_dirs`] over tier
+/// directories they own.
+/// Test: `compose_session_instructions_display_matches_live_prompt` and its
+/// `_with_override` sibling (`tests_behavior_b_tests.rs`).
+pub fn build_system_prompt_for_with_roster(project_dir: &Path, roster: Option<String>) -> String {
+    let (prompt, _source) =
+        crate::core::instruction_overrides::resolve_pm_prompt_with_roster(project_dir, || roster);
+    let native = crate::core::output_style::claude_supports_native_output_style();
+    crate::core::output_style::apply_output_style_to_prompt_with_native(
+        project_dir,
+        None,
+        prompt,
+        native,
     )
 }

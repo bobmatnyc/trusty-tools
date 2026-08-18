@@ -67,6 +67,247 @@ async fn call(
     body
 }
 
+/// Drive the granted-worktree route and unwrap its body.
+async fn granted_call(
+    state: &Arc<DaemonState>,
+    session: SessionId,
+    req: SharedTreeDispatchRequest,
+) -> SharedTreeWritersResponse {
+    let Json(body) =
+        granted_worktree_route(State(state.clone()), Path(session.0.to_string()), Json(req))
+            .await
+            .expect("route succeeds");
+    body
+}
+
+/// The `PreToolUse` payload the daemon's own `matcher: "*"` hook observes — the
+/// ORIGINAL dispatch, before the guard rewrote it.
+fn unisolated_hook_payload(tool_use_id: &str) -> Value {
+    serde_json::json!({
+        "cwd": "/repo",
+        "tool": "Agent",
+        "tool_use_id": tool_use_id,
+        "input": {"subagent_type": "rust-engineer", "description": "go"},
+    })
+}
+
+#[tokio::test]
+async fn a_grant_and_the_tracker_converge_in_either_order() {
+    // #5769, and the reason the fix is an upsert rather than a second call to
+    // `observe`. TWO writers describe one dispatch: this route, carrying the
+    // isolation `tm hook --pm-guard` granted, and the daemon's own `matcher: "*"`
+    // tracker hook, carrying the ORIGINAL unisolated payload. They fire on the
+    // same event and race, and `on_dispatch` returns early when the `tool_use_id`
+    // already exists — so an `observe`-based grant would correct the record only
+    // in the orders it happened to win. Both orders must converge on ONE isolated
+    // record, or a HEAD move in this checkout is denied for the six hours of
+    // `RUNNING_STALE_AFTER_SECS` on a writer that is not there.
+    for guard_first in [true, false] {
+        let (state, _dir, session) = hermetic();
+        let original = unisolated_hook_payload("toolu_grant");
+        let granted = dispatch(
+            "/repo",
+            "rust-engineer",
+            Some("worktree"),
+            Some("toolu_grant"),
+        );
+
+        if guard_first {
+            let body = granted_call(&state, session, granted).await;
+            assert!(body.claimed, "an empty checkout must be claimed");
+            crate::daemon::services::delegation_tracker::observe(
+                &state,
+                session,
+                HookEvent::PreToolUse,
+                &original,
+            );
+        } else {
+            crate::daemon::services::delegation_tracker::observe(
+                &state,
+                session,
+                HookEvent::PreToolUse,
+                &original,
+            );
+            // Causality: the tracker's record IS the phantom at this point.
+            // Only an overwrite can clear it — `observe` would return early on
+            // the `tool_use_id` it already wrote and change nothing.
+            assert_eq!(state.delegations_for(session)[0].isolation, None);
+            let body = granted_call(&state, session, granted).await;
+            assert!(
+                body.claimed,
+                "the caller's own record is excluded, so the checkout is still free"
+            );
+        }
+
+        let records = state.delegations_for(session);
+        assert_eq!(
+            records.len(),
+            1,
+            "guard_first={guard_first}: one dispatch must leave one record, got {records:?}"
+        );
+        assert_eq!(
+            records[0].isolation.as_deref(),
+            Some("worktree"),
+            "guard_first={guard_first}: the granted isolation must survive both orders"
+        );
+        // The property the whole fix exists for: a later `git merge` in this
+        // checkout asks exactly this question, and a non-empty answer denies it.
+        assert!(
+            state
+                .live_shared_tree_writers(&PathBuf::from("/repo"), None)
+                .is_empty(),
+            "guard_first={guard_first}: a granted writer must not be named as writing here"
+        );
+    }
+}
+
+#[test]
+fn a_grant_and_the_tracker_race_without_losing_the_isolation() {
+    // What `dispatch_record` exists for, and the only test that can fail if it
+    // is deleted. The sibling above drives both writers sequentially on one
+    // thread: it proves the two ARRIVAL ORDERS converge, and proves nothing
+    // about the locked window between a writer's find and its insert.
+    //
+    // Two ways the unguarded interleaving loses. If `observe` inserts between
+    // `record_granted_isolation`'s find and `on_dispatch_locked`'s own find,
+    // that second find hits and returns early — one record, isolation `None`,
+    // a silent lost update. If neither find sees the other, both insert — two
+    // records for one dispatch, and the unisolated one decides later denies.
+    // Both assertions below are needed; neither alone catches both shapes.
+    const ROUNDS: usize = 300;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    for round in 0..ROUNDS {
+        let (state, _dir, session) = hermetic();
+        let payload = unisolated_hook_payload("toolu_race");
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+                crate::daemon::services::delegation_tracker::observe(
+                    &state,
+                    session,
+                    HookEvent::PreToolUse,
+                    &payload,
+                );
+            });
+            barrier.wait();
+            rt.block_on(granted_call(
+                &state,
+                session,
+                dispatch(
+                    "/repo",
+                    "rust-engineer",
+                    Some("worktree"),
+                    Some("toolu_race"),
+                ),
+            ));
+        });
+
+        let records = state.delegations_for(session);
+        assert_eq!(
+            records.len(),
+            1,
+            "round {round}: one dispatch must leave one record, got {records:?}"
+        );
+        assert_eq!(
+            records[0].isolation.as_deref(),
+            Some("worktree"),
+            "round {round}: the grant must not be lost to the tracker's insert"
+        );
+    }
+}
+
+#[tokio::test]
+async fn granted_worktree_route_records_nothing_without_isolation_or_a_tool_use_id() {
+    // Both keys are load-bearing. Without `tool_use_id` the record could never
+    // be found again, so writing one would leave a SECOND record beside the
+    // tracker's — the phantom duplicated rather than removed. Without an
+    // isolating mode there is no grant to record, and this route must not become
+    // a way to claim a directory for an ordinary unisolated dispatch.
+    for req in [
+        dispatch("/repo", "rust-engineer", Some("worktree"), None),
+        dispatch("/repo", "rust-engineer", None, Some("toolu_x")),
+        dispatch("/repo", "rust-engineer", Some("nonsense"), Some("toolu_x")),
+    ] {
+        let (state, _dir, session) = hermetic();
+        let body = granted_call(&state, session, req).await;
+        assert!(!body.claimed);
+        assert!(state.delegations_for(session).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn record_granted_isolation_refuses_a_non_separating_mode() {
+    // The rule lives in the WRITER, not only in the route's eligibility test.
+    // This function exists to erase a record that names a writer as sharing the
+    // checkout, so a caller handing it `isolation: "inline"` would write that
+    // phantom over a correct record — the exact inverse of its purpose.
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "rust-engineer",
+        "/repo",
+        Some("worktree"),
+        Some("toolu_x"),
+        DelegationStatus::Running,
+    );
+    for mode in ["inline", "Worktree", "worktrees", ""] {
+        let payload = serde_json::json!({
+            "cwd": "/repo",
+            "tool": "Agent",
+            "tool_use_id": "toolu_x",
+            "input": {"subagent_type": "rust-engineer", "isolation": mode},
+        });
+        assert!(
+            !crate::daemon::services::delegation_tracker::record_granted_isolation(
+                &state, session, &payload
+            ),
+            "{mode:?} does not separate the working tree and must not be recorded"
+        );
+    }
+    assert_eq!(
+        state.delegations_for(session)[0].isolation.as_deref(),
+        Some("worktree"),
+        "a correct record must survive every refused call"
+    );
+}
+
+#[tokio::test]
+async fn granted_worktree_route_reports_a_live_writer_without_claiming() {
+    // The deny arm the reorder restored (#5769 finding 2): the grant is emitted
+    // only after this answer comes back empty, so a sibling already holding the
+    // checkout denies the dispatch instead of silently sharing it — which is
+    // what happened while the grant returned before the concurrency check.
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "python-engineer",
+        "/repo",
+        None,
+        Some("toolu_first"),
+        DelegationStatus::Running,
+    );
+    let body = granted_call(
+        &state,
+        session,
+        dispatch(
+            "/repo",
+            "rust-engineer",
+            Some("worktree"),
+            Some("toolu_second"),
+        ),
+    )
+    .await;
+    assert_eq!(body.total, 1);
+    assert_eq!(body.agents[0].agent, "python-engineer");
+    assert!(!body.claimed, "a denied dispatch must record nothing");
+    assert_eq!(state.delegations_for(session).len(), 1);
+}
+
 #[tokio::test]
 async fn shared_tree_dispatch_route_reports_live_unisolated_writers() {
     let (state, _dir, session) = hermetic();
@@ -133,11 +374,15 @@ async fn shared_tree_dispatch_route_reports_live_unisolated_writers() {
         Some("toolu_F"),
         DelegationStatus::Running,
     );
-    // Another session's children are not this session's problem.
+    // Another session's child in THIS directory now counts (ADR-0048). This
+    // line used to assert the opposite — "not this session's problem" — and
+    // that assumption is what made the guard blind to the reported incident:
+    // the writers sharing one checkout each belonged to a different session.
+    // Dedicated coverage is `shared_tree_writers_span_sessions_in_one_checkout`.
     insert(
         &state,
         SessionId(uuid::Uuid::new_v4()),
-        "rust-engineer",
+        "python-engineer",
         "/repo",
         None,
         Some("toolu_G"),
@@ -151,10 +396,13 @@ async fn shared_tree_dispatch_route_reports_live_unisolated_writers() {
     )
     .await;
 
-    assert_eq!(body.total, 1, "only the live unisolated engineer counts");
-    assert_eq!(body.agents.len(), 1);
-    assert_eq!(body.agents[0].agent, "rust-engineer");
-    assert_eq!(body.agents[0].count, 1);
+    assert_eq!(
+        body.total, 2,
+        "the live unisolated engineers in this directory, whichever session dispatched them"
+    );
+    assert_eq!(body.agents.len(), 2, "{:?}", body.agents);
+    assert_eq!(body.agents[0].agent, "python-engineer");
+    assert_eq!(body.agents[1].agent, "rust-engineer");
     assert!(!body.claimed, "a denied dispatch must not claim the tree");
 }
 
@@ -370,6 +618,44 @@ async fn shared_tree_dispatch_route_does_not_reserve_a_non_dispatch_tool() {
 }
 
 #[tokio::test]
+async fn shared_tree_dispatch_route_answers_a_bash_query_without_claiming() {
+    // ADR-0048 decision 10: the HEAD-moving Bash rule reads this route through
+    // `pm_guard_dispatch::live_shared_tree_writers`, which sends the Bash call's
+    // own payload — `tool: "Bash"` and an `input` projected to nothing. Two
+    // halves of that contract are pinned here, because the rule depends on both.
+    // It must ANSWER: a `git merge` beside a live writer is the deny this exists
+    // for. And it must claim NOTHING: a pull is not a dispatch, and a claim it
+    // took would occupy a directory no `SubagentStop` will ever release.
+    let (state, _dir, session) = hermetic();
+    insert(
+        &state,
+        session,
+        "rust-engineer",
+        "/repo",
+        None,
+        Some("toolu_A"),
+        DelegationStatus::Running,
+    );
+    let req = SharedTreeDispatchRequest {
+        payload: serde_json::json!({
+            "cwd": "/repo",
+            "tool": "Bash",
+            "input": {},
+            "tool_use_id": "toolu_pull",
+        }),
+    };
+    let body = call(&state, session, req).await;
+    assert_eq!(body.total, 1, "the live writer must be reported");
+    assert_eq!(body.agents[0].agent, "rust-engineer");
+    assert!(!body.claimed, "a Bash query must never claim the tree");
+    assert_eq!(
+        state.delegations_for(session).len(),
+        1,
+        "no record may be added by a Bash query"
+    );
+}
+
+#[tokio::test]
 async fn shared_tree_dispatch_route_is_empty_without_a_cwd() {
     // Declared fail-open branch: with no directory in the payload there is
     // nothing to compare against and nothing to claim. Seeding a live writer
@@ -392,6 +678,97 @@ async fn shared_tree_dispatch_route_is_empty_without_a_cwd() {
     assert_eq!(body.total, 0);
     assert!(!body.claimed);
     assert_eq!(state.delegations_for(session).len(), 1);
+}
+
+#[tokio::test]
+async fn shared_tree_writers_span_sessions_in_one_checkout() {
+    // THE REGRESSION (ADR-0048). The reported incident, reduced: three sessions
+    // standing in one `mcp-services` checkout, each dispatching a writer into
+    // it. Every guard saw an empty answer and admitted its writer, because the
+    // answer was filtered to the ASKING session's own delegations before any
+    // other test ran — so the writers were invisible to each other by
+    // construction, not by timing. Downstream that produced branches switching
+    // under each other and a commit landing on a workstream it did not belong
+    // to.
+    //
+    // Session B asks about the directory session A's writer is already in.
+    // With the session filter this answered 0 and claimed the tree a second
+    // time; the hazard is a shared git HEAD, which belongs to the DIRECTORY and
+    // knows nothing about session ids.
+    let (state, _dir, session_a) = hermetic();
+    let session_b = SessionId(uuid::Uuid::new_v4());
+    let session_c = SessionId(uuid::Uuid::new_v4());
+
+    insert(
+        &state,
+        session_a,
+        "rust-engineer",
+        "/repo/mcp-services",
+        None,
+        Some("toolu_A"),
+        DelegationStatus::Running,
+    );
+
+    let body = call(
+        &state,
+        session_b,
+        dispatch(
+            "/repo/mcp-services",
+            "python-engineer",
+            None,
+            Some("toolu_B"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        body.total, 1,
+        "session B must see session A's writer in the same checkout"
+    );
+    assert_eq!(body.agents[0].agent, "rust-engineer");
+    assert!(
+        !body.claimed,
+        "a denied dispatch must not also occupy the directory"
+    );
+
+    // A third session gets the same answer, naming every writer it would be
+    // joining rather than only the ones its own session dispatched.
+    insert(
+        &state,
+        session_b,
+        "documentation",
+        "/repo/mcp-services",
+        None,
+        Some("toolu_B2"),
+        DelegationStatus::Running,
+    );
+    let body = call(
+        &state,
+        session_c,
+        dispatch("/repo/mcp-services", "qa", None, Some("toolu_C")),
+    )
+    .await;
+    assert_eq!(body.total, 2, "every live writer in the directory counts");
+
+    // The widening must not reach across DIRECTORIES — that would deny every
+    // dispatch on the machine as soon as one agent was running anywhere. A
+    // worktree is a different directory and stays free, which is what makes the
+    // remedy the deny offers actually work.
+    let body = call(
+        &state,
+        session_c,
+        dispatch(
+            "/repo/mcp-services/.claude/worktrees/w1",
+            "rust-engineer",
+            None,
+            Some("toolu_D"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        body.total, 0,
+        "a different directory is a different git HEAD and must stay admitted"
+    );
+    assert!(body.claimed, "the first writer in its own tree claims it");
 }
 
 #[tokio::test]

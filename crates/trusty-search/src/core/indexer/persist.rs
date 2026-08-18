@@ -32,7 +32,8 @@ impl CodeIndexer {
     /// Why (issue #85): on graceful shutdown (and incrementally after each
     /// committed batch) we persist the corpus so a restart can rebuild BM25
     /// and the symbol graph without re-parsing the source tree. Pairs with
-    /// [`VectorStore::save_to`] which persists the HNSW vectors.
+    /// [`VectorStore::save_to`](crate::core::store::VectorStore::save_to) which
+    /// persists the HNSW vectors.
     /// What: copies chunks + entities under read locks (releasing them before
     /// the I/O), then writes JSON atomically via tmp + rename. An empty corpus
     /// is still written so the on-disk file accurately reflects state — EXCEPT
@@ -399,7 +400,8 @@ impl CodeIndexer {
         // postings cannot linger alongside the new relative-path ones.
         {
             let mut bm25 = self.bm25.write().await;
-            *bm25 = crate::core::bm25::Bm25Index::new();
+            // #5828: reconstruct the trusty-search wrapper, not the shared scorer.
+            *bm25 = crate::core::bm25::CodeBm25Index::new();
             for chunk in &chunks {
                 let text = Self::bm25_doc_text(chunk);
                 bm25.upsert_document(&chunk.id, &text);

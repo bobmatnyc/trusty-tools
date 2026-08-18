@@ -115,13 +115,13 @@ pub(crate) async fn events(client: &reqwest::Client, url: &str) -> anyhow::Resul
 /// Why: a misconfigured trusty-mpm stack fails confusingly; `tm doctor` runs
 /// every health probe in one command and prints a formatted verdict so the
 /// operator can confirm — or fix — a broken install at a glance.
-/// What: runs [`TrustyCommand::Doctor`] through the shared [`CommandExecutor`]
+/// What: runs `TrustyCommand::Doctor` through the shared `CommandExecutor`
 /// (which calls `GET /api/v1/doctor`), then prints one status-tagged line per
 /// check plus the two client-side checks — the #2332 stale-daemon check (see
 /// [`super::doctor_stale::stale_daemon_check`]) and the #4230 orphan-daemon
 /// check (see [`super::doctor_orphan::orphan_daemon_check`]) — and an overall
 /// verdict that folds all three. When `prune_stale_skills` is set (hidden
-/// `--prune-stale-skills` flag), also runs [`prune_stale_skills_locally`] as a
+/// `--prune-stale-skills` flag), also runs `prune_stale_skills_locally` as a
 /// manual troubleshooting escape hatch — normal operation cleans up
 /// pre-rename `mpm-*` skill directories automatically and silently via the
 /// one-time `core::stale_skills::run_stale_mpm_skills_migration_once`
@@ -223,7 +223,7 @@ pub(crate) async fn doctor(url: &str, flags: &crate::cli::DoctorFlags) -> anyhow
 /// CI, in a freshly-provisioned worktree with no daemon yet, or as a
 /// non-interactive gate (`tm validate --path <dir> || exit 1`).
 /// What: resolves `path` (default: the current directory) to a
-/// [`FrameworkPaths`] via [`FrameworkPaths::for_managed_workspace`], runs the
+/// `FrameworkPaths` via `FrameworkPaths::for_managed_workspace`, runs the
 /// validator, and — when `repair` is set and gaps were found — re-runs
 /// [`trusty_mpm::core::deploy_validate::validate_and_repair`] (which itself
 /// calls `prepare_session_with_repo_url`, the same pipeline `spawn_managed`
@@ -246,13 +246,19 @@ pub(crate) async fn validate(path: Option<std::path::PathBuf>, repair: bool) -> 
 
     let complete = if repair {
         let outcome = validate_and_repair(&fw, &workspace, None);
-        if outcome.repaired {
+        // #4781: an attempt ran exactly when the pre-repair report had gaps;
+        // `repaired` now reports whether it SUCCEEDED, so it can no longer gate
+        // the attempt's own diagnostics — a failed repair used to print nothing.
+        if !outcome.before.is_complete() {
             println!(
                 "auto-repair ran ({} gap(s) found before repair)",
                 outcome.before.gaps.len()
             );
             if let Some(err) = &outcome.repair_error {
-                eprintln!("repair pipeline reported an error (non-fatal): {err}");
+                eprintln!("repair pipeline reported an error: {err}");
+            }
+            if !outcome.repaired {
+                eprintln!("auto-repair did NOT restore the workspace");
             }
         }
         print_gaps(&outcome.after.gaps);
@@ -298,12 +304,12 @@ fn print_gaps(gaps: &[trusty_mpm::core::deploy_validate::DeploymentGap]) {
 ///
 /// Why: the operator (and scripts) want a quick "is the daemon up, is the catalog
 /// fresh, how big is the fleet?" probe. Routing it through the shared
-/// [`CommandExecutor`] (rather than a bespoke `reqwest` call here) means the CLI
+/// `CommandExecutor` (rather than a bespoke `reqwest` call here) means the CLI
 /// shares the exact `health` dispatch with every other adapter — a single source
 /// of truth per the chat-core nucleus. The `resolved:` line tells operators
 /// whether traffic is flowing via the trusty-console gateway or direct to the
 /// daemon, making the resolution path transparent (#1849 Phase 2).
-/// What: runs [`TrustyCommand::Health`] through the executor and prints a compact,
+/// What: runs `TrustyCommand::Health` through the executor and prints a compact,
 /// scriptable summary. A dead daemon prints `daemon: unreachable` and is NOT an
 /// error exit (the probe succeeded in determining the daemon is down). The
 /// `resolved:` line is printed only on success so unreachable output is unchanged.
@@ -347,7 +353,7 @@ pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Render a [`CheckStatus`] as a status icon for terminal output.
+/// Render a `CheckStatus` as a status icon for terminal output.
 ///
 /// Why: the `tm doctor` table marks each check with a glanceable symbol; one
 /// helper keeps the mapping consistent between the per-check lines and the
@@ -492,7 +498,7 @@ pub(crate) async fn read_transcript_tail(path: &std::path::Path, max_bytes: u64)
 /// mechanical back-stop: on a turn-end event, check what the agent actually said
 /// last and flag the stall so it can be surfaced (and later auto-nudged).
 /// What: reads `transcript_path` from the hook payload, tail-reads the transcript
-/// (bounded to [`MAX_TRANSCRIPT_TAIL`]) under a short [`DETECT_TIMEOUT`] so the
+/// (bounded to `MAX_TRANSCRIPT_TAIL`) under a short `DETECT_TIMEOUT` so the
 /// hook stays within its non-blocking budget, then runs
 /// [`trusty_mpm::core::idle_parking::detect_idle_parking_in_transcript`]. Returns
 /// the matched phrase, or `None` on any missing field / timeout / I/O error /
@@ -709,8 +715,8 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
 /// Why: a scriptable, one-shot entry point to the coordinator so Telegram, cron
 /// jobs, and shell scripts can ask "what is happening across my sessions?" or
 /// route a `@session:` command without the TUI.
-/// What: dispatches a [`TrustyCommand::CoordinatorChat`] through the shared
-/// [`CommandExecutor`] and prints the reply (or the routed command's output);
+/// What: dispatches a `TrustyCommand::CoordinatorChat` through the shared
+/// `CommandExecutor` and prints the reply (or the routed command's output);
 /// a daemon/LLM failure becomes a non-zero-exit error line.
 /// Test: covered by the executor's coordinator wire-shape tests.
 pub(crate) async fn coordinator(url: &str, message: String) -> anyhow::Result<()> {

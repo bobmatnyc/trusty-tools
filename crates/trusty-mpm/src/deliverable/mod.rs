@@ -14,6 +14,12 @@
 //! routes.
 //! Test: each submodule carries inline unit tests; run with
 //! `cargo test -p trusty-mpm deliverable`.
+//!
+//! [`Deliverable`]: crate::deliverable::Deliverable
+//! [`Milestone`]: crate::deliverable::Milestone
+//! [`DeliverableStatus`]: crate::deliverable::DeliverableStatus
+//! [`store`]: crate::deliverable::store
+//! [`DeliverableManager`]: crate::deliverable::DeliverableManager
 
 pub mod manager;
 pub mod milestone;

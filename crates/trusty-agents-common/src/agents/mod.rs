@@ -25,6 +25,13 @@
 //! Test: `cargo test -p trusty-agents-common agents::` exercises every
 //! submodule in place; `cargo test -p trusty-mpm` exercises the re-exported
 //! call sites end-to-end.
+//!
+//! [`frontmatter`]: crate::agents::frontmatter
+//! [`builder`]: crate::agents::builder
+//! [`builder_in_memory`]: crate::agents::builder_in_memory
+//! [`manifest`]: crate::agents::manifest
+//! [`deployer`]: crate::agents::deployer
+//! [`metadata`]: crate::agents::metadata
 
 pub mod builder;
 pub mod builder_in_memory;

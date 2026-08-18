@@ -593,7 +593,8 @@ async fn health_probe_self_heals_after_migration_wipe() {
             "sentinel must be seeded when palace is empty (issue #1142)"
         );
         assert_eq!(
-            drawers[0].content, PROBE_SENTINEL_CONTENT,
+            drawers[0].content(),
+            PROBE_SENTINEL_CONTENT,
             "seeded drawer must carry the well-known sentinel content"
         );
     }
@@ -610,5 +611,77 @@ async fn health_probe_self_heals_after_migration_wipe() {
     assert_eq!(
         drawer_count, 1,
         "seed_probe_sentinel_if_absent must be idempotent (got {drawer_count})"
+    );
+}
+
+// ---- Issue #4911: /health must show a palace it refused to open ----
+
+/// Why (issue #4911): once a read-only open REFUSES an incompatible store
+/// instead of recreating it, the palace's bytes survive but nothing tells an
+/// operator the palace is there — it is missing from `palace_list` and missing
+/// from the handle cache, which reads exactly like deletion. Recording the skip
+/// in the registry is only half the fix; without a reader it is bookkeeping no
+/// human can reach. `/health` is that reader.
+/// What: records an unopenable palace on the state's registry (the same call
+/// `AppState::load_palaces_from_disk` makes when an open fails), drives the
+/// cheap `/health` path, and asserts the id and the reason both surface.
+/// Test: this test.
+#[tokio::test]
+async fn health_reports_unopenable_palaces() {
+    let state = test_state();
+    state.registry.record_unopenable(
+        PalaceId::new("stale-format"),
+        "open vector store for stale-format: incompatible on-disk format".to_string(),
+    );
+    let app = router().with_state(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+
+    let listed = v["unopenable_palaces"]
+        .as_array()
+        .unwrap_or_else(|| panic!("/health must list unopenable palaces; got {v:?}"));
+    assert_eq!(listed.len(), 1, "exactly one palace was refused; got {v:?}");
+    assert_eq!(listed[0]["id"], "stale-format");
+    assert!(
+        listed[0]["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("incompatible on-disk format")),
+        "the reason must reach the operator, not just the id; got {v:?}"
+    );
+}
+
+/// Why (issue #4911): monitors poll `/health` every second, so the healthy
+/// payload must not grow a field that is empty in every normal response.
+/// What: drives `/health` on a daemon with no refused palace and asserts the
+/// key is absent entirely.
+/// Test: this test.
+#[tokio::test]
+async fn health_omits_unopenable_palaces_when_none() {
+    let state = test_state();
+    let app = router().with_state(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        v.get("unopenable_palaces").is_none(),
+        "a healthy daemon's payload must be unchanged; got {v:?}"
     );
 }

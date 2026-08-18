@@ -14,7 +14,8 @@
 //! error type), [`deployer`] (writes skill `.md` sources into
 //! `<dest>/<name>/SKILL.md`, consulting the manifest to avoid clobbering user
 //! edits), and [`tiers`] (the project-custom / user-custom / bundled
-//! precedence resolver and multi-tier deploy orchestrator), plus two halves of
+//! precedence resolver and multi-tier deploy orchestrator — `plan_skill_tiers`
+//! and `deploy_all_skill_tiers`), plus two halves of
 //! the #4605 unreachable-bundled-skill fix — [`unmanaged`] (READ-ONLY
 //! detection of a bundled-named skill a deploy target does not manage, which
 //! [`tiers`] silently excludes from every deploy) and [`reconcile`] (the
@@ -26,6 +27,12 @@
 //! Test: `cargo test -p trusty-agents-common skills::` exercises every
 //! submodule in place; `cargo test -p trusty-mpm` exercises the re-exported
 //! call sites end-to-end.
+//!
+//! [`manifest`]: crate::skills::manifest
+//! [`deployer`]: crate::skills::deployer
+//! [`tiers`]: crate::skills::tiers
+//! [`unmanaged`]: crate::skills::unmanaged
+//! [`reconcile`]: crate::skills::reconcile
 
 pub mod deployer;
 pub mod manifest;

@@ -394,13 +394,13 @@ pub fn parse_daemon_env(content: &str) -> (Vec<DaemonEnvPair>, Vec<DaemonEnvReje
 /// What: returns `$TRUSTY_DATA_DIR/http_addr` when the env var is set,
 /// otherwise `$HOME/.trusty-search/http_addr` (unchanged default, preserving
 /// the existing cross-crate discovery contract for the production daemon).
+/// #5670 moved that rule into `DaemonAddrLayout::TRUSTY_SEARCH` so the daemon
+/// that WRITES this file and the clients that READ it — including `tga`, which
+/// cannot depend on this crate — resolve it from one place.
 /// Test: `http_addr_path_respects_trusty_data_dir` below; with `HOME=/tmp/xyz`
 /// and no override → returns "/tmp/xyz/.trusty-search/http_addr".
 pub fn http_addr_path() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("TRUSTY_DATA_DIR") {
-        return Some(PathBuf::from(dir).join("http_addr"));
-    }
-    dirs::home_dir().map(|h| h.join(".trusty-search").join("http_addr"))
+    trusty_common::daemon_guard::DaemonAddrLayout::TRUSTY_SEARCH.discovery_file_path()
 }
 
 /// Resolve the root data directory for this daemon instance.
@@ -825,20 +825,15 @@ pub use crate::service::shutdown_flush::{
 /// a bare `std::fs::write`, which could tear a concurrent reader's view of the
 /// file that `trusty-console`/`trusty-mpm`'s daemon discovery trust as ground
 /// truth.
-/// What: creates parent directory if missing; writes via temp + rename.
+/// What: delegates to `trusty_common::daemon_guard::write_addr_file_atomic`,
+/// which creates the parent directory if missing and writes via temp + rename.
+/// #5670 moved the write there so the daemon's write and the shared resolver's
+/// stale-file refresh cannot drift apart.
 /// Test: with a fresh tempdir, write addr → read back → matches `host:port`.
 pub fn write_http_addr_file(path: &Path, addr: &str) -> Result<(), DaemonError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("addr.tmp");
-    {
-        let mut f = File::create(&tmp)?;
-        writeln!(f, "{addr}")?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    Ok(trusty_common::daemon_guard::write_addr_file_atomic(
+        path, addr,
+    )?)
 }
 
 /// Populate the generic, non-`TRUSTY_DATA_DIR`-aware discovery registry

@@ -46,7 +46,7 @@ pub struct TickReport {
 ///
 /// Why: this is the supervisor's heartbeat. Factoring it out of the timer loop
 /// makes the consequential logic (auto-resume gating, classification) unit-
-/// testable with a [`crate::session_manager::tests`]-style fake tmux driver and a
+/// testable with a `crate::session_manager::tests`-style fake tmux driver and a
 /// mock classifier, with zero real time elapsed.
 /// What: lists all sessions via `mgr.list()`; for each `Stopped` session, resumes
 /// it when `cfg.auto_resume` is true, counting successes and — on failure —

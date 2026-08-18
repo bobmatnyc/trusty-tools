@@ -9,7 +9,7 @@
 //! lets any code path emit events without threading the bus through dozens of
 //! function signatures, while SSE subscribers fan out to all browsers.
 //!
-//! #2055 adds [`SessionEventEnvelope`]: every event the `session.attach`
+//! #2055 adds [`SessionEventEnvelope`](crate::events::SessionEventEnvelope): every event the `session.attach`
 //! protocol (#2054) cares about is session-scoped, so the bus now carries the
 //! ENVELOPE (`session_id`, a per-session monotonic `seq`, a UTC timestamp,
 //! and the tagged [`Event`] payload) rather than a bare `Event`. This is the
@@ -34,6 +34,8 @@
 //! round-trips through `subscribe()`, `kind()` is pinned against the serde tag
 //! for every variant, and the relay prefix is stable so the parent stderr
 //! reader can detect and re-publish.
+//!
+//! [`Event`]: crate::events::Event
 
 use std::sync::OnceLock;
 
@@ -51,8 +53,15 @@ use tokio::sync::broadcast;
 /// channel that already carries `__OMPM_PROGRESS__` (the legacy 2s-poll
 /// path) avoids inventing yet another IPC mechanism.
 /// What: Match by exact byte prefix; payload after the space is one JSON
-/// object decodable as `Event`.
-pub const EVENT_LINE_PREFIX: &str = "__OMPM_EVENT__ ";
+/// object decodable as `Event`. Re-exported, not declared — the marker is a
+/// cross-crate wire format, so it has exactly one declaration, in
+/// `trusty_agents_common::events`, which the harness-understanding assets
+/// document and the session-manager prompt is built from.
+/// Test: `events_tests::event_line_prefix_is_stable` and
+/// `events_tests::sm_harness_doc_documents_the_prefix_tcode_emits`.
+// #5129: a second copy here is what let the documented marker drift off the
+// emitted one; a re-export makes that divergence impossible to write.
+pub use trusty_agents_common::events::EVENT_LINE_PREFIX;
 
 /// Capacity of the broadcast channel. Larger than `bus`'s 256 because event
 /// volume is much higher (every PM thought, every agent line). 1024 keeps
@@ -540,7 +549,7 @@ pub enum Event {
 
     // -- Persona (workflow) --
     /// #196: emitted once per workflow run when a persona is detected from the
-    /// task text. Lets the UI surface "running in [hacker] mode" before any
+    /// task text. Lets the UI surface "running in \[hacker\] mode" before any
     /// phases execute, so users immediately see why the pipeline shape may
     /// differ from the default.
     PersonaDetected {
@@ -950,23 +959,30 @@ pub struct ContextBudgetSnapshot {
     /// for budget state (`session.get_context_budget`) instead of requiring
     /// a second `session.get_transcript` call.
     pub lifetime_compaction_alarm_count: u64,
-    /// (issue #3912) This SESSION's lowest-ever `working_context_pct`,
-    /// derived fresh from `agent_loop::telemetry::session_working_context_floor`
-    /// every time this RPC is queried — `None` when no durable sample for
-    /// this session exists yet. Same "read fresh at query time, `0`/`None`
-    /// placeholder on the write path" pattern as
-    /// `lifetime_compaction_alarm_count` immediately above, and for the same
-    /// reason: the load-realistic compression soak (epic #3866) proved the
-    /// single most-recent snapshot above (`working_context_pct`) can read
-    /// 98-99% while a durable per-turn sample this same session produced
-    /// moments earlier was 48-60% — a coarse once-per-`task.run`-call poll
-    /// reliably misses the turn where the floor was lowest. This field is
-    /// the fix: the real floor, not a snapshot that can miss it.
+    /// (issues #3912, #3948) This SESSION's lowest `working_context_pct`
+    /// across every cadence measurement `SessionRegistry` has recorded for
+    /// it — `None` until the first measurement lands. It exists because the
+    /// load-realistic compression soak (epic #3866) proved the single
+    /// most-recent snapshot above (`working_context_pct`) can read 98-99%
+    /// while the same session dipped to 48-60% moments earlier; a coarse
+    /// poll reliably misses the turn where the floor was lowest.
+    ///
+    /// (#3948) Unlike `lifetime_compaction_alarm_count` above, this is NOT
+    /// read fresh from a durable log at query time. It is folded in
+    /// incrementally by `SessionRegistry::record_context_budget` and lives
+    /// as long as the session does, which means the value is scoped to the
+    /// running daemon: a restart drops the session itself, so the RPC
+    /// answers `session_not_found` rather than a reset floor. Offline
+    /// history stays in `compression.jsonl`, readable via
+    /// `agent_loop::telemetry::session_working_context_floor`; that reader
+    /// aggregates a different sample set (only turns that did compaction
+    /// work, plus threshold fires), so its floor and this one can differ.
     pub working_context_pct_low_water_mark: Option<u8>,
-    /// (issue #3912) How many durable telemetry samples
+    /// (issues #3912, #3948) How many cadence measurements
     /// `working_context_pct_low_water_mark` was computed over for this
     /// session — lets a consumer distinguish "no samples yet" (`None` above)
-    /// from "exactly one, possibly unrepresentative, sample".
+    /// from "exactly one, possibly unrepresentative, sample". Counts live
+    /// measurements, not durable JSONL rows.
     pub working_context_pct_sample_count: usize,
     /// (issue #3911) Lifetime, cross-session count of a cadence-level
     /// 60%-floor breach (`CadenceOutcome::within_budget == false` after
@@ -1253,12 +1269,33 @@ pub fn publish(envelope: SessionEventEnvelope) {
 /// writes one NDJSON line to stderr prefixed with `__OMPM_EVENT__ `. The
 /// parent's stderr reader (in `api::server::run_task`) detects the prefix
 /// and re-publishes on its own bus.
-/// Test: Indirect — exercised by the workflow integration path.
+/// Test: `events_tests::sm_harness_doc_documents_the_prefix_tcode_emits`
+/// covers the wire line via `format_event_line`; the stderr write itself is
+/// exercised by the workflow integration path.
 pub fn emit(envelope: SessionEventEnvelope) {
-    publish(envelope.clone());
-    if let Ok(line) = serde_json::to_string(&envelope) {
-        eprintln!("{EVENT_LINE_PREFIX}{line}");
+    let line = format_event_line(&envelope);
+    publish(envelope);
+    if let Some(line) = line {
+        eprintln!("{line}");
     }
+}
+
+/// Format the single stderr relay line `emit` writes for `envelope`, or `None`
+/// if it cannot be serialised.
+///
+/// Why: the relay line is a cross-process wire format, and the session
+/// manager's harness-understanding doc tells an operator which prefix to look
+/// for. Splitting formatting out of `emit` lets a test compare the REAL
+/// emitted line against that doc instead of against a copy of the literal —
+/// the divergence #5129 recorded was invisible precisely because every test
+/// pinned a constant to itself.
+/// What: returns `EVENT_LINE_PREFIX` concatenated with the compact JSON of the
+/// envelope; `None` only on the (practically impossible) serde failure.
+/// Test: `events_tests::sm_harness_doc_documents_the_prefix_tcode_emits`.
+pub fn format_event_line(envelope: &SessionEventEnvelope) -> Option<String> {
+    serde_json::to_string(envelope)
+        .ok()
+        .map(|json| format!("{EVENT_LINE_PREFIX}{json}"))
 }
 
 /// Truncate a string to at most `max` characters, appending an ellipsis

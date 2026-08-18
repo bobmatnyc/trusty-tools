@@ -73,14 +73,6 @@ services:
     stop_cmd: null
     restart_cmd: null
 
-  trusty-bm25-daemon:
-    description: "BM25 index sidecar (UDS at $TMPDIR/trusty-bm25-<palace>.sock)"
-    default_port: null
-    port_discovery: static
-    health_url: null
-    log_path: null
-    version_cmd: null
-    process_match: "trusty-bm25-"
-    start_cmd: null
-    stop_cmd: null
-    restart_cmd: null
+# Why (#5329): the `trusty-bm25-daemon` service was REMOVED. BM25 ran as a
+# per-palace subprocess; it now runs inside trusty-memory, so `tm services`
+# has no separate process to discover or report on.

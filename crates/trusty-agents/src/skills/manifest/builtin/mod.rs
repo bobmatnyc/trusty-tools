@@ -1,6 +1,6 @@
 //! The compile-time skill catalog — one named skill per registered tool.
 //!
-//! Why: The owner's model is 1:1 (#3933) — *"each [tool] needs an accompanying
+//! Why: The owner's model is 1:1 (#3933) — *"each \[tool\] needs an accompanying
 //! skill"* — with human, provider-recognisable names ("MTA Train Time", not
 //! `get_train_schedule`). Shipping that as ~170 Markdown files would block the
 //! Skills pane on a content project; shipping it as `const` tables gives every

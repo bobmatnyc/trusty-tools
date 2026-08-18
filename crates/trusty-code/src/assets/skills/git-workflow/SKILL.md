@@ -138,24 +138,39 @@ git add forgotten_file.py
 git commit --amend --no-edit
 ```
 
-### Stashing Work
+### Getting a Temporary Clean Tree
+
+When you need a clean tree to run one command — a baseline check, a bisect, a
+build against `origin/main` — add a throwaway worktree instead of moving the
+work already in your tree:
 
 ```bash
-# Save current work temporarily
-git stash
+git worktree add .claude/worktrees/baseline-$$ origin/main
+# … run the check there …
+git worktree remove .claude/worktrees/baseline-$$
+```
 
-# List stashes
+Your own tree keeps its changes throughout, so a command that dies partway
+through leaves nothing to restore.
+
+### Stashing Work
+
+The stash stack is repo-global, not per-worktree: every worktree of a repo
+shares one stack. Name each entry and restore it by ref, so you get back the
+one you saved:
+
+```bash
+# Save current work under a name you can recognize
+git stash push -u -m "WIP: authentication feature $(date +%s)"
+
+# List first — confirm which ref is yours
 git stash list
 
-# Apply most recent stash
-git stash pop
-
-# Apply specific stash
-git stash apply stash@{0}
-
-# Create named stash
-git stash save "WIP: authentication feature"
+# Apply the ref you confirmed, not "the most recent"
+git stash apply 'stash@{0}'
 ```
+
+Check that the restored files are the ones you saved before dropping the entry.
 
 ### Cherry-Picking Commits
 

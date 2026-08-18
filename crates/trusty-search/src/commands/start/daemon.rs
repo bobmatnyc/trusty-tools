@@ -362,6 +362,27 @@ pub async fn handle_start(
                 install_state
                     .prior_index_count
                     .store(prior, std::sync::atomic::Ordering::Relaxed);
+                // #767: before the first allowlist-gated restore, carry the
+                // roots this daemon is ALREADY serving into `allowlist.toml`.
+                // Without this, switching on default-deny would silently stop
+                // indexing a working install.
+                // #5926: runs once per install, keyed on the `.grandfathered`
+                // stamp rather than on whether `allowlist.toml` exists — a
+                // pre-upgrade file the gate never read is incomplete, not
+                // curated. Once the stamp is written, a pruned root stays
+                // pruned.
+                if let Ok(registry_path) = crate::service::persistence::indexes_toml_path() {
+                    if let Err(e) = crate::allowlist::grandfather_existing_indexes(
+                        &install_state.allowlist_paths,
+                        &registry_path,
+                    ) {
+                        tracing::warn!(
+                            "allowlist: first-run grandfather pass failed: {e:#} — \
+                             already-registered roots may now be refused; \
+                             approve them with `trusty-search index add` (#767)"
+                        );
+                    }
+                }
                 // Issue #85: restore every index recorded in `indexes.toml`.
                 // Issue #3929: `no_auto_discover` must also gate the warm-boot
                 // colocated-root discovery scan, not just `auto_discover_and_index`

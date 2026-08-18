@@ -25,6 +25,7 @@ use tokio::task::JoinHandle;
 
 use crate::service::indexed_files::IndexedFiles;
 use crate::service::walker::{path_in_skipped_dir, should_skip_path};
+use crate::service::watch_rescan::RescanFollowUp;
 use crate::service::watcher::{FileWatcher, WatchEvent};
 
 /// Handle for a running watch loop. Drop it (or call [`WatcherTask::stop`]) to
@@ -45,17 +46,34 @@ pub struct WatcherTask {
 }
 
 impl WatcherTask {
-    /// Stop watching: abort the consumer task and drop the OS watcher.
+    /// Stop watching and WAIT for the consumer task to terminate.
     ///
-    /// Why: lets the [`crate::service::watcher_manager::WatcherManager`] tear a
-    /// single watcher down deterministically (e.g. on `DELETE /indexes/:id` or
-    /// graceful shutdown) without waiting for the value to be dropped at an
-    /// `await` boundary.
-    /// What: aborts the consumer `JoinHandle`; the `FileWatcher` is dropped when
-    /// `self` is consumed, releasing the kqueue/inotify/fsevent handle.
-    /// Test: `watcher_task_stop_aborts_consumer`.
-    pub fn stop(self) {
+    /// Why: the consumer task owns a clone of the index's
+    /// `Arc<RwLock<CodeIndexer>>`, and that indexer owns the index's open redb
+    /// corpus. redb is single-open, so until the task is gone the corpus file
+    /// cannot be reopened. `abort()` alone does not give that: it drops the
+    /// future inline only when the task is idle, and a task that is actively
+    /// running keeps its captured `Arc` until it reaches its next await point on
+    /// some other worker thread. `DELETE /indexes/:id` then released its
+    /// teardown guard while the previous generation's corpus was still open, so
+    /// a recreate under the same id hit `DatabaseAlreadyOpen`, set
+    /// `corpus_open_failed`, and answered `500` — see #3049 and
+    /// `unregister_index`. Measured: the watcher held the indexer at the end of
+    /// every one of 60 delete runs; the test only passed because the drop
+    /// usually landed inside `open_corpus_with_retry`'s single 50 ms retry.
+    /// What: aborts the consumer `JoinHandle` and awaits it. A cancelled task
+    /// resolves to `Err(JoinError::Cancelled)`, which is the expected outcome
+    /// and is discarded. The `FileWatcher` is dropped when `self` is dropped at
+    /// the end of the call, releasing the kqueue/inotify/fsevent handle. The
+    /// wait is bounded by construction: an idle or lock-parked task is dropped
+    /// by `abort()` itself, and a running one cancels at its next await.
+    /// Test: `watcher_task_stop_aborts_consumer`,
+    /// `stop_for_index_releases_the_indexer_before_it_returns`.
+    pub async fn stop(mut self) {
         self.join.abort();
+        // `JoinHandle` is `Unpin` and cannot be moved out of `self` (this type
+        // has a `Drop` impl), so await it through a `&mut` borrow.
+        let _ = (&mut self.join).await;
         // `_watcher` drops here, terminating the OS watch.
     }
 }
@@ -84,6 +102,9 @@ pub fn spawn_watch_loop(
     indexed_files: IndexedFiles,
 ) -> Result<WatcherTask> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
+    // Retained so a failed dropped-event reconcile can re-arm itself. See
+    // `watch_rescan::schedule_rescan_retry`.
+    let retry_tx = tx.clone();
     let watcher = FileWatcher::start(root_path.to_path_buf(), tx)?;
 
     // Canonicalize the root exactly as the reindex walker does (issue #402).
@@ -102,8 +123,78 @@ pub fn spawn_watch_loop(
         std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
 
     let join = tokio::spawn(async move {
+        // Consecutive failed reconciles, driving the retry backoff. Reset to 0
+        // by the first pass that actually succeeds.
+        let mut rescan_failures: u32 = 0;
         while let Some(event) = rx.recv().await {
             match event {
+                // `Flag::Rescan`: the OS dropped an unknown batch of events and
+                // nothing will redeliver them, so the changed paths can only be
+                // re-derived from disk. Discarding this is a silent data loss.
+                WatchEvent::Rescan => {
+                    let outcome = crate::service::watch_rescan::reconcile_after_rescan(
+                        &index_id,
+                        &canonical_root,
+                        &raw_root,
+                        &indexer,
+                        &indexed_files,
+                    )
+                    .await;
+                    // One decision for every way a pass can fall short. The
+                    // partial-read case used to reset the counter and schedule
+                    // nothing, which left those files stale with only a `warn`
+                    // to show for it. See `watch_rescan::rescan_follow_up`.
+                    let follow_up = crate::service::watch_rescan::rescan_follow_up(
+                        outcome.as_ref(),
+                        rescan_failures,
+                    );
+                    let retry_attempt = match follow_up {
+                        RescanFollowUp::InSync => {
+                            rescan_failures = 0;
+                            None
+                        }
+                        RescanFollowUp::Retry { attempt } => {
+                            rescan_failures = attempt;
+                            crate::service::watch_rescan::schedule_rescan_retry(
+                                retry_tx.clone(),
+                                attempt,
+                            );
+                            Some(attempt)
+                        }
+                    };
+                    match &outcome {
+                        Ok(stats) if retry_attempt.is_none() => {
+                            tracing::info!(
+                                index_id = %index_id,
+                                files_reindexed = stats.files_reindexed,
+                                chunks_indexed = stats.chunks_indexed,
+                                files_removed = stats.files_removed,
+                                "reconciled watched tree after a dropped-event rescan",
+                            );
+                        }
+                        // The pass ran, but some files could not be read, so
+                        // their contents are still unknown to the index.
+                        Ok(stats) => {
+                            tracing::warn!(
+                                index_id = %index_id,
+                                attempt = retry_attempt,
+                                files_reindexed = stats.files_reindexed,
+                                chunks_indexed = stats.chunks_indexed,
+                                files_removed = stats.files_removed,
+                                files_unreadable = stats.files_unreadable,
+                                "watched tree is NOT fully reconciled after a dropped-event \
+                                 rescan — some files could not be read; will retry",
+                            );
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                index_id = %index_id,
+                                attempt = retry_attempt,
+                                "index is NOT in sync after a dropped-event rescan and will be retried: {err:#}",
+                            );
+                        }
+                    }
+                }
                 WatchEvent::Modified(path) => {
                     handle_modified(
                         &path,
@@ -195,7 +286,22 @@ pub fn watcher_relative_path(canonical_root: &Path, raw_root: &Path, event_path:
 /// Re-chunk the file and merge it into the indexer. Stale chunks from a
 /// previous version of the same file are removed first so we don't accumulate
 /// dead entries on edit.
-async fn handle_modified(
+///
+/// Every chunk this function leaves in the corpus is recorded in
+/// `indexed_files`, including on the `index_file` error path — see the comment
+/// at that arm (#100). `handle_removed` can only evict what is recorded here,
+/// so anything committed but unrecorded is orphaned for the index's lifetime.
+///
+/// Test: `partial_commit_at_cap_then_delete_leaves_no_orphan_chunks` and
+/// `partial_commit_at_cap_then_edit_replaces_the_landed_chunk` in
+/// `tests/watcher_chunk_cap_orphans_100.rs`.
+///
+/// Public so that integration test can call it directly instead of racing real
+/// OS watcher events for a state the debouncer makes hard to hit on purpose;
+/// `#[doc(hidden)]` keeps it off the documented API surface, matching
+/// `server::typeahead_handler_for_tests`.
+#[doc(hidden)]
+pub async fn handle_modified(
     path: &Path,
     index_id: &crate::core::registry::IndexId,
     canonical_root: &Path,
@@ -299,6 +405,28 @@ async fn handle_modified(
     let idx = indexer.read().await;
     if let Err(err) = idx.index_file(&path_str, &content).await {
         tracing::warn!(?err, ?path, "index_file failed");
+        // #100: `index_file` refuses a write the `TRUSTY_MAX_CHUNKS` cap
+        // discarded, and raises that refusal AFTER committing the chunks that
+        // did fit. Returning without recording anything would leave those
+        // committed chunks untracked: a later delete finds no `IndexedFiles`
+        // entry, `handle_removed` returns early, and they stay in the corpus,
+        // BM25 and HNSW forever, with a later edit's stale-removal pass
+        // skipped the same way.
+        //
+        // Recorded from the corpus rather than from `new_ids` above, which is
+        // what the file PARSED into, not what landed. When the two disagree
+        // the corpus is the set a removal has to act on, so reading it here
+        // cannot leave a real chunk untracked. Error paths that commit nothing
+        // (the quarantine refusal, an embed failure) return an empty set and
+        // record nothing, which is also correct — the stale-removal pass above
+        // already took this file's prior entry.
+        let landed = idx.chunk_ids_for_file(&path_str).await;
+        drop(idx);
+        if !landed.is_empty() {
+            indexed_files
+                .record(std::path::PathBuf::from(&path_str), landed)
+                .await;
+        }
         return;
     }
     drop(idx);
@@ -325,8 +453,14 @@ async fn handle_modified(
 /// the lookup still hits the entry stored by `handle_modified`.
 ///
 /// Test: `removed_event_produces_same_relative_key_as_modified` and
-/// `removed_deleted_file_dual_root_fallback` unit tests below.
-async fn handle_removed(
+/// `removed_deleted_file_dual_root_fallback` unit tests below;
+/// `partial_commit_at_cap_then_delete_leaves_no_orphan_chunks` in
+/// `tests/watcher_chunk_cap_orphans_100.rs` covers the case where the entry it
+/// looks up was written by `handle_modified`'s error arm.
+///
+/// Public for that integration test on the same terms as `handle_modified`.
+#[doc(hidden)]
+pub async fn handle_removed(
     path: &Path,
     index_id: &crate::core::registry::IndexId,
     canonical_root: &Path,
@@ -357,6 +491,7 @@ async fn handle_removed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::watch_test_support::{await_watch_condition, await_watch_condition_within};
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::RwLock;
@@ -497,7 +632,10 @@ mod tests {
     }
 
     /// End-to-end: writing a `.rs` file inside a watched directory causes the
-    /// indexer's chunk count to grow within ~2s.
+    /// indexer's chunk count to grow.
+    ///
+    /// #4731: the save is re-applied until the indexer reacts, so a dropped
+    /// FSEvents batch no longer strands a fixed 2 s deadline.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn modified_file_triggers_indexing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -512,27 +650,26 @@ mod tests {
         )
         .expect("watch loop starts");
 
-        // Allow the OS watcher to install.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
         let file = dir.path().join("lib.rs");
-        tokio::fs::write(&file, "fn alpha() {}\nfn beta() {}\n")
+        let indexed = {
+            let indexer = Arc::clone(&indexer);
+            await_watch_condition(
+                |generation| {
+                    std::fs::write(
+                        &file,
+                        format!("fn alpha() {{}}\nfn beta{generation}() {{}}\n"),
+                    )
+                    .expect("write file");
+                },
+                move || {
+                    let indexer = Arc::clone(&indexer);
+                    async move { indexer.read().await.chunk_count() > 0 }
+                },
+            )
             .await
-            .expect("write file");
+        };
 
-        // Poll up to 2s for the indexer to pick the change up.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let count = indexer.read().await.chunk_count();
-            if count > 0 {
-                break;
-            }
-            if tokio::time::Instant::now() > deadline {
-                panic!("chunk_count never grew above 0");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
+        assert!(indexed, "chunk_count never grew above 0");
         assert!(
             tracker.len().await >= 1,
             "expected at least one tracked file"
@@ -541,6 +678,11 @@ mod tests {
 
     /// Issue #129: a file created inside `cdk.out/` must NOT be indexed by the
     /// watcher — the build-artefact subtree exclusion applies incrementally.
+    ///
+    /// #4731: both files are re-saved until the positive control indexes, then
+    /// the excluded file keeps being re-saved through a bounded window. The
+    /// exclusion therefore gets MORE chances to wrongly fire than the single
+    /// write plus 300 ms sleep it replaces, not fewer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cdk_out_file_is_not_indexed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -555,31 +697,44 @@ mod tests {
         )
         .expect("watch loop starts");
 
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
-        // Write a real source file and a build-artefact file.
         let cdk_dir = dir.path().join("cdk.out/asset.abc/python");
-        tokio::fs::create_dir_all(&cdk_dir).await.expect("mkdir");
-        tokio::fs::write(cdk_dir.join("vendored.py"), "import boto3\n")
-            .await
-            .expect("write vendored");
-        tokio::fs::write(dir.path().join("handler.py"), "def handler(): pass\n")
-            .await
-            .expect("write handler");
+        std::fs::create_dir_all(&cdk_dir).expect("mkdir");
+        let vendored = cdk_dir.join("vendored.py");
+        let handler = dir.path().join("handler.py");
 
-        // Poll for the real file to be picked up.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if indexer.read().await.chunk_count() > 0 {
-                break;
-            }
-            if tokio::time::Instant::now() > deadline {
-                panic!("real source was never indexed");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        // Give the watcher a moment to (not) process the cdk.out file.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let save_vendored = |generation: u32| {
+            std::fs::write(&vendored, format!("import boto3\nV = {generation}\n"))
+                .expect("write vendored");
+        };
+
+        let indexed = {
+            let indexer = Arc::clone(&indexer);
+            await_watch_condition(
+                |generation| {
+                    save_vendored(generation);
+                    std::fs::write(&handler, format!("def handler{generation}(): pass\n"))
+                        .expect("write handler");
+                },
+                move || {
+                    let indexer = Arc::clone(&indexer);
+                    async move { indexer.read().await.chunk_count() > 0 }
+                },
+            )
+            .await
+        };
+        assert!(indexed, "real source was never indexed");
+
+        // Negative control: keep feeding the excluded path and assert it never
+        // becomes tracked. `false` here is the passing outcome.
+        let leaked = {
+            let tracker = tracker.clone();
+            await_watch_condition_within(Duration::from_secs(1), save_vendored, move || {
+                let tracker = tracker.clone();
+                async move { tracker.len().await > 1 }
+            })
+            .await
+        };
+        assert!(!leaked, "the cdk.out file must never be tracked");
 
         // Only handler.py should be tracked; vendored.py must be excluded.
         let tracked = tracker.len().await;
@@ -606,11 +761,12 @@ mod tests {
         )
         .expect("watch loop starts");
 
-        // Stop immediately — the OS watch is dropped and the consumer aborted.
-        task.stop();
+        // Stop immediately. #3049: `stop` now AWAITS the consumer's termination,
+        // so there is no in-flight teardown left to sleep for — the settle sleep
+        // this replaces was the only thing standing between the abort and the
+        // write below.
+        task.stop().await;
 
-        // Allow any in-flight teardown to settle, then write a file.
-        tokio::time::sleep(Duration::from_millis(150)).await;
         tokio::fs::write(dir.path().join("after_stop.rs"), "fn z() {}\n")
             .await
             .expect("write file");
@@ -633,10 +789,11 @@ mod tests {
     /// indexed via the office-document extractor — the watcher path must not
     /// diverge from the reindex/ingest path (`service::reindex::batch`) that
     /// already routes these extensions through `core::extract`.
+    ///
+    /// #4731: the docx is re-written per generation rather than once behind a
+    /// fixed sleep.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn modified_docx_file_triggers_indexing_via_extractor() {
-        use std::io::Write as _;
-
         let dir = tempfile::tempdir().expect("tempdir");
         let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
         let tracker = IndexedFiles::new();
@@ -648,43 +805,52 @@ mod tests {
             tracker.clone(),
         )
         .expect("watch loop starts");
-        tokio::time::sleep(Duration::from_millis(150)).await;
 
-        // Minimal valid docx: a zip containing just word/document.xml with
-        // one paragraph — enough for `core::extract::docx::extract` to
-        // recover text (see `core::extract::docx` for the full fixture
-        // pattern; kept minimal here since only the watcher dispatch is
-        // under test, not extraction correctness).
-        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Watched document paragraph.</w:t></w:r></w:p></w:body></w:document>"#;
+        let file = dir.path().join("memo.docx");
+        let indexed = {
+            let indexer = Arc::clone(&indexer);
+            await_watch_condition(
+                |generation| {
+                    std::fs::write(&file, minimal_docx(generation)).expect("write docx");
+                },
+                move || {
+                    let indexer = Arc::clone(&indexer);
+                    async move { indexer.read().await.chunk_count() > 0 }
+                },
+            )
+            .await
+        };
+
+        assert!(indexed, "docx was never indexed via the watcher path");
+        assert!(
+            tracker.len().await >= 1,
+            "expected the docx to be tracked after indexing"
+        );
+    }
+
+    /// Minimal valid docx: a zip containing just `word/document.xml` with one
+    /// paragraph — enough for `core::extract::docx::extract` to recover text.
+    /// `generation` varies the body so successive saves are never identical
+    /// (see `core::extract::docx` for the full fixture pattern; kept minimal
+    /// here since only the watcher dispatch is under test, not extraction
+    /// correctness).
+    fn minimal_docx(generation: u32) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let document_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Watched document paragraph {generation}.</w:t></w:r></w:p></w:body></w:document>"#
+        );
         let mut docx_bytes = Vec::new();
         {
             let cursor = std::io::Cursor::new(&mut docx_bytes);
             let mut zip = zip::ZipWriter::new(cursor);
             let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
-            zip.start_file("word/document.xml", opts).unwrap();
-            zip.write_all(document_xml.as_bytes()).unwrap();
-            zip.finish().unwrap();
+            zip.start_file("word/document.xml", opts)
+                .expect("start docx entry");
+            zip.write_all(document_xml.as_bytes())
+                .expect("write docx entry");
+            zip.finish().expect("finish docx zip");
         }
-
-        let file = dir.path().join("memo.docx");
-        tokio::fs::write(&file, &docx_bytes)
-            .await
-            .expect("write docx");
-
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if indexer.read().await.chunk_count() > 0 {
-                break;
-            }
-            if tokio::time::Instant::now() > deadline {
-                panic!("docx was never indexed via the watcher path");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        assert!(
-            tracker.len().await >= 1,
-            "expected the docx to be tracked after indexing"
-        );
+        docx_bytes
     }
 }

@@ -92,6 +92,60 @@
 //! `.claude/worktrees/**` stay allowed. No daemon is consulted, so there is no
 //! unreachable-daemon arm to fail open through; see that module's doc for the
 //! registry it deliberately does not gate on and why.
+//! **Main-checkout write boundary (ADR-0044, enforced by ADR-0048):** the
+//! destructive-git rule above covers only whole-tree destruction, so an
+//! ordinary `Write` to a `.rs` file in a shared checkout — the write the
+//! reported incident was made of — passed every check in this file. Two rules
+//! close it, both placed with the destructive rule and ahead of the same two
+//! exemptions, because ADR-0044 binds the PM AND every agent it dispatches:
+//! [`crate::commands::pm_guard_bash::evaluate_main_checkout_commit_command`]
+//! classifies `git commit` in a main checkout — since ADR-0049 on what is
+//! STAGED rather than on the verb, so a documents-and-configuration staged set
+//! is permitted (then subject to the HEAD-move rule's live-writer query below,
+//! because a commit moves the shared HEAD too) while any staged source file,
+//! an unreadable or empty index, and every form that commits content the index
+//! does not hold all keep the deny — and
+//! [`crate::commands::pm_guard_write_boundary::evaluate_main_checkout_write`]
+//! denies an edit tool whose target is a SOURCE file there. Documents,
+//! configuration, and everything in a worktree stay writable — that is
+//! ADR-0044's boundary, and the source-vs-not question is answered by the same
+//! [`SOURCE_CODE_EXTENSIONS`] the PM rule uses, so the two cannot drift apart.
+//! **Main-checkout HEAD move (ADR-0048 decision 10):** a fourth rule sits with
+//! those three and ahead of the same two exemptions.
+//! [`crate::commands::pm_guard_bash::main_checkout_head_move`] classifies
+//! `git merge` and `git rebase` aimed at a main checkout, and the
+//! call site then asks
+//! [`crate::commands::pm_guard_dispatch::live_shared_tree_writers`] — the
+//! daemon's directory-keyed writer query, the same one the #4480 dispatch guard
+//! decides on — who else is writing there. The deny fires only when both halves
+//! are positively answered, so a solo session's `git merge` in its own checkout
+//! is untouched and an unreachable daemon allows. `git fetch` and `git pull`
+//! are never classified at all (decision 9, ADR-0053), and the deny names both
+//! as the first remedy.
+//! **Worktree grant for dispatched writers (ADR-0048):** enforcement alone
+//! would block all work, because a dispatched writer in a main checkout had
+//! nowhere else to write —
+//! [`trusty_mpm::project::worktree_enabled_for_project`] never had a production
+//! caller. [`crate::commands::pm_guard_worktree_grant::evaluate_worktree_grant`]
+//! gives it somewhere: on an `Agent` dispatch made from a main checkout by an
+//! agent that is not positively known to be read-only, it emits
+//! `hookSpecificOutput.updatedInput` carrying the dispatch's own input with
+//! `isolation: "worktree"` added, so the harness provisions the worktree under
+//! `.claude/worktrees/` (ADR-0036) and reclaims it on completion. Trusty-mpm
+//! creates nothing, per ADR-0044 decision 4. It runs after the fan-out denial,
+//! so only the PM reaches it. Unlike its neighbours it does NOT fail open on an
+//! unknown agent — see that module's doc for why the fail-open direction stops
+//! at the main checkout. For the dispatches it handles it REPLACES the #4480
+//! check rather than skipping it (#5769): the grant is emitted only after
+//! [`crate::commands::pm_guard_dispatch::evaluate_granted_worktree`] has asked
+//! the daemon who holds this checkout, which both keeps the concurrency verdict
+//! alive if the harness ignores `updatedInput` and records the granted isolation
+//! so the tracker's original-payload record stops naming an isolated writer as a
+//! shared-checkout one. **A project may decline the grant (#5814):** with
+//! `agent_worktree = false` in its committed `.trusty-mpm.toml` the dispatch
+//! keeps the checkout and its prompt is annotated with the in-place workflow
+//! instead. That arm reports no granted worktree to the daemon — there is none —
+//! but still runs the #4480 concurrency check before printing.
 //! **Subagent fan-out denial (issue #4784):** [`pm_guard`] calls
 //! [`crate::commands::pm_guard_fanout::evaluate_subagent_fanout`] DIRECTLY,
 //! before Guards 1 and 4, denying `Task`/`Agent` when the calling session is
@@ -124,12 +178,14 @@
 //! exercises the stdin→decision→stdout path (and the env bypasses / sub-agent
 //! exemption / fail-open) end to end through the real binary.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
 use crate::commands::pm_guard_bash::{
-    SHELL_EDIT_REASON, evaluate_bash_command, evaluate_main_checkout_destructive_command,
-    evaluate_worktree_add_command, extract_shell_edit_target,
+    CommitVerdict, SHELL_EDIT_REASON, docs_commit_deny_reason, evaluate_bash_command,
+    evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
+    evaluate_worktree_add_command, extract_shell_edit_target, head_move_deny_reason,
+    main_checkout_head_move,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_cost;
@@ -137,6 +193,8 @@ use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 use crate::commands::pm_guard_dispatch;
 use crate::commands::pm_guard_fanout;
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
+use crate::commands::pm_guard_worktree_grant;
+use crate::commands::pm_guard_write_boundary;
 use trusty_mpm::core::agent_cost::{self, AgentCostConfig, BudgetStatus};
 use trusty_mpm::core::config::MpmConfig;
 
@@ -169,7 +227,7 @@ pub(crate) const PM_UNRESTRICTED_ENV: &str = "TRUSTY_MPM_PM_UNRESTRICTED";
 /// (issue #2604 — Bob's directive: "the PM can write single files").
 /// What: matched by exact tool name in [`evaluate_tool`], then classified by
 /// target path in [`evaluate_edit_tool`].
-const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
+pub(crate) const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 /// Deny reason for a PM direct write to a *source-code* file (prohibition P1).
 ///
@@ -295,16 +353,21 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // this block after Guard 1 or Guard 4, and do NOT fold it into
     // `evaluate_tool`/`evaluate_bash_command` — doing so re-introduces the
     // no-op this comment exists to prevent.
+    // Hoisted out of the Bash block below (ADR-0048): the main-checkout write
+    // boundary and the worktree grant both need the same directory, and
+    // resolving it twice would be the way the three rules drift into
+    // disagreeing about which tree the call is standing in.
+    let hook_cwd = payload
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+
     if tool_name == "Bash" {
         let command = tool_input
             .and_then(|v| v.get("command"))
             .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let hook_cwd = payload
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
         if let Some(reason) = evaluate_worktree_add_command(command, &hook_cwd) {
             audit_denied_tool(url, session_id, tool_name, reason).await;
@@ -324,6 +387,86 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             println!("{}", build_pretooluse_deny_response(&reason));
             return Ok(());
         }
+        // ABSOLUTE guard (ADR-0044 decision 1, enforced by ADR-0048, amended by
+        // ADR-0049) — the same placement and the same reason as the two above.
+        // A commit is where a write becomes permanent on a branch other
+        // sessions are standing on, and the reported incident is a commit
+        // landing on another workstream's branch. See
+        // `pm_guard_bash::main_checkout` for why branch-MOVING verbs are
+        // deliberately not folded in here.
+        //
+        // ADR-0049 makes this two-armed rather than one. A staged set of
+        // documents and configuration is permitted, and then takes decision
+        // 10's concurrency test — a docs commit moves the shared HEAD exactly
+        // as far as a source commit does, so the same directory-keyed writer
+        // query decides it. Everything else still denies outright.
+        match evaluate_main_checkout_commit_command(command, &hook_cwd) {
+            Some(CommitVerdict::Deny(reason)) => {
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pretooluse_deny_response(&reason));
+                return Ok(());
+            }
+            Some(CommitVerdict::DocsOnly { root, dirs }) => {
+                let keys: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+                let live = pm_guard_dispatch::live_shared_tree_writers_in(
+                    url, session_id, &keys, &payload,
+                )
+                .await;
+                if !live.is_empty() {
+                    let reason = docs_commit_deny_reason(&root, &live);
+                    audit_denied_tool(url, session_id, tool_name, &reason).await;
+                    println!("{}", build_pretooluse_deny_response(&reason));
+                    return Ok(());
+                }
+            }
+            None => {}
+        }
+        // ABSOLUTE guard (ADR-0048 decision 10, narrowed by ADR-0053) — the
+        // same placement and the same reason as the three above. `git merge`
+        // and `git rebase` move
+        // the shared HEAD under whoever else is standing on it. Unlike its
+        // neighbours the verb alone is not the whole decision: the directory
+        // must be a main checkout AND the daemon must report another live
+        // writer in it, so a solo session updating its own checkout is never
+        // denied and a daemon that cannot answer allows. The query is made only
+        // after both lexical halves match, so ordinary Bash traffic never pays
+        // for it.
+        if let Some((verb, target, root)) = main_checkout_head_move(command, &hook_cwd) {
+            // Two keys, not one (#5769): `tm hook` stamps a delegation's `cwd`
+            // from its own process directory, while `target` is resolved through
+            // `cd` and `git -C`. They name the same HEAD but need not be the
+            // same string, and a query on one alone matched nothing for a
+            // command run from a subdirectory of the checkout.
+            let live = pm_guard_dispatch::live_shared_tree_writers_in(
+                url,
+                session_id,
+                &[root.as_path(), target.as_path()],
+                &payload,
+            )
+            .await;
+            if !live.is_empty() {
+                let reason = head_move_deny_reason(&verb, &root, &live);
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pretooluse_deny_response(&reason));
+                return Ok(());
+            }
+        }
+    }
+
+    // ABSOLUTE guard (ADR-0044 decision 1, enforced by ADR-0048) — the write
+    // boundary for edit tools, placed with the Bash rules above and ahead of
+    // Guards 1 and 4 for the identical structural reason: ADR-0044 binds "the
+    // PM and every agent it dispatches", and both exemptions early-return
+    // ALLOW precisely for the dispatched agents this rule exists to bind. It
+    // is NOT routed through `evaluate_tool` — that path asks who is writing
+    // and is budgeted and subagent-exempt, while this one asks where the write
+    // lands and holds for everyone. DO NOT move it below either exemption.
+    if let Some(reason) =
+        pm_guard_write_boundary::evaluate_main_checkout_write(tool_name, tool_input, &hook_cwd)
+    {
+        audit_denied_tool(url, session_id, tool_name, &reason).await;
+        println!("{}", build_pretooluse_deny_response(&reason));
+        return Ok(());
     }
 
     // #4784: a subagent must never dispatch further subagents. Placed here,
@@ -344,6 +487,86 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // ADR-0048 Part A: a dispatched writer standing in a main checkout is GIVEN
+    // a worktree rather than refused one. Placed after the fan-out deny, so a
+    // subagent's dispatch is already blocked and only the PM reaches here.
+    //
+    // It REPLACES the #4480 check below for the dispatches it handles rather
+    // than skipping it (#5769). Two things went wrong when it merely returned
+    // first. The concurrency verdict stopped being computed at all, so if the
+    // harness does not apply `hookSpecificOutput.updatedInput` for `Agent` — a
+    // property this binary cannot verify — a second unisolated writer that used
+    // to be denied was admitted, with the shell-write path and `git checkout
+    // <branch>` both known not to backstop it. And the daemon's `matcher: "*"`
+    // tracker recorded this dispatch from the ORIGINAL payload, so a writer the
+    // grant had just moved into its own worktree stayed named as writing in the
+    // shared checkout, and decision 10's HEAD-move rule below denied a HEAD
+    // move there for the six hours of `RUNNING_STALE_AFTER_SECS`. (The command
+    // that hit it was `git pull`, which ADR-0053 has since permitted; `merge`
+    // and `rebase` still reach that record.)
+    //
+    // `evaluate_granted_worktree` closes both in one daemon call: it asks who
+    // holds this checkout and, on an empty answer, records the granted isolation
+    // inside the same critical section. A non-empty answer denies instead of
+    // granting — the cost inversion ADR-0048 states for a main checkout, where a
+    // false deny costs a round trip and a false allow corrupts another session's
+    // branch.
+    if !caller_is_subagent
+        && let Some(grant) =
+            pm_guard_worktree_grant::evaluate_worktree_grant(tool_name, tool_input, &hook_cwd)
+    {
+        match grant {
+            pm_guard_worktree_grant::WorktreeGrant::Rewrite(updated_input) => {
+                match pm_guard_dispatch::evaluate_granted_worktree(
+                    url,
+                    session_id,
+                    &hook_cwd,
+                    &payload,
+                    tool_input,
+                    &updated_input,
+                )
+                .await
+                {
+                    Some(reason) => {
+                        audit_denied_tool(url, session_id, tool_name, &reason).await;
+                        println!("{}", build_pretooluse_deny_response(&reason));
+                    }
+                    None => println!(
+                        "{}",
+                        pm_guard_worktree_grant::build_worktree_grant_response(&updated_input)
+                    ),
+                }
+            }
+            pm_guard_worktree_grant::WorktreeGrant::Deny(reason) => {
+                audit_denied_tool(url, session_id, tool_name, reason).await;
+                println!("{}", build_pretooluse_deny_response(reason));
+            }
+            // #5814: this project declared `agent_worktree = false`, so the
+            // dispatch keeps the checkout and is told the workflow that replaces
+            // isolation. It must NOT go through `evaluate_granted_worktree` —
+            // that records a granted worktree, and there is none to record. The
+            // #4480 concurrency question is still asked here rather than skipped:
+            // opting out of isolation does not make two writers on one git HEAD
+            // safe, and a printed rewrite ends this call, so the check below
+            // would never run.
+            pm_guard_worktree_grant::WorktreeGrant::InPlace(updated_input) => {
+                match pm_guard_dispatch::evaluate(url, &payload, tool_name, tool_input, session_id)
+                    .await
+                {
+                    Some(reason) => {
+                        audit_denied_tool(url, session_id, tool_name, &reason).await;
+                        println!("{}", build_pretooluse_deny_response(&reason));
+                    }
+                    None => println!(
+                        "{}",
+                        pm_guard_worktree_grant::build_worktree_grant_response(&updated_input)
+                    ),
+                }
+            }
+        }
+        return Ok(());
+    }
+
     // #4480: the PM must not put a SECOND file-mutating subagent into a working
     // directory that already has one — they race over a single git HEAD and git
     // does not refuse the collision. Placed here, after the fan-out guard,
@@ -351,9 +574,11 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // early-return ALLOW precisely when the caller IS a subagent, and such a
     // caller's dispatch has already been denied above. The `caller_is_subagent`
     // gate keeps a subagent from paying for a check that can never apply to it.
-    // Fails OPEN throughout (see `pm_guard_dispatch`): a read-only or isolated
-    // dispatch never reaches the daemon at all, and a down daemon answers
-    // "nobody else is here".
+    // A read-only or isolated dispatch never reaches the daemon at all, and a
+    // daemon that is not listening answers "nobody else is here" with a warning
+    // on stderr. #5923: a daemon that IS listening and does not answer usably
+    // now DENIES — see `pm_guard_dispatch`'s module doc for which failure sits
+    // on which side of that line.
     if !caller_is_subagent
         && let Some(reason) =
             pm_guard_dispatch::evaluate(url, &payload, tool_name, tool_input, session_id).await
@@ -620,7 +845,7 @@ fn evaluate_edit_tool(tool_input: Option<&serde_json::Value>) -> Option<&'static
 /// call — the caller then fails open).
 /// Test: covered via `evaluate_edit_tool_fails_open_without_path` and the
 /// `evaluate_tool_*` edit cases.
-fn edit_tool_target_path(tool_input: Option<&serde_json::Value>) -> Option<&str> {
+pub(crate) fn edit_tool_target_path(tool_input: Option<&serde_json::Value>) -> Option<&str> {
     let input = tool_input?;
     input
         .get("file_path")
@@ -666,7 +891,7 @@ fn is_pm_orchestration_path(path: &str) -> bool {
 /// [`SOURCE_CODE_EXTENSIONS`]. Extension-less files (e.g. `Makefile`, `README`)
 /// and non-code extensions (`.md`, `.toml`, `.json`, `.txt`) return `false`.
 /// Test: `is_source_code_path_classifies_by_extension`.
-fn is_source_code_path(path: &str) -> bool {
+pub(crate) fn is_source_code_path(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())

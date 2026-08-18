@@ -259,9 +259,13 @@ mod tests {
         assert!(prompt.contains("You MAY do directly (Allowlist)"));
         // The harness-understanding section (DOC-21) canonical markers.
         assert!(prompt.contains('✻'), "harness ✻ glyph must be present");
+        // #5129: pinned to the emitting harness's constant, not a literal —
+        // the SM watches for whatever this prompt names, so the prompt must
+        // name what tcode/tagent actually write.
+        let marker = trusty_agents_common::events::EVENT_LINE_PREFIX.trim_end();
         assert!(
-            prompt.contains("__HARNESS_EVENT__"),
-            "harness __HARNESS_EVENT__ must be present"
+            prompt.contains(marker),
+            "harness relay marker `{marker}` must be present"
         );
         // The 6-phase loop + verification gate.
         assert!(prompt.contains("# SM Workflow -- the delegation loop"));
@@ -358,9 +362,13 @@ mod tests {
             prompt.contains('✻'),
             "assembled SM prompt must contain ✻ (harness understanding glyph marker)"
         );
+        // #5129: the marker comes from the constant tcode emits, so a rename
+        // on either side fails here instead of silently telling the SM to
+        // watch for a string no harness ever writes.
+        let marker = trusty_agents_common::events::EVENT_LINE_PREFIX.trim_end();
         assert!(
-            prompt.contains("__HARNESS_EVENT__"),
-            "assembled SM prompt must contain __HARNESS_EVENT__ (tcode event marker)"
+            prompt.contains(marker),
+            "assembled SM prompt must contain `{marker}` (tcode event marker)"
         );
     }
 

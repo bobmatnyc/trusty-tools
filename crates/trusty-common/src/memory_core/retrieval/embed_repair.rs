@@ -440,7 +440,7 @@ pub(crate) fn classify_repair(
 
 impl PalaceHandle {
     /// Free every drawer caught in a vector-id collision so a re-embed can
-    /// repair it — the operator surface for [`UsearchStore::unalias`].
+    /// repair it — the operator surface for [`UsearchStore::unalias`](crate::memory_core::store::vector::UsearchStore::unalias).
     ///
     /// Why (#5005): stopping new aliasing does not repair the drawers already
     /// destroyed by it, and those are what block #4834. `unalias` existed but
@@ -655,7 +655,7 @@ impl PalaceHandle {
                 drawers
                     .iter()
                     .find(|d| d.id == id)
-                    .map(|d| d.content.clone())
+                    .map(|d| d.content().to_string())
             };
             let Some(content) = content else {
                 continue;

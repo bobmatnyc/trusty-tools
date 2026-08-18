@@ -211,11 +211,41 @@ pub struct FileModels {
 
 // ─── Resolution helper (private) ─────────────────────────────────────────────
 
+/// Parse one precedence layer's provider string, warning on a value that fails.
+///
+/// Why: `resolve_role` used to collapse the CLI and env layers with
+/// `cli_provider.or(env_provider)` before parsing.  `Option::or` falls through
+/// on absence only, so an unparsable `--provider` value still won that slot and
+/// `TRUSTY_REVIEW_PROVIDER` was never consulted — resolution dropped straight
+/// to the config file or the built-in default, collapsing two of the four
+/// documented layers into one (#5679).
+/// What: returns `Some` only when `raw` is present AND parses.  An absent value
+/// and an unparsable one both return `None`, so the caller advances to the next
+/// layer either way; the unparsable case logs a warning naming `source` so a
+/// typo is visible rather than silently downgraded.
+/// Test: `role_models_unparsable_cli_provider_falls_through_to_env`,
+/// `role_models_unparsable_cli_and_env_provider_fall_through_to_config_file`,
+/// `role_models_unparsable_provider_at_every_layer_falls_back_to_default`,
+/// `role_models_valid_cli_provider_still_beats_env`.
+fn parse_provider_layer(raw: Option<&str>, source: &str) -> Option<Provider> {
+    raw.and_then(|s| {
+        s.parse::<Provider>()
+            .map_err(|e| {
+                warn!("ignoring unparsable provider {s:?} from {source}: {e}");
+            })
+            .ok()
+    })
+}
+
 /// Resolve a single role's full config from the four-level precedence chain.
 ///
 /// Why: avoids copy-pasting the same precedence logic three times.
-/// What: each parameter is one precedence level; the first `Some` wins.
-/// Test: covered indirectly by `RoleModels` unit tests.
+/// What: each parameter is one precedence level; the first `Some` wins.  For
+/// `provider`, a layer that is present but does not parse as a `Provider`
+/// counts as absent and yields to the next layer (#5679) — it never consumes
+/// the chain.
+/// Test: covered indirectly by `RoleModels` unit tests; the provider
+/// parse-failure arm is covered by the `role_models_unparsable_*` tests.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_role(
     cli_model: Option<&str>,
@@ -236,25 +266,14 @@ pub(super) fn resolve_role(
         .to_string();
 
     // Provider: CLI → env → config file → built-in default.
-    let provider_str = cli_provider.or(env_provider);
-    let provider = provider_str
-        .and_then(|s| {
-            s.parse::<Provider>()
-                .map_err(|e| {
-                    warn!("unrecognised provider {s:?}: {e} — using default");
-                })
-                .ok()
-        })
+    // #5679: each layer parses on its own so a bad value yields the next layer, not the default.
+    let provider = parse_provider_layer(cli_provider, "--provider")
+        .or_else(|| parse_provider_layer(env_provider, "TRUSTY_REVIEW_PROVIDER"))
         .or_else(|| {
-            file.and_then(|f| {
-                f.provider.as_deref().and_then(|s| {
-                    s.parse::<Provider>()
-                        .map_err(|e| {
-                            warn!("config file provider {s:?}: {e} — using default");
-                        })
-                        .ok()
-                })
-            })
+            parse_provider_layer(
+                file.and_then(|f| f.provider.as_deref()),
+                "config file [models.*].provider",
+            )
         })
         .unwrap_or(default_provider);
 

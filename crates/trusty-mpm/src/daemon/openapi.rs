@@ -5,7 +5,7 @@
 //! the contract discoverable and lets clients be generated rather than
 //! hand-written.
 //! What: the [`ApiDoc`] type derives a [`utoipa::OpenApi`] document from the
-//! `#[utoipa::path]`-annotated handlers in [`crate::api`] and the
+//! `#[utoipa::path]`-annotated handlers in [`crate::api`](crate::daemon::api) and the
 //! `#[derive(ToSchema)]` types they exchange.
 //! Test: `openapi_spec_is_valid` in `api.rs` asserts `GET
 //! /api-docs/openapi.json` returns a document with an `openapi` key and the

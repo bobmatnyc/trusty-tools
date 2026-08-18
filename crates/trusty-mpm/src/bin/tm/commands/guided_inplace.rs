@@ -154,11 +154,12 @@ fn read_env_managed_session_id() -> Option<String> {
 /// `SessionManager::mark_runtime_exited_stopped` (item 3).
 /// What: when `$TMUX` is unset (not inside tmux), returns `None` immediately
 /// — there is no session to query. Otherwise shells out to
-/// `tmux show-environment TM_MANAGED_SESSION_ID` and parses the id via
-/// [`parse_show_environment_value`]. Any I/O failure, non-zero exit, or the
-/// variable being unset in the session (`tmux` prints `-NAME` for an unset
-/// variable) folds into `None` — the caller then falls through exactly as if
-/// no env var was found anywhere.
+/// `tmux show-environment TM_MANAGED_SESSION_ID` (via
+/// `core::tmux::show_environment_argv`/`run_tmux_argv_with_bin` — #2414) and
+/// parses the id via [`parse_show_environment_value`]. Any I/O failure,
+/// non-zero exit, or the variable being unset in the session (`tmux` prints
+/// `-NAME` for an unset variable) folds into `None` — the caller then falls
+/// through exactly as if no env var was found anywhere.
 /// Test: the I/O shell-out is not unit-tested (requires a live tmux server);
 /// [`parse_show_environment_value`] covers the pure parsing logic exhaustively.
 fn read_tmux_env_managed_session_id() -> Option<String> {
@@ -168,10 +169,11 @@ fn read_tmux_env_managed_session_id() -> Option<String> {
     if !inside_tmux {
         return None;
     }
-    let output = std::process::Command::new("tmux")
-        .args(["show-environment", MANAGED_SESSION_ID_ENV])
-        .output()
-        .ok()?;
+    // #2414: routes through the shared tmux binary-resolution + TCC-disclaim
+    // spawn primitive instead of a bare, unresolved `Command::new("tmux")`.
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    let argv = trusty_mpm::core::tmux::show_environment_argv(None, MANAGED_SESSION_ID_ENV);
+    let output = trusty_mpm::core::tmux::run_tmux_argv_with_bin(&tmux_bin, &argv).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -297,7 +299,7 @@ async fn fetch_managed_session(
 /// unresolved/unknown id still falls through promptly.
 /// Test: `fetch_until_stopped_returns_immediately_when_already_stopped`,
 /// `fetch_until_stopped_gives_up_after_budget_when_never_stopped` (both use a
-/// local one-shot/counting mock, mirroring [`spawn_mock`]'s convention).
+/// local one-shot/counting mock, mirroring `spawn_mock`'s convention).
 async fn fetch_managed_session_until_stopped(
     client: &reqwest::Client,
     url: &str,

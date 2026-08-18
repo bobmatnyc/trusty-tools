@@ -31,6 +31,17 @@
 //! Test: `super::tests` (inline `#[cfg(test)] mod tests`) covers AC-1..AC-7 —
 //! all four precedence cases, fail-open, PR→ticket linkage, the no-SLD-ref gap,
 //! and the stale-spec conflict flag — without any network access.
+//!
+//! [`IntentQuery`]: crate::intent_source::IntentQuery
+//! [`ResolvedIntent`]: crate::intent_source::ResolvedIntent
+//! [`ResolvedIntent::unresolved`]: crate::intent_source::ResolvedIntent::unresolved
+//! [`IsrError`]: crate::intent_source::IsrError
+//! [`types`]: crate::intent_source::types
+//! [`linkage`]: crate::intent_source::linkage
+//! [`spec_resolve`]: crate::intent_source::spec_resolve
+//! [`extract`]: crate::intent_source::extract
+//! [`resolve`]: crate::catchup::resolve
+//! [`backend_fetcher`]: crate::intent_source::backend_fetcher
 
 pub mod backend_fetcher;
 pub mod extract;

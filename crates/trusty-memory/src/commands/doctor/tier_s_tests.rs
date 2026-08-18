@@ -1,5 +1,9 @@
 //! Unit tests for the Tier S re-affirmation doctor check (#4890).
 //!
+//! These live in a sibling file because `doctor/mod.rs` is already at 472 SLOC
+//! against a 500 cap, so the suite could not go there either; a sibling
+//! `*_tests.rs` is this repo's established answer (see `memory_core/filter.rs`).
+//!
 //! Why: the check's judgment must be provable without a daemon. Two
 //! `check_daemon_health_*` tests in this same module already fail whenever a
 //! live trusty-memory daemon happens to be listening on 7070-7079 (#4897) —

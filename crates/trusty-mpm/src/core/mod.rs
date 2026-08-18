@@ -23,6 +23,9 @@ pub mod agent_skill_codeploy;
 pub mod agent_source;
 pub mod artifact;
 pub mod auto_resume;
+// #5069: the base checkout behind a worktree owns the embedding lane that
+// `worktree_index` deliberately skips; this module is what creates it.
+pub mod base_facet_index;
 pub mod binary_provenance;
 pub mod budget;
 pub mod bundle;
@@ -80,6 +83,7 @@ pub mod git_identity;
 pub mod harness_root;
 pub mod home_trust_seed;
 pub mod hook;
+pub mod host_state_gate;
 pub mod idle_nudge;
 pub mod idle_parking;
 pub mod instruction_overrides;
@@ -153,6 +157,7 @@ pub mod skill_unmanaged;
 pub mod sm;
 pub mod spawn_disclaim;
 pub mod stack_profile;
+pub mod staged_paths;
 pub mod stale_skills;
 pub mod standalone;
 pub mod stray_mcp;

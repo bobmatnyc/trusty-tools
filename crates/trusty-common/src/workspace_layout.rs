@@ -67,6 +67,15 @@
 //! `reserved_worktrees_dirname_falls_back_to_default`,
 //! `reserved_name_via_env_cannot_claim_the_claude_agent_store`,
 //! `detection_matches_configured_and_builtin`.
+//!
+//! [`resolve_workspace_root`]: crate::workspace_layout::resolve_workspace_root
+//! [`resolve_worktrees_dirname`]: crate::workspace_layout::resolve_worktrees_dirname
+//! [`workspace_root`]: crate::workspace_layout::workspace_root
+//! [`worktrees_dirname`]: crate::workspace_layout::worktrees_dirname
+//! [`WorkspaceLayoutConfig`]: crate::workspace_layout::WorkspaceLayoutConfig
+//! [`WorktreeDirNames`]: crate::workspace_layout::WorktreeDirNames
+//! [`WorktreeDirNames::matches`]: crate::workspace_layout::WorktreeDirNames::matches
+//! [`is_worktrees_dirname`]: crate::workspace_layout::is_worktrees_dirname
 
 use std::path::{Path, PathBuf};
 

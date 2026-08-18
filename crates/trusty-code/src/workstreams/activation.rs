@@ -51,7 +51,7 @@
 //! They also publish [`crate::events::Event::WorkstreamStateInferred`] for
 //! every workstream whose computed state actually transitions alongside the
 //! pointer change (the newly-active workstream on every real activation, plus
-//! the prior one on a force-switch); [`super::protocol::close`] publishes the
+//! the prior one on a force-switch); `super::protocol::close` publishes the
 //! same event's `"closed"` state via [`publish_state_inferred`] (`pub(super)`
 //! for exactly that one cross-file call).
 //!

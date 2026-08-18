@@ -41,6 +41,12 @@
 //! Test: `tests.rs` — directory and socket modes after a real bind, the
 //! pre-existing-wide-directory repair, symlink refusal, the pure decision
 //! functions behind every refusal, and the `sun_path` budget pre-check.
+//!
+//! [`scratch_socket_dir`]: crate::uds::scratch_socket_dir
+//! [`bind_hardened`]: crate::uds::bind_hardened
+//! [`connect_hardened`]: crate::uds::connect_hardened
+//! [`ensure_peer_is_self`]: crate::uds::ensure_peer_is_self
+//! [`dir::prepare_socket_dir`]: crate::uds::dir::prepare_socket_dir
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -71,7 +77,10 @@ pub mod supervisor;
 pub use dir::prepare_socket_dir;
 pub use peer::{ensure_peer_is_self, peer_uid, self_uid};
 pub use probe::{SocketVerdict, probe_socket_verdict, socket_is_serving};
-pub use rpc::{MAX_FRAME_BYTES, UdsRpcError, send_framed_request};
+pub use rpc::{
+    MAX_FRAME_BYTES, UdsRpcError, encode_frame, send_framed_notification, send_framed_request,
+    send_framed_request_capped, write_frame,
+};
 pub use singleton::bind_singleton_hardened;
 #[cfg(feature = "uds-supervisor")]
 pub use supervisor::{

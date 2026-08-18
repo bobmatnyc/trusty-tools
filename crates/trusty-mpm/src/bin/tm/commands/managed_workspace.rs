@@ -31,9 +31,9 @@
 //! deploy `CLAUDE.md` / `.mcp.json` / `.claude/` into whatever checkout the
 //! operator happens to be standing in? — where the registry's `worktree: false`
 //! is the project TELLING it yes. The two paths still compose: the fallback ends
-//! by calling `launch()` with its already-provisioned worktree as the cwd, so
-//! `provision_for_launch` names that protected directory rather than the live
-//! checkout.
+//! by calling `launch()` with its already-provisioned worktree as the cwd and
+//! [`LaunchDir::CallerResolved`], which is what stops `provision_for_launch` from
+//! resolving that placement a second time and overwriting it.
 //! Scope note: this deliberately does NOT change #3455's concurrency
 //! behaviour. `spawn_managed_on_main` WARNS (never refuses) on a second
 //! session against one main checkout, and that stays the rule here — nothing
@@ -62,6 +62,31 @@ pub(crate) enum ManagedWorkspace {
     Worktree(PathBuf),
     /// The project's own main checkout — no clone, no worktree (#3455 opt-out).
     MainCheckout(PathBuf),
+}
+
+/// Who resolved the directory [`provision_for_launch`] was handed.
+///
+/// Why: `launch()` serves two kinds of caller and they need opposite treatment.
+/// `tm launch` passes the operator's cwd, which is not a placement yet —
+/// resolving it against the managed checkout is the whole job. The guided
+/// daemon-unreachable fallback and `tm run` pass a directory they ALREADY
+/// resolved (a per-session worktree, a managed checkout they just established),
+/// and re-resolving it discards their answer. Without this distinction the
+/// redirect fired on every caller: the fallback's fresh worktree was created,
+/// abandoned, and every daemon-unreachable session collapsed onto the one shared
+/// base clone.
+/// What: `OperatorCwd` runs ADR-0037's placement rule via
+/// `managed_checkout::resolve_placement_at`. `CallerResolved` takes the
+/// directory as given and prints no placement notice — every such caller prints
+/// its own, naming the workspace it chose.
+/// Test: `provision_for_launch_keeps_a_caller_resolved_placement`,
+/// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchDir {
+    /// Wherever the operator typed `tm launch` — placement is still to resolve.
+    OperatorCwd,
+    /// A directory the caller already resolved as this session's placement.
+    CallerResolved,
 }
 
 impl ManagedWorkspace {
@@ -97,9 +122,14 @@ impl ManagedWorkspace {
 /// than re-reading the registry here) guarantees the notice each caller
 /// printed describes the action actually taken.
 /// What: `isolate == false` returns [`ManagedWorkspace::MainCheckout`] having
-/// touched nothing on disk; otherwise ensures the base clone and adds a
-/// UUID-named per-session worktree. Errors are the raw `inproject` strings so
-/// each caller can wrap them with its own remediation text.
+/// touched nothing on disk. `main_checkout` is a placement its caller has fully
+/// resolved by the time it gets here — [`provision_for_launch`] routes an
+/// operator cwd through `managed_checkout::resolve_placement_at` first
+/// (ADR-0037's 2026-08-17 terminology clarification), while
+/// [`provision_for_fallback`] answers #1724's separate question and resolves its
+/// own. With `isolate` it ensures the base clone and adds a UUID-named
+/// per-session worktree. Errors are the raw `inproject` strings so each caller
+/// can wrap them with its own remediation text.
 /// Test: `managed_workspace_tests.rs`.
 async fn provision(
     isolate: bool,
@@ -109,6 +139,10 @@ async fn provision(
     session_id: &ManagedSessionId,
 ) -> Result<ManagedWorkspace, String> {
     if !isolate {
+        // `main_checkout` is already resolved — this function never re-resolves
+        // it. `provision_for_launch` applies the ADR-0037 rule to an operator cwd
+        // before calling here; `provision_for_fallback` resolves its own and says
+        // so with `LaunchDir::CallerResolved` when it composes onto `launch()`.
         tracing::info!(
             origin = %origin_url,
             path = %main_checkout.display(),
@@ -152,37 +186,73 @@ async fn provision(
 /// a machine with no `git` on PATH) falls back to `cwd` itself — the pre-#4300
 /// behaviour, never worse.
 ///
-/// #1724 survives the change unchanged, and by construction. The guided
-/// daemon-unreachable fallback composes onto this function: it provisions a
-/// protected worktree itself via [`provision_for_fallback`] and then calls
-/// `launch()` WITH that worktree as `cwd`, so `find_git_root` resolves to the
-/// worktree and `MainCheckout` here names the already-protected directory, never
-/// the operator's live checkout. The three `tests_behavior_b` cases cover it.
+/// The placement rule applies to an operator's cwd and to nothing else, which is
+/// what `launch_dir` selects. The guided daemon-unreachable fallback composes
+/// onto this function: it provisions a protected worktree via
+/// [`provision_for_fallback`] and calls `launch()` with that worktree as `cwd`,
+/// already resolved. Running the rule over it again found `find_git_root` ==
+/// the worktree, `worktree != base_path`, and redirected the session into the
+/// shared base clone — discarding the worktree and its branch, and putting two
+/// concurrent fallback sessions in one tree. Such a caller passes
+/// [`LaunchDir::CallerResolved`] and the rule is skipped.
 /// Test: `provision_for_launch_without_a_request_uses_the_main_checkout`,
 /// `provision_for_launch_from_subdirectory_targets_repo_root`,
 /// `provision_for_launch_explicit_request_creates_worktree`,
-/// `provision_for_launch_ignores_a_registered_worktree_true_project`.
+/// `provision_for_launch_ignores_a_registered_worktree_true_project`,
+/// `provision_for_launch_keeps_a_caller_resolved_placement`.
 pub(crate) async fn provision_for_launch(
     origin_url: &str,
     base_path: &Path,
     cwd: &Path,
     worktree_requested: bool,
+    launch_dir: LaunchDir,
     session_id: &ManagedSessionId,
 ) -> anyhow::Result<ManagedWorkspace> {
-    let main_checkout = super::guided::find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let launch_root = super::guided::find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    // ADR-0037 (2026-08-17 clarification): "the project's main checkout" is the
+    // MANAGED checkout `<workspace-root>/<owner>/<repo>` — already in hand as
+    // `base_path` — not the repo root of wherever `tm` was typed. Shared with the
+    // daemon's `spawn_managed_routed` through one function so the CLI and the
+    // daemon cannot resolve the same phrase two different ways. Only reached on
+    // the no-worktree branch; `--worktree` provisions from `base_path` already.
     if worktree_requested {
         eprintln!(
             "note: uncommitted local changes are not carried into the managed clone. \
              Use `tm connect` if you need to work from the live checkout."
         );
         eprintln!("provisioning managed workspace...");
+    } else if launch_dir == LaunchDir::CallerResolved {
+        // The caller already named the workspace on the terminal; a second
+        // notice here would describe a placement decision that is not being
+        // made.
+    } else if launch_root != base_path {
+        // Name the switch on the terminal BEFORE it happens, so the operator is
+        // never surprised about which tree the session opened in — and so a
+        // first-run clone is announced rather than looking like a hang.
+        eprintln!(
+            "tm: {} is not the managed checkout — launching in {} instead \
+             (provisioning it if absent); your checkout is not modified",
+            launch_root.display(),
+            base_path.display()
+        );
     } else {
         eprintln!(
-            "tm: launching in {} (no managed clone, no worktree) — \
+            "tm: launching in {} (no worktree) — \
              pass `--worktree` to provision an isolated one instead",
-            main_checkout.display()
+            base_path.display()
         );
     }
+
+    let main_checkout = if worktree_requested || launch_dir == LaunchDir::CallerResolved {
+        launch_root
+    } else {
+        trusty_mpm::daemon::managed_routes::managed_checkout::resolve_placement_at(
+            &launch_root,
+            base_path,
+            origin_url,
+        )
+        .map_err(|e| anyhow::anyhow!("failed to provision managed workspace: {e}"))?
+    };
 
     provision(
         worktree_requested,
@@ -207,9 +277,16 @@ pub(crate) async fn provision_for_launch(
 /// delegates to [`provision`] with `git_root` (the repo ROOT, not the
 /// possibly-nested cwd) as the opt-out target; errors carry the fallback's
 /// "start the daemon" remediation.
+///
+/// This function's answer is final because [`super::guided`] hands it to
+/// `launch()` as [`LaunchDir::CallerResolved`]. The three tests below stop one
+/// call short of that composition, so they cannot see it reversed — the two
+/// named last cover the composed path instead.
 /// Test: `provision_for_fallback_opted_out_creates_no_clone_and_no_worktree`,
 /// `provision_for_fallback_unset_creates_worktree_not_live_checkout`,
-/// `provision_for_fallback_other_projects_optout_does_not_leak`.
+/// `provision_for_fallback_other_projects_optout_does_not_leak`,
+/// `provision_for_launch_keeps_a_caller_resolved_placement`,
+/// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`.
 pub(crate) async fn provision_for_fallback(
     registry_dir: &Path,
     origin_url: &str,
@@ -238,12 +315,11 @@ pub(crate) async fn provision_for_fallback(
             base.display()
         );
     } else {
-        // Deliberately terse: this path ends in `launch()`, which calls
-        // `provision_for_launch` and prints the full "worktree isolation is
-        // disabled … no managed clone, no worktree" line itself. Repeating it
-        // here showed the operator the same sentence twice. What is NOT
-        // redundant is the daemon-unreachable context, which only this path
-        // knows.
+        // Deliberately terse: this path hands `launch()` a
+        // `LaunchDir::CallerResolved`, so `provision_for_launch` prints no
+        // placement line at all and `print_launch_banner` names the directory
+        // the session opens in. What is NOT redundant is the
+        // daemon-unreachable context, which only this path knows.
         eprintln!(
             "tm: daemon unreachable — this project opted out of worktrees (#3455), \
              so there is nothing to redirect to."

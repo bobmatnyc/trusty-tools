@@ -24,6 +24,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use trusty_agents_common::agents::tier_audit::TierAuditError;
 use trusty_agents_common::agents::tier_audit::{MisplacedAgent, audit_agent_tier};
 
 // #4448: the roster moved to `core::bundled_roster` so the quarantine in
@@ -38,14 +39,42 @@ const CHECK_NAME: &str = "asset_tier";
 /// How many offending agent names the message lists before summarising.
 const MAX_NAMED: usize = 5;
 
-/// One scanned non-canonical tier and what was found in it.
+/// One non-canonical tier and what the scan established about it.
 struct TierScan {
     /// Human label for the message (`project`, `operator home`).
     label: &'static str,
-    /// The scanned directory.
+    /// The directory the scan was asked for.
     dir: PathBuf,
-    /// tm-owned files found there, sorted by resolved agent name.
-    found: Vec<MisplacedAgent>,
+    /// What the scan found, or why it could not look.
+    outcome: TierOutcome,
+}
+
+/// What one tier scan established.
+///
+/// Why (#5626): the probe's message asserts `(scanned: <dir>)`, so "found
+/// nothing" and "could not look" must not arrive as the same empty vec — that
+/// is #4408's defining property, a check no failure can reach, reinstated by a
+/// permission error.
+/// What: [`Scanned`](Self::Scanned) carries the tm-owned files, possibly none;
+/// [`Unscannable`](Self::Unscannable) carries the rendered
+/// [`TierAuditError`].
+/// Test: `verdict_unscannable_tier_is_warn`,
+/// `verdict_unscannable_tier_is_not_reported_as_scanned`.
+enum TierOutcome {
+    /// The directory was enumerated; these are the tm-owned files in it.
+    Scanned(Vec<MisplacedAgent>),
+    /// The directory could not be enumerated; nothing is known about it.
+    Unscannable(String),
+}
+
+impl TierScan {
+    /// The tm-owned files found here, or none when the scan never ran.
+    fn found(&self) -> &[MisplacedAgent] {
+        match &self.outcome {
+            TierOutcome::Scanned(found) => found,
+            TierOutcome::Unscannable(_) => &[],
+        }
+    }
 }
 
 /// Probe for tm-owned agent files living outside the canonical deploy tier.
@@ -84,8 +113,17 @@ pub(super) fn check_asset_tier(
         if !seen.insert(dir.clone()) {
             continue;
         }
-        let found = audit_agent_tier(&dir, &roster);
-        scans.push(TierScan { label, dir, found });
+        // #5626: a tier that could not be enumerated is recorded as such, not
+        // folded into "scanned, found nothing".
+        let outcome = match audit_agent_tier(&dir, &roster) {
+            Ok(found) => TierOutcome::Scanned(found),
+            Err(e @ TierAuditError::Unscannable { .. }) => TierOutcome::Unscannable(e.to_string()),
+        };
+        scans.push(TierScan {
+            label,
+            dir,
+            outcome,
+        });
     }
 
     verdict(&scans, &canonical)
@@ -115,12 +153,49 @@ fn agent_tier_of(base: &Path) -> PathBuf {
 /// but do not resolve. And the empirical half: the deployer's skip-and-warn log
 /// covering this same directory fired on eight separate days through
 /// 2026-07-30 with no operator follow-up — a `Warn` here would join it.
+///
+/// #5626: a tier that could not be enumerated never appears in the `scanned:`
+/// list, and an otherwise-clean run holding one is `Warn`, not `Ok` — the
+/// question is open, not answered. A real hit still outranks it, since a
+/// confirmed shadowing is the more actionable finding.
 /// Test: `verdict_project_hit_is_fail`, `verdict_home_only_is_warn`,
-/// `verdict_clean_is_ok`, `verdict_names_the_files_and_both_tiers`.
+/// `verdict_clean_is_ok`, `verdict_names_the_files_and_both_tiers`,
+/// `verdict_unscannable_tier_is_warn`,
+/// `verdict_unscannable_tier_is_not_reported_as_scanned`.
 fn verdict(scans: &[TierScan], canonical: &Path) -> DoctorCheck {
-    let hits: Vec<&TierScan> = scans.iter().filter(|s| !s.found.is_empty()).collect();
+    let unscannable: Vec<String> = scans
+        .iter()
+        .filter_map(|s| match &s.outcome {
+            TierOutcome::Unscannable(why) => Some(format!("{} tier — {why}", s.label)),
+            TierOutcome::Scanned(_) => None,
+        })
+        .collect();
+
+    let hits: Vec<&TierScan> = scans.iter().filter(|s| !s.found().is_empty()).collect();
     if hits.is_empty() {
-        let scanned: Vec<String> = scans.iter().map(|s| s.dir.display().to_string()).collect();
+        let scanned: Vec<String> = scans
+            .iter()
+            .filter(|s| matches!(s.outcome, TierOutcome::Scanned(_)))
+            .map(|s| s.dir.display().to_string())
+            .collect();
+        if !unscannable.is_empty() {
+            return DoctorCheck::new(
+                CHECK_NAME,
+                CheckStatus::Warn,
+                format!(
+                    "a non-canonical agent tier could not be scanned, so whether tm-owned agent \
+                     files shadow the canonical tier {} is UNDETERMINED here: {}. Scanned: {}. \
+                     Make the directory readable and re-run, or delete it.",
+                    canonical.display(),
+                    unscannable.join("; "),
+                    if scanned.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        scanned.join(", ")
+                    }
+                ),
+            );
+        }
         return DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Ok,
@@ -137,17 +212,18 @@ fn verdict(scans: &[TierScan], canonical: &Path) -> DoctorCheck {
     }
 
     let shadowing = hits.iter().any(|s| s.label == "project");
-    let detail: Vec<String> = hits
+    let mut detail: Vec<String> = hits
         .iter()
         .map(|s| {
             format!(
                 "{} tier {} — {}",
                 s.label,
                 s.dir.display(),
-                name_list(&s.found)
+                name_list(s.found())
             )
         })
         .collect();
+    detail.extend(unscannable.iter().map(|u| format!("{u} (UNDETERMINED)")));
 
     if shadowing {
         return DoctorCheck::new(

@@ -473,7 +473,7 @@ impl MpmConfig {
     /// What: calls `dirs::home_dir()` to find `~/.trusty-mpm/`; if home is
     /// unavailable (stripped CI), returns [`MpmConfig::default`].
     /// Test: covered indirectly by `config_absent_yields_defaults` (which passes
-    /// a temp dir to [`load`]).
+    /// a temp dir to [`load`](crate::core::standalone::load)).
     pub fn load_default() -> Self {
         match dirs::home_dir() {
             Some(home) => Self::load(&home.join(".trusty-mpm")),
@@ -526,7 +526,7 @@ impl MpmConfig {
     /// home-directory handling, including the stripped-CI fallback — then folds
     /// on the project and host layers.
     /// Test: `load_effective_applies_the_project_layer` covers the layering;
-    /// the root resolution is [`load_default`]'s.
+    /// the root resolution is `load_default`'s.
     pub fn load_effective_default(project_dir: Option<&Path>) -> Self {
         Self::load_default().with_outer_default_model_layers(project_dir)
     }
@@ -552,7 +552,7 @@ impl MpmConfig {
 
     /// Overlay the project and host default-model layers onto `[models] default`.
     ///
-    /// Why: split from [`load_effective`] so the precedence is assertable without
+    /// Why: split from `load_effective` so the precedence is assertable without
     /// a home directory or a real config file.
     /// What: `project` wins over `host`, which wins over whatever `[models]
     /// default` already held. Both absent → unchanged.

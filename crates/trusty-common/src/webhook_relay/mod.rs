@@ -25,6 +25,16 @@
 //! writes to, [`serve`] is the listener that answers the frame, and the socket
 //! paths both halves use are [`review_socket_path`] / [`analyze_socket_path`]
 //! here rather than a string literal per crate.
+//!
+//! [`RELAY_METHOD`]: crate::webhook_relay::RELAY_METHOD
+//! [`RelayFrame`]: crate::webhook_relay::RelayFrame
+//! [`RelayRequest`]: crate::webhook_relay::RelayRequest
+//! [`RelayResponse`]: crate::webhook_relay::RelayResponse
+//! [`RelayResult::ack`]: crate::webhook_relay::RelayResult::ack
+//! [`inbox`]: crate::webhook_relay::inbox
+//! [`serve`]: crate::webhook_relay::serve
+//! [`review_socket_path`]: crate::webhook_relay::review_socket_path
+//! [`analyze_socket_path`]: crate::webhook_relay::analyze_socket_path
 
 use std::collections::BTreeMap;
 

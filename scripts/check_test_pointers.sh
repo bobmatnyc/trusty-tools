@@ -927,7 +927,18 @@ scan "$VIOL" "$STALE" "$ERR" "$CHECKED"
 # all — and this gate's true positives are additionally masked by 920
 # grandfathered allowlist rows. CITATIONS_CHECKED is the number that can tell
 # them apart. The floor sits far below the current reality and far above zero.
-MIN_CITATIONS=200
+#
+# #5529: 200 was 0.74% of the real corpus (~26,874 per the issue; measured
+# locally and across five 2026-08-12 CI runs at 24,281-24,325) — a scan that
+# resolved barely 200 citations before reporting "0 dangling pointers" would
+# have been a catastrophic collapse, not a clean tree, and this floor let it
+# through. 5000 sits at ~20% of the measured baseline: comfortably above what
+# a collapse to a handful of the workspace's 21 crates would resolve (the
+# per-crate average is ~1,150), and comfortably below what legitimate corpus
+# shrinkage (crate removal, doc-comment consolidation) could plausibly cost
+# in one PR. Matches this repo's house convention for a #4618-style floor —
+# see MIN_RS_FILES in check_line_cap.sh, set to ~14% of its tracked-file count.
+MIN_CITATIONS=5000
 CITATIONS_CHECKED="$(awk 'END{print NR}' "$CHECKED")"
 if [ "${CITATIONS_CHECKED:-0}" -lt "$MIN_CITATIONS" ]; then
   echo "FAIL: SCAN FLOOR — only ${CITATIONS_CHECKED} Test: citation(s) were resolved, below the" >&2

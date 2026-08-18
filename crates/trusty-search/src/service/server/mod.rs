@@ -17,11 +17,15 @@ mod contrib_graph;
 // #4087: query-time guard so a corpus-failed index fails loudly instead of
 // answering HTTP 200 with an empty result set.
 mod degraded;
+mod facet_route;
 mod fanout;
 mod files;
 mod health;
 pub(crate) mod helpers;
 mod index_config;
+// #5349: the single resolve-or-lazy-load path every index-scoped endpoint that
+// can restore a cold-parked index routes through.
+mod index_resolve;
 mod indexes;
 mod indexes_relocate;
 mod reindex_handlers;
@@ -39,6 +43,8 @@ mod typeahead;
 #[cfg(test)]
 mod collision_3993_tests;
 #[cfg(test)]
+mod facet_route_tests;
+#[cfg(test)]
 mod list_repo_identity_tests;
 #[cfg(test)]
 mod test_support;
@@ -50,6 +56,10 @@ mod tests_2336;
 mod tests_2984;
 #[cfg(test)]
 mod tests_3304;
+#[cfg(test)]
+mod tests_allowlist_gate_767;
+#[cfg(test)]
+mod tests_same_id_root_mismatch;
 // #3049: DELETE must quiesce in-flight writers and report what it actually did.
 #[cfg(test)]
 mod tests_3049;
@@ -69,6 +79,10 @@ mod tests_4951;
 // rather than degrade to "trusted".
 #[cfg(test)]
 mod tests_5357;
+// #5349: a write against a cold-parked index drives the load the read path
+// drives, and a load that fails refuses the write instead of absorbing it.
+#[cfg(test)]
+mod tests_5349;
 // #4250: timeout-parked index recovery and the /health un-latch.
 #[cfg(test)]
 mod tests_4250;
@@ -87,13 +101,21 @@ mod tests_grep;
 #[cfg(test)]
 mod tests_health;
 #[cfg(test)]
+mod tests_health_contention;
+#[cfg(test)]
 mod tests_health_degraded;
+// #5927: corpus-open failure vs. any-lane failure counter semantics.
+#[cfg(test)]
+mod stage_failed_5927_tests;
 #[cfg(test)]
 mod tests_health_switchable;
 #[cfg(test)]
 mod tests_index;
 #[cfg(test)]
 mod tests_index_config;
+// #2203: a search that drops rows after fusion must report how many and why.
+#[cfg(test)]
+mod tests_dropped_results;
 // #5068 / #5061 / #4787 / #4839: the index-routing + status-reporting cluster.
 #[cfg(test)]
 mod tests_index_routing;

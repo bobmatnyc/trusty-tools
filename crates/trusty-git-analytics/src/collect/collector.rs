@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use crate::collect::azdo::AzureDevOpsClient;
 use crate::collect::bitbucket::BitbucketClient;
 use crate::collect::errors::Result;
+use crate::collect::fault::CollectionFault;
 use crate::collect::git::GitCollector;
 use crate::collect::github::GitHubClient;
 use crate::collect::identity::IdentityResolver;
@@ -16,6 +17,7 @@ use crate::collect::linear_pipeline;
 use crate::collect::notify;
 use crate::collect::pr_provider::PrProvider;
 use crate::collect::weeks::{clamp_week_to_range, weeks_in_range};
+use crate::collect::work_item_pipeline;
 use crate::core::config::Config;
 use crate::core::db::{self, Database};
 use crate::core::models::PullRequest;
@@ -70,7 +72,8 @@ pub struct PerRepoFetch {
 /// describing what the run did, both for stdout output and for asserting
 /// expectations in tests.
 /// What: counter struct populated by [`CollectionPipeline::run`]; the
-/// `errors` vec accumulates per-repo non-fatal errors.
+/// `errors` vec accumulates non-fatal faults, each tagged with whether a whole
+/// stage failed or one record was skipped (#5655).
 /// Test: covered by `tests::collect_integration_repo` (integration test
 /// that runs the pipeline against a fixture repo).
 #[derive(Debug, Clone, Default)]
@@ -90,8 +93,13 @@ pub struct CollectionStats {
     /// Number of `(repo, week)` pairs skipped because already present in
     /// `collection_runs` (and `force` was false).
     pub weeks_skipped: usize,
-    /// Per-repo error messages encountered (non-fatal).
-    pub errors: Vec<String>,
+    /// Non-fatal faults encountered, each tagged with its blast radius (#5655).
+    ///
+    /// Nothing in the pipeline aborts on a fault. A `StageFailed` entry means
+    /// that stage's data is absent from the database, which is what
+    /// [`Self::stage_failures`] hands the caller so the process exit code can
+    /// say so.
+    pub errors: Vec<CollectionFault>,
     /// Total `fact_commit_reachability` rows upserted across all repos.
     pub reachability_rows: usize,
     /// Per-repo fetch outcomes (one entry per repository attempted).
@@ -360,7 +368,7 @@ impl CollectionPipeline {
                         repo_label.clone(),
                         msg.clone(),
                     ));
-                    stats.errors.push(msg);
+                    stats.fail_stage(msg);
                     continue;
                 }
             };
@@ -388,7 +396,7 @@ impl CollectionPipeline {
                         repo_label.clone(),
                         msg.clone(),
                     ));
-                    stats.errors.push(msg);
+                    stats.fail_stage(msg);
                     continue;
                 }
             };
@@ -401,7 +409,10 @@ impl CollectionPipeline {
             self.progress.emit(if failures == 0 {
                 ProgressEvent::completed(Stage::Collect, repo_label, collected)
             } else {
-                let first = stats.errors.get(errors_before).map_or("", String::as_str);
+                let first = stats
+                    .errors
+                    .get(errors_before)
+                    .map_or("", |f| f.message.as_str());
                 ProgressEvent::failed(
                     Stage::Collect,
                     repo_label,
@@ -455,16 +466,8 @@ impl CollectionPipeline {
                     warn!("Azure DevOps connection failed (non-fatal): {e}");
                 }
             }
-            if azdo_cfg.fetch_on_reference {
-                if let Err(e) = self
-                    .fetch_and_persist_azdo_work_items(db, &client, azdo_cfg)
-                    .await
-                {
-                    stats
-                        .errors
-                        .push(format!("ADO work item persistence failed: {e}"));
-                }
-            }
+            // #5219: the ADO work-item pull moved to `work_item_pipeline`,
+            // which runs it through `PmAdapter` alongside JIRA and GitHub.
             if azdo_cfg.fetch_prs {
                 match self.fetch_and_persist_azdo_prs(db, azdo_cfg).await {
                     Ok(n) => {
@@ -472,13 +475,19 @@ impl CollectionPipeline {
                         stats.prs_fetched += n;
                     }
                     Err(e) => {
-                        stats.errors.push(format!("ADO PR fetch failed: {e}"));
+                        stats.fail_stage(format!("ADO PR fetch failed: {e}"));
                     }
                 }
             }
         }
 
         linear_pipeline::fetch_and_store_linear_issues(db, &self.config, &mut stats).await;
+
+        // #5219: JIRA, GitHub Issues and Azure DevOps all reach `work_items`
+        // through one `PmAdapter`-driven pass. Linear stays above because it
+        // writes the provider-specific `linear_issues` in the same pass; see
+        // `work_item_pipeline`'s module doc.
+        work_item_pipeline::fetch_and_persist_work_items(db, &self.config, &mut stats).await;
 
         Ok(stats)
     }
@@ -534,7 +543,7 @@ impl CollectionPipeline {
                 Err(e) => {
                     let msg = format!("reachability scan failed for {name}: {e}");
                     warn!("{msg}");
-                    stats.errors.push(msg);
+                    stats.fail_stage(msg);
                 }
             }
         }
@@ -598,7 +607,7 @@ impl CollectionPipeline {
                     );
                     match GitHubClient::new_for_prs(gh_cfg, repos) {
                         Ok(gh) => providers.push(Box::new(gh)),
-                        Err(e) => stats.errors.push(format!("GitHub client init failed: {e}")),
+                        Err(e) => stats.fail_stage(format!("GitHub client init failed: {e}")),
                     }
                 } else {
                     info!(
@@ -608,7 +617,7 @@ impl CollectionPipeline {
                     );
                     match GitHubClient::new_for_prs(gh_cfg, repos) {
                         Ok(gh) => providers.push(Box::new(gh)),
-                        Err(e) => stats.errors.push(format!("GitHub client init failed: {e}")),
+                        Err(e) => stats.fail_stage(format!("GitHub client init failed: {e}")),
                     }
                 }
             } else {
@@ -642,9 +651,7 @@ impl CollectionPipeline {
             if bb_cfg.fetch_prs {
                 match BitbucketClient::new(bb_cfg) {
                     Ok(bb) => providers.push(Box::new(bb)),
-                    Err(e) => stats
-                        .errors
-                        .push(format!("Bitbucket client init failed: {e}")),
+                    Err(e) => stats.fail_stage(format!("Bitbucket client init failed: {e}")),
                 }
             }
         }
@@ -698,45 +705,9 @@ impl CollectionPipeline {
 
         // Drain results as they complete. Persistence runs on the main task
         // (where `&mut Database` is safe to use) and uses the matching
-        // provider's `store_pull_requests`.
-        while let Some(joined) = set.join_next().await {
-            let (provider_name, fetch_result) = match joined {
-                Ok(t) => t,
-                Err(e) => {
-                    stats.errors.push(format!("PR fetch task panicked: {e}"));
-                    continue;
-                }
-            };
-            match fetch_result {
-                Ok(prs) => {
-                    // Find the matching provider for storage.
-                    let Some(provider) = providers.iter().find(|p| p.name() == provider_name)
-                    else {
-                        stats.errors.push(format!(
-                            "internal: no provider registered for '{provider_name}' \
-                             when storing PRs"
-                        ));
-                        continue;
-                    };
-                    match provider.store_pull_requests(db, &prs) {
-                        Ok(n) => {
-                            info!(provider = %provider_name, prs = n, "stored pull requests");
-                            stats.prs_fetched += n;
-                        }
-                        Err(e) => {
-                            stats
-                                .errors
-                                .push(format!("{provider_name} PR store failed: {e}"));
-                        }
-                    }
-                }
-                Err(e) => {
-                    stats
-                        .errors
-                        .push(format!("{provider_name} PR fetch failed: {e}"));
-                }
-            }
-        }
+        // provider's `store_pull_requests`. The drain lives in
+        // `pr_pipeline` so every fault-severity decision sits in one place.
+        super::pr_pipeline::drain_and_store_pull_requests(set, &providers, db, stats).await;
 
         // Phase 3 (issue #742): GitHub reviewer ingestion pass (serial, after
         // PRs are stored so FK lookups succeed).
@@ -813,7 +784,7 @@ impl CollectionPipeline {
                     Err(e) => {
                         let msg = format!("collection failed for {repo_name}: {e}");
                         warn!("{msg}");
-                        stats.errors.push(msg);
+                        stats.fail_stage(msg);
                     }
                 }
                 return stats.errors.len() - errors_before;
@@ -842,7 +813,7 @@ impl CollectionPipeline {
                     Err(e) => {
                         let msg = format!("collection failed for {repo_name}: {e}");
                         warn!("{msg}");
-                        stats.errors.push(msg);
+                        stats.fail_stage(msg);
                     }
                 }
                 return stats.errors.len() - errors_before;
@@ -873,7 +844,7 @@ impl CollectionPipeline {
                             "collection_runs lookup failed for {repo_name} W{week_no} {year}: {e}"
                         );
                         warn!("{msg}");
-                        stats.errors.push(msg);
+                        stats.skip_item(msg);
                         continue;
                     }
                 }
@@ -906,13 +877,13 @@ impl CollectionPipeline {
                             "failed to record collection_run for {repo_name} W{week_no} {year}: {e}"
                         );
                         warn!("{msg}");
-                        stats.errors.push(msg);
+                        stats.skip_item(msg);
                     }
                 }
                 Err(e) => {
                     let msg = format!("collection failed for {repo_name} W{week_no} {year}: {e}");
                     warn!("{msg}");
-                    stats.errors.push(msg);
+                    stats.skip_item(msg);
                 }
             }
         }
@@ -954,134 +925,6 @@ impl CollectionPipeline {
             count += 1;
         }
         Ok(count)
-    }
-
-    /// Scan stored commit messages for `AB#N` references, batch-fetch the
-    /// referenced ADO work items, and persist them in `work_items` and
-    /// `commit_work_items`.
-    ///
-    /// The pipeline pulls `(sha, message)` from `commits`, computes the unique
-    /// set of referenced IDs, calls
-    /// [`AzureDevOpsClient::get_work_items`] in batches of up to 200, then
-    /// upserts the resulting rows and inserts join-table links.
-    ///
-    /// All work-item linking is done in a single transaction so that a partial
-    /// failure doesn't leave dangling rows.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`crate::collect::CollectError`] if reading commits, calling
-    /// ADO, or writing to SQLite fails.
-    async fn fetch_and_persist_azdo_work_items(
-        &self,
-        db: &mut Database,
-        client: &AzureDevOpsClient,
-        azdo_cfg: &crate::core::config::AzureDevOpsConfig,
-    ) -> Result<()> {
-        use crate::collect::azdo::extract_work_item_refs;
-        use std::collections::{BTreeSet, HashMap};
-
-        // The ticket_regex pattern is validated at config load
-        // (`Config::validate_ticket_regexes`), so compilation here cannot fail
-        // under normal flow. We still propagate the error rather than panic
-        // to keep the no-`unwrap()` invariant in library code from CLAUDE.md.
-        let ticket_re = regex::Regex::new(&azdo_cfg.ticket_regex).map_err(|e| {
-            crate::collect::CollectError::Config(format!(
-                "pm.azure_devops.ticket_regex {:?} failed to compile: {e}",
-                azdo_cfg.ticket_regex
-            ))
-        })?;
-
-        // 1. Pull (sha, message) pairs from the database.
-        let rows: Vec<(String, String)> = {
-            let conn = db.connection();
-            let mut stmt = conn.prepare("SELECT sha, message FROM commits")?;
-            let mapped = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            let mut out = Vec::new();
-            for r in mapped {
-                out.push(r?);
-            }
-            out
-        };
-
-        // 2. Build commit -> [work_item_id] map and the unique ID set.
-        let mut commit_refs: HashMap<String, Vec<u32>> = HashMap::new();
-        let mut all_ids: BTreeSet<u32> = BTreeSet::new();
-        for (sha, msg) in &rows {
-            let ids = extract_work_item_refs(&ticket_re, msg);
-            if !ids.is_empty() {
-                for id in &ids {
-                    all_ids.insert(*id);
-                }
-                commit_refs.insert(sha.clone(), ids);
-            }
-        }
-
-        if all_ids.is_empty() {
-            info!(
-                pattern = %azdo_cfg.ticket_regex,
-                "No work-item references found in commit messages; skipping ADO work item fetch",
-            );
-            return Ok(());
-        }
-
-        // 3. Batch-fetch the referenced work items.
-        let ids: Vec<u32> = all_ids.iter().copied().collect();
-        let items = match client.get_work_items(&ids).await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("ADO get_work_items failed: {e}");
-                return Ok(());
-            }
-        };
-        info!(
-            fetched = items.len(),
-            commits = commit_refs.len(),
-            "Fetched ADO work items for commits",
-        );
-
-        // 4. Persist work items and commit links in a single transaction.
-        let tx = db.connection_mut().transaction()?;
-        let fetched_ids: std::collections::HashSet<u32> = items.iter().map(|w| w.id).collect();
-        for w in &items {
-            let raw_json = serde_json::to_string(w).ok();
-            let tags_csv = if w.tags.is_empty() {
-                None
-            } else {
-                Some(w.tags.join(","))
-            };
-            let row = crate::core::db::WorkItemRow {
-                id: w.id.to_string(),
-                source: "azdo".to_string(),
-                title: w.title.clone(),
-                status: w.state.clone(),
-                item_type: w.work_item_type.clone(),
-                tags: tags_csv,
-                project: Some(w.team_project.clone()),
-                url: w.url.clone(),
-                raw_json,
-            };
-            crate::core::db::work_items::upsert_work_item(&tx, &row)?;
-        }
-        for (sha, ref_ids) in &commit_refs {
-            for id in ref_ids {
-                // Skip refs that ADO didn't return (deleted, scope-restricted)
-                // to avoid FK violations on the join table.
-                if !fetched_ids.contains(id) {
-                    continue;
-                }
-                crate::core::db::work_items::link_commit_work_item(
-                    &tx,
-                    sha,
-                    &id.to_string(),
-                    "azdo",
-                )?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
     }
 
     /// Fetch ADO pull requests referenced by commit-message `Merged PR NNNN:`

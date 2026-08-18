@@ -49,7 +49,7 @@ const BUSY_LABEL: &str = "[thinking...]";
 /// The cursor is positioned by counting chars up to `app.cursor_pos`, not
 /// bytes, so multi-byte input doesn't desync the visual cursor from the true
 /// edit point.
-/// Test: [`tests::draw_input_shows_idle_placeholder_when_empty`] and
+/// Test: `tests::draw_input_shows_idle_placeholder_when_empty` and
 /// friends exercise the pure text composition via [`compose_line`]; the
 /// `Frame`/cursor-position side effects are integration-level and covered by
 /// [`crate::layout::draw`]'s manual/visual verification.

@@ -7,7 +7,7 @@
 //! LABEL (default `tm-agent`), not assignee — no bot account exists. `poll` is the
 //! one-shot, cron-friendly form; `listen` is a long-running poll loop.
 //! What: this module owns the two operator entry points — [`poll`] (discover +
-//! dispatch once, then exit) and [`listen`] (poll-loop until Ctrl-C) — plus the
+//! dispatch once, then exit) and [`listen`](mod@crate::commands::watch::listen) (poll-loop until Ctrl-C) — plus the
 //! repo-coordinate resolver ([`resolve_board_repo`]) and the safety-gate mapping
 //! ([`dispatch_mode`]). Discovery lives in `github`, settings precedence in
 //! `args`, per-issue dispatch in `dispatch`, and the loop in `listen`.
@@ -228,7 +228,7 @@ async fn run_poll_once<R: CommandRunner, L: IssueLister>(
 /// What: loads config, resolves settings, resolves the board repo coords, then
 /// hands off to [`run_listen_loop`] (poll → dedup → dispatch → sleep), which
 /// traps SIGINT for a clean stop.
-/// Test: the dedup core ([`select_new_issues`]) is unit-tested; the loop is
+/// Test: the dedup core ([`select_new_issues`](crate::commands::watch::listen::select_new_issues)) is unit-tested; the loop is
 /// exercised manually (it sleeps + traps signals).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn listen(

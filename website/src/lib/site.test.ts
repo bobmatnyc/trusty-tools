@@ -66,8 +66,13 @@ describe('install commands are grounded in the repository', () => {
 
 	it('STABLE_SET matches stable_set.rs', () => {
 		const source = read('crates/trusty-installer/src/commands/stable_set.rs');
-		const declared = [...source.matchAll(/StableMember::new\("([^"]+)"/g)].map((m) => m[1]);
-		expect(declared.length).toBe(7);
+		// #5200: scope the match to the `stable_set()` body. Sweeping the whole
+		// file also counts the `StableMember::new` in the test module — a
+		// fixture, not a shipped member — so the count drifted with test edits.
+		const body = source.match(/pub fn stable_set\(\) -> Vec<StableMember> \{([\s\S]*?)\n\}/);
+		expect(body, 'stable_set() not found in stable_set.rs').not.toBeNull();
+		const declared = [...body![1].matchAll(/StableMember::new\("([^"]+)"/g)].map((m) => m[1]);
+		expect(declared.length).toBe(8);
 		expect(STABLE_SET).toEqual(declared);
 	});
 

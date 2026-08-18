@@ -32,9 +32,11 @@
 //! file write/edit, it POSTs just that file's fresh content to the daemon's
 //! cheap per-file `POST /indexes/{id}/index-file` endpoint (never a full
 //! reindex walk), so the growing codebase stays searchable within the same
-//! task. Same fail-open contract, and non-blocking by construction (spawns its
-//! own detached thread rather than relying on the caller to wrap it, since
-//! its call sites are tcode's tool executors, not a one-shot task-start hook).
+//! task. Same fail-open contract, and non-blocking by construction (hands the
+//! work to a background pool rather than relying on the caller to wrap it,
+//! since its call sites are tcode's tool executors, not a one-shot task-start
+//! hook). That pool is BOUNDED (issue #2798) — see [`crate::index_dispatch`]
+//! for the sizes and for what happens to a batch submitted when it is full.
 //!
 //! `allow_sensitive_path` (issue #2914 — ephemeral index leak): earlier
 //! revisions hardcoded `allow_sensitive_path: true` on every `POST /indexes`
@@ -63,7 +65,11 @@
 //! `retry_backoff_is_bounded_and_increasing` /
 //! `post_index_file_retries_transient_send_failure` /
 //! `post_index_file_exhausts_retries_and_returns_send_failed` in the `tests`
-//! module below.
+//! module below, plus the #2798 saturation test
+//! `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`.
+//!
+//! [`ensure_project_indexed`]: crate::search_index::ensure_project_indexed
+//! [`index_files_best_effort`]: crate::search_index::index_files_best_effort
 
 use std::path::Path;
 
@@ -399,13 +405,27 @@ fn refuse_daemon_write_under_test(operation: &str, index_id: &str) -> bool {
 /// (expensive); the daemon's per-file `POST /indexes/{id}/index-file`
 /// endpoint lets a caller add or update ONE file's chunks cheaply, so the
 /// growing codebase stays searchable within the same task.
-/// What: spawns ONE detached OS thread and returns immediately — the caller
-/// (a tool executor mid-turn) must never block or fail because trusty-search
-/// is unreachable or slow. Inside the thread, [`index_files_inner`] derives
-/// the same `(root, index_id)` [`ensure_project_indexed`] would (so this
-/// always targets the same index a task-start call already created) and
-/// POSTs each of `paths` to the daemon. A no-op with zero thread spawn when
-/// `paths` is empty.
+/// What: submits ONE job to the shared bounded pool ([`crate::index_dispatch`])
+/// and returns immediately — the caller (a tool executor mid-turn) must never
+/// block or fail because trusty-search is unreachable or slow. On a worker,
+/// [`index_files_inner`] derives the same `(root, index_id)`
+/// [`ensure_project_indexed`] would (so this always targets the same index a
+/// task-start call already created) and POSTs each of `paths` to the daemon. A
+/// no-op with zero work submitted when `paths` is empty.
+///
+/// Saturation (issue #2798): the pool runs at most
+/// [`crate::index_dispatch::MAX_INDEX_WORKERS`] batches at once with at most
+/// [`crate::index_dispatch::INDEX_QUEUE_CAPACITY`] more queued. A batch
+/// submitted when both are full is **DROPPED, not blocked and not queued** —
+/// the alternative, blocking the caller, would turn a slow daemon into a
+/// stalled agent task. The drop is not silent: it is logged at `warn` naming
+/// the file count, the project root, the first path, and the running
+/// process-wide drop total — and it is readable as state via
+/// [`index_drop_stats`], which trusty-code's `GET /health` publishes so a
+/// saturation episode changes the health answer rather than only a log line.
+/// Losing an incremental update degrades mid-task search freshness until the
+/// next write or reindex covers the file; it does not lose the file, and it
+/// does not fail the tool call.
 ///
 /// Sensitive-path note (issue #2747): unlike `POST /indexes`, the per-file
 /// `index-file` endpoint does NOT re-run the sensitive-path denylist — it
@@ -415,23 +435,183 @@ fn refuse_daemon_write_under_test(operation: &str, index_id: &str) -> bool {
 /// an index created under the #2747 `allow_sensitive_path` bypass (a tempdir
 /// root) accepts incremental updates unconditionally. No bypass flag is
 /// threaded through here because none is needed.
-/// Test: this function is a thin spawn wrapper (side-effect only, no return
-/// to assert); its logic is [`index_files_inner`], which the
-/// `index_files_inner_*` tests below exercise directly (synchronously, off
-/// the spawned thread) for determinism.
+/// Test: `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`
+/// covers the submit/reject half; the work itself is [`index_files_inner`],
+/// which the `index_files_inner_*` tests below exercise directly
+/// (synchronously, off any worker) for determinism.
 pub fn index_files_best_effort(project_root: &Path, paths: &[std::path::PathBuf]) {
     if paths.is_empty() {
         return;
     }
+    let count = paths.len();
+    let root_display = project_root.display().to_string();
+    let first = paths.first().map(|p| p.display().to_string());
     let project_root = project_root.to_path_buf();
     let paths = paths.to_vec();
-    std::thread::spawn(move || {
+
+    // #2798: bound the in-flight indexing threads — a degraded daemon must not
+    // let a burst of writes spawn OS threads without limit.
+    let accepted = crate::index_dispatch::global().try_submit(Box::new(move || {
         index_files_inner(&project_root, &paths);
-    });
+    }));
+    if !accepted {
+        tracing::warn!(
+            "DROPPED incremental trusty-search index update for {count} file(s) under \
+             {root_display} (first: {}): all {} indexing workers are busy and the \
+             {}-slot queue is full; {} batch(es) dropped in this process so far (#2798)",
+            first.as_deref().unwrap_or("<none>"),
+            crate::index_dispatch::MAX_INDEX_WORKERS,
+            crate::index_dispatch::INDEX_QUEUE_CAPACITY,
+            crate::index_dispatch::global().rejected(),
+        );
+    }
 }
 
-/// Synchronous body of [`index_files_best_effort`], run on its detached
-/// thread (or called directly by tests for determinism).
+/// How many incremental index batches this process has dropped, and when the
+/// last one happened (#2798 review).
+///
+/// Why: the bound is only acceptable because the loss it creates is visible.
+/// A `warn!` line nobody greps is not visibility, so this is the read surface a
+/// health check consumes — trusty-code's `GET /health` publishes it as
+/// `incremental_index`.
+///
+/// The four fields are two pairs, and both pairs are needed. Within a pair, the
+/// count says whether the loss has EVER happened and the age says whether it is
+/// happening NOW — a monotonic total alone cannot distinguish a wedged daemon
+/// right now from one episode an hour ago. Between the pairs, a DROP means the
+/// pool refused the batch outright and none of it ran, while a TRUNCATION means
+/// the pool accepted and started the batch and then
+/// [`BATCH_INDEX_BUDGET`] cut it short partway. Different causes, different
+/// fixes, so they are never summed: an episode where every batch is accepted
+/// and then truncated leaves files unindexed while `dropped_batches` reads `0`
+/// forever.
+/// What: both counts are monotonic for the life of the process; each age is
+/// `None` until that loss first happens, then the age of the most recent one
+/// (saturating at 0 if the wall clock moved backwards). All four read the
+/// shared pool, so they cover every caller in the process.
+/// Test: `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`
+/// (asserts the drop pair right after a real drop),
+/// `a_truncated_batch_is_counted_separately_from_a_dropped_one`,
+/// `a_fresh_pool_reports_no_drop_ever`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IndexDropStats {
+    /// Batches refused at submission because the pool was saturated, since
+    /// process start. None of a dropped batch's files were indexed.
+    pub dropped_batches: u64,
+    /// Age in seconds of the most recent drop; `None` if there has been none.
+    pub seconds_since_last_drop: Option<u64>,
+    /// Batches the pool accepted and started, then cut short at
+    /// [`BATCH_INDEX_BUDGET`], since process start.
+    ///
+    /// The files a truncated batch had not reached yet are ABANDONED, not
+    /// retried: nothing records which paths were skipped, so this crate never
+    /// attempts them again. They become searchable once something unrelated
+    /// covers them — the next write to the same file, a full reindex, or
+    /// trusty-search's own file watcher where one is running for that index —
+    /// and nothing here triggers or confirms any of those.
+    pub truncated_batches: u64,
+    /// Age in seconds of the most recent truncation; `None` if there has been
+    /// none.
+    pub seconds_since_last_truncation: Option<u64>,
+}
+
+/// Snapshot the shared pool's loss counters — see [`IndexDropStats`].
+///
+/// Test: `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`,
+/// `a_truncated_batch_is_counted_separately_from_a_dropped_one`.
+#[must_use]
+pub fn index_drop_stats() -> IndexDropStats {
+    let pool = crate::index_dispatch::global();
+    IndexDropStats {
+        dropped_batches: pool.rejected(),
+        seconds_since_last_drop: seconds_since(pool.last_drop_unix_secs()),
+        truncated_batches: pool.truncated(),
+        seconds_since_last_truncation: seconds_since(pool.last_truncation_unix_secs()),
+    }
+}
+
+/// Age in seconds of a unix-second stamp, saturating at 0 if the clock moved
+/// backwards.
+fn seconds_since(at: Option<u64>) -> Option<u64> {
+    at.map(|at| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        now.saturating_sub(at)
+    })
+}
+
+/// Wall-clock budget one batch may spend indexing before it stops early.
+///
+/// Why (#2798 review): a job is a whole `write_files` BATCH, and that tool caps
+/// nothing — a scaffold write is one job. At [`MAX_INDEX_ATTEMPTS`]'s ~6.2s
+/// worst case per file against a degraded daemon, a 30-file batch would hold
+/// one of the four workers for over three minutes, and the queue-depth
+/// reasoning behind [`crate::index_dispatch::INDEX_QUEUE_CAPACITY`] collapses.
+/// Capping the batch in TIME is what makes worker turnover derivable: no job
+/// occupies a worker for more than this budget plus the one file already in
+/// flight (~36s), so a full 64-slot queue drains in ~10 minutes worst case
+/// rather than an unbounded time.
+/// What: 30s, checked before each file — never mid-request, so an in-flight
+/// POST always finishes. Files the batch had not reached when the budget ran
+/// out are abandoned; the loss is counted as
+/// [`IndexDropStats::truncated_batches`], separately from a pool rejection.
+/// Test: `batch_budget_is_exhausted_at_and_past_the_cap`.
+pub(crate) const BATCH_INDEX_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Has this batch spent its [`BATCH_INDEX_BUDGET`]?
+///
+/// Test: `batch_budget_is_exhausted_at_and_past_the_cap`.
+fn batch_budget_exhausted(elapsed: std::time::Duration) -> bool {
+    elapsed >= BATCH_INDEX_BUDGET
+}
+
+/// Should this batch stop here? Counts and logs the truncation when it should.
+///
+/// Why: the decision and the accounting are one function so a batch cannot stop
+/// without being counted. When the `break` only logged, a sustained episode in
+/// which every batch was accepted and then truncated reported
+/// `dropped_batches: 0` in `GET /health` for as long as it lasted, while files
+/// went unindexed batch after batch — the same single-reader blind spot the
+/// rejection counter was added to close, reintroduced on the other loss path.
+/// Splitting "decide" from "record" is what would let it come back.
+/// What: returns `true` once [`batch_budget_exhausted`], and on that edge
+/// records the truncation on `pool` (readable as
+/// [`IndexDropStats::truncated_batches`], distinct from a drop) and warns with
+/// how many of the batch's files were reached and how many are abandoned.
+/// Returns `false` and records nothing while the budget holds. `pool` is a
+/// parameter rather than a reach for [`crate::index_dispatch::global`] so the
+/// negative case can assert an untouched counter absolutely, on an isolated
+/// pool, instead of a delta against a process-wide one a sibling test also
+/// writes — the same reason [`crate::index_dispatch::BoundedDispatcher`]'s own
+/// tests build small instances rather than racing the shared pool.
+/// Test: `a_truncated_batch_is_counted_separately_from_a_dropped_one`,
+/// `an_unexhausted_budget_records_no_truncation`.
+fn stop_batch_for_budget(
+    pool: &crate::index_dispatch::BoundedDispatcher,
+    elapsed: std::time::Duration,
+    index_id: &str,
+    done: usize,
+    total: usize,
+) -> bool {
+    if !batch_budget_exhausted(elapsed) {
+        return false;
+    }
+    pool.record_truncation();
+    tracing::warn!(
+        "incremental index update for '{index_id}' stopped after {done} of {total} \
+         file(s): the {}s per-batch budget was exhausted; the remaining {} file(s) \
+         were skipped and are NOT retried — they stay searchable only from the next \
+         write, a reindex, or the daemon's own file watcher (#2798)",
+        BATCH_INDEX_BUDGET.as_secs(),
+        total.saturating_sub(done),
+    );
+    true
+}
+
+/// Synchronous body of [`index_files_best_effort`], run on a pool worker (or
+/// called directly by tests for determinism).
 ///
 /// Why: split out so tests can exercise the fail-open branches (empty index
 /// id, undiscoverable daemon) synchronously, without waiting on — or racing
@@ -445,7 +625,12 @@ pub fn index_files_best_effort(project_root: &Path, paths: &[std::path::PathBuf]
 /// against `root`, reads its current content from disk (an unreadable file —
 /// e.g. deleted since the write — is logged at debug and skipped, not fatal to
 /// the batch), and POSTs it via [`best_effort_index_one_file`] (which itself
-/// retries transient send failures with backoff). Every step fails open.
+/// retries transient send failures with backoff). Every step fails open. The
+/// loop also stops early once [`BATCH_INDEX_BUDGET`] is spent (#2798) — a batch
+/// has no size limit, so without that a single large write pins a pool worker
+/// for minutes. Stopping goes through [`stop_batch_for_budget`], which counts
+/// the truncation into [`index_drop_stats`] as well as logging it; the files it
+/// had not reached are abandoned, never retried from here.
 /// Test: `index_files_inner_is_noop_for_empty_paths`,
 /// `index_files_inner_skips_when_index_id_empty`,
 /// `index_files_inner_skips_gracefully_when_daemon_down`.
@@ -487,7 +672,19 @@ fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
         }
     };
 
-    for path in paths {
+    // #2798: a batch is unbounded in size, so cap it in time — otherwise one
+    // large write holds a worker for minutes and the queue never turns over.
+    let started = std::time::Instant::now();
+    for (done, path) in paths.iter().enumerate() {
+        if stop_batch_for_budget(
+            crate::index_dispatch::global(),
+            started.elapsed(),
+            &index_id,
+            done,
+            paths.len(),
+        ) {
+            break;
+        }
         let abs = if path.is_absolute() {
             path.clone()
         } else {
@@ -652,8 +849,9 @@ fn post_index_file_with_retries(
 /// `client` [`index_files_inner`] built once for the batch (so rapid writes
 /// reuse keep-alive connections). Unlike [`best_effort_create_index`], this
 /// does NOT spawn-and-join its own nested OS thread: it is only ever reached
-/// from inside [`index_files_inner`]'s own detached thread (spawned by
-/// [`index_files_best_effort`]), which is already off any tokio runtime, so a
+/// from inside [`index_files_inner`] running on a [`crate::index_dispatch`]
+/// pool worker (submitted by [`index_files_best_effort`]), a plain
+/// `std::thread` that is already off any tokio runtime, so a
 /// direct blocking call here cannot trigger the "cannot drop a runtime in a
 /// context where blocking is not allowed" panic. A non-2xx response (including
 /// 404 for an unregistered/unknown index — e.g. the daemon restarted since task
@@ -746,6 +944,30 @@ fn create_index_request_body(index_id: &str, root: &Path, opts: IndexOptions) ->
     })
 }
 
+/// Extract the tree a `POST /indexes` response says the index is registered at,
+/// but ONLY when the daemon reported it did not create anything.
+///
+/// Why: `created: true` means the daemon adopted the root that was just sent, so
+/// there is nothing to cross-check. `created: false` means an entry already
+/// existed, and THAT is the case where the registered tree can differ from the
+/// requested one. Returning `None` for every other shape keeps the caller's
+/// behaviour identical against a daemon too old to report `root_path` — the
+/// check strengthens the verdict where it can and never invents a failure where
+/// it cannot.
+/// What: parses `body` as JSON and returns `root_path` when it is a string and
+/// `created` is exactly `false`. Any parse failure, absent field, or wrong type
+/// yields `None`.
+/// Test: `registered_root_from_response_reads_the_already_exists_root`,
+/// `registered_root_from_response_ignores_a_fresh_create`,
+/// `registered_root_from_response_tolerates_a_daemon_that_omits_it`.
+fn registered_root_from_response(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("created")? != &serde_json::Value::Bool(false) {
+        return None;
+    }
+    value.get("root_path")?.as_str().map(str::to_string)
+}
+
 /// POST `/indexes` to find-or-create `index_id`; failures are logged, never
 /// propagated (issue #1373).
 ///
@@ -771,8 +993,17 @@ fn create_index_request_body(index_id: &str, root: &Path, opts: IndexOptions) ->
 /// review): a non-2xx, a transport error, and a panicked worker thread are all
 /// `NotConfirmed`. They are still logged and swallowed — the return value gives
 /// the caller something honest to report, it does not make the call fallible.
-/// Test: exercised via `ensure_project_indexed_returns_derived_id_when_daemon_down`
-/// (daemon-down path); the live HTTP path is covered by integration use.
+///
+/// A 2xx is no longer sufficient on its own. The daemon answers a find-or-create
+/// for an id it already holds with `200 {created: false}`, and reading only the
+/// status made that indistinguishable from a real create — so a caller whose
+/// tree differed from the registered one was told the registration succeeded and
+/// then had every query answered from the OTHER tree, with no error and no
+/// warning. The response now carries the registered `root_path` and a mismatch
+/// downgrades the verdict to `NotConfirmed`.
+/// Test: `ensure_project_indexed_withholds_id_when_nothing_was_registered`
+/// (daemon-down path), `registered_root_from_response_*` (the body contract),
+/// `create_index_response_for_a_different_tree_is_not_confirmed` (the error arm).
 fn best_effort_create_index(
     base: &str,
     index_id: &str,
@@ -792,16 +1023,38 @@ fn best_effort_create_index(
             .connect_timeout(std::time::Duration::from_millis(750))
             .build()?;
         let resp = client.post(&url).json(&body).send()?;
-        Ok::<reqwest::StatusCode, reqwest::Error>(resp.status())
+        let status = resp.status();
+        // The body is read here, inside the worker, because `resp` cannot cross
+        // the join. An unreadable body is not itself a failure — it degrades to
+        // the pre-existing status-only verdict below.
+        let text = resp.text().unwrap_or_default();
+        Ok::<(reqwest::StatusCode, String), reqwest::Error>((status, text))
     })
     .join();
 
     match result {
-        Ok(Ok(status)) if status.is_success() => {
+        Ok(Ok((status, body))) if status.is_success() => {
+            // The daemon answers a find-or-create for an id it already holds
+            // with `200 {created: false}`. Reading only `status` made that
+            // byte-identical to a real create, so a session whose tree differs
+            // from the registered one was told it had been registered and then
+            // had every query answered from the OTHER tree. Compare the tree the
+            // daemon reports against the one that was asked for.
+            match registered_root_from_response(&body) {
+                Some(registered) if !crate::identifies_same_path(Path::new(&registered), root) => {
+                    tracing::warn!(
+                        "trusty-search index '{index_id}' is registered at {registered}, not at \
+                         the requested {root_display}; withholding confirmation so the caller \
+                         cannot pin an index that searches a different tree"
+                    );
+                    return IndexRegistration::NotConfirmed;
+                }
+                _ => {}
+            }
             tracing::debug!("registered trusty-search index '{index_id}' (root={root_display})");
             IndexRegistration::Confirmed
         }
-        Ok(Ok(status)) => {
+        Ok(Ok((status, _))) => {
             tracing::warn!(
                 "trusty-search index registration for '{index_id}' returned HTTP {status}"
             );
@@ -845,7 +1098,7 @@ fn best_effort_create_index(
 /// `index_is_fresh_false_when_last_indexed_missing_or_malformed`; the live-HTTP
 /// trigger path is exercised the same way `best_effort_create_index` is
 /// (daemon-down graceful path via
-/// `ensure_project_indexed_returns_derived_id_when_daemon_down`).
+/// `ensure_project_indexed_withholds_id_when_nothing_was_registered`).
 fn best_effort_trigger_reindex(base: &str, index_id: &str) {
     let status_url = format!("{base}/indexes/{index_id}/status");
     let reindex_url = format!("{base}/indexes/{index_id}/reindex");

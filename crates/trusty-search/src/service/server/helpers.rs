@@ -45,6 +45,13 @@ use crate::core::registry::{IndexHandle, IndexId};
 /// create-index request that opted in (`CreateIndexRequest::allow_sensitive_path`);
 /// every other caller (reindex/relocate root validation) passes `false` to
 /// preserve today's behaviour exactly.
+///
+/// #767 adds step (5): the canonical path must also be APPROVED — present in
+/// `allowlist.toml`, listed by the `trusty-mpm` project registry, or a worktree
+/// provisioned under one of those. Unapproved roots get `403`. This is the one
+/// gate for `POST /indexes`, the reindex `root_path` override, and relocate;
+/// before it existed, `allowlist::check_path` had zero production callers and
+/// the default-deny control gated nothing.
 /// Test: `validate_root_path_denylist_rejects_ssh`, `_rejects_home`,
 /// `_rejects_tmp`, `_accepts_project_dir` in `tests_denylist.rs`;
 /// `create_index_allows_sensitive_path_when_opted_in`,
@@ -54,6 +61,7 @@ use crate::core::registry::{IndexHandle, IndexId};
 pub(super) async fn validate_root_path(
     path: &std::path::Path,
     allow_sensitive_path: bool,
+    allowlist_paths: &crate::allowlist::AllowlistPaths,
 ) -> Result<std::path::PathBuf, Response> {
     if path.as_os_str().is_empty() {
         return Err((
@@ -151,7 +159,84 @@ pub(super) async fn validate_root_path(
         )
             .into_response());
     }
+    // #767: default-deny. The denylist above says which roots are NEVER
+    // indexable; this says which roots ARE — an explicit `allowlist.toml`
+    // entry, a root the project registry lists, or a worktree provisioned
+    // under one of those. A root that matches none of them is refused.
+    // Deliberately AFTER the denylist so an approval can never admit a
+    // sensitive path, and deliberately NOT skipped by `allow_sensitive_path`.
+    //
+    // That flag relaxes `SENSITIVE_PATH_PREFIXES` and NOTHING ELSE. It is not
+    // an approval: a caller that sets it still needs the root approved by
+    // `resolve_allow_source`. An earlier revision of this PR let the flag stand
+    // in for approval, which made `POST /indexes {root_path: "$HOME/Writing",
+    // allow_sensitive_path: true}` succeed against an empty allowlist —
+    // default-deny defeated for every ordinary directory, which is the exact
+    // population #767 exists because of. `trusty-code` passes the flag
+    // unconditionally, so that hole needed no operator action to reach.
+    // Approving such a root is `trusty-search index add --allow-sensitive-path`.
+    //
+    // Calls `resolve_allow_source` rather than `check_path_with`: the denylist
+    // step ran just above with the CORRECT opt-in semantics, and re-running it
+    // here would apply the strict variant and refuse the prefix relaxation the
+    // caller legitimately opted into.
+    match crate::allowlist::sources::resolve_allow_source(&canonical, allowlist_paths) {
+        Ok(Some(source)) => {
+            tracing::debug!(
+                path = %canonical.display(),
+                %source,
+                "indexing approved (#767)"
+            );
+        }
+        Ok(None) => {
+            return Err(allowlist_refusal_response(
+                &canonical,
+                "root is not approved for indexing (default-deny)",
+            ));
+        }
+        Err(e) => {
+            // An unreadable policy is not an empty one — refuse rather than
+            // fall through to "nothing forbids it".
+            return Err(allowlist_refusal_response(
+                &canonical,
+                &format!("allowlist could not be read: {e:#}"),
+            ));
+        }
+    }
     Ok(canonical)
+}
+
+/// Build the `403` a caller gets when a root is not approved for indexing.
+///
+/// Why (#767): the refusal must be LOUD — the incident that produced this
+/// ticket was 74 indexes appearing with no operator action and no log line. It
+/// also has to be actionable, so the body names the exact command that would
+/// approve the root.
+/// What: logs at `warn` with the path and reason, and returns `403` with an
+/// `error` string plus the machine-readable `root_path` and `remedy` fields.
+/// `403` (not `400`) because the request is well-formed and the root exists —
+/// what is missing is authorization.
+/// Test: `create_index_refuses_unlisted_root`,
+/// `create_index_accepts_allowlisted_root` in `tests_allowlist_gate_767.rs`.
+fn allowlist_refusal_response(canonical: &std::path::Path, reason: &str) -> Response {
+    tracing::warn!(
+        path = %canonical.display(),
+        %reason,
+        "indexing refused: root is not on the opt-in allowlist (#767)"
+    );
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": format!("indexing refused: {reason}"),
+            "root_path": canonical.display().to_string(),
+            "remedy": format!(
+                "run `trusty-search index add {}` to approve this root, \
+                 or register it as a project with `tm`",
+                canonical.display()
+            ),
+        })),
+    )
+        .into_response()
 }
 
 /// Determine whether a chunk's stored `file` field falls within an index's
@@ -326,42 +411,65 @@ pub(crate) fn find_root_path_collision(
 /// Decide whether `a` and `b` name the same on-disk root (issue #2519).
 ///
 /// Why: see `find_root_path_collision`'s doc for the case-insensitive
-/// filesystem hazard this closes.
-/// What: prefers `(dev, ino)` identity via `same_filesystem_entry` when both
-/// paths exist; falls back to canonicalized-`PathBuf` equality otherwise.
-/// Test: covered transitively by `find_root_path_collision`'s test list.
-fn identifies_same_root(a: &std::path::Path, b: &std::path::Path) -> bool {
-    match same_filesystem_entry(a, b) {
-        Some(same) => same,
-        None => a == b,
-    }
+/// filesystem hazard this closes. The `(dev, ino)` comparison itself now lives
+/// in `trusty_common::index_id::identifies_same_path`, because the mirror guard
+/// — trusty-common's `best_effort_create_index`, catching same-id-different-tree
+/// — needs the identical answer, and a second copy of a rule this subtle is how
+/// the two silently drift apart.
+/// What: delegates to that shared entry point.
+/// Test: covered transitively by `find_root_path_collision`'s test list; the
+/// primitive's own coverage is `index_id::tests` in trusty-common.
+pub(crate) fn identifies_same_root(a: &std::path::Path, b: &std::path::Path) -> bool {
+    trusty_common::index_id::identifies_same_path(a, b)
 }
 
-/// Compare `a` and `b` by `(dev, ino)`, returning `None` when either path's
-/// metadata cannot be read (does not exist, permission denied, etc.) so the
-/// caller can fall back to string equality.
+/// Build a `409 Conflict` for a `POST /indexes` that reused a registered id
+/// while naming a DIFFERENT directory tree.
 ///
-/// Why: `stat(2)`-level identity is the only reliable way to tell whether two
-/// path strings name the same file on a case-insensitive-but-case-preserving
-/// filesystem (macOS APFS default) — canonicalize() preserves the case each
-/// path was spelled with, it does not normalize case, so two differently-cased
-/// spellings of the same directory canonicalize to two different strings.
-/// What: unix-only (`dev`/`ino` via `std::os::unix::fs::MetadataExt`); no
-/// portable equivalent is wired up for non-unix targets, so this always
-/// returns `None` there and callers fall back to path equality.
-/// Test: `create_index_rejects_case_variant_of_registered_root` (macOS-gated)
-/// in `tests_2336.rs`.
-#[cfg(unix)]
-fn same_filesystem_entry(a: &std::path::Path, b: &std::path::Path) -> Option<bool> {
-    use std::os::unix::fs::MetadataExt;
-    let meta_a = std::fs::metadata(a).ok()?;
-    let meta_b = std::fs::metadata(b).ok()?;
-    Some(meta_a.dev() == meta_b.dev() && meta_a.ino() == meta_b.ino())
-}
-
-#[cfg(not(unix))]
-fn same_filesystem_entry(_a: &std::path::Path, _b: &std::path::Path) -> Option<bool> {
-    None
+/// Why: this is the mirror of `root_path_collision_response`, and until now the
+/// two were asymmetric. Same tree under a new id was refused and hardened three
+/// times (#2336, #2519, #3993); same id over a new tree was ACCEPTED with
+/// `200 {created: false}` and the previously-registered tree went on answering
+/// every query. Nothing told the caller — `best_effort_create_index` read only
+/// the status — so a session opening in one checkout was served results from a
+/// different one, reported as correct. An index identifies a directory tree, so
+/// a request naming a tree the daemon does not have under that id has not been
+/// satisfied, and saying so is the whole fix.
+/// What: `409 { error, index_id, registered_root_path, requested_root_path }`.
+/// Both roots are named because the caller cannot otherwise tell which of its
+/// checkouts it just collided with.
+/// Test: `create_index_same_id_different_root_is_refused`,
+/// `create_index_same_id_same_root_still_reports_already_exists`,
+/// `create_index_same_id_different_root_still_reaps_a_cold_entry` in
+/// `tests_same_id_root_mismatch.rs`.
+pub(super) fn root_path_mismatch_response(
+    index_id: &IndexId,
+    registered: &std::path::Path,
+    requested: &std::path::Path,
+) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": format!(
+                "index '{}' is registered at {:?}; it cannot be re-registered at {:?} \
+                 because one index identifies one directory tree. Use the relocate \
+                 endpoint to move it, or register the other tree under a distinct id",
+                index_id,
+                registered.display(),
+                requested.display(),
+            ),
+            "index_id": index_id.0,
+            // #5827: `json!` on a non-literal expands to `to_value(..).unwrap()`,
+            // and serde's `Serialize for Path` ERRORS on a non-UTF-8 path — so
+            // serializing a raw `&Path` here panics the handler for a canonical
+            // root reached through a symlink to a non-UTF-8 target, which
+            // `validate_root_path` does not reject. The lossy form is what the
+            // sibling builders above and in `indexes_relocate.rs` already use.
+            "registered_root_path": registered.display().to_string(),
+            "requested_root_path": requested.display().to_string(),
+        })),
+    )
+        .into_response()
 }
 
 /// Build a `409 Conflict` response naming the index that already owns
@@ -372,7 +480,7 @@ fn same_filesystem_entry(_a: &std::path::Path, _b: &std::path::Path) -> Option<b
 /// distinct root — a bare 409 with no context forces the operator to
 /// cross-reference `GET /indexes?details=true` by hand.
 /// What: `409 { "error": "...", "existing_id": "..." }`.
-/// Test: see `find_root_path_collision` test list above.
+/// Test: see `find_root_path_collision`'s test list above.
 pub(super) fn root_path_collision_response(
     existing_id: &IndexId,
     root_path: &std::path::Path,

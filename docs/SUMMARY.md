@@ -159,8 +159,6 @@
 
 - [trusty-embedderd](./trusty-embedderd/README.md)
   - [Spec](./trusty-embedderd/SPEC.md)
-- [trusty-bm25-daemon](./trusty-bm25-daemon/README.md)
-  - [Spec](./trusty-bm25-daemon/SPEC.md)
 - [trusty-gworkspace](./trusty-gworkspace/README.md)
   - [Spec](./trusty-gworkspace/SPEC.md)
 - [trusty-cto-db](./trusty-cto-db/README.md)

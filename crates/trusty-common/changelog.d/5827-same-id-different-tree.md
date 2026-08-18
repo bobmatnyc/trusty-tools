@@ -1,0 +1,3 @@
+Fixed
+
+- `ensure_project_indexed` no longer reports a successful registration when the daemon already holds that index id pointed at a different directory tree. `best_effort_create_index` read only the HTTP status, so `200 {created: false, reason: "already exists"}` was indistinguishable from a real create — the caller pinned the id and every later search was answered from the other checkout, with no error. It now reads the registered `root_path` out of the response and withholds confirmation when it names a different tree. A daemon that does not report `root_path` leaves the verdict unchanged ([#5827](https://github.com/bobmatnyc/trusty-tools/issues/5827))

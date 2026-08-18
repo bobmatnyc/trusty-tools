@@ -39,18 +39,35 @@ use std::sync::Arc;
 /// its writes against a throw-away copy — a correctness disaster. Passing
 /// `OpenIntent` lets the function fail loud (Err) for writers while
 /// preserving the snapshot fallback for genuine read-only clients.
-/// What: Two-variant enum. `Writer` → error on lock contention;
-/// `ReadOnlyClient` → snapshot fallback (legacy behaviour, kept for
-/// future read-only client paths).
+/// What: Two-variant enum selecting the recovery policy on two conditions —
+/// lock contention and an incompatible on-disk format. `Writer` → error on
+/// contention, destructive rename-aside-and-recreate on an incompatible
+/// format. `ReadOnlyClient` → snapshot fallback on contention, error on an
+/// incompatible format.
+///
+/// Scope of the read-only guarantee (issue #4911): `ReadOnlyClient` guarantees
+/// that *this function* never moves, replaces, or truncates the file at
+/// `path`. It does NOT hand back a handle that is incapable of writing — on an
+/// uncontended file `Database::create` returns a normal read-write
+/// [`redb::Database`], and callers such as `KgStoreRedb::open_with_intent`
+/// then run their table-init write transaction against the live file.
+/// redb 4.1's `ReadOnlyDatabase` cannot serve this variant: it is a distinct
+/// type that cannot be opened concurrently with a `Database`, which is exactly
+/// the daemon-holds-the-lock case `ReadOnlyClient` exists to serve.
 /// Test: `writer_intent_fails_on_locked_file`,
-/// `snapshot_fallback_when_locked` (ReadOnlyClient path).
+/// `snapshot_fallback_when_locked` (ReadOnlyClient path),
+/// `read_only_intent_refuses_incompatible_format_and_leaves_store_intact`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenIntent {
     /// The caller needs read-write access. When the file is already locked
-    /// by another process, return `Err` rather than opening a snapshot.
+    /// by another process, return `Err` rather than opening a snapshot. When
+    /// the file is in an incompatible format, recover it destructively
+    /// (issue #702): rename it aside and create a fresh empty database.
     Writer,
     /// The caller only needs to read. When the file is already locked, open
-    /// a process-local snapshot copy (existing behaviour, issue #59).
+    /// a process-local snapshot copy (existing behaviour, issue #59). When the
+    /// file is in an incompatible format, return `Err` — never rename the
+    /// caller's store aside (issue #4911).
     ReadOnlyClient,
 }
 
@@ -257,13 +274,18 @@ fn snapshot_path_for(original: &Path) -> PathBuf {
 /// [`WRITER_RETRY_ATTEMPTS`] times with exponential backoff
 /// ([`WRITER_RETRY_SLEEP_MS`]); if the lock is still held after the window,
 /// returns `Err` with a clear, actionable message and an ERROR log — never a
-/// snapshot. Returns the open database, a `SnapshotGuard` that removes the
+/// snapshot. On an incompatible on-disk format `intent` decides again
+/// (issue #4911): Writer runs the #702 rename-aside-and-recreate recovery and
+/// returns [`OpenMode::Recreated`]; ReadOnlyClient returns `Err` with the file
+/// untouched. Returns the open database, a `SnapshotGuard` that removes the
 /// snapshot file when dropped, and the `OpenMode` so the caller can reject
 /// writes when running on a snapshot.
 /// Test: `snapshot_fallback_when_locked` (ReadOnlyClient path),
 /// `writer_intent_fails_on_locked_file` (Writer persistent-conflict path),
-/// and `writer_intent_retries_then_succeeds_when_lock_released` (Writer
-/// transient-conflict path, issue #1487).
+/// `writer_intent_retries_then_succeeds_when_lock_released` (Writer
+/// transient-conflict path, issue #1487), and
+/// `read_only_intent_refuses_incompatible_format_and_leaves_store_intact`
+/// (issue #4911).
 pub fn try_open_or_snapshot(
     path: &Path,
     intent: OpenIntent,
@@ -275,28 +297,12 @@ pub fn try_open_or_snapshot(
         // safe to move it aside and create a fresh empty database. The caller
         // receives `OpenMode::Recreated` and must surface degraded status —
         // never report this store as `ready`.
-        Err(e) if super::redb_open::is_incompatible_format(&e) => {
-            let backup = super::redb_open::backup_incompatible_file(path).with_context(|| {
-                format!(
-                    "back up incompatible-format redb file {} before recreating",
-                    path.display()
-                )
-            })?;
-            let db = Database::create(path).with_context(|| {
-                format!(
-                    "create fresh redb after moving incompatible file aside at {}",
-                    path.display()
-                )
-            })?;
-            tracing::error!(
-                path = %path.display(),
-                backup = %backup.display(),
-                error = %e,
-                "redb file is in an incompatible/old format (redb 2.x); moved it aside and \
-                 created a fresh empty database — this palace must be rebuilt, not treated as ready"
-            );
-            Ok((Arc::new(db), SnapshotGuard::noop(), OpenMode::Recreated))
-        }
+        Err(e) if super::redb_open::is_incompatible_format(&e) => match intent {
+            OpenIntent::Writer => recreate_incompatible_file(path, &e),
+            // #4911: this recovery relocates the caller's store, so it belongs
+            // to the writer that owns the file, not to a read-only client.
+            OpenIntent::ReadOnlyClient => Err(refuse_incompatible_file(path, &e)),
+        },
         Err(DatabaseError::DatabaseAlreadyOpen) => match intent {
             // Issue #1152, Tier 3 + #1487: a writer that hits the lock must
             // fail loud (never a snapshot), but only after a short bounded
@@ -307,6 +313,108 @@ pub fn try_open_or_snapshot(
         },
         Err(e) => Err(anyhow::anyhow!("open redb at {}: {e}", path.display())),
     }
+}
+
+/// Move an incompatible-format redb file aside and create a fresh empty one.
+///
+/// Why (issue #702): redb 4.x cannot open a file written by redb 2.x, so a
+/// routine binary upgrade would otherwise crash the daemon on its first warm
+/// boot. The writer that owns the file recovers by renaming the stale bytes to
+/// a `*.v2-incompatible` sibling and starting empty, returning
+/// [`OpenMode::Recreated`] so the store is surfaced as degraded rather than
+/// `ready` (the #601/#694 false-healthy guard).
+/// What: extracted verbatim from the [`try_open_or_snapshot`] match arm when
+/// #4911 restricted it to [`OpenIntent::Writer`]. Backs the file up, creates a
+/// fresh database at the original path, logs an ERROR naming both paths. A
+/// failed backup propagates rather than recreating over un-backed-up bytes.
+/// Test: `recreates_on_incompatible_format`.
+fn recreate_incompatible_file(
+    path: &Path,
+    err: &DatabaseError,
+) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    let backup = super::redb_open::backup_incompatible_file(path).with_context(|| {
+        format!(
+            "back up incompatible-format redb file {} before recreating",
+            path.display()
+        )
+    })?;
+    let db = Database::create(path).with_context(|| {
+        format!(
+            "create fresh redb after moving incompatible file aside at {}",
+            path.display()
+        )
+    })?;
+    tracing::error!(
+        path = %path.display(),
+        backup = %backup.display(),
+        error = %err,
+        "redb file is in an incompatible/old format (redb 2.x); moved it aside and \
+         created a fresh empty database — this palace must be rebuilt, not treated as ready"
+    );
+    Ok((Arc::new(db), SnapshotGuard::noop(), OpenMode::Recreated))
+}
+
+/// Refuse to open an incompatible-format redb file under read-only intent.
+///
+/// Why (issue #4911): the #702 recovery renames the operator's store aside and
+/// substitutes an empty one. Running it for a caller that declared
+/// [`OpenIntent::ReadOnlyClient`] turns a recoverable format problem into
+/// apparent total data loss, and it fired on the first `Database::create`
+/// error regardless of intent — so a reporting tool that only wanted to read a
+/// palace could relocate it. Returning `Err` leaves the bytes exactly where
+/// they are; a writer-intent open still performs the recovery.
+/// What: logs an ERROR at the point of refusal (so an eager-hydration caller
+/// that downgrades the returned error to a WARN — `PalaceRegistry::open` does
+/// — cannot bury it) and returns an error naming the path, the underlying redb
+/// error, and the writer-intent open that can recover it.
+/// Test: `read_only_intent_refuses_incompatible_format_and_leaves_store_intact`.
+fn refuse_incompatible_file(path: &Path, err: &DatabaseError) -> anyhow::Error {
+    tracing::error!(
+        path = %path.display(),
+        error = %err,
+        "redb file is in an incompatible/old format (redb 2.x) and this open declared \
+         read-only intent; refusing to move it aside and substitute an empty database \
+         (issue #4911) — the file is untouched"
+    );
+    anyhow::Error::new(IncompatibleFormatRefused {
+        message: format!(
+            "palace redb file {} is in an incompatible/old on-disk format ({err}); this open \
+             declared read-only intent, so the file was left exactly as it is rather than being \
+             renamed aside and replaced with an empty database. Re-open with OpenIntent::Writer \
+             (the trusty-memory daemon) to run that recovery, or migrate the file out of band.",
+            path.display()
+        ),
+    })
+}
+
+/// The error [`refuse_incompatible_file`] returns, as a downcastable type.
+///
+/// Why (issue #4911): both store retry loops — `KgStoreRedb::open_with_intent`
+/// and `open_or_get_cached_db` — retry on ANY `Err`, because every failure they
+/// were written for was a transient lock or TOCTOU race that waiting resolves.
+/// A refused incompatible format never resolves by waiting, so an untyped error
+/// would burn all four backoff slots (162 ms) and emit the refusal ERROR five
+/// times for one file. A concrete type lets those loops stop on the first one.
+/// What: carries the fully-composed message so the `Display` a caller sees is
+/// identical to the untyped error it replaces. Crate-private: it exists to be
+/// recognised, not constructed, outside this module.
+/// Test: `read_only_intent_refuses_incompatible_format_and_leaves_store_intact`
+/// asserts the refusal; `refusal_is_recognised_through_a_context_layer` asserts
+/// it survives the `.with_context` wrap `open_or_get_cached_db` applies.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct IncompatibleFormatRefused {
+    message: String,
+}
+
+/// Whether `err` is the read-only refusal of an incompatible on-disk format.
+///
+/// Why: the retry loops must not spend their backoff window on a condition that
+/// cannot change (issue #4911).
+/// What: downcasts through any `.context()` layers the caller added.
+/// Test: `refusal_is_recognised_through_a_context_layer`.
+pub(crate) fn is_incompatible_format_refusal(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<IncompatibleFormatRefused>().is_some()
 }
 
 /// Open `path` exclusively for a writer, retrying through a brief
@@ -654,6 +762,104 @@ mod tests {
         // The fresh DB is writable.
         let wtx = db.begin_write().unwrap();
         wtx.commit().unwrap();
+    }
+
+    /// Why (issue #4911): `ReadOnlyClient` reads as a promise that the open
+    /// cannot disturb the caller's store, and the #702 recovery broke that
+    /// promise on an UNLOCKED palace — it renamed the store aside and handed
+    /// back a fresh empty one, so a read-only reporting tool could relocate an
+    /// operator's data. Asserting only that an error surfaces is not enough;
+    /// the property that matters is that the bytes did not move.
+    /// What: writes the same garbage fixture `recreates_on_incompatible_format`
+    /// uses into two temp dirs. The `ReadOnlyClient` open must return `Err`,
+    /// leave the file byte-identical, and create no `.v2-incompatible`
+    /// sibling. The `Writer` open over the identical fixture must still
+    /// recover — that arm is the anti-vacuous guard: it proves the fixture
+    /// really does trip `is_incompatible_format`, so the read-only assertions
+    /// cannot pass because redb simply accepted the file.
+    /// Test: this test.
+    #[test]
+    fn read_only_intent_refuses_incompatible_format_and_leaves_store_intact() {
+        const GARBAGE: [u8; 4096] = [0xABu8; 4096];
+
+        // Anti-vacuous guard: the identical fixture MUST reach the
+        // incompatible-format arm, or the read-only half proves nothing.
+        let writer_dir = tempdir().unwrap();
+        let writer_path = writer_dir.path().join("kg.redb");
+        std::fs::write(&writer_path, GARBAGE).unwrap();
+        let (_db, _guard, mode) = try_open_or_snapshot(&writer_path, OpenIntent::Writer)
+            .expect("fixture must reach the #702 writer recovery");
+        assert_eq!(
+            mode,
+            OpenMode::Recreated,
+            "fixture is not classified as an incompatible format, so the read-only \
+             assertions below would pass for the wrong reason"
+        );
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        std::fs::write(&path, GARBAGE).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let result = try_open_or_snapshot(&path, OpenIntent::ReadOnlyClient);
+        assert!(
+            result.is_err(),
+            "a read-only-intent open must refuse an incompatible-format file, \
+             not recover it destructively"
+        );
+
+        // The direction that matters: the store did not move and did not change.
+        assert!(
+            path.exists(),
+            "the store must still be at its original path"
+        );
+        assert_eq!(
+            before,
+            std::fs::read(&path).unwrap(),
+            "the store must be byte-identical after a refused read-only open"
+        );
+        let mut entries: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec!["kg.redb".to_string()],
+            "no backup sibling may be created — nothing was renamed aside"
+        );
+    }
+
+    /// Why (issue #4911): `open_or_get_cached_db` wraps every
+    /// `try_open_or_snapshot` result in `.with_context(…)` before its retry
+    /// loop inspects it. If the refusal marker did not survive that wrap the
+    /// loop would fall back to retrying, which is the 162 ms / five-ERROR-log
+    /// behaviour the marker exists to prevent — and nothing would fail, so the
+    /// regression would be invisible.
+    /// What: refuses an incompatible-format file, adds a context layer the way
+    /// the vector store does, and asserts the marker is still recognised and
+    /// the original message still reachable.
+    /// Test: this test.
+    #[test]
+    fn refusal_is_recognised_through_a_context_layer() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("index.usearch.redb");
+        std::fs::write(&path, [0xABu8; 4096]).unwrap();
+
+        let Err(err) = try_open_or_snapshot(&path, OpenIntent::ReadOnlyClient) else {
+            panic!("read-only intent must refuse an incompatible-format file");
+        };
+        assert!(is_incompatible_format_refusal(&err));
+
+        let wrapped = err.context(format!("open vector redb at {}", path.display()));
+        assert!(
+            is_incompatible_format_refusal(&wrapped),
+            "the marker must survive the .with_context wrap open_or_get_cached_db applies"
+        );
+        assert!(
+            format!("{wrapped:#}").contains("incompatible/old on-disk format"),
+            "the operator-facing message must still be reachable through the wrap"
+        );
     }
 
     /// Why: A path is process-scoped; running tests in parallel must not

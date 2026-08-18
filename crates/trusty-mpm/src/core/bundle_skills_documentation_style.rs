@@ -19,7 +19,7 @@
 
 /// `documentation-style` skill entry point (issue #2911).
 ///
-/// Why: registration in [`crate::core::bundle_all::ALL`] (not just the asset
+/// Why: registration in [`crate::core::bundle_all::ALL`](crate::core::bundle::ALL) (not just the asset
 /// file existing under `src/assets/skills/`) is what makes
 /// `deploy_all_skill_tiers` actually ship it — the tm-doctor.md orphaning
 /// lesson (`bundle_tm_skills.rs`'s module doc) applies here too.

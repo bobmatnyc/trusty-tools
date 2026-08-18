@@ -11,7 +11,7 @@ use clap::Subcommand;
 ///
 /// Why: `poll` and `listen` share every flag but differ in lifecycle (one-shot
 /// vs loop); a sub-subcommand enum keeps them discoverable and individually
-/// parseable while reusing one flag set via the flattened [`WatchArgs`].
+/// parseable while reusing one flag set via the flattened [`WatchArgs`](crate::cli::actions::WatchArgs).
 /// What: `Poll` (discover + dispatch once, then exit) and `Listen` (repeatedly
 /// poll on an interval, processing newly-matched issues, until Ctrl-C).
 /// Test: `cli_parses_watch_poll`, `cli_parses_watch_listen` in `tests.rs`.

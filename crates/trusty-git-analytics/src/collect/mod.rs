@@ -20,6 +20,9 @@
 //! - [`ai_markers`] — the agentic-marker set behind `agentic_mode` detection
 //! - [`ai_marker_config`] — operator-supplied markers, read from a file (#5414)
 //! - [`errors`] — module-level error type ([`CollectError`])
+//! - [`fault`] — severity-tagged non-fatal faults ([`CollectionFault`], #5655)
+//! - [`work_item_pipeline`] — the provider-agnostic `work_items` pull that
+//!   runs every [`PmAdapter`] over the commit corpus (#5219)
 
 pub mod ai_attribution;
 pub mod ai_marker_config;
@@ -30,6 +33,7 @@ pub mod collector;
 pub mod correlate;
 pub mod env_expand;
 pub mod errors;
+pub mod fault;
 pub mod git;
 pub mod github;
 mod github_pipeline;
@@ -39,13 +43,19 @@ pub mod linear;
 mod linear_pipeline;
 mod notify;
 pub mod pm_adapter;
+// #5734: the concurrent PR fetch drain, split out of `collector` (frozen SLOC).
+mod pr_pipeline;
 pub mod pr_provider;
 pub mod ticket;
 pub mod weeks;
+// #5219: the provider-agnostic `work_items` pull, and the only production
+// caller of `build_adapters`.
+pub mod work_item_pipeline;
 
 pub use collector::{CollectionPipeline, CollectionStats};
 pub use correlate::{correlate_commits, CorrelationOutcome};
 pub use errors::{CollectError, Result};
+pub use fault::{CollectionFault, FaultSeverity};
 pub use pm_adapter::{
     build_adapters, AzureDevOpsAdapter, GitHubAdapter, JiraAdapter, LinearAdapter, PmAdapter,
     PmError, PmSource, PmTicket,

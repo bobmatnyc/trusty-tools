@@ -1,0 +1,15 @@
+TYPES tga 2.19.1
+  baseline: /repo/target/semver-checks/cache/tga-2_19_0-aarch64_apple_darwin-b9afc9ea5d7838c6.json
+  current:  /repo/target/semver-checks/local-tga-2_19_1-aarch64_apple_darwin-e222d1f636266871/target/doc/tga.json
+CHANGED fn tga::collect::linear::LinearClient::fetch_referenced_issues -> : Vec<LinearIssue> -> Result<Vec<LinearIssue>>
+CHANGED fn tga::collect::linear::client::LinearClient::fetch_referenced_issues -> : Vec<LinearIssue> -> Result<Vec<LinearIssue>>
+compared: 7628 public item(s); 2 changed, 0 removed, 89 added
+
+TYPE CHANGE(S) FOUND in the public API of tga 2.19.1, listed above.
+
+cargo-semver-checks does not compare types, so NONE of these will appear in its
+output however strict --release-type is. Each one is a source-breaking change
+for any caller that named the old type.
+
+Confirm every one was intended. If the release is not already carrying a
+breaking bump, it needs one — 0.x crates in the MINOR position, 1.x+ in MAJOR.

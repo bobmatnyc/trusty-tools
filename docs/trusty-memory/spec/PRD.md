@@ -44,7 +44,7 @@ over HTTP, and a human can browse the same data in an embedded web dashboard.
 
 The product is deliberately **single-install**: `cargo install trusty-memory`
 produces three binaries (`trusty-memory`, `trusty-memory-mcp-bridge`, and the
-bundled `trusty-bm25-daemon`) so an operator never has to hand-assemble a sidecar
+in-process BM25 lane) so an operator never has to hand-assemble a sidecar
 fleet.
 
 ### Mission
@@ -77,7 +77,7 @@ served as a standalone daemon, with no code change.
 | G2 | **Palace namespacing anchored to projects** — one palace per project (slug-derived), plus a `personal` escape hatch. | ✅ |
 | G3 | **Multi-transport single daemon** — one long-lived daemon serving MCP (via the stdio→UDS bridge), HTTP/SSE REST, and a `POST /rpc` JSON-RPC surface. | ✅ |
 | G4 | **Fire-and-forget writes for sub-agents** — a `note` CLI + `POST /api/v1/remember` that returns immediately (detached spawn) for agents with no MCP connection. | ✅ |
-| G5 | **Bundled BM25 sidecar** — ship and auto-spawn `trusty-bm25-daemon` so lexical recall works out of the box (single-install convention). | ✅ |
+| G5 | **In-process BM25 lane** — lexical recall works out of the box with no second binary and no subprocess (#5329). | ✅ |
 | G6 | **Temporal knowledge graph** — assert/query time-bounded triples; auto-extraction on write; visual graph in the UI. | ✅ |
 | G7 | **Idle-time consolidation ("dream")** — NLP dedup/prune/compact + optional LLM-backed semantic consolidation. | ✅ |
 | G8 | **Embedded admin UI** — Svelte dashboard compiled into the binary (no Node at runtime). | ✅ |
@@ -133,7 +133,7 @@ to `crates/trusty-memory/src/`.
 
 **FR-1.2 — Hybrid recall (`memory_recall`)** ✅
 - *Vision:* A query returns the most relevant drawers using BM25 *and* vector similarity, cheaply.
-- *Current:* Implemented over the **4-layer progressive retrieval** (`memory_core/retrieval.rs`): L0 (palace identity) + L1 (top-N essential, persisted as `l1_cache.json`) are always loaded (~900 tokens); L2 (on-demand vector) is paid only when the query needs it. BM25 comes from the bundled `trusty-bm25-daemon`; vectors from the in-process HNSW index.
+- *Current:* Implemented over the **4-layer progressive retrieval** (`memory_core/retrieval.rs`): L0 (palace identity) + L1 (top-N essential, persisted as `l1_cache.json`) are always loaded (~900 tokens); L2 (on-demand vector) is paid only when the query needs it. BM25 comes from the in-process lexical lane (#5329); vectors from the in-process HNSW index.
 - *Gap:* None material.
 
 **FR-1.3 — Deep recall (`memory_recall_deep`)** ✅
@@ -202,17 +202,23 @@ to `crates/trusty-memory/src/`.
 - *Current:* `/api/v1/*` covers status, palaces, drawers, recall, KG (subjects/graph/triples/gaps/aliases), chat, config, activity, dream, messages, and logs (`web.rs`).
 - *Gap:* None material.
 
-### 4.5 BM25 Sidecar (`bm25_supervisor.rs`, `src/bin/bm25_daemon.rs`)
+### 4.5 BM25 Lexical Lane (`bm25_lane.rs`, `bm25_index.rs`)
 
-**FR-5.1 — Bundled single-install daemon** ✅
-- *Vision:* `cargo install trusty-memory` produces the `trusty-bm25-daemon` binary too, so lexical recall works without a separate install.
-- *Current:* The `[[bin]]` shim (`src/bin/bm25_daemon.rs`) delegates to `trusty_bm25_daemon::run()`; the daemon crate is a Cargo dependency so it builds and installs alongside (mirrors #190 for trusty-embedderd).
+**FR-5.1 — Lexical recall with no separate install** ✅
+- *Vision:* `cargo install trusty-memory` gives an operator working lexical recall without assembling a sidecar.
+- *Current:* #5329 collapsed `trusty-bm25-daemon` into this process. There is no second binary to install, no socket to reach, and no supervisor to configure — `TRUSTY_BM25_DAEMON=1` and the lane is on. The variable keeps its daemon-era name deliberately: renaming it would break the only enablement path an operator could already have set.
 - *Gap:* None material.
 
-**FR-5.2 — Per-palace spawn supervision** ✅
-- *Vision:* On first BM25 use for a palace, auto-spawn a child with the right `--palace`/`--data-dir`, poll its socket, and own the process for the daemon's life — so operators never hand-`launchctl bootstrap` one daemon per palace.
-- *Current:* `Bm25Supervisor` (`bm25_supervisor.rs`, #193) keyed by palace id, with a `tokio::sync::Mutex<HashMap<…>>` guarding against double-spawn. Graceful SIGTERM → SIGKILL shutdown via `libc::kill`. `TRUSTY_BM25_EXTERNAL=1` opts out (operator runs their own daemon).
-- *Gap:* Unix-only (the daemon protocol is UDS).
+**FR-5.2 — Bounded per-palace residency** ✅
+- *Vision:* One `memory_recall_all` touches every palace on disk (~99 on this host), and the lane must not hold every corpus in memory for the process's lifetime.
+- *Current:* `Bm25Lane` (`bm25_lane.rs`) keeps an LRU-bounded map of resident indexes, flushing each victim's snapshot before dropping it. `TRUSTY_BM25_MAX_PALACES` (default 3) carries forward the #2845 cap and `TRUSTY_BM25_TEXT_BUDGET_MB` (default 512) carries forward #2846's ceiling, measured against retained corpus text rather than child RSS.
+- *Gap:* Losing a process boundary means a runaway index cannot be killed independently of recall. The text budget bounds it; it does not isolate it.
+
+**FR-5.3 — Snapshots survive the collapse and a restart** ✅
+- *Vision:* Turning the lane on, restarting the daemon, or downgrading a release must not lose a palace's corpus.
+- *Current:* `PalaceBm25Index` reads and writes the daemon-era snapshot path and format verbatim (`<data_root>/<palace>/bm25/bm25_index.json`). Covered by `tests/bm25_lane_e2e.rs`.
+- *Gap:* None material.
+
 
 ### 4.6 Knowledge Graph & Facts (`kg_extract.rs`, `bootstrap.rs`, `discovery.rs`, `prompt_facts.rs`, `memory_core/store/kg*.rs`)
 

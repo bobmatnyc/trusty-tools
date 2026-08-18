@@ -310,13 +310,21 @@ async fn fetch_drawers_by_tag(
     resp.json::<Vec<DrawerRow>>().await.unwrap_or_default()
 }
 
-/// Resolve the current project's trusty-memory palace id from `cwd` — the
-/// read-only variant (`project_slug_at_readonly`) so a poll of this endpoint
-/// never has the side effect of lazily writing a pin file (that side effect
-/// is reserved for interactive `trusty-memory` commands, not a GUI GET
-/// handler polled on an interval).
+/// Resolve the current project's trusty-memory palace id from `cwd`.
+///
+/// Why: this used `project_slug_at_readonly`, which is pin-then-BASENAME and
+/// consults no git identity — so an unpinned repo listed workstreams from
+/// `<dirname>` while the daemon wrote them to `<owner>-<repo>` and the endpoint
+/// showed an empty list (#5811). The shared entry point answers the same way as
+/// every other caller, and is still side-effect-free, so a polled GET never
+/// writes a pin file.
+/// What: returns `None` when no level yields an id or when a pin exists but
+/// cannot be trusted — an empty workstream list is the safe answer for a poll.
 pub(crate) fn palace_id_for(cwd: &Path) -> Option<String> {
-    trusty_memory::project_root::project_slug_at_readonly(cwd)
+    trusty_common::palace_resolve::resolve_palace(cwd)
+        .inspect_err(|e| tracing::debug!("no palace for {}: {e}", cwd.display()))
+        .ok()
+        .map(|r| r.id)
 }
 
 /// Core listing logic against an explicit cwd + trusty-memory base URL.
@@ -408,25 +416,28 @@ fn build_http_client() -> Option<reqwest::Client> {
 /// (`tags = ["ws:<label>"]`) or a refreshed per-workstream summary
 /// (`tags = ["ws-summary:<label>"]`).
 ///
-/// Why: resolves the palace id via the WRITING `project_slug_at` (may
-/// lazily create the pin file), unlike every read helper above, since this
-/// only runs on a genuine chat turn, never a poll. Returns `Err` on failure
-/// instead of silently dropping the turn — callers log it and carry on.
+/// Why: this is a WRITE path, so resolving it differently from the readers is
+/// how drawers end up somewhere nobody looks. It used the writing
+/// `project_slug_at` (pin-then-basename, no git identity, and a lazy pin-file
+/// write as a side effect); it now uses the same entry point as every other
+/// caller (#5811). Returns `Err` on failure instead of silently dropping the
+/// turn — callers log it and carry on.
 /// What: idempotently ensures the palace exists (`force: true`, matching
 /// `TrustyMemoryClient::ensure_palace`), then posts the drawer with
 /// `force: true` (bypasses trusty-memory's signal/noise gate for
 /// short/structured content, same rationale as `CreateDrawerReq::force`).
 /// Test: `create_tagged_drawer_at_and_drawers_by_tag_at_round_trip`,
-/// `create_tagged_drawer_at_no_project_root_errs`.
+/// `create_tagged_drawer_at_without_a_project_root_still_resolves_a_palace`,
+/// `create_tagged_drawer_at_malformed_pin_errs`.
 pub(crate) async fn create_tagged_drawer_at(
     cwd: &Path,
     base_url: &str,
     content: &str,
     tags: Vec<String>,
 ) -> Result<()> {
-    let Some(palace_id) = trusty_memory::project_root::project_slug_at(cwd) else {
-        bail!("no project root found at {}", cwd.display());
-    };
+    let palace_id = trusty_common::palace_resolve::resolve_palace(cwd)
+        .with_context(|| format!("resolve palace for {}", cwd.display()))?
+        .id;
     let client = build_http_client().context("building trusty-memory HTTP client")?;
 
     let create_url = format!("{}/api/v1/palaces", base_url.trim_end_matches('/'));

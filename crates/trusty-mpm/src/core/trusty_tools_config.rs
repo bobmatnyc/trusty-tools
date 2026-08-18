@@ -185,7 +185,7 @@ pub struct TrustyToolsConfig {
 /// per-call flag a careless/compromised caller could always supply.
 /// What: currently one toggle, `allow_mcp_spawn`; resolution precedence (env >
 /// config > safe default) lives in
-/// [`crate::daemon::managed_routes::mcp_spawn_gate::mcp_spawn_enabled`], not
+/// `crate::daemon::managed_routes::mcp_spawn_gate::mcp_spawn_enabled`, not
 /// here — this is purely the on-disk shape.
 /// Test: `daemon_config_yaml_round_trip`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -664,7 +664,7 @@ pub fn workspace_root(config: &TrustyToolsConfig) -> PathBuf {
 ///
 /// Why: the creation sites (`provisioner::workspace`,
 /// `daemon::managed_routes::inproject`) need the single name new worktrees are
-/// created under. Detection sites must use [`worktree_dir_names`] instead —
+/// created under. Detection sites must use `worktree_dir_names` instead —
 /// see that function for why the two differ.
 /// What: delegates to [`trusty_common::workspace_layout::worktrees_dirname`],
 /// which applies **`TRUSTY_MPM_WORKTREES_DIRNAME` env > config

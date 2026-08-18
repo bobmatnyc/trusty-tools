@@ -24,6 +24,11 @@
 //!
 //! Test: `cargo test -p trusty-mpm` exercises the tool catalog, argument
 //! parsing, and dispatch against an in-memory mock backend.
+//!
+//! [`tools::TOOL_CATALOG`]: crate::mcp::tools::TOOL_CATALOG
+//! [`OrchestratorBackend`]: crate::mcp::OrchestratorBackend
+//! [`dispatch`]: crate::mcp::dispatch
+//! [`Request`]: trusty_common::mcp::Request
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -127,14 +132,16 @@ pub trait OrchestratorBackend: Send + Sync {
 
     /// Back `session_new`: spawn a new managed session.
     ///
-    /// Why: the driver skill needs a typed, JSON-native way to create an
-    ///      isolated, provisioned workspace and launch a harness in it — without
-    ///      scraping `tm session new` CLI text (the #842 defect).
-    /// What: provisions a workspace cloned from `repo_url` at `git_ref`, creates
-    ///       the tmux host, launches the selected `runtime` (default claude-code)
-    ///       with `task`, and returns the new session's id / tmux name /
-    ///       workspace path / state / attach command. An unknown `runtime` value
-    ///       is an error string.
+    /// Why: the driver skill needs a typed, JSON-native way to provision a
+    ///      session workspace and launch a harness in it — without scraping
+    ///      `tm session new` CLI text (the #842 defect).
+    /// What: a LOCAL `repo_url` runs the session on that main checkout itself,
+    ///       writing documents and configuration only (ADR-0037, ADR-0044); a
+    ///       remote `repo_url` is cloned into a freshly-provisioned isolated
+    ///       workspace. Either way this creates the tmux host, launches the
+    ///       selected `runtime` (default claude-code) with `task`, and returns
+    ///       the new session's id / tmux name / workspace path / state /
+    ///       attach command. An unknown `runtime` value is an error string.
     /// Test: `dispatch_session_new_tool` (mock) + the daemon-side
     ///       `session_new_spawns_via_manager` integration test.
     async fn session_new(
@@ -235,8 +242,12 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       always safe. `tmux_window` is the caller's own
     ///       `session_name:window_index:window_id`; it resolves a snapshot only
     ///       when `session_id` matched nothing, and `resolved_via` says which
-    ///       of the two answered.
-    /// Test: `dispatch_session_context_catchup_tool` (mock).
+    ///       of the two answered. #5557: `sessions` is a bounded PAGE starting
+    ///       at `sessions_offset`, and the response carries `sessions_total` /
+    ///       `sessions_next_offset` / `truncated` / `truncation_notice` so a
+    ///       short page can never read as a complete one.
+    /// Test: `dispatch_session_context_catchup_tool` (mock),
+    ///       `dispatch_session_context_catchup_forwards_sessions_offset`.
     async fn session_context_catchup(
         &self,
         project_dir: &str,
@@ -244,6 +255,7 @@ pub trait OrchestratorBackend: Send + Sync {
         tmux_window: Option<&str>,
         all_projects: bool,
         full: bool,
+        sessions_offset: usize,
     ) -> Result<Value, String>;
 
     /// Back `session_context_pause`: write a pause snapshot + prune worktrees.

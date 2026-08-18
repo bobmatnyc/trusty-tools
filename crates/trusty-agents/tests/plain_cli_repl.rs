@@ -416,6 +416,72 @@ fn plain_cli_resolves_assistant_via_bundled_deploy_when_no_project_tier() {
     );
 }
 
+/// Why (#3655): `tagent`'s startup fires a background code-index file watcher,
+/// and building it calls the synchronous `FastEmbedder::new`, which reaches the
+/// on-disk model cache through `fastembed` -> `hf_hub` -> `std::fs`. That read
+/// has no ceiling. When the cache lived on a wedged volume the `open` syscall
+/// never returned, so a tokio blocking thread never finished, so the runtime's
+/// `Drop` at the end of `main` waited on it forever: the REPL printed `Bye.`,
+/// `run()` returned, and the process still never exited. Every test in this
+/// file then failed with `tagent did not exit within 120s`. A background
+/// convenience feature must not be able to hold the process open.
+/// What: reproduces that wedge without needing a wedged filesystem. A FIFO is
+/// placed exactly where `hf_hub` looks up the cached repo ref for fastembed's
+/// `AllMiniLML6V2` model (`Qdrant/all-MiniLM-L6-v2-onnx`, revision `main`), so
+/// the child's read of it blocks indefinitely. The test holds the FIFO's write
+/// end open for the whole run and never writes, which both keeps the child
+/// blocked and proves it actually got there — if fastembed's cache layout ever
+/// moves, the writer's `open` never returns and this test fails loudly rather
+/// than passing on an unreachable wedge.
+/// Test: itself. Against the pre-fix commit it fails on the 120s timeout.
+#[cfg(unix)]
+#[test]
+fn wedged_model_cache_cannot_block_process_exit() {
+    let hf_home = tempfile::tempdir().expect("isolated HF_HOME for the wedged-cache test");
+    let refs_dir = hf_home
+        .path()
+        .join("models--Qdrant--all-MiniLM-L6-v2-onnx")
+        .join("refs");
+    std::fs::create_dir_all(&refs_dir).expect("create hf-hub refs dir");
+    let fifo = refs_dir.join("main");
+    let mkfifo = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(mkfifo.success(), "mkfifo {} failed", fifo.display());
+
+    // Opening a FIFO for writing blocks until a reader opens it, so this send
+    // is the proof that the child reached the model cache. The thread then
+    // parks holding the file: with a writer attached but no bytes written, the
+    // child's read blocks forever, which is the wedge under test.
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let held = std::fs::OpenOptions::new().write(true).open(&fifo);
+        let _ = reached_tx.send(held.is_ok());
+        loop {
+            std::thread::park();
+        }
+    });
+
+    let home_str = hf_home
+        .path()
+        .to_str()
+        .expect("tempdir path is valid UTF-8")
+        .to_string();
+    let (success, _stdout, stderr) =
+        run_piped(&["--plain"], &[("HF_HOME", home_str.as_str())], "/quit\n");
+    assert!(
+        success,
+        "tagent must still exit 0 with a wedged model cache; stderr:\n{stderr}"
+    );
+
+    let reached = reached_rx.recv_timeout(Duration::from_secs(10)).expect(
+        "child never opened the FIFO — fastembed's cache layout may have changed, so this test \
+         was not exercising the wedge it claims to",
+    );
+    assert!(reached, "opening the FIFO's write end failed");
+}
+
 #[test]
 fn switch_ctrl_still_reaches_the_ctrl_coordinator() {
     // `ctrl` must remain fully reachable via `/switch ctrl` — defaulting to

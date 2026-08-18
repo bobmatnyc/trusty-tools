@@ -103,7 +103,7 @@ pub fn observe(drawer: &Drawer, age_days: f32, window_start: Option<DateTime<Utc
             out.push(Signal::Tagged(tag.to_string()));
         }
     }
-    if opens_with_date(&drawer.content) {
+    if opens_with_date(drawer.content()) {
         out.push(Signal::DateStamped);
     }
     if drawer.importance >= 1.0 {

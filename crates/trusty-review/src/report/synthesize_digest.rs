@@ -42,7 +42,7 @@ pub const CONTEXT_FINDINGS_CAP: usize = 40;
 /// entirely — their evidence-grounded prose is already authoritative and is
 /// merged onto the report regardless of what this call produces, so asking the
 /// model to re-elaborate them would only spend output budget on discarded text
-/// (see [`super::synthesize::apply_guardrail`]'s caller, which layers
+/// (see `super::synthesize::apply_guardrail`'s caller, which layers
 /// investigation prose over synthesis prose, investigation always winning).
 pub const ELABORATION_TARGETS_CAP: usize = 10;
 

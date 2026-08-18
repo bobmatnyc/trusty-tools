@@ -274,6 +274,105 @@ async fn search_health_does_not_report_ok_when_no_index_could_be_resolved() {
     );
 }
 
+/// An unreadable chunk count is not a count of zero.
+///
+/// Why (#5633): `status.rs` deliberately reports `chunk_count: null` under HTTP
+/// 200 when the durable corpus failed to open — #4333 chose `null` over the
+/// in-memory fallback precisely because that fallback reported 122 for an index
+/// holding 201,206 chunks. Reading that `null` as `0` turned the daemon's "I do
+/// not know" into this tool's "it holds nothing", and sent the caller to
+/// `trusty-search index` — a reindex, which is the WRONG action against a
+/// write-quarantined corpus.
+/// What: serves a 200 status body with `chunk_count: null` plus the
+/// `corpus_open_failure` block the daemon sends alongside it, and asserts the
+/// verdict is `index_unknown` rather than `index_empty`, with a remediation that
+/// does not tell the caller to reindex.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn search_health_does_not_report_an_unreadable_chunk_count_as_empty() {
+    let base = spawn_health_daemon(
+        (200, healthy_body(1, 0)),
+        (
+            200,
+            json!({
+                "index_id": "mine",
+                "chunk_count": Value::Null,
+                "root_path": "/x",
+                "corpus_open_failure": {
+                    "kind": "open_timeout",
+                    "transient": true,
+                    "reason": "redb open timed out after 30s",
+                },
+            }),
+        ),
+    )
+    .await;
+    let server = McpServer::new(base).with_pinned_index("mine");
+
+    let report = health_report(&server, json!({})).await;
+
+    assert_eq!(
+        report["status"], HEALTH_INDEX_UNKNOWN,
+        "an unreadable count must not be rendered as an empty index: {report}"
+    );
+    assert_eq!(report["healthy"], Value::Bool(false));
+    assert_eq!(
+        report["index"]["chunk_count"],
+        Value::Null,
+        "the daemon's own null must pass through, not become 0: {report}"
+    );
+
+    let remediation = report["remediation"].as_str().expect("remediation");
+    assert!(
+        !remediation.contains("trusty-search index") && !remediation.contains("doctor --fix"),
+        "reindexing a write-quarantined corpus is the wrong action: {remediation}"
+    );
+    assert!(
+        remediation.contains("Do NOT reindex"),
+        "an unknown count must actively steer the caller away from the reindex \
+         the `index_empty` verdict used to prescribe: {remediation}"
+    );
+
+    // Report WHY, not just the value: the corpus failure the daemon already
+    // sent must reach the caller rather than being dropped.
+    let message = report["message"].as_str().expect("message");
+    assert!(
+        message.contains("corpus"),
+        "the message must say the count was unreadable because the corpus \
+         would not open: {message}"
+    );
+    assert_eq!(
+        report["index"]["corpus_open_failure"]["kind"],
+        "open_timeout"
+    );
+}
+
+/// A 200 status body that simply omits `chunk_count` is also unknown, not zero.
+///
+/// Why (#5633): the same `unwrap_or(0)` swallowed an absent key exactly as it
+/// swallowed an explicit `null`. Both mean the count was never established, and
+/// neither is evidence of an empty index.
+/// What: serves a 200 body with no `chunk_count` key at all and asserts the
+/// verdict is `index_unknown`.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn search_health_does_not_report_a_missing_chunk_count_as_empty() {
+    let base = spawn_health_daemon(
+        (200, healthy_body(1, 0)),
+        (200, json!({ "index_id": "mine", "root_path": "/x" })),
+    )
+    .await;
+    let server = McpServer::new(base).with_pinned_index("mine");
+
+    let report = health_report(&server, json!({})).await;
+
+    assert_eq!(
+        report["status"], HEALTH_INDEX_UNKNOWN,
+        "an absent chunk_count is not a count of zero: {report}"
+    );
+    assert_eq!(report["healthy"], Value::Bool(false));
+}
+
 /// An explicit `index_id` argument outranks the session pin, and the report
 /// says which source decided.
 #[tokio::test(flavor = "multi_thread")]

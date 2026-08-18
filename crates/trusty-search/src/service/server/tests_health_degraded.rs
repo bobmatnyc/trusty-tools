@@ -57,6 +57,14 @@ async fn health_reports_degraded_when_corpus_open_failed() {
         "/tmp/apex-green".into(),
     ));
     {
+        // #5927 fixture correction: this test simulates a corpus-open failure,
+        // so it must set the flag that IS the corpus-open failure. Before
+        // #5927 `indexes_corpus_failed` was derived from the stage lanes, so
+        // stamping the stages alone was enough; it now reads this flag.
+        let mut indexer = broken.indexer.write().await;
+        indexer.corpus_open_failed = true;
+    }
+    {
         let mut stages = broken.stages.write().await;
         *stages = derive_warm_boot_stages(WarmBootInputs {
             chunk_count: 47_946,
@@ -534,6 +542,14 @@ async fn health_reports_degraded_for_a_stuck_never_walked_index() {
 /// What: the same `InProgress` lexical lane, but with `last_walk_started_at`
 /// set as the reindex runner sets it. Asserts the count stays 0 and the status
 /// stays `"ok"`.
+///
+/// #5336 fixture correction: the assertion "an in-flight reindex must not
+/// degrade the daemon's status" needs an in-flight reindex, and stamping
+/// `last_walk_started_at` is not one — the runner also holds the index's
+/// mutual-exclusion permit for the whole walk, and this fixture held nothing.
+/// It was, exactly, an abandoned walk. The permit is now held so the fixture
+/// matches its own claim; without it the index is `stuck_mid_walk`, which is
+/// what `health_reports_degraded_for_an_abandoned_mid_walk_index` asserts.
 /// Test: this IS the test.
 #[tokio::test]
 async fn health_does_not_flag_a_walked_index_as_stuck() {
@@ -543,8 +559,9 @@ async fn health_does_not_flag_a_walked_index_as_stuck() {
     use tokio::sync::RwLock;
 
     let registry = IndexRegistry::new();
+    let id = IndexId::new("walking-4680");
     let handle = registry.register(IndexHandle::bare(
-        IndexId::new("walking-4680"),
+        id.clone(),
         Arc::new(RwLock::new(CodeIndexer::new(
             "walking-4680",
             "/tmp/walking-4680",
@@ -559,6 +576,10 @@ async fn health_does_not_flag_a_walked_index_as_stuck() {
         let mut diag = handle.walk_diagnostics.write().await;
         diag.last_walk_started_at = Some("2026-08-03T00:00:00Z".to_owned());
     }
+    let _driver = crate::service::reindex::index_semaphore(&id)
+        .acquire_owned()
+        .await
+        .expect("per-index semaphore is never closed");
 
     let state = Arc::new(SearchAppState::new(registry));
 
@@ -571,5 +592,139 @@ async fn health_does_not_flag_a_walked_index_as_stuck() {
     assert_eq!(
         resp.status, "ok",
         "#4680: an in-flight reindex must not degrade the daemon's status"
+    );
+}
+
+/// THE false-positive guard for #5336, and the assertion that matters most: a
+/// reindex that is genuinely running must never be reported as stuck.
+///
+/// Why: the detector's whole value is telling "a walk is running" from "the
+/// stage says a walk is running and nothing is". Get that wrong in this
+/// direction and every long reindex on the box reads as broken, `/health` sits
+/// permanently at `degraded`, and the signal is worse than none. The fixture
+/// reproduces what `runner::run_reindex` holds mid-walk: the per-index permit
+/// (taken before it flips the stage, released only when the task returns),
+/// lexical `InProgress`, and a stamped `last_walk_started_at`.
+/// What: asserts the count is 0 and the status stays `"ok"` while the permit is
+/// held, then drops the permit and asserts the SAME registry now reports the
+/// index as stuck — so the test proves the permit is what the detector keys on,
+/// not some other difference between the two fixtures.
+/// Test: this IS the test.
+#[tokio::test]
+async fn health_does_not_flag_an_in_flight_reindex_as_stuck_mid_walk() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    let id = IndexId::new("live-reindex-5336");
+    let handle = registry.register(IndexHandle::bare(
+        id.clone(),
+        Arc::new(RwLock::new(CodeIndexer::new(
+            "live-reindex-5336",
+            "/tmp/live-reindex-5336",
+        ))),
+        "/tmp/live-reindex-5336".into(),
+    ));
+    {
+        let mut stages = handle.stages.write().await;
+        stages.lexical.status = StageStatus::InProgress;
+        stages.lexical.started_at = Some("2026-08-11T00:00:00Z".to_owned());
+    }
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-11T00:00:00Z".to_owned());
+    }
+
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let driver = crate::service::reindex::index_semaphore(&id)
+        .acquire_owned()
+        .await
+        .expect("per-index semaphore is never closed");
+    let Json(running) = health_handler(State(Arc::clone(&state))).await;
+    assert_eq!(
+        running.indexes_stuck_mid_walk, 0,
+        "#5336: a reindex holding this index's permit is doing the work the \
+         stage claims — it must never be counted as stuck"
+    );
+    assert_eq!(
+        running.status, "ok",
+        "#5336: a live multi-minute reindex must not pin /health at degraded"
+    );
+
+    // Same registry, same stages, same walk timestamp — only the driver is gone.
+    drop(driver);
+    let Json(abandoned) = health_handler(State(Arc::clone(&state))).await;
+    assert_eq!(
+        abandoned.indexes_stuck_mid_walk, 1,
+        "#5336: with no task holding the permit, the identical stage surface is \
+         an abandoned walk — proving the detector keys on driver liveness"
+    );
+}
+
+/// Regression guard for the reported half of #5336: a walk that started and was
+/// then abandoned is counted and degrades the daemon.
+///
+/// Why: `ReindexTerminationGuard` marks the `ReindexProgress` `Failed` and emits
+/// an SSE error when the reindex task panics or is cancelled, but it never
+/// touches `handle.stages`. The lexical lane is left at `InProgress` forever,
+/// which `lifecycle_status` renders as `"walking"` — byte-for-byte what a live
+/// reindex looks like. #4680's `indexes_stuck_empty` cannot see it: that
+/// predicate requires `last_walk_started_at` to be `None`, and this walk
+/// stamped it. Against the pre-fix implementation this test fails on both
+/// assertions (`status` is `"ok"`, and the field does not exist).
+/// What: registers the observed shape — lexical `InProgress`, walk timestamp
+/// stamped, no task holding the index permit — and asserts `/health` counts it
+/// and downgrades the status that `status != "ok"` monitors gate on. Also
+/// asserts `indexes_stuck_empty` stays 0, so the two counters partition rather
+/// than double-count.
+/// Test: this IS the test.
+#[tokio::test]
+async fn health_reports_degraded_for_an_abandoned_mid_walk_index() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    let handle = registry.register(IndexHandle::bare(
+        IndexId::new("abandoned-5336"),
+        Arc::new(RwLock::new(CodeIndexer::new(
+            "abandoned-5336",
+            "/tmp/abandoned-5336",
+        ))),
+        "/tmp/abandoned-5336".into(),
+    ));
+    {
+        // What `reset_stages_for_reindex` stamps, left frozen by a task that
+        // died before any terminal transition.
+        let mut stages = handle.stages.write().await;
+        stages.lexical.status = StageStatus::InProgress;
+        stages.lexical.started_at = Some("2026-08-11T00:00:00Z".to_owned());
+    }
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-11T00:00:00Z".to_owned());
+    }
+
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+
+    assert_eq!(
+        resp.indexes_stuck_mid_walk, 1,
+        "#5336: a walk that started and has no driver left must be counted"
+    );
+    assert_eq!(
+        resp.indexes_stuck_empty, 0,
+        "#5336: the two stuck predicates partition on walk_started — a started \
+         walk belongs to exactly one of them"
+    );
+    assert_eq!(
+        resp.status, "degraded",
+        "#5336: /health must not self-certify as healthy while an index is \
+         frozen at 'walking' with nothing driving it"
     );
 }

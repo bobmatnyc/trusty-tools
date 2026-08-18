@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Input to [`crate::intent_source::resolve`]: one of two query shapes.
+/// Input to [`crate::intent_source::resolve`](crate::catchup::resolve): one of two query shapes.
 ///
 /// Why: the BACK gate starts from a PR (it must *extract* the ticket-id and
 /// resolve spec links from changed files), while the FRONT gate already holds

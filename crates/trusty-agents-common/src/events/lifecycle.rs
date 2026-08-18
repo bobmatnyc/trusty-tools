@@ -144,7 +144,7 @@ pub enum LifecycleEvent {
 
     // -- Persona (workflow) --
     /// Emitted once per workflow run when a persona is detected from the task
-    /// text, so the UI can surface "running in [persona] mode" before any
+    /// text, so the UI can surface "running in \[persona\] mode" before any
     /// phases execute.
     PersonaDetected {
         session_id: String,

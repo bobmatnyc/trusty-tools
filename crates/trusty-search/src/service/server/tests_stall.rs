@@ -158,6 +158,7 @@ fn health_response_contains_stall_fields() {
         indexes_component_catch_up_in_progress: 0,
         indexes_embed_pool_missing: 0,
         indexes_stuck_empty: 0,
+        indexes_stuck_mid_walk: 0,
         indexes_populated: 0,
         indexes_empty: 0,
         total_chunks: 0,
@@ -221,6 +222,7 @@ fn health_response_omits_last_ok_when_none() {
         indexes_component_catch_up_in_progress: 0,
         indexes_embed_pool_missing: 0,
         indexes_stuck_empty: 0,
+        indexes_stuck_mid_walk: 0,
         indexes_populated: 0,
         indexes_empty: 0,
         total_chunks: 0,
@@ -235,5 +237,88 @@ fn health_response_omits_last_ok_when_none() {
         json.get("embedder_last_ok_secs_ago").is_none(),
         "embedder_last_ok_secs_ago must be absent (not null) when None; \
          json={json}"
+    );
+}
+
+/// `/health`'s `deferred_embed_queue_depth` must report a REAL queued
+/// deferred-embed catch-up job, end to end — not just round-trip whatever
+/// value a struct literal was built with.
+///
+/// Why: `health_response_contains_stall_fields` and
+/// `health_response_omits_last_ok_when_none` above both build a
+/// `HealthResponse` literal with `deferred_embed_queue_depth: 0` and assert
+/// nothing about that field — that proves serde serializes the field, not
+/// that `health_handler` reads the live
+/// `reindex::deferred_embed_queue::QUEUE_DEPTH` gauge. #5546 caught this: the
+/// doc comment on the field (`health.rs`) cited a test,
+/// `health_reports_the_deferred_embed_queue_depth`, that was never written.
+/// This test closes that gap by driving the real queue: it holds the single
+/// `background_reindex_semaphore` permit itself so a job enqueued via
+/// `spawn_deferred_embed_pass` reaches `wait_for_turn` — which increments
+/// `QUEUE_DEPTH` synchronously, inside `enqueue`, before `wait_for_turn` ever
+/// runs — but cannot proceed past its own semaphore acquire. That makes the
+/// nonzero reading deterministic rather than a race against the pass's own
+/// (otherwise near-instant, no-embedder) completion.
+/// What: reads a baseline `/health` depth (tolerant of a nonzero value left
+/// by another test's in-flight job — `QUEUE_DEPTH` is a process-global
+/// static shared by the whole test binary, per `defer_embed_queue`'s module
+/// docs), acquires the background semaphore, enqueues one bare-handle job,
+/// and asserts `/health` immediately reports `baseline + 1`. Then releases
+/// the semaphore and polls `/health` until the depth drops back to
+/// `baseline`, proving the field tracks the queue draining too, not only its
+/// creation.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_reports_the_deferred_embed_queue_depth_end_to_end() {
+    let (state, _tracker) = ready_state_with_tracker();
+
+    let Json(baseline_resp) = health_handler(State(Arc::clone(&state))).await;
+    let baseline = baseline_resp.deferred_embed_queue_depth;
+
+    // Hold the ONE background-reindex permit ourselves so the job we are
+    // about to enqueue is counted (QUEUE_DEPTH is incremented synchronously
+    // inside `enqueue`, before the spawned `wait_for_turn` task ever runs)
+    // but cannot race ahead and complete before the assertion below runs.
+    let permit = crate::service::reindex::background_reindex_semaphore()
+        .acquire()
+        .await
+        .expect("background_reindex_semaphore is never closed");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let indexer =
+        crate::core::indexer::CodeIndexer::new("health-deferred-depth-test", root.clone());
+    let handle = Arc::new(crate::core::registry::IndexHandle::bare(
+        crate::core::registry::IndexId::new("health-deferred-depth-test"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root,
+    ));
+    let progress = Arc::new(crate::service::reindex::ReindexProgress::new());
+    crate::service::reindex::spawn_deferred_embed_pass(handle, progress, 0);
+
+    let Json(during_resp) = health_handler(State(Arc::clone(&state))).await;
+    assert_eq!(
+        during_resp.deferred_embed_queue_depth,
+        baseline + 1,
+        "/health must report the real queued job while it is pending — not a value \
+         frozen at whatever a fixture happened to hardcode"
+    );
+
+    // Release the permit so the job can drain, then confirm the field
+    // reflects the drain too — the round trip a fixture round-trip cannot
+    // prove.
+    drop(permit);
+    let mut drained = during_resp.deferred_embed_queue_depth;
+    for _ in 0..500 {
+        let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+        drained = resp.deferred_embed_queue_depth;
+        if drained == baseline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        drained, baseline,
+        "/health must reflect the queue draining back down once the job completes"
     );
 }

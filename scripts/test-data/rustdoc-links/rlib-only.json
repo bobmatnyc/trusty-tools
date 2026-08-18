@@ -1,0 +1,4 @@
+{"reason":"compiler-artifact","fresh":false,"target":{"name":"trusty_common","kind":["lib"],"src_path":"crates/trusty-common/src/lib.rs"},"filenames":["target/debug/deps/libtrusty_common-aaaa.rmeta"]}
+{"reason":"compiler-artifact","fresh":false,"target":{"name":"trusty_search","kind":["lib"],"src_path":"crates/trusty-search/src/lib.rs"},"filenames":["target/debug/deps/libtrusty_search-bbbb.rmeta"]}
+{"reason":"compiler-artifact","fresh":false,"target":{"name":"build-script-build","kind":["custom-build"],"src_path":"crates/trusty-search/build.rs"},"filenames":["target/debug/build/trusty-search-cccc/build-script-build"]}
+{"reason":"build-finished","success":true}

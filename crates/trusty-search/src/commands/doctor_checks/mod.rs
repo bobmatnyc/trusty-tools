@@ -529,7 +529,6 @@ pub fn fix_stale_lock(data_dir: &std::path::Path) {
     }
 }
 
-/// MCP-client registration checks (#5264) — see the module's own doc comment.
 pub mod mcp_registration;
 
 #[cfg(test)]

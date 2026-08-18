@@ -23,6 +23,7 @@ use anyhow::Context as _;
 use serde::Deserialize;
 
 use super::first_run::needs_first_run_clone;
+use super::picker_launch_new::LaunchIsolation;
 use super::tmux_attach::AttachOutcome;
 
 /// How long to wait between `provision-status` polls.
@@ -118,18 +119,31 @@ fn provisioning_message(label: Option<&str>, detail: Option<&str>) -> String {
 
 /// POST a new managed session to the daemon (async) and attach once ready.
 ///
-/// Why: "launch new" must use the daemon's protected managed-clone spawn path
-/// (never write framework files into the live checkout, #1724) AND must not
-/// hold one HTTP request open across a multi-minute clone (#2605). This POSTs
+/// Why: "launch new" must go through the daemon's managed spawn path rather
+/// than deploying framework files itself (#1724) AND must not hold one HTTP
+/// request open across a multi-minute clone (#2605). This POSTs
 /// `background: true`, then polls `provision-status`, rendering live phase +
 /// clone-percent progress, before attaching.
+///
+/// What that path does with a LOCAL `repo_url` changed under this comment and
+/// the old wording — "never write framework files into the live checkout" — is
+/// no longer true of it. ADR-0037 made a local working-tree root run on that
+/// checkout by default, and `spawn_managed_on_main` deploys `.claude/`, the
+/// bundled skills, and `TASK.md` into it. That is permitted configuration
+/// under ADR-0044, which restricts the same checkout to documents and
+/// configuration and nothing else. #1724's actual guarantee — that the
+/// daemon-unreachable FALLBACK never deploys into a checkout it was not told
+/// it could — lives in `provision_for_fallback` and is unchanged.
 /// What: (1) shows a `trusty_progress` spinner (auto-hidden in non-TTY/plain
 /// output); (2) POSTs `{ repo_url, ref: "HEAD", task: "", force_new: true,
 /// background: true }`, plus `name_hint` when the caller supplied one (#4965 —
 /// the picker's `n <name>`, ALREADY kebab-cased by
 /// `trusty_common::session_naming::leaf_slug_from_hint` so the daemon's own
 /// sanitization is a no-op; the key is omitted entirely for `None`, so the
-/// unnamed path's wire shape is unchanged); (3) if the daemon answered
+/// unnamed path's wire shape is unchanged), plus `worktree: true` when
+/// `isolation` is [`LaunchIsolation::OwnWorktree`] (#5773 — `n <name>
+/// --worktree`; the key is likewise omitted otherwise, so ADR-0037's
+/// `#[serde(default)]` main-checkout default still applies); (3) if the daemon answered
 /// synchronously (`201` with a
 /// name — an older daemon ignoring `background`) attaches immediately; (4)
 /// otherwise polls `GET .../{id}/provision-status` every [`POLL_INTERVAL`] up
@@ -152,6 +166,7 @@ pub(crate) async fn launch_new_session_and_attach(
     url: &str,
     repo_url: &str,
     name_hint: Option<&str>,
+    isolation: LaunchIsolation,
 ) -> anyhow::Result<AttachOutcome> {
     let first_run = needs_first_run_clone(repo_url);
     let progress_output = trusty_progress::Output::to_stderr();
@@ -179,6 +194,16 @@ pub(crate) async fn launch_new_session_and_attach(
     // `session::start`'s wire-shape tests already pin.
     if let Some(hint) = name_hint {
         body["name_hint"] = serde_json::Value::String(hint.to_string());
+    }
+    // #5773: the picker's `--worktree` travels on the SAME `worktree` key
+    // `tm launch --worktree` sets — ADR-0037 decision 1 makes that explicit
+    // launch-time request the one input deciding placement, and one key with
+    // one spelling is what keeps the two surfaces from drifting. Omitted
+    // entirely when nothing was asked for, so the default launch's wire shape
+    // stays byte-identical to what `session_start_posts_the_same_wire_shape_…`
+    // pins.
+    if isolation.requests_worktree() {
+        body["worktree"] = serde_json::Value::Bool(true);
     }
 
     let send_result = client

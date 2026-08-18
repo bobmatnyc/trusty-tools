@@ -5,7 +5,7 @@
 //! `anyhow::Result<Value>` methods lets the HTTP handlers stay one-liners
 //! and lets non-HTTP callers (chat tool dispatch, future RPC bridges) reuse
 //! the same code paths without dragging axum types around.
-//! What: A zero-cost wrapper around [`AppState`] exposing one async method
+//! What: A zero-cost wrapper around [`AppState`](crate::AppState) exposing one async method
 //! per logical operation. Each method returns either `anyhow::Result<Value>`
 //! (for handlers that already wrap errors with `ApiError::internal`) or a
 //! domain-specific result the handler maps into JSON.

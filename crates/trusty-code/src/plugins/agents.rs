@@ -52,7 +52,7 @@ const UNSUPPORTED_AGENT_FIELDS: &[&str] = &[
 /// Why: `agents::protocol::agents_list`'s `plugin` tier needs the same
 /// `AgentConfig` shape (for `description`/`model` in its wire entry) the
 /// embedded and disk tiers already produce.
-/// What: for each [`PluginRoot`], scans `agents_dir` via
+/// What: for each [`PluginRoot`](crate::plugins::PluginRoot), scans `agents_dir` via
 /// `agents::discover_agents` (the same `.md`-only, `.toml`-warns scan disk
 /// agents use), skips any local name `agents::protocol::is_base_agent`
 /// recognizes (a plugin literally shipping `base-engineer.md` etc. is
@@ -185,9 +185,9 @@ fn warn_unsupported_fields(namespaced: &str, raw: &str) {
 /// (code-critic PR #3547 review, HIGH 3 — the guard belongs to this
 /// function, not merely to an upstream caller that happens to reject `:`
 /// today) — `None` on a traversal/unsafe-charset payload like
-/// `plugin:../../etc`. Then finds the [`PluginRoot`] whose resolved `name`
+/// `plugin:../../etc`. Then finds the [`PluginRoot`](crate::plugins::PluginRoot) whose resolved `name`
 /// equals `plugin` (not the directory name, which may differ — see
-/// [`PluginRoot`]'s doc); `None` if no such plugin. Within it, `None` if
+/// [`PluginRoot`](crate::plugins::PluginRoot)'s doc); `None` if no such plugin. Within it, `None` if
 /// `<agent_name>.md` does not exist; otherwise `Some` wrapping
 /// [`load_plugin_agent`]'s result.
 /// Test: `tests::find_plugin_agent_config_resolves_known_agent`,

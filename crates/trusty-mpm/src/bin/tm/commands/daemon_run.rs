@@ -227,7 +227,10 @@ async fn wait_for_shutdown_signal() {
 fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) -> bool {
     use trusty_common::supervision::{LaunchdSupervision, launchd_supervision};
 
-    let plist_exists = crate::commands::launchd_probe::mpm_launchd_plist_exists();
+    // #5623: fail-closed — an unreadable `~/Library/LaunchAgents` now counts as
+    // "launchd may own this", so `/health` reports the hazard instead of a
+    // `supervised: true` it never established.
+    let plist_exists = crate::commands::launchd_probe::launchd_may_own_daemon();
     // #4469: ONE authoritative query, whose three-state answer is published on
     // `/health` alongside the bool it collapses into. Without the third state a
     // launchctl that could not be asked reads as `supervised: false`, and
@@ -314,7 +317,7 @@ fn unsupervised_daemon_error() -> anyhow::Error {
 /// reads `.env.local`, then `.env`, then the environment). When a token is found
 /// the supervised bot loop ([`trusty_mpm::telegram::run_supervised`]) is spawned
 /// on a tokio task pointed at `base_url`, cancellable via the returned
-/// [`CancellationToken`] so graceful shutdown can stop it; when absent a single
+/// `CancellationToken` so graceful shutdown can stop it; when absent a single
 /// warning is logged and the daemon continues. Returns the token (or `None` when
 /// no bot was started) so the caller can cancel it on shutdown.
 /// Test: token resolution is covered by `trusty-mpm-telegram`'s

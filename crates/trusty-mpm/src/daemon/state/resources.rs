@@ -134,7 +134,7 @@ impl DaemonState {
     ///
     /// Why: tests must exercise the reload path against a temp file without
     /// touching the real `~/.trusty-mpm` framework install.
-    /// What: loads `path` via [`OptimizerConfig::load_from_file`] and stores the
+    /// What: loads `path` via [`OptimizerConfig::load_from_file`](crate::daemon::optimizer::OptimizerConfig::load_from_file) and stores the
     /// result; a missing file yields `OptimizerConfig::default()`.
     /// Test: `reload_optimizer_config_picks_up_file_changes`.
     pub fn reload_optimizer_config_from(&self, path: &std::path::Path) -> anyhow::Result<()> {
@@ -181,7 +181,7 @@ impl DaemonState {
     /// Why: the `/api/v1/bus/*` handlers need the instance registry and the
     /// delivery channels; borrowing rather than cloning the `Arc` keeps the
     /// handlers' access read-only in shape.
-    /// What: returns a shared reference to the daemon's [`PeerBus`].
+    /// What: returns a shared reference to the daemon's [`PeerBus`](crate::daemon::bus::PeerBus).
     /// Test: `crate::daemon::bus::tests::route_register_returns_instance_id`.
     pub fn bus(&self) -> &Arc<crate::daemon::bus::PeerBus> {
         &self.bus
@@ -189,7 +189,7 @@ impl DaemonState {
 
     /// The standalone LLM overseer for interactive chat, if configured.
     ///
-    /// Why: `POST /llm/chat` needs the concrete [`LlmOverseer`] (the hook-path
+    /// Why: `POST /llm/chat` needs the concrete [`LlmOverseer`](crate::core::llm_overseer::LlmOverseer) (the hook-path
     /// overseer is hidden behind `dyn Overseer`); this is `Some` exactly when an
     /// OpenRouter API key resolved at startup.
     /// What: returns a clone of the `Arc<LlmOverseer>`, or `None` when LLM chat

@@ -217,6 +217,9 @@ impl SlackFormatter {
                 name,
                 state,
                 action,
+                // The workspace verdict is rendered by the CLI only; this line
+                // reports the state transition.
+                ..
             } => format!("✅ {name} ({}) {action} → {state}", short_id(id)),
             CommandResult::Help(text) => text.clone(),
             CommandResult::Health(report) => format_health(report),

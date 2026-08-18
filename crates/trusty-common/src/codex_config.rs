@@ -20,6 +20,9 @@
 //! `patch_mcp_server_repairs_empty_args`,
 //! `patch_mcp_server_repairs_nested_json_string_args`,
 //! `patch_mcp_server_preserves_other_servers_and_comments`.
+//!
+//! [`codex_config_path`]: crate::codex_config::codex_config_path
+//! [`patch_mcp_server`]: crate::codex_config::patch_mcp_server
 
 use std::path::{Path, PathBuf};
 

@@ -15,7 +15,6 @@ pub mod kg;
 pub mod kg_redb;
 pub mod kg_store;
 pub mod kg_writer;
-pub mod kuzu;
 pub mod l1_cache;
 pub mod palace_store;
 pub mod payload_store;

@@ -20,6 +20,12 @@
 //! Test: `cargo test -p trusty-sld-lint` (unit `mod tests` + the real-tree
 //! integration test `tests/lint_real_tree.rs`).
 
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
+
 pub mod allowlist;
 pub mod catalog;
 pub mod checks;

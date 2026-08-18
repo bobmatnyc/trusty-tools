@@ -13,7 +13,9 @@
 use clap::Parser;
 
 use crate::cli::{AuthAction, Cli, Command, RepairAction, ServicesAction, SessctlAction};
-use crate::commands::session::compose_session_instructions;
+use crate::commands::session::{
+    compose_session_instructions, compose_session_instructions_with_roster,
+};
 
 #[test]
 fn cli_parses_attach() {
@@ -308,6 +310,47 @@ fn cli_parses_services_restart() {
 // display exactly what it stashes and what the live launch prompt is.
 // ------------------------------------------------------------------
 
+/// A fixture agent roster, rendered exactly as the live tiers would render it.
+///
+/// Why (#5544, #4937): the two convergence tests below compare two independently
+/// composed prompts, and each composition rescanned the agent roster from tiers
+/// rooted in `$HOME` and `$CLAUDE_CONFIG_DIR` — machine-global mutable state, so
+/// the two scans could legitimately disagree and the `assert_eq!` failed with a
+/// message indistinguishable from a real prompt regression. On this workstation
+/// `~/.claude/agents` is the only tier carrying `copyeditor`, `pangram-editor`,
+/// `proofreader`, `writer` and `writing-critic`, which is why the diff was
+/// always those exact five names and why CI — which has no ambient tier at all —
+/// never reproduced it.
+///
+/// The previous revision pinned `$HOME` and `$CLAUDE_CONFIG_DIR` around the test
+/// and took `#[serial]`. That treated the symptom with the disease: a process
+/// env write is visible to EVERY test in this binary for its whole duration, and
+/// `#[serial]` excludes only other `#[serial]` tests. Injecting one roster into
+/// both sides of the comparison removes the shared global entirely, so these
+/// tests neither write env nor need serialising.
+/// What: seeds one agent into a tempdir tier and renders it through
+/// `roster_section_from_dirs` — the same function the live path uses — returning
+/// the rendered `## Delegation Authority` block. The `TempDir` is returned so the
+/// caller keeps it alive.
+/// Test: used by `compose_session_instructions_display_matches_live_prompt` and
+/// `compose_session_instructions_display_matches_live_prompt_with_override`.
+fn fixture_roster_section() -> (tempfile::TempDir, String) {
+    let tiers = tempfile::tempdir().expect("fixture tier root");
+    let agents = tiers.path().join("agents");
+    std::fs::create_dir_all(&agents).expect("fixture tier");
+    // One agent, so the roster-present composer path is the one under test —
+    // the same branch the ambient roster used to select.
+    std::fs::write(
+        agents.join("engineer.md"),
+        "---\nname: engineer\nrole: engineer\nmodel: sonnet\n---\n\n# Engineer\n",
+    )
+    .expect("seed fixture agent");
+
+    let section = trusty_mpm::core::delegation_authority::roster_section_from_dirs(&[agents])
+        .expect("a seeded tier renders a roster section");
+    (tiers, section)
+}
+
 #[test]
 fn compose_session_instructions_display_matches_stash() {
     // Why: the #382 bug was that `tm session instructions` printed
@@ -340,21 +383,34 @@ fn compose_session_instructions_display_matches_live_prompt() {
     // `build_system_prompt_for`, which calls `resolve_pm_prompt`. If
     // `compose_session_instructions` ever returns something different from
     // `build_system_prompt_for`, the stash would again diverge from reality.
-    // What: runs `compose_session_instructions` and `build_system_prompt_for`
-    // on the same empty project directory and asserts the outputs match.
+    // What: runs both composers on the same empty project directory with the
+    // SAME injected roster and asserts the outputs match.
+    // #5544: the roster is injected rather than rescanned per side — see
+    // `fixture_roster_section`. No process env is touched, so this test needs
+    // no `#[serial]`.
     // Test: any future change that re-introduces the #382 divergence will
     // break this test immediately.
+    let (_tiers, roster) = fixture_roster_section();
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path();
 
     let (display, _output, _stash) =
-        compose_session_instructions(project).expect("compose succeeds");
+        compose_session_instructions_with_roster(project, Some(roster.clone()))
+            .expect("compose succeeds");
 
-    let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
+    let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_roster(
+        project,
+        Some(roster),
+    );
 
     assert_eq!(
         display, live_prompt,
         "tm session instructions output must match the live launch prompt (issue #382)"
+    );
+    assert!(
+        display.contains("### engineer"),
+        "the injected fixture roster must reach the composed prompt, or this \
+         test is no longer comparing the roster-present composer path"
     );
 }
 
@@ -367,8 +423,10 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
     // `.trusty-mpm/WORKFLOW.md` file this used to write is no longer read),
     // then asserts the display and the live prompt both include it (and don't
     // include the bundled heading).
+    // #5544: one injected roster feeds both sides — see the test above.
     // Test: if `compose_session_instructions` stops reading overrides for the
     // display path, this test fails.
+    let (_tiers, roster) = fixture_roster_section();
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path();
 
@@ -381,9 +439,13 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
     .unwrap();
 
     let (display, _output, _stash) =
-        compose_session_instructions(project).expect("compose succeeds");
+        compose_session_instructions_with_roster(project, Some(roster.clone()))
+            .expect("compose succeeds");
 
-    let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
+    let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_roster(
+        project,
+        Some(roster),
+    );
 
     assert_eq!(
         display, live_prompt,
@@ -1648,23 +1710,12 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
         .current_dir(live_dir.path())
         .status();
 
-    // ── Point REPOS_ROOT at our temp dir (RAII: restore on scope exit) ───────
-    let repos_root_key = trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV;
-    let prev_repos_root = std::env::var(repos_root_key).ok();
-    unsafe { std::env::set_var(repos_root_key, repos_root.path()) };
+    let _repos_root_env = ReposRootEnv::set(repos_root.path());
 
     let client = reqwest::Client::new();
     let _result =
         crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", live_dir.path())
             .await;
-
-    // Restore env var immediately (before assertions that might panic).
-    unsafe {
-        match prev_repos_root {
-            Some(ref v) => std::env::set_var(repos_root_key, v),
-            None => std::env::remove_var(repos_root_key),
-        }
-    }
 
     // ── Acceptance criteria (#1724 success path) ─────────────────────────────
     // Live checkout must be untouched.
@@ -1699,6 +1750,162 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
         !sessions.is_empty(),
         "#1724 #1803: at least one per-session worktree must be present under .worktrees/, \
          proving launch(Some(worktree)) was invoked rather than launch(None)"
+    );
+}
+
+/// The guided fallback prepares the session IN the worktree it provisioned,
+/// not in the shared base clone (#5836 critic HIGH).
+///
+/// Why: `guided_fallback_redirect_success_worktree_not_live_checkout` above
+/// asserts only that a worktree EXISTS under `<base>/.worktrees`, and
+/// `provision_for_fallback` creates that worktree before `launch()` runs — so
+/// that test passes whether the session then runs in the worktree or somewhere
+/// else entirely. It stayed green while `provision_for_launch`'s managed-checkout
+/// redirect discarded the worktree and collapsed the placement onto `<base>`,
+/// which puts two concurrent daemon-unreachable sessions in one tree.
+/// What: same fixture as the test above, then asserts on the DIRECTORY the
+/// session was prepared in — `prepare_isolated_session` deploys `.claude/` into
+/// the placement `launch()` resolved, so the worktree must carry it and the base
+/// clone must not.
+/// Test: this is the test. RED at 34da769f: `.claude` appeared in `<base>`.
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone() {
+    let origin = "https://github.com/test-owner-5836/test-repo-5836.git";
+    let repos_root = tempfile::tempdir().unwrap();
+    // Canonical because `find_git_root` resolves the macOS `/var` symlink and
+    // the placement rule compares paths by plain equality (ADR-0037).
+    let repos_root_path = repos_root.path().canonicalize().unwrap();
+    // Must match `parse_github_path(origin)`.
+    let base = repos_root_path
+        .join("test-owner-5836")
+        .join("test-repo-5836");
+    fallback_git_repo(&base);
+    // The base clone carries the origin its worktrees inherit — without it
+    // `launch()` stops at "no git origin remote found" and never reaches
+    // placement at all.
+    fallback_git_remote(&base, origin);
+
+    let live_dir = tempfile::tempdir().unwrap();
+    fallback_git_repo(live_dir.path());
+    fallback_git_remote(live_dir.path(), origin);
+
+    let _repos_root_env = ReposRootEnv::set(&repos_root_path);
+
+    let client = reqwest::Client::new();
+    let _result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", live_dir.path())
+            .await;
+
+    // Exactly one worktree, and it is the directory the session must run in.
+    let worktrees_dir = base.join(".worktrees");
+    let mut sessions: Vec<std::path::PathBuf> = std::fs::read_dir(&worktrees_dir)
+        .expect(".worktrees must be listable — the fallback provisions it")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    sessions.sort();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "the fallback provisions exactly one per-session worktree, found {sessions:?}"
+    );
+    let worktree = &sessions[0];
+
+    assert!(
+        !base.join(".claude").exists(),
+        "the shared base clone must NOT become the session directory — the \
+         fallback already resolved placement to {}",
+        worktree.display()
+    );
+    assert!(
+        !base.join("CLAUDE.md").exists(),
+        "the shared base clone must NOT be deployed into: {}",
+        base.join("CLAUDE.md").display()
+    );
+    assert!(
+        worktree.join(".claude").is_dir(),
+        "the session must be prepared in the worktree the fallback provisioned: {} \
+         has no .claude",
+        worktree.display()
+    );
+}
+
+/// A git repository with one empty commit at `path`, created or asserted.
+///
+/// Why: `git worktree add` needs a HEAD commit, and a fixture that cannot be
+/// built is a test failure rather than a skip — the older fallback tests above
+/// return early when git is missing, which hides a broken fixture as a pass.
+/// What: `git init` + identity + `commit --allow-empty`, asserting each step.
+/// Test: used by `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`.
+fn fallback_git_repo(path: &std::path::Path) {
+    std::fs::create_dir_all(path).unwrap();
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+        assert!(
+            status.success(),
+            "git {args:?} failed in {}",
+            path.display()
+        );
+    };
+    run(&["init"]);
+    run(&["config", "user.email", "ci@test.invalid"]);
+    run(&["config", "user.name", "CI"]);
+    run(&["commit", "--allow-empty", "-m", "init"]);
+}
+
+/// RAII override of `TRUSTY_MPM_REPOS_ROOT`, restored on drop (unwind included).
+///
+/// Why: the two fallback tests here each open-coded a set + two-arm restore, and
+/// each restored BEFORE its assertions so a panicking assertion could not leak
+/// the variable — six process-global writes to work around a problem `Drop`
+/// does not have. One guard covers both and shrinks this file's
+/// `ENV_MUTATION_BUDGET` row rather than growing it.
+/// What: sets the var on construction, restores the previous value (or removes
+/// it) on drop. Callers MUST be `#[serial_test::serial]` — the variable is
+/// process-global.
+/// Test: used by the two `guided_fallback_*` tests above.
+struct ReposRootEnv {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl ReposRootEnv {
+    fn set(path: &std::path::Path) -> Self {
+        let key = trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV;
+        let prev = std::env::var_os(key);
+        // SAFETY: every caller is `#[serial_test::serial]`, so no other test
+        // thread races this set/restore.
+        unsafe { std::env::set_var(key, path) };
+        Self { prev }
+    }
+}
+
+impl Drop for ReposRootEnv {
+    fn drop(&mut self) {
+        let key = trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV;
+        // SAFETY: see `set`.
+        match self.prev.take() {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+}
+
+/// Point `path`'s `origin` remote at `url`.
+fn fallback_git_remote(path: &std::path::Path, url: &str) {
+    let status = std::process::Command::new("git")
+        .args(["remote", "add", "origin", url])
+        .current_dir(path)
+        .status()
+        .expect("git remote add must spawn");
+    assert!(
+        status.success(),
+        "git remote add failed in {}",
+        path.display()
     );
 }
 

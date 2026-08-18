@@ -290,7 +290,7 @@ pub fn current_rss_mb() -> Option<u64> {
 /// figure that excludes pages the memory compressor currently holds. A daemon
 /// with several GB compressed can read as tens of MB, so `TRUSTY_MEMORY_LIMIT_MB`
 /// never trips. On macOS this now tries
-/// [`trusty_common::sys_metrics::physical_footprint_mb`] (the `ri_phys_footprint`
+/// `trusty_common::sys_metrics::physical_footprint_mb` (the `ri_phys_footprint`
 /// counter `vmmap`/`footprint`/Activity Monitor report) first, falling back to
 /// the `sysinfo` reading if the `libproc` call fails (e.g. cross-user
 /// permission denial sampling a foreign pid).

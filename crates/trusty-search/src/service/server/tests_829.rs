@@ -133,17 +133,30 @@ async fn validate_root_path_is_non_blocking_and_async() {
     use std::path::Path;
 
     // Empty path — rejected before any I/O (fast path).
-    let result = super::helpers::validate_root_path(Path::new(""), false).await;
+    let result = super::helpers::validate_root_path(
+        Path::new(""),
+        false,
+        &crate::allowlist::test_fixtures::paths(),
+    )
+    .await;
     assert!(result.is_err(), "empty path must be rejected");
 
     // Relative path — rejected before any I/O (no is_absolute check, fast path).
-    let result = super::helpers::validate_root_path(Path::new("relative/path"), false).await;
+    let result = super::helpers::validate_root_path(
+        Path::new("relative/path"),
+        false,
+        &crate::allowlist::test_fixtures::paths(),
+    )
+    .await;
     assert!(result.is_err(), "relative path must be rejected");
 
     // Non-existent absolute path — exercises the async metadata check.
-    let result =
-        super::helpers::validate_root_path(Path::new("/this/path/does/not/exist/issue829"), false)
-            .await;
+    let result = super::helpers::validate_root_path(
+        Path::new("/this/path/does/not/exist/issue829"),
+        false,
+        &crate::allowlist::test_fixtures::paths(),
+    )
+    .await;
     assert!(result.is_err(), "non-existent path must be rejected");
 }
 

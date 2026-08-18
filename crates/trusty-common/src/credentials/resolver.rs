@@ -79,7 +79,7 @@ fn env_tier(provider: &str) -> Option<String> {
 /// `KeyStore` rather than erroring — a missing home directory or an
 /// unavailable keychain degrades the backend, it doesn't break credential
 /// resolution (env-var-only usage still works).
-/// What: behind the `keyring-store` feature, probes [`KeyringStore`] first
+/// What: behind the `keyring-store` feature, probes `KeyringStore` first
 /// (see its docs for the probe/cache semantics) and returns it when
 /// available; otherwise constructs [`FileKeyStore::new`], falling back to
 /// [`MemoryKeyStore`] only in the (CI/container) case where
@@ -105,7 +105,69 @@ pub fn default_store() -> Box<dyn KeyStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::env_guard::EnvVarGuard;
     use serial_test::serial;
+
+    /// Render a resolved credential for a failure message without disclosing it.
+    ///
+    /// Why: the env tier reads REAL credential variables, so a failing
+    /// `assert_eq!` on the raw `Option<String>` prints whatever the process
+    /// actually holds. That is how this module printed a live OpenRouter key
+    /// into test output. Every ACTUAL value goes through
+    /// [`crate::credentials::redact_secret`], which is non-reversible by
+    /// contract; only the EXPECTED side is a test literal and safe verbatim.
+    fn describe(value: Option<&str>) -> String {
+        match value {
+            None => "None".to_string(),
+            Some(v) => format!("Some({})", crate::credentials::redact_secret(v)),
+        }
+    }
+
+    /// Assert a resolution result, redacting the actual value on failure.
+    ///
+    /// Why: no assertion in this module may print a credential, pass or fail —
+    /// see [`describe`].
+    fn assert_resolved(actual: Option<String>, expected: Option<&str>) {
+        assert!(
+            actual.as_deref() == expected,
+            "expected {expected:?}, got {} (actual value redacted: this \
+             assertion can observe a real credential from the process \
+             environment)",
+            describe(actual.as_deref())
+        );
+    }
+
+    /// Why: the leak this module shipped lived in the FAILURE path — a passing
+    /// run printed nothing, so no happy-path test could catch its return. The
+    /// env tier reads real credential variables, so a mismatch here can hold a
+    /// live key; assert directly that the panic message does not carry it.
+    /// What: provokes a failed [`assert_resolved`] with a secret-shaped actual
+    /// value and checks the message keeps only the non-reversible preview.
+    /// Test: itself.
+    #[test]
+    fn a_failed_resolution_assert_never_prints_the_secret() {
+        let secret = "sk-or-v1-0123456789abcdef0123456789abcdef";
+        let panic = std::panic::catch_unwind(|| {
+            assert_resolved(Some(secret.to_string()), Some("from-dotenv"));
+        })
+        .expect_err("a mismatched resolution must panic");
+        let msg = panic
+            .downcast_ref::<String>()
+            .expect("assert! panics with a String payload");
+
+        assert!(
+            !msg.contains(secret),
+            "the failure message echoed the secret verbatim"
+        );
+        assert!(
+            !msg.contains("0123456789"),
+            "the failure message echoed secret material past the redaction head"
+        );
+        assert!(
+            msg.contains(&crate::credentials::redact_secret(secret)),
+            "the failure message must still identify WHICH credential it saw"
+        );
+    }
 
     /// Why: tier 1 (process env) must win over tier 3 (store) — the core
     /// precedence contract.
@@ -113,20 +175,10 @@ mod tests {
     #[test]
     #[serial(dotenv_credential_env)]
     fn env_beats_store() {
-        // SAFETY: `#[serial(dotenv_credential_env)]` guarantees no other
-        // test in this crate mutates process env concurrently with this one.
-        unsafe {
-            std::env::set_var("FIREWORKS_API_KEY", "from-env");
-        }
+        let _guard = EnvVarGuard::set("FIREWORKS_API_KEY", "from-env");
         let store = MemoryKeyStore::new();
         store.set("fireworks", "from-store").unwrap();
-        assert_eq!(
-            resolve_key_with("fireworks", &store),
-            Some("from-env".to_string())
-        );
-        unsafe {
-            std::env::remove_var("FIREWORKS_API_KEY");
-        }
+        assert_resolved(resolve_key_with("fireworks", &store), Some("from-env"));
     }
 
     /// Why: tier 2 (`.env.local`, once loaded into the process env) must
@@ -138,10 +190,13 @@ mod tests {
     #[test]
     #[serial(dotenv_credential_env)]
     fn dotenv_loaded_value_beats_store() {
-        // SAFETY: see `env_beats_store`.
-        unsafe {
-            std::env::remove_var("OPENROUTER_API_KEY");
-        }
+        // The guard clears the variable so `load_env_from_path` below is what
+        // populates it (`dotenvy` never overrides an already-set var), and
+        // restores whatever the machine had on drop. Nothing here reads an
+        // ambient value: the fixture is a `.env.local` this test writes into a
+        // temp dir, so the outcome is identical on a machine with no such file
+        // and on one whose file says something else.
+        let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
         let tmp = tempfile::TempDir::new().unwrap();
         let env_path = tmp.path().join(".env.local");
         std::fs::write(&env_path, "OPENROUTER_API_KEY=from-dotenv\n").unwrap();
@@ -149,13 +204,7 @@ mod tests {
 
         let store = MemoryKeyStore::new();
         store.set("openrouter", "from-store").unwrap();
-        assert_eq!(
-            resolve_key_with("openrouter", &store),
-            Some("from-dotenv".to_string())
-        );
-        unsafe {
-            std::env::remove_var("OPENROUTER_API_KEY");
-        }
+        assert_resolved(resolve_key_with("openrouter", &store), Some("from-dotenv"));
     }
 
     /// Why: with no env var and no `.env.local` value, the store tier must
@@ -164,16 +213,10 @@ mod tests {
     #[test]
     #[serial(dotenv_credential_env)]
     fn falls_through_to_store() {
-        // SAFETY: see `env_beats_store`.
-        unsafe {
-            std::env::remove_var("ANTHROPIC_API_KEY");
-        }
+        let _guard = EnvVarGuard::remove("ANTHROPIC_API_KEY");
         let store = MemoryKeyStore::new();
         store.set("anthropic", "from-store").unwrap();
-        assert_eq!(
-            resolve_key_with("anthropic", &store),
-            Some("from-store".to_string())
-        );
+        assert_resolved(resolve_key_with("anthropic", &store), Some("from-store"));
     }
 
     /// Why: when every tier is absent, resolution must return `None`, not
@@ -182,12 +225,9 @@ mod tests {
     #[test]
     #[serial(dotenv_credential_env)]
     fn absent_everywhere_is_none() {
-        // SAFETY: see `env_beats_store`.
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-        }
+        let _guard = EnvVarGuard::remove("OPENAI_API_KEY");
         let store = MemoryKeyStore::new();
-        assert_eq!(resolve_key_with("openai", &store), None);
+        assert_resolved(resolve_key_with("openai", &store), None);
     }
 
     /// Why: an env var explicitly set to the empty string must not shadow
@@ -196,18 +236,9 @@ mod tests {
     #[test]
     #[serial(dotenv_credential_env)]
     fn empty_env_var_falls_through_to_store() {
-        // SAFETY: see `env_beats_store`.
-        unsafe {
-            std::env::set_var("FIREWORKS_API_KEY", "");
-        }
+        let _guard = EnvVarGuard::set("FIREWORKS_API_KEY", "");
         let store = MemoryKeyStore::new();
         store.set("fireworks", "from-store").unwrap();
-        assert_eq!(
-            resolve_key_with("fireworks", &store),
-            Some("from-store".to_string())
-        );
-        unsafe {
-            std::env::remove_var("FIREWORKS_API_KEY");
-        }
+        assert_resolved(resolve_key_with("fireworks", &store), Some("from-store"));
     }
 }

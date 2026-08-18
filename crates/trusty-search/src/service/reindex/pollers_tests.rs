@@ -1,0 +1,283 @@
+//! Shutdown-latency and shutdown-completeness tests for the reindex RSS pollers.
+//!
+//! Why: #5047 — `stop_pollers` cost 584–952ms of pure tick-wait on every reindex
+//! teardown, because a poller parked in `Interval::tick()` could not observe its
+//! stop flag until the tick expired, and the sidecar poller was not signalled
+//! until the daemon poller had already joined. These tests pin both halves of the
+//! fix: shutdown is prompt, and it still joins both tasks having done their work.
+//! What: drives the real `spawn_memory_poller` / `spawn_embedderd_rss_poller`
+//! tasks at their production 1s / 500ms cadences and times `stop_pollers`.
+//! Against the pre-fix code the latency assertion fails at ~1400ms.
+//! Test: this file — run via `cargo test -p trusty-search`.
+
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use super::finish_teardown::stop_pollers;
+use super::pollers::{spawn_embedderd_rss_poller, spawn_memory_poller, PollerStop};
+
+/// Ceiling for a prompt shutdown.
+///
+/// Deliberately loose. Every test below parks the daemon poller no more than
+/// `SETTLE` into its 1s tick, so the pre-fix path costs at least 900ms from any
+/// of these fixtures, while the fixed path measures 0.14–0.97ms. 750ms sits
+/// between those with ~150ms of margin on the failure side and ~750x on the
+/// pass side — wide enough to survive a runner loaded by parallel tests (the
+/// flake mode #3769, #4306 and #4488 all landed in) without letting a
+/// regression back to waiting out a tick through.
+const PROMPT_SHUTDOWN_CEILING: Duration = Duration::from_millis(750);
+
+/// Long enough for both pollers to take a sample and park mid-tick.
+const SETTLE: Duration = Duration::from_millis(100);
+
+struct Fixture {
+    memory: (tokio::task::JoinHandle<()>, Arc<super::pollers::PollerStop>),
+    sidecar: (tokio::task::JoinHandle<()>, Arc<super::pollers::PollerStop>),
+    mem_abort: Arc<AtomicBool>,
+    peak_rss: Arc<AtomicU64>,
+    peak_sidecar_rss: Arc<AtomicU64>,
+}
+
+/// Spawn both pollers exactly as `runner::run_reindex` does.
+///
+/// The sidecar poller is pointed at this test process's own PID so it samples a
+/// real, always-readable RSS rather than being skipped as a dead sidecar.
+fn spawn_both(mem_limit: Option<u64>) -> Fixture {
+    let mem_abort = Arc::new(AtomicBool::new(false));
+    let peak_rss = Arc::new(AtomicU64::new(0));
+    let peak_sidecar_rss = Arc::new(AtomicU64::new(0));
+    let memory = spawn_memory_poller(
+        mem_limit,
+        Arc::clone(&mem_abort),
+        Arc::clone(&peak_rss),
+        "pollers-tests".to_string(),
+    );
+    let pid_slot = Arc::new(AtomicU32::new(std::process::id()));
+    let sidecar = spawn_embedderd_rss_poller(pid_slot, Arc::clone(&peak_sidecar_rss));
+    Fixture {
+        memory,
+        sidecar,
+        mem_abort,
+        peak_rss,
+        peak_sidecar_rss,
+    }
+}
+
+/// Poll `cond` until it holds or `budget` expires; returns whether it held.
+///
+/// Condition-based rather than a fixed sleep so the tests do not encode a guess
+/// about how fast the first poll tick lands on a loaded machine.
+async fn wait_for(budget: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        if cond() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The fix itself: teardown must not wait out the current poll tick.
+///
+/// Pre-fix this measures ~1400ms (900ms left of the daemon poller's 1s tick,
+/// then a further 500ms because the sidecar poller was only signalled after the
+/// first join returned).
+#[tokio::test]
+async fn stop_pollers_returns_without_waiting_out_the_tick() {
+    let fx = spawn_both(None);
+    tokio::time::sleep(SETTLE).await;
+
+    let started = Instant::now();
+    stop_pollers(
+        fx.memory.1,
+        fx.memory.0,
+        Some(fx.sidecar.1),
+        Some(fx.sidecar.0),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    println!("stop_pollers teardown = {}us", elapsed.as_micros());
+    assert!(
+        elapsed < PROMPT_SHUTDOWN_CEILING,
+        "stop_pollers took {}ms; it must not wait out a poll tick (ceiling {}ms)",
+        elapsed.as_millis(),
+        PROMPT_SHUTDOWN_CEILING.as_millis(),
+    );
+}
+
+/// Prompt is not enough — teardown must still have joined both tasks, and both
+/// must have done the sampling they exist to do.
+///
+/// A shutdown that returned faster by abandoning the poller tasks, or by exiting
+/// them before their first sample, would pass the latency test above and be a
+/// regression. `stop_pollers` returning at all proves both `JoinHandle`s
+/// resolved; the peak assertions prove neither task was cut short of its work.
+#[tokio::test]
+async fn stop_pollers_still_joins_both_pollers() {
+    let fx = spawn_both(None);
+
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            fx.peak_rss.load(Ordering::Acquire) > 0
+                && fx.peak_sidecar_rss.load(Ordering::Acquire) > 0
+        })
+        .await,
+        "both pollers must record a peak RSS before teardown",
+    );
+    let peak_before = fx.peak_rss.load(Ordering::Acquire);
+    let sidecar_peak_before = fx.peak_sidecar_rss.load(Ordering::Acquire);
+
+    stop_pollers(
+        fx.memory.1,
+        fx.memory.0,
+        Some(fx.sidecar.1),
+        Some(fx.sidecar.0),
+    )
+    .await;
+
+    // Peaks are monotonic and must survive teardown — the terminal `complete`
+    // SSE event reports them after `stop_pollers` returns.
+    assert!(fx.peak_rss.load(Ordering::Acquire) >= peak_before);
+    assert!(fx.peak_sidecar_rss.load(Ordering::Acquire) >= sidecar_peak_before);
+}
+
+/// The memory poller's reason for existing still works: it trips `mem_abort`
+/// when RSS crosses the limit, and teardown after that is still prompt.
+#[tokio::test]
+async fn memory_poller_still_trips_abort_then_stops_promptly() {
+    // 1 MB — this test process is always over it, so the first sample trips.
+    let fx = spawn_both(Some(1));
+
+    assert!(
+        wait_for(Duration::from_secs(5), || fx
+            .mem_abort
+            .load(Ordering::Acquire))
+        .await,
+        "memory poller must trip mem_abort once RSS exceeds the limit",
+    );
+
+    let started = Instant::now();
+    stop_pollers(
+        fx.memory.1,
+        fx.memory.0,
+        Some(fx.sidecar.1),
+        Some(fx.sidecar.0),
+    )
+    .await;
+    assert!(started.elapsed() < PROMPT_SHUTDOWN_CEILING);
+    assert!(
+        fx.mem_abort.load(Ordering::Acquire),
+        "abort flag must persist"
+    );
+}
+
+/// A reindex that tears down before either poller has parked stays prompt.
+///
+/// Covers the short-run case — a reindex that fails or finds nothing to do —
+/// where teardown races the pollers' first loop iteration, rather than the
+/// mid-tick case the other latency tests set up.
+///
+/// Budgeted over `RACE_ROUNDS` rather than one shot on purpose. A single round
+/// costs only ~500ms against the fully pre-fix code — under
+/// `PROMPT_SHUTDOWN_CEILING`, so a one-shot assertion at that ceiling would miss
+/// it. Repeating separates the two outcomes by an order of magnitude: a few ms
+/// for the whole loop when shutdown is prompt, ~4s when each round waits out a
+/// tick.
+///
+/// Mutation testing says this pins the same "the wakeup exists" property every
+/// other timing test here pins, just timed at spawn-race instead of mid-tick:
+/// removing only `notify_one` leaves it green (the top-of-loop flag check wins
+/// that race), and reverting only the signalling order leaves it green too
+/// (once the wakeup exists, that reordering costs ~100µs). The two properties
+/// are isolated by `stop_pollers_returns_without_waiting_out_the_tick` and
+/// `stop_pollers_signals_both_before_awaiting_either` respectively.
+#[tokio::test]
+async fn stop_signalled_before_the_poller_parks_still_stops_it() {
+    /// Enough rounds that one lost wakeup per round blows the budget outright.
+    const RACE_ROUNDS: u32 = 8;
+
+    let started = Instant::now();
+    for _ in 0..RACE_ROUNDS {
+        let fx = spawn_both(None);
+        stop_pollers(
+            fx.memory.1,
+            fx.memory.0,
+            Some(fx.sidecar.1),
+            Some(fx.sidecar.0),
+        )
+        .await;
+    }
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < PROMPT_SHUTDOWN_CEILING,
+        "{RACE_ROUNDS} spawn-then-stop rounds took {}ms; a lost wakeup costs a \
+         full tick per round (budget {}ms)",
+        elapsed.as_millis(),
+        PROMPT_SHUTDOWN_CEILING.as_millis(),
+    );
+}
+
+/// Both pollers are signalled before either join is awaited.
+///
+/// The other half of the fix, and the one no wall-clock test can pin: once the
+/// wakeup exists, signalling serially instead costs ~100µs, far below any
+/// ceiling this file could assert without becoming a flake generator. So this
+/// observes the ORDER directly instead of timing it.
+///
+/// The daemon poller is stood in for by a task that will not finish until the
+/// test releases it. While that join is blocked, the sidecar's stop flag must
+/// ALREADY be set. Under serial signalling it is not set until the first join
+/// returns, so `wait_for` exhausts its budget and the assertion fails — and it
+/// fails on any machine at any load, because the flag never becomes true rather
+/// than becoming true late.
+#[tokio::test]
+async fn stop_pollers_signals_both_before_awaiting_either() {
+    let memory_stop = PollerStop::new();
+    let sidecar_stop = PollerStop::new();
+
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = Arc::clone(&release);
+    // Stands in for a daemon poller still winding down.
+    let memory_handle = tokio::spawn(async move { gate.notified().await });
+    let sidecar_handle = tokio::spawn(async {});
+
+    let observed = Arc::clone(&sidecar_stop);
+    let teardown = tokio::spawn(stop_pollers(
+        memory_stop,
+        memory_handle,
+        Some(sidecar_stop),
+        Some(sidecar_handle),
+    ));
+
+    let signalled = wait_for(Duration::from_secs(5), || observed.should_stop()).await;
+
+    // Release regardless, so the assertion below reports rather than hangs.
+    release.notify_one();
+    let _ = teardown.await;
+
+    assert!(
+        signalled,
+        "the sidecar poller was still unsignalled while the daemon poller's \
+         join was blocked — the two shutdowns are running back to back",
+    );
+}
+
+/// The sidecar poller is absent whenever no embedderd PID slot exists; teardown
+/// must handle the `None` arms and stay prompt.
+#[tokio::test]
+async fn stop_pollers_handles_absent_sidecar_poller() {
+    let fx = spawn_both(None);
+    fx.sidecar.1.signal();
+    let _ = fx.sidecar.0.await;
+    tokio::time::sleep(SETTLE).await;
+
+    let started = Instant::now();
+    stop_pollers(fx.memory.1, fx.memory.0, None, None).await;
+    assert!(started.elapsed() < PROMPT_SHUTDOWN_CEILING);
+}

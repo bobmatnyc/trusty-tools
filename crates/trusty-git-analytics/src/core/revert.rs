@@ -70,7 +70,7 @@ fn patterns() -> &'static RevertPatterns {
 /// What: tests the message's first line against the recognized revert forms
 /// (`^revert`, `^fix.*revert`, case-insensitive). Multi-line bodies are
 /// ignored — only the subject can declare a revert.
-/// Test: [`tests`] below cover each accepted form and the false-positive
+/// Test: `tests` below cover each accepted form and the false-positive
 /// guards.
 pub fn is_revert(message: &str) -> bool {
     let first_line = message.lines().next().unwrap_or(message);

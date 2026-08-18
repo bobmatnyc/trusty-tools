@@ -172,6 +172,31 @@ jobs:
             echo "No crate declares a new version in this diff."
           fi
 
+      # #5501: the SECOND trigger, and the self-tests below run on either one.
+      # `have_work` is computed only from detect-version-bumps.sh, so a PR that
+      # repairs this gate and bumps nothing took the no-op path and the
+      # self-tests stood down on exactly the PR that changed the thing they
+      # test. Observed on PR #5496 (see #5500): it fixed this workflow, `Public
+      # API / SemVer` passed in ~15s through the no-op path, and its regression
+      # proof was local only.
+      #
+      # The `else` arm is the tag push and the manual dispatch, neither of which
+      # has a diff to classify. `have_work` is true by construction there, so
+      # this output changes nothing — it says true rather than false because a
+      # classifier that could not look must never be the reason a self-test is
+      # skipped.
+      - name: Classify SemVer gate machinery from the diff
+        id: machinery
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SEMVER_GATE_BASE="origin/${BASE_REF}" \
+              bash scripts/detect-semver-gate-inputs.sh > /dev/null
+          else
+            echo "semver_gate_inputs_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # STABLE, DELIBERATELY NOT THE MSRV 1.94 THIS REPO PINS (#5289).
       # cargo-semver-checks builds rustdoc in a scratch project that ignores this
       # workspace's Cargo.lock, so the graph it resolves can demand a higher
@@ -186,9 +211,31 @@ jobs:
       # to pay on every PR, so they are gated on there being a release under
       # test. STEP-level, never job-level: a skipped JOB does not satisfy a
       # required context.
+      #
+      # #5501: this one step also runs on the machinery path, because both
+      # self-tests need a `cargo` on PATH — check_semver_selftest.sh's stub
+      # forwards `cargo metadata` to the real one, and the type differ resolves
+      # `--crate` the same way. It costs seconds; the three below stay on
+      # `have_work` alone, which is what keeps #5149's decision intact.
       - name: Install stable toolchain
-        if: steps.crate.outputs.have_work == 'true'
+        if: steps.crate.outputs.have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'
         uses: dtolnay/rust-toolchain@stable
+
+      # #5440: trusty-common's `keyring-store` feature pulls in libdbus-sys,
+      # whose build.rs shells out to `pkg-config dbus-1`. That package is
+      # absent on the ubuntu-latest runner image, so building rustdoc for
+      # trusty-common under `--only-explicit-features` (which includes every
+      # non-excluded feature, keyring-store among them — see feature_args() in
+      # scripts/check_semver.sh) aborted before cargo-semver-checks ever
+      # compared an API. That is a NO VERDICT (exit 3), not a pass and not a
+      # confirmed-unchanged API — see the "Enforce public-API SemVer" step
+      # below. libdbus-1-dev supplies the `dbus-1` pkg-config package this
+      # build.rs looks for.
+      - name: Install system dependencies (libdbus for keyring-store)
+        if: steps.crate.outputs.have_work == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev
 
       # A prebuilt binary, PINNED. `cargo install cargo-semver-checks` compiles
       # ~2 minutes of tool before a single crate is checked. install-action
@@ -210,12 +257,37 @@ jobs:
           # cargo-semver-checks builds into target/semver-checks/, which
           # rust-cache prunes as "unrecognised" by default.
           cache-directories: target/semver-checks
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota, and this
+          # repo was over it — see the note on the test-shard cache in ci.yml.
+          # This one also saved from worktree branches pushed for release tags.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Runs BEFORE the real gate, matching line-cap.yml's selftest-then-gate
       # ordering: a gate that cannot fail makes the real run's green meaningless.
+      #
+      # #5501: OR the machinery trigger — a gate-fix PR bumps no version, and
+      # gating this on the bump alone skipped the proof on every PR that changed
+      # the gate.
       - name: SemVer gate selftest (must refuse a blind run)
-        if: steps.crate.outputs.have_work == 'true'
+        if: steps.crate.outputs.have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'
         run: bash scripts/check_semver_selftest.sh
+
+      # cargo-semver-checks 0.50.0 compares NO TYPES: substitute any type and
+      # the item still exists with the same name and arity, so every lint
+      # passes. Against a 9-break probe crate at --release-type patch it caught
+      # 2 and missed 7, all 7 type substitutions; trusty-common 0.32.0 -> 0.33.0
+      # changed a return from u64 to Result<u64> and the step below reported
+      # `196 checks: 196 pass`. scripts/check_semver_types.sh closes that, and
+      # this proves it still catches all seven.
+      #
+      # Gated the same way as the selftest above, not because it is expensive —
+      # it reads two committed rustdoc JSON documents and builds nothing — but
+      # because its --crate cases need `cargo metadata`, and the toolchain step
+      # is itself gated. #5501 widened both to the machinery trigger together.
+      - name: Type-differ selftest (must catch what the lints miss)
+        if: steps.crate.outputs.have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'
+        run: bash scripts/check_semver_types_selftest.sh
 
       # The two nonzero statuses are annotated differently ON PURPOSE (#5289).
       # Exit 1 is a computed verdict that says break; exit 3 means the gate never

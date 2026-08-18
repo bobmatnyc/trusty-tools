@@ -1,6 +1,6 @@
 [package]
 name = "trusty-common"
-version = "0.33.1"
+version = "0.36.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -162,6 +162,10 @@ hex = { workspace = true, optional = true }
 # `X-Hub-Signature-256` verifier is the crate's only HMAC consumer.
 hmac = { workspace = true, optional = true }
 hnsw_rs = { workspace = true, optional = true }
+# Optional: enabled by the `memory-core` feature. NFC composition for
+# `memory_core::content_hash`'s normalization contract (#5902) — the only
+# consumer, so it is gated with the rest of the Memory Palace.
+unicode-normalization = { workspace = true, optional = true }
 git2 = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
@@ -170,7 +174,6 @@ futures = { workspace = true, optional = true }
 # default-features builds, so it cannot be gated behind a feature flag.
 chrono = { workspace = true }
 regex = { workspace = true, optional = true }
-kuzu = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }
 postcard = { workspace = true, optional = true }
 # Optional: enabled by the `tickets` feature (absorbed from `trusty-tickets`).
@@ -270,6 +273,15 @@ postcard = { workspace = true }
 
 [features]
 default = []
+# #4901: names a test run that deliberately covers only the always-compiled
+# surface (banner, port, slug, data_dir, chat, tmux, …). Enables no module and
+# pulls in no dependency — its whole job is to be typed on the command line, so
+# that `cargo test -p trusty-common --features unconditional-only` says out loud
+# what the bare form used to hide: 328 of the crate's ~2062 tests ran, and the
+# feature-gated modules were never compiled. The `build.rs` zero-feature guard
+# rejects the bare form; this is the documented way through it when the gated
+# modules genuinely are not what you changed.
+unconditional-only = []
 # Enables the `docgen` module: marker-delimited generated documentation
 # regions (`<!-- BEGIN GENERATED: <id> -->`) plus the MCP-tool-table renderer
 # and the check-or-rewrite gate the consumer crates' `tests/generated_docs.rs`
@@ -286,7 +298,7 @@ docgen = []
 # already unconditional in this crate. Also requires `mcp` (issue #2030):
 # `catchup::palace` reaches trusty-memory via `mcp::memory_rpc`'s discovery +
 # JSON-RPC helper rather than a hardcoded REST URL.
-catchup = ["dep:rusqlite", "mcp"]
+catchup = ["dep:rusqlite", "mcp", "palace-resolve"]
 # Enables the `server` module: standard axum middleware stack (CORS, trace,
 # gzip) and a fast-fail reqwest client for daemon-to-daemon calls.
 axum-server = ["dep:axum", "dep:tower-http"]
@@ -330,11 +342,9 @@ bm25 = []
 # Issue #179. Pure user of existing `serde` / `serde_json` / `anyhow` /
 # `tracing` workspace deps — adds no new dependencies.
 migrations = []
-# Enables the `bm25_client` module: a UDS JSON-RPC client for the per-palace
-# `trusty-bm25-daemon` subprocess (issue #156). Pure user of existing
-# `tokio` / `serde_json` / `anyhow` workspace deps — adds no new deps.
-# Implies `uds` for the shared socket-path resolver (#5099).
-bm25-client = ["uds"]
+# Why (#5329): the `bm25-client` feature was REMOVED with the `bm25_client`
+# module. BM25 runs in-process in trusty-memory now, so there is no subprocess
+# to speak a wire protocol to. Consumers that had it on want `bm25` instead.
 # Enables the `uds` module: the shared 0700-directory / 0600-socket /
 # peer-uid enforcement every UDS bind site routes through (issue #5099).
 # Pulls in `thiserror` (error enum) and uses the `libc` and `tokio` workspace
@@ -471,14 +481,16 @@ memory-core = [
     "dep:petgraph",
     "dep:sha2",
     "dep:hex",
+    # #5902: NFC for the content-hash normalization contract.
+    "dep:unicode-normalization",
     "embedder",
     "embedder-bundled-ort",
     "credentials",
 ]
-# Optional kuzu graph DB read-only integration on top of the memory-core
-# feature. Pulls in the `kuzu` crate. Off by default because kuzu adds a
-# large native dependency.
-memory-core-kuzu = ["memory-core", "dep:kuzu"]
+# Why (#5695): the `memory-core-kuzu` feature and its `memory_core::store::kuzu`
+# module were REMOVED. Nothing enabled the feature and no bindings were ever
+# wired in, so it only made `--all-features` — the path cargo-semver-checks
+# takes — require a cmake source build of kuzu.
 # Enables the `monitor` module: the unified ratatui dashboard for the
 # trusty-search and trusty-memory daemons (formerly the `trusty-monitor-tui`
 # crate, and before that the standalone `trusty-monitor` binary). Pulls in
@@ -502,7 +514,11 @@ embedder-client = ["dep:thiserror", "embedder", "uds"]
 # JIRA, and Linear backends (absorbed from the former standalone `trusty-tickets`
 # crate). Pulls in `chrono`, `uuid`, `base64`, `thiserror`, and `toml` as
 # additional optional deps. Requires the `mcp` feature for the stdio loop.
-tickets = ["mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml"]
+tickets = ["mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml", "gh-cli"]
+# Enables the `gh` module: the workspace's single entry point for invoking the
+# GitHub CLI (#5475). Pulls in `thiserror` only — `tokio/process`, `serde` and
+# `serde_json` are already unconditional here.
+gh-cli = ["dep:thiserror"]
 # Enables the `intent_source` module: the shared intent-source resolver (ISR)
 # for the intent/method conformance gates (DOC-15, SPEC-CONFORMANCE-03, #1358).
 # Resolves the ticket method + spec method from a PR or ticket-id and applies
@@ -539,6 +555,14 @@ cli-help = ["dep:serde_yaml", "dep:strsim", "dep:indexmap", "dep:thiserror"]
 # per-crate location. Pulls in `serde_yaml` (pinned 0.9 — see the workspace
 # manifest's pin note and #1250) and `dirs` (already an unconditional dep).
 crate-config = ["dep:serde_yaml", "dep:thiserror"]
+# Enables the `palace_resolve` module: the single entry point every crate routes
+# through to answer "which trusty-memory palace does this project use?" (#5811).
+# Owns all four precedence levels — env override, committed
+# `.trusty-tools/trusty-memory.yaml` pin, git `owner/repo`, `parent/dir` of the
+# MAIN worktree root — plus the shared `git` probes. The pure three-level core
+# (`palace_id`) stays unconditional; only the pin-file I/O needs `serde_yaml`,
+# and the fail-closed error enum needs `thiserror`.
+palace-resolve = ["dep:serde_yaml", "dep:thiserror"]
 # Enables the `update` module: throttled crates.io update-notification helper.
 # Checks once per 24 h via a JSON cache file in the OS cache directory. Opt-out
 # via `TRUSTY_NO_UPDATE_CHECK` or `CI` environment variables. Reuses the

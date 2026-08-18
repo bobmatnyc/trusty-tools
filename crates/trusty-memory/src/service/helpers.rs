@@ -326,19 +326,37 @@ fn wing_registry_count(handle: &Arc<PalaceHandle>) -> Option<usize> {
 /// status/metrics roll-ups have no field to carry "unknown", and #4637 already
 /// fixed 0 as "unknown, never empty" for those totals, so they degrade. Keeping
 /// the degrade in one named helper is what stops it from sinking back into the
-/// store where no caller can see it.
-/// What: logs the error at warn with the palace id and returns 0.
-/// Test: `status_does_not_open_uncached_palaces`. The read error this converts
-/// is covered cross-crate, in
-/// `crates/trusty-common/src/memory_core/store/kg_redb/tests.rs`, by
-/// `count_active_triples_surfaces_read_failure` — named in prose because
-/// `scripts/check_test_pointers.sh` resolves a cited name only within the
-/// citing crate.
+/// store where no caller can see it. The read error this converts is raised,
+/// and pinned, cross-crate in
+/// `crates/trusty-common/src/memory_core/store/kg_redb/tests.rs` by
+/// `count_active_triples_surfaces_read_failure`.
+/// What: performs the read and hands it to [`triple_count_or_zero`], which
+/// owns the degrade.
+/// Test: `status_does_not_open_uncached_palaces` (success path, through the
+/// status roll-up), `triple_count_or_zero_degrades_a_failed_read_to_zero` (the
+/// error arm, in the delegate that owns it). What stays uncovered is the
+/// one-line wiring of the read into that rule: inducing a real failure needs
+/// `KgStoreRedb::db()`, which trusty-common keeps `pub(super)`.
 pub(crate) fn kg_triple_count_or_zero(handle: &Arc<PalaceHandle>) -> usize {
-    match handle.kg.count_active_triples() {
+    triple_count_or_zero(&handle.id, handle.kg.count_active_triples())
+}
+
+/// Apply the degrade rule to an already-performed count read.
+///
+/// Why (#5489): `count_active_triples` fails only when its backing redb table
+/// is unreadable, and nothing in this crate can force that — `KgStoreRedb::db()`
+/// is `pub(super)` within trusty-common, so the failure cannot be induced from
+/// here without widening that crate's public API. Taking the read as a
+/// parameter puts the branch #5384 actually cares about — an error must become
+/// a *logged* 0, never a silent one — under an in-crate test instead.
+/// What: `Ok(n)` passes through; `Err` is logged at warn against the palace id
+/// and becomes 0.
+/// Test: `triple_count_or_zero_degrades_a_failed_read_to_zero`.
+fn triple_count_or_zero(palace: &PalaceId, read: Result<usize>) -> usize {
+    match read {
         Ok(n) => n,
         Err(e) => {
-            tracing::warn!(palace = %handle.id, "kg_triple_count unavailable: {e:#}");
+            tracing::warn!(palace = %palace, "kg_triple_count unavailable: {e:#}");
             0
         }
     }
@@ -703,6 +721,41 @@ mod tests {
     fn drawer_snippet_handles_empty_content() {
         assert_eq!(drawer_snippet(""), "");
         assert_eq!(drawer_snippet("   \n\t  "), "");
+    }
+
+    /// Issue #5384 regression guard — a failed count read degrades to `0`,
+    /// and a successful one is passed through untouched.
+    ///
+    /// Why: #4637 fixed `0` as "unknown, never empty" for the status,
+    /// console-metrics and palace-info totals, which is only safe while the
+    /// failure stays loud. Before #5384 the store swallowed the error and
+    /// returned `0` itself, so no caller could tell an empty graph from a
+    /// broken read; the degrade now survives at exactly one call site, and
+    /// this pins it there. Without this test the whole error arm of
+    /// `kg_triple_count_or_zero` is unexecuted in this crate — the upstream
+    /// test in trusty-common proves the error is raised, not that this
+    /// converts it.
+    /// What: feeds an `Err` and asserts `0`, then an `Ok(n)` and asserts `n`,
+    /// so the degrade is provably scoped to the error arm rather than
+    /// flattening real counts.
+    /// Test: this test.
+    #[test]
+    fn triple_count_or_zero_degrades_a_failed_read_to_zero() {
+        let palace = PalaceId::new("degrade-guard");
+
+        assert_eq!(
+            triple_count_or_zero(
+                &palace,
+                Err(anyhow!("active_subject_counts: no such table"))
+            ),
+            0,
+            "an unreadable count degrades to 0 rather than propagating or panicking"
+        );
+        assert_eq!(
+            triple_count_or_zero(&palace, Ok(7)),
+            7,
+            "a successful read is passed through untouched"
+        );
     }
 
     /// Build an `AppState` over a temp dir whose registry holds at most two

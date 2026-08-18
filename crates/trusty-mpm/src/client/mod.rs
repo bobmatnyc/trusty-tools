@@ -13,6 +13,11 @@
 //! one shared layer.
 //! Test: `cargo test -p trusty-mpm-client` covers URL construction, the command
 //! model, and the executor against an in-process test daemon.
+//!
+//! [`DaemonClient`]: crate::client::DaemonClient
+//! [`TrustyCommand`]: crate::client::TrustyCommand
+//! [`CommandResult`]: crate::client::CommandResult
+//! [`CommandExecutor`]: crate::client::CommandExecutor
 
 pub mod catalog;
 pub mod command;
@@ -31,10 +36,10 @@ pub use http_client::{
     CoordinatorSession, DaemonClient, DiscoveredProjectRow, EventRow, FleetByProjectWireResponse,
     FleetProjectGroupWire, HealthSnapshot, LastSeen, LlmChatOutcome, ManagedActivityResponse,
     ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse,
-    ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
-    ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
-    ManagedStoreHealth, OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow,
-    TmuxSessionRow,
+    ManagedAttachCmdResponse, ManagedDecommissionOutcome, ManagedListResponse,
+    ManagedSendInputRequest, ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest,
+    ManagedSpawnResponse, ManagedStoreHealth, OverseerSnapshot, PairConfirm, PairRequest,
+    PairStatus, SessionRow, TmuxSessionRow,
 };
 pub use proxy::{
     ActivityDigest, FocusOutcome, FocusTarget, FreeTextRoute, InjectOutcome, ManagedBackend,

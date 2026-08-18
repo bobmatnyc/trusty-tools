@@ -40,7 +40,12 @@ managed session) — not `/tm-init`.
 2. **Scaffold or update `CLAUDE.md`** — the project-instructions file that
    tells any future session how to build, test, and navigate this repo. New
    projects get a fresh priority-ranked (🔴🟡🟢⚪) file; existing projects get a
-   smart, non-destructive refresh that preserves custom sections.
+   smart, non-destructive refresh that preserves custom sections. For a Rust
+   project (`Cargo.toml` present — the same marker `rust-engineer` deploys
+   on), this step also adds the **Build Performance** pointer described under
+   "What Gets Written" below, so build-performance discipline is part of
+   project setup rather than something reached only after a build already
+   feels slow.
 3. **Register the project** with the trusty-mpm daemon (`tm project init`) so it
    is tracked, listable, and resumable.
 4. Optionally surface recent work context (`update` / `context` / `catchup`
@@ -120,6 +125,39 @@ project — instant, no LLM analysis. After running it, reconcile against
   (point the link at the project's own repo when known), and that this overrides
   any harness default — never `🤖 Generated with Claude Code` or a
   `Co-Authored-By: Claude …` trailer. Preserve the section on smart-merge.
+- ✅ **Build Performance pointer (Rust projects only)** — when `Cargo.toml`
+  exists at the project root, a scaffolded or refreshed `CLAUDE.md` MUST
+  include a short **Build Performance** section, added at setup time instead
+  of waiting for a build to feel slow first:
+  - Point at the bundled `rust-build-performance` skill
+    (`Skill(skill="rust-build-performance")`) for the day-to-day discipline —
+    `cargo check` first, trim the dependency/feature graph, and protect
+    incremental compilation.
+  - Name `cargo build --timings` as the first concrete action for a new
+    contributor: establish a measured baseline before assuming anything is
+    slow or reaching for a shared-cache/compiler-flag fix.
+  - **Never assert that `sccache` (or any other shared compilation cache)
+    makes builds faster.** The skill's own §6 is explicit that for a
+    workspace's own path/member crates — the common multi-worktree
+    cold-build scenario — sccache under its default config gets **zero
+    benefit**: cargo's dev profile builds those crates incrementally, and
+    sccache cannot cache incremental compiler output. That is not a
+    theoretical caveat; a forced path-crate recompile under an active
+    sccache wrapper reproduces it directly (`Non-cacheable reasons:
+    incremental`, 0 hits). The only lever for a cross-worktree hit on path
+    crates is `CARGO_INCREMENTAL=0`, which trades away single-tree
+    incremental speed to get it — name that tradeoff, but do not recommend
+    making it; it is unmeasured and stays an explicit operator decision.
+    Whether sccache's cache pays off on a workspace's EXTERNAL, non-path
+    dependencies (the one case its mechanism is expected to help, since
+    those build non-incrementally and identically across worktrees) is a
+    separate, still-unquantified question — point at `sccache --show-stats`
+    to measure a real hit rate on the target machine before treating that
+    case as settled either. State any adoption as a measured, opt-in
+    team/operator decision, never as a default every Rust project should
+    turn on.
+  Preserve this section on smart-merge, same as the attribution section
+  above.
 - ✅ project registration under `.trusty-mpm/` (via `tm project init`)
 - ❌ never `.claude/agents/`, `.claude/skills/`, `.claude/settings.json`,
   `INSTRUCTIONS.md`, output styles, or `.mcp.json` (those are `tm install`'s job)
@@ -141,6 +179,11 @@ version-controllable and is never clobbered on re-`init`.
 
 - `tm install` — (re)deploy the trusty **config** (agents/skills/settings/mcp);
   this is the config path `/tm-init` deliberately does not cover.
+- `rust-build-performance` — the skill the Build Performance pointer (above)
+  points to for a detected Rust project; also carried resident in
+  `rust-engineer` and `tauri-engineer`'s own `skills:` frontmatter, so this
+  pointer is a project-setup complement to that per-agent coverage, not a
+  duplicate of it.
 - `/tm-session-management` — session pause/resume policy, the auto-pause
   threshold, project-local `.trusty-mpm/sessions/` format, and worktree pruning.
 - `/tm-session-pause` and `/tm-session-resume` — the focused pause/resume actions.

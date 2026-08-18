@@ -85,7 +85,12 @@ impl L1Cache {
     /// hazards (issue #154): two concurrent writers must not stomp on each
     /// other's tmp file, and the parent directory must exist at rename time
     /// even if a prior op transiently removed it (e.g. the dream subprocess).
-    /// What: Sorts a clone of `drawers` by importance descending, takes the
+    /// #4836: the snapshot is a SELECTION that outlives the process —
+    /// `PalaceHandle::open_with_intent` hydrates `l1_drawers` verbatim from it,
+    /// so whichever entries land here are the ones `retrieve_l0_l1` serves
+    /// until the next write. Sorting on importance alone picked them by the
+    /// caller's input order (v4 UUIDs, uncorrelated with age).
+    /// What: Sorts a clone of `drawers` by `drawer_listing_order`, takes the
     /// first `L1_SNAPSHOT_CAP`, writes JSON to a per-call unique tmp path
     /// (PID + monotonic counter so concurrent writers don't share the tmp),
     /// re-asserts `create_dir_all` immediately before the rename so the
@@ -94,9 +99,12 @@ impl L1Cache {
     /// failure the stray tmp is best-effort removed so disk doesn't fill
     /// with `.tmp.<pid>.<seq>` orphans.
     /// Test: `l1_cache_roundtrip` saves 20 drawers and verifies only the top
-    /// 15 (by importance) come back. `concurrent_save_l1_cache_no_enoent`
-    /// stresses 16 parallel writers and asserts none hit ENOENT (covers the
-    /// trample race fixed by per-call tmp naming).
+    /// 15 (by importance) come back;
+    /// `l1_snapshot_keeps_the_newest_drawers_within_an_importance_tie` covers
+    /// what the cap cuts when importance ties.
+    /// `concurrent_save_l1_cache_no_enoent` stresses 16 parallel writers and
+    /// asserts none hit ENOENT (covers the trample race fixed by per-call tmp
+    /// naming).
     pub fn save_l1_cache(drawers: &[Drawer], data_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(data_dir).map_err(|e| L1CacheError::io(data_dir, e))?;
         let target = data_dir.join(L1_CACHE_JSON);
@@ -110,11 +118,9 @@ impl L1Cache {
         let tmp = data_dir.join(format!("{L1_CACHE_JSON}.tmp.{pid}.{seq}"));
 
         let mut sorted: Vec<Drawer> = drawers.to_vec();
-        sorted.sort_by(|a, b| {
-            b.importance
-                .partial_cmp(&a.importance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // #4836: shares the listers' comparator so a restart restores the
+        // newest of an importance tie, not the lowest-UUID of it.
+        sorted.sort_by(crate::memory_core::palace::drawer_listing_order);
         sorted.truncate(L1_SNAPSHOT_CAP);
 
         let bytes = serde_json::to_vec_pretty(&sorted)
@@ -153,8 +159,16 @@ impl L1Cache {
             return Ok(Vec::new());
         }
         let bytes = std::fs::read(&target).map_err(|e| L1CacheError::io(target.clone(), e))?;
-        let drawers: Vec<Drawer> =
+        let mut drawers: Vec<Drawer> =
             serde_json::from_slice(&bytes).map_err(|e| L1CacheError::json(target, e))?;
+        // #5902: derive the content digest rather than trust the snapshot's copy.
+        // A snapshot written before the field existed carries `ContentHash::UNSET`,
+        // and one written by a binary on a different `CONTENT_HASH_VERSION`
+        // carries a digest from another space; both would otherwise leak into
+        // export as an identity no other machine can reproduce.
+        for d in &mut drawers {
+            d.refresh_content_hash();
+        }
         Ok(drawers)
     }
 
@@ -222,6 +236,47 @@ mod tests {
         }
         // The top entry should be the 0.95-importance drawer.
         assert!((loaded[0].importance - 0.95).abs() < 1e-6);
+    }
+
+    /// #4836: the persisted snapshot must break an importance tie by recency.
+    ///
+    /// Why: this is the selection that survives a restart. `save_l1_cache`
+    /// truncates to `L1_SNAPSHOT_CAP` and `open_with_intent` hydrates
+    /// `handle.l1_drawers` verbatim from the result, so whichever 15 drawers
+    /// this picks are the ones `retrieve_l0_l1` — and through it the
+    /// prompt-injection hook — serves until the next write.
+    /// What: 20 drawers tied at importance 0.5, oldest first, ids ascending
+    /// with age. Pre-fix the importance-only sort is stable, so it keeps the
+    /// input order and persists the 15 OLDEST.
+    #[test]
+    fn l1_snapshot_keeps_the_newest_drawers_within_an_importance_tie() {
+        let tmp = tempdir().unwrap();
+        let data_dir = tmp.path();
+
+        let now = chrono::Utc::now();
+        let drawers: Vec<Drawer> = (0..20u128)
+            .map(|i| {
+                let mut d = drawer_with_importance(&format!("tied drawer {i}"), 0.5);
+                d.id = Uuid::from_u128(i + 1);
+                d.created_at = now - chrono::Duration::minutes((19 - i) as i64);
+                d
+            })
+            .collect();
+
+        L1Cache::save_l1_cache(&drawers, data_dir).expect("save");
+        let loaded = L1Cache::load_l1_cache(data_dir).expect("load");
+
+        assert_eq!(loaded.len(), L1_SNAPSHOT_CAP);
+        assert_eq!(
+            loaded[0].id,
+            Uuid::from_u128(20),
+            "the newest of a tie must lead the snapshot; got {:?}",
+            loaded.iter().map(|d| d.content()).collect::<Vec<_>>()
+        );
+        assert!(
+            loaded.iter().all(|d| d.id >= Uuid::from_u128(6)),
+            "the snapshot must hold the newest 15 of the tie, not the oldest 15"
+        );
     }
 
     #[test]

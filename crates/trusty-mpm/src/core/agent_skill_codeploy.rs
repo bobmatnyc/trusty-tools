@@ -7,7 +7,7 @@
 //! resolve through the 3-tier precedence. This logic is identical whether the
 //! caller is the ordinary session-launch path (`core::session_launch`) or the
 //! standalone `tm install` deploy — both call
-//! [`agent_deployer::deploy_agents_filtered`] and then need to (a) fold every
+//! [`agent_deployer::deploy_agents_filtered`](crate::core::agent_deployer::deploy_agents_filtered) and then need to (a) fold every
 //! deployed agent's declared skills into the skill-deploy `select` predicate
 //! and (b) log the resolution outcome. Centralising it here keeps the two
 //! call sites from re-implementing (and silently diverging on) the same
@@ -163,7 +163,7 @@ mod tests {
     use trusty_agents_common::agents::metadata::agent_metadata_from_str;
 
     fn agents_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/agents")
+        std::path::Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR).to_path_buf()
     }
 
     fn skills_dir() -> PathBuf {

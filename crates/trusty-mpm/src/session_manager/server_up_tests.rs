@@ -168,3 +168,156 @@ async fn resume_fails_loudly_when_server_cannot_start() {
          server-up guard fails first"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #3886 — the guard belongs to `resolve_session_name`, not to its callers.
+//
+// Testing seam, stated explicitly: the two routes that actually failed in
+// #3886 — `daemon::managed_routes::launch_on_main::spawn_managed_on_main` and
+// `daemon::managed_routes::lifecycle::reserve_inproject_worktree` — both take
+// `&Arc<DaemonState>`, and `DaemonState` builds its `SessionManager` around a
+// REAL `daemon::tmux::TmuxDriver` with no injection point, so neither can be
+// driven against `FakeTmuxDriver` without a live tmux server. What both routes
+// DO share, and the single line where the failure occurred, is
+// `SessionManager::resolve_session_name` — which is exactly where the fix put
+// the guard. These tests therefore target that seam: they fail on the
+// pre-fix tree (the guard was in `create_with_id`, which neither route calls)
+// and pass after it, for every caller present or future.
+// ---------------------------------------------------------------------------
+
+/// `resolve_session_name` must confirm the tmux server is up BEFORE its own
+/// `list-sessions` probe (`names_for_serial_allocation`), because the two
+/// in-project launch routes reach it without going through
+/// `create_with_id`'s guard.
+#[tokio::test]
+async fn resolve_session_name_ensures_server_up_before_listing_sessions() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    mgr.resolve_session_name(
+        None,
+        Some("trusty-tools"),
+        &PathBuf::from("/tmp/wt-3886"),
+        |_| false,
+    )
+    .await
+    .expect("resolve_session_name must succeed");
+
+    assert_eq!(
+        *fake.ensure_server_up_calls.lock().unwrap(),
+        1,
+        "resolve_session_name must run the server-up guard exactly once"
+    );
+}
+
+/// The #3886 reproduction: on a host where tmux has never run the socket is
+/// absent, so `list-sessions` hard-errors until something issues
+/// `start-server`. Name resolution must still succeed — that is precisely
+/// what `ensure_server_up` exists to make true.
+#[tokio::test]
+async fn resolve_session_name_succeeds_on_a_cold_tmux_host() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+    *fake.cold_tmux_host.lock().unwrap() = true;
+
+    let name = mgr
+        .resolve_session_name(
+            None,
+            Some("trusty-tools"),
+            &PathBuf::from("/tmp/wt-cold"),
+            |_| false,
+        )
+        .await
+        .expect("name resolution must survive a cold tmux host (#3886)");
+
+    assert!(
+        name.starts_with("tm-"),
+        "must return a real managed name, got {name}"
+    );
+}
+
+/// Same cold host, reached through `dedupe_session_name` — the other
+/// `list-sessions` caller on the create path. Its guard comes from
+/// `create_with_reserved_name`, which is why this goes through that entry
+/// point rather than calling `dedupe_session_name` bare.
+#[tokio::test]
+async fn create_with_reserved_name_succeeds_on_a_cold_tmux_host() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+    *fake.cold_tmux_host.lock().unwrap() = true;
+
+    mgr.create_with_reserved_name(
+        ManagedSessionId::new(),
+        "tm-cold-host-01".into(),
+        "task".into(),
+        Some(PathBuf::from("/tmp/wt-cold-reserved")),
+        None,
+        None,
+        None,
+        crate::runtime::RuntimeKind::default(),
+        false,
+        false,
+    )
+    .await
+    .expect("create_with_reserved_name must survive a cold tmux host (#3886)");
+}
+
+/// #3886 secondary defect: `names_for_serial_allocation` re-wrapped an
+/// already-typed `ManagedError` in `TmuxUnavailable`, so the operator saw
+/// `tmux error: tmux error: protocol error: …`. The rendered message must
+/// carry the prefix exactly once.
+#[tokio::test]
+async fn tmux_error_prefix_is_not_doubled_by_name_resolution() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+    *fake.list_sessions_should_fail.lock().unwrap() = true;
+
+    let err = mgr
+        .resolve_session_name(
+            None,
+            Some("trusty-tools"),
+            &PathBuf::from("/tmp/wt-dbl"),
+            |_| false,
+        )
+        .await
+        .expect_err("name resolution must fail when list-sessions fails");
+
+    let rendered = err.to_string();
+    assert_eq!(
+        rendered.matches("tmux error:").count(),
+        1,
+        "the `tmux error:` prefix must appear exactly once, got: {rendered}"
+    );
+}
+
+/// Same un-doubling, for `dedupe_session_name` (`naming.rs`) — the identical
+/// re-wrap, reached via `create_with_reserved_name`.
+#[tokio::test]
+async fn tmux_error_prefix_is_not_doubled_by_dedupe() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+    *fake.list_sessions_should_fail.lock().unwrap() = true;
+
+    let err = mgr
+        .create_with_reserved_name(
+            ManagedSessionId::new(),
+            "tm-dedupe-dbl-01".into(),
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt-dedupe-dbl")),
+            None,
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect_err("create must fail when list-sessions fails");
+
+    let rendered = err.to_string();
+    assert_eq!(
+        rendered.matches("tmux error:").count(),
+        1,
+        "the `tmux error:` prefix must appear exactly once, got: {rendered}"
+    );
+}

@@ -244,7 +244,7 @@ impl WatcherManager {
         let mut guard = self.inner.lock().await;
         if guard.contains_key(&handle.id) {
             drop(guard);
-            task.stop();
+            task.stop().await;
             return;
         }
         guard.insert(handle.id.clone(), task);
@@ -260,10 +260,15 @@ impl WatcherManager {
     /// the OS watch. No-op when the index is not being watched.
     ///
     /// Why: `DELETE /indexes/:id` must not leave a watcher firing into a
-    /// dropped indexer.
-    /// What: removes the entry and calls `WatcherTask::stop`. Returns `true`
-    /// when a watcher was actually stopped.
-    /// Test: `stop_for_index_removes_entry`.
+    /// dropped indexer — and, since #3049, must not return while the watcher
+    /// still HOLDS that indexer. The watcher's `Arc<RwLock<CodeIndexer>>` keeps
+    /// the index's redb corpus open, and redb is single-open, so a recreate
+    /// under the same id fails to open the corpus until this returns.
+    /// What: removes the entry and awaits `WatcherTask::stop`, which aborts the
+    /// consumer task and waits for it to terminate. Returns `true` when a
+    /// watcher was actually stopped.
+    /// Test: `stop_for_index_removes_entry`,
+    /// `stop_for_index_releases_the_indexer_before_it_returns`.
     pub async fn stop_for_index(&self, id: &IndexId) -> bool {
         let task = self.inner.lock().await.remove(id);
         // Issue #3408: `DELETE /indexes/:id` should not leave a stale
@@ -271,7 +276,7 @@ impl WatcherManager {
         self.network_degraded.lock().await.remove(id);
         match task {
             Some(task) => {
-                task.stop();
+                task.stop().await;
                 tracing::debug!(index_id = %id, "file watcher stopped");
                 true
             }
@@ -284,13 +289,19 @@ impl WatcherManager {
     /// Why: the daemon's graceful-shutdown path (`run_daemon`, after the axum
     /// server drains) calls this so the OS watches and consumer tasks are gone
     /// before the process exits — honouring SIGTERM cleanly (issue #534/#1621).
-    /// What: drains the map and calls `stop` on each `WatcherTask`.
+    /// What: drains the map and awaits `stop` on each `WatcherTask`, so every
+    /// consumer task has terminated — and released its indexer `Arc` — before
+    /// the process exits. Drained OUT of the map first so the lock is not held
+    /// across the waits.
     /// Test: `stop_all_clears_all`.
     pub async fn stop_all(&self) -> usize {
-        let mut guard = self.inner.lock().await;
-        let count = guard.len();
-        for (_id, task) in guard.drain() {
-            task.stop();
+        let tasks: Vec<WatcherTask> = {
+            let mut guard = self.inner.lock().await;
+            guard.drain().map(|(_id, task)| task).collect()
+        };
+        let count = tasks.len();
+        for task in tasks {
+            task.stop().await;
         }
         if count > 0 {
             tracing::info!("stopped {count} file watcher(s) on shutdown");
@@ -442,6 +453,91 @@ mod tests {
         assert!(!mgr.stop_for_index(&handle.id).await);
     }
 
+    /// #3049: `stop_for_index` must not return while the watcher still holds the
+    /// index's indexer.
+    ///
+    /// Why: the watcher's `Arc<RwLock<CodeIndexer>>` owns the index's open redb
+    /// corpus, and redb is single-open. `DELETE /indexes/:id` calls this while
+    /// holding the teardown write guard and then releases it; if the watcher
+    /// task is still alive at that moment, the recreate that follows cannot open
+    /// the corpus, sets `corpus_open_failed`, and answers `500` —
+    /// `create_index_cannot_register_while_a_delete_is_tearing_the_id_down`'s
+    /// intermittent CI failure. `WatcherTask::stop` used to call only `abort()`,
+    /// which drops the task's future inline when the task is IDLE but not when
+    /// it is running, so a watcher with events to process outlived the call.
+    /// What: drives real file events through the loop first, then asserts that
+    /// nothing owns `indexer` once `stop_for_index` returns — the watcher is the
+    /// only other owner by then, so `Weak::strong_count` reads exactly "does the
+    /// watcher still hold it".
+    ///
+    /// HONEST LIMIT: this is an invariant guard, NOT a proof. It does not fail
+    /// against the pre-fix code, because `abort()` DOES reap an idle task inline
+    /// and this test cannot pin the watcher mid-poll without a hook into the
+    /// loop. What the fix rests on is a direct measurement instead: instrumented
+    /// `unregister_index` reported the watcher still holding the indexer at the
+    /// end of all 60 of 60 runs of
+    /// `create_index_cannot_register_while_a_delete_is_tearing_the_id_down`, and
+    /// 0 of 1 with `TRUSTY_DISABLE_WATCHER=1`. See the PR for the raw counts.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stop_for_index_releases_the_indexer_before_it_returns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = IndexId::new("release-idx");
+        let indexer = Arc::new(RwLock::new(CodeIndexer::new("release-idx", dir.path())));
+        let weak = Arc::downgrade(&indexer);
+        let handle = Arc::new(IndexHandle::bare(
+            id.clone(),
+            Arc::clone(&indexer),
+            dir.path().to_path_buf(),
+        ));
+        drop(indexer);
+
+        let mgr = WatcherManager::new();
+        mgr.spawn_for_index(&handle).await;
+        assert!(mgr.is_watching(&id).await, "watcher must be running");
+
+        // Drive the loop until it has provably picked work up, so the abort
+        // below lands on a task that is doing something rather than one parked
+        // on an empty channel.
+        let file = dir.path().join("busy.rs");
+        {
+            let probe = Arc::clone(&handle);
+            let reacted = crate::service::watch_test_support::await_watch_condition(
+                |generation| {
+                    for n in 0..16 {
+                        std::fs::write(
+                            dir.path().join(format!("busy{n}.rs")),
+                            format!("fn f{generation}_{n}() {{}}\n"),
+                        )
+                        .expect("write file");
+                    }
+                    std::fs::write(&file, format!("fn busy{generation}() {{}}\n"))
+                        .expect("write file");
+                },
+                move || {
+                    let probe = Arc::clone(&probe);
+                    async move { probe.indexer.read().await.chunk_count() > 0 }
+                },
+            )
+            .await;
+            assert!(reacted, "watcher never indexed the stimulus");
+        }
+
+        // The watcher's clone is now the only other owner; drop ours so the
+        // count below is unambiguous.
+        drop(handle);
+
+        assert!(mgr.stop_for_index(&id).await, "a watcher was stopped");
+
+        assert_eq!(
+            weak.strong_count(),
+            0,
+            "stop_for_index returned while the watcher task still held the \
+             indexer — its redb corpus is still open, so a recreate under this \
+             id would fail to open it and answer 500 (issue #3049)"
+        );
+    }
+
     /// Why: graceful shutdown must clear every watcher and report the count.
     /// Test: this test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -463,32 +559,39 @@ mod tests {
     /// save must be incrementally indexed (chunk count grows) within the
     /// debounce window. This is the core acceptance criterion of issue #1621.
     /// Test: this test.
+    ///
+    /// #4731: the save is re-applied until the index reacts, so a dropped
+    /// FSEvents batch no longer strands a fixed 3 s deadline.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn save_triggers_incremental_index_via_manager() {
-        use std::time::Duration;
-
         let dir = tempfile::tempdir().expect("tempdir");
         let handle = handle_for("live", dir.path());
         let mgr = WatcherManager::new();
         mgr.spawn_for_index(&handle).await;
 
-        // Allow the OS watcher to install.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
-        tokio::fs::write(dir.path().join("lib.rs"), "fn alpha() {}\nfn beta() {}\n")
+        let file = dir.path().join("lib.rs");
+        let indexed = {
+            let handle = Arc::clone(&handle);
+            crate::service::watch_test_support::await_watch_condition(
+                |generation| {
+                    std::fs::write(
+                        &file,
+                        format!("fn alpha() {{}}\nfn beta{generation}() {{}}\n"),
+                    )
+                    .expect("write file");
+                },
+                move || {
+                    let handle = Arc::clone(&handle);
+                    async move { handle.indexer.read().await.chunk_count() > 0 }
+                },
+            )
             .await
-            .expect("write file");
+        };
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            if handle.indexer.read().await.chunk_count() > 0 {
-                break;
-            }
-            if tokio::time::Instant::now() > deadline {
-                panic!("chunk_count never grew — watcher did not index the save");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        assert!(
+            indexed,
+            "chunk_count never grew — watcher did not index the save"
+        );
         mgr.stop_all().await;
     }
 

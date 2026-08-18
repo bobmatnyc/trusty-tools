@@ -181,6 +181,16 @@ jobs:
       # the release job's changelog --tag-pattern, which must match the literal
       # pushed tag. For non-aliased crates tag_prefix == crate.
       tag_prefix: ${{ steps.parse.outputs.tag_prefix }}
+      # Why (See #5455): the SINGLE resolved release tag, computed once here
+      # instead of read from `github.ref_name` at each call site. On a real tag
+      # push, `github.ref_name` IS the tag, so this equals it exactly. On
+      # `workflow_dispatch`, `github.ref_name` is whatever branch/ref the run
+      # was dispatched against (e.g. literal `main`), NOT a tag — reading it
+      # directly at a downstream step produced an unrecoverable trap (see the
+      # `release` job comments below). Every step that needs "the tag" reads
+      # `needs.setup.outputs.tag`; no other expression may reference
+      # `github.ref_name` for this purpose.
+      tag: ${{ steps.parse.outputs.tag }}
       version:  ${{ steps.parse.outputs.version }}
       matrix:   ${{ steps.matrix.outputs.matrix }}
       dry_run:  ${{ steps.parse.outputs.dry_run }}
@@ -188,8 +198,8 @@ jobs:
       # standalone distributable binary, skip the build/release/homebrew jobs
       # GREEN." It fires for any crate NOT in the binary-crate allowlist in the
       # `config` step — i.e. all library-only crates. Examples: trusty-common
-      # (shared lib), trusty-bm25-daemon / trusty-embedderd (sidecar binaries
-      # that ship INSIDE a host crate, single-owner-per-binary), trusty-progress,
+      # (shared lib), trusty-embedderd (a sidecar binary that ships INSIDE a
+      # host crate, single-owner-per-binary), trusty-progress,
       # the internal trusty-agents* libs, etc. Previously a library-only tag
       # (e.g. trusty-common-v0.15.3) errored RED; it now green-skips. (trusty-console
       # is NOT bundled — it has its own standalone release job.)
@@ -214,6 +224,26 @@ jobs:
             CRATE="${BASH_REMATCH[1]}"
             VERSION="${BASH_REMATCH[2]}"
             DRY_RUN="false"
+          fi
+
+          # See #5455: resolve the SINGLE canonical release tag here, once, for
+          # every downstream consumer. On a `push` of a tag, `$TAG` above IS the
+          # literal pushed tag (already validated against <prefix>-v<version>
+          # above) — reuse it unchanged rather than reconstructing it, so a tag
+          # this branch's own regex would reject can never mismatch what actually
+          # got pushed. On `workflow_dispatch` there is no `$TAG` — synthesize
+          # one from the raw (pre-alias) crate input, using the SAME
+          # `<prefix>-v<version>` convention documented in CLAUDE.md ("Git Tag /
+          # Release Convention") and enforced by the regex above, so a manual
+          # republish targets the tag that was actually pushed (e.g. `tga-v2.18.0`,
+          # not `trusty-git-analytics-v2.18.0`). Reading `github.ref_name`
+          # directly at each downstream call site is what broke this: under
+          # workflow_dispatch it resolves to the dispatched-against REF (e.g. the
+          # literal string `main`), never the crate/version inputs.
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            RESOLVED_TAG="${CRATE}-v${VERSION}"
+          else
+            RESOLVED_TAG="$TAG"
           fi
 
           # ── Tag-prefix aliases (issue #1128) ─────────────────────────────────
@@ -243,10 +273,11 @@ jobs:
           {
             echo "crate=$CRATE"
             echo "tag_prefix=$TAG_PREFIX"
+            echo "tag=$RESOLVED_TAG"
             echo "version=$VERSION"
             echo "dry_run=$DRY_RUN"
           } >> "$GITHUB_OUTPUT"
-          echo "Parsed: crate=$CRATE  tag_prefix=$TAG_PREFIX  version=$VERSION  dry_run=$DRY_RUN"
+          echo "Parsed: crate=$CRATE  tag_prefix=$TAG_PREFIX  tag=$RESOLVED_TAG  version=$VERSION  dry_run=$DRY_RUN"
 
       # ── Per-crate configuration table ──────────────────────────────────────
       # Each entry encodes everything the build job needs for one crate:
@@ -256,9 +287,23 @@ jobs:
       #   skip_ui_build  – "true" to set SKIP_UI_BUILD=1 (UI-embedding crates)
       #   cargo_features – value for --features flag (empty = use defaults)
       #   no_default_features – "true" to pass --no-default-features
-      #   al2023_variant – "true" to also build the AL2023 load-dynamic asset
+      #   native_linux_link – "true" when the crate links a PREBUILT GNU-ABI
+      #     C++ archive (e.g. ort-sys' bundled ONNX Runtime) and therefore
+      #     cannot use `cargo zigbuild` on either Linux leg. zig cc ships LLVM
+      #     libc++, not GNU libstdc++, so the final link fails with
+      #     `undefined symbol: std::__cxx11::...`. See #5682.
+      #   al2023_variant – "true" to ALSO build the AL2023 load-dynamic asset
       #   al2023_no_default_features – "true" for the AL2023 build
       #   al2023_features – --features value for the AL2023 build
+      #
+      # NOTE (#5682): `native_linux_link` and `al2023_variant` are INDEPENDENT.
+      # Until #5682 the single `al2023_variant` flag answered both "does this
+      # crate need native GNU-ABI linking?" and "does this crate also want an
+      # AL2023-container asset?". Those are different questions: trusty-memory
+      # bundles ORT (so it needs the first) but ships no AL2023 asset (so it
+      # does not want the second). Conflating them left trusty-memory on
+      # zigbuild, and BOTH its Linux legs failed to link for five consecutive
+      # tag pushes over 40 days.
       #
       # TO ADD A NEW CRATE: append one `elif [[ "$CRATE" == "<name>" ]]; then`
       # block with the variables filled in.  Everything else is automatic.
@@ -284,13 +329,15 @@ jobs:
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            # Bundles ORT (prebuilt GNU-ABI C++ archive) -> no zigbuild.
+            NATIVE_LINUX_LINK="true"
             AL2023_VARIANT="true"
             AL2023_NO_DEFAULT="true"
             AL2023_FEATURES="load-dynamic"
 
           elif [[ "$CRATE" == "trusty-memory" ]]; then
-            # Binaries: trusty-memory + trusty-bm25-daemon
-            # Both [[bin]] targets confirmed in trusty-memory/Cargo.toml.
+            # Binary: trusty-memory. #5329 removed trusty-bm25-daemon from the
+            # install surface — BM25 runs in-process, so that [[bin]] is gone.
             # trusty-console was REMOVED from the install surface in #1318
             # (single-owner-per-binary); it now ships as its own release job.
             # (The trusty-memory-mcp-bridge compat shim is built but not part of
@@ -298,12 +345,33 @@ jobs:
             # trusty-memory bin has required-features=["axum-server"]; default
             # features include axum-server so all build with default features.
             # UI-embedding crate: SKIP_UI_BUILD=1
-            # No ORT bundling (BM25 sidecar, no ONNX): no AL2023 variant.
+            #
+            # #5682 — THIS CRATE DOES BUNDLE ORT. The line that used to sit here
+            # ("No ORT bundling (no ONNX in the released binary)") was wrong, and
+            # that error is the whole defect. trusty-memory depends on
+            # trusty-common with `features = [... "memory-core" ...]`, and
+            # trusty-common's `memory-core` implies `embedder-bundled-ort` ->
+            # `fastembed/ort-download-binaries-native-tls`, which links a
+            # prebuilt ONNX Runtime static archive compiled against GNU
+            # libstdc++. Under `cargo zigbuild` the link dies on
+            # `undefined symbol: std::__cxx11::basic_string<...>::_M_create` etc,
+            # referenced from `libort_sys-*.rlib` (onnx-ml.pb.cc, unsqueeze.cc) —
+            # verified in run 31883156657 (trusty-memory-v0.23.0). Both Linux
+            # legs therefore need the runner's real GCC/libstdc++.
+            #
+            # NATIVE_LINUX_LINK is set INDEPENDENTLY of AL2023_VARIANT: this
+            # crate needs native GNU-ABI linking, but it exposes no
+            # `load-dynamic` feature path (memory-core hardcodes
+            # embedder-bundled-ort), so there is no AL2023 load-dynamic build to
+            # publish. Enabling AL2023_VARIANT here would fail the build.
+            # An AL2023 variant is a separate follow-up requiring a crate-level
+            # feature change, deliberately NOT bundled into this fix.
             CARGO_PKG="trusty-memory"
-            BINARIES="trusty-memory trusty-bm25-daemon"
+            BINARIES="trusty-memory"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="true"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -327,6 +395,7 @@ jobs:
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -343,6 +412,7 @@ jobs:
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -364,6 +434,7 @@ jobs:
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -381,6 +452,7 @@ jobs:
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -394,6 +466,7 @@ jobs:
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -408,6 +481,36 @@ jobs:
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
+            AL2023_VARIANT="false"
+            AL2023_NO_DEFAULT="false"
+            AL2023_FEATURES=""
+
+          elif [[ "$CRATE" == "trusty-audit" ]]; then
+            # Binaries: trusty-audit + taudit (#5502) — two [[bin]] targets over
+            # ONE src/main.rs, the trusty-installer / tctl precedent. `taudit` is
+            # what crates/trusty-audit/install.sh (#5870) downloads and launches.
+            #
+            # #5870: before this branch existed, a `trusty-audit-v*` tag fell
+            # through to the library-only green-skip below and published nothing,
+            # which is exactly the "missing binary release is silent" caveat the
+            # green-skip comment warns about. The self-downloading installer has
+            # no asset to fetch without it.
+            #
+            # `publish = false` in Cargo.toml governs crates.io only and does not
+            # affect this workflow, which builds from the tag — trusty-code is the
+            # existing precedent for a publish=false crate in this allowlist.
+            #
+            # No required-features on either bin target. No UI embedding (the
+            # crate's ui/ is not a rust-embed bundle), so no SKIP_UI_BUILD. No ORT
+            # anywhere in the graph, so ordinary zigbuild on Linux and no AL2023
+            # variant.
+            CARGO_PKG="trusty-audit"
+            BINARIES="trusty-audit taudit"
+            SKIP_UI_BUILD="false"
+            CARGO_FEATURES=""
+            NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -428,6 +531,7 @@ jobs:
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
+            NATIVE_LINUX_LINK="false"
             AL2023_VARIANT="false"
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
@@ -441,7 +545,6 @@ jobs:
           # no standalone binary target this workflow can build/package/upload:
           #
           #   trusty-common      — shared library (thiserror error types, memory-core, …)
-          #   trusty-bm25-daemon — binary ships INSIDE trusty-memory (#1318)
           #   trusty-embedderd   — binary ships INSIDE trusty-search (#1318)
           #   trusty-progress    — shared progress-reporting library
           #   trusty-agents-common / trusty-agents-local — internal libs (publish=false)
@@ -468,9 +571,10 @@ jobs:
             echo "::notice title=Library-only crate — release skipped::Crate '$CRATE' is not in the binary-release allowlist; treating it as library-only and skipping the binary release gracefully (green, not an error)."
             echo "Binary-producing crates (built + released): trusty-search, trusty-memory,"
             echo "  trusty-analyze, trusty-review, trusty-mpm, trusty-git-analytics (tga),"
-            echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias)."
+            echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias),"
+            echo "  trusty-audit (+ taudit alias)."
             echo "Library-only / internal crates (green-skip, no standalone binary):"
-            echo "  trusty-common, trusty-bm25-daemon, trusty-embedderd, trusty-progress,"
+            echo "  trusty-common, trusty-embedderd, trusty-progress,"
             echo "  trusty-agents*, trusty-mpm-gui, tc-services,"
             echo "  trusty-cto-db, trusty-gworkspace, and any future library crate."
             echo "If '$CRATE' SHOULD produce a released binary, add a config branch for it"
@@ -486,6 +590,7 @@ jobs:
             echo "skip_ui_build=$SKIP_UI_BUILD"
             echo "cargo_features=$CARGO_FEATURES"
             echo "no_default_features=$NO_DEFAULT_FEATURES"
+            echo "native_linux_link=$NATIVE_LINUX_LINK"
             echo "al2023_variant=$AL2023_VARIANT"
             echo "al2023_no_default=$AL2023_NO_DEFAULT"
             echo "al2023_features=$AL2023_FEATURES"
@@ -531,6 +636,7 @@ jobs:
           SKIP_UI_BUILD:        ${{ steps.config.outputs.skip_ui_build }}
           CARGO_FEATURES:       ${{ steps.config.outputs.cargo_features }}
           NO_DEFAULT_FEATURES:  ${{ steps.config.outputs.no_default_features }}
+          NATIVE_LINUX_LINK:    ${{ steps.config.outputs.native_linux_link }}
           AL2023_VARIANT:       ${{ steps.config.outputs.al2023_variant }}
           AL2023_NO_DEFAULT:    ${{ steps.config.outputs.al2023_no_default }}
           AL2023_FEATURES:      ${{ steps.config.outputs.al2023_features }}
@@ -547,6 +653,9 @@ jobs:
           feats        = os.environ["CARGO_FEATURES"]
           no_def       = os.environ["NO_DEFAULT_FEATURES"] == "true"
           al2023       = os.environ["AL2023_VARIANT"] == "true"
+          # #5682: "needs native GNU-ABI linking" is its OWN question, asked
+          # separately from "also wants an AL2023-container asset".
+          native_link  = os.environ["NATIVE_LINUX_LINK"] == "true"
           al_no_def    = os.environ["AL2023_NO_DEFAULT"] == "true"
           al_feats     = os.environ["AL2023_FEATURES"]
 
@@ -642,8 +751,12 @@ jobs:
           # below, which sidesteps the problem entirely by not linking ONNX
           # Runtime at build time at all. All OTHER crates get the full
           # glibc-2.17 zigbuild leg.
+          #
+          # #5682: keyed off `native_link`, NOT `al2023`. For trusty-search the
+          # two are both True so this is unchanged; trusty-memory is the crate
+          # that needed native linking without an AL2023 asset.
           x86_64_entry = (
-              native_linux_entry("x86_64-unknown-linux-gnu") if al2023
+              native_linux_entry("x86_64-unknown-linux-gnu") if native_link
               else linux_zigbuild_entry("x86_64-unknown-linux-gnu", best_effort=False, use_al2023_features=False)
           )
 
@@ -678,8 +791,19 @@ jobs:
           # `aarch64-linux-al2023` counterpart to the existing x86_64 AL2023
           # asset is the portable-arm64 follow-up; it is deliberately NOT
           # bundled into this fix.
+          #
+          # #5682: the TOOLCHAIN choice is keyed off `native_link`, but the
+          # FEATURE choice stays keyed off `al2023`. They answer different
+          # questions. `use_al2023_features` exists because trusty-search's
+          # default `bundled-ort` has no aarch64 archive it can use, so that
+          # crate substitutes its load-dynamic set on arm64. trusty-memory has
+          # no load-dynamic feature to substitute, and needs none: ort-sys
+          # rc.12's dist.txt DOES list an `aarch64-unknown-linux-gnu` prebuilt,
+          # and run 31883156657 proves it downloads and compiles on arm64 —
+          # that leg reached the LINK stage with an aarch64 libort_sys rlib and
+          # failed only on zig's libc++. Native GCC is exactly what it lacked.
           aarch64_entry = (
-              native_linux_entry("aarch64-unknown-linux-gnu", use_al2023_features=True) if al2023
+              native_linux_entry("aarch64-unknown-linux-gnu", use_al2023_features=al2023) if native_link
               else linux_zigbuild_entry("aarch64-unknown-linux-gnu", best_effort=False, use_al2023_features=False)
           )
 
@@ -823,13 +947,19 @@ jobs:
         shell: bash
         # TAG is passed via `env:` rather than interpolated directly into the
         # script (as `.claude/skills/cargo-publish/SKILL.md`-documented issue
-        # #3568 review flagged: raw `${{ github.ref_name }}` interpolation is
-        # a shell-injection hazard — a ref name can contain `$`, backticks,
-        # quotes, parens) and always referenced quoted (`"$TAG"`). Matches the
-        # `homebrew-bump` job's existing `env: TAG: ${{ github.ref_name }}`
-        # pattern below — one convention for this file, not two.
+        # #3568 review flagged: raw ref/tag interpolation is a shell-injection
+        # hazard — a ref name can contain `$`, backticks, quotes, parens) and
+        # always referenced quoted (`"$TAG"`). Matches the `homebrew-bump`
+        # job's `env: TAG: ...` pattern below — one convention for this file,
+        # not two.
+        #
+        # See #5455: reads the single resolved tag from `needs.setup.outputs.tag`
+        # rather than `github.ref_name` directly — this step only runs its
+        # ancestry check on `push` (guarded below), where the two are
+        # identical, but a second independent `github.ref_name` read here
+        # would reintroduce the exact drift #5455/#5571 fixed everywhere else.
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.setup.outputs.tag }}
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" != "push" ]]; then
@@ -1514,7 +1644,7 @@ jobs:
   #
   # NEVER runs a real `cargo publish` — `--dry-run` only, always.
   #
-  # DOES NOT COVER UI BUNDLE FRESHNESS (issue #3568 review finding, HIGH):
+  # DOES NOT COVER UI BUNDLE FRESHNESS (issue #3606):
   #   this job's `cargo publish --dry-run` runs with `SKIP_UI_BUILD=1` (set by
   #   scripts/publish-dry-run-order.sh) for the UI-embedding crates
   #   (trusty-search, trusty-memory, trusty-analyze, trusty-console) — NOT as
@@ -1527,7 +1657,14 @@ jobs:
   #   (docs/reference/release-workflow.md's "UI-embedding crates" note) — it
   #   is not a divergence from it. Consequently this job provides ZERO signal
   #   about whether the COMMITTED UI bundle is stale relative to current
-  #   `ui/src` — that is the separate `ui-freshness-check` job below.
+  #   `ui/src`. That signal comes from two other places, not from a job in
+  #   this workflow (#5774 removed the rebuild-then-diff job that used to sit
+  #   here — see that issue for why): `.github/workflows/ui-bundle-freshness.yml`
+  #   runs a source-digest comparison (scripts/check-ui-bundle-freshness.sh,
+  #   #3606) on every push to `main` and every PR touching UI paths, so drift
+  #   is caught at merge time, long before a tag exists; and
+  #   `scripts/preflight-publish.sh` CHECK 7 runs the same script again,
+  #   immediately before the maintainer's local `cargo publish`.
   # ─────────────────────────────────────────────────────────────────────────────
   publish-dry-run:
     name: crates.io publish dry-run, dependency-ordered (issue #3366)
@@ -1554,136 +1691,6 @@ jobs:
         run: bash scripts/publish-dry-run-order.sh "${{ needs.preflight.outputs.pkg_name }}"
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # JOB 2c: ui-freshness-check (issue #3568 review finding, HIGH)
-  #
-  # WHY: `publish-dry-run` above (and a real `cargo publish`) both necessarily
-  #   use the COMMITTED `ui-dist/`/`ui/dist/` bundle — they cannot rebuild it
-  #   during packaging even in principle for `trusty-search`/`trusty-console`,
-  #   whose `Cargo.toml` `include` list excludes `ui/src` from the package
-  #   entirely (confirmed via `cargo package --list`). A dry-run "PASS" was
-  #   therefore silently giving zero coverage of whether that committed
-  #   bundle actually reflects current `ui/src` — the exact "guard exists but
-  #   doesn't guard" failure mode. This is not hypothetical: at the time this
-  #   job was added, `crates/trusty-search/ui-dist/` was last regenerated
-  #   2026-07-07 (commit `28648d38`), but `crates/trusty-search/ui/src` was
-  #   changed afterward by the Foundry v2 token migration (commit `972171e8`)
-  #   — confirmed via `git log 28648d38..HEAD -- crates/trusty-search/ui/src`
-  #   — so the published bundle has been stale in a real, verifiable sense.
-  #
-  # WHY NOT "install pnpm and let `cargo publish` rebuild it" (the OTHER
-  #   option considered): structurally impossible for `trusty-search` /
-  #   `trusty-console` (source isn't packaged, see above) — this is not a
-  #   convention that could be relaxed, it is what `Cargo.toml` `include`
-  #   already enforces. `trusty-memory`/`trusty-analyze` (no `include`
-  #   override) technically DO package `ui/src` and so COULD rebuild
-  #   in-process, but doing this two different ways for four crates that are
-  #   meant to behave identically (issue #987's canonical-build.rs-block
-  #   invariant) is worse than one uniform check applied the same way to all
-  #   four — this job does that.
-  #
-  # WHY NOT hash-filename diffing being treated as automatically flaky and
-  #   skipped: `.github/workflows/ci.yml`'s `ui-checks` job (issue #3508,
-  #   merged the same day as this one) explicitly considered and rejected
-  #   REBUILD-THEN-DIFF for these same crates, reasoning that Vite's
-  #   content-hashed filenames (`index-CPNos4BT.js`) can legitimately change
-  #   across a toolchain patch bump with no real behavior change, making a
-  #   naive diff a flaky false-failure generator, and left a "hash-normalizing
-  #   comparator" as unbuilt future work. That risk is real and NOT solved
-  #   here either — but `pnpm install --frozen-lockfile` pins the exact
-  #   dependency versions from the committed lockfile, which bounds (does not
-  #   eliminate) that risk to Node-runtime-version drift specifically, and the
-  #   remedy on a false positive is the same safe action as a true positive
-  #   (regenerate and commit the bundle) — so this job fails CLOSED (diff ==
-  #   fail) rather than skip the check entirely while that gap exists. If a
-  #   false positive is ever observed, that is the trigger to build the
-  #   hash-normalizing comparator `ci.yml` deferred — not a reason to make
-  #   this check advisory.
-  #
-  # WHAT: for each of the four UI-embedding crates ONLY (skips cleanly, not
-  #   silently, for every other crate), snapshots the currently-committed
-  #   embed directory, runs a REAL `pnpm install --frozen-lockfile && pnpm
-  #   run build` from current `ui/src` (same toolchain-setup pattern as
-  #   `ci.yml`'s `ui-checks` job), then `diff -rq`s the snapshot against the
-  #   fresh build output. Any difference — including a build FAILURE, which
-  #   is the more common and more dangerous form of drift — fails the job
-  #   loudly with the diff and a remedy command.
-  # ─────────────────────────────────────────────────────────────────────────────
-  ui-freshness-check:
-    name: UI bundle freshness check (issue #3568)
-    needs: [setup, preflight]
-    if: contains(fromJson('["trusty-search","trusty-console","trusty-memory","trusty-analyze"]'), needs.setup.outputs.crate)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: pnpm
-          cache-dependency-path: crates/${{ needs.setup.outputs.crate }}/ui/pnpm-lock.yaml
-
-      - name: Rebuild ui/src and diff against the committed bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          CRATE="${{ needs.setup.outputs.crate }}"
-          UI_DIR="crates/${CRATE}/ui"
-
-          # trusty-search embeds from a separate crate-root `ui-dist/`
-          # (build.rs copies `ui/dist -> ui-dist`, issue #109); the other
-          # three embed directly from `ui/dist`. See this job's header
-          # comment for how this was confirmed per-crate.
-          if [[ "${CRATE}" == "trusty-search" ]]; then
-            COMMITTED_DIR="crates/${CRATE}/ui-dist"
-          else
-            COMMITTED_DIR="${UI_DIR}/dist"
-          fi
-
-          if [[ ! -d "${COMMITTED_DIR}" ]]; then
-            echo "::error::Expected committed UI bundle directory ${COMMITTED_DIR} does not exist."
-            exit 1
-          fi
-
-          SNAPSHOT="$(mktemp -d)/committed"
-          cp -r "${COMMITTED_DIR}" "${SNAPSHOT}"
-
-          (cd "${UI_DIR}" && pnpm install --frozen-lockfile && pnpm run build)
-
-          FRESH_DIR="${UI_DIR}/dist"
-
-          echo "Comparing committed (${COMMITTED_DIR}, snapshotted before rebuild) against a fresh build (${FRESH_DIR})..."
-          if diff -rq "${SNAPSHOT}" "${FRESH_DIR}" > /tmp/ui-freshness.diff; then
-            echo "OK — committed bundle matches a fresh build from current ui/src."
-          else
-            echo "::error::UI bundle drift detected for ${CRATE}: the committed ${COMMITTED_DIR} does NOT match a fresh 'pnpm run build' from current ui/src."
-            cat /tmp/ui-freshness.diff
-            echo ""
-            echo "Remedy: (cd ${UI_DIR} && pnpm install --frozen-lockfile && pnpm run build)"
-            if [[ "${CRATE}" == "trusty-search" ]]; then
-              echo "  then copy ui/dist/* into ui-dist/ (or run 'make release-prep')."
-            fi
-            echo "  Commit the regenerated bundle, then re-tag."
-            echo ""
-            echo "NOTE: a false positive here (build succeeds, content genuinely differs" \
-                 "only due to a toolchain version difference between this runner and" \
-                 "whatever machine last produced the committed bundle) is possible — see" \
-                 "this job's header comment / ci.yml's ui-checks job for the known,"\
-                 "not-yet-solved content-hash-filename-churn risk. If you believe that is" \
-                 "what happened here, verify locally with the same pinned lockfile before" \
-                 "assuming this check is wrong; the safe remedy is identical either way" \
-                 "(regenerate and commit)."
-            exit 1
-          fi
-
-  # ─────────────────────────────────────────────────────────────────────────────
   # JOB 3: release
   #
   # Downloads all per-platform artifacts and uploads them to the GitHub Release
@@ -1693,7 +1700,10 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   release:
     name: Create / update GitHub Release
-    needs: [setup, build]
+    # #5682: `release-completeness-audit` is a dependency so its verdict is
+    # available here — but see the "ASSET-COMPLETENESS GATE" note below for why
+    # it is deliberately NOT gated on in this `if:`.
+    needs: [setup, build, release-completeness-audit]
     runs-on: ubuntu-latest
     # TOLERATED-FAILURE BEHAVIOR (issue #3540):
     #
@@ -1723,6 +1733,42 @@ jobs:
     # (regardless of Linux leg outcome); release is NOT created (job fails
     # red) when the macOS leg itself failed or when `build` was skipped/the
     # workflow was cancelled.
+    #
+    # ── ASSET-COMPLETENESS GATE (#5682) — WHY IT IS NOT IN THIS `if:` ─────────
+    # `release-completeness-audit` correctly failed on every trusty-memory run
+    # since it was added in f6f54774, while this job published green beside it —
+    # it computed `missing_required` and exited 1, but nothing consumed that.
+    # It has to gate the publish. The obvious change — adding
+    # `needs.release-completeness-audit.result == 'success'` to this expression
+    # — is the WRONG one: it would re-create the exact #3540 failure shape. A
+    # false `if:` SKIPS a job, and a skipped release is silent. #3540 was
+    # precisely that silence (trusty-mpm frozen at v0.16.0 with nothing red to
+    # show for it), and a skip is also indistinguishable from the legitimate
+    # dry-run/bundled skips right above.
+    #
+    # So the two conditions are separated by MECHANISM, not just by wording:
+    #
+    #   a build LEG failed          -> this job still RUNS (`!cancelled()`).
+    #                                  Unchanged from #3540. A red Linux leg
+    #                                  must never silently skip the release.
+    #   a REQUIRED ASSET is missing -> this job runs, then FAILS LOUDLY at the
+    #                                  "Require complete required-asset set"
+    #                                  step below, before anything is uploaded.
+    #
+    # Those are genuinely different conditions: `build.result == 'failure'` is
+    # true whenever any leg failed, including a best-effort AL2023 leg whose
+    # absence is tolerated by design. `missing_required` is true only when an
+    # asset the matrix marked REQUIRED did not appear. Gating on the audit's
+    # verdict rather than on `build.result` is what keeps a tolerated
+    # best-effort drop publishable while a genuine hole is not.
+    #
+    # Failing a step (rather than skipping the job) also keeps the run RED and
+    # keeps `homebrew-bump` — which needs this job — correctly skipped.
+    #
+    # This matters more here than in most repos: this repo has Immutable
+    # Releases enabled, so an incomplete release can never be repaired in
+    # place (see the immutable-release step below). Not publishing is the only
+    # available remedy.
     if: >-
       !cancelled() &&
       needs.setup.outputs.bundled != 'true' &&
@@ -1774,6 +1820,31 @@ jobs:
           fi
           echo "Primary macOS artifact present — proceeding (any Linux leg failures are tolerated)."
 
+      # ── Require a complete required-asset set (issue #5682) ──────────────────
+      # The step above only proves the macOS artifact exists. This one enforces
+      # the audit's verdict over the WHOLE matrix, and is the gate that stops a
+      # partial release from publishing.
+      #
+      # It reads `needs.release-completeness-audit.result` rather than
+      # re-deriving the asset list: the audit already owns that computation
+      # (expected names come from the build matrix), so duplicating it here
+      # would be a second implementation free to drift from the first.
+      #
+      # `!= 'success'` deliberately also catches 'skipped' and 'cancelled' —
+      # fail closed. If the audit did not render a verdict we do not publish.
+      # That cannot currently fire spuriously: the audit's `if:` is strictly
+      # broader than this job's (same `!cancelled()`, same `bundled`, same
+      # `build.result != 'skipped'`, minus the dry_run clause), so whenever
+      # this job runs the audit ran too.
+      #
+      # Placed BEFORE the git-cliff / softprops steps so nothing is created or
+      # uploaded when it trips.
+      - name: Require complete required-asset set (issue #2533 / #5682)
+        if: needs.release-completeness-audit.result != 'success'
+        run: |
+          echo "::error::Release BLOCKED — the release completeness audit did not pass (result: ${{ needs.release-completeness-audit.result }}). At least one REQUIRED platform asset is missing, so publishing would create a permanently incomplete release (Immutable Releases are enabled on this repo — assets can never be added after the fact). See the 'Release completeness audit' job summary for the per-leg table naming the missing asset, then the corresponding build job log for the underlying failure."
+          exit 1
+
       - name: Detect prerelease
         id: prerelease
         shell: bash
@@ -1823,10 +1894,94 @@ jobs:
         env:
           OUTPUT: RELEASE_NOTES.md
 
+      # ── Detect (never repair-by-deletion) a stuck immutable asset-less
+      # release (issue #5455, revised in PR #5591 after this exact strategy
+      # was proven destructive) ──────────────────────────────────────────────
+      # WHY THE ORIGINAL "delete and let softprops recreate" REPAIR DOES NOT
+      # WORK, established empirically while investigating trusty-installer-v0.5.0:
+      #   This repo has GitHub's Immutable Releases enabled repo-wide — every
+      #   release object here reports `"immutable": true` via the REST API
+      #   (`gh api repos/<repo>/releases --paginate --jq '.[]|{tag_name,immutable}'`,
+      #   confirmed across every crate's release history, not just this tag).
+      #   Two GitHub-documented facts combine to make delete-and-recreate
+      #   actively destructive rather than a repair:
+      #     1. "Once you publish a release as immutable, its assets can't be
+      #        added, modified, or deleted." (github.blog/changelog,
+      #        2025-10-28, "Immutable releases are now generally available")
+      #        — so there is no in-place repair for an asset-less immutable
+      #        release; assets can never be attached to it after the fact.
+      #     2. "If you delete the immutable release, you can delete the tag,
+      #        but you cannot reuse the same tag name." (GitHub Docs,
+      #        code-security/concepts/supply-chain-security/immutable-releases)
+      #        — so deleting the release object to let softprops recreate it
+      #        PERMANENTLY forfeits the tag name. A recreate attempt fails at
+      #        finalize with "tag_name was used by an immutable release" —
+      #        the exact failure observed reproducing this for
+      #        trusty-installer-v0.5.0 after a fresh release object had
+      #        already uploaded all 6 assets successfully. The original
+      #        release for that tag had published once (2026-08-04, run
+      #        30961682562) before an earlier repair attempt deleted its
+      #        asset-less release object, so the tag name was already gone —
+      #        turning a degraded (0-asset) release into NO release (404).
+      #   Net effect: for an immutable, asset-less release, THERE IS NO SAFE
+      #   AUTOMATED REPAIR. The only real remedy is a new version (new tag).
+      #
+      # WHAT THIS STEP DOES INSTEAD: looks up the release for this tag and
+      # reads GitHub's own `.immutable` field directly off the release object
+      # — the authoritative per-release signal, not an inference from repo
+      # history — then NEVER deletes:
+      #   - No release exists: nothing to do; softprops creates fresh. OK.
+      #   - Release exists with >0 assets: already fine, leave untouched. OK.
+      #   - Release exists, 0 assets, immutable=false: a genuinely mutable
+      #     stale release (e.g. from before immutable releases was enabled on
+      #     this repo). softprops's normal GET → PATCH → upload path already
+      #     handles this in place — a mutable release does not reject the
+      #     target_commitish PATCH the way an immutable one does — so there is
+      #     nothing to delete here either.
+      #   - Release exists, 0 assets, immutable=true: THE HAZARD. FAIL THE JOB
+      #     LOUDLY (never delete, never touch the release) and name the real
+      #     remedy in the error text: cut a new version/tag.
+      #
+      # TAG is `needs.setup.outputs.tag`, not `github.ref_name` (#5455): under
+      # `workflow_dispatch` — a manual republish, exactly the case this step
+      # exists for — `github.ref_name` is the dispatched-against REF (e.g. the
+      # literal string "main"), not a tag at all.
+      - name: Detect a stuck immutable asset-less release for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          set -euo pipefail
+          RELEASE_INFO="$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
+            --jq '[(.assets | length), (.immutable // false)] | @tsv' 2>/dev/null || echo "")"
+          if [[ -z "$RELEASE_INFO" ]]; then
+            echo "No existing release for tag '${TAG}' — nothing to do; softprops will create it."
+            exit 0
+          fi
+
+          ASSET_COUNT="$(cut -f1 <<< "$RELEASE_INFO")"
+          IMMUTABLE="$(cut -f2 <<< "$RELEASE_INFO")"
+
+          if [[ "$ASSET_COUNT" != "0" ]]; then
+            echo "Existing release for '${TAG}' already has ${ASSET_COUNT} asset(s) attached — leaving it in place."
+            exit 0
+          fi
+
+          if [[ "$IMMUTABLE" == "true" ]]; then
+            echo "::error::Release '${TAG}' exists with 0 assets and is IMMUTABLE. GitHub permanently forbids adding assets to a published immutable release, and deleting it would permanently forfeit the tag name (any recreate attempt then fails at finalize with 'tag_name was used by an immutable release' — see github.blog/changelog 2025-10-28 'Immutable releases are now generally available', and GitHub Docs code-security/concepts/supply-chain-security/immutable-releases: 'If you delete the immutable release, you can delete the tag, but you cannot reuse the same tag name.'). There is NO safe automated repair for this tag. Cut a NEW version for this crate (a new tag) instead — do not delete or recreate this release. See #5455."
+            exit 1
+          fi
+
+          echo "Existing release for '${TAG}' has 0 assets but is NOT immutable — softprops's normal update path can attach assets to it in place; nothing to delete."
+
       - name: Create / update GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          # See #5455: single resolved tag (needs.setup.outputs.tag), not
+          # github.ref_name — see the "Detect a stuck immutable asset-less
+          # release" step above for why a raw ref_name read is wrong here
+          # under workflow_dispatch.
+          tag_name: ${{ needs.setup.outputs.tag }}
           name: "${{ needs.setup.outputs.crate }} v${{ needs.setup.outputs.version }}"
           prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
           # Release notes are now generated by git-cliff (step above) instead of
@@ -1968,8 +2123,10 @@ jobs:
         env:
           CRATE:   ${{ needs.setup.outputs.crate }}
           VERSION: ${{ needs.setup.outputs.version }}
-          # TAG is the raw git ref name, e.g. "trusty-analyze-v0.5.1"
-          TAG:     ${{ github.ref_name }}
+          # See #5455: single resolved tag, e.g. "trusty-analyze-v0.5.1" — was
+          # `github.ref_name`, which under workflow_dispatch is the
+          # dispatched-against ref (e.g. literal "main"), not a tag.
+          TAG:     ${{ needs.setup.outputs.tag }}
           # GITHUB_REPOSITORY is "bobmatnyc/trusty-tools"
           REPO:    ${{ github.repository }}
         run: |
@@ -2024,7 +2181,7 @@ jobs:
           # INSTALL_BINS. The trusty-console case below installs only its own bin.
           case "${CRATE}" in
             trusty-search)   INSTALL_BINS="trusty-search trusty-embedderd" ;;
-            trusty-memory)   INSTALL_BINS="trusty-memory trusty-bm25-daemon" ;;
+            trusty-memory)   INSTALL_BINS="trusty-memory" ;;
             trusty-analyze)  INSTALL_BINS="trusty-analyze" ;;
             trusty-review)   INSTALL_BINS="trusty-review" ;;
             trusty-mpm)      INSTALL_BINS="tm trusty-mpm" ;;

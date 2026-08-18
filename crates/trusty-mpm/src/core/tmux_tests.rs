@@ -7,6 +7,61 @@
 
 use super::*;
 
+// ── #2414: untyped-argv builders for display-message / show-environment ──
+
+#[test]
+fn display_message_argv_untargeted() {
+    assert_eq!(
+        display_message_argv(None, "#S"),
+        vec!["display-message", "-p", "#S"]
+    );
+}
+
+#[test]
+fn display_message_argv_session_targeted() {
+    assert_eq!(
+        display_message_argv(Some(&TmuxTarget::session("tmpm-sess")), "#{pane_pid}"),
+        vec!["display-message", "-t", "tmpm-sess", "-p", "#{pane_pid}"]
+    );
+}
+
+#[test]
+fn show_environment_argv_untargeted() {
+    assert_eq!(
+        show_environment_argv(None, "TM_MANAGED_SESSION_ID"),
+        vec!["show-environment", "TM_MANAGED_SESSION_ID"]
+    );
+}
+
+#[test]
+fn show_environment_argv_session_targeted() {
+    assert_eq!(
+        show_environment_argv(Some("tmpm-sess"), "TM_MANAGED_SESSION_ID"),
+        vec![
+            "show-environment",
+            "-t",
+            "tmpm-sess",
+            "TM_MANAGED_SESSION_ID"
+        ]
+    );
+}
+
+#[serial_test::serial]
+#[test]
+fn run_tmux_argv_with_bin_does_not_panic_on_missing_binary() {
+    // Mirrors `run_tmux_with_bin_does_not_panic_on_missing_binary` for the
+    // untyped-argv spawn path.
+    let result = run_tmux_argv_with_bin(
+        "definitely-not-a-real-tmux-binary-2414",
+        &[
+            "display-message".to_string(),
+            "-p".to_string(),
+            "#S".to_string(),
+        ],
+    );
+    assert!(result.is_err());
+}
+
 #[test]
 fn resolve_tmux_binary_does_not_panic() {
     // Works whether or not tmux is installed on the test host.
@@ -20,6 +75,7 @@ fn resolve_tmux_binary_or_bare_never_empty() {
     assert!(!resolve_tmux_binary_or_bare().is_empty());
 }
 
+#[serial_test::serial]
 #[test]
 fn run_tmux_with_bin_does_not_panic_on_missing_binary() {
     // A deliberately bogus binary name must surface as an Err, never panic.
@@ -30,6 +86,7 @@ fn run_tmux_with_bin_does_not_panic_on_missing_binary() {
     assert!(result.is_err());
 }
 
+#[serial_test::serial]
 #[test]
 fn create_managed_session_does_not_panic_on_missing_binary() {
     // Same smoke guarantee for the session-creation choke point: a bogus
@@ -116,6 +173,7 @@ fn write_fake_tmux(dir: &std::path::Path, name: &str, body: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
+#[serial_test::serial]
 #[test]
 fn ensure_server_up_retries_then_succeeds() {
     // Fails the first two `start-server` invocations (simulating the
@@ -143,6 +201,7 @@ fn ensure_server_up_retries_then_succeeds() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn ensure_server_up_fails_loudly_after_exhausting_retries() {
     // Always fails — the probe must return a loud Err after exhausting
@@ -164,6 +223,7 @@ fn ensure_server_up_fails_loudly_after_exhausting_retries() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn probe_history_limit_reads_back_configured_value() {
     let dir = tempfile::tempdir().unwrap();
@@ -173,6 +233,7 @@ fn probe_history_limit_reads_back_configured_value() {
     assert_eq!(probe_history_limit(&bin), Ok(100_000));
 }
 
+#[serial_test::serial]
 #[test]
 fn probe_history_limit_errors_on_unparsable_output() {
     let dir = tempfile::tempdir().unwrap();
@@ -186,6 +247,7 @@ fn probe_history_limit_errors_on_unparsable_output() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn probe_history_limit_errors_on_nonzero_exit() {
     let dir = tempfile::tempdir().unwrap();
@@ -207,6 +269,7 @@ fn fake_show_options_case(history_limit: &str, alternate_screen: &str) -> String
     )
 }
 
+#[serial_test::serial]
 #[test]
 fn probe_alternate_screen_reads_back_on() {
     let dir = tempfile::tempdir().unwrap();
@@ -218,6 +281,7 @@ fn probe_alternate_screen_reads_back_on() {
     assert_eq!(probe_alternate_screen(&bin), Ok(true));
 }
 
+#[serial_test::serial]
 #[test]
 fn probe_alternate_screen_reads_back_off() {
     let dir = tempfile::tempdir().unwrap();
@@ -229,6 +293,7 @@ fn probe_alternate_screen_reads_back_off() {
     assert_eq!(probe_alternate_screen(&bin), Ok(false));
 }
 
+#[serial_test::serial]
 #[test]
 fn probe_alternate_screen_errors_on_unrecognised_value() {
     // Anything tmux does not document must NOT be guessed at — a wrong
@@ -242,6 +307,7 @@ fn probe_alternate_screen_errors_on_unrecognised_value() {
     assert!(probe_alternate_screen(&bin).is_err());
 }
 
+#[serial_test::serial]
 #[test]
 fn probe_alternate_screen_errors_on_nonzero_exit() {
     let dir = tempfile::tempdir().unwrap();
@@ -253,6 +319,7 @@ fn probe_alternate_screen_errors_on_nonzero_exit() {
     assert!(probe_alternate_screen(&bin).is_err());
 }
 
+#[serial_test::serial]
 #[test]
 fn probe_alternate_screen_queries_the_window_scope() {
     // #5151 fail-open guard: the probe must read `-wg`, the same scope
@@ -275,6 +342,7 @@ fn probe_alternate_screen_queries_the_window_scope() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn create_managed_session_confirms_server_before_applying_options() {
     // #3386 end-to-end (still no live tmux): a fake `tmux` that records
@@ -346,6 +414,7 @@ fn create_managed_session_confirms_server_before_applying_options() {
 
 // ── #3386 review: apply-and-verify retries the WHOLE cycle ──────────
 
+#[serial_test::serial]
 #[test]
 fn apply_and_verify_scrollback_options_succeeds_on_second_attempt() {
     // The probe reports the WRONG value on the first cycle, then the
@@ -375,6 +444,7 @@ fn apply_and_verify_scrollback_options_succeeds_on_second_attempt() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn apply_and_verify_scrollback_options_returns_false_after_exhausting_retries() {
     // The probe ALWAYS reports the wrong value — every apply-and-verify
@@ -408,6 +478,7 @@ fn apply_and_verify_scrollback_options_returns_false_after_exhausting_retries() 
 
 // ── #5151: alternate-screen rides the same verified path ────────────
 
+#[serial_test::serial]
 #[test]
 fn apply_and_verify_scrollback_options_fails_when_only_alternate_screen_is_wrong() {
     // #5151 regression: history-limit reads back correctly, but the
@@ -432,6 +503,7 @@ fn apply_and_verify_scrollback_options_fails_when_only_alternate_screen_is_wrong
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn apply_and_verify_scrollback_options_verifies_alternate_screen_off() {
     // The positive counterpart: when the server DOES report the
@@ -449,6 +521,7 @@ fn apply_and_verify_scrollback_options_verifies_alternate_screen_off() {
     ));
 }
 
+#[serial_test::serial]
 #[test]
 fn apply_and_verify_probes_the_same_scope_it_sets() {
     // #5151 fail-open guard, asserted on the real argv the apply-and-

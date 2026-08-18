@@ -473,3 +473,57 @@ fn repair_closes_gaps_on_incomplete_workspace() {
         outcome.after.gaps
     );
 }
+
+#[test]
+#[serial_test::serial]
+fn repair_is_not_reported_when_the_pipeline_fails_fatally() {
+    // Why (#4781): `repaired` was set unconditionally on the repair path, so a
+    // repair that was REFUSED still reported `repaired: true` next to a
+    // `repair_error` — a caller reading the flag alone concluded the workspace
+    // had been fixed while it was left exactly as broken as it was found.
+    //
+    // FIXTURE: the same one `prepare_session_refuses_when_the_instructions_cannot_be_built`
+    // uses — a directory planted where `<workspace>/CLAUDE.md` goes, so the
+    // instruction pipeline's load-or-create step fails and
+    // `prepare_session_with_repo_url` returns the fatal `PrepError::Instructions`
+    // (#4752) before settings/output-style/hooks are ever written.
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let fake_home = TempDir::new().unwrap();
+    let _home_guard = {
+        let prior = std::env::var("HOME").ok();
+        // SAFETY: serialized via `#[serial_test::serial]`.
+        unsafe { std::env::set_var("HOME", fake_home.path()) };
+        HomeGuard(prior)
+    };
+    let tmp = TempDir::new().unwrap();
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut fw = FrameworkPaths::for_managed_project(tmp.path(), &workspace);
+    fw.trusty_mpm_root = None;
+    seed_agent_source(&fw, &["engineer"]);
+    seed_skill_source(&fw, &["tm-doctor"]);
+    std::fs::create_dir_all(workspace.join("CLAUDE.md"))
+        .expect("plant a directory where CLAUDE.md goes");
+
+    assert!(
+        !validate_workspace(&fw).is_complete(),
+        "fixture must start incomplete so the repair path runs"
+    );
+
+    let outcome = validate_and_repair(&fw, &workspace, None);
+
+    assert!(
+        outcome.repair_error.is_some(),
+        "the planted directory must make the repair pipeline fail"
+    );
+    assert!(
+        !outcome.is_complete(),
+        "a refused repair leaves gaps, remaining: {:?}",
+        outcome.after.gaps
+    );
+    assert!(
+        !outcome.repaired,
+        "a repair that failed fatally must NOT report repaired: true (error was {:?})",
+        outcome.repair_error
+    );
+}

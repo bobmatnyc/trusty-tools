@@ -30,7 +30,10 @@ use crate::core::models::ClassificationMethod;
 /// and the `weighted_sum` config for Tier 2.5 (added in 1.3.0).
 /// Test: every classifier test in `classify::tests` builds one via
 /// `Default::default()` or with explicit overrides.
-#[derive(Debug, Clone)]
+// #5770: `Debug` is hand-written in `core::config::credential_debug`, not
+// derived — the derived one printed this struct's clone of
+// `ClassificationConfig::openrouter_api_key` in the clear.
+#[derive(Clone)]
 pub struct ClassificationEngineConfig {
     /// Whether to engage the LLM tier when tiers 1–3 fail.
     pub use_llm: bool,

@@ -35,16 +35,25 @@
 //! options again. [`daemon::tmux::TmuxDriver`](crate::daemon::tmux::TmuxDriver)
 //! wraps [`run_tmux_with_bin`] rather than spawning independently.
 //!
-//! Scope note (#2398 follow-up filed for stragglers): a handful of read-only
-//! probes — `tmux display-message -p '#S'` (current-session-name lookups in
-//! `bin/tm/commands/tmux_attach.rs` and `bin/tm/commands/statusline/
-//! branch.rs`), `tmux show-environment` (`bin/tm/commands/guided_inplace.rs`),
-//! and `tmux display-message -t <s> -p '#{pane_pid}'`
-//! (`core::process::tmux_pane_pid`) — still shell out directly. They are
-//! read-only queries against an EXISTING session, not session-creation, so
-//! they cannot bypass the scrollback/mouse ergonomics; migrating them was
-//! judged out of scope for this PR (no `TmuxCommand` variant models
-//! `display-message`/`show-environment` yet) to keep the diff reviewable.
+//! Scope note (#2414, closing the #2398 follow-up): the four read-only probes
+//! that used to shell out directly — `tmux display-message -p '#S'`
+//! (current-session-name lookups in `bin/tm/commands/tmux_attach.rs` and
+//! `bin/tm/commands/statusline/branch.rs`), `tmux show-environment`
+//! (`bin/tm/commands/guided_inplace.rs`), and
+//! `tmux display-message -t <s> -p '#{pane_pid}'`
+//! (`core::process::tmux_pane_pid`) — now route through
+//! [`display_message_argv`]/[`show_environment_argv`] +
+//! [`run_tmux_argv_with_bin`]/[`run_tmux_argv`]. Those are a SEPARATE pair of
+//! entry points from [`run_tmux_with_bin`]/[`run_tmux`] because
+//! `trusty_common::tmux::TmuxCommand` does not model `display-message`/
+//! `show-environment`, and extending that shared enum was out of scope for
+//! #2414 (a concurrent branch owns `trusty-common/`); they still fold into the
+//! SAME [`run_tmux_argv_with_bin`] → [`crate::core::spawn_disclaim::disclaimed_output`]
+//! spawn primitive [`run_tmux_with_bin`] itself calls, so binary resolution and
+//! TCC-disclaim wrapping stay unified across every tmux call in the crate even
+//! though argv construction for these two sub-commands is local. This mirrors
+//! `statusline::branch::git_branch`'s existing pattern of calling
+//! `disclaimed_output` directly for a probe with no typed command wrapper.
 //! `bin/tm/commands/tmux_attach.rs::tmux_attach` (the actual `attach-session`/
 //! `switch-client` spawn) DOES route its binary resolution through
 //! [`resolve_tmux_binary_or_bare`] even though its interactive,
@@ -54,8 +63,11 @@
 //! `scrollback_option_commands`/the scrollback defaults from
 //! `trusty_common::tmux`; [`resolve_tmux_binary`]/[`resolve_tmux_binary_or_bare`]
 //! (binary resolution), [`run_tmux_with_bin`]/[`run_tmux`] (the shared spawn
-//! primitive), and [`create_managed_session`] (the session-creation choke
-//! point with ergonomics baked in, config-resolved locally).
+//! primitive for typed `TmuxCommand`s), [`display_message_argv`]/
+//! [`show_environment_argv`]/[`run_tmux_argv_with_bin`]/[`run_tmux_argv`] (the
+//! same spawn primitive for the two untyped sub-commands above), and
+//! [`create_managed_session`] (the session-creation choke point with
+//! ergonomics baked in, config-resolved locally).
 //! Test: `cargo test -p trusty-mpm-core` covers the mpm-specific spawn/config
 //! glue; argv construction and the options-before-new-session ordering
 //! guarantee are tested once in `trusty_common::tmux` and reused here without
@@ -90,7 +102,7 @@ pub fn resolve_tmux_binary() -> Option<std::path::PathBuf> {
 /// [`resolve_tmux_binary`], falling back to the literal `"tmux"` (a plain
 /// `PATH` lookup at spawn time) when resolution itself comes up empty.
 ///
-/// Why: callers that do not need [`daemon::tmux::TmuxDriver::discover`]'s
+/// Why: callers that do not need [`daemon::tmux::TmuxDriver::discover`](crate::daemon::discover)'s
 /// (crate::daemon::tmux) fail-fast-if-truly-absent contract — the CLI and TUI
 /// client, which already surface their own "tmux command failed" error on the
 /// subsequent spawn — just want a best-effort binary name to run. Falling
@@ -143,7 +155,42 @@ pub fn run_tmux_with_bin(
     tmux_bin: &str,
     cmd: &TmuxCommand,
 ) -> std::io::Result<std::process::Output> {
+    host_state_guard()?;
     crate::core::spawn_disclaim::disclaimed_output(tmux_bin, &tmux_argv(cmd))
+}
+
+/// Refuse a tmux spawn when this process is not running in the operator's
+/// real environment (#5784).
+///
+/// Why: a tmux server is keyed to the OS user, not to `$HOME`, so a daemon or
+/// CLI under a throwaway `$HOME` still reaches the operator's live sessions.
+/// [`crate::daemon::tmux::TmuxDriver::discover`] gates every path that holds a
+/// driver, but `tm launch`/`tm connect` CREATE and KILL sessions through
+/// [`create_managed_session`] and [`run_tmux`] without ever constructing one —
+/// so the check also belongs at the spawn itself, which this module already
+/// owns as the crate's single tmux-spawning point.
+/// What: `Ok(())` when [`crate::core::host_state_gate::host_state_access`]
+/// allows; otherwise an `io::Error` of kind `PermissionDenied` carrying the
+/// reason, so a caller that only prints the error still tells its operator
+/// which variable lifts the gate. Logged at `debug!` rather than `warn!`
+/// because one operation issues many spawns — the loud line belongs at the
+/// entry point ([`create_managed_session`], `TmuxDriver::discover`,
+/// `discovery::discover_all`, the daemon's startup banner).
+/// Test: `scratch_home_daemon_does_not_spawn_tmux` in
+/// `tests/scratch_home_tmux_gate.rs` drives both a `create_managed_session`
+/// and a `run_tmux(KillSession)` through this guard and asserts each is
+/// refused with `PermissionDenied` and no subprocess.
+fn host_state_guard() -> std::io::Result<()> {
+    match crate::core::host_state_gate::host_state_access().skip_reason() {
+        None => Ok(()),
+        Some(reason) => {
+            tracing::debug!("#5784: tmux spawn refused — {reason}");
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("tmux spawn refused: {reason}"),
+            ))
+        }
+    }
 }
 
 /// [`run_tmux_with_bin`], resolving the tmux binary via
@@ -155,6 +202,91 @@ pub fn run_tmux_with_bin(
 /// Test: exercised transitively; see [`run_tmux_with_bin`].
 pub fn run_tmux(cmd: &TmuxCommand) -> std::io::Result<std::process::Output> {
     run_tmux_with_bin(&resolve_tmux_binary_or_bare(), cmd)
+}
+
+/// Render `tmux display-message [-t <target>] -p <format>` argv (#2414).
+///
+/// Why: `trusty_common::tmux::TmuxCommand` has no `display-message` variant
+/// (extending that shared enum is out of scope here — see this module's scope
+/// note), so the four read-only probes this issue migrates need a local,
+/// pure argv builder to route through, exactly like [`tmux_argv`] does for
+/// the typed commands.
+/// What: `target: None` renders untargeted (`display-message -p <format>`,
+/// which tmux resolves against the invoking CLIENT, not any particular
+/// session — the "current client" fallback [`current_tmux_session_name`](
+/// crate) and [`tmux_session_name`](crate) both rely on); `Some(target)`
+/// renders `-t <target.as_target()> -p <format>`, addressing exactly the
+/// session or bare pane id [`TmuxTarget::as_target`] renders (never a
+/// `"session:%pane"` compound, which tmux parses as a window spec, not a
+/// pane spec).
+/// Test: `display_message_argv_untargeted`, `display_message_argv_session_targeted`.
+pub fn display_message_argv(target: Option<&TmuxTarget>, format: &str) -> Vec<String> {
+    let mut argv = vec!["display-message".to_string()];
+    if let Some(t) = target {
+        argv.push("-t".to_string());
+        argv.push(t.as_target());
+    }
+    argv.push("-p".to_string());
+    argv.push(format.to_string());
+    argv
+}
+
+/// Render `tmux show-environment [-t <name>] <key>` argv (#2414).
+///
+/// Why: the [`display_message_argv`] counterpart for
+/// `bin/tm/commands/guided_inplace.rs::read_tmux_env_managed_session_id`,
+/// which reads a variable's durably-published value from the SESSION
+/// environment table (never a per-pane `export`) — see
+/// [`TmuxCommand::SetEnvironment`]'s doc for why that table exists.
+/// What: `name: None` renders untargeted (`show-environment <key>`, querying
+/// the CURRENT session — the only shape this issue's call site uses, since it
+/// only ever runs from inside the tmux client whose own session it wants);
+/// `Some(name)` renders `-t <name> <key>` for a caller that needs an
+/// explicit session.
+/// Test: `show_environment_argv_untargeted`, `show_environment_argv_session_targeted`.
+pub fn show_environment_argv(name: Option<&str>, key: &str) -> Vec<String> {
+    let mut argv = vec!["show-environment".to_string()];
+    if let Some(n) = name {
+        argv.push("-t".to_string());
+        argv.push(n.to_string());
+    }
+    argv.push(key.to_string());
+    argv
+}
+
+/// Run raw tmux argv against an EXPLICITLY resolved binary path, through the
+/// SAME spawn primitive [`run_tmux_with_bin`] uses (#2414).
+///
+/// Why: [`display_message_argv`]/[`show_environment_argv`] cover sub-commands
+/// `trusty_common::tmux::TmuxCommand` does not model, so they cannot go
+/// through [`run_tmux_with_bin`]'s `&TmuxCommand` signature — but the actual
+/// spawn (binary resolution already done by the caller, TCC-disclaim
+/// wrapping) must still be the ONE place that happens, or these four probes
+/// would just re-introduce the ad hoc `Command::new("tmux")` drift #2414
+/// exists to close, one layer down. Delegating straight to
+/// [`crate::core::spawn_disclaim::disclaimed_output`] — the exact primitive
+/// [`run_tmux_with_bin`] itself calls — keeps that one place shared.
+/// What: spawns `tmux_bin` with `args` via `disclaimed_output`. Callers own
+/// interpreting the exit status / stderr, exactly like [`run_tmux_with_bin`].
+/// Test: exercised transitively by every migrated call site (a live `tmux`
+/// binary is required to observe real output).
+pub fn run_tmux_argv_with_bin(
+    tmux_bin: &str,
+    args: &[String],
+) -> std::io::Result<std::process::Output> {
+    host_state_guard()?;
+    crate::core::spawn_disclaim::disclaimed_output(tmux_bin, args)
+}
+
+/// [`run_tmux_argv_with_bin`], resolving the tmux binary via
+/// [`resolve_tmux_binary_or_bare`] first (#2414).
+///
+/// Why: the common-case convenience mirroring [`run_tmux`] for the untyped
+/// argv path.
+/// What: resolves then delegates to [`run_tmux_argv_with_bin`].
+/// Test: exercised transitively; see [`run_tmux_argv_with_bin`].
+pub fn run_tmux_argv(args: &[String]) -> std::io::Result<std::process::Output> {
+    run_tmux_argv_with_bin(&resolve_tmux_binary_or_bare(), args)
 }
 
 /// Build the exact ordered [`TmuxCommand`] sequence [`create_managed_session`]
@@ -281,6 +413,19 @@ pub fn create_managed_session(
     name: &str,
     workdir: Option<&str>,
 ) -> std::io::Result<ManagedSessionOutcome> {
+    // #5784: refuse once, loudly, at the entry point. `host_state_guard` also
+    // guards every spawn below, but this is the operation an operator asked
+    // for by name, so it is the one that earns a `warn!` — and refusing here
+    // skips the retried apply-and-verify cycle that would otherwise emit a
+    // dozen refusals for one `tm launch`.
+    if let Some(reason) = crate::core::host_state_gate::host_state_access().skip_reason() {
+        warn!("#5784: refusing to create tmux session '{name}' — {reason}");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("tmux session creation refused: {reason}"),
+        ));
+    }
+
     let owned_bin;
     let bin = match tmux_bin {
         Some(b) => b,

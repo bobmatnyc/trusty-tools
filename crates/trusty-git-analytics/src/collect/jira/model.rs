@@ -275,7 +275,7 @@ pub struct JiraComment {
     pub author: Option<String>,
     /// Comment creation timestamp.
     pub created: DateTime<Utc>,
-    /// Length of the comment body — see [`JiraClient::fetch_comments`] doc
+    /// Length of the comment body — see [`JiraClient::fetch_comments`](crate::collect::jira::JiraClient::fetch_comments) doc
     /// comment for the ADF-vs-plain-text caveat.
     pub body_len: i64,
 }

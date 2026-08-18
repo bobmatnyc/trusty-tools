@@ -11,7 +11,7 @@
 //! tagged write and a tag-scoped enumeration — and nothing else.
 //! What: defines [`GoalMemory`] (two async methods returning a `String` error so
 //! the trait stays feature-independent) and, behind `sm-memory`, implements it for
-//! [`super::super::memory::SmMemory`] by delegating to its `remember_tagged` /
+//! `super::super::memory::SmMemory` by delegating to its `remember_tagged` /
 //! `list_tagged` scoped-write/enumerate methods.
 //! Test: the mock impl in `goals/store_tests.rs` exercises the store; the real
 //! `SmMemory` impl is covered by the `#[ignore]`-free seam delegation plus the

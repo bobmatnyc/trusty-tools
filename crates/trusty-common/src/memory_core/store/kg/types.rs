@@ -2,8 +2,11 @@
 //!
 //! Why: Extracted from store/kg.rs to keep each file under the 500-SLOC cap
 //! (#607). Pure data types with no graph or storage logic.
-//! What: `UndirectedSnapshot` type alias, `KgEdge`, `Triple`.
-//! Test: Types are exercised transitively by all KG tests.
+//! What: `UndirectedSnapshot` type alias, `KgEdge`, `Triple`, and the
+//! `AdjacencyDesync` error contract (#5424).
+//! Test: Types are exercised transitively by all KG tests;
+//! `poisoned_adjacency_error_downcasts_with_the_committed_row_count` pins the
+//! `AdjacencyDesync` contract.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -39,6 +42,61 @@ pub struct KgEdge {
     pub provenance: Option<String>,
     pub valid_from: DateTime<Utc>,
     pub valid_to: Option<DateTime<Utc>>,
+}
+
+/// Storage committed a KG write that the in-memory adjacency could not record.
+///
+/// Why (#5424): every KG mutation commits to redb first and updates the
+/// in-memory adjacency second. redb is authoritative; the adjacency is a
+/// derived index that answers `neighbors`, `reachable`, `shortest_path` and
+/// the graph views. When the second step fails the row is already durable, so
+/// a bare `Err` reads to the caller as "the retraction did not happen" — and
+/// its retry reads `Ok(0)` from storage, which reads the same way. Those two
+/// states need opposite remediations: retry the write, versus reopen the
+/// palace to rebuild the index. This type is what tells them apart.
+/// What: a two-variant `thiserror` payload returned inside `anyhow::Error`.
+/// [`Self::CommittedButStale`] reports the write that just committed without
+/// being indexed; [`Self::HandleStale`] is the refusal every later mutation on
+/// that handle returns, so a follow-up call cannot answer `Ok(0)` and be
+/// mistaken for "the fact was never there". Recover either with
+/// `err.downcast_ref::<AdjacencyDesync>()`.
+/// Test: `poisoned_adjacency_error_downcasts_with_the_committed_row_count`,
+/// `retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted`,
+/// `cascade_delete_after_poisoned_adjacency_is_distinguishable_from_never_deleted`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum AdjacencyDesync {
+    /// The redb transaction committed; the adjacency update did not.
+    #[error(
+        "{operation}: {committed} row(s) already COMMITTED to storage, but the \
+         in-memory KG adjacency could not be updated ({cause}). The write DID \
+         happen — do not retry it. Graph views on this handle are stale until \
+         the palace is reopened."
+    )]
+    CommittedButStale {
+        /// The `KnowledgeGraph` method whose commit went unindexed.
+        operation: &'static str,
+        /// Rows the storage transaction committed before the sync failed.
+        committed: usize,
+        /// Why the adjacency could not be updated.
+        cause: &'static str,
+    },
+    /// An earlier write already desynced this handle, so later ones refuse.
+    #[error(
+        "{operation}: refused — this handle's KG adjacency desynced from \
+         storage on an earlier write ({earlier_operation} COMMITTED \
+         {earlier_committed} row(s) it could not index). Storage is \
+         authoritative and that write stands; reopen the palace to rebuild the \
+         adjacency. A `0` from this call would NOT mean the fact is absent."
+    )]
+    HandleStale {
+        /// The method being refused.
+        operation: &'static str,
+        /// The method whose commit went unindexed.
+        earlier_operation: &'static str,
+        /// Rows that earlier commit made durable.
+        earlier_committed: usize,
+    },
 }
 
 /// A temporal knowledge graph fact.

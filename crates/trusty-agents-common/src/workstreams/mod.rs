@@ -32,13 +32,26 @@
 //! here.
 //!
 //! What: [`Harness`], [`WorkstreamStatus`], [`Priority`], [`Workstream`],
-//! [`NewWorkstream`] (value types — see [`types`]); [`WorkstreamLedger`] (the
-//! JSON-backed create/list/get/query/update registry — see [`ledger`]);
-//! [`LedgerError`] (the typed failure surface — see [`error`]);
+//! [`NewWorkstream`] (value types — see `types`); [`WorkstreamLedger`] (the
+//! JSON-backed create/list/get/query/update registry — see `ledger`);
+//! [`LedgerError`] (the typed failure surface — see `error`);
 //! [`LedgerRecovery`]/[`JsonFileRecovery`]/[`TrustyMemoryRecovery`] (the
-//! restart-recovery seam — see [`recovery`]).
+//! restart-recovery seam — see `recovery`; `JsonFileRecovery` is the default and
+//! `TrustyMemoryRecovery` is a stub blocked on issue #3228).
 //! Test: `cargo test -p trusty-agents-common workstreams::` exercises every
 //! submodule in place.
+//!
+//! [`Harness`]: crate::workstreams::Harness
+//! [`super::connectors::BackendParams`]: crate::connectors::BackendParams
+//! [`WorkstreamStatus`]: crate::workstreams::WorkstreamStatus
+//! [`Priority`]: crate::workstreams::Priority
+//! [`Workstream`]: crate::workstreams::Workstream
+//! [`NewWorkstream`]: crate::workstreams::NewWorkstream
+//! [`WorkstreamLedger`]: crate::workstreams::WorkstreamLedger
+//! [`LedgerError`]: crate::workstreams::LedgerError
+//! [`LedgerRecovery`]: crate::workstreams::LedgerRecovery
+//! [`JsonFileRecovery`]: crate::workstreams::JsonFileRecovery
+//! [`TrustyMemoryRecovery`]: crate::workstreams::TrustyMemoryRecovery
 
 mod error;
 mod ledger;

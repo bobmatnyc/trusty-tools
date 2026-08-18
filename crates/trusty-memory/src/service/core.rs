@@ -19,6 +19,7 @@ use trusty_common::memory_core::retrieval::{
     recall_across_palaces_with_default_embedder, recall_deep_with_default_embedder,
     recall_with_default_embedder, RememberOptions,
 };
+use trusty_common::memory_core::store::PalaceStoreError;
 use trusty_common::memory_core::PalaceRegistry;
 use uuid::Uuid;
 
@@ -332,7 +333,9 @@ impl MemoryService {
     /// `palace.json` changes — so cached `PalaceHandle`s stay valid and no
     /// registry invalidation is required.
     /// What: 1) loads the palace via `PalaceStore::load_palace` (404 when the
-    /// directory or `palace.json` is missing), 2) trims the new name and
+    /// directory or `palace.json` is genuinely missing; a probe that cannot
+    /// determine whether it is there is a 500, not a 404 — #5549), 2) trims the
+    /// new name and
     /// returns `BadRequest` when empty, 3) mutates `palace.name` and writes
     /// the metadata back through the atomic `PalaceStore::save_palace`
     /// (tmp file + rename), 4) emits an aggregate `StatusChanged` so
@@ -349,7 +352,14 @@ impl MemoryService {
         }
         let palace_dir = self.state.data_root.join(palace_id);
         let mut palace = trusty_common::memory_core::store::PalaceStore::load_palace(&palace_dir)
-            .map_err(|e| anyhow!("palace not found: {palace_id} ({e})"))?;
+            .map_err(|e| {
+            // #5549: only a genuine absence may be reported as "not found".
+            if matches!(&e, PalaceStoreError::NotFound(_)) {
+                anyhow!("palace not found: {palace_id} ({e})")
+            } else {
+                anyhow!("cannot load palace {palace_id}: {e}")
+            }
+        })?;
         palace.name = trimmed.to_string();
         trusty_common::memory_core::store::PalaceStore::save_palace(&palace)
             .with_context(|| format!("save palace metadata for {palace_id}"))?;
@@ -377,11 +387,15 @@ impl MemoryService {
     /// untyped one keeps the wire shape correct on both surfaces without
     /// asking either caller to parse error strings.
     /// What: same as [`Self::update_palace_name`] but returns
-    /// `ServiceError::BadRequest` for empty names and
-    /// `ServiceError::NotFound` for missing palace metadata.
+    /// `ServiceError::BadRequest` for empty names and `ServiceError::NotFound`
+    /// for palace metadata that is genuinely absent. Metadata whose presence
+    /// cannot be determined — a denied or transient stat — is
+    /// `ServiceError::Internal`: a 404 would tell the client the palace does
+    /// not exist when nobody established that (#5549, ADR-0045).
     /// Test: `update_palace_name_renames_palace`,
     /// `update_palace_name_rejects_empty_name`,
-    /// `update_palace_name_returns_not_found_for_missing_id`.
+    /// `update_palace_name_returns_not_found_for_missing_id`,
+    /// `update_palace_name_reports_an_unstattable_palace_as_internal`.
     pub async fn update_palace_name_typed(
         &self,
         palace_id: &str,
@@ -396,7 +410,13 @@ impl MemoryService {
         let palace_dir = self.state.data_root.join(palace_id);
         let mut palace = trusty_common::memory_core::store::PalaceStore::load_palace(&palace_dir)
             .map_err(|e| {
-            ServiceError::not_found(format!("palace not found: {palace_id} ({e})"))
+            // #5549: `not_found` on every variant told the client the palace
+            // does not exist for a stat we were merely denied.
+            if matches!(&e, PalaceStoreError::NotFound(_)) {
+                ServiceError::not_found(format!("palace not found: {palace_id} ({e})"))
+            } else {
+                ServiceError::internal(format!("cannot load palace {palace_id}: {e}"))
+            }
         })?;
         palace.name = trimmed.to_string();
         trusty_common::memory_core::store::PalaceStore::save_palace(&palace).map_err(|e| {
@@ -489,7 +509,7 @@ impl MemoryService {
         let payload: Vec<Value> = page
             .into_iter()
             .map(|drawer| {
-                let snippet = drawer_snippet(&drawer.content);
+                let snippet = drawer_snippet(drawer.content());
                 let mut value = serde_json::to_value(&drawer).unwrap_or_else(|_| json!({}));
                 if let Value::Object(ref mut map) = value {
                     // `null` when the drawer has no usable content so
@@ -601,10 +621,16 @@ impl MemoryService {
     /// Why: same dedup story as `create_drawer`. #5231: `DELETE` on a drawer id
     /// that was never stored used to answer `204 No Content`, the same as a
     /// real delete — this now 404s, matching `delete_palace`.
-    /// What: parses the drawer UUID, calls `PalaceHandle::forget`, maps
-    /// [`ForgetOutcome::NotFound`] to `ServiceError::not_found`, and emits
-    /// `DrawerDeleted` only when a drawer was actually removed.
-    /// Test: `delete_drawer_404s_for_an_unknown_drawer_id`.
+    /// What: parses the drawer UUID, calls `PalaceHandle::forget`, deletes the
+    /// drawer's BM25 document, maps `ForgetOutcome::NotFound` to
+    /// `ServiceError::not_found`, and emits `DrawerDeleted` only when a drawer
+    /// was actually removed. #5053: the lexical delete runs on this path for
+    /// the same reason it runs on the MCP one — `HTTP DELETE` and
+    /// `memory_forget` remove the same drawer, and the backfill indexes it
+    /// whichever way it was written, so a lexical copy left here is the same
+    /// stale document.
+    /// Test: `delete_drawer_404s_for_an_unknown_drawer_id`;
+    /// `tests/bm25_forget_delete.rs` covers the deletion contract itself.
     pub async fn delete_drawer(
         &self,
         id: &str,
@@ -618,6 +644,10 @@ impl MemoryService {
             .forget(uuid)
             .await
             .map_err(|e| ServiceError::internal(format!("forget: {e:#}")))?;
+        // #5053: a drawer the user deleted must stop matching lexical queries.
+        crate::tools::bm25::bm25_delete_document(&self.state, handle.id.as_str(), uuid)
+            .await
+            .map_err(|e| ServiceError::internal(format!("{e:#}")))?;
         if !outcome.is_deleted() {
             return Err(ServiceError::not_found(format!(
                 "drawer '{drawer_id}' not found in palace '{id}'"
@@ -700,7 +730,7 @@ impl MemoryService {
                 .map(|r| json!({
                     "palace_id": r.palace_id,
                     "drawer_id": r.result.drawer.id.to_string(),
-                    "content": r.result.drawer.content,
+                    "content": r.result.drawer.content(),
                     "importance": r.result.drawer.importance,
                     "tags": r.result.drawer.tags,
                     "score": r.result.score,

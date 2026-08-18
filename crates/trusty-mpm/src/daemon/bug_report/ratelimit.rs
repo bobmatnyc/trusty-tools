@@ -360,9 +360,9 @@ impl HourlyCap {
 ///
 /// Why: the two guards are always used together; a composite struct simplifies
 ///      the call sites in the filing path.
-/// What: holds a [`FingerprintStampStore`] and a [`HourlyCap`]; [`check`]
+/// What: holds a [`FingerprintStampStore`] and a [`HourlyCap`]; `check`
 ///       returns the first blocking decision, or `Allowed` when both allow.
-///       [`record_filed`] updates both stores atomically.
+///       `record_filed` updates both stores atomically.
 /// Test: composite behaviour covered by individual store tests + integration
 ///       in the filing path.
 pub struct RateLimitGuard {

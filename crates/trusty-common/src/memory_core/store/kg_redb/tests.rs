@@ -122,6 +122,39 @@ mod tests {
         assert_eq!(rows, vec![("alice".to_string(), 3), ("bob".to_string(), 1)]);
     }
 
+    /// Why: #5384 / trusty-common 0.33.0 changed this from `u64` to
+    /// `Result<u64>` precisely so `Ok(0)` could mean "empty" and nothing else —
+    /// before it, a failed read also produced `0` and `kg_query` reported
+    /// `graph_state: "graph_empty"`, the false claim #4775 exists to prevent.
+    /// The contract test asserts the MEANING of `Ok(0)`, which is what a caller
+    /// relies on; the type differ sees the signature move but not this.
+    /// What: a freshly opened store reports `Ok(0)`, and the zero survives a
+    /// full assert-then-retract round trip — so `Ok(0)` is reachable only from
+    /// a completed read of an empty graph.
+    /// Test: itself.
+    #[test]
+    fn contract_count_active_triples_zero_means_empty_not_failed() {
+        let (_d, kg) = open_kg();
+
+        // Postcondition: Ok(0) on a store that opened cleanly and holds nothing.
+        // `open_with_intent` creates every table on open, so this is a real
+        // read of an empty graph and never a missing-table shortcut.
+        assert_eq!(kg.count_active_triples().unwrap(), 0);
+
+        kg.assert(&t("alice", "is_alias_for", "Acme")).unwrap();
+        assert_eq!(kg.count_active_triples().unwrap(), 1);
+
+        // Postcondition: retraction returns it to Ok(0) — the same value, still
+        // meaning "empty", reached by a different route.
+        kg.retract("alice", "is_alias_for").unwrap();
+        assert_eq!(kg.count_active_triples().unwrap(), 0);
+
+        // Invariant: counts ACTIVE triples only. The retracted triple's history
+        // row survives, and must not be counted.
+        kg.assert(&t("bob", "is_alias_for", "Gamma")).unwrap();
+        assert_eq!(kg.count_active_triples().unwrap(), 1);
+    }
+
     #[test]
     fn count_active_triples_returns_live_only() {
         let (_d, kg) = open_kg();
@@ -213,7 +246,7 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, d.id);
         assert_eq!(loaded[0].room_id, room_id);
-        assert_eq!(loaded[0].content, "the cold-start drawer");
+        assert_eq!(loaded[0].content(), "the cold-start drawer");
         assert!((loaded[0].importance - 0.83).abs() < 1e-5);
         assert_eq!(loaded[0].tags, vec!["alpha".to_string(), "beta".into()]);
         assert_eq!(loaded[0].source_file, Some(PathBuf::from("/tmp/source.md")));
@@ -305,7 +338,7 @@ mod tests {
         let loaded = kg.load_drawers().expect("load drawers");
         assert_eq!(loaded.len(), 1, "legacy row must decode, not be skipped");
         assert_eq!(loaded[0].id, id);
-        assert_eq!(loaded[0].content, "pre-spec-001 task row");
+        assert_eq!(loaded[0].content(), "pre-spec-001 task row");
         assert_eq!(
             loaded[0].drawer_type,
             DrawerType::Task,
@@ -386,7 +419,7 @@ mod tests {
         let loaded = kg.load_drawers().expect("load drawers");
         assert_eq!(loaded.len(), 1, "pre-#4884 row must decode, not be skipped");
         assert_eq!(loaded[0].id, id);
-        assert_eq!(loaded[0].content, "pre-#4884 task row");
+        assert_eq!(loaded[0].content(), "pre-#4884 task row");
         assert_eq!(loaded[0].drawer_type, DrawerType::Task);
         assert!(
             loaded[0].fact_key.is_none(),
@@ -572,12 +605,12 @@ mod tests {
         let (_d, kg) = open_kg();
         let mut d = Drawer::new(Uuid::new_v4(), "original");
         kg.upsert_drawer(&d).unwrap();
-        d.content = "updated".into();
+        d.set_content("updated");
         d.importance = 0.95;
         kg.upsert_drawer(&d).unwrap();
         let loaded = kg.load_drawers().unwrap();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].content, "updated");
+        assert_eq!(loaded[0].content(), "updated");
         assert!((loaded[0].importance - 0.95).abs() < 1e-5);
     }
 
