@@ -478,7 +478,10 @@ async fn reap_and_record(
 /// sentinel and registration re-fires on every `PreToolUse`, so an agent that
 /// moved between trees leaves the first one stamped. Which directory such an
 /// agent owns is undeterminable, and an undeterminable owner on a destructive
-/// path keeps every candidate rather than picking one.
+/// path keeps every candidate rather than picking one. This is not a
+/// permanent leak: an ambiguous pair stays reclaimable via `tm session
+/// prune-worktrees --merged-prs`, whose sweep (`worktree_reclaim`) does not
+/// consult this guard.
 /// Test: `session_end_spares_another_sessions_agent`,
 /// `session_end_reaps_every_agent_of_the_ending_session`,
 /// `session_end_keeps_a_worktree_whose_agent_names_two_directories`.
