@@ -34,6 +34,7 @@
 //! Test: `super::registration_tests`.
 
 use crate::chain::ChainOptions;
+use crate::cli::bootstrap::{self, ColdStart};
 use crate::cli::credential::Tty;
 use crate::cli::{Cli, render};
 use crate::error::AuditError;
@@ -133,7 +134,8 @@ pub enum Launch {
 /// a second command. It stops at the DECISION rather than running the sweep
 /// itself so `main` can resolve the inference credential only once the sweep is
 /// actually going to happen (#5896 review) — see [`Launch`].
-/// What: the loop, then [`Command::Guided`] — which is where auto-install
+/// What: the cold start (#5970) when this directory holds no engagement config,
+/// then the loop, then [`Command::Guided`] — which is where auto-install
 /// happens, so the tools land in this same invocation — and then the question,
 /// when the flow reached [`NextStep::ReadyForRun`]. Everything shown before the
 /// answer goes to the terminal; what `main` prints to stdout is whatever it does
@@ -149,8 +151,16 @@ pub enum Launch {
 /// it is reported and the loop asks again.
 pub async fn guided_at_the_terminal(
     session: &Session,
+    cold: &ColdStart,
     tty: &mut dyn Tty,
 ) -> Result<Launch, AuditError> {
+    // #5970: the engagement FIRST — key, config, tools — and registration after
+    // it. The other order is what this issue reported: an operator naming
+    // repositories for an engagement that did not exist, then being told to run
+    // `trusty-audit install`. A directory that already has a config skips this
+    // entirely and the flow is what it always was.
+    bootstrap::cold_start(session, cold, tty).await?;
+
     register_targets(session, tty).await?;
 
     let guided = session.execute(Command::Guided).await?;
@@ -365,11 +375,30 @@ mod registration_tests {
     }
 
     /// A session whose repository registrations succeed without `gh`, rooted in
-    /// a throwaway working directory.
+    /// a throwaway working directory, ALREADY carrying an engagement config.
+    ///
+    /// #5970: the config is seeded so these cases stay about registration. A
+    /// launch that finds one skips the cold start entirely, which is exactly the
+    /// recipient-handed-a-config path every one of them was written for.
+    /// `the_key_is_asked_for_before_the_first_target` is the case that starts
+    /// from nothing.
     fn accepting_session(dir: &Path) -> Session {
-        Session::new(WorkDir::new(dir.join("work")))
+        let session = Session::new(WorkDir::new(dir.join("work")))
+            .with_config_path(dir.join("engagement.toml"))
             .with_repo_probe(RepoProbe::accepting())
-            .with_auto_install(false)
+            .with_auto_install(false);
+        bootstrap::create_engagement(
+            session.config_path(),
+            &crate::config::SecretKey::new("sk-or-v1-from-the-auditor"),
+            &bootstrap::fixed_pins("1.2.3"),
+        )
+        .expect("seed an engagement config");
+        session
+    }
+
+    /// Pins no test here ever downloads.
+    fn pins() -> ColdStart {
+        ColdStart::fixed(bootstrap::fixed_pins("1.2.3"))
     }
 
     /// The outcome a launch that stopped short of the sweep hands back.
@@ -399,7 +428,7 @@ mod registration_tests {
         let mut tty = FakeTty::new(["acme/api", "not a target", "acme/schema", ""]);
 
         let outcome = reported(
-            guided_at_the_terminal(&session, &mut tty)
+            guided_at_the_terminal(&session, &pins(), &mut tty)
                 .await
                 .expect("the loop runs"),
         );
@@ -413,6 +442,83 @@ mod registration_tests {
             status.next,
             NextStep::SelectRepositories,
             "the flow must not still be asking for what was just registered"
+        );
+    }
+
+    /// 🔴 The ordering #5970's ruling fixes, asserted as an order rather than as
+    /// a set of things that happened.
+    ///
+    /// A directory with no `engagement.toml` must be asked for the OpenRouter
+    /// key FIRST, have the config written, and only then be asked what the audit
+    /// covers. Registration going first is what produced the reported transcript:
+    /// the operator named repositories for an engagement that did not exist, was
+    /// told `Tools: 0/4 installed`, and was never asked for a key at all.
+    ///
+    /// Against `8cfdda3ab` this fails on the first assertion — the only prompts
+    /// issued are registration's.
+    #[tokio::test]
+    async fn the_key_is_asked_for_before_the_first_target() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Deliberately NOT `accepting_session`: this case starts from nothing.
+        let session = Session::new(WorkDir::new(tmp.path().join("work")))
+            .with_config_path(tmp.path().join("engagement.toml"))
+            .with_repo_probe(RepoProbe::accepting())
+            .with_auto_install(false);
+        let mut tty = FakeTty::new(["sk-or-v1-cold-start", "sk-or-v1-cold-start", "acme/api", ""]);
+
+        guided_at_the_terminal(&session, &pins(), &mut tty)
+            .await
+            .expect("the cold start runs");
+
+        let first_target = tty
+            .prompts
+            .iter()
+            .position(|p| p == PROMPT)
+            .expect("the registration loop must still run");
+        let last_key = tty
+            .prompts
+            .iter()
+            .rposition(|p| p.contains("key"))
+            .expect("the key must be asked for");
+        assert!(
+            last_key < first_target,
+            "the key must be asked for before the first target: {:?}",
+            tty.prompts
+        );
+
+        let config = crate::config::EngagementConfig::load(session.config_path())
+            .expect("the launch must have written an engagement config");
+        assert_eq!(config.openrouter_key.expose(), "sk-or-v1-cold-start");
+        assert_eq!(config.tools.tga.version(), "1.2.3");
+        assert_eq!(registered_ids(&session), vec!["acme/api"]);
+    }
+
+    /// The other half of the ordering: the config is on disk BEFORE the
+    /// registration loop opens, not written at the end of a successful launch.
+    ///
+    /// A terminal that dies during registration therefore leaves a set-up
+    /// engagement behind, so re-running does not ask for the key again.
+    #[tokio::test]
+    async fn the_engagement_survives_a_terminal_that_dies_during_registration() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = Session::new(WorkDir::new(tmp.path().join("work")))
+            .with_config_path(tmp.path().join("engagement.toml"))
+            .with_repo_probe(RepoProbe::accepting())
+            .with_auto_install(false);
+        let mut tty = FakeTty::new(["sk-or-v1-cold-start", "sk-or-v1-cold-start"]);
+        tty.answers
+            .push_back(Err(io::Error::other("the terminal went away")));
+
+        let err = guided_at_the_terminal(&session, &pins(), &mut tty)
+            .await
+            .expect_err("a terminal that fails is an error");
+        assert!(
+            matches!(err, AuditError::RegistrationPromptFailed { .. }),
+            "{err:?}"
+        );
+        assert!(
+            session.config_path().is_file(),
+            "the engagement must already be on disk when registration opens"
         );
     }
 
@@ -559,7 +665,7 @@ mod registration_tests {
         let mut tty = FakeTty::new(["acme/api", "", "n"]);
 
         let outcome = reported(
-            guided_at_the_terminal(&session, &mut tty)
+            guided_at_the_terminal(&session, &pins(), &mut tty)
                 .await
                 .expect("declining is not a failure"),
         );
@@ -747,7 +853,7 @@ trusty-review = "0.15.1"
     /// wrong `Command` at that seam, so a test that named the command itself
     /// would assert the mistake rather than the behaviour.
     async fn launch(session: &Session, tty: &mut dyn Tty) -> Result<Outcome, AuditError> {
-        match guided_at_the_terminal(session, tty).await? {
+        match guided_at_the_terminal(session, &pins(), tty).await? {
             Launch::Reported(outcome) => Ok(*outcome),
             Launch::SweepConfirmed => session.execute(confirmed_sweep()).await,
         }

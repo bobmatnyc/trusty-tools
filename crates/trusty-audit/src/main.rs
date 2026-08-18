@@ -95,7 +95,17 @@ async fn main() -> Result<()> {
     // several times — registration, then the guided flow, then the sweep. What
     // it returns is the last outcome, which is what stdout carries.
     let outcome = match &mut terminal {
-        Some(tty) => match cli::registration::guided_at_the_terminal(&session, tty).await? {
+        // #5970: the launch sets the engagement up when there is none — key,
+        // config, tools, and only then targets. `from_environment` is the one
+        // place the cold start's inputs are read; the seam exists so its other
+        // branches are provable without a network and without an exported key.
+        Some(tty) => match cli::registration::guided_at_the_terminal(
+            &session,
+            &cli::bootstrap::ColdStart::from_environment(),
+            tty,
+        )
+        .await?
+        {
             cli::registration::Launch::Reported(outcome) => *outcome,
             cli::registration::Launch::SweepConfirmed => {
                 let sweep = cli::registration::confirmed_sweep();

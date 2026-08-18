@@ -1,4 +1,7 @@
 use super::*;
+// #5970: `pinned.rs` reaches the host-target probe through `preflight::resolve_pin`
+// now, so it is no longer in scope via `use super::*`.
+use crate::download::platform;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -796,4 +799,174 @@ async fn fails_closed_when_the_release_list_is_unreachable() {
         "got {err:?}"
     );
     assert_nothing_installed(dir.path());
+}
+
+/// Preflight the set against a fixture, asking only whether each pin resolves.
+async fn preflight(base: &str, tools: &[PinnedTool]) -> Vec<PinnedPreflight> {
+    let releases_url = format!("{base}/releases");
+    let download_base = format!("{base}/dl");
+    let endpoints = Endpoints {
+        releases_url: &releases_url,
+        download_base: &download_base,
+    };
+    preflight::preflight_pinned_set_at(&crate::download::http_client(), &endpoints, tools).await
+}
+
+/// Why: #5970's whole point — a caller can ask "could this be installed" and get
+/// an answer without a download.
+/// What: two published pins over a fixture; both come back installable.
+/// Test: This is the test.
+#[tokio::test]
+async fn preflight_reports_every_tool_as_installable() {
+    let Some(target) = tier1() else {
+        return;
+    };
+    let base = Fixture::new(target)
+        .publish("demo-tool", "1.2.3", Flaw::None)
+        .publish("other-tool", "0.4.0", Flaw::None)
+        .start()
+        .await;
+
+    let checked = preflight(
+        &base,
+        &[
+            PinnedTool::new("demo-tool", "1.2.3"),
+            PinnedTool::new("other-tool", "0.4.0"),
+        ],
+    )
+    .await;
+
+    assert_eq!(checked.len(), 2);
+    assert!(
+        checked.iter().all(PinnedPreflight::installable),
+        "{checked:?}"
+    );
+    let names: Vec<&str> = checked.iter().map(|c| c.crate_name.as_str()).collect();
+    assert_eq!(names, vec!["demo-tool", "other-tool"], "order must survive");
+}
+
+/// Why: the answer has to name the TOOL and the reason, or the operator cannot
+/// act on it.
+/// What: one published pin, one naming a version the fixture never published;
+/// the second carries `VersionNotPublished`.
+/// Test: This is the test.
+#[tokio::test]
+async fn preflight_names_the_tool_whose_version_was_never_published() {
+    let Some(target) = tier1() else {
+        return;
+    };
+    let base = Fixture::new(target)
+        .publish("demo-tool", "1.2.3", Flaw::None)
+        .start()
+        .await;
+
+    let checked = preflight(
+        &base,
+        &[
+            PinnedTool::new("demo-tool", "1.2.3"),
+            PinnedTool::new("demo-tool", "9.9.9"),
+        ],
+    )
+    .await;
+
+    assert!(checked[0].installable(), "{checked:?}");
+    assert!(
+        matches!(
+            checked[1].problem,
+            Some(PinnedError::VersionNotPublished { .. })
+        ),
+        "{checked:?}"
+    );
+    let rendered = checked[1]
+        .problem
+        .as_ref()
+        .expect("a problem was reported")
+        .to_string();
+    assert!(rendered.contains("demo-tool"), "{rendered}");
+    assert!(rendered.contains("9.9.9"), "{rendered}");
+}
+
+/// Why: the set is reported WHOLE. Stopping at the first refusal would make a
+/// recipient fix one tool, re-run, and meet the next.
+/// What: an unpublished pin between two published ones; all three come back.
+/// Test: This is the test.
+#[tokio::test]
+async fn preflight_reports_every_tool_even_after_one_fails() {
+    let Some(target) = tier1() else {
+        return;
+    };
+    let base = Fixture::new(target)
+        .publish("demo-tool", "1.2.3", Flaw::None)
+        .publish("other-tool", "0.4.0", Flaw::None)
+        .start()
+        .await;
+
+    let checked = preflight(
+        &base,
+        &[
+            PinnedTool::new("demo-tool", "1.2.3"),
+            PinnedTool::new("demo-tool", "9.9.9"),
+            PinnedTool::new("other-tool", "0.4.0"),
+        ],
+    )
+    .await;
+
+    let installable: Vec<bool> = checked.iter().map(PinnedPreflight::installable).collect();
+    assert_eq!(installable, vec![true, false, true], "{checked:?}");
+}
+
+/// Why: a preflight that downloaded would be an install under another name, and
+/// `install_pinned_set` must stay the only path that fetches bytes.
+/// What: preflights a pin whose ARTIFACT is missing from the fixture. The pin
+/// still resolves — the tag is published — which is exactly the limit: a clean
+/// preflight promises resolution, never a successful download. The install over
+/// the same set then fails closed, which is what makes that a limit rather than
+/// a hole.
+/// Test: This is the test.
+#[tokio::test]
+async fn preflight_downloads_nothing() {
+    let Some(target) = tier1() else {
+        return;
+    };
+    let base = Fixture::new(target)
+        .publish("demo-tool", "1.2.3", Flaw::AssetMissing)
+        .start()
+        .await;
+
+    let checked = preflight(&base, &[PinnedTool::new("demo-tool", "1.2.3")]).await;
+    assert!(
+        checked[0].installable(),
+        "a published tag resolves even when its asset 404s: {checked:?}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let err = run(&base, &[PinnedTool::new("demo-tool", "1.2.3")], dir.path())
+        .await
+        .expect_err("a missing artifact must still fail the install");
+    assert!(
+        matches!(err, PinnedError::ArtifactUnavailable { .. }),
+        "got {err:?}"
+    );
+    assert_nothing_installed(dir.path());
+}
+
+/// Why: an unreachable release list is not "not published", and the preflight
+/// owes the same distinction the install does.
+/// What: points the resolver at a port that refuses.
+/// Test: This is the test.
+#[tokio::test]
+async fn preflight_distinguishes_an_unreachable_list_from_an_unpublished_pin() {
+    if tier1().is_none() {
+        return;
+    }
+    let base = format!("http://{}", crate::commands::test_support::dead_addr());
+    let checked = preflight(&base, &[PinnedTool::new("demo-tool", "1.2.3")]).await;
+
+    assert!(
+        matches!(
+            checked[0].problem,
+            Some(PinnedError::ReleaseLookupFailed { .. })
+        ),
+        "{checked:?}"
+    );
 }

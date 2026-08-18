@@ -40,7 +40,14 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::download::{fetch, glibc, platform, release};
+use crate::download::{fetch, glibc, release};
+
+// #5970: "can this be installed without installing it" — the question a consumer
+// had to either install or grow a second resolver to answer. Its `resolve_pin` is
+// checks 1 and 2 of `stage_one` below, shared rather than copied.
+mod preflight;
+
+pub use preflight::{preflight_pinned_set, PinnedPreflight};
 
 /// A tool to install at an exact pinned version.
 ///
@@ -481,33 +488,10 @@ async fn stage_one(
 ) -> Result<Staged, PinnedError> {
     let (name, version) = (tool.crate_name.as_str(), tool.version.as_str());
 
-    // Check 1 — a prebuilt exists for this host. Unlike the latest path, an
-    // unsupported target is terminal, not a cargo fallback.
-    let target = platform::current_target().ok_or_else(|| PinnedError::UnsupportedTarget {
-        crate_name: name.to_owned(),
-        version: version.to_owned(),
-        os: std::env::consts::OS.to_owned(),
-        arch: std::env::consts::ARCH.to_owned(),
-    })?;
-
-    // Check 2 — the EXACT pinned version is published. #5491: never `latest`.
-    let resolved =
-        release::resolve_pinned_tag_from_url(client, endpoints.releases_url, name, version)
-            .await
-            .map_err(|e| match e {
-                release::ResolveError::NotPublished { available } => {
-                    PinnedError::VersionNotPublished {
-                        crate_name: name.to_owned(),
-                        version: version.to_owned(),
-                        available,
-                    }
-                }
-                release::ResolveError::Fetch(source) => PinnedError::ReleaseLookupFailed {
-                    crate_name: name.to_owned(),
-                    version: version.to_owned(),
-                    source,
-                },
-            })?;
+    // Checks 1 and 2 — a prebuilt exists for this host, and the EXACT pinned
+    // version is published. #5970 moved them into `preflight` so the dry-run
+    // check and this install ask the same two questions of the same code.
+    let (target, resolved) = preflight::resolve_pin(client, endpoints, tool).await?;
 
     let suffix = glibc::select_asset_suffix(name, target, glibc::host_glibc_version()).suffix;
     let archive_name = release::asset_filename(name, &resolved.version, &suffix);

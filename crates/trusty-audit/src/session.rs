@@ -532,6 +532,15 @@ impl Session {
         &self.config_path
     }
 
+    /// Whether this session may download the pinned tools on its own (#5970).
+    ///
+    /// The cold-start launch reads it to decide whether to preflight and install
+    /// after writing the config, so `--no-install` means the same thing there as
+    /// it does in [`Session::guided`] rather than only in one of the two.
+    pub fn auto_install(&self) -> bool {
+        self.auto_install
+    }
+
     /// Run one capability.
     ///
     /// Why: the single entry point. Every front end goes through here, so a
