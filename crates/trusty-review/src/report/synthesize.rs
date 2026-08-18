@@ -128,35 +128,35 @@ pub enum SynthesisError {
 
 /// One synthesized top-risk table row (rationale for the Top Risks table).
 ///
-/// Why: #6009 shape 2 — a live capture against `anthropic/claude-opus-4.8`
-/// returned valid top-level JSON, but every `top_risks` item used drifted
-/// field names (`risk` for `description`, `applications` for `apps`) and
-/// omitted `severity`/`cost` entirely, so `serde_json::from_str::<RawSynthesis>`
-/// failed on the whole response and the run was classified `Unparseable` even
-/// though the risk content itself was present and verifiable.
-/// What: `description`/`apps` accept the drifted names via `#[serde(alias)]`
-/// (still SERIALIZED under their canonical names — the JSON twin on
-/// [`ReportModel`] is unaffected). `severity`/`cost` default to `""` when the
-/// provider omits them; the reporter renders an empty value as the honesty
-/// marker (`not stated in source data`), never a fabricated band or figure —
-/// see `reporter.rs::inject_synthesis_summary`.
-/// Test: `synthesize_tests.rs::parse_raw_recovers_shape2_field_name_drift`,
+/// Why: three consecutive live calls against `anthropic/claude-opus-4.8`
+/// (#6009) returned three different `top_risks` field-name shapes —
+/// canonical, `risk`/`applications` (shape 2), and
+/// `risk`/`cost_effort_framing`/`affected_applications` (shape 3). Field-name
+/// recovery now happens once, upstream, in
+/// [`crate::report::synthesize_normalize`] — a whitelist synonym table that
+/// runs before `serde_json::from_value` — rather than as a per-shape
+/// `#[serde(alias)]` here, which can never converge on a model that renames
+/// fields differently on every call.
+/// What: `severity`/`cost` still default to `""` when the provider omits them
+/// (observed in shapes 2 and 3); the reporter renders an empty value as the
+/// honesty marker (`not stated in source data`), never a fabricated band or
+/// figure — see `reporter.rs::inject_synthesis_summary`.
+/// Test: `synthesize_tests.rs::{parse_raw_recovers_shape2_field_name_drift,
+/// parse_raw_recovers_shape3_field_name_drift}`,
 /// `reporter_tests.rs::reporter_renders_defaulted_top_risk_severity_honestly`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskRow {
     /// Risk description.
-    #[serde(alias = "risk")]
     pub description: String,
     /// Severity band (`RED`/`AMBER`), or `""` when the provider omitted it
-    /// (#6009 shape 2) — never fabricated.
+    /// (#6009 shapes 2/3) — never fabricated.
     #[serde(default)]
     pub severity: String,
     /// Qualitative cost/effort framing, or `""` when the provider omitted it
-    /// (#6009 shape 2) — never fabricated.
+    /// (#6009 shapes 2/3) — never fabricated.
     #[serde(default)]
     pub cost: String,
     /// Affected application(s).
-    #[serde(alias = "applications")]
     pub apps: String,
 }
 
@@ -313,11 +313,11 @@ impl Synthesizer {
         };
 
         match self.try_once(model, false).await {
-            Attempt::Ok(raw) => apply_guardrail(raw, &allowed),
+            Attempt::Ok(raw, norm_notes) => apply_guardrail(raw, &allowed, norm_notes),
             Attempt::Truncated => {
                 warn!("synthesis: response truncated — retrying once, concise");
                 match self.try_once(model, true).await {
-                    Attempt::Ok(raw) => apply_guardrail(raw, &allowed),
+                    Attempt::Ok(raw, norm_notes) => apply_guardrail(raw, &allowed, norm_notes),
                     // #5454: the retry is unchanged; only its exhaustion is now fatal.
                     Attempt::Truncated => {
                         warn!("synthesis: still truncated after retry");
@@ -359,7 +359,7 @@ impl Synthesizer {
             return Attempt::Truncated;
         }
 
-        let raw = match parse_raw(&resp.text) {
+        let (raw, norm_notes) = match parse_raw(&resp.text) {
             Some(r) => r,
             None => {
                 warn!("synthesis: unparseable response");
@@ -373,7 +373,7 @@ impl Synthesizer {
             output_tokens = resp.output_tokens,
             "synthesis: provider call complete"
         );
-        Attempt::Ok(raw)
+        Attempt::Ok(raw, norm_notes)
     }
 
     /// Persist a scrubbed copy of an unparseable response, when a capture
@@ -412,8 +412,10 @@ impl Synthesizer {
 
 /// The outcome of one provider call attempt (pre-guardrail).
 enum Attempt {
-    /// Parsed cleanly; carries the raw (pre-guardrail) synthesis.
-    Ok(RawSynthesis),
+    /// Parsed cleanly; carries the raw (pre-guardrail) synthesis plus any
+    /// normalization notes recorded while resolving field-name drift (#6009
+    /// shape 3 — see [`crate::report::synthesize_normalize`]).
+    Ok(RawSynthesis, Vec<String>),
     /// The response was truncated at the output-token ceiling.
     Truncated,
     /// A provider/timeout/parse error — not a truncation.
@@ -433,47 +435,71 @@ struct RawSynthesis {
     findings: Vec<FindingProse>,
 }
 
-/// Parse the provider response into [`RawSynthesis`].
+/// Parse the provider response into [`RawSynthesis`] plus any normalization
+/// notes recorded while resolving field-name drift.
 ///
 /// Why: forced structured output returns a bare JSON object, but we still accept
 /// a fenced block (defensive, matching the profile synthesizer) so a provider
-/// that ignores the schema does not silently fail.  #6009: a live 4/4 repro
-/// against `anthropic/claude-opus-4.8` showed a THIRD shape — `strict:true`
-/// `response_format` silently ignored end to end (200 OK, `finish_reason:
-/// "stop"`), with the model instead writing the system prompt's own `## Output`
-/// section labels back as literal markdown headings ("## Executive Summary",
-/// "## Top Risks", "## Findings") around free prose.  There is no JSON to
-/// recover there, but the executive-summary prose IS recoverable, and it still
-/// passes through the same numeric guardrail as a normal field — so it is
-/// worth recovering rather than discarding a run's only inference output.
-/// What: tries a direct object parse, then a ```json fenced block, then a
-/// markdown-heading fallback that recovers ONLY `executive_summary` (never
-/// `top_risks`/`findings` — reconstructing structured rows out of prose would
-/// mean inventing fields the model never actually populated, which is exactly
-/// what this parser must not do).  `None` when none of the three yields
-/// anything, so a response that is not even this fallback shape is still
-/// rejected as [`SynthesisError::Unparseable`].  A FOURTH shape (#6009 shape
-/// 2) needs no fallback tier of its own: a live capture returned valid
-/// top-level JSON but drifted `top_risks` field names (`risk`/`applications`
-/// for `description`/`apps`, `severity`/`cost` omitted) — [`RiskRow`]'s
-/// `#[serde(alias)]`/`#[serde(default)]` attributes absorb that at the first
-/// (direct-object) tier, so it never falls through to here.
+/// that ignores the schema does not silently fail.  #6009: three consecutive
+/// live calls against `anthropic/claude-opus-4.8` produced three different
+/// shapes — pure markdown prose (shape 1), valid JSON with `top_risks` fields
+/// renamed to `risk`/`applications` (shape 2), and valid JSON renamed to
+/// `risk`/`cost_effort_framing`/`affected_applications` (shape 3).
+/// `response_format: json_schema` is best-effort for Anthropic-family models —
+/// there is no native strict-JSON mode, so OpenRouter forwards but cannot
+/// enforce the shape — and per-shape `#[serde(alias)]` additions can never
+/// converge on a model that renames fields differently on every call.
+/// What: tries a direct object parse, then a ```json fenced block — both
+/// routed through [`parse_json_object`], which normalizes known field-name
+/// synonyms (shapes 2/3) via [`crate::report::synthesize_normalize`] BEFORE
+/// typed deserialization — then a markdown-heading fallback (shape 1) that
+/// recovers ONLY `executive_summary` (never `top_risks`/`findings` —
+/// reconstructing structured rows out of prose would mean inventing fields
+/// the model never actually populated, which is exactly what this parser
+/// must not do).  `None` when none of the three yields anything, so a
+/// response that is not even this fallback shape is still rejected as
+/// [`SynthesisError::Unparseable`].
 /// Test: `synthesize_tests.rs::{synthesize_happy_path_injects,
 /// synthesize_malformed_json_fails_closed,
 /// synthesize_recovers_executive_summary_from_markdown_fallback,
 /// synthesize_markdown_fallback_rejects_response_with_no_heading,
-/// parse_raw_recovers_shape2_field_name_drift}`.
-fn parse_raw(text: &str) -> Option<RawSynthesis> {
+/// parse_raw_recovers_shape2_field_name_drift,
+/// parse_raw_recovers_shape3_field_name_drift,
+/// parse_raw_rejects_a_wholly_unrecognized_shape}`.
+fn parse_raw(text: &str) -> Option<(RawSynthesis, Vec<String>)> {
     let body = text.trim();
     if body.starts_with('{')
-        && let Ok(r) = serde_json::from_str::<RawSynthesis>(body)
+        && let Some(result) = parse_json_object(body)
     {
-        return Some(r);
+        return Some(result);
     }
-    if let Some(r) = parse_fenced_json(body) {
-        return Some(r);
+    if let Some(result) = parse_fenced_json(body) {
+        return Some(result);
     }
-    parse_markdown_fallback(body)
+    parse_markdown_fallback(body).map(|r| (r, Vec::new()))
+}
+
+/// Parse one JSON object into [`RawSynthesis`], normalizing known field-name
+/// synonyms first.
+///
+/// Why: split out so both the direct-object and fenced-block tiers share the
+/// exact same normalize-then-deserialize path — a synonym recognised at one
+/// tier is recognised at the other.
+/// What: parses `body` as a [`serde_json::Value`], runs
+/// [`crate::report::synthesize_normalize::normalize_raw_synthesis`], then
+/// deserializes the normalized value into [`RawSynthesis`]. `None` when
+/// `body` is not valid JSON or the normalized shape still does not match —
+/// a wholly unrecognised shape (every key dropped by the whitelist) still
+/// deserializes to an empty [`RawSynthesis`], which the numeric guardrail
+/// then rejects as [`SynthesisError::NoVerifiableContent`] rather than this
+/// function silently accepting it as content.
+/// Test: `synthesize_tests.rs::parse_raw_recovers_shape3_field_name_drift`.
+fn parse_json_object(body: &str) -> Option<(RawSynthesis, Vec<String>)> {
+    let mut value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let mut notes = Vec::new();
+    super::synthesize_normalize::normalize_raw_synthesis(&mut value, &mut notes);
+    let raw: RawSynthesis = serde_json::from_value(value).ok()?;
+    Some((raw, notes))
 }
 
 /// Parse a ```` ```json ````-fenced block, if one is present.
@@ -483,13 +509,13 @@ fn parse_raw(text: &str) -> Option<RawSynthesis> {
 /// What: finds the LAST `\`\`\`json` marker (defensive against a fence
 /// appearing earlier in reasoning/preamble text), then the next closing fence
 /// after it; `None` when either marker is absent or the enclosed text does not
-/// decode.
+/// decode via [`parse_json_object`].
 /// Test: covered transitively via `parse_raw`'s own tests.
-fn parse_fenced_json(body: &str) -> Option<RawSynthesis> {
+fn parse_fenced_json(body: &str) -> Option<(RawSynthesis, Vec<String>)> {
     let fence_start = body.rfind("```json")?;
     let after = &body[fence_start + 7..];
     let fence_end = after.find("```")?;
-    serde_json::from_str::<RawSynthesis>(after[..fence_end].trim()).ok()
+    parse_json_object(after[..fence_end].trim())
 }
 
 /// Recover an `executive_summary` from a markdown-headed free-text response
@@ -559,7 +585,11 @@ fn heading_section(text: &str, wanted: &str) -> Option<String> {
 /// deterministic-only report.
 /// What: verifies the executive summary and every risk row / finding against
 /// `allowed`; keeps only clean fields.  Findings must carry a RED/AMBER severity
-/// (defence-in-depth greens exclusion).  `Ok` iff at least one field survived.
+/// (defence-in-depth greens exclusion).  `seed_notes` (the normalization
+/// drop-notes recorded by [`crate::report::synthesize_normalize`], #6009 shape
+/// 3) are recorded first, so an unrecognized-field drop is visible in the
+/// rendered status lines alongside a numeric-guardrail rejection.  `Ok` iff at
+/// least one field survived.
 ///
 /// # Errors
 ///
@@ -570,8 +600,12 @@ fn heading_section(text: &str, wanted: &str) -> Option<String> {
 fn apply_guardrail(
     raw: RawSynthesis,
     allowed: &std::collections::HashSet<String>,
+    seed_notes: Vec<String>,
 ) -> Result<Synthesis, SynthesisError> {
-    let mut out = Synthesis::default();
+    let mut out = Synthesis {
+        notes: seed_notes,
+        ..Synthesis::default()
+    };
 
     // Executive summary.
     let exec = raw.executive_summary.trim();

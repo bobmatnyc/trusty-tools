@@ -23,7 +23,9 @@ use crate::report::metrics::{
 };
 use crate::report::model::{ReportModel, RepositoryReport};
 use crate::report::synthesize_guard::{allowed_numbers, numbers_in, verify_prose};
-use crate::report::synthesize_prompt::{build_synthesis_prompt, synthesis_schema};
+use crate::report::synthesize_prompt::{
+    build_synthesis_prompt, schema_contract_statement, synthesis_schema,
+};
 
 use super::{Synthesis, SynthesisError, Synthesizer};
 
@@ -306,6 +308,54 @@ fn synthesis_schema_shape() {
         req.response_schema.is_some(),
         "every synthesis request must force structured output"
     );
+}
+
+/// Why: #6009 shape 3 — the prompt-text contract must be derived FROM the
+/// schema, not hand-typed beside it, or the two can drift exactly the way
+/// the three live shapes drifted from the schema itself.
+/// What: asserts the statement built from `synthesis_schema(5)` names every
+/// canonical top-level field and every `top_risks`/`findings` item field.
+/// Test: this test itself.
+#[test]
+fn schema_contract_statement_lists_every_field_name() {
+    let schema = synthesis_schema(5);
+    let contract = schema_contract_statement(&schema.schema);
+    for needle in [
+        "executive_summary",
+        "top_risks",
+        "findings",
+        "description",
+        "severity",
+        "cost",
+        "apps",
+        "app_slug",
+        "title",
+        "evidence",
+        "component",
+        "business_impact",
+        "remediation",
+        "cost_effort",
+    ] {
+        assert!(
+            contract.contains(needle),
+            "contract statement must name field {needle:?}: {contract}"
+        );
+    }
+}
+
+/// Why: the derived contract text is worthless unless it actually reaches
+/// the system prompt the provider receives.
+/// What: asserts `req.system` contains the "Required JSON object shape"
+/// section and the canonical field names it lists.
+/// Test: this test itself.
+#[test]
+fn schema_contract_statement_reaches_system_prompt() {
+    let model = fixture_model(vec![]);
+    let req = build_synthesis_prompt(&model, "stub/model", false);
+    assert!(req.system.contains("Required JSON object shape"));
+    assert!(req.system.contains("executive_summary"));
+    assert!(req.system.contains("top_risks"));
+    assert!(req.system.contains("findings"));
 }
 
 /// Why: the schema's `top_risks` cap must shrink on the one-shot truncation
@@ -919,8 +969,12 @@ fn shape2_capture_response() -> String {
 /// Test: this test itself.
 #[test]
 fn parse_raw_recovers_shape2_field_name_drift() {
-    let raw =
+    let (raw, notes) =
         super::parse_raw(&shape2_capture_response()).expect("shape-2 field drift must still parse");
+    assert!(
+        notes.is_empty(),
+        "recognised shape-2 synonyms record no drop notes: {notes:?}"
+    );
     assert_eq!(raw.top_risks.len(), 5, "all 5 captured rows must survive");
     assert_eq!(
         raw.top_risks[0].description,
@@ -941,4 +995,171 @@ fn parse_raw_recovers_shape2_field_name_drift() {
             "row {i}: an omitted cost must default to empty, never be fabricated"
         );
     }
+}
+
+// ── #6009 shape 3: a THIRD field-name drift on the same forced schema ──────
+
+/// Verbatim (structure and field names unchanged) reconstruction of the third
+/// consecutive live capture at `synthesis-unparseable-response.txt` (#6009
+/// shape 3): valid top-level JSON, but every `top_risks` item uses `risk`
+/// instead of `description`, `cost_effort_framing` instead of `cost`, and
+/// `affected_applications` instead of `apps` — a THIRD distinct set of
+/// drifted names from the SAME provider/model, proving per-shape
+/// `#[serde(alias)]` additions can never converge and motivating the
+/// whitelist-synonym-table class fix in
+/// `crate::report::synthesize_normalize`.
+fn shape3_capture_response() -> String {
+    r#"{
+  "executive_summary": "This diligence pass on 00-bobmatnyc-trusty-tools surfaced 32 findings, all AMBER, concentrated in authentication & secrets, error handling, state management, and scalability.",
+  "top_risks": [
+    {
+      "risk": "API keys and OAuth client secrets persisted as plaintext files, with hardening that is Unix-only and unverified/absent on Windows.",
+      "cost_effort_framing": "Moderate remediation: introduce OS keyring/secret-manager integration and enforce cross-platform permission or encryption controls before any Windows deployment.",
+      "affected_applications": "00-bobmatnyc-trusty-tools"
+    },
+    {
+      "risk": "Pervasive silent-failure error handling — corrupt or malformed config/credential files degrade to defaults or None, poisoned locks recover silently, and home resolution falls back to CWD.",
+      "cost_effort_framing": "Moderate, dispersed effort: convert silent fallbacks to surfaced errors across multiple modules and add operator-visible diagnostics.",
+      "affected_applications": "00-bobmatnyc-trusty-tools"
+    },
+    {
+      "risk": "Non-atomic persistence in the memory store — cross-segment moves and payload/vector index writes commit in separate steps, risking duplicated or orphaned records on crash.",
+      "cost_effort_framing": "Higher effort: requires transactional or reconciliation design across redb and usearch to guarantee cross-store consistency.",
+      "affected_applications": "00-bobmatnyc-trusty-tools"
+    },
+    {
+      "risk": "Agent tool-capability surface defaults to unrestricted, granting all registered tools including shell-capable ones when a config omits an allowlist; combined with denylist-style traversal checks and an auth-exempt SSE route.",
+      "cost_effort_framing": "Moderate: flip defaults to deny-by-default, adopt allowlist validation, and confirm downstream SSE auth gating.",
+      "affected_applications": "00-bobmatnyc-trusty-tools"
+    },
+    {
+      "risk": "Persistence layer is single-node demo-scale — full-file JSONL re-reads with no fsync/checksum, cross-process locks that cannot serialize the redb writer, blocking flock on the async runtime, and a per-segment write mutex.",
+      "cost_effort_framing": "Higher effort: durability and concurrency rework needed before multi-node or production-scale operation.",
+      "affected_applications": "00-bobmatnyc-trusty-tools"
+    }
+  ],
+  "findings": []
+}"#
+    .to_string()
+}
+
+/// Why: #6009 shape 3 — this is the THIRD distinct field-name shape the same
+/// live model produced across three consecutive calls, and it is neither of
+/// the two `#[serde(alias)]`s the previous round of this fix added. A
+/// per-shape alias can never converge; the whitelist synonym table in
+/// `synthesize_normalize` recognises `cost_effort_framing`/
+/// `affected_applications` alongside the shape-2 `risk`/`applications`
+/// names. RED against `f6102c50a` (pre-fix `RiskRow` has no
+/// `cost_effort_framing`/`affected_applications` alias, so this capture fails
+/// `serde_json::from_str::<RawSynthesis>` and the whole response is
+/// classified `Unparseable`), GREEN after.
+/// What: parses the verbatim shape-3 capture; asserts all 5 rows recover
+/// `description` (from `risk`), `cost` (from `cost_effort_framing`), and
+/// `apps` (from `affected_applications`), with `severity` defaulted to `""`
+/// (omitted in this shape, same as shape 2) — never fabricated.
+/// Test: this test itself.
+#[test]
+fn parse_raw_recovers_shape3_field_name_drift() {
+    let (raw, notes) =
+        super::parse_raw(&shape3_capture_response()).expect("shape-3 field drift must still parse");
+    assert!(
+        notes.is_empty(),
+        "recognised shape-3 synonyms record no drop notes: {notes:?}"
+    );
+    assert_eq!(raw.top_risks.len(), 5, "all 5 captured rows must survive");
+    assert_eq!(
+        raw.top_risks[0].description,
+        "API keys and OAuth client secrets persisted as plaintext files, with hardening that is Unix-only and unverified/absent on Windows.",
+        "`risk` must normalize onto `description`"
+    );
+    assert_eq!(
+        raw.top_risks[0].cost,
+        "Moderate remediation: introduce OS keyring/secret-manager integration and enforce cross-platform permission or encryption controls before any Windows deployment.",
+        "`cost_effort_framing` must normalize onto `cost`"
+    );
+    assert_eq!(
+        raw.top_risks[0].apps, "00-bobmatnyc-trusty-tools",
+        "`affected_applications` must normalize onto `apps`"
+    );
+    for (i, row) in raw.top_risks.iter().enumerate() {
+        assert_eq!(
+            row.severity, "",
+            "row {i}: an omitted severity must default to empty, never be fabricated"
+        );
+    }
+}
+
+/// Why: the shape-3 fixture must also synthesize end to end — not merely
+/// parse — so the numeric guardrail and reporter path are exercised exactly
+/// as they would be against the live response.  The captured executive
+/// summary cites "32 findings", a figure absent from the fixture model's
+/// allowed set (8200/120/640), so the guardrail correctly rejects THAT field
+/// on its own numeric-fabrication grounds — this test is not asserting
+/// normalization bypasses the guardrail, only that the 5 top-risk rows (whose
+/// prose carries no digits, aside from the "00" embedded in the repo name
+/// itself — matched here by naming the fixture repo
+/// "00-bobmatnyc-trusty-tools", exactly as the live capture named it, so that
+/// digit sequence is a legitimately allowed figure) recover and survive
+/// independently.
+/// What: runs the full `Synthesizer::synthesize` against the shape-3
+/// capture; asserts the executive summary is rejected with a note citing
+/// "32", while all 5 top-risk rows survive intact.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesize_recovers_shape3_end_to_end() {
+    let mut model = fixture_model(vec![red("x")]);
+    model.repositories[0].name = "00-bobmatnyc-trusty-tools".to_string();
+    model.repositories[0].slug = "00-bobmatnyc-trusty-tools".to_string();
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm {
+        body: shape3_capture_response(),
+        finish_reason: Some("stop".to_string()),
+    });
+    let result = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect("the shape-3 capture must synthesize end to end (top-risk rows survive)");
+    assert!(
+        result.executive_summary.is_none(),
+        "the captured summary cites an unverifiable figure (32) and must be rejected"
+    );
+    assert!(
+        result
+            .notes
+            .iter()
+            .any(|n| n.contains("rejected (unverified figure)") && n.contains("32")),
+        "the rejection must be recorded: {:?}",
+        result.notes
+    );
+    assert_eq!(result.top_risks.len(), 5, "all 5 rows must survive intact");
+}
+
+/// Why: normalization must never turn a genuinely wrong response shape into
+/// an accepted one — the contract stays strict. A response using entirely
+/// different top-level field names (no `executive_summary` key at all) must
+/// still fail, exactly as it did before this change, just via
+/// `NoVerifiableContent` instead of a parse error (the JSON itself is
+/// syntactically valid; every key is simply unrecognized and dropped).
+/// What: a response with `summary`/`risks` instead of
+/// `executive_summary`/`top_risks`; asserts
+/// `Err(SynthesisError::NoVerifiableContent)`.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesize_rejects_a_wholly_unrecognized_shape() {
+    let model = fixture_model(vec![red("x")]);
+    let body = r#"{
+      "summary": "The codebase looks fine overall.",
+      "risks": [{"issue": "something", "severity_band": "RED"}]
+    }"#;
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm {
+        body: body.to_string(),
+        finish_reason: Some("stop".to_string()),
+    });
+    let err = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect_err("a wholly unrecognized shape must never be accepted");
+    assert!(
+        matches!(err, SynthesisError::NoVerifiableContent),
+        "expected NoVerifiableContent, got {err:?}"
+    );
 }

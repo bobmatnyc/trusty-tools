@@ -21,10 +21,19 @@
 //! forced [`ResponseSchema`]).  `retry_concise` shrinks the schema's `top_risks`
 //! cap and asks for a shorter paragraph — the same one-shot truncation-retry
 //! shape used by the wave-3 batch investigation.  The `bedrock/`/`openrouter/`
-//! routing prefix is stripped so the bare id reaches the provider API.
+//! routing prefix is stripped so the bare id reaches the provider API.  #6009
+//! shape 3: [`schema_contract_statement`] renders the required field names
+//! and a canonical example object directly from the same [`ResponseSchema`]
+//! value forced via `response_format`, and embeds that text in the system
+//! prompt itself — `response_format` is best-effort for Anthropic-family
+//! models (no native strict-JSON mode; OpenRouter forwards but cannot
+//! enforce), so the field names are also stated where a model that ignores
+//! the schema entirely will still read them.
 //! Test: `synthesize_tests.rs` asserts schema shape, that greens are absent from
 //! the digest, that the prefix is stripped, the compact-digest cap/overflow
-//! behaviour, and the layered-instruction override precedence.
+//! behaviour, the layered-instruction override precedence, and that the
+//! derived contract statement names every field and reaches the system
+//! prompt.
 
 use crate::llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix};
 use crate::report::model::ReportModel;
@@ -121,6 +130,72 @@ pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
     )
 }
 
+/// Render a deterministic statement of the required JSON shape directly from
+/// the schema's own field names, for embedding in the prompt TEXT itself
+/// (#6009 shape 3).
+///
+/// Why: `response_format: json_schema` (even `strict: true`) is best-effort
+/// for Anthropic-family models routed through OpenRouter — Anthropic's API
+/// has no native strict-JSON mode, so a live 3/3 repro against
+/// `anthropic/claude-opus-4.8` produced three different response shapes on
+/// three consecutive calls with the identical `response_schema` attached: pure
+/// markdown (no JSON at all), then two rounds of `top_risks` field-name
+/// drift. `response_format` alone cannot be trusted to reach a model that
+/// ignores it; stating the exact contract in the prompt's own text is a
+/// second, independent path to the same field names — and generating that
+/// text FROM `schema` (rather than a hand-typed string beside it) is what
+/// keeps the two from silently drifting apart, since [`synthesis_schema`] is
+/// the only place either originates.
+/// What: walks `schema`'s top-level `properties`; for a scalar property
+/// (`executive_summary`) states its name, for an array-of-objects property
+/// (`top_risks`, `findings`) lists its item field names, then appends one
+/// compact canonical-shape example object built the same way. Property
+/// iteration order is [`serde_json::Map`]'s default (`BTreeMap`, this
+/// workspace does not enable `preserve_order`) — alphabetical and stable run
+/// to run.
+/// Test: `synthesize_tests.rs::{schema_contract_statement_lists_every_field_name,
+/// schema_contract_statement_reaches_system_prompt}`.
+pub(crate) fn schema_contract_statement(schema: &serde_json::Value) -> String {
+    let Some(props) = schema["properties"].as_object() else {
+        return String::new();
+    };
+    let mut lines = String::from("Required JSON object shape — use EXACTLY these field names:\n");
+    let mut example = serde_json::Map::new();
+
+    for (name, def) in props {
+        match def["items"]["properties"].as_object() {
+            Some(item_props) => {
+                let field_names: Vec<&str> = item_props.keys().map(String::as_str).collect();
+                lines.push_str(&format!(
+                    "- `{name}`: array of objects, each with fields: {}\n",
+                    field_names.join(", ")
+                ));
+                let mut item_example = serde_json::Map::new();
+                for f in &field_names {
+                    item_example.insert(
+                        (*f).to_string(),
+                        serde_json::Value::String(format!("<{f}>")),
+                    );
+                }
+                example.insert(
+                    name.clone(),
+                    serde_json::Value::Array(vec![serde_json::Value::Object(item_example)]),
+                );
+            }
+            None => {
+                lines.push_str(&format!("- `{name}`: string\n"));
+                example.insert(name.clone(), serde_json::Value::String(format!("<{name}>")));
+            }
+        }
+    }
+
+    lines.push_str(&format!(
+        "\nExample shape (field names only — write your own content, never copy these placeholder values):\n{}\n",
+        serde_json::to_string(&serde_json::Value::Object(example)).unwrap_or_default()
+    ));
+    lines
+}
+
 /// The synthesis system prompt, built from the resolved (layered) section
 /// instructions.
 ///
@@ -130,11 +205,15 @@ pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
 /// template or analyst may steer — see [`section_instructions`] for the
 /// generic → template → analyst layering (the same shape as the crate's
 /// existing stock → principles → voice reviewer layering, see `src/voice/`).
-/// What: the "Absolute rules" and "Coverage gaps in the assessed set" blocks
-/// are static invariants; the "Output" section embeds
-/// `resolved[EXECUTIVE_SUMMARY]` / `resolved[TOP_RISKS]` /
-/// `resolved[FINDING_ELABORATION]` verbatim.  `retry_concise` appends a
-/// directive to shorten the response (used on the one truncation retry).
+/// What: the "Absolute rules", "Required JSON object shape", and "Coverage
+/// gaps in the assessed set" blocks are static invariants; the "Required JSON
+/// object shape" block is `contract` — [`schema_contract_statement`] run over
+/// the SAME [`synthesis_schema`] value this request forces via
+/// `response_format`, so the two can never say different things (#6009 shape
+/// 3). The "Output" section embeds `resolved[EXECUTIVE_SUMMARY]` /
+/// `resolved[TOP_RISKS]` / `resolved[FINDING_ELABORATION]` verbatim.
+/// `retry_concise` appends a directive to shorten the response (used on the
+/// one truncation retry).
 ///
 /// The coverage-gaps block is static rather than a fourth section instruction
 /// because a template that overrides `executive_summary` would otherwise drop
@@ -145,10 +224,12 @@ pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
 /// [`super::investigate::render::coverage_prompt_summary`] already mandates.
 /// Test: `synthesize_tests.rs::{system_prompt_embeds_resolved_instructions,
 /// system_prompt_concise_retry_directive,
-/// system_prompt_asks_for_unregistered_target_gaps}`.
+/// system_prompt_asks_for_unregistered_target_gaps,
+/// schema_contract_statement_reaches_system_prompt}`.
 fn synthesis_system_prompt(
     resolved: &std::collections::BTreeMap<String, String>,
     retry_concise: bool,
+    contract: &str,
 ) -> String {
     let exec = resolved
         .get(EXECUTIVE_SUMMARY)
@@ -172,6 +253,9 @@ fn synthesis_system_prompt(
 - Write prose for RED and AMBER findings ONLY. Do not mention, elaborate, or infer GREEN/positive findings — none are provided, and none should appear.
 - Be concise, specific, and deal-relevant: what an acquirer must act on.
 - Every finding field is structurally required. Emit an empty string for any you have nothing grounded to say in — never fill one with invented content.
+
+## Required JSON object shape
+Respond with ONLY a single JSON object — no markdown headings, no prose outside it, no fenced code block. {contract}
 
 ## Coverage gaps in the assessed set
 - The applications listed under "Applications assessed" are the ENTIRE assessed set. When the data references a repository, service, database schema, or project board that is not one of them, name it in a short coverage-gaps note closing the executive summary.
@@ -222,16 +306,21 @@ pub(super) fn build_synthesis_prompt(
     } else {
         TOP_RISKS_CAP
     };
+    // #6009 shape 3: built from the SAME schema value forced via
+    // `response_format` below, so the prompt-text contract and the schema can
+    // never say different things — see `schema_contract_statement`.
+    let schema = synthesis_schema(top_risks_cap);
+    let contract = schema_contract_statement(&schema.schema);
     LlmRequest {
         model: strip_provider_prefix(llm_model).to_string(),
-        system: synthesis_system_prompt(&resolved, retry_concise),
+        system: synthesis_system_prompt(&resolved, retry_concise, &contract),
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: build_digest(model),
         }],
         temperature: SYNTHESIS_TEMPERATURE,
         max_tokens: SYNTHESIS_MAX_TOKENS,
-        response_schema: Some(synthesis_schema(top_risks_cap)),
+        response_schema: Some(schema),
     }
 }
 
