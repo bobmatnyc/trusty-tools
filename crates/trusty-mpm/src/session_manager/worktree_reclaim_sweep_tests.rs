@@ -236,6 +236,85 @@ fn reclaim_remove_mode_spares_a_live_agents_merged_worktree() {
 }
 
 #[test]
+fn survey_discloses_a_live_agents_spared_worktree() {
+    // #5829. #5661 stopped the deletion; it did not make the operator aware of
+    // it. Through the same `--merged-prs --force` chain, the run reported
+    // `reclaimed 0 worktree(s)` and nothing else — identical output to a run
+    // that found nothing to do — so neither the operator nor a reviewer could
+    // tell the guard had fired, or which agent it fired for.
+    //
+    // This exercises the guarded branch directly: gate 4 is the only gate that
+    // yields `BlockedByAgent`, and `agent_owned` is folded from exactly that
+    // verdict, so the assertion below fails unless gate 4 both refused AND
+    // recorded why.
+    let fx = GitWorktreeFixture::new();
+    let parent = fx.repo.join(".claude").join("worktrees");
+    let path = fx.add_worktree_at(&parent, "spared-agent-5829");
+    land(&path);
+    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-mid-task-5829");
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            agent_state: &agent_live,
+            in_use_now: &|| Some(Vec::new()),
+            index_for: &|_: &Path| merged_index("wt/spared-agent-5829", 5829),
+        },
+        ReclaimMode::Remove,
+    );
+    assert!(
+        out.removed.is_empty(),
+        "removed a live agent's tree: {out:?}"
+    );
+    assert!(path.exists(), "the directory must still be there");
+    let disclosed = out.survey.agent_owned.join("\n");
+    assert_eq!(
+        out.survey.agent_owned.len(),
+        1,
+        "the spared worktree must be reported exactly once: {disclosed}"
+    );
+    assert!(
+        disclosed.contains("spared-agent-5829"),
+        "the disclosure must name the worktree: {disclosed}"
+    );
+    assert!(
+        disclosed.contains("agent-mid-task-5829"),
+        "and the agent it was spared for: {disclosed}"
+    );
+}
+
+#[test]
+fn survey_discloses_nothing_when_no_agent_was_spared() {
+    // The complement: a reclaimable worktree owned by nobody must still be
+    // removed, and must not appear in the spared list. Without this, a fix that
+    // reported every candidate as agent-owned — or one that refused everything —
+    // would satisfy the test above.
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("no-agent-5829");
+    land(&path);
+    let out = reclaim_with_probes(
+        &fx.repos_root,
+        &FreshProbes {
+            agent_state: &no_agents,
+            in_use_now: &|| Some(Vec::new()),
+            // `add_worktree` names the branch `session/<name>`, unlike
+            // `add_worktree_at`'s `wt/<name>`.
+            index_for: &|_: &Path| merged_index("session/no-agent-5829", 5830),
+        },
+        ReclaimMode::Remove,
+    );
+    assert!(
+        out.survey.agent_owned.is_empty(),
+        "nothing was agent-owned: {out:?}"
+    );
+    assert_eq!(
+        out.removed.len(),
+        1,
+        "the sweep must still reclaim: {out:?}"
+    );
+    assert!(!path.exists(), "and the directory must be gone");
+}
+
+#[test]
 fn recheck_permits_a_clean_merged_owned_worktree() {
     // The permit path must be reachable, or every refusal test above would pass
     // against a function that refuses unconditionally.
