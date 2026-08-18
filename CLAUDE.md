@@ -206,6 +206,24 @@ BEHIND" reports read as a branch-currency problem when the real block was
 pending checks. `gh pr update-branch <n>` stays correct for a genuine
 `CONFLICTING` state, which is different and harder.
 
+🔴 **BEHIND does not block a merge; a missing required job definition does —
+and the two look identical from the outside.** A `pull_request`-triggered
+workflow runs from the PR's own ref, not from `main`'s. A PR whose branch
+does not contain the commit that ADDED a job has no definition for that job
+in its workflow snapshot and can never produce that check run. GitHub counts
+a required context with no check run as UNMET, so the PR sits `BLOCKED`
+permanently — and `gh pr checks` does not list the missing context as
+pending, it is simply absent, so everything the PR *can* produce reads
+SUCCESS. [#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958) added
+`trusty-mpm-gui clippy` and `trusty-code-gui clippy`, and branch protection
+made both required immediately after; [#5962](https://github.com/bobmatnyc/trusty-tools/pull/5962),
+opened before that merge, had every context it could produce green,
+auto-merge armed, and sat BLOCKED indefinitely with nothing red anywhere. For
+a PR predating a newly-required job, `update-branch` is not optional — it is
+the only way the check can exist. Also expect the operational consequence:
+adding a required context wedges every open PR that predates the job, so plan
+to `update-branch` all of them once branch protection picks it up.
+
 🟡 **`gh pr merge --admin` bypasses nothing on this repo.** The working account is
 push-only (`admin: false`), so the flag is silently ineffective. `gh`'s own refusal
 message offers `--admin` as the remedy — following that suggestion is a dead end,
