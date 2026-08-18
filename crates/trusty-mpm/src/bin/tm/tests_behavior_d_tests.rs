@@ -2022,7 +2022,7 @@ async fn fetch_raw_live(
 }
 
 /// Scope a list the way a DEFAULT (non-`--all`) `tm ls` does, given an EMPTY
-/// dead set — i.e. exactly the pre-#4994 filter: state and slot-tombstone only.
+/// dead set — i.e. exactly the pre-#4994 filter: lifecycle state only.
 ///
 /// 🔴 The empty set is the point, not a shortcut. `seed_dead_session` fixtures
 /// carry `unresumable: true`, so a filter keyed on that flag would drop the

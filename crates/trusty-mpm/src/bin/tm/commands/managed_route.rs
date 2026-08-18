@@ -30,8 +30,10 @@ use crate::cli::SessionAction;
 /// must reuse it (timeouts/pool) rather than minting a default one.
 /// What: returns `CommandExecutor::with_client(client.clone(), url)` — cloning a
 /// `reqwest::Client` is cheap (`Arc` internally), so the pool/settings persist.
+/// `pub(crate)` since #5913: `commands::managed`'s decommission handler builds
+/// its executor here rather than minting a second one.
 /// Test: exercised transitively by every routed managed handler's coverage.
-fn executor(client: &reqwest::Client, url: &str) -> CommandExecutor {
+pub(crate) fn executor(client: &reqwest::Client, url: &str) -> CommandExecutor {
     CommandExecutor::with_client(client.clone(), url.to_string())
 }
 

@@ -11296,11 +11296,12 @@ dependencies = [
 
 [[package]]
 name = "trusty-audit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
  "dirs 5.0.1",
+ "libc",
  "reqwest 0.12.28",
  "rpassword",
  "serde",

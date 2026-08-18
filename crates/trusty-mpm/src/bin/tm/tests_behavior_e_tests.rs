@@ -259,26 +259,26 @@ fn picker_filter_live_state_excludes_decommissioned() {
     // None of these are #3034 slot tombstones, so `is_slot_tombstone` is `false`
     // throughout — it is only consulted when `state == "deleted"`.
     assert!(
-        !is_live_session_state("decommissioned", false, false),
+        !is_live_session_state("decommissioned", false),
         "decommissioned must be excluded from default view"
     );
     // Active sessions must always be visible.
     assert!(
-        is_live_session_state("active", false, false),
+        is_live_session_state("active", false),
         "active must be included in default view"
     );
     // Stopped/errored sessions can still be resumed — they must show.
     assert!(
-        is_live_session_state("stopped", false, false),
+        is_live_session_state("stopped", false),
         "stopped must be included in default view"
     );
     assert!(
-        is_live_session_state("errored", false, false),
+        is_live_session_state("errored", false),
         "errored must be included in default view"
     );
     // Provisioning sessions are in-flight — they must show.
     assert!(
-        is_live_session_state("provisioning", false, false),
+        is_live_session_state("provisioning", false),
         "provisioning must be included in default view"
     );
 }
@@ -292,31 +292,31 @@ fn is_live_session_state_excludes_soft_deleted_record() {
     // excluded from the default picker/list exactly like `decommissioned`, so
     // it is never offered as a resume target (which would resurrect it).
     assert!(
-        !is_live_session_state("deleted", false, false),
+        !is_live_session_state("deleted", false),
         "a soft-deleted, still-in-store record must be excluded from the \
          default picker/list view"
     );
-    assert!(!is_live_session_state("decommissioned", false, false));
-    assert!(is_live_session_state("active", false, false));
-    assert!(is_live_session_state("stopped", false, false));
+    assert!(!is_live_session_state("decommissioned", false));
+    assert!(is_live_session_state("active", false));
+    assert!(is_live_session_state("stopped", false));
 }
 
 #[test]
-fn is_live_session_state_keeps_slot_tombstone_visible() {
-    // Why (#3034/#3044): a stable-numbering SLOT tombstone — the daemon's
-    // `tombstone_summary` placeholder for a slot whose record left the store
-    // entirely — is ALSO rendered with wire `state == "deleted"`, but it must
-    // stay VISIBLE at its slot in the default view, or the entire point of
-    // stable numbering (an operator seeing exactly why a captured number no
-    // longer resolves) is defeated. `is_slot_tombstone == true` is what
-    // distinguishes it from the soft-deleted-record case above.
+fn is_live_session_state_hides_slot_tombstone_from_default_view() {
+    // Why (#5952): a #3034 slot tombstone — the daemon's `tombstone_summary`
+    // placeholder for a slot whose record left the store — carries wire
+    // `state == "deleted"` like the soft-deleted record above, and is now
+    // hidden alongside it. 44 of the owner's 130 rows were these placeholders.
+    // The predicate no longer takes an `is_slot_tombstone` input at all: the
+    // two rows it used to separate now share one outcome.
     assert!(
-        is_live_session_state("deleted", true, false),
-        "a #3034 slot tombstone must remain visible in the default view"
+        !is_live_session_state("deleted", false),
+        "a #3034 slot tombstone must be hidden from the default view"
     );
-    // Resurrection-safety for this visible row is NOT this predicate's job —
-    // see `guided_resume_tests`/`session_picker.rs`'s `decide_for_index` for
-    // the separate guards that keep it non-resumable regardless.
+    // #3034 is preserved elsewhere, not here: the slot registry never reuses
+    // the number, the hidden slot still shows as a gap in the NUM column, and
+    // `--all` still renders the row at its original slot — pinned by
+    // `scope_for_display_hides_tombstone_by_default_and_all_shows_it`.
 }
 
 #[test]
@@ -403,17 +403,17 @@ fn picker_filter_all_decommissioned_returns_empty() {
 }
 
 #[test]
-fn picker_filter_keeps_slot_tombstone_hides_soft_deleted_record() {
-    // Why (#3034/#3044 reconciliation): both rows below serialize wire
-    // `state == "deleted"`, but only the slot-tombstone row sets the
-    // dedicated `deleted: bool` field — `filter_live_sessions` must tell them
-    // apart via that field rather than the state string alone.
+fn picker_filter_hides_slot_tombstone_and_soft_deleted_record() {
+    // Why (#5952): both rows below serialize wire `state == "deleted"` and only
+    // the slot-tombstone row sets the dedicated `deleted: bool` field. Before
+    // #5952 the filter told them apart to keep the tombstone visible; now both
+    // are hidden from the default view and both return under `--all`.
     let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
         serde_json::from_value(serde_json::json!([
             { "id": "a1", "name": "sess-active", "state": "active" },
-            // #3034 numbered-slot tombstone — must stay visible.
+            // #3034 numbered-slot tombstone.
             { "id": "", "name": "", "state": "deleted", "slot": 2, "deleted": true },
-            // #3302 soft-deleted, still-in-store record — must stay hidden.
+            // #3302 soft-deleted, still-in-store record.
             { "id": "b2", "name": "sess-soft-deleted", "state": "deleted" },
         ]))
         .expect("test data must deserialize");
@@ -421,17 +421,9 @@ fn picker_filter_keeps_slot_tombstone_hides_soft_deleted_record() {
     let filtered = filter_live_sessions(sessions, &std::collections::HashSet::new());
 
     assert_eq!(
-        filtered.len(),
-        2,
-        "exactly the active session and the slot tombstone must survive"
-    );
-    assert!(
-        filtered.iter().any(|s| s.deleted),
-        "the slot tombstone (deleted: true) must survive the filter"
-    );
-    assert!(
-        !filtered.iter().any(|s| s.state == "deleted" && !s.deleted),
-        "the soft-deleted, still-in-store record (deleted: false) must be excluded"
+        filtered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        vec!["a1"],
+        "only the active session survives the default view"
     );
 }
 
@@ -451,11 +443,11 @@ fn is_live_session_state_hides_a_record_the_prune_classified_dead() {
     // list. `classified_dead` is the ONLY input that differs between these
     // assertions and `is_live_session_state_keeps_resumable_stopped_record`.
     assert!(
-        !is_live_session_state("stopped", false, true),
+        !is_live_session_state("stopped", true),
         "a stopped record the sweep classified dead must be hidden from the default view"
     );
     assert!(
-        !is_live_session_state("errored", false, true),
+        !is_live_session_state("errored", true),
         "an errored record the sweep classified dead must be hidden from the default view"
     );
 }
@@ -467,34 +459,28 @@ fn is_live_session_state_keeps_resumable_stopped_record() {
     // ones. Hiding a stopped record on its STATE rather than on the sweep's
     // verdict would take those 18 with it.
     assert!(
-        is_live_session_state("stopped", false, false),
+        is_live_session_state("stopped", false),
         "a stopped record with an intact workspace is resumable and must stay visible"
     );
     assert!(
-        is_live_session_state("errored", false, false),
+        is_live_session_state("errored", false),
         "an errored record with an intact workspace must stay visible"
     );
     assert!(
-        is_live_session_state("active", false, false),
+        is_live_session_state("active", false),
         "an active record must stay visible"
     );
 }
 
 #[test]
-fn is_live_session_state_keeps_slot_tombstone_even_when_classified_dead() {
-    // Why (#3034 × #4994): the two rules meet on one row. A slot tombstone is a
-    // rendering placeholder for a slot whose record left the store, and Bob's
-    // #3034 directive keeps it visible at its slot unconditionally. The
-    // `classified_dead` arm therefore sits BELOW the `"deleted"` arm —
-    // reordering them would silently un-do #3034.
-    assert!(
-        is_live_session_state("deleted", true, true),
-        "a #3034 slot tombstone must stay visible regardless of the dead classification"
-    );
-    // The soft-deleted-record and decommissioned rules are unmoved by the new
-    // input.
-    assert!(!is_live_session_state("deleted", false, false));
-    assert!(!is_live_session_state("decommissioned", false, false));
+fn is_live_session_state_hides_slot_tombstone_whatever_the_sweep_said() {
+    // Why (#3034 x #4994 x #5952): the two hiding rules meet on one row. A slot
+    // tombstone has no record for the sweep to classify, so `classified_dead`
+    // can arrive either way; neither value may make the row reappear.
+    assert!(!is_live_session_state("deleted", true));
+    assert!(!is_live_session_state("deleted", false));
+    // The soft-deleted-record and decommissioned rules are unmoved.
+    assert!(!is_live_session_state("decommissioned", false));
 }
 
 #[test]
@@ -518,9 +504,9 @@ fn picker_filter_hides_only_what_the_prune_classified_dead() {
 
     assert_eq!(
         filtered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
-        vec!["a1", "b2", ""],
-        "exactly the active row, the stopped row the sweep left alone, and the \
-         slot tombstone must survive"
+        vec!["a1", "b2"],
+        "exactly the active row and the stopped row the sweep left alone \
+         survive; the slot tombstone is hidden too since #5952"
     );
 }
 
@@ -596,5 +582,52 @@ fn scope_for_display_all_keeps_dead_record_visible() {
             .collect::<Vec<_>>(),
         vec!["a1"],
         "the default view must drop the same record --all keeps"
+    );
+}
+
+#[test]
+fn scope_for_display_hides_tombstone_by_default_and_all_shows_it() {
+    // #5952 in one assertion pair, at the seam both `tm ls` and `tm sessions ls`
+    // run through. The default view drops the `-- deleted --` slot rows; `--all`
+    // lists every one of them, still at its original slot and still in slot
+    // order (tombstones are excluded from the sink-to-bottom sort).
+    //
+    // 🔴 This is the #3034 guard, restated for the hidden case: slot 3 is
+    // ABSENT from the default listing, never renumbered and never handed to
+    // another session. The gap between slots 2 and 4 is what an operator sees.
+    use crate::commands::session_picker::{parse_managed_sessions, scope_for_display};
+
+    let raw = serde_json::json!({
+        "sessions": [
+            { "id": "a1", "name": "sess-one", "state": "active",  "slot": 2 },
+            { "id": "",   "name": "",         "state": "deleted", "slot": 3, "deleted": true },
+            { "id": "c3", "name": "sess-two", "state": "stopped", "slot": 4 },
+        ]
+    })
+    .to_string();
+    let sessions = parse_managed_sessions(&raw).expect("parse must succeed");
+    let none: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    assert_eq!(
+        scope_for_display(sessions.clone(), false, &none)
+            .iter()
+            .map(|s| s.slot)
+            .collect::<Vec<_>>(),
+        vec![2, 4],
+        "the default view must omit the deleted slot, leaving its number as a gap"
+    );
+    assert!(
+        !scope_for_display(sessions.clone(), false, &none)
+            .iter()
+            .any(|s| s.deleted),
+        "no tombstone row may reach the default table"
+    );
+    assert_eq!(
+        scope_for_display(sessions, true, &none)
+            .iter()
+            .map(|s| (s.slot, s.deleted))
+            .collect::<Vec<_>>(),
+        vec![(2, false), (3, true), (4, false)],
+        "--all must list the tombstone at its original slot, in slot order"
     );
 }
