@@ -7,10 +7,16 @@
 //!      `trusty_agents::install_plugins(...)` BEFORE invoking `run()`, without
 //!      polluting the crate with references to `publish = false` agent crates
 //!      such as `cto-assistant`.
-//! What: Standard `#[tokio::main]` entry point that delegates straight to
-//!       `trusty_agents::run()`. No additional setup, no plugin wiring — the
-//!       binary ships with an empty plugin registry by default.
+//! What: Synchronous entry point that delegates straight to
+//!       `trusty_agents::run_to_completion()`, which owns the tokio runtime.
+//!       No additional setup, no plugin wiring — the binary ships with an
+//!       empty plugin registry by default.
 //! Test: `cargo run -p trusty-agents -- --version` prints the build banner.
+//!
+//! #3655: this used to be `#[tokio::main]`. That attribute drops the runtime
+//! at the end of `main` and the drop waits on the blocking pool forever, so a
+//! single background task stuck in a syscall left `tagent` unable to exit.
+//! `run_to_completion` bounds that wait.
 
 // docs.rs builds a release's documentation once, from the uploaded tarball,
 // so a broken intra-doc link is baked into that version forever and only a new
@@ -20,7 +26,6 @@
 
 use anyhow::Result;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    trusty_agents::run().await
+fn main() -> Result<()> {
+    trusty_agents::run_to_completion()
 }
