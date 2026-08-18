@@ -3,8 +3,8 @@
 //! Why: Centralises tiny, broadly-reused functions (slot draining, self-project
 //! detection, the PM messaging audit log) so the larger turn/handler modules
 //! can stay focused on their main flow.
-//! What: `drain_slot`, `detect_self_project`, `append_pm_message`, and
-//! `pm_messages_path`.
+//! What: `drain_slot`, `detect_self_project`, `self_project_from_exe`,
+//! `append_pm_message`, and `pm_messages_path`.
 //! Test: Each is covered indirectly by the ctrl integration tests; pure helpers
 //! are also exercised by unit tests in `mod tests` of the parent module.
 
@@ -75,8 +75,9 @@ pub fn detect_self_project() -> Option<PathBuf> {
 ///      explicitly-set hint is an operator declaration, so it wins outright —
 ///      the `.trusty-agents/agents/pm.toml` marker is NOT required of it
 ///      (#4826).
-///   2. Walk up from `current_exe()` looking for the marker.
-///   3. Use `current_dir()` if it contains the marker.
+///   2. [`self_project_from_exe`] on `current_exe()` — the checkout the running
+///      binary was BUILT from, never an arbitrary ancestor of it (#5944).
+///   3. Walk up from `current_dir()` looking for the marker.
 /// Returns the first match, or `None` when no strategy succeeds. The marker is
 /// only ever a heuristic for strategies 2 and 3, which run when nobody told us
 /// where the project is.
@@ -84,12 +85,6 @@ pub fn detect_self_project() -> Option<PathBuf> {
 /// `detect_self_project_hint_beats_exe_inference`,
 /// `detect_self_project_ignores_unresolvable_hint`.
 pub fn detect_self_project_with_hint(hint: Option<&str>) -> Option<PathBuf> {
-    fn looks_like_self(p: &Path) -> bool {
-        p.join(".trusty-agents")
-            .join("agents")
-            .join("pm.toml")
-            .is_file()
-    }
     fn walk_up(start: &Path) -> Option<PathBuf> {
         let mut cur = Some(start.to_path_buf());
         while let Some(p) = cur {
@@ -116,8 +111,7 @@ pub fn detect_self_project_with_hint(hint: Option<&str>) -> Option<PathBuf> {
         }
     }
     if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-        && let Some(found) = walk_up(parent)
+        && let Some(found) = self_project_from_exe(&exe)
     {
         return Some(found);
     }
@@ -127,6 +121,50 @@ pub fn detect_self_project_with_hint(hint: Option<&str>) -> Option<PathBuf> {
         return Some(found);
     }
     None
+}
+
+/// Does `dir` carry the `.trusty-agents/agents/pm.toml` self-project marker?
+fn looks_like_self(dir: &Path) -> bool {
+    dir.join(".trusty-agents")
+        .join("agents")
+        .join("pm.toml")
+        .is_file()
+}
+
+/// Cargo's build-output directory name. An executable's `target` ancestor is
+/// what ties it to the checkout it was compiled from.
+const CARGO_TARGET_DIR: &str = "target";
+
+/// Infer the checkout a cargo-built executable was produced from. (#5944)
+///
+/// Why: strategy 2 of [`detect_self_project_with_hint`] used to climb from
+/// `exe.parent()` all the way to the filesystem root. That climb reads the
+/// executable's real location and consults no environment at all, so it sailed
+/// past the checkout the binary came from and matched the developer's real
+/// `~/.trusty-agents/agents/pm.toml` — the user-level config, which is not a
+/// project. It shipped once as #4826: an installed `~/.cargo/bin/tagent`
+/// resolved `$HOME` as the project and the Slack gateway answered users against
+/// the wrong corpus. #4826 only made an explicit hint outrank it; with no hint
+/// the climb still escaped, so a test that pinned `$HOME` to a tempdir got the
+/// real home back and wrote state there while believing it was sandboxed.
+/// What: requires the executable to sit under a `target/` directory, and
+/// returns that directory's parent when it carries the marker. `cargo run`, a
+/// `cargo test` binary (`target/debug/deps/…`) and a release binary invoked from
+/// an unrelated cwd all keep resolving their checkout, because in each of those
+/// the checkout IS the `target` parent — that is the case this strategy was
+/// written for. An executable with no `target` ancestor (`~/.cargo/bin/tagent`,
+/// `/usr/local/bin/tagent`) has no knowable build checkout, so this returns
+/// `None` and detection falls through to the cwd strategy rather than climbing
+/// into whatever happens to sit above the install directory.
+/// Test: `exe_inference_stops_at_the_build_root`,
+/// `exe_inference_finds_the_checkout_it_was_built_from`,
+/// `exe_inference_declines_an_installed_binary`.
+pub(crate) fn self_project_from_exe(exe: &Path) -> Option<PathBuf> {
+    let build_root = exe
+        .ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == CARGO_TARGET_DIR))
+        .and_then(Path::parent)?;
+    looks_like_self(build_root).then(|| build_root.to_path_buf())
 }
 
 /// JSONL record persisted to `~/.trusty-agents/sessions/pm-messages.jsonl` for
