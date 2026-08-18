@@ -162,7 +162,11 @@ fn next_view(next: &NextStep) -> Result<NextStepView, String> {
 /// from the process environment instead — `TRUSTY_AUDIT_WORKDIR` and the
 /// current directory. Resolution goes through the same `WorkDir::resolve` and
 /// `EngagementConfig::resolve_path` the CLI uses, so both front ends open the
-/// same engagement when launched the same way.
+/// same engagement when launched the same way. #5935: that parity was broken
+/// by #5929's new `home` parameter on `WorkDir::resolve` — this call site went
+/// uncompiled, not just unupdated, and `main.rs` is the pattern it follows:
+/// `dirs::home_dir()`, read here alongside the rest of the environment so
+/// `resolve` stays a pure function of what it is handed.
 /// What: resolves the work-dir root and the engagement config, then builds a
 /// `Session` over them.
 /// Test: `super::view_tests::a_session_resolves_under_the_named_root`.
@@ -170,7 +174,8 @@ fn session() -> Result<Session, String> {
     let cwd = std::env::current_dir()
         .map_err(|e| format!("cannot determine the current directory: {e}"))?;
     let env_value = std::env::var(WORKDIR_ENV).ok();
-    let work = WorkDir::resolve(None, env_value.as_deref(), &cwd);
+    let home = dirs::home_dir();
+    let work = WorkDir::resolve(None, env_value.as_deref(), home.as_deref(), &cwd);
     Ok(Session::new(work).with_config_path(EngagementConfig::resolve_path(None, &cwd)))
 }
 
@@ -337,7 +342,9 @@ mod view_tests {
     #[test]
     fn a_session_resolves_under_the_named_root() {
         let cwd = std::path::Path::new("/engagement");
-        let work = WorkDir::resolve(None, Some("/engagement/work"), cwd);
+        // `home` is irrelevant here: an explicit env value always wins over
+        // the home-derived default (see `WorkDir::resolve`'s precedence).
+        let work = WorkDir::resolve(None, Some("/engagement/work"), None, cwd);
         assert_eq!(
             Session::new(work).work_dir().root(),
             std::path::Path::new("/engagement/work")

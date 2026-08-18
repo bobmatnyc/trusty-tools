@@ -23,6 +23,11 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { workspace = true }
 tokio = { workspace = true }
+# #5935: `WorkDir::resolve` takes a `home: Option<&Path>` (#5929) so its
+# default can land under `~/.trusty-tools/trusty-audit/work` rather than
+# beside the cwd. Same dependency `trusty-audit`'s own `main.rs` uses to
+# supply it, for the same reason.
+dirs = { workspace = true }
 # The auditor client itself. DOC-68 §11: this shell is a view over
 # `Session::execute` and calls it IN-PROCESS — no HTTP endpoint, no `taudit`
 # subprocess. Capabilities live in `session::Command`, never here.
