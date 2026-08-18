@@ -119,13 +119,14 @@ claims, and disputed results. Full rule in
 ### What CI actually gates
 
 🔴 **A bounded list of required checks gates every merge — read it live, never
-hand-copy the count.** This section has re-copied that count repeatedly: six,
-then nine, then eleven, with a rise to thirteen already staged (`ci.yml`
-gained `trusty-mpm-gui clippy` and `trusty-code-gui clippy` in
-[#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958); only the
-branch-protection update to make them required is still pending). A stale copy
-has already cost a real merge (next paragraph). The list is never worth
-copying here — read it directly:
+hand-copy the list.** This section has repeated the same mistake every time a
+required job was added — most recently when `ci.yml` gained `trusty-mpm-gui
+clippy` and `trusty-code-gui clippy`
+([#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958)) and branch
+protection picked both up as required. Copying the list here only gives the
+next such change one more place to go stale, and a stale copy has already cost
+a real merge (next paragraph). The list is never worth copying here — read it
+directly:
 
 ```bash
 gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
