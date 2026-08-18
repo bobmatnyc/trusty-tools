@@ -15,8 +15,10 @@
 //!      shared `LaunchdConfig`. On other platforms, this phase is skipped
 //!      with a friendly note.
 //!   3. Patches every discovered Claude settings file with an MCP server
-//!      entry pointing at `trusty-memory serve --stdio`. Falls back to
-//!      creating `~/.claude/settings.json` when no settings files were found.
+//!      entry pointing at `trusty-memory serve`. Falls back to creating
+//!      `~/.claude/settings.json` when no settings files were found.
+//!   4. Registers the same `serve` entrypoint with the Codex CLI in
+//!      `~/.codex/config.toml` (#5265).
 //!
 //! Test: unit tests cover the patch phase against tempdir-rooted settings
 //! files. The launchd phase is side-effecting (macOS only) and exercised
@@ -39,7 +41,23 @@ use trusty_common::claude_config::{
 /// What: the literal string `"trusty-memory"`.
 /// Test: covered by every test in this module that asserts the key is
 /// present after a patch.
-const MCP_SERVER_KEY: &str = "trusty-memory";
+pub(crate) const MCP_SERVER_KEY: &str = "trusty-memory";
+
+/// The argument vector every MCP-client registration must launch (#5265).
+///
+/// Why: bare `trusty-memory serve` speaks MCP over stdio since #5267, so
+/// `--stdio` no longer selects anything — it is a legacy transport-selection
+/// flag the released CLI contract has retired. Naming the vector once keeps the
+/// Claude and Codex registrations from drifting, and re-running `setup` rewrites
+/// a legacy `["serve", "--stdio"]`, a joined `["serve --stdio"]`, or a
+/// nested-JSON `["[\"serve\"]"]` registration onto it — every one of those is a
+/// registration a client lists as enabled while the process behind it either
+/// never initializes MCP or carries a flag that is about to stop parsing.
+/// What: the single element `serve`.
+/// Test: `patch_one_repairs_a_legacy_serve_stdio_entry`,
+/// `setup_codex_writes_the_serve_entrypoint`,
+/// `setup_codex_repairs_a_legacy_stdio_registration`.
+pub(crate) const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
 /// The Claude Code hook event the UserPromptSubmit hook is registered under.
 ///
@@ -184,6 +202,60 @@ pub fn handle_setup() -> Result<()> {
         "  Try: {} (or restart Claude Code to pick up the new MCP server)",
         "trusty-memory serve".cyan()
     );
+
+    // Phase 4 (#5265): register the same entrypoint with the Codex CLI, so one
+    // setup run leaves both clients working. A Codex failure never fails setup.
+    println!();
+    if let Err(e) = setup_codex_phase() {
+        eprintln!("  {} Codex registration: {}", "✗".red(), e);
+    }
+    Ok(())
+}
+
+/// Register (or repair) the Codex CLI's stdio MCP entry for trusty-memory.
+///
+/// Why (#5265): Codex listed `trusty-memory` as an enabled stdio server and
+/// exposed no tools. Nothing in trusty-memory wrote that registration, so the
+/// broken shape had no owner to repair it — the operator's config held whatever
+/// they last hand-edited, including a whole argument vector serialized as one
+/// JSON-looking string. `setup` now owns the Codex file the same way it owns the
+/// Claude settings files.
+/// What: resolves `$HOME`, then upserts `[mcp_servers.trusty-memory]` in
+/// `~/.codex/config.toml` with `command = "trusty-memory"` and
+/// [`MCP_SERVER_ARGS`], through the shared writer in
+/// `trusty_common::codex_config` — which rewrites an empty, joined, legacy
+/// `--stdio`, or nested-JSON-string vector and leaves every other table and
+/// comment in the operator's config byte-for-byte intact. Prints one status
+/// line either way.
+/// Test: `setup_codex_writes_the_serve_entrypoint`,
+/// `setup_codex_repairs_a_legacy_stdio_registration`, `setup_codex_is_idempotent`.
+fn setup_codex_phase() -> Result<()> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+    setup_codex(&home)
+}
+
+/// [`setup_codex_phase`] against an explicit home directory, so tests never
+/// touch the real `~/.codex/config.toml`.
+fn setup_codex(home: &Path) -> Result<()> {
+    let path = trusty_common::codex_config::codex_config_path(home);
+    let wrote = trusty_common::codex_config::patch_mcp_server(
+        &path,
+        MCP_SERVER_KEY,
+        MCP_SERVER_KEY,
+        MCP_SERVER_ARGS,
+    )?;
+    if wrote {
+        println!("  {} Codex: {}", "✓ added".green(), path.display());
+        println!("  Restart Codex to pick up `{}`.", MCP_SERVER_KEY.cyan());
+    } else {
+        println!(
+            "  {} Codex: {} {}",
+            "↻".cyan(),
+            path.display().to_string().dimmed(),
+            "(already configured)".dimmed()
+        );
+    }
     Ok(())
 }
 
@@ -411,7 +483,7 @@ fn patch_claude_settings_phase() -> Result<SettingsPatchSummary> {
     // settings file gets the same absolute hook command.
     let exe = resolve_setup_exe();
 
-    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
+    let entry = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
     let files = discover_claude_settings(&home, default_settings_max_depth());
 
     if files.is_empty() {

@@ -8,16 +8,18 @@ Memory palace MCP server (HTTP/SSE) backed by `hnsw_rs` (HNSW) vector store,
 and retrieves natural-language memories organized into named "palaces"
 (namespaces), with an optional knowledge-graph layer for structured triples.
 
-Claude Code integration uses `trusty-memory serve --stdio` — a direct
+Claude Code and Codex integration uses `trusty-memory serve` — a direct
 stdio JSON-RPC MCP server that forwards every request to the running HTTP
 daemon and returns daemon responses verbatim. No Unix domain socket is
-involved.
+involved. `serve --stdio` is the same server: the flag selects nothing since
+#5267, and `trusty-memory setup` rewrites a registration still carrying it
+(#5265).
 
 A DEPRECATED `trusty-memory-mcp-bridge` shim binary is also installed by
 `cargo install trusty-memory` so that existing `.mcp.json` configs that still
 reference the old bridge name keep working without per-project changes.
 To update your config, manually set the `trusty-memory` entry to
-`"command": "trusty-memory", "args": ["serve", "--stdio"]` in your `.mcp.json`
+`"command": "trusty-memory", "args": ["serve"]` in your `.mcp.json`
 or `~/.claude/mcp.json`.
 
 Integrates with Claude Code and any other MCP-aware client as a first-class
@@ -191,14 +193,20 @@ The recommended entry in `.mcp.json` or `~/.claude/mcp.json` is:
   "mcpServers": {
     "trusty-memory": {
       "command": "trusty-memory",
-      "args": ["serve", "--stdio"],
+      "args": ["serve"],
       "env": {}
     }
   }
 }
 ```
 
-`trusty-memory serve --stdio` is a pure daemon-bridge proxy: it ensures the
+Codex reads its own file. `trusty-memory setup` writes the same entrypoint into
+`~/.codex/config.toml` as `[mcp_servers.trusty-memory]` with
+`command = "trusty-memory"` and `args = ["serve"]`, repairing an empty, joined,
+legacy `--stdio`, or nested-JSON-string vector without touching any other table
+or comment (#5265).
+
+`trusty-memory serve` is a pure daemon-bridge proxy: it ensures the
 HTTP daemon is running (auto-starting it if absent), then forwards every
 JSON-RPC request to `POST /rpc` on the daemon and returns the response
 verbatim. No Unix domain socket is involved. The stdio process never opens
@@ -222,7 +230,7 @@ the `trusty-memory` entry to:
   "mcpServers": {
     "trusty-memory": {
       "command": "trusty-memory",
-      "args": ["serve", "--stdio"]
+      "args": ["serve"]
     }
   }
 }
