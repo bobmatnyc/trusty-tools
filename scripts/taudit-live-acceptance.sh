@@ -266,26 +266,7 @@ else
   fail "extracted engagement.toml does not carry OPENROUTER_API_KEY — 'taudit distribute' did not embed the supplied credential"
 fi
 
-# --- 5. register a real target, from the EXTRACTED copy --------------------
-
-step "add: register $TARGET_REPO from the extracted client"
-ADD_OUTPUT="$("$LAUNCHER" add repo "$TARGET_REPO" 2>&1)" \
-  || { printf '%s\n' "$ADD_OUTPUT" >&2; fail "'audit.sh add repo $TARGET_REPO' exited non-zero"; }
-printf '%s\n' "$ADD_OUTPUT"
-case "$ADD_OUTPUT" in
-  *"registered:"*"$TARGET_REPO"*) ok "registered and validated: $TARGET_REPO" ;;
-  *) fail "add output did not confirm registration of $TARGET_REPO" ;;
-esac
-
-TARGETS_OUTPUT="$("$LAUNCHER" targets 2>&1)" \
-  || { printf '%s\n' "$TARGETS_OUTPUT" >&2; fail "'audit.sh targets' exited non-zero"; }
-printf '%s\n' "$TARGETS_OUTPUT"
-case "$TARGETS_OUTPUT" in
-  *"$TARGET_REPO"*) ok "target list confirms $TARGET_REPO is registered" ;;
-  *) fail "'audit.sh targets' did not list $TARGET_REPO" ;;
-esac
-
-# --- 5b. ask the client where its working directory is --------------------
+# --- 5. ask the client where its working directory is, and reset it -------
 
 # Asked, never assumed. #5915 MOVED this location, and a hardcoded path would
 # make this script agree with only one revision of the client — which is the
@@ -304,7 +285,27 @@ esac
 rm -rf "$WORK_ROOT"
 ok "work root reset"
 
-# --- 6. run the one-shot audit chain: install, clone, analyse, package ----
+# --- 6. register a real target, from the EXTRACTED copy -------------------
+
+step "add: register $TARGET_REPO from the extracted client"
+ADD_OUTPUT="$("$LAUNCHER" add repo "$TARGET_REPO" 2>&1)" \
+  || { printf '%s\n' "$ADD_OUTPUT" >&2; fail "'audit.sh add repo $TARGET_REPO' exited non-zero"; }
+printf '%s\n' "$ADD_OUTPUT"
+case "$ADD_OUTPUT" in
+  *"registered:"*"$TARGET_REPO"*) ok "registered and validated: $TARGET_REPO" ;;
+  *) fail "add output did not confirm registration of $TARGET_REPO" ;;
+esac
+
+TARGETS_OUTPUT="$("$LAUNCHER" targets 2>&1)" \
+  || { printf '%s\n' "$TARGETS_OUTPUT" >&2; fail "'audit.sh targets' exited non-zero"; }
+printf '%s\n' "$TARGETS_OUTPUT"
+case "$TARGETS_OUTPUT" in
+  *"$TARGET_REPO"*) ok "target list confirms $TARGET_REPO is registered" ;;
+  *) fail "'audit.sh targets' did not list $TARGET_REPO" ;;
+esac
+
+
+# --- 7. run the one-shot audit chain: install, clone, analyse, package ----
 
 step "audit: install tools, clone, analyse via OpenRouter, package (this is the slow step)"
 RETURN_ZIP="$RETURN_DIR/audit-return-package.zip"
@@ -318,7 +319,37 @@ esac
 [ -s "$RETURN_ZIP" ] || fail "expected return package not found or empty: $RETURN_ZIP"
 ok "return package: $RETURN_ZIP ($(wc -c <"$RETURN_ZIP" | tr -d ' ') bytes)"
 
-# --- 7. verify the return package BY CONTENT --------------------------------
+# --- 8. the approvals this run added, and the ones it must not have removed --
+
+step "verify: the run added allowlist rows and destroyed no pre-existing one"
+if [ -s "$ALLOWLIST_BEFORE" ]; then
+  MISSING=""
+  while IFS= read -r prior; do
+    grep -q -F -- "$prior" "$ALLOWLIST" 2>/dev/null || MISSING="$MISSING$prior
+"
+  done <<EOF
+$(grep '^path *=' "$ALLOWLIST_BEFORE" || true)
+EOF
+  if [ -n "$MISSING" ]; then
+    printf '%s\n' "$MISSING" >&2
+    fail "the run removed allowlist entries that existed before it (listed above)"
+  fi
+  ok "every pre-existing allowlist entry survived the run"
+fi
+
+APPROVED="$(grep '^path *=' "$ALLOWLIST" 2>/dev/null | grep -F -- "$WORK_ROOT" || true)"
+if [ -n "$APPROVED" ]; then
+  ok "the run approved these clones for indexing (remove by hand — see the header):"
+  printf '%s\n' "$APPROVED"
+else
+  fail "no allowlist row names a clone under $WORK_ROOT.
+       The audit reported success, but nothing approved a checkout — which
+       means trusty-search refused the index and the code analysis read
+       nothing (#5915). A report can still be produced in that state, which is
+       why this check exists rather than trusting the exit status."
+fi
+
+# --- 9. verify the return package BY CONTENT --------------------------------
 
 step "verify: extract and inspect the return package"
 RETURN_EXTRACT="$SCRATCH/return-extracted"
@@ -387,38 +418,54 @@ REPORT_FILE="$(find "$RETURN_EXTRACT" -path '*/reports/*/report.md' -type f -pri
 REPORT_BYTES="$(wc -c <"$REPORT_FILE" | tr -d ' ')"
 [ "$REPORT_BYTES" -gt 0 ] || fail "report is empty: $REPORT_FILE"
 
-# #5915: "non-empty" was never the question. A report assembled from an
-# extract the code analysis never read is several KiB of headings with no
-# finding under them — which is precisely what an unapproved checkout
-# produced, silently, on every run. The report must name files that exist in
-# the repository that was audited.
-step "verify: the report names real files from the audited repository"
-CHECKOUT_DIR="$(find "$WORK_ROOT/repos" -maxdepth 1 -mindepth 1 -type d -print -quit 2>/dev/null || true)"
+ok "git-activity report present: $REPORT_FILE ($REPORT_BYTES bytes)"
+
+# #5915: "non-empty" was never the question, and `report.md` is the wrong file
+# to ask it of — that one is tga's git-activity summary, built from the commit
+# tables alone, so it looks identical whether or not the code was ever read.
+# The CODE analysis lands in `<date>-technical-due-diligence.md`. That is the
+# artifact that must name files from the repository: assembled without an
+# indexed checkout it is prose about commit counts, and it stays several KiB
+# either way, so size cannot tell the two apart.
+step "verify: the code-analysis report names real files from the repository"
+DD_FILE="$(find "$RETURN_EXTRACT" -path '*/reports/*' -name '*technical-due-diligence.md' -type f -print -quit)"
+[ -n "$DD_FILE" ] || fail "no technical-due-diligence report in the return package — the code-analysis leg produced nothing at all"
+DD_BYTES="$(wc -c <"$DD_FILE" | tr -d ' ')"
+
+# The clone lands at repos/<owner>/<name>, so the repository root is the
+# directory holding `.git` — not the first directory under repos/, which is the
+# owner. Getting that wrong points the search at a directory with no source in
+# it and reports a false empty report.
+GIT_DIR="$(find "$WORK_ROOT/repos" -mindepth 1 -maxdepth 3 -type d -name '.git' -print -quit 2>/dev/null || true)"
+CHECKOUT_DIR="$(dirname "$GIT_DIR")"
 [ -n "$CHECKOUT_DIR" ] || fail "no checkout under $WORK_ROOT/repos — the clone phase left nothing behind"
 
-# Real source files from the clone, by basename. A report that read the code
-# names some of them; one assembled from nothing names none.
+# Real source files from the clone, matched as REPOSITORY-RELATIVE paths
+# (`src/main.rs`), not bare basenames: `main.rs` appears in generic prose about
+# any Rust project, while `src/main.rs` is a path the analysis had to have read
+# the tree to write.
 NAMED=0
 NAMED_EXAMPLES=""
 while IFS= read -r candidate; do
-  base="$(basename "$candidate")"
-  if grep -q -F -- "$base" "$REPORT_FILE"; then
+  [ -n "$candidate" ] || continue
+  rel="${candidate#"$CHECKOUT_DIR"/}"
+  if grep -q -F -- "$rel" "$DD_FILE"; then
     NAMED=$((NAMED + 1))
     [ -n "$NAMED_EXAMPLES" ] && NAMED_EXAMPLES="$NAMED_EXAMPLES, "
-    NAMED_EXAMPLES="$NAMED_EXAMPLES$base"
+    NAMED_EXAMPLES="$NAMED_EXAMPLES$rel"
   fi
 done <<EOF
-$(find "$CHECKOUT_DIR" -type f \( -name '*.rs' -o -name '*.py' -o -name '*.go' -o -name '*.ts' -o -name '*.js' -o -name '*.java' \) -not -path '*/.git/*' | head -40)
+$(find "$CHECKOUT_DIR" -type f \( -name '*.rs' -o -name '*.py' -o -name '*.go' -o -name '*.ts' -o -name '*.js' -o -name '*.java' \) -not -path '*/.git/*' | head -60)
 EOF
 
-[ "$NAMED" -gt 0 ] || fail "the report ($REPORT_BYTES bytes) names not one source file from
-       $CHECKOUT_DIR. That is what a report looks like when the code-analysis
-       leg read nothing — trusty-search is default-deny, so an unapproved
-       checkout is refused and tga still exits 0 (#5915)."
-ok "report names $NAMED source file(s) from the checkout: $NAMED_EXAMPLES"
-ok "report is present and substantive: $REPORT_FILE ($REPORT_BYTES bytes)"
+[ "$NAMED" -gt 0 ] || fail "the code-analysis report ($DD_BYTES bytes) names not one source
+       path from $CHECKOUT_DIR. That is what it looks like when the analysis
+       read nothing — trusty-search is default-deny, so an unapproved checkout
+       is refused and tga still exits 0 (#5915)."
+ok "code-analysis report names $NAMED source path(s): $NAMED_EXAMPLES"
+ok "code-analysis report: $DD_FILE ($DD_BYTES bytes)"
 
-# --- 8. the guard that matters most: no credential in the return package --
+# --- 10. the guard that matters most: no credential in the return package --
 
 step "verify: the OpenRouter key never reaches the return package"
 LEAK_HITS="$(grep -a -r -l -F -- "$OPENROUTER_API_KEY" "$RETURN_EXTRACT" 2>/dev/null || true)"
@@ -427,36 +474,6 @@ if [ -n "$LEAK_HITS" ]; then
   fail "OPENROUTER_API_KEY leaked into the return package (see file list above; value withheld from this message)"
 fi
 ok "grepped every extracted member of the return package — no credential found"
-
-# --- 9. the approvals this run added, and the ones it must not have removed --
-
-step "verify: the run added allowlist rows and destroyed no pre-existing one"
-if [ -s "$ALLOWLIST_BEFORE" ]; then
-  MISSING=""
-  while IFS= read -r prior; do
-    grep -q -F -- "$prior" "$ALLOWLIST" 2>/dev/null || MISSING="$MISSING$prior
-"
-  done <<EOF
-$(grep '^path *=' "$ALLOWLIST_BEFORE" || true)
-EOF
-  if [ -n "$MISSING" ]; then
-    printf '%s\n' "$MISSING" >&2
-    fail "the run removed allowlist entries that existed before it (listed above)"
-  fi
-  ok "every pre-existing allowlist entry survived the run"
-fi
-
-APPROVED="$(grep '^path *=' "$ALLOWLIST" 2>/dev/null | grep -F -- "$WORK_ROOT" || true)"
-if [ -n "$APPROVED" ]; then
-  ok "the run approved these clones for indexing (remove by hand — see the header):"
-  printf '%s\n' "$APPROVED"
-else
-  fail "no allowlist row names a clone under $WORK_ROOT.
-       The audit reported success, but nothing approved a checkout — which
-       means trusty-search refused the index and the code analysis read
-       nothing (#5915). A report can still be produced in that state, which is
-       why this check exists rather than trusting the exit status."
-fi
 
 # --- verdict -----------------------------------------------------------------
 
