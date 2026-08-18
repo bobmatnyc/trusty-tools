@@ -57,6 +57,14 @@ async fn health_reports_degraded_when_corpus_open_failed() {
         "/tmp/apex-green".into(),
     ));
     {
+        // #5927 fixture correction: this test simulates a corpus-open failure,
+        // so it must set the flag that IS the corpus-open failure. Before
+        // #5927 `indexes_corpus_failed` was derived from the stage lanes, so
+        // stamping the stages alone was enough; it now reads this flag.
+        let mut indexer = broken.indexer.write().await;
+        indexer.corpus_open_failed = true;
+    }
+    {
         let mut stages = broken.stages.write().await;
         *stages = derive_warm_boot_stages(WarmBootInputs {
             chunk_count: 47_946,

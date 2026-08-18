@@ -104,6 +104,9 @@ mod tests_health;
 mod tests_health_contention;
 #[cfg(test)]
 mod tests_health_degraded;
+// #5927: corpus-open failure vs. any-lane failure counter semantics.
+#[cfg(test)]
+mod stage_failed_5927_tests;
 #[cfg(test)]
 mod tests_health_switchable;
 #[cfg(test)]

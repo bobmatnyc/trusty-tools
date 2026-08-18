@@ -557,8 +557,12 @@ pub struct WarmBootSummary {
     /// `true` when any of the following hold:
     /// - `indexes_skipped_tcc > 0` (TCC / FDA denial)
     /// - `indexes_skipped_timeout > 0` (scan timeout — issue #1091)
-    /// - `indexes_corpus_failed > 0` (a registered index's corpus/lane failed
-    ///   to open — issue #1870)
+    /// - `indexes_stage_failed > 0` (a registered index has a failed search
+    ///   lane — issue #1870; renamed from `indexes_corpus_failed` by #5927)
+    /// - `indexes_corpus_failed > 0` (a registered index's durable corpus
+    ///   failed to open — issue #5927; a strict subset of the line above,
+    ///   OR'd in so a corpus failure recorded outside warm-boot stage
+    ///   derivation still degrades the daemon)
     /// - `indexes_loaded` is less than 80% of the prior-known count
     ///   (suggesting a large fraction of indexes are missing, e.g. after
     ///   FDA was revoked)
@@ -589,8 +593,8 @@ pub struct WarmBootSummary {
     /// `ColdIndexStore::failed_len`. `0` is the normal steady-state value.
     /// Test: `health_failed_index_reported` in server tests.
     pub indexes_failed: usize,
-    /// Number of registered indexes whose durable redb corpus (or any search
-    /// lane) failed to open on warm-boot (issue #1870).
+    /// Number of registered indexes whose durable redb corpus failed to open
+    /// (issues #1870, #5927).
     ///
     /// Why: distinct from every other counter here. `indexes_failed` and
     /// `warmboot_failed_indexes` count entries that never made it into the
@@ -599,26 +603,58 @@ pub struct WarmBootSummary {
     /// `chunk_count` but a `DatabaseAlreadyOpen` / incompatible-format corpus
     /// open failure marks all its stages `Failed` (see the `corpus_open_failed`
     /// guard in `derive_warm_boot_stages`), so free-text / BM25 / hybrid queries
-    /// silently return `[]` while `/health` previously reported `"ok"`. This
-    /// counter closes that honesty gap: any non-zero value forces
-    /// `warm_boot_degraded = true` and downgrades the top-level `status` to
-    /// `"degraded"` so a `status != "ok"` probe catches the outage.
-    /// What: computed live on every `GET /health` poll by scanning registry
-    /// handles for any `Failed` stage (`IndexStages::any_failed`); not persisted.
-    /// `0` is the healthy steady state.
-    /// Test: `health_reports_degraded_when_corpus_open_failed` in
-    /// `tests_health_degraded`.
+    /// silently return `[]` while `/health` previously reported `"ok"`.
+    ///
+    /// #5927 narrowed this counter to the fact its name states. It used to key
+    /// off `IndexStages::any_failed()`, so a failed SEMANTIC lane on an index
+    /// whose corpus opened fine incremented it too — and two investigations
+    /// read the name literally, checked every index's `corpus_open_failure`
+    /// (correctly `null`), found nothing, and dismissed a live count of `1` as
+    /// a stale snapshot. The any-lane count now lives under its own name,
+    /// [`Self::indexes_stage_failed`], which is a strict superset of this one:
+    /// a corpus-open failure fails every lane.
+    /// What: computed live on every `GET /health` poll from
+    /// `CodeIndexer::corpus_open_failed` — the same flag
+    /// `GET /indexes/:id/status` reports as `corpus_open_failure`, so the two
+    /// surfaces can no longer disagree. Not persisted; `0` is the healthy
+    /// steady state. A contended `indexer` lock undercounts this poll only
+    /// (`indexes_stage_failed` reads a different lock and still fires).
+    /// Test: `health_counts_a_corpus_open_failure_under_both_names`,
+    /// `health_does_not_count_a_semantic_lane_failure_as_a_corpus_failure`,
+    /// `health_stays_degraded_when_the_corpus_flag_read_is_contended` in
+    /// `stage_failed_5927_tests`; `health_reports_degraded_when_corpus_open_failed`
+    /// in `tests_health_degraded`.
     #[serde(default)]
     pub indexes_corpus_failed: usize,
+    /// Number of registered indexes with at least one `Failed` search lane —
+    /// lexical, semantic, or graph (issue #5927).
+    ///
+    /// Why: this is what `indexes_corpus_failed` actually measured before
+    /// #5927, under a name that promised something narrower. The count was
+    /// always right; only the name was wrong. Keeping it — under an accurate
+    /// name — is what stops the split from creating a blind spot: an index
+    /// whose embed lane died still serves no vector results, and that is worth
+    /// degrading the daemon over whether or not its corpus opened.
+    /// What: computed live in the same `GET /health` registry scan, from
+    /// `IndexStages::any_failed()`. Non-zero forces `warm_boot_degraded = true`
+    /// and the top-level `status` to `"degraded"`, exactly as the old
+    /// `indexes_corpus_failed` did — so no daemon that used to report
+    /// `"degraded"` stops doing so. A contended `stages` lock fails open for
+    /// that poll and is counted in [`Self::indexes_health_scan_skipped`].
+    /// Test: `health_does_not_count_a_semantic_lane_failure_as_a_corpus_failure`
+    /// and `health_counts_a_corpus_open_failure_under_both_names` in
+    /// `stage_failed_5927_tests`.
+    #[serde(default)]
+    pub indexes_stage_failed: usize,
     /// Number of registered handles whose `stages` lock was contended (a
     /// `try_read()` miss) during the most recent `/health` scan for
-    /// `indexes_corpus_failed` (issue #1870 review follow-up).
+    /// `indexes_stage_failed` (issue #1870 review follow-up).
     ///
     /// Why: the health handler must never block on a contended lock (issue
     /// #1006), so a miss fails open (treated as "not failed" for that poll).
     /// That is the correct trade-off, but it means a *persistently* contended
     /// handle could in principle stay invisibly excluded from
-    /// `indexes_corpus_failed` forever. This counter makes that failure mode
+    /// `indexes_stage_failed` forever. This counter makes that failure mode
     /// observable: `0` on every healthy poll; a handle stuck under sustained
     /// write-lock contention shows up as a repeated non-zero count here (and
     /// by index id at `debug!` in the daemon log) across consecutive polls,
