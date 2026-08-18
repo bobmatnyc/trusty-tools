@@ -20,11 +20,12 @@
 /// because that has happened here before.
 /// What: prints one line per reclaimed path to stdout, then a summary naming
 /// either the candidate count (dry run) or the reclaimed count and bytes, then
-/// every re-check refusal to stderr. A `null`/absent object prints nothing —
+/// [`diagnostic_lines`] to stderr. A `null`/absent object prints nothing —
 /// that is the shape the route returns when the pass was not requested.
 /// Test: `merged_pr_pass_prints_nothing_for_a_null_body`,
 /// `merged_pr_pass_reports_reclaimed_paths_and_bytes`,
-/// `merged_pr_pass_surfaces_recheck_refusals`.
+/// `merged_pr_pass_surfaces_recheck_refusals`,
+/// `merged_pr_pass_surfaces_an_agent_owned_skip`.
 pub(crate) fn print_merged_pr_pass(merged: Option<&serde_json::Value>, dry_run: bool) {
     let Some(merged) = merged.filter(|m| !m.is_null()) else {
         return;
@@ -77,19 +78,52 @@ pub(crate) fn print_merged_pr_pass(merged: Option<&serde_json::Value>, dry_run: 
             reclaimed.len()
         );
     }
-    // A candidate the survey approved but the fresh re-check refused is the
-    // most interesting line in the output: it means the workspace changed
-    // underneath the pass, and staying quiet about it hides a near-miss.
-    for r in &array("refused_at_recheck") {
-        if let Some(s) = r.as_str() {
-            eprintln!("  refused at re-check: {s}");
-        }
+    for line in diagnostic_lines(merged) {
+        eprintln!("{line}");
     }
-    for f in &array("removal_failed") {
-        if let Some(s) = f.as_str() {
-            eprintln!("  removal FAILED (still on disk): {s}");
-        }
+}
+
+/// Every stderr diagnostic the merged-PR pass owes the operator (#2919, #5829).
+///
+/// Why: pure so the lines can be ASSERTED rather than merely executed. The
+/// previous renderer printed straight to stderr, so its tests could only prove
+/// it did not panic — which is why `spared_agent_owned` being dropped entirely
+/// was invisible to them.
+/// What: three families, each `"  <label>: <path>: <reason>"`. A worktree spared
+/// because a dispatched agent owns it comes FIRST: it is the only one naming a
+/// tree that is still being written to, and #5829 exists because the sweep
+/// stayed silent about it. Then the re-check near-misses, then removals that
+/// failed. An absent or non-array key contributes nothing.
+/// Test: `merged_pr_pass_surfaces_an_agent_owned_skip`,
+/// `merged_pr_pass_surfaces_recheck_refusals`.
+fn diagnostic_lines(merged: &serde_json::Value) -> Vec<String> {
+    let strings = |key: &str| -> Vec<String> {
+        merged
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut out = Vec::new();
+    // #5829: a live agent's tree was spared. The operator has to see this — it
+    // is the difference between "nothing was reclaimable" and "something was
+    // deliberately protected, and here is who for".
+    for s in strings("spared_agent_owned") {
+        out.push(format!("  spared — a dispatched agent owns it: {s}"));
     }
+    // A candidate the survey approved but the fresh re-check refused is a
+    // near-miss: the workspace changed underneath the pass.
+    for s in strings("refused_at_recheck") {
+        out.push(format!("  refused at re-check: {s}"));
+    }
+    for s in strings("removal_failed") {
+        out.push(format!("  removal FAILED (still on disk): {s}"));
+    }
+    out
 }
 
 /// `tm session prune --worktrees [--dry-run]` — remove orphaned per-session worktrees (#1840).

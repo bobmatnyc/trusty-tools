@@ -603,12 +603,36 @@ pub(crate) enum ReclaimVerdict {
         /// Operator-facing explanation of the refusal.
         reason: String,
     },
+    /// Refused by gate 4 because a DISPATCHED AGENT owns the worktree (#5829).
+    ///
+    /// Why a separate variant rather than a `Blocked` carrying agent wording:
+    /// the operator has to be TOLD about this one. Every other refusal leaves
+    /// a directory the operator can see and re-run against; this one spares a
+    /// tree an agent is working in right now, and a sweep that spared it
+    /// silently is indistinguishable from a sweep that found nothing to do —
+    /// which is what `--merged-prs --force` printed while the gate was working
+    /// correctly. Matching on the reason STRING to recover the distinction
+    /// would re-couple the operator surface to the wording of a refusal
+    /// message, so the survey records the kind instead.
+    /// Test: `survey_discloses_a_live_agents_spared_worktree`,
+    /// `classify_blocks_a_live_agents_worktree`.
+    BlockedByAgent {
+        /// Operator-facing explanation naming the agent being protected.
+        reason: String,
+    },
 }
 
 impl ReclaimVerdict {
     /// Shorthand for a refusal.
     pub(crate) fn blocked(reason: impl Into<String>) -> Self {
         Self::Blocked {
+            reason: reason.into(),
+        }
+    }
+
+    /// Shorthand for gate 4's agent-ownership refusal (#5829).
+    pub(crate) fn blocked_by_agent(reason: impl Into<String>) -> Self {
+        Self::BlockedByAgent {
             reason: reason.into(),
         }
     }
@@ -655,6 +679,7 @@ impl ReclaimVerdict {
 /// `classify_blocks_a_live_agents_worktree`,
 /// `classify_blocks_an_agent_the_registry_never_heard_of`,
 /// `classify_blocks_an_agent_store_worktree_with_an_unreadable_sentinel`,
+/// `classify_records_an_agent_refusal_as_its_own_verdict_kind`,
 /// `classify_blocks_open_pr`,
 /// `classify_blocks_closed_unmerged_pr`, `classify_blocks_no_pr`,
 /// `classify_blocks_unknown_pr_state`, `classify_blocks_dirty_worktree` —
@@ -692,8 +717,11 @@ pub(crate) fn classify(
     // Gate 4 (#5661): a dispatched agent has no session record, so gate 2 is
     // blind to it, and gate 3 reads only whether a sentinel FILE exists — never
     // whose claim it carries. See `agent_ownership_blocks`.
+    // #5829: recorded as its OWN verdict kind, because sparing a live agent's
+    // tree is the one refusal the operator must be told about by name — see
+    // `ReclaimVerdict::BlockedByAgent`.
     if let Some(reason) = agent_ownership_blocks(path, agent_state) {
-        return ReclaimVerdict::blocked(reason);
+        return ReclaimVerdict::blocked_by_agent(reason);
     }
     // Gate 5 (#2919): the merged PR is the landing evidence DOC-52 §3.4 makes
     // the reclamation trigger. Everything else — including "we could not find
@@ -787,6 +815,19 @@ pub(crate) struct ReclaimSurvey {
     /// establishing that 169 unknowns against the real store were repos the
     /// authenticated account cannot see plus detached HEADs, not a second bug.
     pub pr_state_unknown: usize,
+    /// Worktrees spared because a DISPATCHED AGENT owns them, as
+    /// `"<path>: <reason>"` (#5829).
+    ///
+    /// Why: gate 4 has refused these since #5661, but the refusal never left
+    /// the daemon — the prune route returns counts plus the removed and
+    /// re-check-refused lists, and a candidate blocked during CLASSIFICATION
+    /// appears in none of them. So `--merged-prs --force` printed
+    /// `reclaimed 0 worktree(s)` and named neither the worktree it protected
+    /// nor the agent it protected it for. A guard the operator cannot observe
+    /// cannot be trusted or debugged in the field, and #5829 asks for the skip
+    /// to say why.
+    /// Test: `survey_discloses_a_live_agents_spared_worktree`.
+    pub agent_owned: Vec<String>,
     /// How many candidates the survey never inspected, because its classify
     /// deadline expired first.
     ///
@@ -815,6 +856,7 @@ impl ReclaimSurvey {
             blocked: 0,
             unmeasured: 0,
             pr_state_unknown: 0,
+            agent_owned: Vec::new(),
             candidates: Vec::new(),
         };
         for c in &candidates {
@@ -837,6 +879,12 @@ impl ReclaimSurvey {
             }
             if c.pr == BranchPrState::Unknown {
                 out.pr_state_unknown += 1;
+            }
+            // #5829: collected here, with the totals, so the disclosed list can
+            // never disagree with the candidate list it is derived from.
+            if let ReclaimVerdict::BlockedByAgent { reason } = &c.verdict {
+                out.agent_owned
+                    .push(format!("{}: {reason}", c.path.display()));
             }
             if matches!(&c.verdict, ReclaimVerdict::Blocked { reason } if reason == NOT_INSPECTED_REASON)
             {

@@ -95,10 +95,17 @@ fn wt() -> PathBuf {
     PathBuf::from("/tmp/.worktrees/worktree-2919")
 }
 
+/// The refusal text of any blocking verdict, whichever gate produced it.
+///
+/// Both refusal kinds are accepted so that the tests aimed at gates 1-3, 5 and
+/// 6 keep asserting on their own gate's wording rather than on which variant
+/// carries it (#5829).
 fn reason(v: &ReclaimVerdict) -> String {
     match v {
-        ReclaimVerdict::Blocked { reason } => reason.clone(),
-        ReclaimVerdict::Reclaimable { pr } => panic!("expected Blocked, got Reclaimable {pr}"),
+        ReclaimVerdict::Blocked { reason } | ReclaimVerdict::BlockedByAgent { reason } => {
+            reason.clone()
+        }
+        ReclaimVerdict::Reclaimable { pr } => panic!("expected a refusal, got Reclaimable {pr}"),
     }
 }
 
@@ -348,6 +355,78 @@ fn classify_blocks_an_agent_the_registry_never_heard_of() {
     );
     assert!(!v.is_reclaimable(), "{v:?}");
     assert!(reason(&v).contains("undeterminable"), "{}", reason(&v));
+}
+
+#[test]
+fn classify_records_an_agent_refusal_as_its_own_verdict_kind() {
+    // #5829: the refusal reached the operator as nothing at all. Gate 4 spared
+    // the tree — correctly, since #5661 — but returned an anonymous `Blocked`,
+    // and a candidate blocked during classification appears in none of the
+    // lists the prune route returns. So the survey now has to be able to TELL
+    // this refusal from the other five, without matching on its wording.
+    //
+    // Both registry answers that refuse are pinned, because the post-restart
+    // `Unknown` case is the one a fail-open implementation would quietly
+    // reclassify as an ordinary block.
+    let fx = GitWorktreeFixture::new();
+    for (name, probe, agent) in [
+        (
+            "live-agent-5829",
+            &agent_live as &dyn Fn(&AgentWorktreeOwner) -> AgentDelegationState,
+            "agent-still-writing",
+        ),
+        (
+            "forgotten-agent-5829",
+            &no_agents,
+            "agent-lost-to-a-restart",
+        ),
+    ] {
+        let path = agent_store_worktree(&fx, name);
+        GitWorktreeFixture::stamp_agent_sentinel(&path, agent);
+        let v = classify(
+            &path,
+            Admission::Admitted,
+            false,
+            &merged(105),
+            &inspect_dirt,
+            probe,
+        );
+        assert!(
+            matches!(v, ReclaimVerdict::BlockedByAgent { .. }),
+            "an agent-ownership refusal must be its own verdict kind, got {v:?}"
+        );
+        assert!(reason(&v).contains(agent), "{}", reason(&v));
+    }
+}
+
+#[test]
+fn classify_reserves_the_agent_verdict_for_agent_refusals() {
+    // The complement, and the reason this is worth a test: if every refusal
+    // collapsed into `BlockedByAgent`, the operator surface would report a dirty
+    // tree or an open PR as "a dispatched agent owns it" and send the operator
+    // hunting for an agent that does not exist.
+    let dirty_tree = classify_no_agent(
+        &wt(),
+        Admission::Admitted,
+        false,
+        &merged(106),
+        &dirty as &dyn Fn(&Path) -> Option<DirtyWorktree>,
+    );
+    assert!(
+        matches!(dirty_tree, ReclaimVerdict::Blocked { .. }),
+        "a dirty tree is not an agent refusal: {dirty_tree:?}"
+    );
+    let open_pr = classify_no_agent(
+        &wt(),
+        Admission::Admitted,
+        false,
+        &BranchPrState::Open { pr: 107 },
+        &clean,
+    );
+    assert!(
+        matches!(open_pr, ReclaimVerdict::Blocked { .. }),
+        "an open PR is not an agent refusal: {open_pr:?}"
+    );
 }
 
 #[test]

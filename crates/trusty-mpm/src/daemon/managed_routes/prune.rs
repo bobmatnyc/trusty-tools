@@ -253,6 +253,11 @@ pub async fn prune_worktrees_route(
                         "removed_bytes": o.removed_bytes,
                         "refused_at_recheck": o.refused_at_recheck,
                         "removal_failed": o.removal_failed,
+                        // #5829: the agent-ownership gate has spared these
+                        // since #5661, but reported nothing — so a run that
+                        // protected a live agent's tree was indistinguishable
+                        // from one that found nothing to reclaim.
+                        "spared_agent_owned": o.survey.agent_owned,
                         "reclaimable": o.survey.reclaimable,
                         "reclaimable_measured": o.survey.reclaimable_measured,
                         "reclaimable_bytes": o.survey.reclaimable_bytes,

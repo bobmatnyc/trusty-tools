@@ -485,8 +485,18 @@ pub(crate) enum SessionAction {
     /// `--merged-prs` (#2919) adds a second, independent reclaim pass: worktrees
     /// whose BRANCH has a merged pull request, which is the terminal state
     /// DOC-52 §3.4 makes the reclamation trigger. It is opt-in because it is the
-    /// only path that acts on GitHub state; nothing automatic ever runs it, and
-    /// it still refuses any worktree a session claims or that holds unsaved work.
+    /// only path that acts on GitHub state; nothing automatic ever runs it.
+    ///
+    /// What that pass refuses, stated per owner because the two are checked by
+    /// DIFFERENT gates (#5829): a worktree a managed SESSION claims, and one
+    /// holding unsaved work, are refused by the session-record and dirty-tree
+    /// gates. A worktree a DISPATCHED AGENT owns is refused by neither of those
+    /// — an agent has no session record, and an agent that has committed and
+    /// pushed has a clean tree — so it is refused by its own gate, which reads
+    /// the ownership sentinel and the delegation registry (#5661). That gate
+    /// permits deletion only when the registry can positively call the agent
+    /// finished; a registry that cannot answer refuses. Every worktree it spares
+    /// is now reported with the agent it was spared for.
     /// Test: `cli_parses_session_prune_worktrees`,
     /// `cli_prune_worktrees_discard_dirty_is_opt_in`,
     /// `cli_prune_worktrees_merged_prs_is_opt_in`.
