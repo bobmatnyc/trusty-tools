@@ -26,11 +26,14 @@
 //! immediate re-poll after any action that changed the fleet.
 //! Test: the pure notice text is not independently unit-tested (it is a
 //! terminal string, not branch logic); the routing itself is covered by
-//! `events::tests` (which `PendingAction` a key produces). The live HTTP calls
-//! are exercised manually / by `tests/session_manager_mvp.rs`'s coverage of
-//! the underlying `DaemonClient` methods.
+//! `events::tests` (which `PendingAction` a key produces).
+//! `project_ctl_decommission_prunes_stale_worktree_bookkeeping` drives
+//! `Decommission` end to end against a stub daemon and a real git worktree.
+//! The remaining live HTTP calls are exercised manually / by
+//! `tests/session_manager_mvp.rs`'s coverage of the underlying `DaemonClient`
+//! methods.
 
-use crate::client::DaemonClient;
+use crate::client::{CommandExecutor, DaemonClient};
 
 use super::events::PendingAction;
 use super::state::ProjectCtlState;
@@ -40,8 +43,11 @@ use super::state::ProjectCtlState;
 /// Why: the single async seam the run loop calls after `handle_key` returns
 /// `Some(action)`.
 /// What: `Launch` is a stub — see the module doc — that sets an explanatory
-/// notice with no daemon call. `Kill`/`Resume`/`Decommission` call the
-/// matching mutating endpoint and, on success, request an immediate re-poll
+/// notice with no daemon call. `Kill`/`Resume` call the matching mutating
+/// endpoint directly; `Decommission` goes through
+/// [`CommandExecutor::decommission_managed_id`], the shared implementation
+/// that also repairs the base repo's worktree bookkeeping (#5913). All three,
+/// on success, request an immediate re-poll
 /// ([`ProjectCtlState::request_repoll`]) so the fleet reflects the change
 /// now. `Attach` fetches and displays the tmux attach command (read-only —
 /// no repoll). `SubmitConfig` (DOC-35 §6, #2120) PATCHes the config form's
@@ -71,10 +77,13 @@ pub(crate) async fn dispatch(
             apply_mutation_result(state, result, "resumed");
         }
         PendingAction::Decommission(id) => {
+            // #5913: route through the shared implementation, not the raw
+            // endpoint — the endpoint alone skips the base-repo worktree
+            // bookkeeping repair, which is the divergence #5913 exists to close.
             // The notice reports the state change; the workspace verdict rides on
             // the outcome for the CLI's message (#5899).
-            let result = client
-                .decommission_managed_session(&id)
+            let result = CommandExecutor::from_daemon_client(client.clone())
+                .decommission_managed_id(&id)
                 .await
                 .map(|outcome| outcome.summary);
             apply_mutation_result(state, result, "decommissioned");

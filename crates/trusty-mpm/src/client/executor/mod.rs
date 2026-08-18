@@ -79,6 +79,23 @@ impl CommandExecutor {
         }
     }
 
+    /// Build an executor around an existing [`DaemonClient`].
+    ///
+    /// Why (#5913): a UI that already holds a `DaemonClient` — the `tm projects`
+    /// TUI holds one for its poll loop — still has to reach the executor to get
+    /// the shared implementations that wrap a raw endpoint in extra work, such as
+    /// [`decommission_managed_id`](Self::decommission_managed_id)'s worktree
+    /// bookkeeping repair. Without this, that UI's only cheap option is calling
+    /// the endpoint directly and silently skipping the wrapper, which is exactly
+    /// how `tui::project_ctl` came to bypass the shared decommission path.
+    /// What: adopts the passed client verbatim. `DaemonClient` is cheap to clone
+    /// (a `String` plus an `Arc`-backed `reqwest::Client`), so a caller holding a
+    /// `&DaemonClient` builds one per action without minting a new pool.
+    /// Test: `project_ctl_decommission_prunes_stale_worktree_bookkeeping`.
+    pub fn from_daemon_client(client: DaemonClient) -> Self {
+        Self { client }
+    }
+
     /// The underlying daemon client.
     ///
     /// Why: a UI's alert loop and pairing flow need direct client access
