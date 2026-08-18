@@ -696,7 +696,16 @@ impl Session {
     /// What: compares derived names, and only among local targets — a remote
     /// `owner/repo` cannot collide with a path, because its owner is GitHub's
     /// and a local one is always `local/`.
-    /// Test: `super::session_tests::a_second_local_path_with_the_same_basename_is_refused`.
+    ///
+    /// **The comparison is case-folded** ([`crate::local_repo::case_fold`]):
+    /// `derive_name` preserves case, so `/a/Apex` and `/b/apex` derive
+    /// `local/Apex` and `local/apex` — two different strings that are the same
+    /// directory on a case-insensitive, case-preserving filesystem (APFS's
+    /// default). An unfolded comparison let that pair through and registered
+    /// both, so the second registration silently pointed at the first's
+    /// checkout the moment `clone_all` ran.
+    /// Test: `super::session_tests::a_second_local_path_with_the_same_basename_is_refused`,
+    /// `super::session_tests::a_second_local_path_that_differs_only_by_case_is_refused`.
     fn refuse_shared_checkout(
         registered: &[registry::Target],
         incoming: &registry::Target,
@@ -705,11 +714,16 @@ impl Session {
             return Ok(());
         };
         let name = crate::local_repo::derive_name(path)?;
+        let name_fold = crate::local_repo::case_fold(&name);
         for existing in registered {
             let registry::Target::LocalRepo { path: other } = existing else {
                 continue;
             };
-            if crate::local_repo::derive_name(other).ok().as_deref() == Some(name.as_str()) {
+            let collides = crate::local_repo::derive_name(other)
+                .ok()
+                .map(|other_name| crate::local_repo::case_fold(&other_name))
+                .is_some_and(|other_fold| other_fold == name_fold);
+            if collides {
                 return Err(AuditError::CollidingCheckouts {
                     first: other.display().to_string(),
                     second: path.display().to_string(),
@@ -1976,6 +1990,57 @@ trusty-review = "0.15.1"
                 "{err}"
             );
         }
+
+        let registered = session
+            .execute(Command::ListTargets)
+            .await
+            .expect("the listing reads");
+        let Outcome::Targets(list) = registered else {
+            panic!("ListTargets must yield a Targets outcome");
+        };
+        assert_eq!(list.targets.len(), 1, "{:?}", list.targets);
+    }
+
+    /// 🔴 On a case-insensitive, case-preserving filesystem (APFS's default —
+    /// the filesystem this feature runs on) `repos/local/Apex` and
+    /// `repos/local/apex` are ONE directory, but `derive_name` preserves case.
+    /// Before the comparison in `refuse_shared_checkout` was case-folded this
+    /// pair registered as two distinct targets, and the second's later
+    /// `clone_all` reused the first's on-disk tree and reported it as
+    /// independently audited — the #5896 wrong-corpus family.
+    #[tokio::test]
+    async fn a_second_local_path_that_differs_only_by_case_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = tmp.path().join("a/Apex");
+        let second = tmp.path().join("b/apex");
+        crate::local_repo::local_repo_tests::source_repo(&first);
+        crate::local_repo::local_repo_tests::source_repo(&second);
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS)
+            .with_repo_probe(validate::RepoProbe::unusable());
+
+        session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: first.display().to_string(),
+            })
+            .await
+            .expect("the first registers");
+
+        let err = session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: second.display().to_string(),
+            })
+            .await
+            .expect_err("a case-only difference must still be refused as a collision");
+        let AuditError::CollidingCheckouts { name, .. } = &err else {
+            panic!("expected CollidingCheckouts, got {err:?}");
+        };
+        assert_eq!(name.to_ascii_lowercase(), "local/apex");
+        assert!(
+            err.to_string().contains(&first.display().to_string()),
+            "{err}"
+        );
 
         let registered = session
             .execute(Command::ListTargets)

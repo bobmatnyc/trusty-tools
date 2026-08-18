@@ -36,6 +36,20 @@
 //! why the rule is syntactic rather than "an existing directory".
 //!
 //! Test: `super::local_repo_tests`.
+//!
+//! ## Trust boundary
+//!
+//! A local-path line in `engagement.toml` or `repos.txt` is as trusted as a
+//! shell command the operator runs directly: it can name any readable git
+//! repository on the machine, including another engagement's checkout or
+//! anything else the operator's own account can read. There is no sandbox
+//! that confines a local target to "under this engagement's source
+//! directory" — [`is_local_spec`] decides the spec's MEANING syntactically,
+//! and deciding its REACH was a separate question this feature deliberately
+//! left unanswered. The operator who can type a path into `repos.txt` already
+//! had that same filesystem access before this feature existed; this module
+//! adds a way to point the audit at it, not a new privilege. State this
+//! plainly so a future reviewer sees the boundary was considered, not missed.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -142,6 +156,37 @@ pub fn derive_name(path: &Path) -> Result<String, AuditError> {
     Ok(format!("{LOCAL_OWNER}/{name}"))
 }
 
+/// Case-fold a derived name or destination path for a collision comparison.
+///
+/// Why: on a case-insensitive, case-preserving filesystem — APFS's default
+/// mode, and the filesystem this feature runs on — `repos/local/Apex` and
+/// `repos/local/apex` are ONE directory, but [`derive_name`] preserves case on
+/// purpose (the operator's basename is what an operator recognises). A
+/// collision gate that compares the derived names or destinations as plain
+/// strings sees two different values and misses the collision: the second
+/// registration or clone lands in the first's checkout and is reported as
+/// independently audited, having actually read the first repository's
+/// history. Folding only the *comparison*, not [`derive_name`]'s output,
+/// keeps the on-disk directory name exactly what the operator typed.
+///
+/// **Unconditional and ASCII-only.** Applied to every comparison in both
+/// collision gates — [`crate::clone::refuse_collisions`] and
+/// [`crate::session::Session::refuse_shared_checkout`] — not only when the
+/// two paths are known to share a filesystem: a false-positive refusal of a
+/// genuinely distinct `Apex`/`apex` pair on a case-sensitive filesystem costs
+/// far less than a silently misattributed audit. The fold is
+/// [`str::to_ascii_lowercase`], which folds `A`–`Z` only; a non-ASCII case
+/// pair (Turkish İ/i, German ẞ/ß) is not folded further by this function.
+/// That is a narrower guarantee than a full Unicode case fold, not a
+/// regression — those pairs were compared byte-for-byte before this function
+/// existed, so this can only catch more collisions, never fewer.
+/// Test: `super::local_repo_tests::case_folding_is_ascii_only`,
+/// `crate::clone::clone_tests::two_paths_that_differ_only_by_case_are_refused_together`,
+/// `crate::session::session_tests::a_second_local_path_that_differs_only_by_case_is_refused`.
+pub(crate) fn case_fold(s: &str) -> String {
+    s.to_ascii_lowercase()
+}
+
 /// Prove this path is a repository the audit can read, without changing it.
 ///
 /// Why: a remote target is validated by a GitHub probe; a local one has no such
@@ -183,21 +228,30 @@ pub async fn inspect(path: &Path) -> Result<(), String> {
     }
     std::fs::read_dir(path).map_err(|source| format!("it is not readable: {source}"))?;
 
-    // One invocation answers both, and fails as a unit when the path is not a
-    // repository at all — which is the message that has to come first.
-    let flags = rev_parse(path, &["--is-bare-repository", "--is-shallow-repository"])
-        .await
-        .map_err(|_| "it is not a git repository".to_owned())?;
-    let bare = flags.first().is_some_and(|line| line == "true");
-    let shallow = flags.get(1).is_some_and(|line| line == "true");
+    // Folded into one round trip rather than a bare-only follow-up call for
+    // `--show-toplevel`: a bare repository has no working tree, so that flag
+    // alone fails the whole invocation even though the other two still print —
+    // `rev_parse_lenient` keeps that partial answer instead of discarding it.
+    let lines = rev_parse_lenient(
+        path,
+        &[
+            "--is-bare-repository",
+            "--is-shallow-repository",
+            "--show-toplevel",
+        ],
+    )
+    .await;
+    if lines.len() < 2 {
+        return Err("it is not a git repository".to_owned());
+    }
+    let bare = lines[0] == "true";
+    let shallow = lines[1] == "true";
 
     if !bare {
-        let top = rev_parse(path, &["--show-toplevel"])
-            .await
-            .ok()
-            .and_then(|lines| lines.into_iter().next())
+        let top = lines
+            .get(2)
             .ok_or_else(|| "it is not a git repository".to_owned())?;
-        if !same_directory(path, Path::new(&top)) {
+        if !same_directory(path, Path::new(top)) {
             return Err(format!(
                 "it is a subdirectory of the repository at {top} — register that path instead"
             ));
@@ -268,23 +322,52 @@ pub async fn clone_into(source: &Path, into: &Path) -> Result<(), String> {
     ))
 }
 
+/// `git -C <path> rev-parse <args>`, as an argv.
+fn rev_parse_argv(path: &Path, args: &[&str]) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = vec!["-C".into(), path.as_os_str().to_os_string()];
+    argv.push("rev-parse".into());
+    argv.extend(args.iter().map(OsString::from));
+    argv
+}
+
+/// `stdout` split into trimmed lines.
+fn rev_parse_lines(stdout: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(|line| line.trim().to_owned())
+        .collect()
+}
+
 /// `git rev-parse <args>` against `path`, as trimmed stdout lines.
 ///
 /// Read-only in every form used here: `rev-parse` resolves refs and reads
 /// configuration, and writes nothing — which is what keeps the module's
 /// invariant true for the validation half as well as the clone.
 async fn rev_parse(path: &Path, args: &[&str]) -> Result<Vec<String>, ()> {
-    let mut argv: Vec<OsString> = vec!["-C".into(), path.as_os_str().to_os_string()];
-    argv.push("rev-parse".into());
-    argv.extend(args.iter().map(OsString::from));
-    let output = git(argv).output().await.map_err(|_| ())?;
+    let output = git(rev_parse_argv(path, args))
+        .output()
+        .await
+        .map_err(|_| ())?;
     if !output.status.success() {
         return Err(());
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|line| line.trim().to_owned())
-        .collect())
+    Ok(rev_parse_lines(&output.stdout))
+}
+
+/// `git rev-parse <args>` against `path`, tolerating a non-zero exit.
+///
+/// Why: [`inspect`] folds `--is-bare-repository`, `--is-shallow-repository`
+/// and `--show-toplevel` into one invocation, and `--show-toplevel` fails on
+/// its own for a bare repository (no working tree) even though the two flags
+/// ahead of it already printed. [`rev_parse`]'s success gate would discard
+/// that partial stdout; this variant keeps it.
+/// What: empty only when the process could not be spawned — the same failure
+/// [`rev_parse`] maps to `Err(())`.
+async fn rev_parse_lenient(path: &Path, args: &[&str]) -> Vec<String> {
+    match git(rev_parse_argv(path, args)).output().await {
+        Ok(output) => rev_parse_lines(&output.stdout),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// A `git` child with the ambient repository environment cleared.
@@ -399,6 +482,20 @@ pub(crate) mod local_repo_tests {
         // what stops a derived name reaching a path builder that refuses it.
         let name = derive_name(Path::new("/srv/my repo")).expect("a name");
         crate::clone::split_name(&name).expect("the derived name is a usable owner/name");
+    }
+
+    /// 🔴 The fix for the case-insensitive-filesystem collision (#6001 follow-up):
+    /// `Apex` and `apex` fold to the same string, which is what makes both
+    /// collision gates catch them. Also documents the stated ASCII-only scope —
+    /// a non-ASCII case pair is left exactly as case-sensitive as it was before
+    /// this function existed, never worse.
+    #[test]
+    fn case_folding_is_ascii_only() {
+        assert_eq!(case_fold("Apex"), "apex");
+        assert_eq!(case_fold("local/Apex"), "local/apex");
+        assert_eq!(case_fold("apex"), case_fold("APEX"));
+        // Non-ASCII: no further folding is claimed or attempted.
+        assert_ne!(case_fold("İstanbul"), case_fold("istanbul"));
     }
 
     #[test]

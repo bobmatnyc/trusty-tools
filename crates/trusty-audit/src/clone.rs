@@ -246,11 +246,23 @@ fn resolve(spec: &str) -> Result<(String, Source), AuditError> {
 /// audited having read the first one's history. Refusing the whole request is
 /// the same shape as the name check beside it: nothing is acquired when the
 /// request cannot be honoured as asked.
-/// Test: `super::clone_tests::two_paths_with_one_basename_are_refused_together`.
+///
+/// **The comparison is case-folded** ([`local_repo::case_fold`]): on a
+/// case-insensitive, case-preserving filesystem — APFS's default, and the one
+/// this feature runs on — `repos/local/Apex` and `repos/local/apex` are ONE
+/// directory on disk even though [`derive_name`](local_repo::derive_name)
+/// preserves case, so a plain string comparison of `dest` misses exactly the
+/// collision this function exists to catch. Folding is unconditional, not
+/// gated on detecting the filesystem's case sensitivity — a false-positive
+/// refusal of a genuinely distinct pair on a case-sensitive filesystem is far
+/// cheaper than a misattributed audit.
+/// Test: `super::clone_tests::two_paths_with_one_basename_are_refused_together`,
+/// `super::clone_tests::two_paths_that_differ_only_by_case_are_refused_together`.
 fn refuse_collisions(planned: &[(String, Source, PathBuf, PathBuf)]) -> Result<(), AuditError> {
     for (index, (name, source, dest, _)) in planned.iter().enumerate() {
+        let dest_fold = local_repo::case_fold(&dest.to_string_lossy());
         for (other_name, other_source, other_dest, _) in &planned[index + 1..] {
-            if dest != other_dest {
+            if dest_fold != local_repo::case_fold(&other_dest.to_string_lossy()) {
                 continue;
             }
             // The same repository listed twice is the idempotent case, not a
@@ -1342,6 +1354,49 @@ mod clone_tests {
             panic!("expected CollidingCheckouts, got {err:?}");
         };
         assert_eq!(name, "local/apex");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(&first.display().to_string()),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&second.display().to_string()),
+            "{rendered}"
+        );
+        assert!(
+            !work.path(Area::Repos).join("local").exists(),
+            "nothing may be acquired when the request is refused"
+        );
+    }
+
+    /// 🔴 On a case-insensitive, case-preserving filesystem (APFS's default —
+    /// the filesystem this feature runs on) `repos/local/Apex` and
+    /// `repos/local/apex` are ONE directory, but [`local_repo::derive_name`]
+    /// preserves case, so before the collision comparison was case-folded this
+    /// case pair was silently misattributed rather than refused: `clone_all`
+    /// returned `Ok` with the second repository reported as `CloneState::Reused`
+    /// against the first repository's on-disk tree, not `CollidingCheckouts`.
+    #[tokio::test]
+    async fn two_paths_that_differ_only_by_case_are_refused_together() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let first = tmp.path().join("a/Apex");
+        let second = tmp.path().join("b/apex");
+        source_repo(&first);
+        source_repo(&second);
+
+        let err = clone_all(
+            &work,
+            &[first.display().to_string(), second.display().to_string()],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect_err("a case-only difference must still be refused as a collision");
+        let AuditError::CollidingCheckouts { name, .. } = &err else {
+            panic!("expected CollidingCheckouts, got {err:?}");
+        };
+        assert_eq!(name.to_ascii_lowercase(), "local/apex");
         let rendered = err.to_string();
         assert!(
             rendered.contains(&first.display().to_string()),
