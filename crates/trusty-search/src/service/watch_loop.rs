@@ -46,17 +46,34 @@ pub struct WatcherTask {
 }
 
 impl WatcherTask {
-    /// Stop watching: abort the consumer task and drop the OS watcher.
+    /// Stop watching and WAIT for the consumer task to terminate.
     ///
-    /// Why: lets the [`crate::service::watcher_manager::WatcherManager`] tear a
-    /// single watcher down deterministically (e.g. on `DELETE /indexes/:id` or
-    /// graceful shutdown) without waiting for the value to be dropped at an
-    /// `await` boundary.
-    /// What: aborts the consumer `JoinHandle`; the `FileWatcher` is dropped when
-    /// `self` is consumed, releasing the kqueue/inotify/fsevent handle.
-    /// Test: `watcher_task_stop_aborts_consumer`.
-    pub fn stop(self) {
+    /// Why: the consumer task owns a clone of the index's
+    /// `Arc<RwLock<CodeIndexer>>`, and that indexer owns the index's open redb
+    /// corpus. redb is single-open, so until the task is gone the corpus file
+    /// cannot be reopened. `abort()` alone does not give that: it drops the
+    /// future inline only when the task is idle, and a task that is actively
+    /// running keeps its captured `Arc` until it reaches its next await point on
+    /// some other worker thread. `DELETE /indexes/:id` then released its
+    /// teardown guard while the previous generation's corpus was still open, so
+    /// a recreate under the same id hit `DatabaseAlreadyOpen`, set
+    /// `corpus_open_failed`, and answered `500` — see #3049 and
+    /// `unregister_index`. Measured: the watcher held the indexer at the end of
+    /// every one of 60 delete runs; the test only passed because the drop
+    /// usually landed inside `open_corpus_with_retry`'s single 50 ms retry.
+    /// What: aborts the consumer `JoinHandle` and awaits it. A cancelled task
+    /// resolves to `Err(JoinError::Cancelled)`, which is the expected outcome
+    /// and is discarded. The `FileWatcher` is dropped when `self` is dropped at
+    /// the end of the call, releasing the kqueue/inotify/fsevent handle. The
+    /// wait is bounded by construction: an idle or lock-parked task is dropped
+    /// by `abort()` itself, and a running one cancels at its next await.
+    /// Test: `watcher_task_stop_aborts_consumer`,
+    /// `stop_for_index_releases_the_indexer_before_it_returns`.
+    pub async fn stop(mut self) {
         self.join.abort();
+        // `JoinHandle` is `Unpin` and cannot be moved out of `self` (this type
+        // has a `Drop` impl), so await it through a `&mut` borrow.
+        let _ = (&mut self.join).await;
         // `_watcher` drops here, terminating the OS watch.
     }
 }
@@ -744,11 +761,12 @@ mod tests {
         )
         .expect("watch loop starts");
 
-        // Stop immediately — the OS watch is dropped and the consumer aborted.
-        task.stop();
+        // Stop immediately. #3049: `stop` now AWAITS the consumer's termination,
+        // so there is no in-flight teardown left to sleep for — the settle sleep
+        // this replaces was the only thing standing between the abort and the
+        // write below.
+        task.stop().await;
 
-        // Allow any in-flight teardown to settle, then write a file.
-        tokio::time::sleep(Duration::from_millis(150)).await;
         tokio::fs::write(dir.path().join("after_stop.rs"), "fn z() {}\n")
             .await
             .expect("write file");
