@@ -21,7 +21,8 @@ use clap::Parser;
 use trusty_audit::cli::{self, Cli};
 use trusty_audit::config::EngagementConfig;
 use trusty_audit::progress::terminal::TerminalProgress;
-use trusty_audit::session::Session;
+use trusty_audit::run::RunOptions;
+use trusty_audit::session::{Command, Session};
 use trusty_audit::workdir::{WORKDIR_ENV, WorkDir};
 
 // #5495: installing the pinned tools downloads, so `execute` is async and this
@@ -51,11 +52,29 @@ async fn main() -> Result<()> {
     let command = cli.to_command();
     let config_path = EngagementConfig::resolve_path(cli.config.clone(), &cwd);
 
+    // #5885: a bare launch ON A TERMINAL walks the operator through registration
+    // and on into the sweep, instead of printing a card telling them to run a
+    // different command. `/dev/tty` is the probe, exactly as the credential
+    // prompt uses it (#5868) — under `curl … | sh` stdin is the pipe carrying
+    // the script, so it is never the thing to ask on. No terminal means no
+    // interactive path and the launch prints the card it always did.
+    let mut terminal = cli::registration::is_interactive(&command)
+        .then(cli::credential::DevTty::open)
+        .and_then(Result::ok);
+
     // #5868: the terminal prompt lives HERE, in the front end, and only the
     // resolved key crosses into the library — `Session::execute` is what the
     // Tauri shell calls, and it has no terminal to ask on. The source is
     // reported on stderr because stdout carries the report.
-    let credential = cli::credential::resolve_for(&command, &config_path)?;
+    //
+    // #5885: the interactive launch resolves the key the SWEEP needs, before
+    // registration, so the operator answers key → targets → run in that order
+    // rather than being stopped for a credential after naming their targets.
+    let resolving_for = match terminal {
+        Some(_) => Command::Run(RunOptions::default()),
+        None => command.clone(),
+    };
+    let credential = cli::credential::resolve_for(&resolving_for, &config_path)?;
     if let Some(resolved) = &credential {
         eprintln!("{}", resolved.source().describe());
     }
@@ -69,7 +88,13 @@ async fn main() -> Result<()> {
         session = session.with_manifest_path(path);
     }
 
-    let outcome = session.execute(command).await?;
+    // #5885: the interactive launch drives the same `Session::execute` door,
+    // several times — registration, then the guided flow, then the sweep. What
+    // it returns is the last outcome, which is what stdout carries.
+    let outcome = match &mut terminal {
+        Some(tty) => cli::registration::guided_at_the_terminal(&session, tty).await?,
+        None => session.execute(command).await?,
+    };
     print!("{}", cli::render(&outcome));
 
     // #5215/#5555: a sweep that partly failed, or an acquisition that skipped

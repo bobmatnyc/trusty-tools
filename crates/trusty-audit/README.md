@@ -25,14 +25,21 @@ Two constraints are permanent, not phases:
 
 ## Running it
 
-A bare invocation is the entry point. It starts the guided flow, which walks the
-pre-run steps in order (repository selection first, then tooling); it does not
-launch an unattended sweep.
+A bare invocation is the entry point, and on a terminal it is the whole
+engagement: it asks for the audit targets one at a time, registers each as you
+enter it, installs the pinned tools, and then asks before starting the sweep. Run
+it with no controlling terminal — a script, a CI job, `TRUSTY_AUDIT_NO_LAUNCH=1`
+— and it prints the status card instead, prompting for nothing.
 
 ```
-trusty-audit                    # guided flow
+trusty-audit                    # guided flow: register targets, install, sweep
 trusty-audit workdir            # create the working directory, print what lands where
-trusty-audit repos              # repositories this engagement is configured to audit
+trusty-audit add repo OWNER/NAME    # register a repository, after checking it can be read
+trusty-audit add board jira:KEY     # register a JIRA project or Linear team
+trusty-audit targets            # what this engagement is registered to audit
+trusty-audit remove TARGET      # drop a registered target
+trusty-audit repos              # repositories the companion manifest.toml records,
+                                #   which a completed sweep writes — NOT the registry
 trusty-audit tools              # which pinned tools are installed, at which versions
 trusty-audit install            # download and verify the pinned tools
 trusty-audit manifest           # engagement metadata from the companion manifest.toml
@@ -42,6 +49,12 @@ trusty-audit run --fresh        # audit every selected repository again
 trusty-audit package            # assemble the deliverable zip to send back
 trusty-audit audit              # all four of the above, in one invocation
 ```
+
+`targets` and `repos` answer different questions, and reaching for the wrong one
+is the mistake worth naming. `targets` lists the REGISTRY — what `add` wrote, and
+what the sweep will cover. `repos` reads the companion `manifest.toml`, which
+`tga audit` writes once a sweep completes, so before any sweep it is empty no
+matter how many targets are registered.
 
 ## The one-shot run
 

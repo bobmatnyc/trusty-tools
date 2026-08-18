@@ -207,7 +207,8 @@ pub struct WorkDirReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NextStep {
-    /// No repositories are known yet; selection comes first (#5487, #5497).
+    /// Nothing is registered and no manifest names a repository, so naming what
+    /// the engagement covers comes first (#5487, #5497, #5885).
     SelectRepositories,
     /// Repositories are known but tooling is missing (#5491, #5495).
     ///
@@ -859,9 +860,16 @@ impl Session {
 
         // #5502: the epic's pre-sweep order is repo selection, then tooling —
         // so a missing repository set outranks a missing binary.
+        //
+        // #5885: the REGISTRY counts, not only the manifest. `SelectRepositories`
+        // tells the operator to run `add`, and `add` writes the registry — so
+        // reading only the manifest left the flow repeating that instruction
+        // after they had done it, with the manifest not written until a sweep
+        // finishes. Either record means the operator has named an engagement.
         let repos_known = manifest
             .as_ref()
-            .is_some_and(|m| !m.repositories.is_empty());
+            .is_some_and(|m| !m.repositories.is_empty())
+            || !Registry::load(&self.work)?.targets().is_empty();
 
         // #5797: install at the point the flow would otherwise have printed
         // "now go run `install`", and not one step earlier. Repository selection
