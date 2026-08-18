@@ -33,6 +33,7 @@
 //! Test: `bm25_lane_tests.rs`, `tests/bm25_lane_concurrency.rs`,
 //! `tests/bm25_lane_e2e.rs`.
 
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -236,12 +237,17 @@ impl Bm25Lane {
         self.text_budget_bytes
     }
 
-    /// How many palace indexes have been loaded from disk.
+    /// How many palace indexes have been loaded from disk AND made resident.
     ///
     /// Why: distinguishes "the cap is configured" from "the cap did something"
     /// when read alongside [`Self::evicted_count`] — #2846 is the record of a
     /// limit that only ever made the first claim.
-    /// Test: `a_concurrent_fanout_never_exceeds_the_cap`.
+    ///
+    /// A load whose eviction could not free a slot is discarded and NOT counted
+    /// (#5887): it would otherwise over-report in exactly the degraded state an
+    /// operator reads this counter in.
+    /// Test: `a_concurrent_fanout_never_exceeds_the_cap`,
+    /// `a_cold_load_refuses_to_evict_an_unflushable_victim`.
     pub fn loaded_count(&self) -> u64 {
         self.loaded.load(Ordering::Relaxed)
     }
@@ -421,18 +427,24 @@ impl Bm25Lane {
             .context("bm25 snapshot load task failed")?
             .with_context(|| format!("load bm25 snapshot for palace {palace}"))?;
 
-        self.loaded.fetch_add(1, Ordering::Relaxed);
         if resident.len() >= self.max_resident {
-            let (victim, _) = evict_coldest_flushed(&mut resident).with_context(|| {
-                format!(
-                    "no resident bm25 palace could be flushed, so palace {palace} \
+            // A fresh set: this evicts at most once, so there is nothing to carry.
+            let mut unflushable: HashSet<String> = HashSet::new();
+            let (victim, _) =
+                evict_coldest_flushed(&mut resident, &mut unflushable).with_context(|| {
+                    format!(
+                        "no resident bm25 palace could be flushed, so palace {palace} \
                      cannot be made room for without losing another palace's writes"
-                )
-            })?;
+                    )
+                })?;
             self.evicted.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(palace = %victim, "bm25 lane evicted a palace to make room");
         }
         resident.put(palace.to_string(), loaded);
+        // Counted only once the index is resident: the eviction above can fail the
+        // whole call, and a load that was discarded never became a resident
+        // index (#5887).
+        self.loaded.fetch_add(1, Ordering::Relaxed);
         let idx = resident
             .get_mut(palace)
             .context("bm25 index vanished from the LRU immediately after insertion")?;
@@ -465,8 +477,13 @@ impl Bm25Lane {
         };
         let mut resident = self.resident.lock().await;
         let mut total: u64 = resident.iter().map(|(_, idx)| idx.total_text_bytes()).sum();
+        // One set for the whole sweep: an unflushable palace stays resident and
+        // therefore stays coldest, so re-testing it per eviction would re-serialise
+        // its corpus every time (#5887).
+        let mut unflushable: HashSet<String> = HashSet::new();
         while total > budget && resident.len() > 1 {
-            let Some((victim, freed)) = evict_coldest_flushed(&mut resident) else {
+            let Some((victim, freed)) = evict_coldest_flushed(&mut resident, &mut unflushable)
+            else {
                 tracing::warn!(
                     budget_bytes = budget,
                     total_bytes = total,
@@ -501,15 +518,29 @@ impl Bm25Lane {
 /// returned with the retained-text bytes it frees. A palace whose flush fails
 /// stays resident and the next-coldest is tried. `None` means nothing could be
 /// persisted, and the caller must not drop an index anyway.
+///
+/// `skip` carries the palaces whose flush already failed across the calls of one
+/// sweep, and a caller that evicts in a loop MUST reuse one set. A palace that
+/// cannot be flushed stays resident and therefore stays coldest, so without
+/// `skip` it is retried from the top on every later call — and
+/// [`PalaceBm25Index::flush`] clones the whole corpus and serialises it BEFORE
+/// the write that fails, so each retry is O(corpus) wasted under the lane lock
+/// (#5887). Membership is per-sweep, never persisted: the next tick must retry a
+/// palace whose directory has since become writable.
 /// Test: `the_budget_keeps_a_palace_whose_snapshot_cannot_be_flushed`,
-/// `a_cold_load_refuses_to_evict_an_unflushable_victim`.
+/// `a_cold_load_refuses_to_evict_an_unflushable_victim`,
+/// `the_budget_evicts_past_a_palace_it_cannot_flush`.
 fn evict_coldest_flushed(
     resident: &mut LruCache<String, PalaceBm25Index>,
+    skip: &mut HashSet<String>,
 ) -> Option<(String, u64)> {
     // `iter` is most-recently-used first, so `rev` is coldest-first. Collected
     // up front because the flush below needs `&mut` access to the cache.
     let coldest_first: Vec<String> = resident.iter().rev().map(|(k, _)| k.clone()).collect();
     for key in coldest_first {
+        if skip.contains(&key) {
+            continue;
+        }
         let Some(idx) = resident.peek_mut(&key) else {
             continue;
         };
@@ -519,12 +550,17 @@ fn evict_coldest_flushed(
                 "bm25 snapshot flush failed — keeping the index resident rather than \
                  dropping its unflushed writes: {e:#}"
             );
+            skip.insert(key);
             continue;
         }
         let freed = idx.total_text_bytes();
-        // The `None` arm is unreachable: `peek_mut` just resolved this key, and
-        // the caller holds the lane lock across both calls.
-        resident.pop(&key)?;
+        if resident.pop(&key).is_none() {
+            // Unreachable: `peek_mut` just resolved this key and the caller holds
+            // the lane lock across both calls. Returning here would abort the walk
+            // and claim nothing could be persisted, which is a different fact.
+            debug_assert!(false, "bm25 palace {key} vanished between peek_mut and pop");
+            continue;
+        }
         return Some((key, freed));
     }
     None
