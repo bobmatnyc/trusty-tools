@@ -227,35 +227,51 @@ impl PortProber for RealPortProber {
 
 /// Production HTTP health prober using `reqwest::blocking`.
 ///
-/// Why: reqwest is already a workspace dep; blocking client avoids async
-/// complexity in the prober trait while keeping the caller async-friendly.
-/// What: issues GET to `url` with the given timeout; 2xx → Ok, non-2xx → Fail
-/// with status code, connection error → Fail with error text.
-/// Test: `probe_health_ok_on_2xx`, `probe_health_fail_on_503`.
+/// Why: the prober trait is synchronous, so the client has to be blocking — but
+/// `tm`'s `main` is `#[tokio::main]`, so every caller reaches this from inside a
+/// runtime. Building `reqwest::blocking`'s internal runtime there panics with
+/// "Cannot drop a runtime in a context where blocking is not allowed", and even
+/// in release (where reqwest's tripwire compiles out) it parks the calling
+/// thread from inside `poll`. #5965: run the client on a dedicated OS thread and
+/// join it, so the nested runtime never touches an async worker. Same remedy,
+/// same reason as `trusty_common::search_index::best_effort_create_index`.
+/// What: issues GET to `url` with the given timeout on a spawned thread; 2xx →
+/// Ok, non-2xx → Fail with status code, connection error → Fail with error text,
+/// worker panic → Fail.
+/// Test: `probe_health_ok_on_2xx`, `probe_health_fail_on_503`,
+/// `real_http_prober_survives_being_called_inside_a_tokio_runtime`.
 pub struct RealHttpProber;
 
 impl HttpProber for RealHttpProber {
     fn get_health(&self, url: &str, timeout: Duration) -> HealthState {
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return HealthState::Fail {
-                    detail: format!("failed to build HTTP client: {e}"),
-                };
+        let url = url.to_string();
+        // #5965: the blocking client builds its own runtime, which cannot be
+        // dropped inside an async context — keep it off the caller's thread.
+        let worker = std::thread::spawn(move || {
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(timeout)
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    return HealthState::Fail {
+                        detail: format!("failed to build HTTP client: {e}"),
+                    };
+                }
+            };
+            match client.get(&url).send() {
+                Ok(resp) if resp.status().is_success() => HealthState::Ok,
+                Ok(resp) => HealthState::Fail {
+                    detail: format!("HTTP {}", resp.status()),
+                },
+                Err(e) => HealthState::Fail {
+                    detail: e.to_string(),
+                },
             }
-        };
-        match client.get(url).send() {
-            Ok(resp) if resp.status().is_success() => HealthState::Ok,
-            Ok(resp) => HealthState::Fail {
-                detail: format!("HTTP {}", resp.status()),
-            },
-            Err(e) => HealthState::Fail {
-                detail: e.to_string(),
-            },
-        }
+        });
+        worker.join().unwrap_or_else(|_| HealthState::Fail {
+            detail: "health probe thread panicked".to_string(),
+        })
     }
 }
 

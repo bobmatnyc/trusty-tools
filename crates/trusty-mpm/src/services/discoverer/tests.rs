@@ -472,3 +472,27 @@ fn pid_falls_back_to_name_match_when_port_unowned() {
     let status = d.status("test-svc").unwrap();
     assert_eq!(status.pid, Some(7009));
 }
+
+/// `RealHttpProber` must not panic when called from inside a tokio runtime (#5965).
+///
+/// Why: `tm`'s `main` is `#[tokio::main]`, so every `tm services` subcommand that
+/// probes health reaches `get_health` from inside the runtime. Building a
+/// `reqwest::blocking` client there panics with "Cannot drop a runtime in a
+/// context where blocking is not allowed", which aborted `tm services status`
+/// and `tm services list` before they printed anything.
+/// What: calls the real prober from an async context against a closed local
+/// port. The assertion is only that it RETURNS — `Fail` is the expected verdict
+/// since nothing is listening; the panic is what this guards against.
+/// Test: this is the test. Note it can only fail while `debug_assertions` is on
+/// — reqwest's nested-runtime tripwire (`blocking/wait.rs`) compiles away in
+/// release, so `cargo test --release` would pass even with the bug present.
+#[tokio::test]
+async fn real_http_prober_survives_being_called_inside_a_tokio_runtime() {
+    // Port 1 on loopback is not routable to any service, so this fails fast
+    // with a transport error instead of waiting out the timeout.
+    let state = RealHttpProber.get_health("http://127.0.0.1:1/health", Duration::from_millis(250));
+    assert!(
+        matches!(state, HealthState::Fail { .. }),
+        "expected a transport failure against a closed port, got {state:?}"
+    );
+}
