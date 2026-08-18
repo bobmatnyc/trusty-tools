@@ -442,7 +442,7 @@ pub enum AuditError {
     /// What: refuses packaging with the operator's remedy stated directly —
     /// no path or token is named, because there is nothing safe to quote.
     /// Test: `crate::run::github_issues::github_issues_tests::a_mismatched_fingerprint_refuses`,
-    /// `crate::session::session_tests::a_mismatched_github_credential_refuses_packaging`.
+    /// `package::package_tests::packaging_refuses_when_the_active_github_credential_has_changed`.
     #[error(
         "the active GitHub credential differs from the one used during collection; \
          re-authenticate as the original `gh` account or re-run the sweep"
