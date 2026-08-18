@@ -15,6 +15,7 @@
 //! credential-resolution coverage.
 
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_openai::{
@@ -30,6 +31,36 @@ use super::adapter::{self, ModelAdapter};
 use super::anthropic_native;
 use crate::perf::TokenUsage;
 
+/// Ceiling on the TCP+TLS handshake to an LLM endpoint.
+///
+/// Why: #5943 — the shared client was `reqwest::Client::new()`, which carries
+/// no deadline of any kind, so a black-holed SYN left the caller on the OS
+/// retransmit schedule (minutes on macOS) with nothing to interrupt it. Every
+/// endpoint this client talks to — OpenRouter, api.anthropic.com, a loopback
+/// ollama — completes its handshake in well under a second; ten leaves room
+/// for a cold DNS lookup on a slow link without letting an unreachable host
+/// stall an agent turn.
+const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Ceiling on UNINTERRUPTED SILENCE from an LLM endpoint.
+///
+/// Why: #5943 — the failure that motivated this was a half-open listener
+/// (`ollama` LISTENing on :11434 and answering nothing), which no connect
+/// timeout can catch: the connection is established and it is the read that
+/// never completes. The bound is `read_timeout` rather than a blanket
+/// `timeout()` because `timeout()` is a deadline on the WHOLE exchange, and a
+/// completion legitimately runs for minutes — capping it would break real
+/// usage. `read_timeout` resets after every successful read, so a response
+/// that keeps delivering bytes runs as long as it needs and only a connection
+/// that goes silent for the full budget is abandoned.
+/// What: five minutes. The POSTs in this module are non-streaming, so their
+/// whole gap between "request sent" and "first byte back" is one silent
+/// interval — which makes this double as their generation ceiling. The crate
+/// default `max_tokens` is 2048 (`assets/config/default-config.toml`): tens of
+/// seconds from a cloud provider, three to four minutes from the slowest local
+/// CPU ollama model this crate supports.
+const LLM_READ_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Module-level `reqwest::Client` shared across raw LLM POSTs (MIN-2 / #98).
 ///
 /// Why: `reqwest::Client::new()` allocates a fresh connection pool and TLS
@@ -41,13 +72,37 @@ use crate::perf::TokenUsage;
 /// Test: `http_client_returns_same_instance` below.
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
+/// Build a `reqwest::Client` for LLM traffic with the given deadlines.
+///
+/// Why: #5943 — keeping construction separate from the `OnceLock` is what lets
+/// the timeout wiring be exercised with a sub-second budget instead of the
+/// production five minutes, so the regression test runs hermetically against a
+/// local listener rather than waiting out `LLM_READ_TIMEOUT`.
+/// What: applies `connect` as `connect_timeout` and `read` as `read_timeout`.
+/// Sets no total `timeout` — deliberately; see `LLM_READ_TIMEOUT`.
+/// Test: `llm_client_gives_up_on_a_listener_that_never_responds`.
+fn build_llm_client(connect: Duration, read: Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .read_timeout(read)
+        .build()
+}
+
 /// Hand out the shared, lazily-initialized `reqwest::Client`.
 ///
 /// Why: See `HTTP_CLIENT` — connection pooling requires a single instance.
-/// What: Returns a `'static` reference, initializing on first call.
-/// Test: `http_client_returns_same_instance`.
+/// What: Returns a `'static` reference, initializing on first call with the
+/// deadlines in `LLM_CONNECT_TIMEOUT` / `LLM_READ_TIMEOUT`.
+/// Test: `http_client_returns_same_instance`,
+/// `shared_http_client_carries_the_llm_timeout_budget`.
 pub(crate) fn http_client() -> &'static reqwest::Client {
-    HTTP_CLIENT.get_or_init(reqwest::Client::new)
+    HTTP_CLIENT.get_or_init(|| {
+        // `build()` fails only when the TLS backend cannot initialize, and no
+        // LLM call can succeed in that state. Degrading to a deadline-free
+        // `Client::new()` would silently restore #5943, so this fails loudly.
+        build_llm_client(LLM_CONNECT_TIMEOUT, LLM_READ_TIMEOUT)
+            .expect("build LLM http client: TLS backend initialization failed")
+    })
 }
 
 /// Transient HTTP error classifier used by `backon` retry wrappers.
@@ -99,6 +154,16 @@ where
 fn is_transient_anyhow_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         if let Some(re) = cause.downcast_ref::<reqwest::Error>() {
+            // #5943: a timeout means the endpoint delivered nothing for the
+            // entire `LLM_READ_TIMEOUT` budget. Retrying spends three more
+            // budgets — twenty minutes against a wedged endpoint instead of
+            // five — and an endpoint that produced no byte in five minutes
+            // does not produce one on the immediate retry. Connection-refused
+            // and DNS failures stay retryable: they fail in milliseconds and
+            // genuinely do recover.
+            if re.is_timeout() {
+                return false;
+            }
             return match re.status() {
                 Some(status) => is_transient_http_status(status),
                 None => true,
