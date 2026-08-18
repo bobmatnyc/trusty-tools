@@ -53,7 +53,10 @@ const CHUNK_BYTES: usize = 64 * 1024;
 /// `super::super::package_tests::a_member_carrying_the_linear_api_key_is_refused_and_leaves_no_zip`,
 /// `super::super::package_tests::a_member_carrying_several_secrets_is_refused_on_the_first_pass`,
 /// `super::super::package_tests::a_member_carrying_the_github_token_is_refused_and_leaves_no_zip`.
-fn secret_needles<'a>(config: &'a EngagementConfig, github_token: Option<&'a str>) -> Vec<&'a [u8]> {
+fn secret_needles<'a>(
+    config: &'a EngagementConfig,
+    github_token: Option<&'a str>,
+) -> Vec<&'a [u8]> {
     let mut needles: Vec<&[u8]> = config
         .configured_secrets()
         .into_iter()

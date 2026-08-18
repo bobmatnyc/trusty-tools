@@ -482,7 +482,7 @@ where
 /// for what that leaves behind.
 /// Test: `super::run_tests::a_child_that_echoes_the_key_does_not_leave_it_in_the_log`,
 /// `super::run_tests::a_child_that_echoes_a_board_credential_does_not_leave_it_in_the_log`,
-/// `super::run_tests::a_child_that_echoes_the_github_token_does_not_leave_it_in_the_log`.
+/// `super::run_tests::child_output_scrubber_includes_the_github_token`.
 fn child_output_scrubber(
     config: &EngagementConfig,
     github_access: &github_issues::GithubAccess,
