@@ -27,7 +27,7 @@ use std::time::Instant;
 use lru::LruCache;
 use tokio::sync::RwLock;
 
-use crate::core::bm25::Bm25Index;
+use crate::core::bm25::CodeBm25Index;
 use crate::core::chunker::RawChunk;
 use crate::core::embed::Embedder;
 use crate::core::entity::RawEntity;
@@ -178,7 +178,9 @@ pub struct CodeIndexer {
     pub(super) chunk_embeddings: Arc<RwLock<LruCache<String, Vec<f32>>>>,
 
     /// Persistent BM25 index kept hot alongside the HNSW index.
-    pub(super) bm25: Arc<RwLock<Bm25Index>>,
+    ///
+    /// #5828: a trusty-search domain type, not the shared scorer directly.
+    pub(super) bm25: Arc<RwLock<CodeBm25Index>>,
 
     /// LRU cache of query → embedding, keyed by `hash_query`.
     pub(super) query_cache: Arc<Mutex<LruCache<u64, Vec<f32>>>>,
@@ -543,7 +545,7 @@ impl CodeIndexer {
             chunks: Arc::new(RwLock::new(HashMap::new())),
             entities: Arc::new(RwLock::new(HashMap::new())),
             chunk_embeddings: Arc::new(RwLock::new(LruCache::new(emb_cap))),
-            bm25: Arc::new(RwLock::new(Bm25Index::new())),
+            bm25: Arc::new(RwLock::new(CodeBm25Index::new())),
             query_cache: Arc::new(Mutex::new(LruCache::new(cap))),
             symbol_graph: Arc::new(RwLock::new(Arc::new(SymbolGraph::new()))),
             ner: crate::core::ner::NerExtractor::try_load(),

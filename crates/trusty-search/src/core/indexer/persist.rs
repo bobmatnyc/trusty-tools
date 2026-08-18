@@ -400,7 +400,8 @@ impl CodeIndexer {
         // postings cannot linger alongside the new relative-path ones.
         {
             let mut bm25 = self.bm25.write().await;
-            *bm25 = crate::core::bm25::Bm25Index::new();
+            // #5828: reconstruct the trusty-search wrapper, not the shared scorer.
+            *bm25 = crate::core::bm25::CodeBm25Index::new();
             for chunk in &chunks {
                 let text = Self::bm25_doc_text(chunk);
                 bm25.upsert_document(&chunk.id, &text);
