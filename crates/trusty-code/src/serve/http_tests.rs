@@ -19,7 +19,8 @@ use serde_json::{Value, json};
 use tower::util::ServiceExt;
 use trusty_common::mcp::error_codes;
 
-async fn router_and_sessions() -> (Arc<Router>, Arc<SessionRegistry>, SharedWorkstreamStore) {
+pub(super) async fn router_and_sessions()
+-> (Arc<Router>, Arc<SessionRegistry>, SharedWorkstreamStore) {
     let sessions = Arc::new(SessionRegistry::new());
     let workstreams = test_workstreams_store().await;
     let mut router = Router::new();
@@ -33,7 +34,7 @@ async fn router_and_sessions() -> (Arc<Router>, Arc<SessionRegistry>, SharedWork
 /// `workstream.*` just needs SOMETHING to pass to `build_axum_router`
 /// (issue #3297 added the store as a required parameter so
 /// `GET /workstreams/{id}/events` can be merged in).
-async fn test_workstreams_store() -> SharedWorkstreamStore {
+pub(super) async fn test_workstreams_store() -> SharedWorkstreamStore {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("workstreams-test.json");
     let store = crate::workstreams::WorkstreamStore::load(path)
@@ -47,7 +48,7 @@ async fn test_workstreams_store() -> SharedWorkstreamStore {
 /// exercise `GET /health`'s binding field passes to `build_axum_router`
 /// (#4512 made it a required parameter so the daemon can publish which
 /// project it serves).
-fn test_binding() -> Arc<crate::binding::ProjectBinding> {
+pub(super) fn test_binding() -> Arc<crate::binding::ProjectBinding> {
     Arc::new(crate::binding::ProjectBinding::None)
 }
 
