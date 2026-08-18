@@ -572,12 +572,18 @@ async fn verify_model_unavailable_marks_error_refuted_and_preserves_verdict() {
 /// all (it just could not be reached). This is the textbook fail-open bug: an
 /// infrastructure hiccup silently downgraded a real BLOCK to APPROVE.
 /// What: a `LlmError::RateLimited` (a non-alarm, transient error per
-/// `LlmError::is_alarm`) on the ONLY candidate finding must record
-/// `ErrorRefuted` and take path (c) — preserve `primary_verdict` — instead of
-/// path (b) — collapse to APPROVE.
+/// `LlmError::is_alarm`) on the ONLY candidate finding must NOT record plain
+/// `Refuted`, and the round must take a path that preserves `primary_verdict`
+/// instead of path (b) — collapse to APPROVE.
+///
+/// #4459 moved where that lands: an exhausted retry budget now records
+/// `Unverifiable` rather than `ErrorRefuted`, because nothing examined the
+/// finding. The invariant this test was written for is unchanged and still
+/// asserted here — a transient error is never a refutation, and never
+/// fail-opens the review.
 /// Test: this test itself.
 #[tokio::test]
-async fn verify_transient_error_marks_error_refuted_not_plain_refuted() {
+async fn verify_transient_error_is_not_plain_refuted() {
     let verifier: Arc<dyn LlmProvider> = Arc::new(FailingVerifier {
         make_err: || LlmError::RateLimited,
     });
@@ -594,16 +600,22 @@ async fn verify_transient_error_marks_error_refuted_not_plain_refuted() {
     )
     .await;
     assert!(
-        matches!(
-            findings[0].verified,
-            Some(VerifyOutcome::ErrorRefuted { .. })
-        ),
-        "a transient verifier error must map to ErrorRefuted, not plain Refuted (#1876)"
+        !matches!(findings[0].verified, Some(VerifyOutcome::Refuted)),
+        "a transient verifier error must never read as a refutation (#1876)"
+    );
+    assert!(
+        findings[0]
+            .verified
+            .as_ref()
+            .is_some_and(|v| v.is_unverified()),
+        "a transient verifier error must record an unable-to-verify outcome (#1876, #4459), \
+         got {:?}",
+        findings[0].verified
     );
     assert_eq!(
         verdict,
         Verdict::Block,
-        "a transient-error-only round must preserve primary_verdict (path c), \
+        "a transient-error-only round must preserve primary_verdict, \
          not fail-open to APPROVE (path b) (#1876)"
     );
 }
@@ -866,5 +878,316 @@ fn apply_outcome_unverifiable_strips_block_floor_signals() {
         f.confidence <= 0.65,
         "confidence capped, got {}",
         f.confidence
+    );
+}
+
+// ── Fan-out retry and UNVERIFIED accounting (#4459) ───────────────────────────
+
+/// A verifier that fails the first `fail_first` attempts at each distinct
+/// request, then answers CONFIRMED — the shape of a transport blip under
+/// fan-out, where the same call succeeds on a second try.
+struct FlakyVerifier {
+    fail_first: usize,
+    attempts: std::sync::Mutex<std::collections::HashMap<String, usize>>,
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    peak_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    /// Hold each call until this many are in flight at once, so the test
+    /// observes the real ceiling instead of whatever the scheduler happened to
+    /// interleave. `0` disables the rendezvous.
+    rendezvous_at: usize,
+}
+
+impl FlakyVerifier {
+    fn new(fail_first: usize) -> Self {
+        Self {
+            fail_first,
+            attempts: std::sync::Mutex::new(std::collections::HashMap::new()),
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            peak_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rendezvous_at: 0,
+        }
+    }
+
+    fn rendezvous_at(mut self, n: usize) -> Self {
+        self.rendezvous_at = n;
+        self
+    }
+}
+
+#[async_trait]
+impl LlmProvider for FlakyVerifier {
+    fn name(&self) -> &str {
+        "flaky-verifier"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        use std::sync::atomic::Ordering;
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak_in_flight.fetch_max(now, Ordering::SeqCst);
+
+        // Condition polling, never a sleep: yield until the round has as many
+        // calls in flight as the rendezvous asks for, bounded so a wrong
+        // expectation fails the test instead of hanging it.
+        if self.rendezvous_at > 0 {
+            let mut spins = 0;
+            while self.in_flight.load(Ordering::SeqCst) < self.rendezvous_at && spins < 10_000 {
+                spins += 1;
+                tokio::task::yield_now().await;
+            }
+        }
+
+        let key = format!("{:?}", req.messages);
+        let seen = {
+            let mut map = self.attempts.lock().expect("attempt map poisoned");
+            let e = map.entry(key).or_insert(0);
+            *e += 1;
+            *e
+        };
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+
+        if seen <= self.fail_first {
+            return Err(LlmError::Transport("connection reset by peer".into()));
+        }
+        Ok(LlmResponse {
+            text: r#"{"judgment":"CONFIRMED","reason":"present in diff"}"#.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 5,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: None,
+        })
+    }
+}
+
+/// Distinct findings, so each one produces a distinct verifier request.
+fn findings_for_fan_out(n: usize) -> Vec<Finding> {
+    (0..n)
+        .map(|i| {
+            let mut f = Finding::new(
+                format!("src/f{i}.rs"),
+                "logic",
+                format!("bug number {i}"),
+                "fix it",
+                0.95,
+                Effort::High,
+            );
+            f.line = Some(10 + i as u32);
+            f.code_provable = true;
+            f
+        })
+        .collect()
+}
+
+/// Zero-sleep policy: the ladder still runs, the test just does not wait on it.
+fn test_policy(concurrency: usize, max_attempts: u32) -> VerifyPolicy {
+    VerifyPolicy {
+        concurrency,
+        max_attempts,
+        backoff_base_ms: 0,
+    }
+}
+
+/// #4459 (a): a transient transport failure must be RETRIED, and a finding that
+/// succeeds on a later attempt must come back CONFIRMED.
+///
+/// Why: this is the whole bug. Before this fix `verify_one` recorded an outcome
+/// on the FIRST error, so every finding whose call lost the race with the
+/// round's own fan-out was written off unverified — 27 of 29 in the measured
+/// incident — while the same call in isolation succeeded.
+/// What: a verifier that fails each request twice and then answers CONFIRMED,
+/// under a 3-attempt budget. On the pre-fix code this test fails: the outcome is
+/// recorded from attempt 1, so the finding lands on `ErrorRefuted` and the
+/// verifier is never called a second time.
+/// Test: this test itself.
+#[tokio::test]
+async fn verify_transient_failure_is_retried_until_it_succeeds() {
+    let verifier: Arc<dyn LlmProvider> = Arc::new(FlakyVerifier::new(2));
+    let mut findings = vec![finding(Effort::High, 0.95)];
+    let verdict = run_verification_round_with_policy(
+        &verifier,
+        "m",
+        "+ diff",
+        Verdict::Block,
+        &mut findings,
+        None,
+        None,
+        None,
+        test_policy(4, 3),
+    )
+    .await;
+    assert!(
+        matches!(findings[0].verified, Some(VerifyOutcome::Confirmed)),
+        "a transient failure inside the attempt budget must be retried to a real \
+         judgment, got {:?}",
+        findings[0].verified
+    );
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "the confirmed High finding still holds BLOCK"
+    );
+}
+
+/// #4459 (b): a finding the verifier never reaches, on any attempt, is
+/// UNVERIFIED — not refuted, not confirmed — and the run counts it.
+///
+/// Why: recording `ErrorRefuted` states a judgment nothing made, and
+/// `apply_outcome` clamps every refutation variant to 0.10, so the finding
+/// disappeared from the review while the review itself still read clean. The
+/// count is what makes the failure visible to a consumer.
+/// What: a verifier that always returns `Transport`, under a 2-attempt budget.
+/// On the pre-fix code this test fails on the `Unverifiable` assertion — the
+/// outcome was `ErrorRefuted`.
+/// Test: this test itself.
+#[tokio::test]
+async fn verify_permanent_transport_failure_lands_in_unverified() {
+    let verifier: Arc<dyn LlmProvider> = Arc::new(FailingVerifier {
+        make_err: || LlmError::Transport("connection refused".into()),
+    });
+    let mut findings = vec![finding(Effort::High, 0.95)];
+    let verdict = run_verification_round_with_policy(
+        &verifier,
+        "m",
+        "+ diff",
+        Verdict::Block,
+        &mut findings,
+        None,
+        None,
+        None,
+        test_policy(4, 2),
+    )
+    .await;
+
+    let Some(VerifyOutcome::Unverifiable { reason }) = &findings[0].verified else {
+        panic!(
+            "an unreachable verifier must record UNVERIFIED, got {:?}",
+            findings[0].verified
+        );
+    };
+    assert!(
+        reason.contains("2 attempt(s)") && reason.contains("Transport"),
+        "the reason must say what was tried and why it failed, got {reason:?}"
+    );
+    assert_eq!(
+        crate::pipeline::post::count_unverified(&findings),
+        1,
+        "the run must report the finding it could not check"
+    );
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "an unverifiable-only round must preserve primary_verdict, never fail-open \
+         to APPROVE"
+    );
+    assert!(
+        !findings[0].code_provable && findings[0].confidence <= 0.65,
+        "an unverified finding must be demoted so it cannot drive escalation"
+    );
+}
+
+/// #4459 (c): the round honours the configured fan-out ceiling, and every
+/// finding in a wide fan-out still reaches a real judgment.
+///
+/// Why: the ceiling was a hardcoded `4` with no way for an operator to relieve a
+/// provider that was throttling the round. It is now config, and a round that
+/// ignored it would recreate the burst this issue is about.
+/// What: eight findings under a ceiling of 2, against a verifier that fails each
+/// request once before answering. The provider rendezvouses at 2 concurrent
+/// calls (condition polling, no sleep) so the peak is actually observed. On the
+/// pre-fix code this test fails twice over: the width is fixed at 4, and the
+/// single injected failure per finding is never retried.
+/// Test: this test itself.
+#[tokio::test]
+async fn verify_round_never_exceeds_the_configured_concurrency() {
+    use std::sync::atomic::Ordering;
+    let flaky = FlakyVerifier::new(1).rendezvous_at(2);
+    let peak = flaky.peak_in_flight.clone();
+    let verifier: Arc<dyn LlmProvider> = Arc::new(flaky);
+
+    let mut findings = findings_for_fan_out(8);
+    let verdict = run_verification_round_with_policy(
+        &verifier,
+        "m",
+        "+ diff",
+        Verdict::Block,
+        &mut findings,
+        None,
+        None,
+        None,
+        test_policy(2, 3),
+    )
+    .await;
+
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        2,
+        "the round must fan out to exactly the configured width — no wider, and \
+         wide enough that the ceiling is the thing being measured"
+    );
+    for (i, f) in findings.iter().enumerate() {
+        assert!(
+            matches!(f.verified, Some(VerifyOutcome::Confirmed)),
+            "finding {i} must survive its transient failure and be judged, got {:?}",
+            f.verified
+        );
+    }
+    assert_eq!(
+        crate::pipeline::post::count_unverified(&findings),
+        0,
+        "nothing is unverified once every retry succeeded"
+    );
+    assert_eq!(verdict, Verdict::Block);
+}
+
+/// The policy reads operator config and refuses a zero on either count.
+#[test]
+fn policy_from_config_clamps_zero_counts() {
+    let cfg = crate::config::VerificationConfig {
+        enabled: true,
+        liveness_check: true,
+        concurrency: 0,
+        max_attempts: 0,
+    };
+    let policy = VerifyPolicy::from_config(&cfg);
+    assert_eq!(policy.concurrency, 1, "a 0 width must never verify nothing");
+    assert_eq!(
+        policy.max_attempts, 1,
+        "a 0 budget must still make one call"
+    );
+
+    let cfg = crate::config::VerificationConfig {
+        concurrency: 6,
+        max_attempts: 5,
+        ..Default::default()
+    };
+    let policy = VerifyPolicy::from_config(&cfg);
+    assert_eq!(policy.concurrency, 6);
+    assert_eq!(policy.max_attempts, 5);
+}
+
+/// The backoff doubles per attempt and stays inside its jitter band.
+#[test]
+fn backoff_grows_and_stays_within_its_jitter_band() {
+    let policy = VerifyPolicy {
+        concurrency: 4,
+        max_attempts: 4,
+        backoff_base_ms: 200,
+    };
+    assert!(policy.backoff(1).is_zero(), "the first attempt never waits");
+    for (attempt, base) in [(2u32, 200u64), (3, 400), (4, 800)] {
+        let ms = policy.backoff(attempt).as_millis() as u64;
+        assert!(
+            (base..base + base / 4).contains(&ms),
+            "attempt {attempt} must wait {base}ms plus up to 25% jitter, got {ms}ms"
+        );
+    }
+    assert!(
+        VerifyPolicy {
+            backoff_base_ms: 0,
+            ..policy
+        }
+        .backoff(3)
+        .is_zero(),
+        "a zero base disables the wait so tests do not sleep"
     );
 }

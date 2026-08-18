@@ -252,6 +252,26 @@ impl VerifyOutcome {
             }
         }
     }
+
+    /// Does this outcome mean nothing ever rendered a judgment on the finding?
+    ///
+    /// Why (#4459): a consumer deciding whether to trust a review needs one
+    /// number for "how much of this went unchecked", and every surface that
+    /// answered it locally answered it differently. Counting is what makes the
+    /// unable-to-verify case visible instead of silent — a review where the
+    /// verifier was unreachable for most findings must not read the same as one
+    /// where it examined them all.
+    /// What: exhaustive match, no `_` arm, so a new variant forces the decision
+    /// here. True for the three unreachable/unchecked outcomes; false for
+    /// `Confirmed`, `Refuted` (the verifier DID judge), and `Skipped` (below the
+    /// candidate floor — never a question that was asked).
+    /// Test: `is_unverified_covers_every_unable_to_verify_outcome`.
+    pub fn is_unverified(&self) -> bool {
+        match self {
+            Self::Confirmed | Self::Refuted | Self::Skipped => false,
+            Self::ErrorRefuted { .. } | Self::TruncationRefuted | Self::Unverifiable { .. } => true,
+        }
+    }
 }
 
 // ─── Finding category ──────────────────────────────────────────────────────────
@@ -524,6 +544,23 @@ pub struct ReviewResult {
     /// `findings_count_matches_len_on_completed_review` (runner_tests.rs).
     #[serde(default)]
     pub findings_count: usize,
+    /// How many findings nothing ever rendered a judgment on (#4459).
+    ///
+    /// Why: the verifier can fail on most of a review's findings while the
+    /// review still reads clean — that is exactly what #4459 reports, and a
+    /// consumer had no way to see it short of walking `findings` and matching on
+    /// `verified` variants. One integer says how much of this review went
+    /// unchecked, so a consumer can hold a review whose safety net was down
+    /// instead of trusting or discarding it blindly.
+    /// What: the count of findings whose `verified` outcome answers true to
+    /// `VerifyOutcome::is_unverified` — unreachable verifier, truncated
+    /// response, or a claim the pipeline declined to check. Synced at the same
+    /// two canonical exit points as `findings_count`. `#[serde(default)]` keeps
+    /// pre-#4459 serialised results deserialising with `0`.
+    /// Test: `unverified_count_matches_the_unverified_findings` (post_tests),
+    /// `verify_permanent_transport_failure_lands_in_unverified`.
+    #[serde(default)]
+    pub unverified_count: usize,
     /// Per-line inline review comments that were (or, in dry-run, would be)
     /// posted to the PR diff (#1414).
     ///
@@ -666,6 +703,7 @@ impl ReviewResult {
             grade: None,
             findings: Vec::new(),
             findings_count: 0,
+            unverified_count: 0,
             inline_comments: Vec::new(),
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,

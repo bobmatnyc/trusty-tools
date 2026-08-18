@@ -43,9 +43,22 @@
 //! truncated responses), so `rederive_verdict` preserves `primary_verdict`
 //! instead of discarding it.  See `verify_one` for the full rationale.
 //!
+//! ## Fan-out retry and honest UNVERIFIED (#4459)
+//! The round used to fan out at a hardcoded width of 4 with no retry, and in
+//! production that fan-out was the thing breaking it: 27 of 29 findings in one
+//! measured review came back `Transport` while a single call to the same model
+//! in isolation succeeded in ~845 ms, so fabrication detection was effectively
+//! off. `VerifyPolicy` now carries the width and a per-finding attempt budget
+//! from `[verification] concurrency` / `max_attempts`, `verify_one` retries a
+//! transient failure with exponential backoff and jitter, and a finding still
+//! unreachable after the last attempt is recorded `Unverifiable` — counted by
+//! `ReviewResult::unverified_count` — rather than `ErrorRefuted`, which reads as
+//! a judgment nothing made.
+//!
 //! Test: `verify_tests.rs` — candidate selection, CONFIRMED/REFUTED outcomes,
 //! verdict re-derivation, truncation regression (#726), transient-error
-//! fail-open regression (#1876), and liveness-gate logic.
+//! fail-open regression (#1876), fan-out retry / UNVERIFIED accounting (#4459),
+//! and liveness-gate logic.
 
 use std::sync::Arc;
 
@@ -58,6 +71,7 @@ use crate::{
     config::constants::{
         BLOCK_VERDICT_MIN_CONFIDENCE, VERIFY_CANDIDATE_MIN_CONFIDENCE, VERIFY_REFUTED_CONFIDENCE,
     },
+    config::verification::{DEFAULT_VERIFY_CONCURRENCY, DEFAULT_VERIFY_MAX_ATTEMPTS},
     llm::{LlmError, LlmProvider},
     models::{Finding, Verdict, VerifyOutcome},
     pipeline::{
@@ -66,13 +80,91 @@ use crate::{
     },
 };
 
-/// Maximum number of verifier calls to run concurrently.
+/// Base backoff before the second attempt at one finding (#4459).
 ///
-/// Why: verifications are independent per finding, so running them concurrently
-/// cuts wall-clock latency; the bound caps provider concurrency so a PR with
-/// many findings does not burst the verifier model's rate limit.
-/// What: `buffer_unordered(VERIFY_CONCURRENCY)` over the candidate stream.
-const VERIFY_CONCURRENCY: usize = 4;
+/// Why: the ladder has to outlast a provider's throttling window without
+/// stalling a review — 250 / 500 / 1000 ms plus jitter spans the range a
+/// transport blip or a 429 under fan-out clears in, and a default round of 3
+/// attempts adds at most ~750 ms of sleep to a finding that eventually succeeds.
+/// What: attempt *n* (1-based) sleeps `VERIFY_BACKOFF_BASE_MS << (n - 1)` plus
+/// jitter; `VerifyPolicy::backoff_base_ms` overrides it, and `0` disables the
+/// sleep entirely so tests exercise the ladder without waiting.
+const VERIFY_BACKOFF_BASE_MS: u64 = 250;
+
+/// How the round fans out and how hard it retries (#4459).
+///
+/// Why: the fan-out ceiling was a private constant and there was no retry at
+/// all, so a review whose verifier calls hit transport errors had no way to
+/// recover and an operator had no way to relieve the pressure. Both are now
+/// resolved config (`[verification] concurrency` / `max_attempts`), and this
+/// struct is the shape the round reads them through.
+/// What: `concurrency` is the `buffer_unordered` width; `max_attempts` counts
+/// TOTAL attempts per finding, so `1` means no retry; `backoff_base_ms` is the
+/// first sleep in the exponential ladder. Both counts are clamped to ≥ 1 on
+/// construction — a `0` would silently verify nothing.
+/// Test: `verify_transient_failure_is_retried_until_it_succeeds`,
+/// `verify_round_never_exceeds_the_configured_concurrency`,
+/// `policy_from_config_clamps_zero_counts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifyPolicy {
+    /// Verifier calls in flight at once.
+    pub concurrency: usize,
+    /// Total attempts per finding, first call included.
+    pub max_attempts: u32,
+    /// Sleep before the second attempt; doubles each further attempt.
+    pub backoff_base_ms: u64,
+}
+
+impl Default for VerifyPolicy {
+    /// The pre-#4459 fan-out width, plus the retry ladder that width needs.
+    fn default() -> Self {
+        Self {
+            concurrency: DEFAULT_VERIFY_CONCURRENCY,
+            max_attempts: DEFAULT_VERIFY_MAX_ATTEMPTS,
+            backoff_base_ms: VERIFY_BACKOFF_BASE_MS,
+        }
+    }
+}
+
+impl VerifyPolicy {
+    /// Read the policy out of resolved verification config.
+    ///
+    /// Why: `VerificationConfig` owns the env/file precedence; this is the only
+    /// place the pipeline turns it into a fan-out decision.
+    /// What: clamps both counts to ≥ 1 and keeps the default backoff base.
+    /// Test: `policy_from_config_clamps_zero_counts`.
+    pub fn from_config(config: &crate::config::VerificationConfig) -> Self {
+        Self {
+            concurrency: config.concurrency.max(1),
+            max_attempts: config.max_attempts.max(1),
+            backoff_base_ms: VERIFY_BACKOFF_BASE_MS,
+        }
+    }
+
+    /// Sleep before attempt `attempt` (1-based; attempt 1 never sleeps).
+    ///
+    /// Why: a fixed ladder makes every concurrent call retry in lockstep, which
+    /// re-creates the burst that failed in the first place. Jitter spreads the
+    /// retries of a fan-out across the window instead of stacking them.
+    /// What: `backoff_base_ms << (attempt - 2)` plus up to 25% jitter drawn from
+    /// the wall clock. Returns zero when `backoff_base_ms` is zero.
+    /// Test: `backoff_grows_and_stays_within_its_jitter_band`.
+    fn backoff(&self, attempt: u32) -> std::time::Duration {
+        if self.backoff_base_ms == 0 || attempt < 2 {
+            return std::time::Duration::ZERO;
+        }
+        let base = self.backoff_base_ms << (attempt - 2).min(6);
+        // #4459: no `rand` in this crate's graph, and the jitter only has to
+        // decorrelate concurrent retries — nanosecond clock skew between the
+        // in-flight calls is enough for that.
+        let jitter_span = (base / 4).max(1);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0);
+        std::time::Duration::from_millis(base + nanos % jitter_span)
+    }
+}
 
 // ─── Runner seam ──────────────────────────────────────────────────────────────
 
@@ -106,7 +198,7 @@ pub async fn maybe_verify(
         return verdict;
     };
     let role = &config.role_models.verifier;
-    run_verification_round(
+    run_verification_round_with_policy(
         verifier,
         &role.model,
         diff,
@@ -115,6 +207,7 @@ pub async fn maybe_verify(
         Some(role.temperature),
         Some(role.max_tokens),
         author_rationale,
+        VerifyPolicy::from_config(&config.verification),
     )
     .await
 }
@@ -150,6 +243,43 @@ pub async fn run_verification_round(
     max_tokens: Option<u32>,
     author_rationale: Option<&str>,
 ) -> Verdict {
+    run_verification_round_with_policy(
+        verifier,
+        verifier_model,
+        diff,
+        primary_verdict,
+        findings,
+        temperature,
+        max_tokens,
+        author_rationale,
+        VerifyPolicy::default(),
+    )
+    .await
+}
+
+/// Run the verification round under an explicit fan-out policy (#4459).
+///
+/// Why: [`run_verification_round`] is the stable seam its existing callers use;
+/// this is the same round with the concurrency ceiling and retry budget passed
+/// in, so `maybe_verify` can honour operator config and a test can run the
+/// ladder with the sleep set to zero.
+/// What: identical to [`run_verification_round`] except that `policy` replaces
+/// the defaults.
+/// Test: `verify_transient_failure_is_retried_until_it_succeeds`,
+/// `verify_permanent_transport_failure_lands_in_unverified`,
+/// `verify_round_never_exceeds_the_configured_concurrency`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_verification_round_with_policy(
+    verifier: &Arc<dyn LlmProvider>,
+    verifier_model: &str,
+    diff: &str,
+    primary_verdict: Verdict,
+    findings: &mut [Finding],
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+    author_rationale: Option<&str>,
+    policy: VerifyPolicy,
+) -> Verdict {
     // UNKNOWN is terminal — the diff was unassessable, so there is nothing to
     // verify and no verdict to re-derive.
     if primary_verdict == Verdict::Unknown {
@@ -167,6 +297,8 @@ pub async fn run_verification_round(
         candidates = candidate_idxs.len(),
         total = findings.len(),
         primary = %primary_verdict,
+        concurrency = policy.concurrency,
+        max_attempts = policy.max_attempts,
         "verification round: verifying candidate findings"
     );
 
@@ -184,22 +316,26 @@ pub async fn run_verification_round(
                 author_rationale,
             );
             async move {
-                let outcome = verify_one(verifier, req).await;
+                let outcome = verify_one(verifier, req, policy).await;
                 (idx, outcome)
             }
         })
-        .buffer_unordered(VERIFY_CONCURRENCY)
+        .buffer_unordered(policy.concurrency.max(1))
         .collect()
         .await;
 
     // Apply outcomes: record on the finding and demote refuted ones.
     let mut any_confirmed = false;
     let mut any_clean_refuted = false;
+    let mut unverified = 0usize;
     for (idx, outcome) in outcomes {
         match &outcome {
             VerifyOutcome::Confirmed => any_confirmed = true,
             VerifyOutcome::Refuted => any_clean_refuted = true,
             _ => {}
+        }
+        if outcome.is_unverified() {
+            unverified += 1;
         }
         apply_outcome(&mut findings[idx], outcome);
     }
@@ -216,6 +352,7 @@ pub async fn run_verification_round(
         final = %final_verdict,
         any_confirmed,
         any_clean_refuted,
+        unverified,
         "verification round complete — verdict re-derived"
     );
     final_verdict
@@ -246,10 +383,16 @@ pub async fn run_verification_round(
 ///         NOT individually clear the severity-floor confidence gate.
 ///   b)  clean model REFUTED, nothing confirmed
 ///       → drop to APPROVE baseline (escalation rested on refuted evidence)
-///   c)  all demotions are infra / unable-to-verify failures (TruncationRefuted /
-///       ErrorRefuted — the latter now also covers transient errors, #1876), no
-///       confirmed → preserve `primary_verdict` (do not fail-open to APPROVE on
-///       verifier infra failure, #726 + #1876)
+///   c)  nothing was confirmed and nothing was cleanly refuted — every outcome
+///       was an infra / unable-to-verify failure (TruncationRefuted,
+///       ErrorRefuted, or, since #4459, `Unverifiable` after an exhausted retry
+///       budget) → preserve `primary_verdict` (do not fail-open to APPROVE on
+///       verifier infra failure, #726 + #1876). Since #4459 that preservation is
+///       enforced on the RESULT (`verdict_max` against `primary_verdict`), not
+///       just handed to `derive_verdict` as a baseline: an `Unverifiable`
+///       finding SURVIVES into the survivor set, and an all-advisory survivor
+///       set trips `grade`'s low-confidence collapse, which dissolved the
+///       model's own BLOCK. Surviving findings may still escalate.
 ///
 /// `UNKNOWN` is handled by the caller and never reaches here.
 /// What: filters survivors (non-refuted), selects baseline (path a2 takes the
@@ -312,9 +455,20 @@ fn rederive_verdict(
     //      → drop to APPROVE; let survivors alone decide
     //  c)  infra-only fail (TruncationRefuted / ErrorRefuted), nothing confirmed
     //      → preserve primary_verdict (don't discard on infra failure #726)
+    // #4459: path (c) below says "preserve primary_verdict", and until now it
+    // said so by passing `primary_verdict` as the baseline and trusting
+    // `derive_verdict` to treat it as a lower bound. That holds only while the
+    // survivor set is empty. Once an unable-to-verify finding SURVIVES — which
+    // is what `Unverifiable` does, unlike the refutation variants — an
+    // all-advisory survivor set trips `grade`'s low-confidence collapse and
+    // dissolves the model's own BLOCK, which is the fail-open this issue is
+    // about, arriving by a new route. Remember whether this round rendered any
+    // judgment at all; nothing may relax the verdict when nothing did.
+    let no_judgment_rendered = !any_confirmed && !any_clean_refuted;
+
     let baseline = if any_confirmed && any_confirmed_high {
         // Path (a): confirmed High-effort evidence supports the escalation fully.
-        primary_verdict
+        primary_verdict.clone()
     } else if any_confirmed {
         // Path (a2): confirmed evidence, but only Medium/Low tier.  Take the
         // severity-MIN of the model's own verdict and APPROVE* (the advisory tier)
@@ -329,7 +483,7 @@ fn rederive_verdict(
         // `derive_verdict(baseline, survivors)` will still escalate further if the
         // surviving findings warrant it (e.g. a surviving High → BLOCK, or as of
         // #1876 a surviving confident Medium → REQUEST_CHANGES).
-        verdict_min(primary_verdict, Verdict::ApproveWithReservations)
+        verdict_min(primary_verdict.clone(), Verdict::ApproveWithReservations)
     } else if any_clean_refuted {
         // Path (b): at least one clean REFUTED from the model — escalation rested
         // on refuted evidence; let survivors alone decide.
@@ -338,10 +492,30 @@ fn rederive_verdict(
         // Path (c): all demotions were infrastructure failures (TruncationRefuted /
         // ErrorRefuted) — preserve the model's escalation rather than silently
         // collapsing to APPROVE due to verifier infra failure.
-        primary_verdict
+        primary_verdict.clone()
     };
 
-    derive_verdict(baseline, &survivors)
+    let rederived = derive_verdict(baseline, &survivors);
+    if no_judgment_rendered {
+        // Path (c): the round reached no judgment on anything. Surviving
+        // findings may still ESCALATE the verdict, but none of them may lower
+        // what the model itself said.
+        return verdict_max(rederived, primary_verdict);
+    }
+    rederived
+}
+
+/// Return the *more severe* (severity-max) of two verdicts.
+///
+/// Why (#4459): the mirror of [`verdict_min`], used by path (c) so an
+/// infra-only round can escalate on surviving evidence but can never relax the
+/// model's own verdict — nothing in that round examined anything.
+/// What: compares via `Verdict::ordinal`, the single source of truth shared with
+/// `grade.rs`.
+/// Test: `verify_permanent_transport_failure_lands_in_unverified`,
+/// `rederive_error_refuted_preserves_primary_verdict`.
+fn verdict_max(a: Verdict, b: Verdict) -> Verdict {
+    if a.ordinal() >= b.ordinal() { a } else { b }
 }
 
 /// Return the *less severe* (severity-min) of two verdicts.
@@ -455,14 +629,95 @@ struct VerifyJudgment {
 /// itself is still excluded from the severity floor either way (an unverified
 /// finding must not drive escalation on its own); only the *fail-open-to-APPROVE*
 /// side effect on the surrounding review is fixed.
+/// #4459 retry + honest UNVERIFIED: a transient error is now retried up to
+/// `policy.max_attempts` times with exponential backoff and jitter before any
+/// outcome is recorded, because the transport errors that disabled this pass in
+/// production came from the round's OWN fan-out — a single call to the same
+/// model in isolation succeeded in ~845 ms while 27 of 29 findings in a
+/// concurrent round came back `Transport`. When the budget is exhausted the
+/// finding is recorded as `Unverifiable`, NOT `ErrorRefuted`: nothing examined
+/// it, so calling the result a refutation (and clamping its confidence to 0.10
+/// as `apply_outcome` does for every refutation variant) states a judgment the
+/// pipeline never made. `Unverifiable` keeps the finding visible as an advisory
+/// that cannot escalate, and `ReviewResult::unverified_count` reports how many
+/// there were. Alarm-class errors keep the `ErrorRefuted` + alarm treatment from
+/// #726 — a broken deployment is a different fact from an unreachable call, and
+/// retrying a deterministic ModelNotFound only delays the alarm.
 /// Test: `verify_one_confirmed`, `verify_one_refuted`,
 /// `verify_one_model_unavailable_emits_signal`,
 /// `verify_truncated_response_is_truncation_refuted`,
-/// `verify_transient_error_marks_error_refuted_not_plain_refuted` (#1876).
-async fn verify_one(verifier: &Arc<dyn LlmProvider>, req: crate::llm::LlmRequest) -> VerifyOutcome {
+/// `verify_transient_error_is_not_plain_refuted` (#1876),
+/// `verify_transient_failure_is_retried_until_it_succeeds` (#4459),
+/// `verify_permanent_transport_failure_lands_in_unverified` (#4459).
+async fn verify_one(
+    verifier: &Arc<dyn LlmProvider>,
+    req: crate::llm::LlmRequest,
+    policy: VerifyPolicy,
+) -> VerifyOutcome {
     let model = req.model.clone();
+    let attempts = policy.max_attempts.max(1);
+    let mut last_class = String::new();
+    for attempt in 1..=attempts {
+        match attempt_verify(verifier, req.clone(), &model).await {
+            Ok(outcome) => return outcome,
+            Err(AttemptError::Alarm(outcome)) => return outcome,
+            Err(AttemptError::Transient(class)) => {
+                last_class = class;
+                if attempt < attempts {
+                    let backoff = policy.backoff(attempt + 1);
+                    warn!(
+                        attempt,
+                        max_attempts = attempts,
+                        backoff_ms = backoff.as_millis(),
+                        error_class = %last_class,
+                        "verifier transient error — retrying (#4459)"
+                    );
+                    if !backoff.is_zero() {
+                        tokio::time::sleep(backoff).await;
+                    }
+                }
+            }
+        }
+    }
+    warn!(
+        attempts,
+        error_class = %last_class,
+        "verifier unreachable after every attempt — recording the finding as UNVERIFIED (#4459)"
+    );
+    VerifyOutcome::Unverifiable {
+        reason: format!(
+            "the verifier could not be reached after {attempts} attempt(s) ({last_class}); \
+             the finding was neither confirmed nor refuted"
+        ),
+    }
+}
+
+/// Why one attempt failed, when it did (#4459).
+///
+/// Why: the retry loop must tell "retry this" from "stop now, the deployment is
+/// broken" without re-deriving the classification the alarm branch already made.
+/// What: `Alarm` carries the terminal outcome to return as-is; `Transient`
+/// carries the error class for the log line and the eventual reason string.
+enum AttemptError {
+    Alarm(VerifyOutcome),
+    Transient(String),
+}
+
+/// One verifier call, classified.
+///
+/// Why: keeps `verify_one`'s loop readable — the response-parsing arms are the
+/// same on every attempt and only the error arms decide whether to loop.
+/// What: `Ok` on any response the pipeline can act on (including a truncated
+/// one, which is a provider fault the same request will reproduce); `Err` on a
+/// call that failed.
+/// Test: covered through `verify_one` by the tests it lists.
+async fn attempt_verify(
+    verifier: &Arc<dyn LlmProvider>,
+    req: crate::llm::LlmRequest,
+    model: &str,
+) -> Result<VerifyOutcome, AttemptError> {
     match verifier.complete(req).await {
-        Ok(resp) => match parse_judgment(&resp.text) {
+        Ok(resp) => Ok(match parse_judgment(&resp.text) {
             Some(Judgment::Confirmed) => VerifyOutcome::Confirmed,
             Some(Judgment::Refuted) => VerifyOutcome::Refuted,
             // #5309: the verifier declined to confirm a claim the diff cannot
@@ -480,31 +735,30 @@ async fn verify_one(verifier: &Arc<dyn LlmProvider>, req: crate::llm::LlmRequest
                 // distinguish "model said REFUTED" from "provider returned garbage".
                 VerifyOutcome::TruncationRefuted
             }
-        },
+        }),
         Err(e) if e.is_alarm() => {
             // Config/lifecycle failure: the verifier model is broken.  This is
             // the incident path — make it loud, do not pretend the finding was
-            // refuted on its merits.
+            // refuted on its merits.  Deterministic, so it is never retried.
             let error_class = error_class(&e);
-            emit_verification_model_error(&model, &error_class, &e);
-            VerifyOutcome::ErrorRefuted { error_class }
+            emit_verification_model_error(model, &error_class, &e);
+            Err(AttemptError::Alarm(VerifyOutcome::ErrorRefuted {
+                error_class,
+            }))
         }
         Err(e) => {
-            // Transient failure (#1876): we could not verify this finding, but
-            // the deployment is not broken and the model never rendered a
-            // judgment.  Fail toward CAUTION, not toward "this finding is
-            // wrong" — map to ErrorRefuted (not plain Refuted) so
-            // rederive_verdict preserves primary_verdict (path c) instead of
-            // fail-opening the whole review to APPROVE (path b).  This is not
-            // an alarm-worthy incident (no emit_verification_model_error call):
-            // rate limits and transport blips are expected operational noise,
-            // not a broken deployment.
+            // Transient failure (#1876, #4459): we could not verify this
+            // finding, but the deployment is not broken and the model never
+            // rendered a judgment.  Hand it back to the retry ladder; only an
+            // exhausted budget decides an outcome.  This is not an alarm-worthy
+            // incident (no emit_verification_model_error call): rate limits and
+            // transport blips are expected operational noise.
             let error_class = error_class(&e);
-            warn!(
+            debug!(
                 error_class = %error_class,
-                "verifier transient error (treating as unable-to-verify, not refuted): {e}"
+                "verifier call failed (retryable): {e}"
             );
-            VerifyOutcome::ErrorRefuted { error_class }
+            Err(AttemptError::Transient(error_class))
         }
     }
 }
