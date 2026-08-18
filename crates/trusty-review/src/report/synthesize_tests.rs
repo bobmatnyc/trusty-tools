@@ -726,3 +726,143 @@ fn status_lines_render_banners() {
     assert_eq!(lines[0], "synthesis: available");
     assert_eq!(lines[1], syn.notes[0]);
 }
+
+// ── #6009: markdown-heading fallback + raw-capture regression ──────────────
+
+/// A faithful reconstruction of the live 4/4 repro captured against
+/// `anthropic/claude-opus-4.8` (#6009): `strict:true` `response_format` was
+/// silently ignored (200 OK, `finish_reason: "stop"`) and the model wrote the
+/// system prompt's own `## Output` field labels back as markdown headings
+/// around free prose instead of the requested JSON object. The figures here
+/// (8,200 / 120 / 640) are the fixture model's allowed set, so the recovered
+/// text exercises the numeric guardrail rather than bypassing it.
+fn markdown_fallback_response() -> String {
+    "## Executive Summary\n\n\
+     The 8,200 LoC Rust codebase spans 120 files and 640 functions with one \
+     critical security gap that must be remediated before close.\n\n\
+     ## Top Risks\n\n\
+     No RED or AMBER risks were identified in the provided data.\n\n\
+     ## Findings\n\n\
+     No findings require elaboration.\n"
+        .to_string()
+}
+
+/// Why: #6009 — before this fix, `parse_raw` had no fallback for a schema the
+/// provider ignored entirely, so this exact live shape hard-failed the whole
+/// due-diligence run as `Unparseable` with a real finding count sitting
+/// unused behind it. RED against pre-fix `parse_raw` (no markdown fallback),
+/// GREEN after.
+/// What: recovers `executive_summary` from the markdown-headed response;
+/// `top_risks`/`findings` stay empty (never reconstructed from prose).
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesize_recovers_executive_summary_from_markdown_fallback() {
+    let model = fixture_model(vec![red("x")]);
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm {
+        body: markdown_fallback_response(),
+        finish_reason: Some("stop".to_string()),
+    });
+    let result = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect("the markdown fallback must recover a usable executive summary");
+
+    assert_eq!(
+        result.executive_summary.as_deref(),
+        Some(
+            "The 8,200 LoC Rust codebase spans 120 files and 640 functions with one \
+             critical security gap that must be remediated before close."
+        )
+    );
+    assert!(
+        result.top_risks.is_empty(),
+        "prose is never reconstructed into risk rows"
+    );
+    assert!(
+        result.findings.is_empty(),
+        "prose is never reconstructed into findings"
+    );
+    assert!(
+        result.notes.is_empty(),
+        "a clean recovered summary records no notes"
+    );
+}
+
+/// Why: the fallback must not turn every unparseable response into a silent
+/// pass — a genuinely different shape (no heading at all, e.g. a refusal or
+/// an error string) must still fail closed exactly like today.
+/// What: a response with no `## Executive Summary` heading; asserts
+/// `Err(SynthesisError::Unparseable)`.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesize_markdown_fallback_rejects_response_with_no_heading() {
+    let model = fixture_model(vec![red("x")]);
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm {
+        body: "I'm unable to provide a structured response for this request.".to_string(),
+        finish_reason: Some("stop".to_string()),
+    });
+    let err = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect_err("a headingless response must not be silently accepted");
+    assert!(
+        matches!(err, SynthesisError::Unparseable),
+        "expected Unparseable, got {err:?}"
+    );
+}
+
+/// Why: recovering the markdown fallback text must not create a second path
+/// around the numeric guardrail — a fabricated figure in the recovered
+/// executive summary must be rejected exactly like a fabricated figure in a
+/// normal JSON response.
+/// What: the heading is present, but the body cites `999` — absent from the
+/// fixture model's allowed set — so nothing survives and the whole pass fails
+/// as `NoVerifiableContent`.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesize_markdown_fallback_still_applies_numeric_guardrail() {
+    let model = fixture_model(vec![red("x")]);
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm {
+        body: "## Executive Summary\n\n999 critical vulnerabilities were found.\n".to_string(),
+        finish_reason: Some("stop".to_string()),
+    });
+    let err = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect_err("a fabricated figure recovered via the fallback must still be rejected");
+    assert!(
+        matches!(err, SynthesisError::NoVerifiableContent),
+        "expected NoVerifiableContent, got {err:?}"
+    );
+}
+
+/// Why: #6009 — the only prior evidence of an unparseable response was a WARN
+/// log line with no body; a live repro had to spend a fresh OpenRouter call to
+/// see what the model actually sent. This proves the capture wiring writes
+/// that evidence to disk instead.
+/// What: configures a capture directory, sends a response with no recoverable
+/// heading, and asserts both the hard failure AND the persisted file.
+/// Test: this test itself.
+#[tokio::test]
+async fn capture_dir_persists_raw_response_on_parse_failure() {
+    let model = fixture_model(vec![red("x")]);
+    let body = "totally free text with no JSON and no recognised heading".to_string();
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm {
+        body: body.clone(),
+        finish_reason: Some("stop".to_string()),
+    });
+    let dir = tempfile::tempdir().expect("tempdir");
+    let err = Synthesizer::new(llm, "stub/model")
+        .with_raw_capture_dir(dir.path())
+        .synthesize(&model)
+        .await
+        .expect_err("still unparseable — capture must not change the verdict");
+    assert!(matches!(err, SynthesisError::Unparseable));
+
+    let captured = std::fs::read_to_string(dir.path().join(super::UNPARSEABLE_CAPTURE_FILENAME))
+        .expect("the raw response must be persisted next to the report output");
+    assert_eq!(
+        captured, body,
+        "the captured file must hold the verbatim (scrubbed) response"
+    );
+}

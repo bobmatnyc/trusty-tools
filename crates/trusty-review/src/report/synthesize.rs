@@ -18,6 +18,7 @@
 //! Test: `synthesize_tests.rs` — happy-path injection, malformed-JSON and
 //! provider-error hard failure, numeric-guardrail rejection, greens-never-sent.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,6 +32,18 @@ use crate::report::synthesize_prompt::build_synthesis_prompt;
 
 /// Default wall-clock ceiling for one synthesis pass before failing closed.
 const DEFAULT_SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Filename an unparseable-response capture is written under, inside the
+/// configured [`Synthesizer::with_raw_capture_dir`] directory.
+///
+/// Why: #6009 — a live 4/4 repro against `anthropic/claude-opus-4.8` cost real
+/// OpenRouter spend to diagnose because the only evidence was a WARN log line;
+/// the response itself was gone by the time anyone looked. Persisting it next
+/// to the report output makes every future occurrence diagnosable for free.
+/// What: a fixed name (overwritten on each new failure — this is a diagnostic
+/// aid, not an audit trail) so operators know where to look without parsing a
+/// timestamp out of a WARN line.
+const UNPARSEABLE_CAPTURE_FILENAME: &str = "synthesis-unparseable-response.txt";
 
 /// The literal prefix every guardrail-rejection note carries, so the reporter and
 /// tests can assert on it.
@@ -192,6 +205,7 @@ pub struct Synthesizer {
     llm: Arc<dyn LlmProvider>,
     model: String,
     timeout: Duration,
+    raw_capture_dir: Option<PathBuf>,
 }
 
 impl Synthesizer {
@@ -199,13 +213,15 @@ impl Synthesizer {
     ///
     /// Why: the CLI builds the provider from the reviewer role config; tests
     /// inject stubs.
-    /// What: stores the provider + model with the default timeout.
+    /// What: stores the provider + model with the default timeout and no raw
+    /// capture directory (opt-in via [`with_raw_capture_dir`]).
     /// Test: exercised by every synthesize test.
     pub fn new(llm: Arc<dyn LlmProvider>, model: impl Into<String>) -> Self {
         Self {
             llm,
             model: model.into(),
             timeout: DEFAULT_SYNTHESIS_TIMEOUT,
+            raw_capture_dir: None,
         }
     }
 
@@ -213,6 +229,26 @@ impl Synthesizer {
     #[cfg(test)]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Opt in to persisting the raw provider response on an unparseable-
+    /// response failure (#6009).
+    ///
+    /// Why: the only prior evidence of an unparseable response was a WARN log
+    /// line with no body — a live 4/4 repro against `anthropic/claude-opus-4.8`
+    /// had to spend a fresh OpenRouter call just to see what the model actually
+    /// sent. The CLI wires this to the report's own output directory so the
+    /// evidence lands next to the report a failed run was trying to produce.
+    /// What: when set, [`Self::synthesize`] writes the scrubbed response text
+    /// to `<dir>/`[`UNPARSEABLE_CAPTURE_FILENAME`] the moment `parse_raw`
+    /// rejects it — before the guardrail or any retry — so the capture reflects
+    /// exactly what the provider sent. The directory is created if missing; a
+    /// write failure is logged and never escalated, since a diagnostic aid must
+    /// not itself turn a reportable error into a different one.
+    /// Test: `capture_dir_persists_raw_response_on_parse_failure`.
+    pub fn with_raw_capture_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.raw_capture_dir = Some(dir.into());
         self
     }
 
@@ -306,6 +342,7 @@ impl Synthesizer {
             Some(r) => r,
             None => {
                 warn!("synthesis: unparseable response");
+                self.capture_unparseable(&resp.text);
                 return Attempt::Failed(SynthesisError::Unparseable);
             }
         };
@@ -316,6 +353,39 @@ impl Synthesizer {
             "synthesis: provider call complete"
         );
         Attempt::Ok(raw)
+    }
+
+    /// Persist a scrubbed copy of an unparseable response, when a capture
+    /// directory was configured (#6009).
+    ///
+    /// Why: see [`Self::with_raw_capture_dir`]. A no-op when unset, which keeps
+    /// every existing test (none of which configure a capture dir) unaffected.
+    /// What: scrubs `text` against [`crate::report::redact::report_secrets`]
+    /// (the same needle set the `Provider` error path already uses) and writes
+    /// it to `<dir>/`[`UNPARSEABLE_CAPTURE_FILENAME`], creating the directory if
+    /// needed. Any I/O failure is logged at `warn` and swallowed — the
+    /// diagnostic write must never mask or replace the real
+    /// [`SynthesisError::Unparseable`] the caller already returns.
+    /// Test: `capture_dir_persists_raw_response_on_parse_failure`.
+    fn capture_unparseable(&self, text: &str) {
+        let Some(dir) = &self.raw_capture_dir else {
+            return;
+        };
+        let secrets = crate::report::redact::report_secrets();
+        let scrubbed = trusty_common::credentials::scrub_secrets(text, &secrets);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            warn!(error = %e, dir = %dir.display(), "synthesis: could not create raw-capture directory");
+            return;
+        }
+        let path = dir.join(UNPARSEABLE_CAPTURE_FILENAME);
+        match std::fs::write(&path, &scrubbed) {
+            Ok(()) => {
+                warn!(path = %path.display(), "synthesis: unparseable response captured for diagnosis")
+            }
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "synthesis: could not write raw-capture file")
+            }
+        }
     }
 }
 
@@ -346,11 +416,26 @@ struct RawSynthesis {
 ///
 /// Why: forced structured output returns a bare JSON object, but we still accept
 /// a fenced block (defensive, matching the profile synthesizer) so a provider
-/// that ignores the schema does not silently fail.
-/// What: tries a direct object parse, then a ```json fenced block; `None` when
-/// neither yields a decodable object.
+/// that ignores the schema does not silently fail.  #6009: a live 4/4 repro
+/// against `anthropic/claude-opus-4.8` showed a THIRD shape — `strict:true`
+/// `response_format` silently ignored end to end (200 OK, `finish_reason:
+/// "stop"`), with the model instead writing the system prompt's own `## Output`
+/// section labels back as literal markdown headings ("## Executive Summary",
+/// "## Top Risks", "## Findings") around free prose.  There is no JSON to
+/// recover there, but the executive-summary prose IS recoverable, and it still
+/// passes through the same numeric guardrail as a normal field — so it is
+/// worth recovering rather than discarding a run's only inference output.
+/// What: tries a direct object parse, then a ```json fenced block, then a
+/// markdown-heading fallback that recovers ONLY `executive_summary` (never
+/// `top_risks`/`findings` — reconstructing structured rows out of prose would
+/// mean inventing fields the model never actually populated, which is exactly
+/// what this parser must not do).  `None` when none of the three yields
+/// anything, so a response that is not even this fallback shape is still
+/// rejected as [`SynthesisError::Unparseable`].
 /// Test: `synthesize_tests.rs::{synthesize_happy_path_injects,
-/// synthesize_malformed_json_fails_closed}`.
+/// synthesize_malformed_json_fails_closed,
+/// synthesize_recovers_executive_summary_from_markdown_fallback,
+/// synthesize_markdown_fallback_rejects_response_with_no_heading}`.
 fn parse_raw(text: &str) -> Option<RawSynthesis> {
     let body = text.trim();
     if body.starts_with('{')
@@ -358,10 +443,83 @@ fn parse_raw(text: &str) -> Option<RawSynthesis> {
     {
         return Some(r);
     }
+    if let Some(r) = parse_fenced_json(body) {
+        return Some(r);
+    }
+    parse_markdown_fallback(body)
+}
+
+/// Parse a ```` ```json ````-fenced block, if one is present.
+///
+/// Why: split out of [`parse_raw`] so each fallback tier is independently
+/// readable and testable.
+/// What: finds the LAST `\`\`\`json` marker (defensive against a fence
+/// appearing earlier in reasoning/preamble text), then the next closing fence
+/// after it; `None` when either marker is absent or the enclosed text does not
+/// decode.
+/// Test: covered transitively via `parse_raw`'s own tests.
+fn parse_fenced_json(body: &str) -> Option<RawSynthesis> {
     let fence_start = body.rfind("```json")?;
     let after = &body[fence_start + 7..];
     let fence_end = after.find("```")?;
     serde_json::from_str::<RawSynthesis>(after[..fence_end].trim()).ok()
+}
+
+/// Recover an `executive_summary` from a markdown-headed free-text response
+/// (#6009) when the provider ignored the forced JSON schema entirely.
+///
+/// Why: see [`parse_raw`]'s doc comment. `top_risks` and `findings` are always
+/// left empty here — the deterministic composition (#5374) fills those
+/// placeholders, and the numeric guardrail still verifies whatever text is
+/// recovered before it reaches a reader.
+/// What: locates a line that is ONLY a markdown heading (`#`+ prefix) whose
+/// title matches "executive summary" case-insensitively, and takes every line
+/// up to the next heading (or end of input) as the summary body.  `None` when
+/// no such heading exists or its body is blank, so an unrelated free-text
+/// response (an error message, a refusal, a genuinely different shape) is
+/// still rejected rather than silently accepted.
+/// Test: `synthesize_recovers_executive_summary_from_markdown_fallback`,
+/// `synthesize_markdown_fallback_rejects_response_with_no_heading`.
+fn parse_markdown_fallback(text: &str) -> Option<RawSynthesis> {
+    let exec = heading_section(text, "executive summary")?;
+    if exec.is_empty() {
+        return None;
+    }
+    Some(RawSynthesis {
+        executive_summary: exec,
+        top_risks: Vec::new(),
+        findings: Vec::new(),
+    })
+}
+
+/// Return the trimmed line, minus a leading run of `#`, iff the line is
+/// nothing but a markdown heading marker.
+fn heading_title(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let title = trimmed.trim_start_matches('#');
+    // Require at least one '#' actually present, and a space (or end of
+    // line) after it — "#5454" in prose must never be misread as a heading.
+    if title.len() == trimmed.len() {
+        return None;
+    }
+    let title = title.trim();
+    (!title.is_empty()).then_some(title)
+}
+
+/// Extract the body text between a heading whose title matches `wanted`
+/// (case-insensitively) and the next heading line, or end of input.
+fn heading_section(text: &str, wanted: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| heading_title(l).is_some_and(|t| t.eq_ignore_ascii_case(wanted)))?;
+    let body: Vec<&str> = lines[start + 1..]
+        .iter()
+        .take_while(|l| heading_title(l).is_none())
+        .copied()
+        .collect();
+    let joined = body.join("\n").trim().to_string();
+    (!joined.is_empty()).then_some(joined)
 }
 
 /// Apply the numeric guardrail to the raw synthesis, field by field.
