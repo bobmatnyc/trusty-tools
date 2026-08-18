@@ -183,22 +183,34 @@ every push to `main`, folds every job conclusion (the shards included) through
 the `ci-red-main`-labelled tracking issue, then fails the run. It is a GitHub issue,
 not a page — nobody is woken up.
 
-🟡 **A `BEHIND` branch has been observed refusing to merge — cause unconfirmed.**
-A prior session saw `gh pr merge` refuse with "the head branch is not up to date
-with the base branch" even with all required contexts green. `strict: false` (see
-above) rules out the classic "require branches up to date" setting as the cause,
-so if this recurs, a repository ruleset invisible to the
-`branches/main/protection` endpoint is the likelier candidate — not the `strict`
-flag. If you hit it, `gh pr update-branch <n>` and let checks re-report; on a
-docs-only PR that costs well under a minute. A genuine `CONFLICTING` state is a
-different and harder problem.
+🟡 **A `BEHIND` branch merges fine.** `strict: false` (above) means GitHub
+requires only that the PR's own head carry green required contexts, not that
+the branch be current with base — so `gh pr merge --squash --delete-branch
+--auto` is the right tool for an ordinary PR; GitHub owns the wait.
+[#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958) proves it: its
+squash commit `d18184ee` has a single parent, `a4e629e0`
+([#5961](https://github.com/bobmatnyc/trusty-tools/pull/5961)), which had
+merged 47 seconds earlier — the PR had synced `main` into its branch twice
+(04:34Z, 04:48Z) and was still exactly one commit BEHIND, missing that PR,
+when armed auto-merge fired at 04:52:55Z. It merged anyway.
+Updating for BEHIND alone buys nothing and costs real time: every
+`update-branch` restarts CI from scratch, including four Tauri UI clippy jobs
+at roughly 15 minutes each on a cold system-deps install, and while it
+reruns, `main` can move again — which is how a merge loop forms and fails to
+converge. That happened here too: two manual `Merge branch 'main' into …`
+sync commits, 14 minutes apart, before it merged BEHIND regardless. What
+actually blocks a merge is `mergeStateStatus` reporting `BLOCKED` — pending or
+failing checks — which GitHub reports with priority over `BEHIND` in that same
+field; that priority is almost certainly why past "refuses to merge while
+BEHIND" reports read as a branch-currency problem when the real block was
+pending checks. `gh pr update-branch <n>` stays correct for a genuine
+`CONFLICTING` state, which is different and harder.
 
 🟡 **`gh pr merge --admin` bypasses nothing on this repo.** The working account is
 push-only (`admin: false`), so the flag is silently ineffective. `gh`'s own refusal
 message offers `--admin` as the remedy — following that suggestion is a dead end,
 not a fix. A PR merges when every required context passes on the PR's own head
-— `strict: false` means the base does not have to be current too, though see above
-for a case where a merge was refused anyway.
+— `strict: false` means the base does not have to be current too.
 
 ### Baseline failures — the Rust specifics
 
