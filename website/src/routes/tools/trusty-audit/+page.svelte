@@ -34,6 +34,7 @@
 	 * `TRUSTY_AUDIT_NO_LAUNCH=1`, which resolved latest as 0.1.0, verified its
 	 * sha256, and installed both `trusty-audit` and `taudit`.
 	 */
+	import CopyButton from '$lib/components/CopyButton.svelte';
 	import ToolPage from '$lib/components/ToolPage.svelte';
 	import { installCommand, TOOLS } from '$lib/tools';
 
@@ -130,12 +131,17 @@
 			actually runs, installs it with an atomic rename, and then launches it.
 		</p>
 		<!-- `min-w-0`: a `<pre>` never wraps, so without it the flex child widens
-		     to the longest command and the page scrolls sideways at 375px. -->
-		<div class="mt-6 max-w-3xl min-w-0">
+		     to the longest command and the page scrolls sideways at 375px.
+		     `pr-14` on the `<pre>` keeps the copy button clear of the text; the
+		     button sits in the wrapper's own padding, not over the command. -->
+		<div class="relative mt-6 max-w-3xl min-w-0">
 			<pre
-				class="overflow-x-auto rounded-sm border border-foundry-border bg-foundry-card p-4 text-xs leading-relaxed text-foundry-text">{installCommand(
+				class="overflow-x-auto rounded-sm border border-foundry-border bg-foundry-card p-4 pr-14 text-xs leading-relaxed text-foundry-text">{installCommand(
 					tool
 				)}</pre>
+			<div class="absolute right-2 top-2">
+				<CopyButton text={installCommand(tool)} label="Copy install command" />
+			</div>
 		</div>
 		<p class="mt-4 max-w-3xl text-foundry-secondary">
 			It installs into <code class="text-sm">$&#123;CARGO_HOME:-$HOME/.cargo&#125;/bin</code> and
