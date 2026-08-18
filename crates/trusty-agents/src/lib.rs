@@ -173,6 +173,13 @@ pub use tools::agent_plugin::install_plugins;
 /// `trusty_agents::run().await` without referencing the `runtime` module.
 pub use runtime::run;
 
+/// Re-export the bounded-shutdown launcher (#3655) so a `main.rs` is one line.
+///
+/// Why: prefer this over driving [`run`] from `#[tokio::main]` — the attribute
+/// drops the runtime with an unbounded wait, which lets one wedged background
+/// task make the process un-exitable.
+pub use runtime::run_to_completion;
+
 /// Re-exports of items that internal modules historically referenced as
 /// `crate::AgentConfig` and `crate::default_bundled_config_dir`.
 ///
