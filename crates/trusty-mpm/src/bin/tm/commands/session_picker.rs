@@ -288,10 +288,11 @@ pub(crate) fn parse_managed_sessions(raw: &str) -> anyhow::Result<Vec<ManagedSes
 /// Why: the static table and the picker share one filtering/sorting policy so
 /// the two views never diverge (#1809/#1841).
 /// What: when `all` is false, drops decommissioned records, soft-deleted
-/// records, and (#4994) records the listing-time sweep classified dead, via
-/// [`filter_live_sessions`] (a `"deleted"` slot tombstone, #3034, is NOT a
-/// decommissioned record and always passes through this branch too — see
-/// [`super::managed::is_live_session_state`]'s doc).
+/// records, (#4994) records the listing-time sweep classified dead, and (#5952)
+/// `"deleted"` slot tombstones, via [`filter_live_sessions`] — see
+/// [`super::managed::is_live_session_state`]'s doc for why all four share one
+/// opt-in and why hiding the tombstone leaves #3034's no-reuse guarantee
+/// intact.
 ///
 /// 🔴 `dead_ids` must be the set the sweep that just ran over THIS list
 /// produced — never the wire's `unresumable` flag re-derived here. See
@@ -302,7 +303,9 @@ pub(crate) fn parse_managed_sessions(raw: &str) -> anyhow::Result<Vec<ManagedSes
 ///
 /// `"deleted"` (#3034) tombstones are deliberately EXCLUDED from that
 /// sink-to-bottom sort key, even though a reviewer might expect both "dead"
-/// states to be grouped identically. The two are not interchangeable: a
+/// states to be grouped identically. Since #5952 the `--all` branch is the ONLY
+/// branch a tombstone reaches, which makes this exclusion the whole of its
+/// placement policy rather than one half of it. The two are not interchangeable: a
 /// `"decommissioned"` row is a soft-retired but still-present record — sinking
 /// it to the bottom is a pre-existing (#1809) forensic declutter for the
 /// `--all` view, where recency/liveness ordering is more useful than slot
