@@ -314,7 +314,7 @@ impl CommandExecutor {
     /// | Telegram `/decommission`, Slack `/decommission` | [`Self::managed_decommission`] |
     /// | `tui::coordinator` `/kill`, `/decommission`, `/managed-decommission` | [`Self::managed_decommission`] |
     /// | `tui::project_ctl`'s `[d]` hotkey | `project_ctl::actions::dispatch` |
-    /// | `tm session prune`'s bulk sweep | `commands::managed::session_decommission_line` |
+    /// | `tm session prune-idle`'s bulk sweep | `commands::prune::prune_idle` → `commands::managed::session_decommission_line` |
     ///
     /// One caller of the endpoint deliberately stays out:
     /// `commands::session_picker_prune::decommission_dead_record` POSTs
@@ -322,10 +322,23 @@ impl CommandExecutor {
     /// workspace and so must never prune. It also reads the raw body to detect a
     /// daemon too old to honour `record_only`, which a typed response hides.
     ///
-    /// This covers every client-side path. The daemon's own in-process callers
-    /// (`daemon::mcp_session::session_decommission`, `daemon::idle_reaper`) sit
-    /// below this seam and call `SessionManager::decommission` directly, so they
-    /// do not get this repair — see #5913 for that follow-up.
+    /// This covers every client-side path. The daemon's own in-process callers sit
+    /// below this seam and call `SessionManager::decommission` directly, so none of
+    /// them gets this repair (#5949):
+    ///
+    /// - `daemon::mcp_session::session_decommission`
+    /// - `daemon::idle_reaper`
+    /// - `SessionManager::prune_managed` (`session_manager/prune.rs`), which backs
+    ///   `POST /api/v1/sessions/managed/prune` — plain `tm session prune`. This is
+    ///   the largest remaining gap, not a footnote: it is the bulk path operators
+    ///   actually use, so every tm-owned worktree it tears down leaves behind the
+    ///   stale `.git/worktrees` entry #5913 set out to close.
+    ///
+    /// That third one cannot be closed at this layer even in principle. The repair
+    /// needs the removed workspace's path, and `PrunedSession` — the wire response —
+    /// carries one only as `retained_workspace_path`, which is `Some` exactly when
+    /// the worktree was KEPT. A clean removal, the case that strands the git entry,
+    /// reports `None`, so no client could reconstruct where to prune.
     ///
     /// What: POSTs the decommission endpoint via the typed [`crate::client::DaemonClient`],
     /// logs the key names of any response field this client does not model yet,

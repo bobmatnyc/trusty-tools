@@ -17,6 +17,6 @@ Changed
   entry in `git worktree list`.
 - A 404 from the decommission endpoint is mapped to an error naming the session
   once, in `DaemonClient::decommission_managed_session`, rather than at each
-  entry point. `tm sessions prune`'s fail-closed sweep still records a missing
-  session as a failed row, and no longer depends on which caller issued the
-  request.
+  entry point. `tm session prune-idle`'s fail-closed sweep still records a
+  missing session as a failed row, and no longer depends on which caller issued
+  the request.
