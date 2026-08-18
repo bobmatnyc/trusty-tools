@@ -69,9 +69,14 @@
 //! until #5923, and the 2 s budget is reachable on an idle machine, so the
 //! guard switched itself off under exactly the load that makes two concurrent
 //! dispatches likely; two simultaneous dispatches were measured both admitted.
-//! [`claim_shared_tree`] now denies there. The asymmetry between the two is
+//! [`claim_shared_tree`] now denies there, and so does
+//! [`evaluate_granted_worktree`] — it computes the same #4480 verdict for a
+//! main-checkout dispatch (ADR-0048), so its own silence-as-empty read was the
+//! same defect in a second place. The asymmetry between the two directions is
 //! deliberate: a false DENY lands on the PM and halts every dispatch in the
 //! system, so it is spent only where the guard's own question is genuinely open.
+//! [`live_shared_tree_writers`] is the one caller that keeps the older
+//! fail-open contract, and it is stated at that call site.
 //!
 //! **A second caller reads the same answer without claiming (ADR-0048
 //! decision 10).** [`live_shared_tree_writers`] is the query half on its own,
@@ -322,10 +327,46 @@ pub(crate) async fn claim_shared_tree(
     cwd: &Path,
     payload: &Value,
 ) -> SharedTreeClaim {
-    match post_shared_tree(url, session_id, cwd, payload, SHARED_TREE_ROUTE).await {
+    claim_shared_tree_on(
+        url,
+        session_id,
+        cwd,
+        payload,
+        SHARED_TREE_ROUTE,
+        warn_on_eligibility_divergence,
+    )
+    .await
+}
+
+/// One shared-tree POST, resolved into the three outcomes a guard acts on
+/// (#5923).
+///
+/// Why: [`claim_shared_tree`] and [`evaluate_granted_worktree`] ask the same
+/// question on two routes, and the mapping from a reply to a verdict is exactly
+/// the part that must not drift between them — collapsing "the daemon did not
+/// answer" into an empty writer list IS the #5923 defect, and a second copy of
+/// the mapping is a second place it comes back. Only the warning that fires on
+/// an ANSWER differs between the two, so that is the parameter and nothing else
+/// is.
+/// What: [`SharedTreeReply::Answered`] becomes [`SharedTreeClaim::Writers`],
+/// after `warn_on_answer` sees the body and the writers read out of it;
+/// [`SharedTreeReply::Unavailable`] becomes an empty `Writers` and says on
+/// stderr that the guard is not enforcing; [`SharedTreeReply::Unanswered`]
+/// becomes [`SharedTreeClaim::Unknown`], which both callers deny on.
+/// Test: `claim_is_unknown_when_the_daemon_times_out`,
+/// `granted_worktree_denies_when_a_running_daemon_does_not_answer`.
+async fn claim_shared_tree_on(
+    url: &str,
+    session_id: &str,
+    cwd: &Path,
+    payload: &Value,
+    route: &str,
+    warn_on_answer: impl Fn(&Value, &[String]),
+) -> SharedTreeClaim {
+    match post_shared_tree(url, session_id, cwd, payload, route).await {
         SharedTreeReply::Answered(body) => {
             let live = writers_in(&body);
-            warn_on_eligibility_divergence(&body, &live);
+            warn_on_answer(&body, &live);
             SharedTreeClaim::Writers(live)
         }
         // #5923: no daemon to ask, so the guard cannot function here at all —
@@ -501,8 +542,22 @@ pub(crate) async fn live_shared_tree_writers_in(
 /// What: `Some(reason)` (DENY) when the daemon names another live writer in this
 /// checkout; `None` (emit the grant) when it does not, in which case the daemon
 /// has recorded the granted isolation inside the same critical section that
-/// produced the answer. Every daemon failure answers empty, so a down daemon
-/// grants — the fail-open direction the sibling guard commits to.
+/// produced the answer.
+///
+/// **A daemon that is running and did not answer denies here too (#5923).**
+/// This path used to grant on every failure, on the grounds that the grant
+/// gives the dispatch a tree of its own — but the grant is a rewrite of the
+/// dispatch's arguments, and this binary cannot verify the harness applies it.
+/// That is the whole reason ADR-0048 moved the #4480 verdict AHEAD of the
+/// grant: "a dispatch made into a checkout another writer holds is denied, and
+/// only an empty answer is granted". Silence is not an empty answer, so
+/// granting on it admits a possible second writer with the check that exists to
+/// stop it never having run — and ADR-0048 states the cost inversion for a main
+/// checkout directly: "a false allow corrupts another session's branch". An
+/// ABSENT daemon still grants, warning on stderr, for the reason the claim path
+/// keeps that arm: the guard cannot function at all without one, and denying
+/// would block every dispatch from a main checkout on a machine running no
+/// daemon.
 ///
 /// **An empty answer is not proof the grant was recorded, so it is checked
 /// rather than assumed.** Reading only the writer list would make every way the
@@ -516,7 +571,10 @@ pub(crate) async fn live_shared_tree_writers_in(
 /// used since #5324.
 /// Test: `pm_guard_denies_a_granted_dispatch_beside_a_live_writer`,
 /// `pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout`,
-/// `pm_guard_warns_when_a_granted_worktree_is_not_recorded`.
+/// `pm_guard_warns_when_a_granted_worktree_is_not_recorded`,
+/// `pm_guard_denies_a_granted_dispatch_when_the_daemon_does_not_answer`,
+/// `granted_worktree_denies_when_a_running_daemon_does_not_answer`,
+/// `granted_worktree_grants_when_no_daemon_is_listening`.
 pub(crate) async fn evaluate_granted_worktree(
     url: &str,
     session_id: &str,
@@ -527,23 +585,25 @@ pub(crate) async fn evaluate_granted_worktree(
 ) -> Option<String> {
     let mut granted = payload.clone();
     granted["tool_input"] = updated_input.clone();
-    // #5923: this path keeps its fail-open contract. The grant it is deciding
-    // gives the dispatch a tree of ITS OWN, so an unanswered claim admits an
-    // isolated writer rather than a second one on the shared HEAD — the
-    // opposite of the claim path's exposure.
-    let body = post_shared_tree(url, session_id, cwd, &granted, GRANTED_WORKTREE_ROUTE)
-        .await
-        .answered();
-    let live = body.as_ref().map(writers_in).unwrap_or_default();
-    if live.is_empty() {
-        warn_on_unrecorded_grant(body.as_ref(), &live, cwd);
-        return None;
-    }
-    Some(granted_deny_reason(
-        dispatch_agent(tool_input).unwrap_or("this"),
+    let agent = dispatch_agent(tool_input).unwrap_or("this");
+    // #5923: same taxonomy as the claim path, for the same reason. An absent
+    // daemon grants; a running one that did not answer denies, because this
+    // call IS the #4480 verdict for a main-checkout dispatch (ADR-0048) and
+    // granting on its silence leaves that verdict uncomputed.
+    match claim_shared_tree_on(
+        url,
+        session_id,
         cwd,
-        &live,
-    ))
+        &granted,
+        GRANTED_WORKTREE_ROUTE,
+        |body, live| warn_on_unrecorded_grant(body, live, cwd),
+    )
+    .await
+    {
+        SharedTreeClaim::Writers(live) if live.is_empty() => None,
+        SharedTreeClaim::Writers(live) => Some(granted_deny_reason(agent, cwd, &live)),
+        SharedTreeClaim::Unknown(detail) => Some(unanswered_grant_deny_reason(agent, cwd, &detail)),
+    }
 }
 
 /// Warn when a granted worktree was not recorded against the checkout (#5769).
@@ -560,13 +620,7 @@ pub(crate) async fn evaluate_granted_worktree(
 /// answers 404, and denying on that would fail CLOSED on version skew — every
 /// dispatch from a main checkout blocked by an old daemon.
 /// Test: `pm_guard_warns_when_a_granted_worktree_is_not_recorded`.
-fn warn_on_unrecorded_grant(body: Option<&Value>, live: &[String], cwd: &Path) {
-    // No body at all is the unreachable-daemon arm, already covered by this
-    // module's fail-open contract; the interesting case is a daemon that
-    // answered and still recorded nothing.
-    let Some(body) = body else {
-        return;
-    };
+fn warn_on_unrecorded_grant(body: &Value, live: &[String], cwd: &Path) {
     if !eligibility_diverged(body, live) {
         return;
     }
@@ -624,6 +678,40 @@ fn granted_deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
     )
 }
 
+/// Build the deny message for a grant the daemon left unanswered (#5923).
+///
+/// Why: [`granted_deny_reason`] names the sibling the daemon reported, and here
+/// there is none to name — the point is that the daemon said nothing at all. It
+/// is also not [`unanswered_deny_reason`]: that message tells the reader to
+/// re-dispatch with isolation as though none had been offered, and this guard
+/// had already built exactly that rewrite. The remedy is the same words for a
+/// different reason — an EXPLICIT isolation needs no rewrite to be applied and
+/// never reaches this question at all, since
+/// `requires_own_worktree_in_main_checkout` is false for it.
+/// What: names the failure, the checkout, why silence cannot be read as an
+/// empty tree, and the two remedies that need no daemon answer.
+/// Test: `unanswered_grant_deny_reason_names_the_failure_and_the_rewrite`,
+/// `pm_guard_denies_a_granted_dispatch_when_the_daemon_does_not_answer`.
+fn unanswered_grant_deny_reason(agent: &str, cwd: &Path, detail: &str) -> String {
+    format!(
+        "Dispatch denied in a shared main checkout (#5923): {} is a project's main checkout and \
+         the daemon did not answer this guard's claim for it — {detail}. That answer is the only \
+         thing that can say whether another file-mutating agent is already writing here, and \
+         this guard asks it BEFORE granting a worktree precisely because the grant is a rewrite \
+         of this dispatch's arguments that this binary cannot confirm the harness applies \
+         (ADR-0048). Granting on silence would admit this {agent} dispatch with that check never \
+         having run, and if the rewrite is not applied a second file-mutating agent joins the \
+         same git HEAD — a commit landing on another workstream's branch, with no error at any \
+         step. A timeout or an error from a running daemon is correlated with load, which is \
+         when a concurrent dispatch is most likely, so this denies rather than assuming the \
+         checkout is free. Re-issue this dispatch with `isolation: \"worktree\"` declared \
+         explicitly — it needs no rewrite and never reaches this question. If isolation is \
+         unavailable here, serialize instead: dispatch one file-mutating agent at a time. If the \
+         daemon is unhealthy, `tm doctor` reports it and `tm restart` clears it.",
+        cwd.display()
+    )
+}
+
 /// The route that answers and claims for an unisolated dispatch (#4480).
 const SHARED_TREE_ROUTE: &str = "shared-tree-dispatch";
 
@@ -665,10 +753,13 @@ enum SharedTreeReply {
 impl SharedTreeReply {
     /// The parsed body, discarding which failure arm produced its absence.
     ///
-    /// Why: the read-only callers ([`live_shared_tree_writers`]) and the grant
-    /// path ([`evaluate_granted_worktree`]) keep the pre-#5923 fail-open
-    /// contract, and reading them all through one accessor keeps that a stated
-    /// choice at each call site rather than a shape the type quietly allows.
+    /// Why: [`live_shared_tree_writers`] keeps the pre-#5923 fail-open contract
+    /// — it gates the operator's own `git merge`/`git rebase` rather than a
+    /// second agent — and reading it through a named accessor keeps that a
+    /// stated choice at the call site rather than a shape the type quietly
+    /// allows. It is the only remaining caller: the grant path denies on an
+    /// unanswered reply as of #5923 and goes through
+    /// [`claim_shared_tree_on`] with the claim path.
     /// What: `Some` only for [`Self::Answered`].
     /// Test: `pm_guard_allows_a_merge_when_the_daemon_is_unreachable` in
     /// `tests/tm_hook_pm_guard.rs`.
@@ -1429,6 +1520,84 @@ mod tests {
         )
         .await;
         assert_eq!(verdict, None);
+    }
+
+    /// Ask the grant path against `url` with a fixed unisolated dispatch.
+    async fn granted_against(url: &str) -> Option<String> {
+        evaluate_granted_worktree(
+            url,
+            "11111111-1111-1111-1111-111111111111",
+            Path::new("/repo"),
+            &serde_json::json!({"tool_use_id": "toolu_X"}),
+            Some(&input("rust-engineer", None)),
+            &input("rust-engineer", Some("worktree")),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn granted_worktree_denies_when_a_running_daemon_does_not_answer() {
+        // #5923 finding on this PR: the grant path read a daemon that accepted
+        // the connection and went quiet as an empty checkout and granted the
+        // worktree. ADR-0048 puts the #4480 verdict in THIS call — "a dispatch
+        // made into a checkout another writer holds is denied, and only an
+        // empty answer is granted" — so silence granted a tree the guard had
+        // not established was free, and the grant is a rewrite this binary
+        // cannot confirm the harness applies. Before the fix this returned
+        // `None` (grant).
+        let url = spawn_silent_mock();
+        let started = std::time::Instant::now();
+        let reason = granted_against(&url)
+            .await
+            .expect("an unanswered grant must deny");
+        assert!(reason.contains("#5923"), "{reason}");
+        assert!(reason.contains("ADR-0048"), "{reason}");
+        assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the grant must stay inside its own bounded budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn granted_worktree_grants_when_no_daemon_is_listening() {
+        // The other side of the same split, and the arm a fix that denied on
+        // every failure would have broken: with nothing listening the guard
+        // cannot function at all, and denying would block every dispatch from a
+        // main checkout on a machine running no daemon.
+        assert_eq!(granted_against("http://127.0.0.1:1").await, None);
+    }
+
+    #[tokio::test]
+    async fn granted_worktree_denies_beside_a_live_writer() {
+        // The answered DENY arm, unchanged by the split above: a daemon that
+        // names another writer in this checkout still denies, with the reason
+        // that does not offer the isolation the guard already built.
+        let url = spawn_denying_mock();
+        let reason = granted_against(&url)
+            .await
+            .expect("a live writer must deny the grant");
+        assert!(reason.contains("python-engineer"), "{reason}");
+        assert!(reason.contains("ADR-0048"), "{reason}");
+    }
+
+    #[test]
+    fn unanswered_grant_deny_reason_names_the_failure_and_the_rewrite() {
+        // It must not send the reader looking for a sibling agent, and it must
+        // not read as "re-dispatch with isolation" without saying why the
+        // isolation this guard already built is not enough — the explicit one
+        // needs no rewrite to be applied.
+        let reason = unanswered_grant_deny_reason(
+            "rust-engineer",
+            Path::new("/repo"),
+            "the daemon answered 500 Internal Server Error",
+        );
+        assert!(reason.contains("#5923"), "{reason}");
+        assert!(reason.contains("/repo"), "{reason}");
+        assert!(reason.contains("500 Internal Server Error"), "{reason}");
+        assert!(reason.contains("ADR-0048"), "{reason}");
+        assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
+        assert!(reason.contains("serialize"), "{reason}");
     }
 
     #[test]
