@@ -32,7 +32,15 @@ async fn main() -> Result<()> {
 
     let cwd = std::env::current_dir().context("cannot determine the current directory")?;
     let env_value = std::env::var(WORKDIR_ENV).ok();
-    let work = WorkDir::resolve(cli.work_dir.clone(), env_value.as_deref(), &cwd);
+    // #5915: the home directory is read here, with the rest of the environment,
+    // so `resolve` stays a pure function of what it is handed.
+    let home = dirs::home_dir();
+    let work = WorkDir::resolve(
+        cli.work_dir.clone(),
+        env_value.as_deref(),
+        home.as_deref(),
+        &cwd,
+    );
 
     // #5797: the policy lives on `Session`, so the Tauri shell sets it the same
     // way rather than reimplementing when to install.

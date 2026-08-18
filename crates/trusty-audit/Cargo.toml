@@ -72,7 +72,9 @@ trusty-installer = { workspace = true }
 # `Command::new("gh")` here a defect — so this crate never spells one.
 # #5822: `credentials` adds `scrub_secrets`, the workspace's one redaction entry
 # point, used where a board provider's own error text reaches an operator.
-trusty-common = { workspace = true, features = ["gh-cli", "credentials"] }
+# #5915: `crate-config` for `crate_config_dir_at` — the workspace's one owner of
+# the `~/.trusty-tools/<crate>` layout, which `workdir.rs` now defaults into.
+trusty-common = { workspace = true, features = ["gh-cli", "credentials", "crate-config"] }
 # #5822: board validation issues HTTP requests, so it needs `reqwest`'s types —
 # the RequestBuilder, and the error it classifies without quoting the URL. The
 # CLIENT still comes from `trusty_installer::download::http_client`, which stays
