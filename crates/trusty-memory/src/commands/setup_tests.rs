@@ -22,7 +22,7 @@ use serde_json::json;
 fn patch_one_creates_missing_file() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("settings.json");
-    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
+    let entry = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
 
     let outcome = patch_one(&path, &entry, None).expect("patch ok");
     assert!(outcome.mcp_wrote, "first patch writes the MCP entry");
@@ -32,8 +32,15 @@ fn patch_one_creates_missing_file() {
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let server = &value["mcpServers"][MCP_SERVER_KEY];
     assert_eq!(server["command"], "trusty-memory");
+    // #5265: the vector is exactly `["serve"]` — a client that execs the bare
+    // binary never initializes MCP, and `--stdio` no longer selects anything.
+    assert_eq!(
+        server["args"].as_array().map(Vec::len),
+        Some(1),
+        "expected exactly one argument, got {}",
+        server["args"]
+    );
     assert_eq!(server["args"][0], "serve");
-    assert_eq!(server["args"][1], "--stdio");
 
     let hook_entries = value["hooks"][HOOK_EVENT].as_array().unwrap();
     assert_eq!(hook_entries.len(), 1, "exactly one matcher block");
@@ -67,7 +74,7 @@ fn patch_one_creates_missing_file() {
 fn patch_one_installs_hook_with_absolute_path() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("settings.json");
-    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
+    let entry = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
     let fake_exe = std::path::PathBuf::from("/usr/local/bin/trusty-memory");
 
     let outcome = patch_one(&path, &entry, Some(&fake_exe)).expect("patch ok");
@@ -112,10 +119,10 @@ fn patch_one_installs_hook_with_absolute_path() {
 fn patch_one_installs_session_start_hook_when_upgrading() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("settings.json");
-    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
+    let entry = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
     let seed = json!({
         "mcpServers": {
-            MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve", "--stdio"] }
+            MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve"] }
         },
         "hooks": {
             HOOK_EVENT: [{
@@ -165,12 +172,12 @@ fn patch_one_installs_session_start_hook_when_upgrading() {
 fn patch_one_adds_session_start_when_legacy_user_prompt_submit_has_different_shape() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("settings.json");
-    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
+    let entry = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
     // Legacy shape: UserPromptSubmit entry without a `timeout` field,
     // which an older trusty-memory release may have written.
     let seed = json!({
         "mcpServers": {
-            MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve", "--stdio"] }
+            MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve"] }
         },
         "hooks": {
             HOOK_EVENT: [{
@@ -224,7 +231,7 @@ fn patch_one_adds_session_start_when_legacy_user_prompt_submit_has_different_sha
 fn patch_one_is_idempotent() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("settings.json");
-    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
+    let entry = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
 
     let first = patch_one(&path, &entry, None).unwrap();
     assert!(first.mcp_wrote && first.hook_wrote, "first patch writes");
@@ -263,7 +270,7 @@ fn patch_one_preserves_unrelated_keys() {
     });
     std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
-    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
+    let entry = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
     let outcome = patch_one(&path, &entry, None).expect("patch ok");
     assert!(outcome.mcp_wrote);
     assert!(outcome.hook_wrote);
@@ -293,10 +300,10 @@ fn patch_one_preserves_unrelated_keys() {
 fn patch_one_installs_hook_when_mcp_already_present() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("settings.json");
-    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
+    let entry = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
     let seed = json!({
         "mcpServers": {
-            MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve", "--stdio"] }
+            MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve"] }
         }
     });
     std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
@@ -306,42 +313,112 @@ fn patch_one_installs_hook_when_mcp_already_present() {
     assert!(outcome.hook_wrote, "hook freshly installed");
 }
 
-/// Why: regression for the PR3→PR4 upgrade path — an existing install whose
-/// Claude settings file has the old MCP entry shape `args: ["serve"]` (no
-/// `--stdio`, written before PR2 landed) must be rewritten to `args:
-/// ["serve", "--stdio"]` when `setup` (or `migrate kuzu-memory`) is re-run.
-/// Without this check the setup code could silently leave a stale entry
-/// pointing at the HTTP-daemon path, breaking direct-stdio Claude Code
-/// integration even after the binary upgrade.
-/// What: seeds a settings file with the pre-PR2 MCP entry shape (`args:
-/// ["serve"]`), calls `patch_one` with the current canonical entry (`args:
-/// ["serve", "--stdio"]`), and asserts `mcp_wrote = true` (the stale entry
-/// was replaced) and that the written file contains the `--stdio` arg.
-/// Test: this function (upgrade-path regression guard, issue #914 PR4).
+/// Why (#5265): the released contract is bare `serve`, so an existing install
+/// whose Claude settings file still holds `args: ["serve", "--stdio"]` must be
+/// rewritten down to `args: ["serve"]` when `setup` is re-run. Leaving the
+/// legacy vector in place keeps a retired transport-selection flag on the
+/// command line of every future session.
+/// What: seeds a settings file with the legacy vector, calls `patch_one` with
+/// the canonical entry, and asserts the file was rewritten to exactly
+/// `["serve"]`.
 #[test]
-fn patch_one_upgrades_serve_entry_to_serve_stdio() {
+fn patch_one_repairs_a_legacy_serve_stdio_entry() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("settings.json");
-    // Old-shape entry: `args: ["serve"]` — written by pre-PR2 releases.
     let seed = json!({
         "mcpServers": {
-            MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve"] }
+            MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve", "--stdio"] }
         }
     });
     std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
-    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
+    let entry = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
     let outcome = patch_one(&path, &entry, None).expect("patch ok");
     assert!(
         outcome.mcp_wrote,
-        "old args:[\"serve\"] entry must be rewritten to args:[\"serve\",\"--stdio\"]"
+        "legacy args:[\"serve\",\"--stdio\"] must be rewritten to args:[\"serve\"]"
     );
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let args = value["mcpServers"][MCP_SERVER_KEY]["args"]
+    let args: Vec<&str> = value["mcpServers"][MCP_SERVER_KEY]["args"]
         .as_array()
-        .expect("args array present after upgrade");
-    assert_eq!(args[0], "serve", "first arg is 'serve'");
-    assert_eq!(args[1], "--stdio", "second arg is '--stdio' after upgrade");
+        .expect("args array present after repair")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(args, vec!["serve"], "got {args:?}");
+}
+
+/// Why (#5265): the whole defect is a Codex registration that never reaches MCP
+/// mode, so the one thing this must prove is that `serve` arrives in the written
+/// TOML as its own array element.
+/// What: runs `setup_codex` against a tempdir `$HOME` and reads the vector back.
+#[test]
+fn setup_codex_writes_the_serve_entrypoint() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    setup_codex(tmp.path()).expect("codex setup ok");
+
+    let text =
+        std::fs::read_to_string(tmp.path().join(".codex").join("config.toml")).expect("read");
+    let cfg: toml::Value = text.parse().expect("valid TOML");
+    let entry = &cfg["mcp_servers"][MCP_SERVER_KEY];
+    assert_eq!(entry["command"].as_str(), Some("trusty-memory"));
+    let args: Vec<&str> = entry["args"]
+        .as_array()
+        .expect("args array")
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect();
+    assert_eq!(
+        args,
+        vec!["serve"],
+        "#5265: Codex must exec `trusty-memory serve`, not the bare binary"
+    );
+}
+
+/// Why (#5265): re-running setup must REPAIR the two shapes operators already
+/// have on disk — the legacy `serve --stdio` vector, and a whole vector
+/// serialized as one JSON-looking string, which launches
+/// `trusty-memory '["serve"]'` and never initializes.
+/// What: seeds each shape, runs `setup_codex`, asserts the vector is `["serve"]`.
+#[test]
+fn setup_codex_repairs_a_legacy_stdio_registration() {
+    for seeded in [
+        "args = [\"serve\", \"--stdio\"]",
+        "args = [\"[\\\"serve\\\"]\"]",
+        "args = []",
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(".codex").join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!("[mcp_servers.trusty-memory]\ncommand = \"trusty-memory\"\n{seeded}\n"),
+        )
+        .unwrap();
+
+        setup_codex(tmp.path()).expect("codex setup ok");
+
+        let cfg: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        let args: Vec<&str> = cfg["mcp_servers"][MCP_SERVER_KEY]["args"]
+            .as_array()
+            .expect("args array")
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .collect();
+        assert_eq!(args, vec!["serve"], "seeded {seeded}, got {args:?}");
+    }
+}
+
+/// Why: `setup` is re-run routinely; a second run must leave the operator's
+/// Codex config byte-identical.
+#[test]
+fn setup_codex_is_idempotent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join(".codex").join("config.toml");
+    setup_codex(tmp.path()).expect("first run");
+    let before = std::fs::read_to_string(&path).expect("read");
+    setup_codex(tmp.path()).expect("second run");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
 }

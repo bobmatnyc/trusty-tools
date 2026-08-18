@@ -13,6 +13,8 @@
 //!   3. The HTTP daemon responds to `GET /health` on its configured port
 //!   4. No obvious stale palace lock sidecar files (`*.lock`) under the data dir
 //!   5. No Tier S standing rule is overdue for re-affirmation (#4890, `tier_s`)
+//!   6. Every MCP-client registration launches `trusty-memory serve` (#5265,
+//!      `mcp_registration`)
 //!
 //! Each check prints a ✅ or ❌ line. The command exits 0 if all critical
 //! checks pass, 1 otherwise.
@@ -24,6 +26,7 @@
 
 mod audit;
 mod checks;
+mod mcp_registration;
 mod tier_s;
 
 use audit::audit_palaces;
@@ -31,6 +34,7 @@ pub use audit::{PalaceAuditEntry, PalaceAuditStatus};
 #[cfg(target_os = "macos")]
 use checks::check_launchd_plist;
 use checks::{check_daemon_health, check_fastembed_cache, check_stale_palace_locks};
+use mcp_registration::check_mcp_registrations;
 use tier_s::check_tier_s_reaffirmation;
 
 use anyhow::Result;
@@ -279,6 +283,13 @@ pub async fn handle_doctor() -> Result<()> {
 
     // Check 5 (#4890): Tier S facts overdue for re-affirmation. Report only.
     results.push(check_tier_s_reaffirmation().await);
+
+    // Check 6 (#5265): what each MCP client will actually launch. One verdict
+    // per client, so a broken Codex registration cannot hide behind a healthy
+    // Claude one.
+    results.extend(check_mcp_registrations(
+        crate::commands::setup::MCP_SERVER_KEY,
+    ));
 
     for r in &results {
         r.print();
