@@ -1334,6 +1334,11 @@ trusty-review = "0.15.1"
     /// network. `tga` writes the manifest a real one would for whatever
     /// `--output` it is handed, so the sweep succeeds over ANY repository and
     /// the only thing a test can be reading is WHICH one ran.
+    ///
+    /// It also writes the `extract/<stem>.db` a real `tga audit` would (#5862):
+    /// `Area::Output` (`out/`) and `Area::Extract` (`extract/`) are always
+    /// siblings under the work-dir root, so the script derives the database
+    /// path from `$out` rather than parsing the generated `--config` TOML.
     #[cfg(unix)]
     fn install_stubs(work: &crate::workdir::WorkDir) {
         use crate::tools::RequiredTool;
@@ -1343,7 +1348,12 @@ trusty-review = "0.15.1"
              case \"$1\" in --output) out=\"$2\"; shift;; esac\n  shift\ndone\n\
              mkdir -p \"$out\"\n\
              printf '[report]\\ntitle = \"Acme\"\\n\\n[[repositories]]\\n\
-             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n";
+             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\n\
+             work_root=$(dirname \"$(dirname \"$out\")\")\n\
+             stem=$(basename \"$out\")\n\
+             mkdir -p \"$work_root/extract\"\n\
+             printf 'sqlite-stub' > \"$work_root/extract/$stem.db\"\n\
+             exit 0\n";
 
         for tool in RequiredTool::ALL {
             let path = tool.path_in(work);

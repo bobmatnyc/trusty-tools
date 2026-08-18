@@ -22,7 +22,7 @@
 //!
 //! ## What it will not put in the file
 //!
-//! Two refusals, both before a single byte reaches the destination:
+//! Three refusals, all before a single byte reaches the destination:
 //!
 //! - **A link to content from elsewhere, anywhere under `out/` or `extract/`.**
 //!   Packaging one would read a file outside the working directory into an
@@ -34,12 +34,41 @@
 //! - **The engagement credential, in any member.** [`crate::config::SecretKey`]
 //!   has no `Serialize`, so this crate cannot write the key into a file it
 //!   generates — but the members are files OTHER programs wrote, and no type
-//!   governs those. Every member's bytes are scanned as they are copied. See
+//!   governs those. Every member's bytes are scanned as they are copied — see
+//!   "Credential scanning covers every byte, database included" below. See
 //!   [`AuditError::CredentialInPackage`].
+//! - **A report with no collection database.** The owner's ruling on the
+//!   deliverable (2026-08-18) is the database and the report together, so
+//!   [`collect_extract`] refuses the whole assembly when an audited
+//!   repository's `extract/<stem>.db` is missing or the `extract/` directory
+//!   itself does not exist, rather than shipping the report alone with no
+//!   record that its database never arrived (#5862). See
+//!   [`AuditError::MissingExtractDatabase`].
 //!
-//! Both are refusals rather than omissions, and the package is built in a
-//! temporary file that is removed on either, so a refused assembly leaves no
-//! partial zip a recipient could send by mistake.
+//! All three are refusals rather than omissions, and the package is built in a
+//! temporary file that is removed on any of them, so a refused assembly leaves
+//! no partial zip a recipient could send by mistake.
+//!
+//! ## Credential scanning covers every byte, database included
+//!
+//! [`credential_scan::copy_member`] reads each member through a plain
+//! byte-oriented sliding window — it has no notion of file format, so it scans
+//! a SQLite database exactly as it scans a `.md` report: as an opaque byte
+//! stream searched for every configured secret's exact bytes. Nothing about
+//! `extract/<stem>.db` exempts it from that scan; the widened test
+//! `super::package_tests::an_ordinary_member_still_packages_under_the_widened_scan`
+//! and the straddling-window test
+//! `crate::package::credential_scan::credential_scan_tests::a_credential_split_across_two_reads_is_caught`
+//! both exercise the same scan every member goes through, database or not.
+//!
+//! What it does NOT do: parse the database's schema or rows, so it cannot tell
+//! a secret sitting in a legitimate free-text column (a commit message, a
+//! pasted token in a work-item title) from one that leaked — every such value
+//! that happens to match a configured secret's bytes trips the same refusal a
+//! credential in a log file would. That is the same content boundary the
+//! generated README states: the database carries no file content, diffs,
+//! patches, hunks, or blobs, but it does carry whatever free text a human
+//! pasted into a commit message or work-item title.
 //!
 //! ## The boundary with signing (#5481)
 //!
@@ -52,7 +81,7 @@
 //!
 //! Test: `super::package_tests`.
 
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -62,6 +91,13 @@ use crate::error::AuditError;
 use crate::run::{RepoRun, RunReport};
 use crate::tools;
 use crate::workdir::{Area, WorkDir};
+
+// #5862: adding `AuditError::MissingExtractDatabase` pushed this file one line
+// past the 500-SLOC production cap. The credential scan is the most
+// self-contained unit here — it depends on nothing this file does besides
+// `Archive` and `start`, both of which a child module sees without any
+// visibility change — so it moved rather than anything else splitting.
+mod credential_scan;
 
 /// Filename of the return package, when the recipient does not choose one.
 pub const PACKAGE_FILE_NAME: &str = "audit-return-package.zip";
@@ -77,9 +113,6 @@ pub const REPORTS_PREFIX: &str = "reports";
 
 /// Directory inside the zip holding the tga extract databases (#5479).
 pub const EXTRACT_PREFIX: &str = "extract";
-
-/// How much of a member is read at a time while copying and scanning it.
-const CHUNK_BYTES: usize = 64 * 1024;
 
 /// Where the package lands when nothing overrides it.
 ///
@@ -208,6 +241,8 @@ struct PackagedRepo {
 /// [`AuditError::UnsafePackageEntry`] for a symlink or hardlink under `out/` or
 /// `extract/`,
 /// [`AuditError::CredentialInPackage`] when a member carries the engagement key,
+/// [`AuditError::MissingExtractDatabase`] when an audited repository has no
+/// collection database under `extract/`,
 /// and [`AuditError::Package`] for any read, write, or rename failure.
 /// Assemble from the sweep's own record, refusing one that did not finish.
 ///
@@ -288,7 +323,7 @@ pub fn assemble(
             &format!("{REPORTS_PREFIX}/{stem}"),
             &mut collected,
         )?;
-        collect_extract(work, &stem, &mut collected)?;
+        collect_extract(work, &stem, &run.repo.name, &mut collected)?;
     }
     collected.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -419,19 +454,37 @@ fn collect_dir(
 ///
 /// Matching by PREFIX rather than by exact name is what picks up the `-wal` and
 /// `-shm` files WAL mode leaves: a database shipped without them can be missing
-/// the last committed transactions.
+/// the last committed transactions. The prefix match only WIDENS what a present
+/// database brings along; it never substitutes for the primary `<stem>.db`
+/// itself, which is checked by exact name below.
+///
+/// # Errors
+///
+/// [`AuditError::MissingExtractDatabase`] when `extract/<stem>.db` is not
+/// present — including when `extract/` does not exist at all, which is the
+/// same absence one level up (#5862). [`AuditError::UnsafePackageEntry`] for a
+/// symlink or hardlink matching the prefix, and [`AuditError::Package`] for any
+/// other read failure.
+/// Test: `super::package_tests::an_audited_repo_with_no_extract_database_is_refused`,
+/// `super::package_tests::an_audited_repo_with_no_extract_directory_at_all_is_refused`.
 fn collect_extract(
     work: &WorkDir,
     stem: &str,
+    repo_name: &str,
     into: &mut Vec<(String, PathBuf)>,
 ) -> Result<(), AuditError> {
     let dir = work.path(Area::Extract);
     let wanted = format!("{stem}.db");
+    let missing = || AuditError::MissingExtractDatabase {
+        repo: repo_name.to_owned(),
+        expected: dir.join(&wanted),
+    };
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(missing()),
         Err(source) => return Err(AuditError::Package { path: dir, source }),
     };
+    let mut found_primary = false;
     for entry in entries {
         let entry = entry.map_err(|source| AuditError::Package {
             path: dir.clone(),
@@ -453,8 +506,12 @@ fn collect_extract(
         }
         if kind.is_file() {
             refuse_if_hardlinked(&entry.path())?;
+            found_primary |= name == wanted;
             into.push((format!("{EXTRACT_PREFIX}/{name}"), entry.path()));
         }
+    }
+    if !found_primary {
+        return Err(missing());
     }
     Ok(())
 }
@@ -646,7 +703,7 @@ fn fill_archive(
     }
 
     for (entry, source) in collected {
-        let bytes = copy_member(&mut zip, &entry, &source, config, temporary)?;
+        let bytes = credential_scan::copy_member(&mut zip, &entry, &source, config, temporary)?;
         files.push(PackagedFile {
             entry,
             source: Some(source),
@@ -679,128 +736,11 @@ fn start(zip: &mut Archive, entry: &str, bytes: u64, temporary: &Path) -> Result
         })
 }
 
-/// Every secret this engagement holds, as the bytes a member may not carry.
-///
-/// Why: the guard used to scan for `openrouter_key` alone, and #5857 put two
-/// more secrets on the same trust boundary — the JIRA token and the Linear API
-/// key reach a `tga audit` child through its environment, and the files that
-/// child writes are exactly the files this function's caller packages and sends
-/// off the recipient's network. One list, so a credential added to
-/// [`EngagementConfig`] is refused here the moment it is configured.
-/// What: [`EngagementConfig::configured_secrets`] as byte slices — the same
-/// list [`crate::run`]'s child-log scrubber uses as its needles, so the two
-/// guards cannot come to disagree about what a secret is. A provider with no
-/// entry contributes no needle.
-/// Test: `super::package_tests::a_member_carrying_the_jira_token_is_refused_and_leaves_no_zip`,
-/// `super::package_tests::a_member_carrying_the_linear_api_key_is_refused_and_leaves_no_zip`,
-/// `super::package_tests::a_member_carrying_several_secrets_is_refused_on_the_first_pass`.
-fn secret_needles(config: &EngagementConfig) -> Vec<&[u8]> {
-    config
-        .configured_secrets()
-        .into_iter()
-        .map(str::as_bytes)
-        .collect()
-}
-
-/// Copy one file into the archive, refusing it if it carries any credential.
-fn copy_member(
-    zip: &mut Archive,
-    entry: &str,
-    source: &Path,
-    config: &EngagementConfig,
-    temporary: &Path,
-) -> Result<u64, AuditError> {
-    let mut input = std::fs::File::open(source).map_err(|e| AuditError::Package {
-        path: source.to_path_buf(),
-        source: e,
-    })?;
-    let bytes = input.metadata().map(|m| m.len()).unwrap_or(0);
-    start(zip, entry, bytes, temporary)?;
-
-    let needles = secret_needles(config);
-    let mut scan = CredentialScan::over(&needles);
-    let mut buffer = vec![0_u8; CHUNK_BYTES];
-    let mut written = 0_u64;
-    loop {
-        let read = input.read(&mut buffer).map_err(|e| AuditError::Package {
-            path: source.to_path_buf(),
-            source: e,
-        })?;
-        if read == 0 {
-            break;
-        }
-        if scan.feed(&buffer[..read]) {
-            return Err(AuditError::CredentialInPackage {
-                path: source.to_path_buf(),
-            });
-        }
-        zip.write_all(&buffer[..read])
-            .map_err(|source| AuditError::Package {
-                path: temporary.to_path_buf(),
-                source,
-            })?;
-        written += read as u64;
-    }
-    Ok(written)
-}
-
-/// A multi-needle substring search across a stream, without holding the stream
-/// in memory.
-///
-/// Why: the credential check has to cover an extract database that can run to
-/// hundreds of megabytes, and a match that straddles two reads is exactly the
-/// case a naive per-chunk search misses. Keeping the last `len - 1` bytes as the
-/// next window's prefix is what closes that gap.
-///
-/// The carried tail is sized to the LONGEST needle (#5857): one buffer serves
-/// every needle, and a tail cut to the shortest would let a longer secret
-/// straddle two reads undetected — the precise failure a per-needle tail exists
-/// to prevent. One shared window also means one copy per chunk rather than one
-/// per needle per chunk, which matters at extract-database size.
-/// Test: `super::package_tests::a_credential_split_across_two_reads_is_caught`.
-struct CredentialScan<'a> {
-    /// Every secret to refuse. Empty needles are dropped at construction — an
-    /// unset credential must not match every file.
-    needles: Vec<&'a [u8]>,
-    /// Bytes to carry into the next window: `longest needle - 1`.
-    keep: usize,
-    tail: Vec<u8>,
-}
-
-impl<'a> CredentialScan<'a> {
-    fn over(needles: &[&'a [u8]]) -> Self {
-        let needles: Vec<&'a [u8]> = needles.iter().copied().filter(|n| !n.is_empty()).collect();
-        let keep = needles.iter().map(|n| n.len()).max().unwrap_or(1) - 1;
-        Self {
-            needles,
-            keep,
-            tail: Vec::new(),
-        }
-    }
-
-    /// Whether any needle appears in the stream up to and including `chunk`.
-    fn feed(&mut self, chunk: &[u8]) -> bool {
-        if self.needles.is_empty() {
-            return false;
-        }
-        let mut window = std::mem::take(&mut self.tail);
-        window.extend_from_slice(chunk);
-        let found = self.needles.iter().any(|needle| {
-            window.len() >= needle.len()
-                && window
-                    .windows(needle.len())
-                    .any(|candidate| candidate == *needle)
-        });
-        let keep = self.keep.min(window.len());
-        self.tail = window[window.len() - keep..].to_vec();
-        found
-    }
-}
-
 #[cfg(test)]
 mod package_tests {
     use super::*;
     use crate::run::{RepoResult, RepoRun, SelectedRepo};
+    use std::io::Read as _;
 
     const CONFIG: &str = r#"
 openrouter_key = "sk-or-v1-not-a-real-key"
@@ -1117,29 +1057,6 @@ api_key = "lin_api_do-not-package-me"
         assert!(package.path.is_file(), "{package:?}");
     }
 
-    /// A needle straddling two reads is the case the chunked scan exists for,
-    /// and with several needles the tail has to be sized to the LONGEST — a tail
-    /// cut to the shortest would let the longest one straddle undetected.
-    #[test]
-    fn a_credential_split_across_two_reads_is_caught() {
-        let mut scan = CredentialScan::over(&[b"sk-or-v1-secret".as_slice()]);
-        assert!(!scan.feed(b"noise sk-or-v1-"));
-        assert!(scan.feed(b"secret more noise"));
-
-        // The LONGEST needle straddles while a shorter one is also registered —
-        // a tail sized to the shortest would miss this.
-        let mut several =
-            CredentialScan::over(&[b"lin_api".as_slice(), b"jira-token-that-is-long".as_slice()]);
-        assert!(!several.feed(b"noise jira-token-"));
-        assert!(several.feed(b"that-is-long more noise"));
-
-        // And an empty key never matches everything.
-        let mut blank = CredentialScan::over(&[b"".as_slice()]);
-        assert!(!blank.feed(b"anything at all"));
-        let mut nothing = CredentialScan::over(&[]);
-        assert!(!nothing.feed(b"anything at all"));
-    }
-
     /// Following a symlink would read a file outside the working directory into
     /// a package that leaves the recipient's network.
     #[cfg(unix)]
@@ -1362,5 +1279,61 @@ api_key = "lin_api_do-not-package-me"
             !names.iter().any(|n| n.contains("09-other")),
             "an unrelated database was packaged: {names:?}"
         );
+    }
+
+    /// A repository whose output directory exists but whose database was never
+    /// written — build acceptance criterion 3 and #5862's closure condition 1:
+    /// the report alone must never ship as if it were the whole deliverable.
+    #[test]
+    fn an_audited_repo_with_no_extract_database_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited(&work, "00-acme-api", "acme-api");
+        // `audited` wrote the database already; remove it so the output
+        // directory is present with no matching `extract/<stem>.db`.
+        std::fs::remove_file(work.path(Area::Extract).join("00-acme-api.db")).expect("remove db");
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        let err = assemble(&work, &config(), &report, &[], &destination)
+            .expect_err("a report with no database must not be packaged");
+        let AuditError::MissingExtractDatabase { repo, expected } = &err else {
+            panic!("expected MissingExtractDatabase, got {err:?}");
+        };
+        assert_eq!(repo, "acme-api");
+        assert!(
+            expected.ends_with("00-acme-api.db"),
+            "{}",
+            expected.display()
+        );
+        assert!(
+            !destination.exists(),
+            "a refused package must leave no file"
+        );
+        assert!(!destination.with_extension("zip.part").exists());
+    }
+
+    /// The other route to the same absence: `extract/` was never created at
+    /// all, rather than existing and simply lacking this repository's file.
+    /// `collect_extract`'s `NotFound` branch used to treat this as `Ok(())`.
+    #[test]
+    fn an_audited_repo_with_no_extract_directory_at_all_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_record(&work);
+        let run = audited(&work, "00-acme-api", "acme-api");
+        std::fs::remove_dir_all(work.path(Area::Extract)).expect("remove extract dir");
+        let report = RunReport::of(vec![run]);
+        let destination = default_destination(&work);
+
+        let err = assemble(&work, &config(), &report, &[], &destination)
+            .expect_err("a missing extract/ directory must not be packaged");
+        assert!(
+            matches!(err, AuditError::MissingExtractDatabase { .. }),
+            "{err:?}"
+        );
+        assert!(!destination.exists());
+        assert!(!destination.with_extension("zip.part").exists());
     }
 }

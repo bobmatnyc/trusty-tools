@@ -101,6 +101,13 @@ impl Engagement {
 
     /// A stub `tga` that writes the manifest a real one would — a zero exit with
     /// no manifest is a FAILURE, so a test expecting success needs this.
+    ///
+    /// It also writes the `extract/<stem>.db` a real `tga audit` would (#5862),
+    /// deriving the path from `$out` the same way the unit-test stubs in
+    /// `chain.rs` and `cli/registration.rs` do: `out/` and `extract/` are
+    /// always siblings under the work-dir root. Without this, every scenario
+    /// here that reaches `package::assemble` trips
+    /// `AuditError::MissingExtractDatabase` on a stub gap, not a real one.
     fn manifest_writer(exit_for: Option<&str>) -> String {
         let fail = match exit_for {
             Some(pattern) => format!("case \"$*\" in *{pattern}*) exit 4;; esac\n"),
@@ -111,7 +118,12 @@ impl Engagement {
              case \"$1\" in --output) out=\"$2\"; shift;; esac\n  shift\ndone\n\
              mkdir -p \"$out\"\n\
              printf '[report]\\ntitle = \"Acme\"\\n\\n[[repositories]]\\n\
-             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n"
+             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\n\
+             work_root=$(dirname \"$(dirname \"$out\")\")\n\
+             stem=$(basename \"$out\")\n\
+             mkdir -p \"$work_root/extract\"\n\
+             printf 'sqlite-stub' > \"$work_root/extract/$stem.db\"\n\
+             exit 0\n"
         )
     }
 

@@ -492,6 +492,13 @@ trusty-review = "0.15.1"
     /// Matching on the stem is what lets one script produce a MIXED sweep, which
     /// is the case the fail-open test needs — a partial run, not a clean one and
     /// not a total failure.
+    ///
+    /// It also writes the `extract/<stem>.db` a real `tga audit` would (#5862):
+    /// `Area::Output` (`out/`) and `Area::Extract` (`extract/`) are always
+    /// siblings under the work-dir root, so the script derives the database path
+    /// from `$out` rather than parsing the generated `--config` TOML. Without
+    /// this, every chain test that reaches `package::assemble` would trip
+    /// [`AuditError::MissingExtractDatabase`] on a stub gap, not a real one.
     fn tga_stub(succeed: &[&str]) -> String {
         let cases: String = succeed
             .iter()
@@ -504,7 +511,12 @@ trusty-review = "0.15.1"
              [ \"$ok\" = 1 ] || exit 1\n\
              mkdir -p \"$out\"\n\
              printf '[report]\\ntitle = \"Acme\"\\n\\n[[repositories]]\\n\
-             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n"
+             name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\n\
+             work_root=$(dirname \"$(dirname \"$out\")\")\n\
+             stem=$(basename \"$out\")\n\
+             mkdir -p \"$work_root/extract\"\n\
+             printf 'sqlite-stub' > \"$work_root/extract/$stem.db\"\n\
+             exit 0\n"
         )
     }
 
