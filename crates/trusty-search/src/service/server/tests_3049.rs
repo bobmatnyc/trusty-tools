@@ -479,8 +479,11 @@ async fn create_index_cannot_register_while_a_delete_is_tearing_the_id_down() {
     assert_eq!(created.status(), axum::http::StatusCode::OK, "gen-1 create");
 
     // An in-flight writer keeps the delete parked long enough for the create to
-    // be issued squarely inside the teardown window.
-    let writer_guard = index_teardown_lock(&IndexId::new(ID)).read_owned().await;
+    // be issued squarely inside the teardown window. Both arrivals are WAITED
+    // FOR rather than slept through — see `await_condition` for why.
+    let lock = crate::service::reindex::index_teardown_lock(&IndexId::new(ID));
+    let baseline = teardown_lock_waiters(&lock);
+    let writer_guard = Arc::clone(&lock).read_owned().await;
     let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
 
     let delete_state = Arc::clone(&state);
@@ -490,7 +493,12 @@ async fn create_index_cannot_register_while_a_delete_is_tearing_the_id_down() {
         delete_order.lock().expect("order lock").push("delete");
         outcome
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The delete has reached its exclusive acquire and parked: it now holds an
+    // `Arc` clone of the lock, on top of the guard this test holds.
+    await_condition("the delete to park on the teardown lock", || async {
+        teardown_lock_waiters(&lock) >= baseline + 2
+    })
+    .await;
 
     let create_state = Arc::clone(&state);
     let create_order = Arc::clone(&order);
@@ -505,7 +513,15 @@ async fn create_index_cannot_register_while_a_delete_is_tearing_the_id_down() {
         resp
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The create has reached `acquire_index_teardown_read` and parked BEHIND the
+    // delete's pending write — which is what puts it squarely inside the
+    // teardown window this test exists to cover. Without this wait the create
+    // could still be in `validate_root_path` when the guard drops, and the test
+    // would assert an ordering it never actually raced for.
+    await_condition("the create to park behind the delete", || async {
+        teardown_lock_waiters(&lock) >= baseline + 3
+    })
+    .await;
     drop(writer_guard);
 
     let deleted = delete.await.expect("delete task");
@@ -582,6 +598,52 @@ async fn patch_index_config_waits_for_an_in_flight_teardown() {
         axum::http::StatusCode::OK,
         "once teardown releases, the PATCH proceeds normally"
     );
+}
+
+/// Poll `cond` until it holds, or panic with `what` once the budget expires.
+///
+/// Why: the tests below have to stage a precise interleaving — a delete parked
+/// on the teardown lock, then a create parked behind it. Staging that with
+/// `sleep(100ms)` encodes a GUESS about scheduling, which is why
+/// `create_index_cannot_register_while_a_delete_is_tearing_the_id_down` failed
+/// intermittently on a loaded CI runner and never on an idle one. Polling an
+/// observable makes the wait end when the state is actually reached.
+/// What: 5 ms poll, 10 s budget. The budget only ever costs time on a host where
+/// the alternative was a false failure; expiry is a hard panic naming `what`, so
+/// a genuine hang reports what never happened rather than failing an unrelated
+/// assertion further down.
+/// Test: every caller in this module.
+async fn await_condition<C, Fut>(what: &str, mut cond: C)
+where
+    C: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    const BUDGET: Duration = Duration::from_secs(10);
+    const POLL: Duration = Duration::from_millis(5);
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    while !cond().await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out after {BUDGET:?} waiting for {what}"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Number of live `Arc` clones of `id`'s teardown lock.
+///
+/// Why: this is the observable that says "another task is parked on this lock".
+/// Both `acquire_index_teardown_read` and `acquire_index_teardown_write` clone
+/// the `Arc` before awaiting, so a task waiting to acquire is holding one; the
+/// count therefore rises as each participant arrives and is what the tests below
+/// wait on instead of guessing at a duration. Counting through a caller-held
+/// `Arc` rather than a fresh `index_teardown_lock` call keeps the reading free
+/// of the temporary that call would itself create.
+/// What: `Arc::strong_count`, relative to a baseline the caller samples first —
+/// the absolute value also counts the map entry and any guard the test holds,
+/// so only the DELTA is meaningful.
+fn teardown_lock_waiters(lock: &Arc<tokio::sync::RwLock<()>>) -> usize {
+    Arc::strong_count(lock)
 }
 
 /// Build a `CreateIndexRequest` with every optional field defaulted — the same
