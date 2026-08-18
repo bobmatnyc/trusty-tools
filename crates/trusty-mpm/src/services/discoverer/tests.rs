@@ -394,3 +394,81 @@ fn sidecar_shows_unknown_health_when_running() {
     assert_eq!(status.health, HealthState::Unknown);
     assert!(status.port.is_none());
 }
+
+// ── #5951: the PID reported must be the port's owner, not a same-named sibling ──
+
+/// A prober that answers both questions differently, the way the reporting
+/// machine did: `pgrep -f trusty-mpm` returned the stdio bridge (7009) while
+/// port 7880 was held by the daemon (48689).
+struct MockPortOwnerProber {
+    name_pid: Option<u32>,
+    port_owner: Option<u32>,
+}
+
+impl ProcessProber for MockPortOwnerProber {
+    fn pgrep(&self, _pattern: &str) -> Option<u32> {
+        self.name_pid
+    }
+    fn pid_listening_on(&self, _port: u16) -> Option<u32> {
+        self.port_owner
+    }
+}
+
+/// #5951: `tm services list` printed 7009, a `trusty-mpm serve --stdio` MCP
+/// bridge, for a daemon whose real PID was 48689.
+#[test]
+fn pid_prefers_port_owner_over_name_match() {
+    let m = static_manifest_with_port(7880);
+    let mut d = Discoverer::with_probers(
+        m,
+        Box::new(MockPortOwnerProber {
+            name_pid: Some(7009),
+            port_owner: Some(48689),
+        }),
+        Box::new(MockPortProber { port: Some(7880) }),
+        Box::new(MockHttpProber::new(HealthState::Ok)),
+        Box::new(MockVersionRunner { version: None }),
+    );
+    let status = d.status("test-svc").unwrap();
+    assert_eq!(
+        status.pid,
+        Some(48689),
+        "the process bound to the port is the service; 7009 is a sibling"
+    );
+    assert!(status.running);
+}
+
+/// A portless sidecar has no socket to attribute, so name matching stands.
+#[test]
+fn pid_falls_back_to_name_match_without_port() {
+    let mut d = Discoverer::with_probers(
+        sidecar_manifest(),
+        Box::new(MockPortOwnerProber {
+            name_pid: Some(7009),
+            port_owner: Some(48689),
+        }),
+        Box::new(MockPortProber { port: None }),
+        Box::new(MockHttpProber::new(HealthState::Ok)),
+        Box::new(MockVersionRunner { version: None }),
+    );
+    let status = d.status("sidecar").unwrap();
+    assert_eq!(status.pid, Some(7009));
+}
+
+/// No `lsof`, or nothing listening: report the name match rather than nothing.
+#[test]
+fn pid_falls_back_to_name_match_when_port_unowned() {
+    let m = static_manifest_with_port(7880);
+    let mut d = Discoverer::with_probers(
+        m,
+        Box::new(MockPortOwnerProber {
+            name_pid: Some(7009),
+            port_owner: None,
+        }),
+        Box::new(MockPortProber { port: Some(7880) }),
+        Box::new(MockHttpProber::new(HealthState::Ok)),
+        Box::new(MockVersionRunner { version: None }),
+    );
+    let status = d.status("test-svc").unwrap();
+    assert_eq!(status.pid, Some(7009));
+}

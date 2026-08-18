@@ -388,7 +388,7 @@ pub(crate) async fn stop_daemon() -> anyhow::Result<()> {
         let any_alive = targets.iter().any(|p| pid_alive(*p));
         if !any_alive {
             println!("Daemon stopped");
-            cleanup_lock_file();
+            cleanup_lock_file(&targets);
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -414,21 +414,26 @@ pub(crate) async fn stop_daemon() -> anyhow::Result<()> {
         println!("Daemon may still be shutting down");
     } else {
         println!("Daemon stopped");
-        cleanup_lock_file();
+        cleanup_lock_file(&targets);
     }
     Ok(())
 }
 
-/// Remove the stale `~/.trusty-mpm/daemon.lock` after a successful stop.
+/// Remove the `~/.trusty-mpm/daemon.lock` left by the daemons we just stopped.
 ///
 /// Why: the daemon writes its lock file on bind and removes it on graceful
 /// shutdown, but SIGKILL leaves it behind; the next `tm status` call would
 /// then chase a dead address through the discovery timeout.
-/// What: best-effort `fs::remove_file` of `lock_file_path()`.
-/// Test: covered indirectly by the stop integration path.
-pub(crate) fn cleanup_lock_file() {
-    let path = trusty_mpm::core::lock_file_path();
-    let _ = std::fs::remove_file(&path);
+/// Why `stopped` (#1731): this used to delete whatever file sat at the path.
+/// A daemon that started between the SIGTERM and this call owns a valid record,
+/// and deleting it strands a live daemon with no lock file.
+/// What: removes the record only when it names one of `stopped`, then drops the
+/// guided-autostart pidfile.
+/// Test: `remove_lock_owned_by_keeps_newer_daemons_record` in
+/// `trusty_mpm::core::daemon_identity`; the stop path is covered by the stop
+/// integration path.
+pub(crate) fn cleanup_lock_file(stopped: &[u32]) {
+    trusty_mpm::core::daemon_identity::remove_lock_owned_by(stopped);
     // Also drop the guided-autostart pidfile so a stale PID from a prior raw
     // fallback spawn does not mislead `tm`'s tooling after the daemon stops (#1900).
     let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
@@ -503,25 +508,15 @@ pub(crate) fn send_signal(_pid: u32, _sig: &str) -> std::io::Result<()> {
     ))
 }
 
-/// Check whether a PID is still alive (Unix only).
+/// Check whether a PID is still alive.
 ///
-/// Why: the SIGTERM-then-SIGKILL poll loop needs a portable "is this PID
-/// alive?" probe. `kill -0` returns success when the process exists.
-/// What: invokes `kill -0 <pid>` via `Command` so no extra dep is needed.
-/// Test: covered indirectly by the stop integration path.
-#[cfg(unix)]
+/// Why: the SIGTERM-then-SIGKILL poll loop needs a "is this PID alive?" probe.
+/// #1731: this spawned a `kill -0` subprocess per PID per poll iteration and
+/// was the crate's second answer to the question; both now route through the
+/// `kill(pid, 0)` syscall in `core::daemon_identity`.
+/// Test: `pid_alive_true_for_self` in `trusty_mpm::core::daemon_identity`.
 pub(crate) fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn pid_alive(_pid: u32) -> bool {
-    true
+    trusty_mpm::core::daemon_identity::pid_alive(pid)
 }
 
 #[cfg(test)]

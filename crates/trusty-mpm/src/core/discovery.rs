@@ -462,34 +462,12 @@ async fn probe_url(client: &reqwest::Client, url: &str) -> bool {
 }
 
 /// Read the daemon URL from the lock file if present and the PID is alive.
+///
+/// #1731: the parse, the product-magic check, and the stale-record cleanup all
+/// live in [`crate::core::daemon_identity`] — this hand-rolled a second copy of
+/// them, and trusted any TOML at the path with an `addr` line.
 fn read_lock_file_url() -> Option<String> {
-    let path = lock_file_path();
-    let content = std::fs::read_to_string(&path).ok()?;
-
-    let mut addr: Option<String> = None;
-    let mut pid: Option<u32> = None;
-
-    for line in content.lines() {
-        if let Some(v) = line.strip_prefix("addr = ") {
-            addr = Some(v.trim_matches('"').to_string());
-        }
-        if let Some(v) = line.strip_prefix("pid = ") {
-            pid = v.trim().parse::<u32>().ok();
-        }
-    }
-
-    // Validate PID is still alive (Unix only; on non-Unix skip check).
-    #[cfg(unix)]
-    if let Some(p) = pid {
-        // kill(pid, 0) returns Ok if process exists, Err otherwise.
-        if unsafe { libc::kill(p as libc::pid_t, 0) } != 0 {
-            // Stale lock — remove it silently.
-            let _ = std::fs::remove_file(&path);
-            return None;
-        }
-    }
-
-    addr
+    super::daemon_identity::read_lock().map(|lock| lock.addr)
 }
 
 #[cfg(test)]
