@@ -118,28 +118,32 @@ claims, and disputed results. Full rule in
 
 ### What CI actually gates
 
-🔴 **The required-checks list drifts — read it from the API, not from this
-file.** The list below is a snapshot, and a stale snapshot has already cost a
-merge (next paragraph). Before trusting a count, run:
+🔴 **A bounded list of required checks gates every merge — read it live, never
+hand-copy the count.** This section has re-copied that count repeatedly: six,
+then nine, then eleven, with a rise to thirteen already staged (`ci.yml`
+gained `trusty-mpm-gui clippy` and `trusty-code-gui clippy` in
+[#5958](https://github.com/bobmatnyc/trusty-tools/pull/5958); only the
+branch-protection update to make them required is still pending). A stale copy
+has already cost a real merge (next paragraph). The list is never worth
+copying here — read it directly:
 
 ```bash
 gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   --jq '.required_status_checks.contexts'
 ```
 
-Read 2026-08-18 from that command, branch protection requires these eleven
-contexts: `Format check`, `500-line file-size cap`, `Clippy`, `trusty-search
-daemon smoke test`, `MSRV check`, `PR version bump vs crates.io (issue
-#4421)`, `Doc-comment pointer lint (Why/What/Test)`, `Durable writes hold the
-teardown guard`, `No leaked AI-generation / tool-call artifacts`,
-`trusty-agents-ui clippy`, and `trusty-audit-ui clippy`. This list is
-authoritative only as of that read — re-run the command above before trusting
-a count. All eleven trigger unconditionally and gate their expensive steps
-inside the job body on a `docs_only` boolean (`ci.yml:145-172`) — a `paths:`
-filter on a required job would leave the check pending forever, which is why
-none of them has one. `required_status_checks.strict` is `false`: a PR's head
-does not need to be up to date with `main` for its checks to count toward the
-merge — only the checks on the PR's own head matter.
+That endpoint is readable by this account with no special access needed.
+Every required job triggers unconditionally — none of them carries a `paths:`
+filter, because a `paths:` filter would leave a required context pending
+forever on a PR that never touches those paths, instead of reporting green.
+What varies per PR is not whether a job runs but how much it does once
+running: each gates its expensive steps behind a
+`docs_only` boolean computed once by the `changes` job (`ci.yml:166-195`), so
+a docs-only PR gets a green required check in well under a minute of runner
+startup instead of tens of minutes of cargo — a code PR settles in roughly
+four minutes, a docs-only PR in under one. `required_status_checks.strict` is
+`false`: a PR's head does not need to be up to date with `main` for its own
+checks to count toward the merge.
 
 🔴 **A stale copy of this list costs a real merge.** A stale six-item copy of
 this list cost [#5836](https://github.com/bobmatnyc/trusty-tools/pull/5836) a
@@ -149,7 +153,7 @@ check, so it never points back at the stale list as the cause.
 
 🟡 **Why `trusty-agents-ui clippy` and `trusty-audit-ui clippy` exist as
 separate jobs.** The required `Clippy` job runs `--workspace --all-targets`
-but excludes the Tauri UI crates (`ci.yml:32-42`) because they need
+but excludes the Tauri UI crates (`ci.yml:34-47`) because they need
 WebKit2GTK; dedicated per-crate jobs compile them instead. Before
 2026-08-18 those dedicated jobs ran but were not required, so a gate that
 runs without being required is not a gate: [#5929](https://github.com/bobmatnyc/trusty-tools/pull/5929)
@@ -192,7 +196,7 @@ different and harder problem.
 🟡 **`gh pr merge --admin` bypasses nothing on this repo.** The working account is
 push-only (`admin: false`), so the flag is silently ineffective. `gh`'s own refusal
 message offers `--admin` as the remedy — following that suggestion is a dead end,
-not a fix. A PR merges when its eleven required contexts pass on the PR's own head
+not a fix. A PR merges when every required context passes on the PR's own head
 — `strict: false` means the base does not have to be current too, though see above
 for a case where a merge was refused anyway.
 
