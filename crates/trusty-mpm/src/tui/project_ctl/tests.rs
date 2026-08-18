@@ -260,3 +260,105 @@ async fn poll_doesnt_touch_open_config_form() {
          unsaved, not-yet-submitted field edits"
     );
 }
+
+/// #5913: the `[d]` decommission hotkey must leave the base repo's worktree
+/// bookkeeping clean, exactly as the CLI's routed verb and the bulk prune sweep
+/// already do.
+///
+/// This screen reached the decommission endpoint directly, so it never ran the
+/// bookkeeping repair — the same divergence #5913 closed for the other two
+/// callers, still open on the one hotkey an operator is most likely to press.
+/// Against the pre-fix `client.decommission_managed_session(&id)` this fails:
+/// the workspace is gone and the stale `git worktree list` entry is still there.
+///
+/// A stub daemon rather than the real one, because the assertion is about what
+/// the CLIENT does with the response: the fixture removes the workspace itself
+/// (standing in for the daemon's `remove_dir_all`) and the stub reports that
+/// removal with the path, which is the response shape that selects the prune.
+#[tokio::test]
+async fn project_ctl_decommission_prunes_stale_worktree_bookkeeping() {
+    use std::future::IntoFuture;
+
+    /// Run `git` in `dir`, failing the test on a nonzero exit.
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to start: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let base = tmp.path().join("tm-5913-base");
+    std::fs::create_dir_all(&base).expect("create base repo dir");
+    git(&base, &["init", "--quiet"]);
+    git(&base, &["config", "user.email", "tm@example.invalid"]);
+    git(&base, &["config", "user.name", "tm test"]);
+    std::fs::write(base.join("README.md"), "seed\n").unwrap();
+    git(&base, &["add", "README.md"]);
+    git(&base, &["commit", "--quiet", "-m", "seed"]);
+
+    let id = "11111111-2222-3333-4444-555555555555";
+    let leaf = "tm-5913-project-ctl";
+    let ws = base.join(".worktrees").join(leaf);
+    git(
+        &base,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            &format!("session/{leaf}"),
+            &ws.to_string_lossy(),
+        ],
+    );
+    assert!(
+        git(&base, &["worktree", "list", "--porcelain"]).contains(leaf),
+        "fixture invariant: the worktree must be registered before decommission"
+    );
+    // Stand in for the daemon's `remove_dir_all` of an owned workspace: the
+    // directory is gone and git's bookkeeping does not know it.
+    std::fs::remove_dir_all(&ws).expect("remove the workspace");
+
+    let outcome = serde_json::json!({
+        "id": id,
+        "name": leaf,
+        "state": "decommissioned",
+        "workspace_removed": true,
+        "workspace_path_was": ws.to_string_lossy(),
+    });
+    let app = axum::Router::new().route(
+        "/api/v1/sessions/managed/{id}/decommission",
+        axum::routing::post(move || std::future::ready(axum::Json(outcome.clone()))),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app).into_future());
+
+    let client = DaemonClient::new(format!("http://{addr}"));
+    let mut state = seeded_state();
+    super::actions::dispatch(
+        &mut state,
+        &client,
+        PendingAction::Decommission(id.to_string()),
+    )
+    .await;
+
+    assert_eq!(
+        state.notice.as_deref(),
+        Some(format!("decommissioned {leaf} — now decommissioned").as_str()),
+        "the hotkey must still report the state change"
+    );
+    assert!(
+        !git(&base, &["worktree", "list", "--porcelain"]).contains(leaf),
+        "the TUI's [d] decommission left a stale worktree entry for {leaf} — it \
+         is not routed through the shared implementation"
+    );
+}

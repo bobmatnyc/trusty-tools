@@ -302,13 +302,31 @@ impl CommandExecutor {
     /// Decommission one session BY CANONICAL ID — the single implementation every
     /// decommission entry point routes through (#5913).
     ///
-    /// Why: two independent paths used to reach the decommission endpoint — this
-    /// executor for `tm session decommission <id>`, the TUI, Telegram and Slack;
-    /// and a hand-rolled `reqwest` POST in `commands::managed` for the bulk prune
-    /// sweep. They drifted: one printed a hardcoded "workspace removed" (#5899) and
-    /// only the other repaired the base repo's worktree bookkeeping. One
-    /// implementation is the repo's common-entry-point rule, and it is what stops
-    /// the next behaviour added here from diverging again.
+    /// Why: three independent paths used to reach the decommission endpoint, and
+    /// they drifted — one printed a hardcoded "workspace removed" (#5899) and only
+    /// one repaired the base repo's worktree bookkeeping. One implementation is
+    /// the repo's common-entry-point rule, and it is what stops the next behaviour
+    /// added here from diverging again. Every caller now routes through here:
+    ///
+    /// | Caller | Reaches this via |
+    /// |---|---|
+    /// | `tm session decommission <id>` | [`Self::managed_decommission`] |
+    /// | Telegram `/decommission`, Slack `/decommission` | [`Self::managed_decommission`] |
+    /// | `tui::coordinator` `/kill`, `/decommission`, `/managed-decommission` | [`Self::managed_decommission`] |
+    /// | `tui::project_ctl`'s `[d]` hotkey | `project_ctl::actions::dispatch` |
+    /// | `tm session prune`'s bulk sweep | `commands::managed::session_decommission_line` |
+    ///
+    /// One caller of the endpoint deliberately stays out:
+    /// `commands::session_picker_prune::decommission_dead_record` POSTs
+    /// `?record_only=true`, a different operation that must never remove a
+    /// workspace and so must never prune. It also reads the raw body to detect a
+    /// daemon too old to honour `record_only`, which a typed response hides.
+    ///
+    /// This covers every client-side path. The daemon's own in-process callers
+    /// (`daemon::mcp_session::session_decommission`, `daemon::idle_reaper`) sit
+    /// below this seam and call `SessionManager::decommission` directly, so they
+    /// do not get this repair — see #5913 for that follow-up.
+    ///
     /// What: POSTs the decommission endpoint via the typed [`crate::client::DaemonClient`],
     /// logs the key names of any response field this client does not model yet,
     /// repairs the base repo's worktree bookkeeping per
@@ -316,6 +334,7 @@ impl CommandExecutor {
     /// session is an `Err` naming the id — the transport maps the 404, so the
     /// prune sweep's fail-closed loop keeps counting it as a failed row.
     /// Test: `decommission_managed_id_prunes_stale_worktree_bookkeeping`,
+    /// `project_ctl_decommission_prunes_stale_worktree_bookkeeping`,
     /// `decommission_entry_points_agree_on_every_verdict`,
     /// `session_decommission_not_found_errors`.
     pub async fn decommission_managed_id(
