@@ -61,7 +61,14 @@ async fn main() -> Result<()> {
     // #5896 review: the PARSED CLI decides, not the `Command`. `to_command`
     // maps both a bare launch and `trusty-audit guided` onto `Command::Guided`,
     // so asking the command made the named verb block on a prompt.
-    let mut terminal = cli::registration::is_interactive(&cli)
+    //
+    // #5978: whether this is a BARE launch is kept, separately from whether a
+    // terminal opened. The targets files are adopted on both — a scripted run
+    // that quietly audits four of a `repos.txt`'s twenty repositories reports
+    // success over the sixteen it never saw. What the terminal buys is the
+    // review menu.
+    let bare = cli::registration::is_interactive(&cli);
+    let mut terminal = bare
         .then(cli::credential::DevTty::open)
         .and_then(Result::ok);
 
@@ -94,6 +101,9 @@ async fn main() -> Result<()> {
     // #5885: the interactive launch drives the same `Session::execute` door,
     // several times — registration, then the guided flow, then the sweep. What
     // it returns is the last outcome, which is what stdout carries.
+    // #5990: what the targets files did not register, kept so the process status
+    // can be decided from it below.
+    let mut adopted = None;
     let outcome = match &mut terminal {
         // #5970: the launch sets the engagement up when there is none — key,
         // config, tools, and only then targets. `from_environment` is the one
@@ -118,7 +128,19 @@ async fn main() -> Result<()> {
                     .await?
             }
         },
-        None => session.execute(command).await?,
+        // #5978: no terminal, so no menu — the counts and the full list are
+        // printed and the run proceeds. On stderr, because stdout carries the
+        // report. A file with an unparseable line never gets this far: `adopt`
+        // refuses the whole read, naming every bad line.
+        None => {
+            if bare {
+                adopted = cli::registration::adopt_without_a_terminal(&session).await?;
+            }
+            for line in adopted.iter().flat_map(|a| &a.lines) {
+                eprintln!("{line}");
+            }
+            session.execute(command).await?
+        }
     };
     print!("{}", cli::render(&outcome));
 
@@ -128,7 +150,12 @@ async fn main() -> Result<()> {
     // `taudit clone … && taudit run` reads the status, not the text. The
     // judgement itself is `Outcome::exit_code`, in the library, so the Tauri
     // shell reads the same verdict from the same place.
-    let code = outcome.exit_code();
+    //
+    // #5990: a launch whose `repos.txt` registered none of its repositories is
+    // the same fail-open one rung earlier, and the outcome alone cannot show it
+    // — so `exit_code_after` folds the shortfall in. Also in the library, for
+    // the same reason.
+    let code = cli::registration::exit_code_after(&outcome, adopted.as_ref());
     if code == 0 {
         return Ok(());
     }

@@ -323,6 +323,13 @@ pub mod bootstrap;
 // and a prompt is a front-end concern the library must never acquire.
 pub mod registration;
 mod render;
+// #5978: `repos.txt` / `boards.txt` are the target list when they are present,
+// so the per-target prompt loop is skipped rather than seeded. Parsing only —
+// registering stays in `registration`, which owns the one path a target takes.
+pub mod targets_file;
+// #5978: one confirmation surface, reached two ways — the operator who supplied
+// a targets file and the operator who typed targets both end at the same menu.
+pub mod review;
 
 pub use render::render;
 
