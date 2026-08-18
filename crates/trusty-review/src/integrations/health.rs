@@ -176,8 +176,28 @@ pub struct WarmBootSummary {
     /// returns `200 OK` with an EMPTY result set rather than an error, so a
     /// review against such an index would get no context and no signal that
     /// anything was wrong.
+    ///
+    /// trusty-search #5927 narrowed this key to the fact its name states. It
+    /// used to count any index with a failed lexical, semantic, or graph lane
+    /// as well, so this doc comment described a superset of what the number
+    /// meant. That superset now arrives as [`Self::indexes_stage_failed`].
     #[serde(default)]
     pub indexes_corpus_failed: u32,
+    /// Registered indexes with at least one failed search lane — lexical,
+    /// semantic, or graph (trusty-search #5927).
+    ///
+    /// A strict superset of [`Self::indexes_corpus_failed`]: a corpus-open
+    /// failure fails every lane. The excess over that count is indexes whose
+    /// corpus is fine but whose embed or graph lane died, which serve partial
+    /// results rather than empty ones.
+    ///
+    /// Reading it is what keeps `degraded_reason` from regressing across the
+    /// #5927 split. Before #5927 a lane failure arrived under the corpus key
+    /// and produced a clause; without this field it would produce none, and a
+    /// reason-less `"degraded"` is classified `Serving` — turning a real
+    /// capability gap into silence on the review that ran.
+    #[serde(default)]
+    pub indexes_stage_failed: u32,
     /// trusty-search's own aggregate "my warm boot was broken" flag — the OR of
     /// the counters above plus mass index loss.
     ///
@@ -296,6 +316,20 @@ impl HealthResponse {
                 "{} index(es) failed to open their corpus — trusty-search answers queries \
                  against those indexes with an EMPTY result set and no error",
                 w.indexes_corpus_failed
+            ));
+        }
+        // #5927: the indexes counted by `indexes_stage_failed` but NOT by
+        // `indexes_corpus_failed` — a dead embed or graph lane over a corpus
+        // that opened fine. Reported separately because the consequence
+        // differs: those indexes return PARTIAL results, not empty ones.
+        // Subtracting keeps the corpus cohort from being named twice.
+        let lane_only = w
+            .indexes_stage_failed
+            .saturating_sub(w.indexes_corpus_failed);
+        if lane_only > 0 {
+            clauses.push(format!(
+                "{lane_only} index(es) have a failed search lane (semantic or graph) over a \
+                 healthy corpus — queries against them return LEXICAL results only"
             ));
         }
         if w.indexes_failed > 0 {
@@ -628,6 +662,93 @@ mod tests {
         );
     }
 
+    /// trusty-search #5927: a lane failure with a healthy corpus must still
+    /// produce a reason, and must still classify as `Degraded`.
+    ///
+    /// Why: this is the fail-open the #5927 counter split would otherwise
+    /// create here. Before the split, an index whose semantic lane died
+    /// arrived on the wire as `indexes_corpus_failed: 1` and produced a
+    /// clause. After it, that index arrives ONLY as `indexes_stage_failed`, so
+    /// a reader that does not know the new key builds an empty clause list —
+    /// and `serving_state` reads an empty list as the benign network-mount
+    /// case and answers `Serving`. A real capability gap would vanish from
+    /// every review that ran against that daemon, silently.
+    /// What: a payload in the exact shape trusty-search now sends for that
+    /// state — `indexes_stage_failed: 2` with `indexes_corpus_failed: 0` —
+    /// asserting the verdict is `Degraded`, that the reason names the lane
+    /// failure and its consequence, and that it does NOT claim a corpus
+    /// failure that did not happen.
+    /// Test: this IS the test.
+    #[test]
+    fn health_response_degraded_reason_names_a_lane_failure_over_a_healthy_corpus() {
+        let json = r#"{
+            "status": "degraded",
+            "embedder": "ready",
+            "warmboot_summary": {
+                "indexes_loaded": 20,
+                "indexes_corpus_failed": 0,
+                "indexes_stage_failed": 2,
+                "warm_boot_degraded": true
+            }
+        }"#;
+        let resp: HealthResponse = serde_json::from_str(json).unwrap();
+        let ServingState::Degraded(reason) = resp.serving_state() else {
+            panic!(
+                "#5927: a failed search lane must not degrade to Serving; got {:?}",
+                resp.serving_state()
+            );
+        };
+        assert!(
+            reason.contains("2 index(es) have a failed search lane"),
+            "reason must name the lane failures; got: {reason}"
+        );
+        assert!(
+            reason.contains("LEXICAL results only"),
+            "reason must state the query-time consequence; got: {reason}"
+        );
+        assert!(
+            !reason.contains("failed to open their corpus"),
+            "#5927: no corpus failed here — the reason must not invent one; got: {reason}"
+        );
+    }
+
+    /// trusty-search #5927: a corpus-open failure must be named once, not
+    /// twice.
+    ///
+    /// Why: `indexes_stage_failed` is a superset of `indexes_corpus_failed`, so
+    /// summing the two would report the same index under both clauses and
+    /// inflate the count an operator reads.
+    /// What: the shape trusty-search sends when all three failing indexes are
+    /// corpus failures — both counters read `3`. Asserts the corpus clause
+    /// appears and no lane clause does.
+    /// Test: this IS the test.
+    #[test]
+    fn health_response_degraded_reason_does_not_double_count_a_corpus_failure() {
+        let json = r#"{
+            "status": "degraded",
+            "embedder": "ready",
+            "warmboot_summary": {
+                "indexes_loaded": 20,
+                "indexes_corpus_failed": 3,
+                "indexes_stage_failed": 3,
+                "warm_boot_degraded": true
+            }
+        }"#;
+        let resp: HealthResponse = serde_json::from_str(json).unwrap();
+        let ServingState::Degraded(reason) = resp.serving_state() else {
+            panic!("expected Degraded, got {:?}", resp.serving_state());
+        };
+        assert!(
+            reason.contains("3 index(es) failed to open their corpus"),
+            "reason must name the corpus failures; got: {reason}"
+        );
+        assert!(
+            !reason.contains("have a failed search lane"),
+            "#5927: the corpus cohort is already named — it must not be counted \
+             again as a lane failure; got: {reason}"
+        );
+    }
+
     /// `status: "degraded"` with no `warmboot_summary` (older trusty-search, or
     /// a partial response) is degraded-with-unknown-cause — NOT an outage. The
     /// daemon answered the probe, so calling it unreachable is false; the
@@ -684,7 +805,8 @@ mod tests {
                 "warm_boot_degraded": true,
                 "indexes_lazy": 0,
                 "indexes_failed": 1,
-                "indexes_corpus_failed": 4
+                "indexes_corpus_failed": 4,
+                "indexes_stage_failed": 6
             }
         }"#;
         let resp: HealthResponse =
@@ -700,9 +822,10 @@ mod tests {
                 w.indexes_skipped_timeout,
                 w.indexes_failed,
                 w.indexes_corpus_failed,
+                w.indexes_stage_failed,
                 w.warm_boot_degraded,
             ),
-            (40, 2, 3, 1, 4, true),
+            (40, 2, 3, 1, 4, 6, true),
             "every mirrored warmboot_summary key must round-trip; a zero/false here means \
              trusty-search renamed a key and `#[serde(default)]` swallowed it"
         );

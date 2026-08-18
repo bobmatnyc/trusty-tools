@@ -14,8 +14,10 @@
 //! it while the session's record is around. A number becomes reusable only
 //! after [`SlotRegistry::release`], which the record-retention sweep
 //! ([`super::retention`]) calls once a terminal record has aged out of the
-//! store entirely — so the tombstone guarantee above still holds for the whole
-//! retention window, and beyond it there is no record left to point at. It is
+//! store entirely, and which [`super::prune`] calls when it compacts a
+//! tombstone out of the store (#5897) — either way there is no record left to
+//! point at, so the tombstone guarantee above still holds for as long as one
+//! exists. Both callers first check `workspace_needs_protection`. It is
 //! deliberately NOT persisted to disk — the
 //! registry lives only inside the in-memory [`super::manager::SessionManager`]
 //! that owns it, so a fresh daemon process starts with a fresh, empty
@@ -132,8 +134,11 @@ impl SlotRegistry {
     /// session (#3034). Once the record behind it has aged out of the store
     /// entirely there is nothing left to point at, and holding the number
     /// forever is what let `NUM` reach 107 in a 31-row listing. This is the
-    /// ONLY method that removes a slot; the retention sweep is its only caller,
-    /// so an ordinary deletion still tombstones exactly as before.
+    /// ONLY method that removes a slot. Two paths call it — the retention sweep
+    /// and, since #5897, `prune_managed`'s compaction branch — and both first
+    /// check `workspace_needs_protection`, so a slot is never freed while its
+    /// session worktree is still on disk. An ordinary deletion (which leaves the
+    /// record in the store) still tombstones exactly as before.
     /// What: removes `id` from both indexes and returns the freed slot, or
     /// `None` when `id` held none.
     /// Test: `slot_registry_release_frees_the_slot_for_reuse`,
