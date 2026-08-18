@@ -13,10 +13,11 @@
 use std::path::Path;
 
 use super::{
-    REGISTRY_DIR_NAME, registry_data_dir_under, worktree_enabled_for_origin,
-    worktree_enabled_for_origin_at, worktree_enabled_for_project, worktree_enabled_in,
-    worktree_override_in_project,
+    DispatchIsolation, REGISTRY_DIR_NAME, dispatch_isolation_for_project, registry_data_dir_under,
+    worktree_enabled_for_origin, worktree_enabled_for_origin_at, worktree_enabled_for_project,
+    worktree_enabled_in, worktree_override_in_project,
 };
+use crate::core::project_config::PROJECT_CONFIG_FILE;
 use crate::project::{Project, ProjectRegistry};
 
 /// Build a `Project` with only the fields these tests care about.
@@ -529,4 +530,126 @@ async fn agent_isolation_stays_enabled_for_a_worktree_true_project() {
         "`worktree: false` must still reach the main-checkout answer, or the two \
          assertions above would pass for a resolver hard-wired to `true`"
     );
+}
+
+// ── #5814: dispatched-agent isolation, and its fail-closed arms ─────────────
+
+/// Write a `.trusty-mpm.toml` body into a fresh project directory.
+fn project_dir_with_config(body: &str) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(dir.path().join(PROJECT_CONFIG_FILE), body).expect("write config");
+    dir
+}
+
+/// Why: the branch the feature exists for. A project that affirmatively declares
+/// `main-checkout` must reach `MainCheckout` — without this the five fail-closed
+/// tests below would all pass for a resolver hard-wired to `Worktree`.
+#[test]
+fn dispatch_isolation_reads_an_opted_out_project() {
+    let dir = project_dir_with_config("dispatch_isolation = \"main-checkout\"\n");
+    assert_eq!(
+        dispatch_isolation_for_project(dir.path()),
+        DispatchIsolation::MainCheckout
+    );
+}
+
+/// Why (fail-closed arm — no config file at all): the overwhelmingly common
+/// case, and the one an unwritten default would silently get wrong.
+#[test]
+fn dispatch_isolation_defaults_to_worktree_without_a_config() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    assert_eq!(
+        dispatch_isolation_for_project(dir.path()),
+        DispatchIsolation::Worktree
+    );
+    // A directory that does not exist at all resolves the same way — a cwd the
+    // hook was handed for a tree that has since been removed.
+    assert_eq!(
+        dispatch_isolation_for_project(&dir.path().join("gone")),
+        DispatchIsolation::Worktree
+    );
+}
+
+/// Why (fail-closed arm — the file exists but does not parse): a syntax error
+/// rejects the file wholesale, and the caller must land on isolation ON rather
+/// than on "no opinion means no worktree".
+#[test]
+fn dispatch_isolation_defaults_to_worktree_on_a_malformed_config() {
+    let dir = project_dir_with_config("dispatch_isolation = \n");
+    assert_eq!(
+        dispatch_isolation_for_project(dir.path()),
+        DispatchIsolation::Worktree
+    );
+    // An unknown KEY is the same rejection, and it rejects the whole file — so a
+    // valid opt-out sitting beside a typo must NOT apply.
+    let typo = project_dir_with_config("dispatch_isolation = \"main-checkout\"\nworktre = false\n");
+    assert_eq!(
+        dispatch_isolation_for_project(typo.path()),
+        DispatchIsolation::Worktree,
+        "a typo means the author's intent is unknown, so nothing in the file applies"
+    );
+}
+
+/// Why (fail-closed arm — a near-miss token): `"none"`, `"main"` and friends are
+/// what an operator guesses when they have not read the docs. Each one must
+/// leave isolation ON rather than half-matching the opt-out.
+#[test]
+fn dispatch_isolation_defaults_to_worktree_on_an_unknown_token() {
+    for bad in ["none", "main", "false", "off"] {
+        let dir = project_dir_with_config(&format!("dispatch_isolation = \"{bad}\"\n"));
+        assert_eq!(
+            dispatch_isolation_for_project(dir.path()),
+            DispatchIsolation::Worktree,
+            "`{bad}` is not the opt-out token and must not act like one"
+        );
+    }
+}
+
+/// Why (fail-closed arm — the file exists and CANNOT BE READ): the arm
+/// `load_or_report` reports as `Io` rather than `Malformed`, and the only one
+/// reachable without any operator typo. A permission-denied read must not be the
+/// thing that drops isolation.
+#[test]
+#[cfg(unix)]
+fn dispatch_isolation_defaults_to_worktree_on_an_unreadable_config() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = project_dir_with_config("dispatch_isolation = \"main-checkout\"\n");
+    let path = dir.path().join(PROJECT_CONFIG_FILE);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    // Running as root defeats the mode bits entirely; restore and skip rather
+    // than assert a property the environment cannot produce.
+    if std::fs::read_to_string(&path).is_ok() {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("restore");
+        return;
+    }
+    let decided = dispatch_isolation_for_project(dir.path());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("restore");
+    assert_eq!(
+        decided,
+        DispatchIsolation::Worktree,
+        "an unreadable config must keep isolation ON, not fall through to the opt-out"
+    );
+}
+
+/// Why (fail-closed arm — a valid file that simply says nothing about this):
+/// a project that ships a config for `worktree` or `default_model` must not
+/// thereby opt its agents out. This also pins that the two worktree questions
+/// stay separate: `worktree = false` is #3455's SESSION placement and must not
+/// move dispatched-agent isolation.
+#[test]
+fn dispatch_isolation_defaults_to_worktree_when_the_key_is_absent() {
+    for body in [
+        "",
+        "default_model = \"opus\"\n",
+        "worktree = false\n",
+        "worktree = false\ndefault_model = \"opus\"\n",
+    ] {
+        let dir = project_dir_with_config(body);
+        assert_eq!(
+            dispatch_isolation_for_project(dir.path()),
+            DispatchIsolation::Worktree,
+            "config {body:?} says nothing about dispatch isolation and must not lift the grant"
+        );
+    }
 }

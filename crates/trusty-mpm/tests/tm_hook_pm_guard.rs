@@ -2004,6 +2004,52 @@ fn pm_guard_grants_a_worktree_to_a_writer_in_a_main_checkout() {
 }
 
 #[test]
+fn pm_guard_skips_the_grant_in_a_project_that_declared_the_opt_out() {
+    // #5814 through the real binary: a project whose committed `.trusty-mpm.toml`
+    // declares `dispatch_isolation = "main-checkout"` gets no rewrite at all, so
+    // the agent's cwd stays the checkout and nothing needs reclaiming. Asserted
+    // on the hook's actual stdout, because a prompt-level instruction provably
+    // cannot reach this decision.
+    let (_dir, repo) = main_checkout_fixture();
+    std::fs::write(
+        repo.join(".trusty-mpm.toml"),
+        "dispatch_isolation = \"main-checkout\"\n",
+    )
+    .expect("write project config");
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"do the thing"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+    assert!(
+        !stdout.contains("updatedInput") && !stdout.contains("worktree"),
+        "an opted-out project must get no isolation grant: {stdout}"
+    );
+    assert!(
+        !stdout.contains("permissionDecision"),
+        "the opt-out suppresses the grant; it must not turn into a deny: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_still_grants_when_the_project_config_cannot_be_trusted() {
+    // The fail-closed half, through the same path. A `.trusty-mpm.toml` that
+    // carries the opt-out beside a typo is rejected WHOLESALE, and the guard must
+    // land back on the ADR-0048 grant rather than on the opt-out it half-read.
+    let (_dir, repo) = main_checkout_fixture();
+    std::fs::write(
+        repo.join(".trusty-mpm.toml"),
+        "dispatch_isolation = \"main-checkout\"\nworktre = false\n",
+    )
+    .expect("write project config");
+    let input = r#"{"subagent_type":"rust-engineer","prompt":"do the thing"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(
+        value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
+        "an unusable config must keep isolation ON: {stdout}"
+    );
+}
+
+#[test]
 fn pm_guard_denies_a_granted_dispatch_beside_a_live_writer() {
     // #5769 finding 2: the grant used to return BEFORE the #4480 concurrency
     // check, so that verdict stopped being computed for every dispatch made from

@@ -1,6 +1,7 @@
 # 0048. Dispatched writers are granted a worktree, and the main-checkout write boundary is enforced
 
-- **Status:** Amended by [0049](0049-docs-commits-are-permitted-in-a-main-checkout.md)
+- **Status:** Amended by [0049](0049-docs-commits-are-permitted-in-a-main-checkout.md),
+  [0051](0051-a-project-may-exempt-dispatched-agents-from-the-worktree-grant.md)
 - **Date:** 2026-08-15
 - **Scope:** crate `trusty-mpm` — `tm hook --pm-guard` (`pm_guard_worktree_grant`,
   `pm_guard_write_boundary`, `pm_guard_bash::main_checkout`), the agent
@@ -15,11 +16,17 @@
   checkout with commit `f1da7bce` landing on `fix/1646-drive-query-v2-migration`
   and `fix/1644-…` left empty at `cff5bbcd`; ADR-0044 row 4's finding that no
   trusty-mpm path gives a dispatched agent anywhere else to write
-- **Current amendment:** [ADR-0049](0049-docs-commits-are-permitted-in-a-main-checkout.md)
+- **Current amendments:** [ADR-0049](0049-docs-commits-are-permitted-in-a-main-checkout.md)
   makes decision 4's `git commit` deny conditional on the staged set — a
   documents-and-configuration staged set may commit, subject to decision 10's
-  live-writer check — and scopes ADR-0030's DOC-66 §0.5 position. Decisions
-  1-3 and 5-10 stand as accepted.
+  live-writer check — and scopes ADR-0030's DOC-66 §0.5 position.
+  [ADR-0051](0051-a-project-may-exempt-dispatched-agents-from-the-worktree-grant.md)
+  makes decision 1's grant conditional on a project's committed
+  `dispatch_isolation` declaration: a project that declares `main-checkout` gets
+  no grant, every other project keeps the grant, and every failure to read the
+  declaration keeps it too. Decisions 2-3 and 5-10 stand as accepted, and
+  decision 1 stands as the default for every project that does not declare
+  otherwise.
 - **Supersedes / Superseded by:** Amends [ADR-0044](0044-main-checkout-write-boundary-and-agent-worktree-ownership.md).
   ADR-0044's write boundary and its assignment of worktree ownership to the
   harness both remain in force.
