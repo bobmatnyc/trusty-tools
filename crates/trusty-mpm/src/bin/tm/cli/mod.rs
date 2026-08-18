@@ -926,7 +926,8 @@ pub(crate) enum Command {
         /// Mutually exclusive with `--source-id`; passing both is a parse error.
         #[arg(long, conflicts_with = "source_id")]
         current: bool,
-        /// Include decommissioned tombstone sessions (session mode only).
+        /// Include decommissioned (#1809), dead (#4994), and deleted-slot
+        /// (#5952) rows (session mode only).
         ///
         /// Forces static output (the full forensic list is not a connect target).
         /// Note: the short `-a` is `--attached`, NOT this flag — `--all` is
