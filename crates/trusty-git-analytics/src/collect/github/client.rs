@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 
 use async_trait::async_trait;
 
-use crate::collect::errors::Result;
+use crate::collect::errors::{CollectError, Result};
 use crate::collect::github::repo_resolver::{build_http_client, parse_slug};
 use crate::collect::github::retry::retry_get;
 use crate::collect::github::types::{ApiPull, GitHubIssue, GitHubPrCommit, GitHubReview};
@@ -45,6 +45,11 @@ pub struct GitHubClient {
     /// REST root every request is built against. [`GITHUB_API_BASE`] unless a
     /// caller overrode it with [`Self::with_api_base`] (#5465).
     pub(crate) api_base: String,
+    /// Cached result of the repo-visibility probe (#5980 CRITICAL 1).
+    /// `Some(true)` once `GET /repos/{owner}/{repo}` has confirmed this
+    /// client's credential (or lack of one) can see the primary repo — see
+    /// [`Self::ensure_repo_visible`].
+    repo_visible: tokio::sync::OnceCell<bool>,
 }
 
 /// Compute the JSON-encoded `commit_shas` value for a PR row.
@@ -93,6 +98,7 @@ impl GitHubClient {
             repo: repo.clone(),
             repos: vec![(owner, repo)],
             api_base: GITHUB_API_BASE.to_string(),
+            repo_visible: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -129,6 +135,7 @@ impl GitHubClient {
             repo: primary_repo,
             repos,
             api_base: GITHUB_API_BASE.to_string(),
+            repo_visible: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -155,6 +162,7 @@ impl GitHubClient {
             repo: String::new(),
             repos: Vec::new(),
             api_base: GITHUB_API_BASE.to_string(),
+            repo_visible: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -351,15 +359,25 @@ impl GitHubClient {
     /// Fetch a single issue by number from the GitHub REST API.
     ///
     /// Hits `GET /repos/{owner}/{repo}/issues/{number}`. Uses the same
-    /// `Bearer` token (if any) as the bulk PR fetch.
+    /// `Bearer` token (if any) as the bulk PR fetch. Retries on 429/5xx the
+    /// same as [`Self::list_issues`] and [`Self::fetch_pr_commits`] (#5980
+    /// MEDIUM 2 — this used to call `self.client` directly and skip retry).
     ///
-    /// Returns `Ok(None)` when the API responds with `404 Not Found`
-    /// (deleted or invisible issue). All other non-success statuses, as
-    /// well as transport and JSON-parse failures, are propagated as
+    /// Returns `Ok(None)` when the API responds with `404 Not Found` AND the
+    /// repo itself is confirmed visible to this credential (see
+    /// [`Self::ensure_repo_visible`]) — a genuinely deleted or nonexistent
+    /// issue. A 404 on a repo this credential cannot see at all (private repo,
+    /// missing/invalid token) is a different failure — GitHub answers that
+    /// with 404 on every request under it, so treating it as "no such issue"
+    /// would silently report zero issues collected instead of a credential
+    /// problem (#5980 CRITICAL 1). All other non-success statuses, as well as
+    /// transport and JSON-parse failures, are propagated as
     /// [`crate::collect::errors::CollectError`].
     ///
     /// # Errors
     ///
+    /// - [`crate::collect::errors::CollectError::GithubApi`] when the repo
+    ///   itself is not visible to this credential.
     /// - [`crate::collect::errors::CollectError::Http`] on transport or non-`404`
     ///   non-success HTTP responses.
     /// - [`crate::collect::errors::CollectError::Json`] on payload parse failures.
@@ -367,15 +385,64 @@ impl GitHubClient {
         let base = self.api_base();
         let url = format!("{base}/repos/{}/{}/issues/{number}", self.owner, self.repo);
         debug!(url = %url, "GET");
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.retry_request(&url).await?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            self.ensure_repo_visible().await?;
             return Ok(None);
         }
 
         let resp = resp.error_for_status()?;
         let issue: GitHubIssue = resp.json().await?;
         Ok(Some(issue))
+    }
+
+    /// Confirm the primary `(owner, repo)` is visible to this client's
+    /// credential, once per client instance.
+    ///
+    /// Why (#5980 CRITICAL 1): GitHub 404s EVERY request under a private
+    /// repository the credential can't see — `fetch_issue` alone cannot tell
+    /// that apart from "this one issue doesn't exist". Probing
+    /// `GET /repos/{owner}/{repo}` resolves the ambiguity: the repo endpoint
+    /// 404s only when the repo is invisible to this credential (or genuinely
+    /// does not exist), never because of one missing issue number.
+    /// What: on the first call, issues the probe and caches `true` on
+    /// success so later `fetch_issue` calls that also 404 don't repeat the
+    /// request. A failed probe is NOT cached — a transient network error
+    /// should not permanently poison every later call on this client.
+    /// Test: `fetch_issue_tests::a_private_repo_with_no_visible_credential_errors_instead_of_returning_none`,
+    /// `fetch_issue_tests::a_genuinely_missing_issue_on_a_visible_repo_returns_none`,
+    /// `fetch_issue_tests::the_repo_visibility_probe_runs_at_most_once_per_client`.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::collect::errors::CollectError::GithubApi`] when the probe
+    /// itself 404s; [`crate::collect::errors::CollectError::Http`] on any
+    /// other transport or non-success response.
+    async fn ensure_repo_visible(&self) -> Result<()> {
+        if self.repo_visible.get().is_some() {
+            return Ok(());
+        }
+        let base = self.api_base();
+        let url = format!("{base}/repos/{}/{}", self.owner, self.repo);
+        debug!(url = %url, "GET (repo-visibility probe)");
+        let resp = self.retry_request(&url).await?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(CollectError::GithubApi {
+                status: 404,
+                endpoint: url,
+                message: "repository not visible to the configured credential \
+                          (private repo with no or invalid token, or the repo \
+                          genuinely does not exist)"
+                    .to_string(),
+            });
+        }
+        // Any other non-success (401/403/5xx) is a real transport failure,
+        // not the "invisible repo" shape this probe exists to catch.
+        resp.error_for_status()?;
+        let _ = self.repo_visible.set(true);
+        Ok(())
     }
 
     /// Send a GET request with exponential backoff on transient failures.

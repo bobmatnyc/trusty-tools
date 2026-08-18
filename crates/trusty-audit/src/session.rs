@@ -601,7 +601,9 @@ impl Session {
             Command::ListTargets => self.list_targets().map(Outcome::Targets),
             Command::RemoveTarget { spec } => self.remove_target(&spec).await.map(Outcome::Removed),
             Command::Run(options) => self.run(&options).await.map(Outcome::Run),
-            Command::Package { destination } => self.package(destination).map(Outcome::Package),
+            Command::Package { destination } => {
+                self.package(destination).await.map(Outcome::Package)
+            }
             // #5824: the one-shot chain over the four above. `crate::chain`
             // calls each of them unchanged, so this and they cannot drift.
             Command::Audit(options) => self.audit(&options).await.map(Outcome::Audit),
@@ -807,7 +809,7 @@ impl Session {
     /// precondition enforced in two places is one that drifts.
     /// Test: `super::session_tests::packaging_before_any_sweep_is_refused`,
     /// `super::session_tests::packaging_an_unfinished_sweep_is_refused`.
-    fn package(&self, destination: Option<PathBuf>) -> Result<ReturnPackage, AuditError> {
+    async fn package(&self, destination: Option<PathBuf>) -> Result<ReturnPackage, AuditError> {
         // #5868: through `engagement_config` so the outbound credential scan
         // looks for the key the sweep actually used. `package::from_checkpoint`
         // refuses a deliverable containing `config.openrouter_key`; with an
@@ -815,9 +817,17 @@ impl Session {
         // the wrong bytes and let the real one through.
         let config = self.engagement_config()?;
         let destination = destination.unwrap_or_else(|| package::default_destination(&self.work));
+        // #5980 CRITICAL 4: re-resolved here rather than threaded from `run` —
+        // packaging is a standalone command that can run long after (even in a
+        // different process from) the sweep that collected GitHub issues, so
+        // there is no live `GithubAccess` to inherit. `from_checkpoint` proves
+        // this resolution is still the same account the sweep recorded before
+        // trusting it as the outbound scan's needle (#5980 CRITICAL — the
+        // account-switch follow-up).
+        let github_access = run::github_issues::resolve_github_access().await;
         // No unattempted targets: the standalone verb packages whatever the last
         // sweep recorded and knows nothing about a registry (#5824).
-        package::from_checkpoint(&self.work, &config, &[], &destination)
+        package::from_checkpoint(&self.work, &config, &[], &destination, &github_access)
     }
 
     /// Drive the whole engagement in one call (#5824).
@@ -1077,9 +1087,21 @@ path = "/work/repos/acme-api"
     }
 
     /// Record a sweep that reached the end of its selection (#5494).
+    ///
+    /// Records [`run::github_issues::GithubCredentialRecord::NoToken`] (#5980
+    /// follow-up) — deliberately, not because these tests assert anything
+    /// about GitHub: `verify_unchanged` treats "the sweep had no token" as
+    /// compatible with WHATEVER `package()` resolves at test time, real `gh`
+    /// on the host included, so this stays safe however that host answers.
     fn write_finished_progress(work: &WorkDir, report: &RunReport) {
-        run::checkpoint::write_progress(work, &run::RunProgress::finished(report))
-            .expect("write progress");
+        run::checkpoint::write_progress(
+            work,
+            &run::RunProgress::finished(
+                report,
+                run::github_issues::GithubCredentialRecord::NoToken,
+            ),
+        )
+        .expect("write progress");
     }
 
     fn write_manifest(session: &Session, text: &str) {
@@ -1602,8 +1624,14 @@ trusty-review = "0.0.0-never-published"
             resumed: false,
             result: RepoResult::Succeeded,
         }];
-        run::checkpoint::write_progress(session.work_dir(), &run::RunProgress::checkpoint(&done))
-            .expect("write checkpoint");
+        run::checkpoint::write_progress(
+            session.work_dir(),
+            &run::RunProgress::checkpoint(
+                &done,
+                run::github_issues::GithubCredentialRecord::NoToken,
+            ),
+        )
+        .expect("write checkpoint");
 
         let err = session
             .execute(Command::Package { destination: None })
@@ -1637,17 +1665,20 @@ trusty-review = "0.0.0-never-published"
         write_manifest(&session, MANIFEST);
         run::checkpoint::write_progress(
             session.work_dir(),
-            &run::RunProgress::checkpoint(&[RepoRun {
-                repo: SelectedRepo {
-                    name: "acme-api".to_owned(),
-                    path: PathBuf::from("repos/acme-api"),
-                },
-                output: session.work_dir().path(Area::Output).join("00-acme-api"),
-                log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
-                gaps: Vec::new(),
-                resumed: false,
-                result: RepoResult::Succeeded,
-            }]),
+            &run::RunProgress::checkpoint(
+                &[RepoRun {
+                    repo: SelectedRepo {
+                        name: "acme-api".to_owned(),
+                        path: PathBuf::from("repos/acme-api"),
+                    },
+                    output: session.work_dir().path(Area::Output).join("00-acme-api"),
+                    log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
+                    gaps: Vec::new(),
+                    resumed: false,
+                    result: RepoResult::Succeeded,
+                }],
+                run::github_issues::GithubCredentialRecord::NoToken,
+            ),
         )
         .expect("write checkpoint");
 

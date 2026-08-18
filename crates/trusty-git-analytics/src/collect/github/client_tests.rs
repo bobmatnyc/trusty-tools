@@ -545,3 +545,117 @@ fn store_pull_requests_applies_genuinely_newer_fetched_at() {
         "a genuinely newer fetched_at must overwrite the previous row"
     );
 }
+
+// ─── fetch_issue: repo-visibility probe (#5980 CRITICAL 1 / MEDIUM 2) ─────────
+
+mod fetch_issue_tests {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    /// A client pointed at `base`, with no token — the exact shape
+    /// `trusty-audit`'s `resolve_github_access` produces when `gh auth token`
+    /// fails (#5980).
+    fn client_at(base: &str) -> GitHubClient {
+        GitHubClient::new(&gh(Some("acme/private-repo"), None))
+            .expect("client builds")
+            .with_api_base(base)
+    }
+
+    /// Against `4e951393b` (this PR's original head) this passes when it
+    /// should fail: `fetch_issue` mapped every 404 to `Ok(None)`, so a
+    /// private repository the credential can't see — which 404s on EVERY
+    /// request, issue endpoint included — read exactly like "issue #42
+    /// doesn't exist". The visibility probe distinguishes them: the repo
+    /// endpoint 404s too, so this must now be `Err`, not `Ok(None)`.
+    #[tokio::test]
+    async fn a_private_repo_with_no_visible_credential_errors_instead_of_returning_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/private-repo/issues/42"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/private-repo"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = client_at(&server.uri())
+            .fetch_issue(42)
+            .await
+            .expect_err("an invisible repo must error, not report 'no such issue'");
+        assert!(
+            matches!(err, CollectError::GithubApi { status: 404, .. }),
+            "{err:?}"
+        );
+    }
+
+    /// The other side of the same 404: the repo IS visible, so a 404 on the
+    /// issue endpoint alone means the issue genuinely does not exist.
+    #[tokio::test]
+    async fn a_genuinely_missing_issue_on_a_visible_repo_returns_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/private-repo/issues/42"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/private-repo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1,
+                "full_name": "acme/private-repo"
+            })))
+            .mount(&server)
+            .await;
+
+        let issue = client_at(&server.uri())
+            .fetch_issue(42)
+            .await
+            .expect("a visible repo's genuinely-missing issue must not error");
+        assert!(issue.is_none(), "{issue:?}");
+    }
+
+    /// The probe is cached per client instance: two issue lookups that both
+    /// 404 must not repeat the repo-visibility request a second time.
+    #[tokio::test]
+    async fn the_repo_visibility_probe_runs_at_most_once_per_client() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/private-repo/issues/42"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/private-repo/issues/43"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/private-repo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 1,
+                "full_name": "acme/private-repo"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_at(&server.uri());
+        assert!(client
+            .fetch_issue(42)
+            .await
+            .expect("first lookup")
+            .is_none());
+        assert!(client
+            .fetch_issue(43)
+            .await
+            .expect("second lookup")
+            .is_none());
+        // `.expect(1)` on the repo-visibility mock is verified when `server`
+        // drops at the end of this test — a second probe call panics there.
+    }
+}

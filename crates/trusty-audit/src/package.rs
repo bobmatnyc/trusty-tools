@@ -88,6 +88,7 @@ use serde::Serialize;
 
 use crate::config::EngagementConfig;
 use crate::error::AuditError;
+use crate::run::github_issues::{self, GithubAccess};
 use crate::run::{RepoRun, RunReport};
 use crate::tools;
 use crate::workdir::{Area, WorkDir};
@@ -233,6 +234,13 @@ struct PackagedRepo {
 /// What: collects the members, refuses a symlink among them, writes the archive
 /// to a sibling temporary file while scanning every byte for the engagement
 /// credential, then renames.
+///
+/// `github_token` is scanned for verbatim — this function trusts the caller
+/// to have already confirmed it is the SAME credential the sweep collected
+/// under. [`from_checkpoint`] is that confirmation (#5980 CRITICAL — the
+/// account-switch follow-up); calling `assemble` directly with a `github_token`
+/// from a different `gh` account than the sweep used will NOT catch an older
+/// token a file carries — there is nothing here to compare against.
 /// Test: `super::package_tests`.
 ///
 /// # Errors
@@ -261,15 +269,29 @@ struct PackagedRepo {
 /// `crate::session::session_tests::packaging_an_unfinished_sweep_is_refused`,
 /// `crate::chain::chain_tests::the_chain_installs_collects_and_packages`.
 ///
+/// `github_access` is a freshly-resolved credential (#5980 CRITICAL 4) —
+/// packaging can run as a separate process from the sweep, so it never
+/// inherits the sweep's own resolution. Before this function hands
+/// [`GithubAccess::raw_token`] to [`assemble`] as the outbound scan's extra
+/// needle, it first confirms that token is the SAME one the sweep recorded,
+/// via [`github_issues::verify_unchanged`] — see that function's docs and
+/// [`GithubAccess::fingerprint`]'s for the account-switch gap this closes.
+/// A stated-but-unrefused gap from that check (the back-compat case) is
+/// folded into the returned package's `excluded` lines alongside
+/// `unattempted`.
+///
 /// # Errors
 ///
-/// [`AuditError::NothingToPackage`] when no sweep has finished here, and
-/// whatever [`assemble`] fails with.
+/// [`AuditError::NothingToPackage`] when no sweep has finished here,
+/// [`AuditError::GithubCredentialChanged`] when the active GitHub credential
+/// provably differs from the one the sweep collected under, and whatever
+/// [`assemble`] fails with.
 pub fn from_checkpoint(
     work: &WorkDir,
     config: &EngagementConfig,
     unattempted: &[String],
     destination: &Path,
+    github_access: &GithubAccess,
 ) -> Result<ReturnPackage, AuditError> {
     let progress =
         crate::run::read_progress(work)?.ok_or_else(|| AuditError::NothingToPackage {
@@ -291,7 +313,18 @@ pub fn from_checkpoint(
             ),
         });
     }
-    assemble(work, config, &progress.report(), unattempted, destination)
+    let credential_gap =
+        github_issues::verify_unchanged(progress.github_credential.as_ref(), github_access)?;
+    let mut excluded_extra = unattempted.to_vec();
+    excluded_extra.extend(credential_gap);
+    assemble(
+        work,
+        config,
+        &progress.report(),
+        &excluded_extra,
+        destination,
+        github_access.raw_token(),
+    )
 }
 
 pub fn assemble(
@@ -300,6 +333,7 @@ pub fn assemble(
     report: &RunReport,
     unattempted: &[String],
     destination: &Path,
+    github_token: Option<&str>,
 ) -> Result<ReturnPackage, AuditError> {
     let audited: Vec<&RepoRun> = report
         .repos
@@ -333,7 +367,15 @@ pub fn assemble(
     let metadata = render_metadata(work, config, report, &audited, unattempted)?;
     let readme = render_readme(config, &audited, &excluded);
 
-    write_archive(destination, config, readme, metadata, collected, excluded)
+    write_archive(
+        destination,
+        config,
+        readme,
+        metadata,
+        collected,
+        excluded,
+        github_token,
+    )
 }
 
 /// The directory name `run` wrote its output under, which is also the name its
@@ -633,6 +675,7 @@ fn write_archive(
     metadata: String,
     collected: Vec<(String, PathBuf)>,
     excluded: Vec<String>,
+    github_token: Option<&str>,
 ) -> Result<ReturnPackage, AuditError> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|source| AuditError::Package {
@@ -641,7 +684,14 @@ fn write_archive(
         })?;
     }
     let temporary = destination.with_extension("zip.part");
-    let result = fill_archive(&temporary, config, readme, metadata, collected);
+    let result = fill_archive(
+        &temporary,
+        config,
+        readme,
+        metadata,
+        collected,
+        github_token,
+    );
     let mut files = match result {
         Ok(files) => files,
         Err(e) => {
@@ -680,6 +730,7 @@ fn fill_archive(
     readme: String,
     metadata: String,
     collected: Vec<(String, PathBuf)>,
+    github_token: Option<&str>,
 ) -> Result<Vec<PackagedFile>, AuditError> {
     let file = std::fs::File::create(temporary).map_err(|source| AuditError::Package {
         path: temporary.to_path_buf(),
@@ -703,7 +754,14 @@ fn fill_archive(
     }
 
     for (entry, source) in collected {
-        let bytes = credential_scan::copy_member(&mut zip, &entry, &source, config, temporary)?;
+        let bytes = credential_scan::copy_member(
+            &mut zip,
+            &entry,
+            &source,
+            config,
+            temporary,
+            github_token,
+        )?;
         files.push(PackagedFile {
             entry,
             source: Some(source),
@@ -738,9 +796,10 @@ fn start(zip: &mut Archive, entry: &str, bytes: u64, temporary: &Path) -> Result
 
 #[cfg(test)]
 mod package_tests {
+    use std::io::Read as _;
+
     use super::*;
     use crate::run::{RepoResult, RepoRun, SelectedRepo};
-    use std::io::Read as _;
 
     const CONFIG: &str = r#"
 openrouter_key = "sk-or-v1-not-a-real-key"
@@ -847,7 +906,8 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
 
         assert_eq!(package.path, destination);
         assert!(destination.is_file(), "the zip was not written");
@@ -874,7 +934,7 @@ trusty-review = "0.15.1"
         install_record(&work);
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
-        assemble(&work, &config(), &report, &[], &destination).expect("assembles");
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
 
         // `by_index` succeeding with no password IS the unencrypted property:
         // the zip crate returns `UnsupportedArchive` for an encrypted entry.
@@ -911,7 +971,7 @@ trusty-review = "0.15.1"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a package carrying the key must not be produced");
         assert!(
             matches!(err, AuditError::CredentialInPackage { .. }),
@@ -959,11 +1019,29 @@ api_key = "lin_api_do-not-package-me"
         config: &EngagementConfig,
         leaked: &str,
     ) -> Result<ReturnPackage, AuditError> {
+        packaging_a_member_carrying_with_token(work, config, leaked, None)
+    }
+
+    /// [`packaging_a_member_carrying`], with the `gh`-derived credential the
+    /// caller wants in the needle set (#5980 CRITICAL 4).
+    fn packaging_a_member_carrying_with_token(
+        work: &WorkDir,
+        config: &EngagementConfig,
+        leaked: &str,
+        github_token: Option<&str>,
+    ) -> Result<ReturnPackage, AuditError> {
         install_record(work);
         let run = audited(work, "00-acme-api", "acme-api");
         std::fs::write(run.output.join("leaked.log"), leaked).expect("write");
         let report = RunReport::of(vec![run]);
-        assemble(work, config, &report, &[], &default_destination(work))
+        assemble(
+            work,
+            config,
+            &report,
+            &[],
+            &default_destination(work),
+            github_token,
+        )
     }
 
     /// The JIRA token is a secret this crate now hands to a child, so the
@@ -997,6 +1075,171 @@ api_key = "lin_api_do-not-package-me"
             !destination.with_extension("zip.part").exists(),
             "the temporary must be removed too"
         );
+    }
+
+    /// #5980 CRITICAL 4: the `gh`-derived GitHub credential is a third source
+    /// alongside the two board secrets above — it never lives in
+    /// `EngagementConfig`, so `configured_secrets()` alone cannot see it.
+    /// Before `secret_needles` took a `github_token` parameter, this member
+    /// packaged clean and the token left the recipient's network.
+    #[test]
+    fn a_member_carrying_the_github_token_is_refused_and_leaves_no_zip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let destination = default_destination(&work);
+        const TOKEN: &str = "ghp_do-not-package-me";
+
+        let err = packaging_a_member_carrying_with_token(
+            &work,
+            &config(),
+            "auth error: bad credentials (token ghp_do-not-package-me rejected)\n",
+            Some(TOKEN),
+        )
+        .expect_err("a package carrying the GitHub token must not be produced");
+
+        assert!(
+            matches!(err, AuditError::CredentialInPackage { .. }),
+            "{err:?}"
+        );
+        assert!(
+            !destination.exists(),
+            "a refused package must leave no file"
+        );
+    }
+
+    /// #5980 follow-up CRITICAL: the critic's own proof, inverted, through
+    /// the real `from_checkpoint` entry point both `session::package` and
+    /// `chain::assemble` call. A file the sweep wrote carries the SWEEP-TIME
+    /// account's token; packaging under a DIFFERENT account's token must
+    /// refuse instead of silently shipping it — a freshly re-resolved token
+    /// can never be the needle that catches an older one.
+    ///
+    /// Against the commit before this test existed, this scenario packaged
+    /// successfully with the sweep-time token intact in the deliverable —
+    /// `from_checkpoint` took a bare `Option<&str>` and had no checkpoint
+    /// comparison at all.
+    #[test]
+    fn packaging_refuses_when_the_active_github_credential_has_changed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let stem = "00-acme-api";
+        let run = audited(&work, stem, "acme-api");
+        // What a child could echo at sweep time: the SWEEP-TIME token.
+        std::fs::write(
+            run.output.join("leaked.log"),
+            "auth error: bad credentials (token ghp_sweep_time_account_A_token rejected)\n",
+        )
+        .expect("write");
+
+        let sweep_time = GithubAccess::with_token("ghp_sweep_time_account_A_token");
+        crate::run::checkpoint::write_progress(
+            &work,
+            &crate::run::RunProgress::finished(
+                &RunReport::of(vec![run]),
+                github_issues::GithubCredentialRecord::of(&sweep_time),
+            ),
+        )
+        .expect("write checkpoint");
+
+        let package_time = GithubAccess::with_token("ghp_package_time_account_B_token");
+        let destination = default_destination(&work);
+        let err = from_checkpoint(&work, &config(), &[], &destination, &package_time)
+            .expect_err("a mismatched GitHub credential must refuse packaging");
+        assert!(
+            matches!(err, AuditError::GithubCredentialChanged),
+            "{err:?}"
+        );
+        assert!(
+            !destination.exists(),
+            "a refused package must leave no file"
+        );
+    }
+
+    /// The matched-fingerprint counterpart: the SAME account both times still
+    /// packages, and the sweep-time token is caught by the outbound scan like
+    /// any other member.
+    #[test]
+    fn packaging_proceeds_when_the_github_credential_matches() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let stem = "00-acme-api";
+        let run = audited(&work, stem, "acme-api");
+
+        let access = GithubAccess::with_token("ghp_same_account_both_times");
+        crate::run::checkpoint::write_progress(
+            &work,
+            &crate::run::RunProgress::finished(
+                &RunReport::of(vec![run]),
+                github_issues::GithubCredentialRecord::of(&access),
+            ),
+        )
+        .expect("write checkpoint");
+
+        let destination = default_destination(&work);
+        let same_access = GithubAccess::with_token("ghp_same_account_both_times");
+        from_checkpoint(&work, &config(), &[], &destination, &same_access)
+            .expect("a matching credential must not refuse packaging");
+        assert!(destination.exists(), "the package must be written");
+    }
+
+    /// The back-compat case: a checkpoint written before credential
+    /// verification existed carries no `github_credential` record at all.
+    /// Packaging proceeds rather than refusing every pre-existing engagement
+    /// outright, but the returned package states the uncertainty.
+    #[test]
+    fn packaging_an_unverified_checkpoint_proceeds_with_a_stated_gap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let stem = "00-acme-api";
+        let run = audited(&work, stem, "acme-api");
+        write_progress_without_github_credential(&work, &RunReport::of(vec![run]));
+
+        let destination = default_destination(&work);
+        let package = from_checkpoint(
+            &work,
+            &config(),
+            &[],
+            &destination,
+            &GithubAccess::default(),
+        )
+        .expect("an unrecorded checkpoint must not refuse packaging");
+        assert!(
+            package
+                .excluded
+                .iter()
+                .any(|line| line.contains("not recorded")),
+            "the uncertainty must be stated: {:?}",
+            package.excluded
+        );
+    }
+
+    /// Writes a checkpoint the way a pre-#5980-follow-up sweep would have —
+    /// no `github_credential` field at all, which `#[serde(default)]` reads
+    /// back as `None` and `verify_unchanged` treats as unverifiable.
+    ///
+    /// Why hand-edit rather than hand-assemble: `RunProgress` is
+    /// `#[non_exhaustive]`, so nothing outside `checkpoint.rs` can build one
+    /// by struct literal, and hand-assembling the whole TOML document from
+    /// scratch would silently drift from whatever `RunProgress`'s own
+    /// `Serialize` impl actually produces. Serializing a real value and
+    /// stripping just the one line this field owns keeps everything else
+    /// exactly what the real serializer writes.
+    fn write_progress_without_github_credential(work: &WorkDir, report: &RunReport) {
+        let progress = crate::run::RunProgress::finished(
+            report,
+            github_issues::GithubCredentialRecord::NoToken,
+        );
+        let text = toml::to_string_pretty(&progress).expect("progress serializes");
+        let stripped: String = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("github_credential"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert_ne!(
+            stripped, text,
+            "the field must actually have been present to strip"
+        );
+        std::fs::write(crate::run::progress_path(work), stripped).expect("write raw checkpoint");
     }
 
     /// The Linear key, same reason. Two providers, one guard.
@@ -1072,7 +1315,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a symlink must not be followed into the package");
         assert!(
             matches!(err, AuditError::UnsafePackageEntry { .. }),
@@ -1097,7 +1340,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a hardlink must not carry outside content into the package");
         let AuditError::UnsafePackageEntry { kind, .. } = &err else {
             panic!("expected UnsafePackageEntry, got {err:?}");
@@ -1129,7 +1372,7 @@ api_key = "lin_api_do-not-package-me"
         .expect("hard link");
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a hardlink under extract/ must be refused too");
         let AuditError::UnsafePackageEntry { kind, .. } = &err else {
             panic!("expected UnsafePackageEntry, got {err:?}");
@@ -1160,8 +1403,15 @@ api_key = "lin_api_do-not-package-me"
             assert_eq!(links, 1, "{} has {links} links", path.display());
         }
         let report = RunReport::of(vec![run]);
-        assemble(&work, &config(), &report, &[], &default_destination(&work))
-            .expect("ordinary output must still package");
+        assemble(
+            &work,
+            &config(),
+            &report,
+            &[],
+            &default_destination(&work),
+            None,
+        )
+        .expect("ordinary output must still package");
     }
 
     /// A sweep in which nothing was audited must not produce a package that
@@ -1173,7 +1423,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![failed(&work, "00-acme-api", "acme-api")]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("no audited repository means no package");
         assert!(
             matches!(err, AuditError::NothingToPackage { .. }),
@@ -1195,7 +1445,8 @@ api_key = "lin_api_do-not-package-me"
         ]);
         let destination = default_destination(&work);
 
-        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
         assert_eq!(package.excluded.len(), 1);
         assert!(
             package.excluded[0].contains("acme-web"),
@@ -1242,7 +1493,8 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![audited(&work, "00-acme-api", "acme-api")]);
         let destination = tmp.path().join("Desktop/return.zip");
 
-        let package = assemble(&work, &config(), &report, &[], &destination).expect("assembles");
+        let package =
+            assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
         assert_eq!(package.path, destination);
         assert!(destination.is_file());
         assert!(!destination.starts_with(work.root()));
@@ -1265,7 +1517,7 @@ api_key = "lin_api_do-not-package-me"
         std::fs::write(work.path(Area::Extract).join("09-other.db"), b"other").expect("write");
         let destination = default_destination(&work);
 
-        assemble(&work, &config(), &report, &[], &destination).expect("assembles");
+        assemble(&work, &config(), &report, &[], &destination, None).expect("assembles");
         let names = entries(&destination);
         assert!(
             names.contains(&"extract/00-acme-api.db".to_owned()),
@@ -1296,7 +1548,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a report with no database must not be packaged");
         let AuditError::MissingExtractDatabase { repo, expected } = &err else {
             panic!("expected MissingExtractDatabase, got {err:?}");
@@ -1327,7 +1579,7 @@ api_key = "lin_api_do-not-package-me"
         let report = RunReport::of(vec![run]);
         let destination = default_destination(&work);
 
-        let err = assemble(&work, &config(), &report, &[], &destination)
+        let err = assemble(&work, &config(), &report, &[], &destination, None)
             .expect_err("a missing extract/ directory must not be packaged");
         assert!(
             matches!(err, AuditError::MissingExtractDatabase { .. }),
