@@ -48,11 +48,13 @@ mod support;
 use std::collections::HashSet;
 use std::time::Duration;
 
+use chrono::Utc;
 use serde_json::{Value, json};
 use support::{
     StdioSession, assert_envelopes_contiguous, find_session_event, open_sse, parse_sse_frames,
     project_with_agents, read_sse_until,
 };
+use trusty_code::events::{Event, SessionEventEnvelope};
 
 /// The exact, deterministic ordered event-kind sequence a standard
 /// `TCODE_MOCK_LLM=echo` `task.run` produces, from `session.create` through
@@ -165,7 +167,7 @@ fn filter_async_kinds<'a>(kinds: impl IntoIterator<Item = &'a str>) -> Vec<&'a s
         .collect()
 }
 
-/// Assert every `log` envelope in `events` is a well-formed durable-memory
+/// Assert every `log` envelope in `envelopes` is a well-formed durable-memory
 /// degradation warning — unordered, and tolerant of any count including zero.
 ///
 /// Why: [`filter_async_kinds`] drops `log` from the ordered baseline, which on
@@ -181,21 +183,30 @@ fn filter_async_kinds<'a>(kinds: impl IntoIterator<Item = &'a str>) -> Vec<&'a s
 /// `MemoryFailureCategory::PalaceEnsure` vocabulary, the only category a
 /// tempdir-rooted run can produce (`session::registry_memory_sink`). A
 /// regression that changed the level, the category, or the message shape fails
-/// here.
+/// here. Both fields are read from the envelope's nested `event` payload, which
+/// is where `Event::Log` puts them; `kind` is the only field
+/// `SessionEventEnvelope` lifts to the top level (#5911).
 /// Test: called by `m1_cutline_full_scenario_over_stdio` and
-/// `m1_cutline_full_scenario_over_http`.
-fn assert_memory_degradation_logs_well_formed(events: &[Value]) {
-    for event in events.iter().filter(|e| e["kind"] == "log") {
+/// `m1_cutline_full_scenario_over_http`, and pinned without a daemon by
+/// `degradation_log_events_never_move_the_ordered_baseline`.
+fn assert_memory_degradation_logs_well_formed(envelopes: &[Value]) {
+    for envelope in envelopes.iter().filter(|e| e["kind"] == "log") {
+        // #5911: `level`/`message` are `Event::Log`'s own fields, so they live
+        // under the envelope's nested `event` payload. `kind` is the only one
+        // duplicated to the top level (`SessionEventEnvelope`).
+        let payload = &envelope["event"];
         assert_eq!(
-            event["level"], "warn",
+            payload["level"], "warn",
             "the only log event this run can emit is the #2425 degradation \
-             warning, which is warn-level: {event}"
+             warning, which is warn-level: {envelope}"
         );
-        let message = event["message"].as_str().unwrap_or_default();
+        let message = payload["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a log event always carries a string message: {envelope}"));
         assert!(
             message.starts_with("durable memory degraded: category=PalaceEnsure "),
             "a tempdir-rooted run's only log event is the PalaceEnsure \
-             degradation warning (#4638): {event}"
+             degradation warning (#4638): {envelope}"
         );
     }
 }
@@ -215,7 +226,12 @@ fn assert_memory_degradation_logs_well_formed(events: &[Value]) {
 /// can deliver them at — and asserts the filtered spine is the baseline every
 /// time. The `PalaceEnsure` token comes from the production enum, so a rename
 /// there fails here rather than silently weakening
-/// [`assert_memory_degradation_logs_well_formed`].
+/// [`assert_memory_degradation_logs_well_formed`]. The warning envelopes are
+/// SERIALISED from `SessionEventEnvelope`/`Event::Log` for the same reason
+/// (#5911): the first version of this test hand-wrote them as flat `json!`
+/// objects with `level`/`message` at the top level, which is not the wire shape,
+/// so it agreed with a helper that read the wrong path and CI stayed red. A
+/// production-derived fixture cannot drift from the envelope it stands in for.
 /// Test: this test.
 #[test]
 fn degradation_log_events_never_move_the_ordered_baseline() {
@@ -223,16 +239,25 @@ fn degradation_log_events_never_move_the_ordered_baseline() {
         "{:?}",
         trusty_code::session::MemoryFailureCategory::PalaceEnsure
     );
+    // #5911: built by SERIALISING the production envelope, never hand-written as
+    // a flat `json!`. A hand-written fixture states the test author's belief about
+    // the wire shape; this one states the shape itself, so a helper that reads the
+    // wrong path fails here instead of only in CI.
     let warning = |consecutive: u32| {
-        json!({
-            "kind": "log",
-            "session_id": "s1",
-            "level": "warn",
-            "message": format!(
-                "durable memory degraded: category={category} total_failed_turns=2 \
-                 consecutive_failed_turns={consecutive}"
-            ),
-        })
+        serde_json::to_value(SessionEventEnvelope::new(
+            "s1".to_string(),
+            0,
+            Utc::now(),
+            Event::Log {
+                session_id: "s1".to_string(),
+                level: "warn".to_string(),
+                message: format!(
+                    "durable memory degraded: category={category} total_failed_turns=2 \
+                     consecutive_failed_turns={consecutive}"
+                ),
+            },
+        ))
+        .expect("a SessionEventEnvelope always serialises")
     };
     let spine: Vec<Value> = BASELINE_EVENT_KINDS
         .iter()
