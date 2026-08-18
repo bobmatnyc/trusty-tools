@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::info;
 
+use super::contents_links;
 use super::error::{ReportError, Result};
 use super::fill::{Scope, render, strip_leading_comment};
 use super::manifest::slugify;
@@ -22,6 +23,8 @@ use super::metrics::Severity;
 use super::model::{ReportModel, RepositoryReport};
 use super::polish::polish_with_gaps;
 use super::provenance::{self, Provenance, tag};
+use super::reporter_codesec::{push_code_quality_rows, push_security_violation_rows};
+use super::reporter_facts::fill_key_facts;
 use super::reporter_fill::{
     crate_version, fill_profile, instructions_block, set_executive_summary, set_scoring_model,
 };
@@ -29,6 +32,7 @@ use super::reporter_findings::push_finding_band;
 use super::reporter_graph_datasets::{
     inject_complexity_distribution_dataset, inject_loc_by_technology_dataset,
 };
+use super::reporter_performance::fill_performance_note;
 
 /// Renders a [`ReportModel`] to markdown + JSON and writes them atomically.
 ///
@@ -110,7 +114,11 @@ impl Reporter {
         // sections, plus the rejected-evidence note, are appended after polish so
         // their measured/inferred rows are never subject to omit-empty.
         out.push_str(&super::investigate::report_sections(model));
-        out
+        // #6004: LAST — every section this render pass can produce has now been
+        // appended, so this is the one point where the final `##` heading set is
+        // known. Replaces the exec-summary jump-list sentinel with real links to
+        // whichever of those headings actually survived.
+        contents_links::inject(&out)
     }
 
     /// Render and write `{slug}.md` + `{slug}.json` atomically to `output_dir`.
@@ -222,6 +230,11 @@ fn build_scope(model: &ReportModel) -> Scope {
     root.set("report_version", tag(crate_version(), Provenance::Measured));
     root.set("provenance_legend", provenance::LEGEND);
     root.set("analyst_instructions_block", instructions_block(model));
+    // #6004: the Key Facts block frontloads density/complexity/(author/
+    // trajectory once PR B lands) facts ahead of the executive summary.
+    fill_key_facts(&mut root, model);
+    // #6004: deterministic structure, never data — always set.
+    contents_links::set_contents_placeholder(&mut root);
     // Declared deal-side fields: filled + tagged when the manifest supplies them,
     // otherwise omitted (→ Gaps) rather than rendered as a "not stated" row.
     if let Some(analyst) = &model.analyst {
@@ -330,6 +343,14 @@ fn build_scope(model: &ReportModel) -> Scope {
     // never synthesized — filled independent of synthesis availability.
     push_green_topics(&mut root, model);
 
+    // #6004: Code Quality & Architecture and Security Posture re-project data
+    // already loaded above (complexity/findings/LoC) — no new data source, no
+    // LLM involvement in the rows themselves. Performance & Scalability is
+    // FIXED text (DOC-67 §3: no performance data source exists at all).
+    push_code_quality_rows(&mut root, model);
+    push_security_violation_rows(&mut root, model);
+    fill_performance_note(&mut root);
+
     // #5318: §2 has a deterministic source.  It used to be filled ONLY from
     // verified synthesis, so a run without `--synthesize` — which was every
     // `tga audit` run before #5454 — collapsed the first section a diligence
@@ -383,6 +404,22 @@ fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis
         root.set(
             "executive_summary_paragraph",
             tag(exec.clone(), Provenance::Inferred),
+        );
+    }
+    // #6004: same injection shape as the executive summary — verified prose
+    // only, tagged inferred; the deterministic rows built by
+    // `push_code_quality_rows`/`push_security_violation_rows` fill the section
+    // regardless of whether either narrative slot survived the guardrail.
+    if let Some(cq) = &syn.code_quality_summary {
+        root.set(
+            "code_quality_summary_paragraph",
+            tag(cq.clone(), Provenance::Inferred),
+        );
+    }
+    if let Some(sec) = &syn.security_summary {
+        root.set(
+            "security_summary_paragraph",
+            tag(sec.clone(), Provenance::Inferred),
         );
     }
 

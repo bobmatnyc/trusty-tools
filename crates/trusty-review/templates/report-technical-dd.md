@@ -37,20 +37,30 @@
   analysis focused on what the acquirer/reader actually needs to act on.
 
   SECTION-INSTRUCTION OVERRIDES (#2357 layered instructions)
-  Under `--synthesize`, three narrative sections are LLM-written: the executive
-  summary, the top-risks rows, and per-finding elaboration prose. Each has a
-  generic built-in instruction (see `src/report/section_instructions.rs`) that
-  a template may override for its own methodology's voice by embedding a
+  Under `--synthesize`, five narrative sections are LLM-written: the executive
+  summary, the top-risks rows, per-finding elaboration prose, the Code Quality
+  & Architecture summary, and the Security Posture summary. Each has a generic
+  built-in instruction (see `src/report/section_instructions.rs`) that a
+  template may override for its own methodology's voice by embedding a
   `<!-- instruct:<section_id> ... -->` comment anywhere in the file, where
   `<section_id>` is one of `executive_summary`, `top_risks`,
-  `finding_elaboration`. The override REPLACES the generic default for that
-  section only. This generic template ships no override (it uses the crate's
-  defaults for all three sections) — see `report-technical-dd-cast.md` for a
-  worked example overriding `executive_summary` with CAST health-factor
+  `finding_elaboration`, `code_quality_summary`, `security_summary`. The
+  override REPLACES the generic default for that section only. This generic
+  template ships no override (it uses the crate's defaults, which are
+  balanced/adversarial — acquirer-side, skeptical of risk, evenhanded about
+  genuine strengths, never promotional) — see `report-technical-dd-cast.md`
+  for a worked example overriding `executive_summary` with CAST health-factor
   language. An analyst's `--instructions` brief still applies ADDITIVELY on top
   of whichever instruction is active — it steers emphasis, never replaces it.
   `instruct:` comments are parsed at template-load time and, like every other
   comment here, are stripped from rendered output.
+
+  JUMP-LIST PLACEHOLDER (#6004)
+  `{{report_contents_block}}` is deterministic post-render structure, not a
+  data field — never remove it and never expect it to honesty-mark. It is
+  replaced, after every other section has rendered, with links to whichever
+  `##`-level headings actually survived in THIS document (see
+  `src/report/contents_links.rs`).
 -->
 
 # Technical Due-Diligence Analysis: {{target_codename}}
@@ -72,12 +82,39 @@
 | Analyst (this instance) | {{analyst_name}} |
 | Analysis generated | {{analysis_generated_date}} |
 
+## Key Facts
+
+<!-- Owner ruling 2026-08-18: frontload facts — density, complexity, author
+     count, estimated work volume, and its trajectory by month — ahead of the
+     narrative below. Every row is deterministic, never LLM-touched (it is
+     the same anchor set the numeric guardrail validates narrative against).
+     Author count and monthly trajectory are the tga-side authorship artifact
+     (#5453); a manifest without one renders those two rows as named gaps,
+     never a silent zero. "Estimated work volume" is a named gap in every run
+     today — tga has no effort-estimation metric (its `story_points` fields
+     are documented placeholders, always zero) — rather than an invented
+     figure. -->
+
+| Metric | Value |
+|---|---|
+| Codebase size (total LoC) | {{facts_total_loc}} |
+| File count | {{facts_total_files}} |
+| Primary languages | {{facts_languages}} |
+| Complexity profile | {{facts_complexity_summary}} |
+| Number of authors | {{facts_author_count}} |
+| Estimated work volume | {{facts_work_estimate}} |
+| 12-month trajectory | {{facts_trajectory}} |
+
 ## 2. Executive Summary
 
 {{executive_summary_paragraph}}
 
 <!-- One paragraph, deal-relevant: what matters to an acquirer, synthesized
-     across all applications — not a restatement of section headers. -->
+     across all applications — not a restatement of section headers. Voice is
+     balanced/adversarial: acquirer-side, skeptical of risk, evenhanded about
+     genuine strengths, never promotional. -->
+
+{{report_contents_block}}
 
 ### Top Risks
 
@@ -171,9 +208,21 @@ report against others normalized through this same template.
 - {{green_topic_3}}
 <!-- one bullet per positive topic -->
 
-## 6. Risk Registers
+## Code Quality & Architecture
 
-### 6.1 Security Violations
+<!-- #6004: re-projects data already loaded for §3/§4/§5 — complexity
+     distribution, LoC/tech-stack, and maintainability (refactor/code-smell)
+     findings — into its own section. No new data source. -->
+
+{{code_quality_summary_paragraph}}
+
+<!-- BEGIN code_quality_row -->
+| Application | LoC | Primary tech | Complexity profile | Maintainability findings |
+|---|---|---|---|---|
+| {{cq_app_name}} | {{cq_loc}} | {{cq_tech}} | {{cq_complexity}} | {{cq_maintainability_count}} |
+<!-- END code_quality_row -->
+
+## Security Posture
 
 *This table counts findings from general-purpose lint tools (clippy, ruff,
 biome, rubocop, PMD, and similar per language) that happened to be graded
@@ -181,13 +230,25 @@ biome, rubocop, PMD, and similar per language) that happened to be graded
 not a secrets scan. Treat it as a proxy for code-hygiene risk, not as
 evidence the codebase has been screened for exploitable vulnerabilities.*
 
+{{security_summary_paragraph}}
+
 <!-- BEGIN security_violations_table -->
 | Application | Domain | Total violations |
 |---|---|---|
 | {{app_name}} | {{violation_domain}} | {{violation_count}} |
 <!-- END security_violations_table -->
 
-### 6.2 Open-Source / CVE Exposure
+## Performance & Scalability
+
+<!-- #6004: fixed text, never LLM-generated — DOC-67 §3 declares this
+     dimension unavailable; no performance data source exists in this
+     pipeline. -->
+
+{{performance_assessment_note}}
+
+## 6. Risk Registers
+
+### 6.1 Open-Source / CVE Exposure
 
 <!-- BEGIN cve_table -->
 | Application | Component | Critical | High | Medium |
@@ -195,7 +256,7 @@ evidence the codebase has been screened for exploitable vulnerabilities.*
 | {{app_name}} | {{component_name}} | {{cve_critical}} | {{cve_high}} | {{cve_medium}} |
 <!-- END cve_table -->
 
-### 6.3 License / IP Risk
+### 6.2 License / IP Risk
 
 <!-- BEGIN license_risk_table -->
 | Application | License | Risk factor | Component count | Top component |
@@ -203,7 +264,7 @@ evidence the codebase has been screened for exploitable vulnerabilities.*
 | {{app_name}} | {{license_name}} | {{license_risk_factor}} | {{license_component_count}} | {{license_top_component}} |
 <!-- END license_risk_table -->
 
-### 6.4 Obsolescence
+### 6.3 Obsolescence
 
 <!-- BEGIN obsolescence_table -->
 | Application | Total components | % ≥5yr gap | % ≥5yr old | % no release 5yr |
@@ -211,7 +272,7 @@ evidence the codebase has been screened for exploitable vulnerabilities.*
 | {{app_name}} | {{obs_total}} | {{obs_gap_pct}} | {{obs_age_pct}} | {{obs_stale_pct}} |
 <!-- END obsolescence_table -->
 
-### 6.5 Cloud Readiness Blockers
+### 6.4 Cloud Readiness Blockers
 
 <!-- BEGIN cloud_readiness_table -->
 | Application | Cloud maturity % | Blockers % | Roadblock count | Top blocking technology |
@@ -219,7 +280,7 @@ evidence the codebase has been screened for exploitable vulnerabilities.*
 | {{app_name}} | {{cloud_maturity_pct}} | {{cloud_blockers_pct}} | {{cloud_roadblock_count}} | {{cloud_top_tech}} |
 <!-- END cloud_readiness_table -->
 
-### 6.6 Technical-Debt / Remediation Economics
+### 6.5 Technical-Debt / Remediation Economics
 
 <!-- BEGIN remediation_economics_table -->
 | Application | Tier | Violations addressed | Effort (person-days) | Cost |

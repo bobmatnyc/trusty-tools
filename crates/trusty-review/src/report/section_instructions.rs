@@ -27,9 +27,19 @@ pub const EXECUTIVE_SUMMARY: &str = "executive_summary";
 pub const TOP_RISKS: &str = "top_risks";
 /// Section id: per-finding elaboration prose.
 pub const FINDING_ELABORATION: &str = "finding_elaboration";
+/// Section id: the Code Quality & Architecture narrative paragraph (#6004).
+pub const CODE_QUALITY_SUMMARY: &str = "code_quality_summary";
+/// Section id: the Security Posture narrative paragraph (#6004).
+pub const SECURITY_SUMMARY: &str = "security_summary";
 
 /// Every recognised section id, in the order they appear in the synthesis output.
-pub const ALL_SECTION_IDS: &[&str] = &[EXECUTIVE_SUMMARY, TOP_RISKS, FINDING_ELABORATION];
+pub const ALL_SECTION_IDS: &[&str] = &[
+    EXECUTIVE_SUMMARY,
+    TOP_RISKS,
+    FINDING_ELABORATION,
+    CODE_QUALITY_SUMMARY,
+    SECURITY_SUMMARY,
+];
 
 /// True when `id` names a recognised synthesized section.
 ///
@@ -50,17 +60,26 @@ pub fn is_valid_section_id(id: &str) -> bool {
 /// Test: `section_instructions_tests::defaults_cover_all_sections`.
 pub fn default_instruction(id: &str) -> Option<&'static str> {
     match id {
+        // #6004: balanced/adversarial voice — the owner's characterization is
+        // "acquirer-side, skeptical, strengths and risks presented evenhandedly
+        // but risk hunted adversarially, never promotional." Applied to every
+        // default below; a template's `instruct:` override may still replace it.
         EXECUTIVE_SUMMARY => Some(
             "Write ONE deal-analytic paragraph synthesising the verified findings, \
              severity-weighted (RED findings first), tied to what an acquirer must act \
-             on. Reference a coverage gap ONLY if one is genuinely named in the coverage \
-             data above (a listed not-investigated dimension or a named failed batch) — \
-             and name it specifically; never imply a gap that isn't documented there.",
+             on. Write from the acquirer's side: skeptical and adversarial about risk — \
+             hunt for what should worry a buyer — while still naming genuine strengths \
+             the data supports, evenhandedly, never as promotional filler. Reference a \
+             coverage gap ONLY if one is genuinely named in the coverage data above (a \
+             listed not-investigated dimension or a named failed batch) — and name it \
+             specifically; never imply a gap that isn't documented there.",
         ),
         TOP_RISKS => Some(
             "List the most material RED/AMBER risks, most material first (at most 5 \
              rows), each with a qualitative cost/effort framing and the affected \
-             application(s). Draw ONLY from the findings provided.",
+             application(s). Draw ONLY from the findings provided. Hunt for risk \
+             adversarially, from the acquirer's side — do not soften a finding to read \
+             as minor when the underlying data does not support that.",
         ),
         FINDING_ELABORATION => Some(
             "For each finding listed as requiring elaboration, write one concise \
@@ -69,6 +88,21 @@ pub fn default_instruction(id: &str) -> Option<&'static str> {
              already verified elsewhere in the provided data — leave it out of this \
              list entirely; re-elaborating it wastes output budget and cannot improve \
              on already-verified prose.",
+        ),
+        CODE_QUALITY_SUMMARY => Some(
+            "Write ONE paragraph on code quality and architecture, grounded strictly in \
+             the complexity distribution, code-smell/refactor findings, and LoC/tech-stack \
+             data provided. Take the acquirer's skeptical side on maintainability risk \
+             while naming genuine strengths the data supports, evenhandedly. Never invent \
+             an architectural pattern or a metric not present in the data.",
+        ),
+        SECURITY_SUMMARY => Some(
+            "Write ONE paragraph characterising the security posture strictly from the \
+             lint-graded RED/AMBER findings provided. This is code-hygiene signal, NOT a \
+             SAST/CVE/secrets/pen-test result — never write as though it were; state that \
+             limitation if it changes how a risk should be read. Take the acquirer's \
+             skeptical side while still crediting a genuinely clean signal where the data \
+             supports it.",
         ),
         _ => None,
     }

@@ -38,7 +38,7 @@
 use crate::llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix};
 use crate::report::model::ReportModel;
 use crate::report::section_instructions::{
-    self, EXECUTIVE_SUMMARY, FINDING_ELABORATION, TOP_RISKS,
+    self, CODE_QUALITY_SUMMARY, EXECUTIVE_SUMMARY, FINDING_ELABORATION, SECURITY_SUMMARY, TOP_RISKS,
 };
 use crate::report::synthesize_digest::{
     build_split, gather_compact_findings, render_context_section, render_elaboration_section,
@@ -87,6 +87,16 @@ pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
                 "executive_summary": {
                     "type": "string",
                     "description": "ONE deal-relevant paragraph synthesised across all applications. Use ONLY figures present in the provided data; never invent numbers; preserve any \"(approx)\" marker verbatim."
+                },
+                // #6004: two additional narrative slots, same schema/call/guardrail as
+                // executive_summary — see synthesize.rs::apply_guardrail.
+                "code_quality_summary": {
+                    "type": "string",
+                    "description": "ONE paragraph on code quality and architecture, grounded ONLY in the complexity/findings/LoC data provided. Empty string if the data supports nothing."
+                },
+                "security_summary": {
+                    "type": "string",
+                    "description": "ONE paragraph characterising security posture from the lint-graded RED/AMBER findings ONLY — this is code-hygiene signal, not a SAST/CVE/secrets scan. Empty string if the data supports nothing."
                 },
                 "top_risks": {
                     "type": "array",
@@ -243,9 +253,21 @@ fn synthesis_system_prompt(
         .get(FINDING_ELABORATION)
         .map(String::as_str)
         .unwrap_or_default();
+    // #6004: two additional resolved narrative slots.
+    let code_quality = resolved
+        .get(CODE_QUALITY_SUMMARY)
+        .map(String::as_str)
+        .unwrap_or_default();
+    let security = resolved
+        .get(SECURITY_SUMMARY)
+        .map(String::as_str)
+        .unwrap_or_default();
 
     let mut prompt = format!(
         r#"You are a senior technical due-diligence analyst writing the narrative sections of an acquisition-grade report from pre-computed repository analysis data.
+
+## Voice
+Write from the acquirer's side: balanced but adversarial. Hunt for risk skeptically — never read a finding as more benign than the data supports — while still naming genuine strengths the data actually shows, evenhandedly. Never write promotional or vendor-style prose.
 
 ## Absolute rules
 - Use ONLY values present in the provided data. NEVER invent, estimate, or extrapolate a number that is not given.
@@ -267,7 +289,9 @@ Respond with ONLY a single JSON object — no markdown headings, no prose outsid
 Populate the structured response:
 - `executive_summary`: {exec}
 - `top_risks`: {risks}
-- `findings`: {elaboration}"#
+- `findings`: {elaboration}
+- `code_quality_summary`: {code_quality}
+- `security_summary`: {security}"#
     );
 
     if retry_concise {
