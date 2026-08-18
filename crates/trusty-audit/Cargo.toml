@@ -103,6 +103,12 @@ trusty-progress = { workspace = true }
 # #5499: the return package is one zip file, because the return channel is
 # manual (#5642) and a directory cannot be attached to an email.
 zip = { workspace = true }
+# #5980: a non-reversible, truncated fingerprint of the `gh`-derived
+# credential a sweep resolved, persisted in the checkpoint so packaging (which
+# can run as a separate process, possibly under a different `gh` account) can
+# prove it is scanning outbound files with the credential that produced them
+# rather than a freshly re-resolved one that never touched those files.
+sha2 = { workspace = true }
 # #5499: walking each audited repository's output directory. Not followed
 # through symlinks — `package::collect_dir` refuses one rather than reading a
 # file from outside the working directory into a package that leaves the

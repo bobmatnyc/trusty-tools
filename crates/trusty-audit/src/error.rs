@@ -428,6 +428,27 @@ pub enum AuditError {
         expected: PathBuf,
     },
 
+    /// The `gh`-derived credential active now differs from the one the sweep
+    /// recorded when it collected.
+    ///
+    /// Why (#5980): packaging re-resolves `gh auth token` fresh rather than
+    /// inheriting the sweep's value, because packaging can run as a separate
+    /// process — possibly hours later, under a different `gh` account.
+    /// [`Self::CredentialInPackage`]'s guarantee depends on scanning outbound
+    /// files with the SAME token a child could have echoed into them; a
+    /// freshly re-resolved token from a different account can never catch an
+    /// older one. `crate::run::github_issues::verify_unchanged` is what
+    /// proves the two disagree before this fires.
+    /// What: refuses packaging with the operator's remedy stated directly —
+    /// no path or token is named, because there is nothing safe to quote.
+    /// Test: `crate::run::github_issues::github_issues_tests::a_mismatched_fingerprint_refuses`,
+    /// `crate::session::session_tests::a_mismatched_github_credential_refuses_packaging`.
+    #[error(
+        "the active GitHub credential differs from the one used during collection; \
+         re-authenticate as the original `gh` account or re-run the sweep"
+    )]
+    GithubCredentialChanged,
+
     /// The return package could not be read, written, or renamed into place.
     #[error("return package {path}: {source}")]
     Package {

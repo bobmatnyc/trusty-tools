@@ -56,7 +56,8 @@
 //!
 //! Test: `github_issues_tests` below.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// The variable the `gh`-derived token reaches the child under.
 pub const ENV_GITHUB_TOKEN: &str = "TRUSTY_AUDIT_GITHUB_TOKEN";
@@ -118,6 +119,32 @@ impl GithubAccess {
         self.token.as_deref()
     }
 
+    /// A non-reversible, truncated identity fingerprint of the resolved
+    /// token, or `None` when no credential was resolved.
+    ///
+    /// Why (#5980 — the re-resolution/account-switch gap): packaging
+    /// re-resolves `gh auth token` fresh rather than inheriting the sweep's
+    /// value (see [`verify_unchanged`]'s callers), because packaging can run
+    /// as a separate process — possibly after the operator switched `gh`
+    /// accounts between the sweep and the package command. Scanning outbound
+    /// files with the NEW token's bytes can never catch an OLD token a child
+    /// echoed into a file at sweep time. This fingerprint is what lets
+    /// packaging PROVE the two resolutions are the same account without ever
+    /// persisting the raw token — [`crate::run::checkpoint::RunProgress`]
+    /// stores only this value.
+    /// What: the first 8 bytes (16 hex characters) of the token's SHA-256
+    /// digest. Truncated deliberately: this exists to detect a DIFFERENT
+    /// token, never to be treated as a secondary secret worth protecting at
+    /// full strength.
+    /// Test: `github_issues_tests::{fingerprint_is_stable_for_the_same_token,
+    /// fingerprint_differs_for_different_tokens, fingerprint_is_none_with_no_token}`.
+    pub(crate) fn fingerprint(&self) -> Option<String> {
+        self.token.as_deref().map(|t| {
+            let digest = Sha256::digest(t.as_bytes());
+            digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+        })
+    }
+
     /// This repository's `github:` section — always `Some`, per the module
     /// docs: a repository target always contributes its issues, and a
     /// missing credential is not a reason to omit the attempt.
@@ -176,6 +203,86 @@ fn from_probe_result(result: Result<String, trusty_common::gh::GhError>) -> Gith
     match result {
         Ok(token) => GithubAccess { token: Some(token) },
         Err(_) => GithubAccess::default(),
+    }
+}
+
+/// What a sweep recorded about the `gh`-derived credential it resolved.
+///
+/// Why: persisted into `crate::run::checkpoint::RunProgress` so packaging — a
+/// later, possibly separate, process — can prove it is scanning outbound
+/// files with the credential that produced them (see
+/// [`GithubAccess::fingerprint`]'s docs for the gap this closes). The record
+/// being ABSENT from a checkpoint (`Option::None` one level up, in
+/// `RunProgress::github_credential`) is reserved for one specific case: a
+/// checkpoint written before this field existed. This enum's own two
+/// variants are for a sweep that recorded something, one way or the other —
+/// [`verify_unchanged`] treats all three states differently.
+/// Test: `github_issues_tests`, `verify_unchanged`'s own tests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GithubCredentialRecord {
+    /// The sweep resolved no `gh` credential and ran unauthenticated.
+    NoToken,
+    /// [`GithubAccess::fingerprint`] of the token the sweep resolved.
+    Fingerprint(String),
+}
+
+impl GithubCredentialRecord {
+    /// What a sweep should record, from the access it resolved.
+    pub(crate) fn of(access: &GithubAccess) -> Self {
+        match access.fingerprint() {
+            Some(fp) => Self::Fingerprint(fp),
+            None => Self::NoToken,
+        }
+    }
+}
+
+/// Confirm the currently-resolved credential is the one the sweep recorded,
+/// before packaging trusts its scrub needle to have covered every file.
+///
+/// Why: see [`GithubAccess::fingerprint`]'s docs for the account-switch gap
+/// this closes. Called from `crate::package::from_checkpoint`, which is the
+/// one place that has both the checkpoint's record and a freshly resolved
+/// [`GithubAccess`] in hand.
+///
+/// # Returns
+/// `Ok(None)` when the two agree — including "neither run had a token",
+/// which is always safe regardless of what the current resolution holds,
+/// because a sweep with no token could not have put one in any file.
+/// `Ok(Some(gap))` when `persisted` is `None` — the checkpoint predates this
+/// field, so there is nothing to compare against; packaging proceeds, and the
+/// returned line names the uncertainty for the operator.
+/// `Err(AuditError::GithubCredentialChanged)` when the checkpoint recorded a
+/// fingerprint this resolution provably disagrees with, whether the current
+/// resolution has a different token or none at all — a fingerprint is
+/// one-way, so a missing current token leaves no way to scan for the one the
+/// checkpoint named.
+/// Test: `github_issues_tests::{a_matching_fingerprint_proceeds_cleanly,
+/// both_runs_having_no_token_proceeds_cleanly,
+/// an_unrecorded_checkpoint_proceeds_with_a_gap,
+/// a_mismatched_fingerprint_refuses,
+/// losing_the_token_between_sweep_and_package_refuses}`.
+///
+/// # Errors
+///
+/// [`crate::error::AuditError::GithubCredentialChanged`] on a proven mismatch.
+pub(crate) fn verify_unchanged(
+    persisted: Option<&GithubCredentialRecord>,
+    resolved: &GithubAccess,
+) -> Result<Option<String>, crate::error::AuditError> {
+    use crate::error::AuditError;
+    match persisted {
+        None => Ok(Some(
+            "the GitHub credential used during collection was not recorded (this \
+             checkpoint predates credential verification) — GitHub-derived content in \
+             this deliverable could not be re-checked against the currently active \
+             credential"
+                .to_owned(),
+        )),
+        Some(GithubCredentialRecord::NoToken) => Ok(None),
+        Some(GithubCredentialRecord::Fingerprint(old)) => match resolved.fingerprint() {
+            Some(new) if new == *old => Ok(None),
+            _ => Err(AuditError::GithubCredentialChanged),
+        },
     }
 }
 
@@ -248,5 +355,93 @@ mod github_issues_tests {
             Some("ghp_real-token-do-not-write-me-down")
         );
         assert_eq!(GithubAccess::default().raw_token(), None);
+    }
+
+    #[test]
+    fn fingerprint_is_stable_for_the_same_token() {
+        let a = GithubAccess::with_token("ghp_account_a_token");
+        let b = GithubAccess::with_token("ghp_account_a_token");
+        assert_eq!(a.fingerprint(), b.fingerprint());
+        assert!(a.fingerprint().is_some());
+    }
+
+    #[test]
+    fn fingerprint_differs_for_different_tokens() {
+        let a = GithubAccess::with_token("ghp_sweep_time_account_A_token");
+        let b = GithubAccess::with_token("ghp_package_time_account_B_token");
+        assert_ne!(a.fingerprint(), b.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_is_none_with_no_token() {
+        assert_eq!(GithubAccess::default().fingerprint(), None);
+    }
+
+    /// #5980 follow-up CRITICAL: a matching fingerprint proceeds with no gap.
+    #[test]
+    fn a_matching_fingerprint_proceeds_cleanly() {
+        let access = GithubAccess::with_token("ghp_same_account_both_times");
+        let persisted = GithubCredentialRecord::of(&access);
+        let resolved = GithubAccess::with_token("ghp_same_account_both_times");
+        assert_eq!(
+            verify_unchanged(Some(&persisted), &resolved).expect("must not refuse"),
+            None
+        );
+    }
+
+    /// A sweep that ran with no token can never have leaked one — whatever is
+    /// active at package time, there is nothing on disk to have caught.
+    #[test]
+    fn both_runs_having_no_token_proceeds_cleanly() {
+        let persisted = GithubCredentialRecord::NoToken;
+        assert_eq!(
+            verify_unchanged(Some(&persisted), &GithubAccess::default()).expect("no token twice"),
+            None
+        );
+        let with_new_token = GithubAccess::with_token("ghp_a_token_that_showed_up_later");
+        assert_eq!(
+            verify_unchanged(Some(&persisted), &with_new_token)
+                .expect("a sweep with no token never leaked one"),
+            None
+        );
+    }
+
+    /// The back-compat case: a checkpoint written before this field existed.
+    /// Packaging proceeds — refusing every pre-existing engagement's checkpoint
+    /// outright would be disproportionate to a narrowly-scoped verification —
+    /// but the gap line says so, rather than silently claiming agreement.
+    #[test]
+    fn an_unrecorded_checkpoint_proceeds_with_a_gap() {
+        let gap = verify_unchanged(None, &GithubAccess::default())
+            .expect("an unrecorded checkpoint is not a refusal");
+        assert!(gap.is_some(), "the uncertainty must be stated");
+        assert!(gap.unwrap().contains("not recorded"));
+    }
+
+    /// #5980 follow-up CRITICAL — the critic's proof, inverted: a file
+    /// carrying the sweep-time account's token, packaged under a DIFFERENT
+    /// account's token, must now refuse instead of silently succeeding.
+    #[test]
+    fn a_mismatched_fingerprint_refuses() {
+        let sweep_time = GithubAccess::with_token("ghp_sweep_time_account_A_token");
+        let persisted = GithubCredentialRecord::of(&sweep_time);
+        let package_time = GithubAccess::with_token("ghp_package_time_account_B_token");
+        assert!(matches!(
+            verify_unchanged(Some(&persisted), &package_time),
+            Err(crate::error::AuditError::GithubCredentialChanged)
+        ));
+    }
+
+    /// The one-way direction of the mismatch: a token recorded at sweep time
+    /// but NO token active at package time is exactly as unverifiable as a
+    /// different token — the fingerprint cannot be reversed into a needle.
+    #[test]
+    fn losing_the_token_between_sweep_and_package_refuses() {
+        let sweep_time = GithubAccess::with_token("ghp_sweep_time_account_A_token");
+        let persisted = GithubCredentialRecord::of(&sweep_time);
+        assert!(matches!(
+            verify_unchanged(Some(&persisted), &GithubAccess::default()),
+            Err(crate::error::AuditError::GithubCredentialChanged)
+        ));
     }
 }

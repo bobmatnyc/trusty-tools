@@ -43,6 +43,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::github_issues::GithubCredentialRecord;
 use super::{RepoRun, RunReport, RunStatus, SelectedRepo, stem, verify_output};
 use crate::error::AuditError;
 use crate::workdir::{self, Area, WorkDir};
@@ -84,24 +85,45 @@ pub struct RunProgress {
     pub status: RunStatus,
     /// One entry per repository that has finished, in selection order.
     pub repos: Vec<RepoRun>,
+    /// What this sweep recorded about the `gh`-derived GitHub credential it
+    /// resolved (#5980 — the re-resolution/account-switch gap).
+    ///
+    /// Why: packaging can run as a separate process, long after the sweep and
+    /// possibly under a different `gh` account — see
+    /// `super::github_issues::GithubAccess::fingerprint`'s docs. `None` is
+    /// reserved for a checkpoint written before this field existed;
+    /// `super::github_issues::verify_unchanged` treats that as unverifiable
+    /// rather than as either recorded state, and proceeds with a stated gap
+    /// rather than refusing every pre-existing engagement outright.
+    /// What: never the raw token — only [`GithubCredentialRecord`]'s
+    /// non-reversible fingerprint, or the explicit "no token" state.
+    /// Test: `super::run_tests::child_output_scrubber_includes_the_github_token`
+    /// (sweep-side), `github_issues_tests` (the verification itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_credential: Option<GithubCredentialRecord>,
 }
 
 impl RunProgress {
     /// A checkpoint of a sweep that is still working through its selection.
-    pub(crate) fn checkpoint(repos: &[RepoRun]) -> Self {
-        Self::from_report(RunReport::of(repos.to_vec()), false)
+    pub(crate) fn checkpoint(repos: &[RepoRun], github_credential: GithubCredentialRecord) -> Self {
+        Self::from_report(RunReport::of(repos.to_vec()), false, github_credential)
     }
 
     /// The record of a sweep that reached the end of its selection.
-    pub(crate) fn finished(report: &RunReport) -> Self {
-        Self::from_report(report.clone(), true)
+    pub(crate) fn finished(report: &RunReport, github_credential: GithubCredentialRecord) -> Self {
+        Self::from_report(report.clone(), true, github_credential)
     }
 
-    fn from_report(report: RunReport, complete: bool) -> Self {
+    fn from_report(
+        report: RunReport,
+        complete: bool,
+        github_credential: GithubCredentialRecord,
+    ) -> Self {
         Self {
             complete,
             status: report.status,
             repos: report.repos,
+            github_credential: Some(github_credential),
         }
     }
 

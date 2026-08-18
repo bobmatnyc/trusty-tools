@@ -447,9 +447,12 @@ async fn assemble(
     // #5980 CRITICAL 4: resolved here, not threaded from `collect` — the phase
     // is a separate step from collection and re-derives what it needs, the
     // same pattern `run::sweep` and `session::package` both follow.
+    // `from_checkpoint` proves this resolution still matches the account
+    // `collect` recorded before trusting it (#5980 CRITICAL — account-switch
+    // follow-up); a same-process chain still re-verifies rather than
+    // special-casing itself, so one code path owns the guarantee.
     let github_access = crate::run::github_issues::resolve_github_access().await;
-    let assembled =
-        package::from_checkpoint(work, config, gaps, &destination, github_access.raw_token());
+    let assembled = package::from_checkpoint(work, config, gaps, &destination, &github_access);
     progress.unit_finished(
         Operation::Package,
         name.as_str(),

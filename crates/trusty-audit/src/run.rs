@@ -423,7 +423,13 @@ where
         // #5494: the record advances with the work, not after it. A crash, a
         // timeout or a Ctrl-C after this point costs the repositories still to
         // come and none of the ones already done.
-        checkpoint::write_progress(work, &RunProgress::checkpoint(&decided(&runs)))?;
+        checkpoint::write_progress(
+            work,
+            &RunProgress::checkpoint(
+                &decided(&runs),
+                github_issues::GithubCredentialRecord::of(&github_access),
+            ),
+        )?;
     }
 
     let report = RunReport::of(decided(&runs)).stating(board_gaps);
@@ -432,7 +438,13 @@ where
         report.repos.iter().filter(|r| r.result.succeeded()).count(),
         total,
     );
-    checkpoint::write_progress(work, &RunProgress::finished(&report))?;
+    checkpoint::write_progress(
+        work,
+        &RunProgress::finished(
+            &report,
+            github_issues::GithubCredentialRecord::of(&github_access),
+        ),
+    )?;
     Ok(report)
 }
 
