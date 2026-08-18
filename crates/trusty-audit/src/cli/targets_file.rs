@@ -44,6 +44,56 @@ const REPO_SHAPE: &str = "expected owner/repo, or a https://github.com/owner/rep
 const NOT_GITHUB: &str = "only github.com repository URLs are read — expected \
                           https://github.com/owner/repo";
 
+/// What a github.com URL naming one of GitHub's own pages is told.
+///
+/// It names the fix rather than the shape: someone who pasted an organization
+/// URL meant "every repository in this org", and what they need to hear is that
+/// the file takes one repository per line.
+const NOT_A_REPOSITORY_PAGE: &str = "that is one of github.com's own pages, not a repository — \
+                                     /orgs/, /users/ and /topics/ are GitHub's paths, not an \
+                                     owner's. List each repository on its own line as owner/repo";
+
+/// First path segments github.com reserves for itself.
+///
+/// #5990: `github_path` accepted any two-segment path, so
+/// `https://github.com/orgs/acme/repositories` normalized to the target
+/// `orgs/acme` — and the operator got a refusal naming a repository they never
+/// listed. None of these can be an account name on github.com, so refusing them
+/// cannot cost a real repository.
+const RESERVED_SEGMENTS: &[&str] = &[
+    "about",
+    "account",
+    "apps",
+    "codespaces",
+    "collections",
+    "contact",
+    "dashboard",
+    "enterprise",
+    "events",
+    "explore",
+    "features",
+    "issues",
+    "join",
+    "login",
+    "logout",
+    "marketplace",
+    "new",
+    "notifications",
+    "organizations",
+    "orgs",
+    "pricing",
+    "pulls",
+    "search",
+    "security",
+    "settings",
+    "sponsors",
+    "stars",
+    "topics",
+    "trending",
+    "users",
+    "watching",
+];
+
 /// The shape a board line may take.
 const BOARD_SHAPE: &str = "expected jira:KEY, linear:TEAM, or a Jira or Linear board URL";
 
@@ -149,12 +199,34 @@ pub fn detect(config_path: &Path) -> Result<Option<Detected>, AuditError> {
 /// A file's text, or `None` when it is not there.
 fn read_if_present(path: &Path) -> Result<Option<String>, AuditError> {
     match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
+        // #5990: the byte-order mark comes off HERE, once, before any line is
+        // looked at — see [`without_bom`].
+        Ok(text) => Ok(Some(without_bom(text))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(AuditError::Read {
             path: path.to_path_buf(),
             source,
         }),
+    }
+}
+
+/// The text with a leading U+FEFF removed, and nothing else touched.
+///
+/// Why: `str::trim` uses `char::is_whitespace`, and U+FEFF is not whitespace, so
+/// a byte-order mark survives into the charset check and refuses line 1. Because
+/// the parse is all-or-nothing, one invisible byte then blocks every repository
+/// in the engagement — and the refusal echoes the entry, which renders identical
+/// to a valid one. Notepad, Excel's "Save as .txt" and PowerShell's `Out-File`
+/// all emit a BOM by default, so the operator who was told to hand over a list
+/// they already have is the one who hits this (#5990).
+/// What: the prefix at offset 0 only. A U+FEFF anywhere else is a real character
+/// in a malformed entry and is still refused, so this cannot silently repair a
+/// line that says something other than what it looks like.
+/// Test: `super::targets_file_tests::a_byte_order_mark_does_not_refuse_the_file`.
+fn without_bom(text: String) -> String {
+    match text.strip_prefix('\u{FEFF}') {
+        Some(rest) => rest.to_owned(),
+        None => text,
     }
 }
 
@@ -239,12 +311,28 @@ fn scheme_stripped(entry: &str) -> Option<&str> {
 }
 
 /// The repository path of a GitHub URL, host stripped.
+///
+/// #5990: a two-segment path is not enough to make it a repository. GitHub's own
+/// pages are two-segment paths too, so the owner position is checked against
+/// [`RESERVED_SEGMENTS`] before the path is handed back. What must keep working
+/// is everything an operator legitimately copies out of the browser bar while
+/// looking AT a repository — `/issues/12`, `/blob/main/…`, `/tree/release/2.x` —
+/// and those all carry a real owner in the first segment.
 fn github_path(rest: &str) -> Result<&str, &'static str> {
     let (host, path) = rest.split_once('/').ok_or(NOT_GITHUB)?;
     match host.to_ascii_lowercase().as_str() {
-        "github.com" | "www.github.com" => Ok(path),
+        "github.com" | "www.github.com" => owned_path(path),
         _ => Err(NOT_GITHUB),
     }
+}
+
+/// The path back, unless its first segment is one github.com keeps.
+fn owned_path(path: &str) -> Result<&str, &'static str> {
+    let owner = path.split('/').next().unwrap_or(path).to_ascii_lowercase();
+    if RESERVED_SEGMENTS.contains(&owner.as_str()) {
+        return Err(NOT_A_REPOSITORY_PAGE);
+    }
+    Ok(path)
 }
 
 /// The team key in a Linear URL path — never the workspace slug.
@@ -439,6 +527,77 @@ mod targets_file_tests {
             let spec = spec_of(TargetKind::Repo, entry).expect("parses");
             assert_eq!(spec, "acme/api");
             assert!(!spec.ends_with(".git"), "{entry} kept its suffix: {spec}");
+        }
+    }
+
+    /// 🔴 A byte-order mark on line 1 must not refuse the engagement (#5990).
+    ///
+    /// `str::trim` uses `char::is_whitespace` and U+FEFF is not whitespace, so
+    /// against `2c606d10d` the mark reaches `clone::split_name`'s charset check
+    /// and line 1 is refused — which, under the all-or-nothing rule, blocks
+    /// EVERY repository in the file. Notepad, Excel's "Save as .txt" and
+    /// PowerShell's `Out-File` all write one by default.
+    ///
+    /// The second half is the boundary: a U+FEFF anywhere but offset 0 is a real
+    /// character in a malformed entry and is still refused, so stripping the
+    /// prefix cannot quietly repair a line that is not what it looks like.
+    #[test]
+    fn a_byte_order_mark_does_not_refuse_the_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            specs(detected(
+                tmp.path(),
+                Some("\u{FEFF}acme/api\nacme/web\n"),
+                None
+            )),
+            ["acme/api", "acme/web"],
+            "a leading byte-order mark must not refuse the whole engagement"
+        );
+
+        let mid = tempfile::tempdir().expect("tempdir");
+        seed(mid.path(), Some("acme/api\n\u{FEFF}acme/web\n"), None);
+        let err = detect(&mid.path().join("engagement.toml"))
+            .expect_err("a mark mid-file is a malformed entry, not a file artifact");
+        assert!(
+            matches!(err, AuditError::TargetsFileRefused { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// 🔴 GitHub's own pages are two-segment paths, and were accepted as targets
+    /// (#5990).
+    ///
+    /// Against `2c606d10d` `https://github.com/orgs/acme/repositories` — the
+    /// natural paste for someone who means "every repository in this org" —
+    /// normalizes to `orgs/acme` and the operator gets a refusal at registration
+    /// naming a repository they never listed.
+    ///
+    /// The second loop is what must not break: the browser-bar spellings of a
+    /// URL taken while looking AT a repository all carry a real owner.
+    #[test]
+    fn a_github_page_that_is_not_a_repository_is_refused() {
+        for entry in [
+            "https://github.com/orgs/acme/repositories",
+            "https://github.com/users/acme/projects",
+            "https://github.com/topics/rust",
+            "https://github.com/settings/profile",
+            "https://www.github.com/ORGS/acme/repositories",
+        ] {
+            assert!(
+                spec_of(TargetKind::Repo, entry).is_err(),
+                "{entry} is a github.com page, not a repository"
+            );
+        }
+        for entry in [
+            "https://github.com/acme/api",
+            "https://github.com/acme/api/issues/12",
+            "https://github.com/acme/api/blob/main/README.md",
+        ] {
+            assert_eq!(
+                spec_of(TargetKind::Repo, entry),
+                Ok("acme/api".to_owned()),
+                "{entry} names a real owner and must still parse"
+            );
         }
     }
 

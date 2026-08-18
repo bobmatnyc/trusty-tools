@@ -101,6 +101,9 @@ async fn main() -> Result<()> {
     // #5885: the interactive launch drives the same `Session::execute` door,
     // several times — registration, then the guided flow, then the sweep. What
     // it returns is the last outcome, which is what stdout carries.
+    // #5990: what the targets files did not register, kept so the process status
+    // can be decided from it below.
+    let mut adopted = None;
     let outcome = match &mut terminal {
         // #5970: the launch sets the engagement up when there is none — key,
         // config, tools, and only then targets. `from_environment` is the one
@@ -130,12 +133,11 @@ async fn main() -> Result<()> {
         // report. A file with an unparseable line never gets this far: `adopt`
         // refuses the whole read, naming every bad line.
         None => {
-            if bare
-                && let Some(lines) = cli::registration::adopt_without_a_terminal(&session).await?
-            {
-                for line in lines {
-                    eprintln!("{line}");
-                }
+            if bare {
+                adopted = cli::registration::adopt_without_a_terminal(&session).await?;
+            }
+            for line in adopted.iter().flat_map(|a| &a.lines) {
+                eprintln!("{line}");
             }
             session.execute(command).await?
         }
@@ -148,7 +150,12 @@ async fn main() -> Result<()> {
     // `taudit clone … && taudit run` reads the status, not the text. The
     // judgement itself is `Outcome::exit_code`, in the library, so the Tauri
     // shell reads the same verdict from the same place.
-    let code = outcome.exit_code();
+    //
+    // #5990: a launch whose `repos.txt` registered none of its repositories is
+    // the same fail-open one rung earlier, and the outcome alone cannot show it
+    // — so `exit_code_after` folds the shortfall in. Also in the library, for
+    // the same reason.
+    let code = cli::registration::exit_code_after(&outcome, adopted.as_ref());
     if code == 0 {
         return Ok(());
     }

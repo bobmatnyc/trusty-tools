@@ -42,10 +42,11 @@
 use crate::chain::ChainOptions;
 use crate::cli::bootstrap::{self, ColdStart};
 use crate::cli::credential::Tty;
+use crate::cli::render::count_of;
 use crate::cli::{Cli, render, review, targets_file};
 use crate::error::AuditError;
 use crate::registry::{self, COVERAGE_COACHING, Target};
-use crate::session::{Command, NextStep, Outcome, Session};
+use crate::session::{Command, EXIT_INCOMPLETE, NextStep, Outcome, Session};
 
 /// The one prompt, naming both shapes it takes and how to stop.
 ///
@@ -173,7 +174,10 @@ pub async fn guided_at_the_terminal(
     // read, and nothing has been registered by then.
     match targets_file::detect(session.config_path())? {
         Some(detected) => {
-            for line in adopt(session, &detected).await? {
+            // The terminal path shows the refusals and moves on to the review
+            // menu, where the counts are the operator's own check (#5978). The
+            // shortfall status is the no-terminal path's concern (#5990).
+            for line in adopt(session, &detected).await?.lines {
                 say(tty, &line)?;
             }
         }
@@ -272,6 +276,28 @@ pub async fn register_targets(
     Ok(registered)
 }
 
+/// What adopting a targets file produced.
+///
+/// Why: the lines alone cannot be keyed on. #5990 — every registration in a
+/// no-terminal launch could fail and the process still exited 0, so a wrapper
+/// script reading `$?` saw success over a 0-of-14 outcome. The refusal count
+/// travels beside the text so the caller can decide the process status from it.
+/// What: `lines` is what to show, unchanged. `refused` counts the SPECS that did
+/// not reach the registry — never `specs.len()` minus the registry's size, which
+/// would read a file naming one repository in two spellings as a shortfall.
+/// `named` is how many specs the files carried, for the "N of M" line.
+/// Test: `super::registration_tests::a_total_registration_shortfall_does_not_exit_zero`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Adopted {
+    /// Every refusal, then where the list came from, then (without a terminal)
+    /// the counts and the listing.
+    pub lines: Vec<String>,
+    /// How many of the file's specs the registry refused.
+    pub refused: usize,
+    /// How many specs the files named in total.
+    pub named: usize,
+}
+
 /// Register everything a targets file named, reporting what happened.
 ///
 /// Why: the registration is separate from [`targets_file::detect`] so the parse
@@ -280,12 +306,12 @@ pub async fn register_targets(
 /// not configured — is the ordinary refusal the prompt loop already tolerates,
 /// and the counts on the review menu are where the operator sees the shortfall.
 /// What: one [`register_one`] per spec, then the lines to show: every refusal,
-/// then where the list came from. It states no COUNT — the caller does, from
-/// the registry rather than from the lines read. A file naming one repository
-/// twice, in two spellings, reads as two lines and registers one target, and a
-/// count taken from the lines would tell the operator two repositories will be
-/// cloned. Returning the lines rather than printing them is what lets the
-/// no-terminal launch print the same text to stderr (`main.rs`).
+/// then where the list came from. It states no COUNT of what landed — the caller
+/// does, from the registry rather than from the lines read. A file naming one
+/// repository twice, in two spellings, reads as two lines and registers one
+/// target, and a count taken from the lines would tell the operator two
+/// repositories will be cloned. Returning the lines rather than printing them is
+/// what lets the no-terminal launch print the same text to stderr (`main.rs`).
 /// Test: `super::registration_tests::a_targets_file_registers_without_prompting_for_each_target`,
 /// `super::registration_tests::a_refused_line_does_not_stop_the_rest_of_the_file`.
 ///
@@ -296,15 +322,23 @@ pub async fn register_targets(
 pub async fn adopt(
     session: &Session,
     detected: &targets_file::Detected,
-) -> Result<Vec<String>, AuditError> {
+) -> Result<Adopted, AuditError> {
     let mut lines = Vec::new();
+    // #5990: counted here, at the one place a refusal is observed, rather than
+    // inferred later from the registry's size.
+    let mut refused = 0;
     for spec in &detected.specs {
         if let Err(refusal) = register_one(session, spec).await {
+            refused += 1;
             lines.push(format!("not registered: {refusal}"));
         }
     }
     lines.push(format!("Read the targets from {}.", detected.named()));
-    Ok(lines)
+    Ok(Adopted {
+        lines,
+        refused,
+        named: detected.specs.len(),
+    })
 }
 
 /// Adopt the targets files for a launch that has no terminal to review at.
@@ -316,29 +350,68 @@ pub async fn adopt(
 /// proceeds.
 /// What: `None` when neither file is there, which is every invocation that
 /// predates this feature. The caller prints the lines — this crate is a library
-/// and writes to no stream of its own.
+/// and writes to no stream of its own — and reads
+/// [`Adopted::refused`] to decide the process status (#5990).
 /// Test: `super::registration_tests::without_a_terminal_the_files_are_still_adopted`,
-/// `super::registration_tests::without_a_terminal_a_bad_line_still_refuses_everything`.
+/// `super::registration_tests::without_a_terminal_a_bad_line_still_refuses_everything`,
+/// `super::registration_tests::a_total_registration_shortfall_does_not_exit_zero`.
 ///
 /// # Errors
 ///
 /// [`AuditError::TargetsFileRefused`] naming every unparseable line, plus
 /// whatever registering one of them fails with.
-pub async fn adopt_without_a_terminal(
-    session: &Session,
-) -> Result<Option<Vec<String>>, AuditError> {
+pub async fn adopt_without_a_terminal(session: &Session) -> Result<Option<Adopted>, AuditError> {
     let Some(detected) = targets_file::detect(session.config_path())? else {
         return Ok(None);
     };
-    let mut lines = adopt(session, &detected).await?;
+    let mut adopted = adopt(session, &detected).await?;
     // The counts and the full list, because nobody can ask for either here.
     // Both come from the registry, which is what the sweep will read.
     let registered = review::registered(session).await?;
-    lines.push(review::summary(&registered));
+    adopted.lines.push(review::summary(&registered));
     if !registered.is_empty() {
-        lines.push(review::listing(&registered));
+        adopted.lines.push(review::listing(&registered));
     }
-    Ok(Some(lines))
+    // #5990: the summary above states what LANDED. On a shortfall the operator
+    // also needs what was ASKED FOR, because "0 repositories to clone" over a
+    // fourteen-line file reads as an empty file rather than fourteen refusals.
+    if adopted.refused > 0 {
+        adopted.lines.push(shortfall_line(&adopted));
+    }
+    Ok(Some(adopted))
+}
+
+/// The "N of M" line a shortfall earns, above the refusals that explain it.
+fn shortfall_line(adopted: &Adopted) -> String {
+    format!(
+        "{} of the {} listed did not register — the audit will not cover them.",
+        count_of(adopted.refused, "target", "targets"),
+        adopted.named,
+    )
+}
+
+/// The process status a launch with no terminal deserves.
+///
+/// Why: `Session::execute` returns `Ok` for a launch whose every registration
+/// failed, because the refusals are data to render — the same fail-open shape
+/// #5215 and #5555 closed for a partial sweep and a partial clone. Until #5990
+/// nothing closed it here: a `repos.txt` of fourteen repositories could register
+/// none and the process still exited 0, so `taudit && send-it` chained onward
+/// over an engagement covering nothing.
+/// What: whatever [`Outcome::exit_code`] already says, and
+/// [`EXIT_INCOMPLETE`](crate::session::EXIT_INCOMPLETE) when it says 0 and the
+/// files named targets that did not land. Any shortfall counts, not only a total
+/// one — the existing status means "ran, did not cover everything asked for",
+/// and thirteen of fourteen is that. It lives here rather than in `main.rs` so
+/// the Tauri shell reads the same judgement from the same place.
+/// Test: `super::registration_tests::a_total_registration_shortfall_does_not_exit_zero`,
+/// `super::registration_tests::a_launch_that_registered_everything_still_exits_zero`.
+pub fn exit_code_after(outcome: &Outcome, adopted: Option<&Adopted>) -> i32 {
+    let code = outcome.exit_code();
+    match adopted {
+        Some(adopted) if code == 0 && adopted.refused > 0 => EXIT_INCOMPLETE,
+        _ => code,
+    }
 }
 
 /// Register one typed entry through the same path `trusty-audit add` takes.
@@ -750,7 +823,8 @@ pub(crate) mod registration_tests {
         let detected = targets_file::detect(session.config_path())
             .expect("every line parses")
             .expect("both files are present");
-        let lines = adopt(&session, &detected).await.expect("adoption runs");
+        let adopted = adopt(&session, &detected).await.expect("adoption runs");
+        let lines = &adopted.lines;
 
         assert_eq!(registered_ids(&session), vec!["acme/api", "acme/web"]);
         assert!(
@@ -760,6 +834,11 @@ pub(crate) mod registration_tests {
         assert!(
             lines.iter().any(|l| l.contains(targets_file::REPOS_FILE)),
             "the operator must be told where the list came from: {lines:?}"
+        );
+        assert_eq!(
+            (adopted.refused, adopted.named),
+            (1, 3),
+            "the refusal must be counted where it happened (#5990)"
         );
     }
 
@@ -780,17 +859,35 @@ pub(crate) mod registration_tests {
             "https://github.com/acme/api.git\nacme/api\n",
         );
 
-        let lines = adopt_without_a_terminal(&session)
+        let adopted = adopt_without_a_terminal(&session)
             .await
             .expect("adoption runs")
             .expect("the file is present");
 
         assert_eq!(registered_ids(&session), vec!["acme/api"]);
-        let shown = lines.join("\n");
+        let shown = adopted.lines.join("\n");
         assert!(
             shown.contains("1 repository to clone"),
             "two spellings of one repository must count once: {shown}"
         );
+        // #5990: two specs, one target, and NOTHING refused — so this is not a
+        // shortfall and the status stays 0. Counting `named - registry.len()`
+        // would call it one.
+        assert_eq!(adopted.refused, 0, "{shown}");
+        assert_eq!(
+            exit_code_after(&clean_outcome(&session).await, Some(&adopted)),
+            0,
+            "de-duplication is not a shortfall"
+        );
+    }
+
+    /// An outcome that on its own deserves exit 0, so a test asserting on
+    /// [`exit_code_after`] is reading the SHORTFALL and nothing else.
+    async fn clean_outcome(session: &Session) -> Outcome {
+        session
+            .execute(Command::ListTargets)
+            .await
+            .expect("listing targets cannot fail")
     }
 
     /// 🔴 Without a terminal the files are still adopted, and the counts and the
@@ -810,13 +907,13 @@ pub(crate) mod registration_tests {
             "https://linear.app/wonka/team/ENG/active\n",
         );
 
-        let lines = adopt_without_a_terminal(&session)
+        let adopted = adopt_without_a_terminal(&session)
             .await
             .expect("adoption runs")
             .expect("the files are present");
 
         assert_eq!(registered_ids(&session), vec!["acme/api", "acme/web"]);
-        let shown = lines.join("\n");
+        let shown = adopted.lines.join("\n");
         assert!(
             shown.contains("2 repositories to clone, 0 boards to collect from"),
             "the counts must be printed: {shown}"
@@ -824,6 +921,82 @@ pub(crate) mod registration_tests {
         assert!(
             shown.contains("acme/api") && shown.contains("acme/web"),
             "the full list must be printed where there is no menu to ask at: {shown}"
+        );
+    }
+
+    /// 🔴 A launch that registered NOTHING must not exit 0 (#5990).
+    ///
+    /// Against `2c606d10d` a `repos.txt` naming three repositories could refuse
+    /// all three and the process still exited 0 — `registered: []`, status 0 —
+    /// so a wrapper script keying on `$?` chained onward over an engagement
+    /// covering nothing. It is the one Fail-Open Check branch this feature added
+    /// with no error arm, and the same shape #5215 and #5555 already closed for
+    /// a partial clone and a partial sweep.
+    ///
+    /// `RepoProbe::unusable` makes every validation fail offline, so this needs
+    /// no network and no `gh`.
+    #[tokio::test]
+    async fn a_total_registration_shortfall_does_not_exit_zero() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = accepting_session(tmp.path()).with_repo_probe(RepoProbe::unusable());
+        seed_targets_file(
+            &session,
+            targets_file::REPOS_FILE,
+            "acme/api\nacme/web\nacme/iac\n",
+        );
+
+        let adopted = adopt_without_a_terminal(&session)
+            .await
+            .expect("refusals are data, not an error")
+            .expect("the file is present");
+
+        assert!(
+            registered_ids(&session).is_empty(),
+            "the premise: nothing reached the registry"
+        );
+        assert_eq!((adopted.refused, adopted.named), (3, 3));
+
+        let outcome = clean_outcome(&session).await;
+        assert_eq!(
+            outcome.exit_code(),
+            0,
+            "the outcome alone says nothing is wrong — which is the defect"
+        );
+        assert_eq!(
+            exit_code_after(&outcome, Some(&adopted)),
+            EXIT_INCOMPLETE,
+            "0 of 3 registered must not read as success to `$?`"
+        );
+
+        let shown = adopted.lines.join("\n");
+        assert!(
+            shown.contains("3 targets of the 3 listed did not register"),
+            "the operator must be told how much of their list is missing: {shown}"
+        );
+    }
+
+    /// The other side of the same rule: a file that registered every line is not
+    /// a shortfall, so the status stays what the outcome said.
+    #[tokio::test]
+    async fn a_launch_that_registered_everything_still_exits_zero() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = accepting_session(tmp.path());
+        seed_targets_file(&session, targets_file::REPOS_FILE, "acme/api\nacme/web\n");
+
+        let adopted = adopt_without_a_terminal(&session)
+            .await
+            .expect("adoption runs")
+            .expect("the file is present");
+
+        assert_eq!(adopted.refused, 0);
+        assert_eq!(
+            exit_code_after(&clean_outcome(&session).await, Some(&adopted)),
+            0
+        );
+        assert!(
+            !adopted.lines.join("\n").contains("did not register"),
+            "a complete run must not be told anything is missing: {:?}",
+            adopted.lines
         );
     }
 
