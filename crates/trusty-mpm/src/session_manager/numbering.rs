@@ -33,10 +33,11 @@ impl SessionManager {
     /// in `records`, `record: None` once it disappears from the store via ANY
     /// removal path (hard-delete, decommission-reap, prune).
     ///
-    /// Walks the held slots rather than `1..=max` because the retention sweep
-    /// ([`super::retention`]) releases a slot when its record ages out, leaving
-    /// gaps. A `1..=max` walk would emit a phantom tombstone row at every gap —
-    /// a number nobody holds and no operator ever saw.
+    /// Walks the held slots rather than `1..=max` because two paths release a
+    /// slot and leave gaps: the retention sweep ([`super::retention`]) when a
+    /// record ages out, and [`super::prune`] when it compacts a tombstone out of
+    /// the store (#5897). A `1..=max` walk would emit a phantom tombstone row at
+    /// every gap — a number nobody holds and no operator ever saw.
     /// Test: `numbered_snapshot_keeps_slot_stable_across_delete`,
     /// `numbered_snapshot_tombstones_deleted_slot`,
     /// `numbered_snapshot_never_reuses_a_deleted_slot`,
