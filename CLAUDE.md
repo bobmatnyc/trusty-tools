@@ -127,14 +127,19 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   --jq '.required_status_checks.contexts'
 ```
 
-As of 2026-08-17 branch protection requires nine contexts: `Format check`,
-`Clippy`, `MSRV check`, `500-line file-size cap`, `trusty-search daemon smoke
-test`, `PR version bump vs crates.io (issue #4421)`, `Doc-comment pointer lint
-(Why/What/Test)`, `Durable writes hold the teardown guard`, and `No leaked
-AI-generation / tool-call artifacts`. All nine trigger unconditionally and gate
-their expensive steps inside the job body on a `docs_only` boolean
-(`ci.yml:145-172`) — a `paths:` filter on a required job would leave the check
-pending forever, which is why none of them has one.
+Read 2026-08-18 from that command, branch protection requires these eleven
+contexts: `Format check`, `500-line file-size cap`, `Clippy`, `trusty-search
+daemon smoke test`, `MSRV check`, `PR version bump vs crates.io (issue
+#4421)`, `Doc-comment pointer lint (Why/What/Test)`, `Durable writes hold the
+teardown guard`, `No leaked AI-generation / tool-call artifacts`,
+`trusty-agents-ui clippy`, and `trusty-audit-ui clippy`. This list is
+authoritative only as of that read — re-run the command above before trusting
+a count. All eleven trigger unconditionally and gate their expensive steps
+inside the job body on a `docs_only` boolean (`ci.yml:145-172`) — a `paths:`
+filter on a required job would leave the check pending forever, which is why
+none of them has one. `required_status_checks.strict` is `false`: a PR's head
+does not need to be up to date with `main` for its checks to count toward the
+merge — only the checks on the PR's own head matter.
 
 🔴 **A stale copy of this list costs a real merge.** A stale six-item copy of
 this list cost [#5836](https://github.com/bobmatnyc/trusty-tools/pull/5836) a
@@ -163,21 +168,22 @@ every push to `main`, folds every job conclusion (the shards included) through
 the `ci-red-main`-labelled tracking issue, then fails the run. It is a GitHub issue,
 not a page — nobody is woken up.
 
-🟡 **A `BEHIND` branch cannot merge — update it.** `gh pr merge` refuses with "the
-head branch is not up to date with the base branch" even when all nine required
-contexts have passed, so run `gh pr update-branch <n>` and let them re-report; on a
-docs-only PR that costs well under a minute. `required_status_checks.strict` is
-readable without admin access and reads `false` — the classic "require branches up
-to date" setting is OFF, so it does not explain the refusal. The actual mechanism
-stays unconfirmed; a repository ruleset invisible to the
-`branches/main/protection` endpoint is the likely candidate. A genuine
-`CONFLICTING` state is a different and harder problem.
+🟡 **A `BEHIND` branch has been observed refusing to merge — cause unconfirmed.**
+A prior session saw `gh pr merge` refuse with "the head branch is not up to date
+with the base branch" even with all required contexts green. `strict: false` (see
+above) rules out the classic "require branches up to date" setting as the cause,
+so if this recurs, a repository ruleset invisible to the
+`branches/main/protection` endpoint is the likelier candidate — not the `strict`
+flag. If you hit it, `gh pr update-branch <n>` and let checks re-report; on a
+docs-only PR that costs well under a minute. A genuine `CONFLICTING` state is a
+different and harder problem.
 
 🟡 **`gh pr merge --admin` bypasses nothing on this repo.** The working account is
 push-only (`admin: false`), so the flag is silently ineffective. `gh`'s own refusal
 message offers `--admin` as the remedy — following that suggestion is a dead end,
-not a fix. A PR merges when its nine required contexts pass AND its branch is current
-with base.
+not a fix. A PR merges when its eleven required contexts pass on the PR's own head
+— `strict: false` means the base does not have to be current too, though see above
+for a case where a merge was refused anyway.
 
 ### Baseline failures — the Rust specifics
 
