@@ -48,11 +48,13 @@ mod support;
 use std::collections::HashSet;
 use std::time::Duration;
 
+use chrono::Utc;
 use serde_json::{Value, json};
 use support::{
     StdioSession, assert_envelopes_contiguous, find_session_event, open_sse, parse_sse_frames,
     project_with_agents, read_sse_until,
 };
+use trusty_code::events::{Event, SessionEventEnvelope};
 
 /// The exact, deterministic ordered event-kind sequence a standard
 /// `TCODE_MOCK_LLM=echo` `task.run` produces, from `session.create` through
@@ -182,20 +184,27 @@ fn filter_async_kinds<'a>(kinds: impl IntoIterator<Item = &'a str>) -> Vec<&'a s
 /// tempdir-rooted run can produce (`session::registry_memory_sink`). A
 /// regression that changed the level, the category, or the message shape fails
 /// here.
+///
+/// `level` and `message` are fields of `Event::Log`, so they live under the
+/// envelope's nested `event` object — only `kind`, `seq`, `at`, and
+/// `session_id` sit at the top level (`events::SessionEventEnvelope`). Reading
+/// them off the envelope yields `Null` for every real event (#5921).
 /// Test: called by `m1_cutline_full_scenario_over_stdio` and
-/// `m1_cutline_full_scenario_over_http`.
+/// `m1_cutline_full_scenario_over_http`; the extraction itself is pinned
+/// daemon-free by `degradation_log_events_never_move_the_ordered_baseline`.
 fn assert_memory_degradation_logs_well_formed(events: &[Value]) {
-    for event in events.iter().filter(|e| e["kind"] == "log") {
+    for envelope in events.iter().filter(|e| e["kind"] == "log") {
+        let payload = &envelope["event"];
         assert_eq!(
-            event["level"], "warn",
+            payload["level"], "warn",
             "the only log event this run can emit is the #2425 degradation \
-             warning, which is warn-level: {event}"
+             warning, which is warn-level: {envelope}"
         );
-        let message = event["message"].as_str().unwrap_or_default();
+        let message = payload["message"].as_str().unwrap_or_default();
         assert!(
             message.starts_with("durable memory degraded: category=PalaceEnsure "),
             "a tempdir-rooted run's only log event is the PalaceEnsure \
-             degradation warning (#4638): {event}"
+             degradation warning (#4638): {envelope}"
         );
     }
 }
@@ -213,9 +222,14 @@ fn assert_memory_degradation_logs_well_formed(events: &[Value]) {
 /// front, the middle, and past `session_done` — the counts the reconciler's
 /// `[1, 3]` thresholds can emit and the positions an unsequenced detached task
 /// can deliver them at — and asserts the filtered spine is the baseline every
-/// time. The `PalaceEnsure` token comes from the production enum, so a rename
-/// there fails here rather than silently weakening
-/// [`assert_memory_degradation_logs_well_formed`].
+/// time. Each warning is a REAL [`SessionEventEnvelope`] carrying a real
+/// `Event::Log`, serialized through production serde rather than hand-written
+/// as JSON: the envelope nests the payload under `event` while carrying `kind`
+/// at the top level, and a hand-written fixture that flattened `level`/`message`
+/// onto the envelope is exactly how the broken extraction in
+/// [`assert_memory_degradation_logs_well_formed`] shipped green (#5921). The
+/// `PalaceEnsure` token likewise comes from the production enum, so a rename
+/// there fails here.
 /// Test: this test.
 #[test]
 fn degradation_log_events_never_move_the_ordered_baseline() {
@@ -223,23 +237,32 @@ fn degradation_log_events_never_move_the_ordered_baseline() {
         "{:?}",
         trusty_code::session::MemoryFailureCategory::PalaceEnsure
     );
-    let warning = |consecutive: u32| {
-        json!({
-            "kind": "log",
-            "session_id": "s1",
-            "level": "warn",
-            "message": format!(
-                "durable memory degraded: category={category} total_failed_turns=2 \
-                 consecutive_failed_turns={consecutive}"
-            ),
-        })
+    let warning = |seq: u64, consecutive: u32| {
+        let envelope = SessionEventEnvelope::new(
+            "s1".to_string(),
+            seq,
+            Utc::now(),
+            Event::Log {
+                session_id: "s1".to_string(),
+                level: "warn".to_string(),
+                message: format!(
+                    "durable memory degraded: category={category} total_failed_turns=2 \
+                     consecutive_failed_turns={consecutive}"
+                ),
+            },
+        );
+        serde_json::to_value(&envelope).expect("envelope serializes")
     };
     let spine: Vec<Value> = BASELINE_EVENT_KINDS
         .iter()
         .map(|k| json!({"kind": k, "session_id": "s1"}))
         .collect();
 
-    for warnings in [vec![], vec![warning(1)], vec![warning(1), warning(3)]] {
+    for warnings in [
+        vec![],
+        vec![warning(1, 1)],
+        vec![warning(1, 1), warning(2, 3)],
+    ] {
         for offset in [0, spine.len() / 2, spine.len()] {
             let mut events = spine.clone();
             for (i, w) in warnings.iter().enumerate() {
