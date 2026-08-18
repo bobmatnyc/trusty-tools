@@ -357,6 +357,24 @@ point as your own additions, burying a real secret in another PR's noise. The
 branch protection it sits inside, and the review and changelog gates:
 `Skill(skill="tm-workflow")`.
 
+## Merge-Queue Ownership
+
+Exactly one session owns a repository's merge queue at a time. A session that
+does not own it never merges — it routes the merge to the owner and reports that
+it did. An owner's merge authorization is scoped to the PRs presented when it was
+given: "merge them as they clear" is not a standing licence over PRs another
+session opens afterward.
+
+🔴 **Green required contexts are not sufficient to merge.** Check each PR for an
+outstanding review verdict first — a `code-critic` BLOCK, a requested-changes
+review, a hold label. A BLOCK is not a CI context, so no status check can see it,
+and a batch merge gated on "all contexts green" walks straight past one.
+
+Hold a PR by marking it in GitHub state — draft, assignee, or a `do-not-merge`
+label — never by message; messages are advisory and lose races
+(`tm-delegation-patterns`, "Cross-Workstream Coordination"). Claiming the queue
+and handing it off: `Skill(skill="tm-workflow")`.
+
 ## Opportunistic Fixes
 
 An easy fix discovered while working on a file is noted on the CURRENT issue and made in the same work. Never file a new issue for it.

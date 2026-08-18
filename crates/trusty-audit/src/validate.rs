@@ -83,6 +83,9 @@ pub struct RepoProbe {
     credential: fn() -> GhCommand,
     /// Builds the repository read for one `owner/name`.
     view: fn(&str) -> GhCommand,
+    /// Test-only: answer `Ok` without running `gh`. See [`RepoProbe::accepting`].
+    #[cfg(test)]
+    accepts_everything: bool,
 }
 
 impl RepoProbe {
@@ -92,6 +95,30 @@ impl RepoProbe {
         Self {
             credential: discover::credential_probe,
             view: view_command,
+            #[cfg(test)]
+            accepts_everything: false,
+        }
+    }
+
+    /// A probe that accepts every repository, for driving the path where a
+    /// registration SUCCEEDS.
+    ///
+    /// Why: [`RepoProbe::unusable`] made the refusal provable offline and left
+    /// the opposite half with no equivalent — every repository registration in a
+    /// default `cargo test -p trusty-audit` failed, so nothing could drive a
+    /// session in which one entry lands and the next is refused. The guided
+    /// registration loop (#5885) is exactly that shape.
+    ///
+    /// Expressed as a flag rather than a `gh` invocation because there is no
+    /// argv that succeeds AND prints `{"nameWithOwner": …}` without a network
+    /// and an authenticated account. `#[cfg(test)]`, so no shipped build carries
+    /// either the field or the branch that reads it.
+    /// Test: `crate::cli::registration::registration_tests`.
+    #[cfg(test)]
+    pub(crate) fn accepting() -> Self {
+        Self {
+            accepts_everything: true,
+            ..Self::real()
         }
     }
 
@@ -109,6 +136,7 @@ impl RepoProbe {
         Self {
             credential: || GhCommand::new([NO_SUCH_SUBCOMMAND]),
             view: |_| GhCommand::new([NO_SUCH_SUBCOMMAND]),
+            accepts_everything: false,
         }
     }
 }
@@ -199,6 +227,11 @@ async fn validate_repo(name_with_owner: &str, gh: RepoProbe) -> Result<(), Audit
         name_with_owner: name_with_owner.to_owned(),
         source: Box::new(source),
     };
+    // #5885: the accepted half of the same seam — see `RepoProbe::accepting`.
+    #[cfg(test)]
+    if gh.accepts_everything {
+        return Ok(());
+    }
     // #5822: both invocations come from the probe, so a test can supply a pair
     // that cannot answer and prove the refusal offline.
     (gh.credential)().nonempty_stdout().await.map_err(refuse)?;

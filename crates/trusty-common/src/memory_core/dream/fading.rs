@@ -152,7 +152,7 @@ pub fn rank_fading(
                 base_importance: d.importance,
                 effective_importance: effective,
                 age_days,
-                content_preview: preview(&d.content),
+                content_preview: preview(d.content()),
             })
         })
         .collect();

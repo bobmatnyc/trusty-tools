@@ -155,6 +155,29 @@ pub struct ToolStatus {
     pub version: Option<String>,
 }
 
+/// Whether a pinned tool is here, and if not whether it could be (#5970).
+///
+/// Why: [`ToolStatus`] answers "is it on disk", which is the whole question once
+/// an engagement is set up. A cold start has a second one — "and if not, can this
+/// machine get it" — and an operator about to wait several minutes for four
+/// downloads is owed the answer first.
+/// What: the tool, the version pinned for it, whether it is already satisfied,
+/// and the installer's own reason when it cannot be installed. `installed: true`
+/// always carries `problem: None`: nothing asked.
+/// Test: `super::tool_tests::preflight_asks_nothing_about_a_satisfied_set`.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ToolAvailability {
+    /// The tool checked.
+    pub tool: RequiredTool,
+    /// The version this engagement pins for it.
+    pub version: String,
+    /// Whether it is already on disk at that version, verified.
+    pub installed: bool,
+    /// Why it cannot be installed here, or `None` when it can.
+    pub problem: Option<Box<trusty_installer::download::pinned::PinnedError>>,
+}
+
 /// One tool this client installed and verified, at an exact version.
 ///
 /// Why: this is what the deliverable records so a reader knows which triple
@@ -464,6 +487,146 @@ pub async fn ensure(
         return Ok(None);
     }
     install(work, pins, progress).await.map(Some)
+}
+
+/// Resolve the latest published stable release of each required tool (#5970).
+///
+/// Why: a cold start has no `engagement.toml`, so it has no pins — and there is
+/// nowhere else in this crate to get them from. The two candidates were a
+/// compiled-in default set and this. A compiled-in set is a constant nothing in
+/// this workspace bumps: `trusty-audit` releases rarely and the four tools
+/// release often, so a client running a months-old client would pin months-old
+/// tools forever, with a config file that reads as a deliberate choice. Reading
+/// the release list costs nothing this path does not already require — a
+/// recipient who cannot reach the GitHub release host cannot install these tools
+/// at all (see this module's "Known v1 risk").
+///
+/// # Postconditions
+/// On `Ok`, every field of the returned [`ToolPins`] is an EXACT version that
+/// was published as a stable release at the moment this ran. `latest` never
+/// leaves this function: the caller writes these versions into
+/// `engagement.toml`, and every run after the first reads the file. On `Err`,
+/// no version is claimed for any tool and the caller must write nothing.
+///
+/// What: one [`trusty_installer::download::release::resolve_latest_tag`] call
+/// per [`RequiredTool`], through the same HTTP client [`install`] uses. The
+/// fields are named individually rather than mapped over [`RequiredTool::ALL`]
+/// so a fifth tool fails to compile here as well as in [`RequiredTool::pin_in`].
+/// Test: `super::tool_tests::an_unresolvable_pin_names_the_tool`.
+///
+/// # Errors
+///
+/// [`AuditError::PinsUnresolved`] naming the first tool whose release list could
+/// not be read.
+pub async fn latest_pins() -> Result<ToolPins, AuditError> {
+    let client = trusty_installer::download::http_client();
+    Ok(ToolPins {
+        tga: latest_pin(&client, RequiredTool::Tga).await?,
+        trusty_search: latest_pin(&client, RequiredTool::TrustySearch).await?,
+        trusty_analyze: latest_pin(&client, RequiredTool::TrustyAnalyze).await?,
+        trusty_review: latest_pin(&client, RequiredTool::TrustyReview).await?,
+    })
+}
+
+/// One tool's latest published stable version, as a bare version pin.
+///
+/// No digest: nothing here has seen the artifact, and inventing a `sha256` the
+/// caller did not obtain independently would turn the byte pin into decoration.
+async fn latest_pin(client: &reqwest::Client, tool: RequiredTool) -> Result<ToolPin, AuditError> {
+    trusty_installer::download::release::resolve_latest_tag(client, tool.crate_name())
+        .await
+        .map(|resolved| ToolPin::Version(resolved.version))
+        .map_err(|source| AuditError::PinsUnresolved {
+            tool: tool.crate_name(),
+            source: source.into(),
+        })
+}
+
+/// Whether each pinned tool is already here, and if not whether it could be.
+///
+/// Why: the cold-start launch (#5970) tells the recipient what it is about to
+/// do before it spends minutes doing it, and a tool that cannot be installed at
+/// all should surface in that first report rather than half way through a
+/// download. The installability half is
+/// [`trusty_installer::download::pinned::preflight_pinned_set`] — the capability
+/// that issue added INSIDE the installer, so this crate still has exactly one
+/// path that talks to a release list and exactly one that downloads.
+///
+/// # Postconditions
+/// One [`ToolAvailability`] per [`RequiredTool::ALL`] entry, in that order.
+/// Nothing was downloaded and nothing was written.
+///
+/// What: [`unsatisfied`] decides which tools need anything at all; only those
+/// reach the network. A tool already on disk at its pin is reported
+/// `installed: true` with no problem, because asking a release list about a
+/// binary that is already verified answers a question nobody has.
+/// Test: `super::tool_tests::preflight_asks_nothing_about_a_satisfied_set`.
+///
+/// # Errors
+///
+/// Whatever [`unsatisfied`] fails with — an unreadable or malformed version
+/// record. A tool that cannot be installed is DATA here, not an error; turning
+/// it into one is [`ensure_installable`]'s job.
+pub async fn preflight(
+    work: &WorkDir,
+    pins: &ToolPins,
+) -> Result<Vec<ToolAvailability>, AuditError> {
+    let pending = unsatisfied(work, pins)?;
+    let wanted: Vec<PinnedTool> = plan(pins)
+        .into_iter()
+        .zip(RequiredTool::ALL)
+        .filter(|(_, tool)| pending.contains(tool))
+        .map(|(pinned, _)| pinned)
+        .collect();
+    let mut checked = trusty_installer::download::pinned::preflight_pinned_set(
+        &trusty_installer::download::http_client(),
+        &wanted,
+    )
+    .await
+    .into_iter();
+
+    Ok(RequiredTool::ALL
+        .iter()
+        .map(|tool| {
+            let satisfied = !pending.contains(tool);
+            ToolAvailability {
+                tool: *tool,
+                version: tool.pin_in(pins).version().to_owned(),
+                installed: satisfied,
+                problem: if satisfied {
+                    None
+                } else {
+                    checked.next().and_then(|c| c.problem).map(Box::new)
+                },
+            }
+        })
+        .collect())
+}
+
+/// Refuse a set that carries a tool this machine cannot install.
+///
+/// Why: the preflight is only worth running if something acts on it. Pure, so
+/// the verdict is provable without a network.
+/// What: the first problem, as [`AuditError::ToolNotInstallable`]. First rather
+/// than all: the recipient's remedy — reach the release host, or ask for a
+/// package built for their platform — is the same for every entry, and the
+/// rendered report above it already listed them all.
+/// Test: `super::tool_tests::a_tool_that_cannot_be_installed_is_refused_by_name`,
+/// `super::tool_tests::an_installable_set_is_permitted`.
+///
+/// # Errors
+///
+/// [`AuditError::ToolNotInstallable`] naming the first refused tool.
+pub fn ensure_installable(checked: Vec<ToolAvailability>) -> Result<(), AuditError> {
+    for entry in checked {
+        if let Some(problem) = entry.problem {
+            return Err(AuditError::ToolNotInstallable {
+                tool: entry.tool.crate_name(),
+                source: problem,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Refuse an install target that is not a real directory.
@@ -1021,6 +1184,103 @@ trusty-review = "0.0.0-never-published"
         assert!(
             matches!(err, AuditError::UnsafeToolsDir { .. }),
             "ensure must reach install's guard, got {err:?}"
+        );
+    }
+
+    /// A satisfied set reaches no release list (#5970). The pins name a version
+    /// that was never published, so any lookup would fail — an empty problem
+    /// list is only reachable by not asking.
+    #[tokio::test]
+    async fn preflight_asks_nothing_about_a_satisfied_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        place_verified_set(&work, "0.0.0-never-published");
+
+        let checked = preflight(&work, &unpublishable_pins())
+            .await
+            .expect("a satisfied set preflights offline");
+
+        assert_eq!(checked.len(), RequiredTool::ALL.len());
+        assert!(
+            checked.iter().all(|c| c.installed && c.problem.is_none()),
+            "{checked:?}"
+        );
+        let versions: Vec<&str> = checked.iter().map(|c| c.version.as_str()).collect();
+        assert_eq!(versions, vec!["0.0.0-never-published"; 4]);
+    }
+
+    /// The verdict a cold start acts on: one refused tool stops the set, by name.
+    #[test]
+    fn a_tool_that_cannot_be_installed_is_refused_by_name() {
+        let checked = vec![
+            ToolAvailability {
+                tool: RequiredTool::Tga,
+                version: "2.9.4".to_owned(),
+                installed: true,
+                problem: None,
+            },
+            ToolAvailability {
+                tool: RequiredTool::TrustyReview,
+                version: "0.0.1".to_owned(),
+                installed: false,
+                problem: Some(Box::new(
+                    trusty_installer::download::pinned::PinnedError::VersionNotPublished {
+                        crate_name: "trusty-review".to_owned(),
+                        version: "0.0.1".to_owned(),
+                        available: vec!["0.16.0".to_owned()],
+                    },
+                )),
+            },
+        ];
+
+        let err = ensure_installable(checked).expect_err("a refused tool must stop the set");
+        let AuditError::ToolNotInstallable { tool, .. } = &err else {
+            panic!("expected ToolNotInstallable, got {err:?}");
+        };
+        assert_eq!(*tool, "trusty-review");
+        let rendered = err.to_string();
+        assert!(rendered.contains("trusty-review"), "{rendered}");
+        assert!(rendered.contains("0.16.0"), "{rendered}");
+    }
+
+    #[test]
+    fn an_installable_set_is_permitted() {
+        let checked: Vec<ToolAvailability> = RequiredTool::ALL
+            .iter()
+            .map(|tool| ToolAvailability {
+                tool: *tool,
+                version: "1.2.3".to_owned(),
+                installed: false,
+                problem: None,
+            })
+            .collect();
+        ensure_installable(checked).expect("nothing was refused");
+    }
+
+    /// A pin that cannot be resolved names the tool, and no version is invented
+    /// for it — a guessed pin is the #5454 skew with a config file vouching for
+    /// it.
+    #[tokio::test]
+    async fn an_unresolvable_pin_names_the_tool() {
+        // A client with no route to the release host. `latest_pins` resolves in
+        // `RequiredTool::ALL` order, so `tga` is what fails first.
+        let err = latest_pin(
+            &reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(1))
+                .build()
+                .expect("client"),
+            RequiredTool::Tga,
+        )
+        .await
+        .expect_err("a one-millisecond timeout cannot reach GitHub");
+
+        let AuditError::PinsUnresolved { tool, .. } = &err else {
+            panic!("expected PinsUnresolved, got {err:?}");
+        };
+        assert_eq!(*tool, "tga");
+        assert!(
+            err.to_string().contains("no engagement was created"),
+            "{err}"
         );
     }
 

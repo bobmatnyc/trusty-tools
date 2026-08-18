@@ -65,6 +65,7 @@ pub mod config;
 /// Unrecognised-key reporting for the host-level config files (#5207).
 pub mod config_keys;
 pub mod connect;
+pub mod daemon_identity;
 pub mod delegation_authority;
 pub mod deploy_validate;
 pub mod deterministic_overseer;

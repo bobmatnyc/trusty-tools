@@ -204,6 +204,16 @@ jobs:
       # (e.g. trusty-common-v0.15.3) errored RED; it now green-skips. (trusty-console
       # is NOT bundled — it has its own standalone release job.)
       bundled:  ${{ steps.config.outputs.bundled }}
+      # Space-separated `[[bin]]` target names for this crate, as set in the
+      # `config` step's per-crate branches (e.g. "trusty-audit taudit"). This
+      # is the SAME `BINARIES` value the build-matrix step above already
+      # consumes — exposing it here lets `homebrew-bump` install every binary
+      # the crate actually ships instead of hand-maintaining a second
+      # crate→binaries table that can drift from this one (#5972: it did, for
+      # trusty-audit). Empty for a bundled (library-only) crate, but
+      # `homebrew-bump` only runs when `bundled != 'true'`, so it never reads
+      # an empty value.
+      binaries: ${{ steps.config.outputs.binaries }}
 
     steps:
       - name: Parse tag or dispatch inputs
@@ -2129,6 +2139,11 @@ jobs:
           TAG:     ${{ needs.setup.outputs.tag }}
           # GITHUB_REPOSITORY is "bobmatnyc/trusty-tools"
           REPO:    ${{ github.repository }}
+          # #5972: the source of truth for which [[bin]] targets this crate
+          # ships — read from `setup`'s `config` step (see the `binaries`
+          # job-output comment above) instead of a second hand-maintained
+          # crate→binaries table that can (and did) drift from it.
+          BINARIES: ${{ needs.setup.outputs.binaries }}
         run: |
           set -euo pipefail
 
@@ -2175,24 +2190,24 @@ jobs:
           CLASS_NAME=$(echo "${CRATE}" | sed 's/-\([a-z]\)/\U\1/g; s/^\([a-z]\)/\U\1/')
 
           # ── Determine binaries to install ──────────────────────────────────
-          # Map known multi-binary crates; default is the crate name itself.
-          # NOTE (#1318): trusty-console was de-bundled — it is its own formula
-          # now (single-owner-per-binary), so it no longer appears in any host's
-          # INSTALL_BINS. The trusty-console case below installs only its own bin.
-          case "${CRATE}" in
-            trusty-search)   INSTALL_BINS="trusty-search trusty-embedderd" ;;
-            trusty-memory)   INSTALL_BINS="trusty-memory" ;;
-            trusty-analyze)  INSTALL_BINS="trusty-analyze" ;;
-            trusty-review)   INSTALL_BINS="trusty-review" ;;
-            trusty-mpm)      INSTALL_BINS="tm trusty-mpm" ;;
-            trusty-console)  INSTALL_BINS="trusty-console" ;;
-            # Keyed on the canonical crate name; `tga-v*` tags are already
-            # canonicalized to trusty-git-analytics in the parse step (#1128).
-            trusty-git-analytics) INSTALL_BINS="tga" ;;
-            trusty-code)     INSTALL_BINS="tcode" ;;
-            trusty-installer) INSTALL_BINS="trusty-installer tctl" ;;
-            *)               INSTALL_BINS="${CRATE}" ;;
-          esac
+          # #5972: this used to be a second, hand-maintained `case "${CRATE}"`
+          # table mirroring the `config` step's per-crate BINARIES branches in
+          # the `setup` job (release.yml ~line 320-535) — and it drifted:
+          # trusty-audit's two-binary declaration (`trusty-audit taudit`,
+          # #5502) had no case here, so the fallback below installed only
+          # `trusty-audit` and `brew install` users never got `taudit`.
+          #
+          # Read the same BINARIES value the build matrix already builds from
+          # instead (`needs.setup.outputs.binaries`, sourced from
+          # `steps.config.outputs.binaries` — see the job-output comment on
+          # `setup`). One declaration, no second table to fall out of sync.
+          #
+          # The fallback to the bare crate name only matters for a crate that
+          # somehow reaches this job with BINARIES unset; every crate that
+          # reaches `homebrew-bump` today (`bundled != 'true'`) has BINARIES
+          # populated by an explicit `config` step branch, trusty-console
+          # (its own formula, single-owner-per-binary, #1318) included.
+          INSTALL_BINS="${BINARIES:-$CRATE}"
 
           # Build the `bin.install` lines.
           BIN_INSTALL_LINES=""

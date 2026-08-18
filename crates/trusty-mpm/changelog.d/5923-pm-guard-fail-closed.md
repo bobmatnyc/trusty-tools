@@ -12,7 +12,15 @@ Fixed
   a message naming the failure and the remedies that need no daemon; a daemon
   that is not listening, or that 404s the route because it predates it, still
   allows and now says on stderr that the guard is not enforcing.
-- Only the dispatch-claim path changed. The read-only writer query behind the
-  `git merge` / `git rebase` / docs-commit rules and the ADR-0048 granted-worktree
-  path keep their fail-open contract, since a deny there blocks ordinary git work
-  or refuses an isolated writer the shared HEAD was never at risk from.
+- The ADR-0048 worktree grant applies the same split. That call computes the
+  #4480 concurrency verdict before the grant rather than skipping it — "a
+  dispatch made into a checkout another writer holds is denied, and only an
+  empty answer is granted" — so a running daemon that leaves it unanswered now
+  denies there too. The grant it would otherwise emit is a rewrite of the
+  dispatch's arguments that `tm` cannot confirm the harness applies, and in a
+  main checkout ADR-0048 states the cost: a false allow corrupts another
+  session's branch. An absent daemon still grants, and now warns on stderr that
+  the check did not run.
+- The read-only writer query behind the `git merge` / `git rebase` /
+  docs-commit rules keeps its fail-open contract. A deny there blocks ordinary
+  git work on the operator's own checkout rather than admitting a second agent.

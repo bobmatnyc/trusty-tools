@@ -10,6 +10,14 @@
 //! not access-granted in the target account; the three confirmed-available
 //! ids replace it.
 //!
+//! #5971 demoted these constants one rung: the built-in model default is now a
+//! `trusty_common::inference::ModelTier` lookup against the resolved provider,
+//! and a constant here applies only when that (tier, provider) pair has no
+//! verified id. Which is why the reviewer default below still describes
+//! Bedrock: the tier layer resolves Opus 4.8 on OpenRouter and the Anthropic
+//! first-party API, but Bedrock's Opus 4.8 inference-profile id is deliberately
+//! unmapped, so a standalone Bedrock run falls through to Sonnet 4.6 here.
+//!
 //! DEFAULT PROVIDER: Bedrock (effective as of this file's introduction).
 //!   - Reviewer:   `us.anthropic.claude-sonnet-4-6`              (verified)
 //!   - Verifier:   `us.anthropic.claude-haiku-4-5-20251001-v1:0` (verified)
@@ -53,6 +61,9 @@
 /// What: `us.anthropic.claude-sonnet-4-6` is the Claude Sonnet 4.6 cross-region
 /// inference profile for the US geography.  No date stamp or `-v1:0` suffix
 /// (verified against AWS docs as of May 2026).
+/// Since #5971 this is reached only when `ModelTier::Analysis` declines for the
+/// resolved provider — in practice, Bedrock, whose Opus 4.8 profile id is
+/// unmapped by ruling.  On OpenRouter the reviewer resolves Opus 4.8 instead.
 /// Override via `TRUSTY_REVIEW_REVIEWER_MODEL`.
 pub const DEFAULT_REVIEWER_MODEL: &str = "us.anthropic.claude-sonnet-4-6";
 

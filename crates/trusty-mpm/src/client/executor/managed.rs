@@ -14,7 +14,9 @@
 //! Test: the `execute_managed_*` tests in `tests.rs` (wire-shape + dispatch).
 
 use super::CommandExecutor;
-use crate::client::http_client::{ManagedAdoptRequest, ManagedSessionSummary, ManagedSpawnRequest};
+use crate::client::http_client::{
+    ManagedAdoptRequest, ManagedDecommissionOutcome, ManagedSessionSummary, ManagedSpawnRequest,
+};
 use crate::client::resolver::resolve_target;
 use crate::client::result::{CommandResult, ManagedSessionView, ProjectFleetView};
 
@@ -297,6 +299,82 @@ impl CommandExecutor {
         }
     }
 
+    /// Decommission one session BY CANONICAL ID — the single implementation every
+    /// decommission entry point routes through (#5913).
+    ///
+    /// Why: three independent paths used to reach the decommission endpoint, and
+    /// they drifted — one printed a hardcoded "workspace removed" (#5899) and only
+    /// one repaired the base repo's worktree bookkeeping. One implementation is
+    /// the repo's common-entry-point rule, and it is what stops the next behaviour
+    /// added here from diverging again. Every caller now routes through here:
+    ///
+    /// | Caller | Reaches this via |
+    /// |---|---|
+    /// | `tm session decommission <id>` | [`Self::managed_decommission`] |
+    /// | Telegram `/decommission`, Slack `/decommission` | [`Self::managed_decommission`] |
+    /// | `tui::coordinator` `/kill`, `/decommission`, `/managed-decommission` | [`Self::managed_decommission`] |
+    /// | `tui::project_ctl`'s `[d]` hotkey | `project_ctl::actions::dispatch` |
+    /// | `tm session prune-idle`'s bulk sweep | `commands::prune::prune_idle` → `commands::managed::session_decommission_line` |
+    ///
+    /// One caller of the endpoint deliberately stays out:
+    /// `commands::session_picker_prune::decommission_dead_record` POSTs
+    /// `?record_only=true`, a different operation that must never remove a
+    /// workspace and so must never prune. It also reads the raw body to detect a
+    /// daemon too old to honour `record_only`, which a typed response hides.
+    ///
+    /// This covers every client-side path. The daemon's own in-process callers sit
+    /// below this seam and call `SessionManager::decommission` directly, so none of
+    /// them gets this repair (#5949):
+    ///
+    /// - `daemon::mcp_session::session_decommission`
+    /// - `daemon::idle_reaper`
+    /// - `SessionManager::prune_managed` (`session_manager/prune.rs`), which backs
+    ///   `POST /api/v1/sessions/managed/prune` — plain `tm session prune`. This is
+    ///   the largest remaining gap, not a footnote: it is the bulk path operators
+    ///   actually use, so every tm-owned worktree it tears down leaves behind the
+    ///   stale `.git/worktrees` entry #5913 set out to close.
+    ///
+    /// That third one cannot be closed at this layer even in principle. The repair
+    /// needs the removed workspace's path, and `PrunedSession` — the wire response —
+    /// carries one only as `retained_workspace_path`, which is `Some` exactly when
+    /// the worktree was KEPT. A clean removal, the case that strands the git entry,
+    /// reports `None`, so no client could reconstruct where to prune.
+    ///
+    /// What: POSTs the decommission endpoint via the typed [`crate::client::DaemonClient`],
+    /// logs the key names of any response field this client does not model yet,
+    /// repairs the base repo's worktree bookkeeping per
+    /// [`worktree_prune_dir`], and returns the daemon's whole verdict. A missing
+    /// session is an `Err` naming the id — the transport maps the 404, so the
+    /// prune sweep's fail-closed loop keeps counting it as a failed row.
+    /// Test: `decommission_managed_id_prunes_stale_worktree_bookkeeping`,
+    /// `project_ctl_decommission_prunes_stale_worktree_bookkeeping`,
+    /// `decommission_entry_points_agree_on_every_verdict`,
+    /// `session_decommission_not_found_errors`.
+    pub async fn decommission_managed_id(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<ManagedDecommissionOutcome> {
+        let outcome = self.client().decommission_managed_session(id).await?;
+        if !outcome.unrecognized.is_empty() {
+            tracing::debug!(
+                fields = ?outcome.unrecognized.keys().collect::<Vec<_>>(),
+                "decommission response carried fields this client does not model"
+            );
+        }
+        if let Some(dir) = worktree_prune_dir(&outcome) {
+            // Best-effort: a workspace that was never a git worktree makes this a
+            // no-op, and a git that fails has nothing to do with the teardown that
+            // already succeeded.
+            let out = std::process::Command::new("git")
+                .args(["-C", &dir.to_string_lossy(), "worktree", "prune"])
+                .output();
+            if let Err(e) = out {
+                tracing::debug!(dir = %dir.display(), "git worktree prune failed: {e}");
+            }
+        }
+        Ok(outcome)
+    }
+
     /// `managed-decommission` — decommission a session (terminal; removes the
     /// workspace only when tm provisioned it).
     ///
@@ -305,30 +383,53 @@ impl CommandExecutor {
     /// work is refused, and a removal can fail. The daemon reports which happened;
     /// this method used to discard that verdict, so every renderer downstream had
     /// to guess and the CLI guessed "removed" every time (#5899).
-    /// What: forwards the daemon's `workspace_removed` verdict into
-    /// [`CommandResult::ManagedLifecycle`] verbatim, `None` included, and logs the
-    /// key names of any response field this client does not model yet.
-    /// Test: `executor_decommission_reports_daemon_workspace_verdict` and
+    /// What: resolves the fuzzy id-or-name — the one step the bulk prune caller
+    /// does not need, since it already holds canonical ids — then delegates to
+    /// [`Self::decommission_managed_id`] and forwards the daemon's
+    /// `workspace_removed` verdict into [`CommandResult::ManagedLifecycle`]
+    /// verbatim, `None` included.
+    /// Test: `executor_decommission_reports_daemon_workspace_verdict`,
+    /// `decommission_entry_points_agree_on_every_verdict`,
     /// `decommission_message_honours_every_verdict`.
     pub(super) async fn managed_decommission(&self, target: &str) -> CommandResult {
         let id = match self.resolve_managed(target).await {
             Ok(s) => s.id,
             Err(err) => return err,
         };
-        match self.client().decommission_managed_session(&id).await {
+        match self.decommission_managed_id(&id).await {
             // #5899: carry the daemon's workspace verdict instead of dropping it.
-            Ok(outcome) => {
-                if !outcome.unrecognized.is_empty() {
-                    tracing::debug!(
-                        fields = ?outcome.unrecognized.keys().collect::<Vec<_>>(),
-                        "decommission response carried fields this client does not model"
-                    );
-                }
-                lifecycle(outcome.summary, "decommissioned", outcome.workspace_removed)
-            }
+            Ok(outcome) => lifecycle(outcome.summary, "decommissioned", outcome.workspace_removed),
             Err(e) => CommandResult::Error(format!("decommission failed: {e}")),
         }
     }
+}
+
+/// Where — if anywhere — a decommission must run `git worktree prune`.
+///
+/// Why: the daemon has two removal branches and only one of them leaves git's
+/// bookkeeping stale. An in-project worktree it did NOT own is removed with
+/// `git worktree remove`, which prunes daemon-side, and the daemon reports
+/// `workspace_path_was: None`. A workspace tm OWNED is removed with a plain
+/// `remove_dir_all`, which git never learns about — the entry lingers in `git
+/// worktree list` until something prunes it — and that is exactly the case the
+/// daemon reports a path for. So `workspace_path_was.is_some()` already IS the
+/// "git does not know yet" signal; this is not belt-and-braces on the branch
+/// that self-cleans, and it is not a duplicate prune either.
+/// What: returns the workspace's PARENT directory when the daemon both removed
+/// the workspace and named it, and `None` otherwise. The parent is used because
+/// the workspace itself is gone: git discovers the base repo by walking up from
+/// there, which finds it for an in-project layout and finds nothing (a harmless
+/// no-op) for a standalone clone.
+/// Test: `worktree_prune_dir_fires_only_on_a_named_removal`,
+/// `decommission_managed_id_prunes_stale_worktree_bookkeeping`.
+pub(super) fn worktree_prune_dir(
+    outcome: &ManagedDecommissionOutcome,
+) -> Option<std::path::PathBuf> {
+    if outcome.workspace_removed != Some(true) {
+        return None;
+    }
+    let was = std::path::Path::new(outcome.workspace_path_was.as_deref()?);
+    Some(was.parent().unwrap_or(was).to_path_buf())
 }
 
 /// Map a managed summary + verb to a [`CommandResult::ManagedLifecycle`].

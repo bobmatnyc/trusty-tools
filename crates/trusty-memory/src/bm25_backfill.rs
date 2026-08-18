@@ -273,10 +273,10 @@ pub fn docs_from_drawers(drawers: &[Drawer]) -> PalaceDocs {
     let mut docs = Vec::with_capacity(drawers.len());
     let mut skipped_empty = 0usize;
     for d in drawers {
-        if d.content.trim().is_empty() {
+        if d.content().trim().is_empty() {
             skipped_empty += 1;
         } else {
-            docs.push((d.id.to_string(), d.content.clone()));
+            docs.push((d.id.to_string(), d.content().to_string()));
         }
     }
     PalaceDocs {

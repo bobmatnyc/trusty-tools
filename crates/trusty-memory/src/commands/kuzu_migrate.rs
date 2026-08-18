@@ -473,15 +473,15 @@ mod tests {
         let drawer = entity_to_drawer(&entity, "test-palace");
 
         assert!(
-            drawer.content.contains("Alice"),
+            drawer.content().contains("Alice"),
             "content must include name"
         );
         assert!(
-            drawer.content.contains("works at Acme"),
+            drawer.content().contains("works at Acme"),
             "content must include first observation"
         );
         assert!(
-            drawer.content.contains("knows Rust"),
+            drawer.content().contains("knows Rust"),
             "content must include second observation"
         );
         assert!(drawer.tags.contains(&"source:kuzu".to_string()));
@@ -504,7 +504,7 @@ mod tests {
             observations: vec![],
         };
         let drawer = entity_to_drawer(&entity, "palace");
-        assert_eq!(drawer.content, "Bob");
+        assert_eq!(drawer.content(), "Bob");
         assert!(!drawer.tags.iter().any(|t| t.starts_with("type:")));
     }
 

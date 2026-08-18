@@ -498,7 +498,7 @@ pub(crate) async fn seed_probe_sentinel_if_absent(
         .drawers
         .read()
         .iter()
-        .any(|d| d.content.starts_with(PROBE_SENTINEL_PREFIX));
+        .any(|d| d.content().starts_with(PROBE_SENTINEL_PREFIX));
 
     if sentinel_present {
         return Ok(false);

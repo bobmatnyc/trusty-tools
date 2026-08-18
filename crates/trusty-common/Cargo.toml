@@ -1,6 +1,6 @@
 [package]
 name = "trusty-common"
-version = "0.35.1"
+version = "0.37.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -162,6 +162,10 @@ hex = { workspace = true, optional = true }
 # `X-Hub-Signature-256` verifier is the crate's only HMAC consumer.
 hmac = { workspace = true, optional = true }
 hnsw_rs = { workspace = true, optional = true }
+# Optional: enabled by the `memory-core` feature. NFC composition for
+# `memory_core::content_hash`'s normalization contract (#5902) — the only
+# consumer, so it is gated with the rest of the Memory Palace.
+unicode-normalization = { workspace = true, optional = true }
 git2 = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
@@ -477,6 +481,8 @@ memory-core = [
     "dep:petgraph",
     "dep:sha2",
     "dep:hex",
+    # #5902: NFC for the content-hash normalization contract.
+    "dep:unicode-normalization",
     "embedder",
     "embedder-bundled-ort",
     "credentials",

@@ -394,3 +394,105 @@ fn sidecar_shows_unknown_health_when_running() {
     assert_eq!(status.health, HealthState::Unknown);
     assert!(status.port.is_none());
 }
+
+// ── #5951: the PID reported must be the port's owner, not a same-named sibling ──
+
+/// A prober that answers both questions differently, the way the reporting
+/// machine did: `pgrep -f trusty-mpm` returned the stdio bridge (7009) while
+/// port 7880 was held by the daemon (48689).
+struct MockPortOwnerProber {
+    name_pid: Option<u32>,
+    port_owner: Option<u32>,
+}
+
+impl ProcessProber for MockPortOwnerProber {
+    fn pgrep(&self, _pattern: &str) -> Option<u32> {
+        self.name_pid
+    }
+    fn pid_listening_on(&self, _port: u16) -> Option<u32> {
+        self.port_owner
+    }
+}
+
+/// #5951: `tm services list` printed 7009, a `trusty-mpm serve --stdio` MCP
+/// bridge, for a daemon whose real PID was 48689.
+#[test]
+fn pid_prefers_port_owner_over_name_match() {
+    let m = static_manifest_with_port(7880);
+    let mut d = Discoverer::with_probers(
+        m,
+        Box::new(MockPortOwnerProber {
+            name_pid: Some(7009),
+            port_owner: Some(48689),
+        }),
+        Box::new(MockPortProber { port: Some(7880) }),
+        Box::new(MockHttpProber::new(HealthState::Ok)),
+        Box::new(MockVersionRunner { version: None }),
+    );
+    let status = d.status("test-svc").unwrap();
+    assert_eq!(
+        status.pid,
+        Some(48689),
+        "the process bound to the port is the service; 7009 is a sibling"
+    );
+    assert!(status.running);
+}
+
+/// A portless sidecar has no socket to attribute, so name matching stands.
+#[test]
+fn pid_falls_back_to_name_match_without_port() {
+    let mut d = Discoverer::with_probers(
+        sidecar_manifest(),
+        Box::new(MockPortOwnerProber {
+            name_pid: Some(7009),
+            port_owner: Some(48689),
+        }),
+        Box::new(MockPortProber { port: None }),
+        Box::new(MockHttpProber::new(HealthState::Ok)),
+        Box::new(MockVersionRunner { version: None }),
+    );
+    let status = d.status("sidecar").unwrap();
+    assert_eq!(status.pid, Some(7009));
+}
+
+/// No `lsof`, or nothing listening: report the name match rather than nothing.
+#[test]
+fn pid_falls_back_to_name_match_when_port_unowned() {
+    let m = static_manifest_with_port(7880);
+    let mut d = Discoverer::with_probers(
+        m,
+        Box::new(MockPortOwnerProber {
+            name_pid: Some(7009),
+            port_owner: None,
+        }),
+        Box::new(MockPortProber { port: Some(7880) }),
+        Box::new(MockHttpProber::new(HealthState::Ok)),
+        Box::new(MockVersionRunner { version: None }),
+    );
+    let status = d.status("test-svc").unwrap();
+    assert_eq!(status.pid, Some(7009));
+}
+
+/// `RealHttpProber` must not panic when called from inside a tokio runtime (#5965).
+///
+/// Why: `tm`'s `main` is `#[tokio::main]`, so every `tm services` subcommand that
+/// probes health reaches `get_health` from inside the runtime. Building a
+/// `reqwest::blocking` client there panics with "Cannot drop a runtime in a
+/// context where blocking is not allowed", which aborted `tm services status`
+/// and `tm services list` before they printed anything.
+/// What: calls the real prober from an async context against a closed local
+/// port. The assertion is only that it RETURNS — `Fail` is the expected verdict
+/// since nothing is listening; the panic is what this guards against.
+/// Test: this is the test. Note it can only fail while `debug_assertions` is on
+/// — reqwest's nested-runtime tripwire (`blocking/wait.rs`) compiles away in
+/// release, so `cargo test --release` would pass even with the bug present.
+#[tokio::test]
+async fn real_http_prober_survives_being_called_inside_a_tokio_runtime() {
+    // Port 1 on loopback is not routable to any service, so this fails fast
+    // with a transport error instead of waiting out the timeout.
+    let state = RealHttpProber.get_health("http://127.0.0.1:1/health", Duration::from_millis(250));
+    assert!(
+        matches!(state, HealthState::Fail { .. }),
+        "expected a transport failure against a closed port, got {state:?}"
+    );
+}

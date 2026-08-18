@@ -124,14 +124,19 @@ pub(crate) fn now_secs() -> u64 {
 pub(crate) fn merge_into(handle: &Arc<PalaceHandle>, survivor: &Drawer, loser: &Drawer) {
     let mut drawers = handle.drawers.write();
     if let Some(target) = drawers.iter_mut().find(|d| d.id == survivor.id) {
-        let mut combined = target.content.clone();
+        let mut combined = target.content().to_string();
         combined.push_str("\n\nAlso: ");
-        combined.push_str(&loser.content);
+        combined.push_str(loser.content());
         // #5187: cut on a char boundary — `truncate` at a raw byte offset
         // panics when the cap lands inside a multi-byte char.
         let cut = char_safe_prefix(&combined, MERGED_CONTENT_CAP).len();
         combined.truncate(cut);
-        target.content = combined;
+        // #5902: `set_content` rather than a bare field assignment — the merged
+        // body is a new fact, so its content digest must move with it. This is
+        // the only production path that rewrites a stored drawer's content in
+        // place, and a direct assignment here would leave the drawer exporting
+        // under the pre-merge identity.
+        target.set_content(combined);
         target.importance = target.importance.max(loser.importance);
         for tag in &loser.tags {
             if !target.tags.contains(tag) {
@@ -176,8 +181,9 @@ pub(crate) async fn rebuild_index_from_drawers(
         if started.elapsed() >= budget {
             break;
         }
+        let body = drawer.content().to_string();
         let vecs = embedder
-            .embed_batch(std::slice::from_ref(&drawer.content))
+            .embed_batch(std::slice::from_ref(&body))
             .await
             .with_context(|| format!("re-embed drawer {}", drawer.id))?;
         if let Some(v) = vecs.into_iter().next() {
@@ -203,7 +209,7 @@ pub(crate) async fn rebuild_index_from_drawers(
 pub(crate) fn build_closet_index(drawers: &[Drawer]) -> HashMap<String, Vec<Uuid>> {
     let mut new_index: HashMap<String, Vec<Uuid>> = HashMap::new();
     for drawer in drawers.iter() {
-        for kw in extract_keywords(&drawer.content) {
+        for kw in extract_keywords(drawer.content()) {
             new_index.entry(kw).or_default().push(drawer.id);
         }
     }

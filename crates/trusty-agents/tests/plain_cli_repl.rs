@@ -92,24 +92,53 @@ fn run_piped_with_setup(
     let default_isolated_home =
         tempfile::tempdir().expect("create isolated tempdir for tagent $HOME");
 
-    let mut cmd = Command::new(BIN);
-    cmd.args(extra_args)
-        .current_dir(isolated_cwd.path())
-        // Deterministic: skip the interactive first-run profile interview,
-        // which would otherwise consume lines meant for the REPL loop.
-        .env("TAGENT_NONINTERACTIVE", "1")
-        .env("HOME", default_isolated_home.path())
-        // #4826: the child inherits the parent's env, and an explicit
-        // project-dir hint now outranks exe-path inference — so an ambient
-        // `TAGENT_PROJECT_DIR` would override the isolated cwd below and send
-        // this process's state writes into a real directory, with the test
-        // still passing. Clearing it is what makes the isolation above real.
+    let home = default_isolated_home.path().to_string_lossy().to_string();
+    // Deterministic: `TAGENT_NONINTERACTIVE` skips the interactive first-run
+    // profile interview, which would otherwise consume lines meant for the
+    // REPL loop. Both defaults come first so an explicit entry in `extra_env`
+    // is applied after and wins.
+    let mut env: Vec<(&str, &str)> = vec![("TAGENT_NONINTERACTIVE", "1"), ("HOME", &home)];
+    env.extend_from_slice(extra_env);
+
+    spawn_and_capture(
+        Path::new(BIN),
+        isolated_cwd.path(),
+        extra_args,
+        &env,
+        stdin_input,
+    )
+}
+
+/// Spawn `exe` with `cwd`/`args`/`env`, write `stdin_input`, close stdin, and
+/// return `(exit_status, stdout, stderr)` once the child exits.
+///
+/// Why: three call sites in this file spawn the binary with the same piping,
+/// the same hint-var scrubbing and the same bounded wait; they differ only in
+/// which executable, cwd and env they use. Keeping one copy means a change to
+/// the isolation contract lands once.
+/// What: applies `env` in order (later entries win) and always clears the
+/// project-dir hint vars. #4826: the child inherits the parent's env, and an
+/// explicit hint outranks exe-path inference — an ambient `TAGENT_PROJECT_DIR`
+/// would redirect the child's state writes into a real directory with the test
+/// still passing. Clearing it is what makes the cwd/`$HOME` isolation real.
+/// Panics rather than hanging the suite if the child outlives [`WAIT_TIMEOUT`].
+/// Test: every `#[test]` in this file goes through it.
+fn spawn_and_capture(
+    exe: &Path,
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    stdin_input: &str,
+) -> (bool, String, String) {
+    let mut cmd = Command::new(exe);
+    cmd.args(args)
+        .current_dir(cwd)
         .env_remove("TAGENT_PROJECT_DIR")
         .env_remove("OPEN_MPM_PROJECT_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for (k, v) in extra_env {
+    for (k, v) in env {
         cmd.env(k, v);
     }
 
@@ -267,43 +296,16 @@ fn run_piped_no_forced_noninteractive(
     let default_isolated_home =
         tempfile::tempdir().expect("create isolated tempdir for tagent $HOME");
 
-    let mut cmd = Command::new(BIN);
-    cmd.args(extra_args)
-        .current_dir(isolated_cwd.path())
-        .env("HOME", default_isolated_home.path())
-        // #4826: see `run_piped_with_setup` — an inherited project-dir hint
-        // would defeat the cwd isolation above without failing anything.
-        .env_remove("TAGENT_PROJECT_DIR")
-        .env_remove("OPEN_MPM_PROJECT_DIR")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
+    let home = default_isolated_home.path().to_string_lossy().to_string();
+    let mut env: Vec<(&str, &str)> = vec![("HOME", &home)];
+    env.extend_from_slice(extra_env);
 
-    let mut child = cmd.spawn().expect("spawn tagent");
-    {
-        let mut stdin = child.stdin.take().expect("child stdin was piped");
-        stdin
-            .write_all(stdin_input.as_bytes())
-            .expect("write stdin");
-    }
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let out = child.wait_with_output();
-        let _ = tx.send(out);
-    });
-    let out = rx
-        .recv_timeout(WAIT_TIMEOUT)
-        .unwrap_or_else(|_| {
-            panic!("tagent did not exit within {WAIT_TIMEOUT:?} (hang regression?)")
-        })
-        .expect("wait_with_output failed");
-    (
-        out.status.success(),
-        String::from_utf8_lossy(&out.stdout).to_string(),
-        String::from_utf8_lossy(&out.stderr).to_string(),
+    spawn_and_capture(
+        Path::new(BIN),
+        isolated_cwd.path(),
+        extra_args,
+        &env,
+        stdin_input,
     )
 }
 
@@ -480,6 +482,82 @@ fn wedged_model_cache_cannot_block_process_exit() {
          was not exercising the wedge it claims to",
     );
     assert!(reached, "opening the FIFO's write end failed");
+}
+
+/// Why (#5944): `runtime::startup` resolves the directory it writes
+/// `.trusty-agents/state/build.json` into from `ctrl::detect_self_project()`,
+/// whose exe walk-up used to climb from the binary's real location to the
+/// filesystem root. That climb reads no environment, so it matched the
+/// developer's real `~/.trusty-agents/agents/pm.toml` and wrote state into the
+/// real home even when the harness had pinned `$HOME` to a tempdir — the
+/// isolation this file's helpers document was not real. Same class as #3655:
+/// a test that reaches outside its sandbox stops exercising what it claims to,
+/// and the gap survives until someone investigates a second time.
+/// What: reproduces the #4826 install shape hermetically. The binary is
+/// hard-linked to `<home>/.cargo/bin/tagent` and `<home>` is seeded with the
+/// user-level `.trusty-agents/agents/pm.toml` marker, so the old walk-up
+/// resolved `<home>` as the project. The assertion is on the resolved PATH —
+/// where `build.json` landed — not on any log wording, so a reworded log line
+/// cannot leave this test passing while exercising nothing. Both tempdirs are
+/// fixtures, so it fails identically on a machine with no real
+/// `~/.trusty-agents`.
+/// Test: itself. Against the pre-fix commit `build.json` lands under `$HOME`
+/// and the cwd assertion fails.
+#[cfg(unix)]
+#[test]
+fn startup_state_lands_in_the_isolated_cwd_not_the_installed_binarys_home() {
+    let isolated_home = tempfile::tempdir().expect("isolated HOME for the exe-walk-up test");
+    let isolated_cwd = tempfile::tempdir().expect("isolated cwd for the exe-walk-up test");
+
+    // The user-level config tier — NOT a project. The old walk-up treated it
+    // as one purely because it carries `agents/pm.toml`.
+    let home_agents = isolated_home.path().join(".trusty-agents").join("agents");
+    std::fs::create_dir_all(&home_agents).expect("create user-level agents dir");
+    std::fs::write(home_agents.join("pm.toml"), "[agent]\nname = \"pm\"\n")
+        .expect("seed the user-level pm.toml marker");
+
+    // Hard-link (not copy) so the child's `current_exe()` reports the install
+    // path rather than resolving back through a symlink to `target/`.
+    let install_dir = isolated_home.path().join(".cargo").join("bin");
+    std::fs::create_dir_all(&install_dir).expect("create fake install dir");
+    let installed = install_dir.join("tagent");
+    std::fs::hard_link(BIN, &installed).unwrap_or_else(|e| {
+        // A cross-device tempdir can't be hard-linked; copying is equivalent
+        // for this test's purposes, just slower.
+        std::fs::copy(BIN, &installed)
+            .unwrap_or_else(|c| panic!("link ({e}) and copy ({c}) both failed for {BIN}"));
+    });
+
+    let home = isolated_home.path().to_string_lossy().to_string();
+    let (success, stdout, stderr) = spawn_and_capture(
+        &installed,
+        isolated_cwd.path(),
+        &["--plain"],
+        &[("TAGENT_NONINTERACTIVE", "1"), ("HOME", &home)],
+        "/quit\n",
+    );
+    assert!(success, "should exit 0 on /quit; stderr:\n{stderr}");
+
+    let sandboxed = isolated_cwd
+        .path()
+        .join(".trusty-agents")
+        .join("state")
+        .join("build.json");
+    let escaped = isolated_home
+        .path()
+        .join(".trusty-agents")
+        .join("state")
+        .join("build.json");
+    assert!(
+        sandboxed.is_file(),
+        "startup state must land in the isolated cwd at {}; stdout:\n{stdout}\nstderr:\n{stderr}",
+        sandboxed.display()
+    );
+    assert!(
+        !escaped.exists(),
+        "the installed binary's parent directory is not a project — nothing may be written to {}",
+        escaped.display()
+    );
 }
 
 #[test]

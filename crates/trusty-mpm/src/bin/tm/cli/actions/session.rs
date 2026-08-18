@@ -185,8 +185,9 @@ pub(crate) enum SessionAction {
     /// Why: operators need to see every managed session and its pending decision.
     /// What: GETs `/api/v1/sessions/managed` (with optional source_id filter) and
     /// renders a table or JSON. `--current` scopes to sessions for the cwd's repo.
-    /// By default, decommissioned tombstone sessions are hidden (#1809); `--all`
-    /// opts in to seeing every state.
+    /// By default, decommissioned tombstone sessions (#1809), sweep-classified
+    /// dead records (#4994), and deleted-slot tombstones (#5952) are hidden;
+    /// `--all` opts in to seeing every state.
     /// Test: `cli_parses_session_ls`, `cli_parses_session_ls_source_id`,
     /// `cli_parses_session_ls_current`, `cli_parses_session_ls_all`,
     /// `cli_parses_session_ls_terms_*`.
@@ -224,10 +225,12 @@ pub(crate) enum SessionAction {
         /// passing both is a parse error.
         #[arg(long, conflicts_with = "source_id")]
         current: bool,
-        /// Include decommissioned tombstone sessions in the output (#1809).
+        /// Include decommissioned (#1809), dead (#4994), and deleted-slot
+        /// (#5952) rows in the output.
         ///
-        /// Why: by default decommissioned sessions are hidden so the list shows only
-        /// live sessions. `--all` opts in to the full unfiltered list for forensics.
+        /// Why: by default those are hidden so the list shows only live sessions.
+        /// `--all` opts in to the full unfiltered list for forensics — including
+        /// the `-- deleted --` slot tombstones, each at its original slot number.
         /// Has no effect on `--json` output (raw daemon response is always complete).
         #[arg(long)]
         all: bool,

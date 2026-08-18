@@ -164,7 +164,7 @@ pub fn build_census(
                 census.drawers_total += drawers.len();
                 let total = index.total_injections(&slug);
                 for drawer in &drawers {
-                    let excerpt = drawer_preview(&drawer.content);
+                    let excerpt = drawer_preview(drawer.content());
                     let injections = index.injections_for(&slug, &excerpt);
                     if injections < min_injections {
                         continue;
@@ -192,7 +192,7 @@ pub fn build_census(
                         signals: super::signals::observe(drawer, age_days, window_start),
                         // Filled in below, once the whole palace has been read.
                         collision_peers: None,
-                        content_digest: content_digest(&drawer.content),
+                        content_digest: content_digest(drawer.content()),
                     });
                 }
             }

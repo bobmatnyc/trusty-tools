@@ -549,7 +549,7 @@ pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<
         .map(|d| {
             json!({
                 "drawer_id": d.id.to_string(),
-                "content": d.content,
+                "content": d.content(),
                 "importance": d.importance,
                 "tags": d.tags,
                 "created_at": d.created_at.to_rfc3339(),
@@ -683,7 +683,7 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
             json!({
                 "palace_id":  r.palace_id,
                 "drawer_id":  r.result.drawer.id.to_string(),
-                "content":    r.result.drawer.content,
+                "content":    r.result.drawer.content(),
                 "importance": r.result.drawer.importance,
                 "tags":       r.result.drawer.tags,
                 "score":      r.result.score,
