@@ -1,74 +1,208 @@
-//! Git subprocess helpers for branch-aware search (issue #122).
+//! Git subprocess helpers for branch-aware search (issue #122) and for
+//! merge-base delta resolution (ADR-0050).
 //!
-//! Why: when a `SearchQuery` carries `branch: Some(name)` but no explicit
-//! `branch_files`, the search pipeline asks git which files diverge between
-//! `HEAD` and the merge-base with that branch. We shell out rather than
-//! linking libgit2 to keep the dependency surface small and to inherit the
-//! caller's `.gitconfig` / safe.directory settings unchanged.
-//! What: a single best-effort helper that runs `git merge-base HEAD <branch>`
-//! followed by `git diff --name-only <base>..HEAD`. Any failure (non-git
-//! workdir, unknown branch, detached HEAD, missing binary) returns `None`
-//! with a `tracing::warn!` — the caller falls back to no boost rather than
-//! failing the search.
-//! Test: covered by unit tests in this module (no-git case) and the
-//! integration tests in `core::indexer::tests` that exercise the explicit
-//! `branch_files` path.
+//! Why: two callers need to know how a checkout differs from a base ref. The
+//! search pipeline uses it to boost branch-modified files when a `SearchQuery`
+//! carries `branch: Some(name)` without explicit `branch_files`. ADR-0050's
+//! delta-indexed worktree facets use it to decide which files a worktree owes
+//! the index at all. Both route through [`resolve_merge_base_delta`] so the
+//! two can never disagree about what "differs from the merge-base" means. We
+//! shell out rather than linking libgit2 to keep the dependency surface small
+//! and to inherit the caller's `.gitconfig` / safe.directory settings
+//! unchanged.
+//! What: [`resolve_merge_base_delta`] runs `git merge-base HEAD <base_ref>`,
+//! then `git diff --name-status -z <base>` (against the WORKING TREE, not
+//! `HEAD`) and `git ls-files --others --exclude-standard -z`. Any failure
+//! (non-git workdir, unknown ref, detached HEAD, missing binary) returns
+//! `None` with a `tracing::warn!` — a caller falls back to no boost rather
+//! than failing the search, and never receives a partial delta.
+//! Test: covered by unit tests in this module (no-git case, uncommitted work,
+//! deletions, renames, refusal arms) and the integration tests in
+//! `core::indexer::tests` that exercise the explicit `branch_files` path.
 
 use std::path::Path;
 use std::process::Command;
 
-/// Compute the list of files modified on `branch` relative to the merge-base
-/// with `HEAD`, by shelling out to `git`. Paths are returned exactly as `git
-/// diff --name-only` prints them (forward-slash separated, relative to the
-/// repo root).
+/// How a checkout differs from its merge-base with some other ref.
 ///
-/// Returns `None` on any failure — caller treats this as "no boost".
+/// Why: ADR-0050 indexes a worktree as the DELTA against its merge-base rather
+/// than as a full copy, so the indexer needs both halves of that delta and they
+/// mean opposite things. `changed` names files whose current bytes must be
+/// (re)indexed; `deleted` names files whose chunks the base facet still carries
+/// and which the worktree must shadow as absent. Collapsing them into one list
+/// (which is all `resolve_branch_files` returned before) leaves a deletion
+/// indistinguishable from an edit, so the stale chunks are never dropped.
+/// What: `base_sha` is the resolved merge-base commit; `changed` covers
+/// added, modified, and untracked files; `deleted` covers files removed
+/// relative to the merge-base. A rename contributes its old path to `deleted`
+/// and its new path to `changed`. Paths are repo-root-relative and
+/// forward-slash separated, exactly as git prints them.
+/// Test: `merge_base_delta_reports_uncommitted_work_and_deletions`,
+/// `merge_base_delta_splits_a_rename_into_deleted_and_changed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeBaseDelta {
+    /// The merge-base commit the delta was computed against.
+    pub base_sha: String,
+    /// Files to index: added, modified, or untracked relative to the base.
+    pub changed: Vec<String>,
+    /// Files removed relative to the base; their chunks must be dropped.
+    pub deleted: Vec<String>,
+}
+
+/// Compute how the checkout at `root_path` differs from its merge-base with
+/// `base_ref`.
+///
+/// Why: ADR-0050 point 5 keys a worktree's index to the merge-base rather than
+/// to main's moving HEAD, so a delta stays stable while main advances. The
+/// merge-base is compared against the WORKING TREE, not `HEAD`, because a live
+/// agent worktree is mostly uncommitted work — `git diff <base>..HEAD` reports
+/// only what was committed and would omit the majority of a worktree's real
+/// content (measured on a four-change fixture: 1 of 4 differences reported).
+/// What: three best-effort git calls — `merge-base`, `diff --name-status -z`,
+/// and `ls-files --others --exclude-standard -z`. `-z` is used throughout so
+/// paths containing spaces, quotes, or non-ASCII bytes survive verbatim rather
+/// than arriving in git's quoted form. `--exclude-standard` keeps `.gitignore`
+/// honoured, so build output never enters the delta.
+///
+/// Returns `None` on ANY failure, including a failure of the untracked-file
+/// step alone. A partial delta is worse than no delta here: it reads as a
+/// complete answer while silently omitting files that exist in the tree, and
+/// the caller has no way to tell the two apart.
+/// Test: `merge_base_delta_reports_uncommitted_work_and_deletions`,
+/// `merge_base_delta_splits_a_rename_into_deleted_and_changed`,
+/// `merge_base_delta_refuses_rather_than_returning_a_partial_delta`,
+/// `merge_base_delta_is_none_outside_a_repo`.
+pub fn resolve_merge_base_delta(root_path: &Path, base_ref: &str) -> Option<MergeBaseDelta> {
+    resolve_merge_base_delta_with(root_path, base_ref, "git")
+}
+
+/// [`resolve_merge_base_delta`] with an injectable git program name.
+///
+/// Why: the refusal arms are the branches that matter most here, and the only
+/// hermetic way to reach a spawn failure is to name a program that does not
+/// exist — mutating `PATH` is process-global and racy under a parallel test
+/// runner. Mirrors [`probe_work_tree_with`] beside it.
+/// What: identical to [`resolve_merge_base_delta`]; `git_bin` names the program
+/// to spawn.
+/// Test: `merge_base_delta_refuses_rather_than_returning_a_partial_delta`.
+fn resolve_merge_base_delta_with(
+    root_path: &Path,
+    base_ref: &str,
+    git_bin: &str,
+) -> Option<MergeBaseDelta> {
+    let base_sha = merge_base_sha(root_path, base_ref, git_bin)?;
+
+    // #5815: diff the base against the WORKING TREE — `<base>..HEAD` compares
+    // two commits and misses the uncommitted work a worktree mostly consists of.
+    let diff = run_git(
+        root_path,
+        git_bin,
+        &["diff", "--name-status", "-z", &base_sha],
+    )?;
+    let (mut changed, deleted) = parse_name_status_z(&diff);
+
+    // #5815: an untracked file is real worktree content the delta owes the
+    // index. Failing this step yields a delta that LOOKS complete, so refuse.
+    let untracked = run_git(
+        root_path,
+        git_bin,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
+    changed.extend(split_z(&untracked).map(str::to_owned));
+
+    Some(MergeBaseDelta {
+        base_sha,
+        changed,
+        deleted,
+    })
+}
+
+/// Resolve the merge-base commit between `HEAD` and `base_ref`.
+fn merge_base_sha(root_path: &Path, base_ref: &str, git_bin: &str) -> Option<String> {
+    let out = run_git(root_path, git_bin, &["merge-base", "HEAD", base_ref])?;
+    let sha = out.trim().to_owned();
+    if sha.is_empty() {
+        tracing::warn!("merge-base resolution failed for '{base_ref}': empty merge-base");
+        return None;
+    }
+    Some(sha)
+}
+
+/// Run one git subcommand and return its stdout, or `None` with a warning.
+///
+/// Why: the three calls above share identical failure handling, and a silent
+/// divergence between them is how a partial delta gets returned.
+fn run_git(root_path: &Path, git_bin: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(git_bin)
+        .args(args)
+        .current_dir(root_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        tracing::warn!(
+            "git {:?} exited {:?} in {}",
+            args,
+            out.status.code(),
+            root_path.display()
+        );
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
+/// Split a NUL-delimited git output stream into its non-empty fields.
+fn split_z(body: &str) -> impl Iterator<Item = &str> {
+    body.split('\0').filter(|f| !f.is_empty())
+}
+
+/// Parse `git diff --name-status -z` into `(changed, deleted)`.
+///
+/// Why: the `-z` stream is not line-oriented and a rename carries a different
+/// field count from every other status, so a naive pairwise walk desynchronises
+/// on the first rename and mis-attributes every path after it.
+/// What: fields arrive as `status`, then one path — except `R…`/`C…`, which
+/// carry a source path AND a destination path. A rename's source is a deletion
+/// and its destination is a change; a copy's source is untouched.
+/// Test: `merge_base_delta_splits_a_rename_into_deleted_and_changed`.
+fn parse_name_status_z(body: &str) -> (Vec<String>, Vec<String>) {
+    let (mut changed, mut deleted) = (Vec::new(), Vec::new());
+    let mut fields = split_z(body);
+    while let Some(status) = fields.next() {
+        let Some(first) = fields.next() else { break };
+        match status.as_bytes().first() {
+            Some(b'D') => deleted.push(first.to_owned()),
+            Some(b'R') => {
+                let Some(dest) = fields.next() else { break };
+                deleted.push(first.to_owned());
+                changed.push(dest.to_owned());
+            }
+            Some(b'C') => {
+                let Some(dest) = fields.next() else { break };
+                changed.push(dest.to_owned());
+            }
+            _ => changed.push(first.to_owned()),
+        }
+    }
+    (changed, deleted)
+}
+
+/// Compute the list of files that differ from the merge-base with `branch`.
+///
+/// Why: the branch boost (#122) exists to surface what the developer is
+/// working on, and most of that work is uncommitted at the moment they search
+/// for it. This delegates to [`resolve_merge_base_delta`] so the boost sees the
+/// same file set ADR-0050's delta indexing does.
+/// What: returns [`MergeBaseDelta::changed`] — added, modified, and untracked
+/// files. Deletions are omitted deliberately: a deleted file has no chunks to
+/// boost. Paths are repo-root-relative, forward-slash separated.
+///
+/// Returns `None` on any failure — the caller treats that as "no boost".
+/// Test: `resolve_branch_files_reports_uncommitted_work`,
+/// `test_resolve_branch_files_returns_none_when_not_a_repo`.
 pub fn resolve_branch_files(root_path: &Path, branch: &str) -> Option<Vec<String>> {
-    // 1) Find the merge-base between HEAD and the named branch.
-    let base = Command::new("git")
-        .args(["merge-base", "HEAD", branch])
-        .current_dir(root_path)
-        .output()
-        .ok()?;
-    if !base.status.success() {
-        tracing::warn!(
-            "branch file resolution failed for branch '{}': git merge-base exited {:?}",
-            branch,
-            base.status.code()
-        );
-        return None;
-    }
-    let base_sha = std::str::from_utf8(&base.stdout).ok()?.trim().to_owned();
-    if base_sha.is_empty() {
-        tracing::warn!(
-            "branch file resolution failed for branch '{}': empty merge-base",
-            branch
-        );
-        return None;
-    }
-
-    // 2) List files changed between the merge-base and HEAD.
-    let diff = Command::new("git")
-        .args(["diff", "--name-only", &format!("{}..HEAD", base_sha)])
-        .current_dir(root_path)
-        .output()
-        .ok()?;
-    if !diff.status.success() {
-        tracing::warn!(
-            "branch file resolution failed for branch '{}': git diff exited {:?}",
-            branch,
-            diff.status.code()
-        );
-        return None;
-    }
-
-    let body = std::str::from_utf8(&diff.stdout).ok()?;
-    Some(
-        body.lines()
-            .filter(|l| !l.is_empty())
-            .map(str::to_owned)
-            .collect(),
-    )
+    // #5815: delegate so the boost and ADR-0050's delta indexing agree on what
+    // "differs from the merge-base" means.
+    resolve_merge_base_delta(root_path, branch).map(|d| d.changed)
 }
 
 /// Normalize a path string for comparison: strip a leading `./` so that
@@ -238,6 +372,197 @@ fn probe_work_tree_with(root_path: &Path, git_bin: &str) -> WorkTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a repo on `main` with `kept/deleted/modified` committed, then a
+    /// `feature` branch carrying one committed add. Returns the repo path.
+    fn fixture_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t.t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(p.join("kept.rs"), "base\n").unwrap();
+        std::fs::write(p.join("deleted.rs"), "old\n").unwrap();
+        std::fs::write(p.join("modified.rs"), "x\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        git(&["checkout", "-qb", "feature"]);
+        std::fs::write(p.join("committed_change.rs"), "committed\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "feat"]);
+        tmp
+    }
+
+    /// Why: THE regression test for ADR-0050's delta model. A live agent
+    /// worktree is mostly uncommitted work, and the previous implementation
+    /// (`git diff --name-only <base>..HEAD`) compared two COMMITS — so on this
+    /// fixture it reported 1 of the 4 real differences, silently omitting the
+    /// uncommitted edit, the deletion, and the untracked file. Indexing a
+    /// worktree from that answer would omit most of its content.
+    ///
+    /// Fails against the pre-change implementation on every assertion below
+    /// except `committed_change.rs`.
+    #[test]
+    fn merge_base_delta_reports_uncommitted_work_and_deletions() {
+        let tmp = fixture_repo();
+        let p = tmp.path();
+        // Uncommitted work: an edit, a removal, and a brand-new file.
+        std::fs::write(p.join("modified.rs"), "x\nuncommitted\n").unwrap();
+        std::fs::remove_file(p.join("deleted.rs")).unwrap();
+        std::fs::write(p.join("untracked.rs"), "brand new\n").unwrap();
+
+        let delta = resolve_merge_base_delta(p, "main").expect("delta");
+
+        assert!(!delta.base_sha.is_empty(), "merge-base must be resolved");
+        assert!(
+            delta.changed.contains(&"committed_change.rs".to_owned()),
+            "committed add must be in the delta: {:?}",
+            delta.changed
+        );
+        assert!(
+            delta.changed.contains(&"modified.rs".to_owned()),
+            "UNCOMMITTED edit must be in the delta: {:?}",
+            delta.changed
+        );
+        assert!(
+            delta.changed.contains(&"untracked.rs".to_owned()),
+            "UNTRACKED file must be in the delta: {:?}",
+            delta.changed
+        );
+        assert_eq!(
+            delta.deleted,
+            vec!["deleted.rs".to_owned()],
+            "a removal must be reported as deleted, never as changed"
+        );
+        assert!(
+            !delta.changed.contains(&"kept.rs".to_owned()),
+            "an unchanged file must not enter the delta: {:?}",
+            delta.changed
+        );
+    }
+
+    /// Why: a rename is the one status carrying TWO paths in the `-z` stream.
+    /// A pairwise walk desynchronises on it and mis-attributes every path
+    /// after it. The old path must be deleted (its base chunks are stale) and
+    /// the new path indexed.
+    #[test]
+    fn merge_base_delta_splits_a_rename_into_deleted_and_changed() {
+        let tmp = fixture_repo();
+        let p = tmp.path();
+        let out = Command::new("git")
+            .args(["mv", "kept.rs", "renamed.rs"])
+            .current_dir(p)
+            .output()
+            .expect("git mv");
+        assert!(out.status.success(), "git mv failed");
+        // A second change AFTER the rename: proves the parser stayed in sync.
+        std::fs::write(p.join("modified.rs"), "x\nafter rename\n").unwrap();
+
+        let delta = resolve_merge_base_delta(p, "main").expect("delta");
+
+        assert!(
+            delta.deleted.contains(&"kept.rs".to_owned()),
+            "the rename source must be deleted: {:?}",
+            delta.deleted
+        );
+        assert!(
+            delta.changed.contains(&"renamed.rs".to_owned()),
+            "the rename destination must be changed: {:?}",
+            delta.changed
+        );
+        assert!(
+            delta.changed.contains(&"modified.rs".to_owned()),
+            "a path AFTER the rename must not be mis-attributed: {:?}",
+            delta.changed
+        );
+    }
+
+    /// A `git` shim that forwards to real git EXCEPT `ls-files --others`,
+    /// which it fails.
+    ///
+    /// Why: an unspawnable binary is not enough to test the untracked step's
+    /// refusal — it fails the FIRST call (`merge-base`) and the function
+    /// returns before the step under test ever runs. A test built that way
+    /// passes against a deliberately fail-open implementation, which is how it
+    /// would miss the very defect it exists to catch. Only a git that answers
+    /// the first two calls and fails the third reaches the arm.
+    fn git_shim_failing_untracked(dir: &Path) -> String {
+        let shim = dir.join("git-shim.sh");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nfor a in \"$@\"; do\n  [ \"$a\" = \"--others\" ] && exit 1\ndone\nexec git \"$@\"\n",
+        )
+        .expect("write shim");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        shim.to_string_lossy().into_owned()
+    }
+
+    /// Why: the fail-open arm. The untracked-file step runs LAST, after the
+    /// merge-base and the tracked diff have both succeeded, so failing it open
+    /// would return a delta that reads as complete while omitting every new
+    /// file in the tree — and the caller cannot tell the two apart. Refusing is
+    /// the only answer that stays distinguishable.
+    /// What: a shim that answers the first two git calls and fails only
+    /// `ls-files --others`, so the fixture itself stays a perfectly good repo
+    /// and nothing but the refusal rule can produce `None`.
+    #[test]
+    fn merge_base_delta_refuses_rather_than_returning_a_partial_delta() {
+        let tmp = fixture_repo();
+        let p = tmp.path();
+        std::fs::write(p.join("untracked.rs"), "brand new\n").unwrap();
+        let shim_home = tempfile::tempdir().expect("tempdir");
+        let shim = git_shim_failing_untracked(shim_home.path());
+
+        // Control: with real git the same tree resolves AND sees the new file,
+        // so the refusal below cannot be blamed on the fixture.
+        let ok = resolve_merge_base_delta_with(p, "main", "git").expect("real git resolves");
+        assert!(ok.changed.contains(&"untracked.rs".to_owned()));
+
+        assert_eq!(
+            resolve_merge_base_delta_with(p, "main", &shim),
+            None,
+            "a failed untracked-file step must refuse, never return a partial delta"
+        );
+    }
+
+    /// Why: the boost path and the delta path must agree on what changed, so
+    /// the file a developer is actively editing is boosted before they commit
+    /// it. Returns `None` on the pre-change implementation's committed-only
+    /// answer.
+    #[test]
+    fn resolve_branch_files_reports_uncommitted_work() {
+        let tmp = fixture_repo();
+        let p = tmp.path();
+        std::fs::write(p.join("modified.rs"), "x\nuncommitted\n").unwrap();
+        std::fs::remove_file(p.join("deleted.rs")).unwrap();
+
+        let files = resolve_branch_files(p, "main").expect("branch files");
+
+        assert!(
+            files.contains(&"modified.rs".to_owned()),
+            "an uncommitted edit must be boostable: {files:?}"
+        );
+        assert!(
+            !files.contains(&"deleted.rs".to_owned()),
+            "a deleted file has no chunks to boost: {files:?}"
+        );
+    }
+
+    /// Why: the merge-base step's own refusal must survive the rewrite.
+    #[test]
+    fn merge_base_delta_is_none_outside_a_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert_eq!(resolve_merge_base_delta(tmp.path(), "main"), None);
+    }
 
     #[test]
     fn test_resolve_branch_files_returns_none_when_not_a_repo() {
