@@ -866,10 +866,20 @@ impl Session {
         // reading only the manifest left the flow repeating that instruction
         // after they had done it, with the manifest not written until a sweep
         // finishes. Either record means the operator has named an engagement.
+        //
+        // #5896 review: REPOSITORIES, not any target. `Registry::targets` mixes
+        // repositories and boards, so `taudit add board jira:ACME` against an
+        // otherwise empty registry skipped `SelectRepositories`, triggered a
+        // real multi-tool download through `auto_install_tools`, and reported
+        // `ReadyForRun` over an engagement with nothing to sweep. A board is not
+        // a unit of the sweep — `crate::chain::split_targets` says the same.
         let repos_known = manifest
             .as_ref()
             .is_some_and(|m| !m.repositories.is_empty())
-            || !Registry::load(&self.work)?.targets().is_empty();
+            || Registry::load(&self.work)?
+                .targets()
+                .iter()
+                .any(|target| target.kind() == TargetKind::Repo);
 
         // #5797: install at the point the flow would otherwise have printed
         // "now go run `install`", and not one step earlier. Repository selection
@@ -1018,6 +1028,49 @@ trusty-review = "0.0.0-never-published"
         assert_eq!(status.next, NextStep::SelectRepositories);
         assert!(status.manifest.is_none());
         assert!(status.tools.iter().all(|s| !s.installed));
+    }
+
+    /// #5896 review: a BOARD is not a repository. `Registry::targets` mixes the
+    /// two, so a board-only registry looked like a named engagement — the flow
+    /// skipped `SelectRepositories`, `auto_install_tools` started a real
+    /// multi-tool download, and it reported `ReadyForRun` over a sweep with
+    /// nothing to run on.
+    ///
+    /// `with_auto_install(false)` here so the assertion is about the STEP: with
+    /// the defect present and auto-install on, this test would reach the network
+    /// rather than fail.
+    ///
+    /// Against `501b6dae5` this fails with `NextStep::InstallTools(…)`.
+    #[tokio::test]
+    async fn a_board_only_registry_still_asks_for_repositories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path()).with_auto_install(false);
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+
+        let mut registry = Registry::default();
+        registry.insert(registry::parse(Some(TargetKind::Board), "jira:ACME").expect("parses"));
+        registry.save(session.work_dir()).expect("write registry");
+
+        let Outcome::Guided(status) = session.execute(Command::Guided).await.expect("runs") else {
+            panic!("Guided command must yield a Guided outcome");
+        };
+        assert_eq!(
+            status.next,
+            NextStep::SelectRepositories,
+            "a board is not a unit of the sweep — there is still nothing to audit"
+        );
+
+        // And one repository beside it is: the guard must not have gone the
+        // other way and started ignoring the registry.
+        registry.insert(registry::parse(Some(TargetKind::Repo), "acme/api").expect("parses"));
+        registry.save(session.work_dir()).expect("write registry");
+        let Outcome::Guided(status) = session.execute(Command::Guided).await.expect("runs") else {
+            panic!("Guided command must yield a Guided outcome");
+        };
+        assert_ne!(status.next, NextStep::SelectRepositories);
     }
 
     #[tokio::test]

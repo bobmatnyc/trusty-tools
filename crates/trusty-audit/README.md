@@ -27,9 +27,14 @@ Two constraints are permanent, not phases:
 
 A bare invocation is the entry point, and on a terminal it is the whole
 engagement: it asks for the audit targets one at a time, registers each as you
-enter it, installs the pinned tools, and then asks before starting the sweep. Run
-it with no controlling terminal — a script, a CI job, `TRUSTY_AUDIT_NO_LAUNCH=1`
-— and it prints the status card instead, prompting for nothing.
+enter it, installs the pinned tools, and then asks before starting the sweep.
+
+Two ways to get the status card instead, prompting for nothing: run
+`trusty-audit guided`, which is the named verb for exactly that, or run the bare
+invocation with no controlling terminal — a script, a cron entry, a CI job.
+`TRUSTY_AUDIT_NO_LAUNCH=1` is not one of them: it is read by `install.sh`, where
+it decides whether the installer starts the binary at all, and the binary itself
+never reads it.
 
 ```
 trusty-audit                    # guided flow: register targets, install, sweep
