@@ -27,6 +27,11 @@ tokio = { workspace = true }
 # `Session::execute` and calls it IN-PROCESS — no HTTP endpoint, no `taudit`
 # subprocess. Capabilities live in `session::Command`, never here.
 trusty-audit = { workspace = true }
+# #5915 made the work-root default `~/.trusty-tools/trusty-audit/work`, and
+# `WorkDir::resolve` takes the home directory as an argument rather than reading
+# it. This shell reads it the same way `trusty-audit`'s own `main.rs` does, so
+# both front ends land on one root.
+dirs = { workspace = true }
 
 [dev-dependencies]
 # Real directories for the guided-flow mapping tests — the same dependency

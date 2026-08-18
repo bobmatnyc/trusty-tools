@@ -170,7 +170,12 @@ fn session() -> Result<Session, String> {
     let cwd = std::env::current_dir()
         .map_err(|e| format!("cannot determine the current directory: {e}"))?;
     let env_value = std::env::var(WORKDIR_ENV).ok();
-    let work = WorkDir::resolve(None, env_value.as_deref(), &cwd);
+    // #5915: the home directory is read here, with the rest of the environment,
+    // so `resolve` stays a pure function of what it is handed. The CLI's
+    // `main.rs` reads it the same way; omitting it would put this shell's root
+    // beside the cwd, which is the placement #5915 removed.
+    let home = dirs::home_dir();
+    let work = WorkDir::resolve(None, env_value.as_deref(), home.as_deref(), &cwd);
     Ok(Session::new(work).with_config_path(EngagementConfig::resolve_path(None, &cwd)))
 }
 
@@ -337,10 +342,29 @@ mod view_tests {
     #[test]
     fn a_session_resolves_under_the_named_root() {
         let cwd = std::path::Path::new("/engagement");
-        let work = WorkDir::resolve(None, Some("/engagement/work"), cwd);
+        let home = std::path::Path::new("/home/analyst");
+        let work = WorkDir::resolve(None, Some("/engagement/work"), Some(home), cwd);
         assert_eq!(
             Session::new(work).work_dir().root(),
             std::path::Path::new("/engagement/work")
+        );
+    }
+
+    /// With nothing in the environment the shell lands on the home root #5915
+    /// moved the default to — not beside the cwd, which is where an emailed
+    /// package gets unzipped and where `trusty-search` refuses to index.
+    ///
+    /// `session()` reads the process environment, so this asserts the arguments
+    /// it passes rather than calling it. That indirection is exactly what let
+    /// #5929's signature change reach `main.rs` and miss this shell.
+    #[test]
+    fn the_default_root_is_the_home_one_the_cli_uses() {
+        let cwd = std::path::Path::new("/engagement");
+        let home = std::path::Path::new("/home/analyst");
+        let work = WorkDir::resolve(None, None, Some(home), cwd);
+        assert_eq!(
+            Session::new(work).work_dir().root(),
+            std::path::Path::new("/home/analyst/.trusty-tools/trusty-audit/work")
         );
     }
 }
