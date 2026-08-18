@@ -345,8 +345,9 @@ pub enum CommandResult {
     ///
     /// Why: all three terminal/lifecycle verbs report the same shape — the
     /// session's id, name, and new state — so a UI renders them uniformly.
-    /// What: the resolved id, friendly name, the new lifecycle state, and the
-    /// human-readable verb that produced it (`stopped`/`resumed`/`decommissioned`).
+    /// What: the resolved id, friendly name, the new lifecycle state, the
+    /// human-readable verb that produced it (`stopped`/`resumed`/`decommissioned`),
+    /// and — for `decommissioned` — the daemon's workspace-removal verdict.
     ManagedLifecycle {
         /// The resolved managed session id.
         id: String,
@@ -356,6 +357,20 @@ pub enum CommandResult {
         state: String,
         /// The verb applied (`stopped` | `resumed` | `decommissioned`).
         action: String,
+        /// Whether the daemon removed the workspace directory from disk (#5899).
+        ///
+        /// Why: decommission removes the workspace only when tm provisioned it and
+        /// the removal succeeded, so a renderer that assumes removal lies to the
+        /// operator — which is exactly what `tm session decommission` did while
+        /// this field did not exist. It is the daemon's verdict, never a local
+        /// filesystem guess.
+        /// What: `Some(true)` removed, `Some(false)` still on disk, `None` no
+        /// verdict — either a `stopped`/`resumed` result (no workspace decision
+        /// was made) or a daemon that predates the field. A renderer must keep
+        /// `None` distinct from `Some(false)`.
+        /// Test: `decommission_message_honours_every_verdict`,
+        /// `decommission_cli_message_never_claims_removal_when_workspace_remains`.
+        workspace_removed: Option<bool>,
     },
 
     /// Any failure rendered as a message rather than a panic.

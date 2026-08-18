@@ -22,8 +22,9 @@ use super::error::response_or_body_error;
 use super::types::{
     FleetByProjectWireResponse, FleetProjectGroupWire, ManagedActivityResponse,
     ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse,
-    ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
-    ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
+    ManagedAttachCmdResponse, ManagedDecommissionOutcome, ManagedListResponse,
+    ManagedSendInputRequest, ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest,
+    ManagedSpawnResponse,
 };
 
 impl DaemonClient {
@@ -297,13 +298,21 @@ impl DaemonClient {
     /// Decommission a session via `POST .../{id}/decommission`.
     ///
     /// Why: the only operation that permanently removes the workspace directory;
-    /// it is terminal — no resume is possible afterward.
-    /// What: POSTs to the decommission endpoint and returns the tombstone summary.
-    /// Test: live HTTP via `tests/session_manager_mvp.rs`.
+    /// it is terminal — no resume is possible afterward. Decommission does NOT
+    /// always remove the workspace, so the caller needs the daemon's verdict to
+    /// report the outcome honestly — decoding this body into
+    /// [`ManagedSessionSummary`] silently dropped it and made every CLI
+    /// decommission claim removal (#5899).
+    /// What: POSTs to the decommission endpoint and returns the whole response —
+    /// tombstone summary plus `workspace_removed` / `workspace_path_was` — as a
+    /// [`ManagedDecommissionOutcome`].
+    /// Test: `executor_decommission_reports_daemon_workspace_verdict` (real
+    /// daemon round-trip), `decommission_outcome_round_trips_daemon_response`;
+    /// live HTTP via `tests/session_manager_mvp.rs`.
     pub async fn decommission_managed_session(
         &self,
         id: &str,
-    ) -> anyhow::Result<ManagedSessionSummary> {
+    ) -> anyhow::Result<ManagedDecommissionOutcome> {
         let url = format!("{}/api/v1/sessions/managed/{id}/decommission", self.base);
         let resp = self
             .http
@@ -312,7 +321,8 @@ impl DaemonClient {
             .await?
             .error_for_status()?
             .json()
-            .await?;
+            .await
+            .context("decoding decommission response body")?;
         Ok(resp)
     }
 }
