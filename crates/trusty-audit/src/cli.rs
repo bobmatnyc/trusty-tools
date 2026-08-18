@@ -42,7 +42,7 @@ use crate::session::{Command, Outcome};
     long_about = None,
 )]
 pub struct Cli {
-    /// Working-directory root (default: ./trusty-audit-work, or $TRUSTY_AUDIT_WORKDIR).
+    /// Working-directory root (default: ~/.trusty-tools/trusty-audit/work, or $TRUSTY_AUDIT_WORKDIR).
     #[arg(long, global = true, value_name = "DIR")]
     pub work_dir: Option<PathBuf>,
 
@@ -487,6 +487,9 @@ mod cli_tests {
             );
         }
         assert!(text.contains("delete this directory"));
+        // #5915: the approval is recorded outside the root, so the layout must
+        // name what removes it rather than implying deletion covers everything.
+        assert!(text.contains("trusty-search index remove"), "{text}");
     }
 
     #[test]

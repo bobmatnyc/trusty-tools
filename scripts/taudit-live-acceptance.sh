@@ -165,14 +165,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The run's own tree is no longer beside the extracted package (#5915): it is
-# at the client's default, which is the one home location trusty-search will
-# index. A previous run's tree would make "did this run collect anything"
-# unanswerable, so it starts clean.
-WORK_ROOT="$HOME/.trusty-tools/trusty-audit/work"
-rm -rf "$WORK_ROOT"
-ok "work root reset: $WORK_ROOT"
-
 # The allowlist rows this run adds live outside the work root, so `rm -rf` on
 # either does not undo them. Snapshot what was approved BEFORE, so the run
 # can be shown to have destroyed none of it.
@@ -292,6 +284,25 @@ case "$TARGETS_OUTPUT" in
   *"$TARGET_REPO"*) ok "target list confirms $TARGET_REPO is registered" ;;
   *) fail "'audit.sh targets' did not list $TARGET_REPO" ;;
 esac
+
+# --- 5b. ask the client where its working directory is --------------------
+
+# Asked, never assumed. #5915 MOVED this location, and a hardcoded path would
+# make this script agree with only one revision of the client — which is the
+# opposite of what an acceptance test is for.
+step "workdir: ask the client where it will write"
+WORKDIR_OUTPUT="$("$LAUNCHER" workdir 2>&1)" \
+  || { printf '%s\n' "$WORKDIR_OUTPUT" >&2; fail "'audit.sh workdir' exited non-zero"; }
+printf '%s\n' "$WORKDIR_OUTPUT"
+WORK_ROOT="$(printf '%s\n' "$WORKDIR_OUTPUT" | head -1 | tr -d ' \t')"
+case "$WORK_ROOT" in
+  /*) ok "work root: $WORK_ROOT" ;;
+  *) fail "could not read an absolute work root from 'audit.sh workdir': '$WORK_ROOT'" ;;
+esac
+
+# A previous run's tree would make "did THIS run collect anything" unanswerable.
+rm -rf "$WORK_ROOT"
+ok "work root reset"
 
 # --- 6. run the one-shot audit chain: install, clone, analyse, package ----
 
