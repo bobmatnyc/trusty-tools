@@ -31,7 +31,7 @@
 
 use std::io::IsTerminal as _;
 
-use trusty_mpm::client::{ManagedDecommissionOutcome, ManagedSessionSummary};
+use trusty_mpm::client::ManagedSessionSummary;
 
 use super::managed_route::decommission_message;
 use crate::cli::CatalogAction;
@@ -525,25 +525,55 @@ pub(crate) async fn session_resume(
     Ok(())
 }
 
+/// Decommission `id` and return the one line the CLI reports for it.
+///
+/// Why (#5913): this used to be a second, hand-rolled `reqwest` POST to the
+/// decommission endpoint, independent of the routed
+/// `tm session decommission <id>` verb. Two paths to one endpoint is what let
+/// #5899's wording divergence happen, and the routing carried a second
+/// divergence with it: only this path repaired the base repo's worktree
+/// bookkeeping. Both now call
+/// [`CommandExecutor::decommission_managed_id`](trusty_mpm::client::CommandExecutor::decommission_managed_id).
+/// Splitting the line's construction from its `println!` is the same pattern
+/// [`deprecation_message`] uses, and it is what lets
+/// `decommission_entry_points_agree_on_every_verdict` compare this path's output
+/// against the routed one without capturing process stdout.
+/// What: calls the shared implementation with the canonical id the caller
+/// already holds — no fuzzy resolution, so the bulk sweep still costs one
+/// request per session — and renders the verdict through
+/// [`super::managed_route::decommission_message`], the same renderer
+/// [`super::managed_route::render_cli`] uses. A missing id propagates the shared
+/// transport's `Err` (#2457); `prune.rs`'s sweep records that as a failed row.
+/// Test: `decommission_entry_points_agree_on_every_verdict`;
+/// `session_decommission_not_found_errors`.
+async fn session_decommission_line(
+    client: &reqwest::Client,
+    url: &str,
+    id: &str,
+) -> anyhow::Result<String> {
+    let outcome = super::managed_route::executor(client, url)
+        .decommission_managed_id(id)
+        .await?;
+    Ok(decommission_message(
+        &outcome.summary.id,
+        outcome.workspace_removed,
+    ))
+}
+
 /// `tm session decommission <id>` — full teardown (may or may not remove workspace).
 ///
 /// Why: an adopted or local-path workspace was never tm's to delete, a worktree
 /// holding unsaved work is refused, and a removal can fail — so decommission
 /// often leaves the workspace on disk, and only the daemon knows which happened.
-/// This handler reports that verdict rather than assuming removal. When the
-/// workspace WAS removed and a pre-decommission path came back, it also runs
-/// `git worktree prune` on the parent directory so the base repo's worktree
-/// bookkeeping is cleaned up immediately instead of at the next GC pass.
-/// What: POSTs `/api/v1/sessions/managed/{id}/decommission`, decodes the typed
-/// [`ManagedDecommissionOutcome`], and prints
-/// [`super::managed_route::decommission_message`]'s line for the verdict it
-/// carries. Only `workspace_removed == Some(true)` triggers the
-/// `git worktree prune` (best-effort; errors are suppressed).
+/// This handler reports that verdict rather than assuming removal.
+/// What: prints [`session_decommission_line`]'s rendering of the daemon's
+/// verdict. The daemon call and the base-repo worktree cleanup both live in the
+/// shared implementation that helper calls (#5913).
 /// A missing id is a genuine failure to decommission the requested session
 /// (#2457) — printing "not found" and returning `Ok(())` let a script/CI
-/// check treat it as success, so this now returns `Err` (non-zero exit)
-/// instead. `prune.rs`'s bulk teardown loop (the only other caller) already
-/// propagates this `Err` with `?`, matching its established fail-closed
+/// check treat it as success, so this returns `Err` (non-zero exit) instead.
+/// `prune.rs`'s bulk teardown loop (the only other caller) catches that `Err`
+/// and records the row as failed, matching its established fail-closed
 /// convention (#1508).
 /// Test: `session_decommission_prints_daemon_verdict_over_http`;
 /// `session_decommission_not_found_errors` covers the #2457 exit-code fix; the
@@ -553,34 +583,7 @@ pub(crate) async fn session_decommission(
     url: &str,
     id: String,
 ) -> anyhow::Result<()> {
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/decommission"))
-        .send()
-        .await?;
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        anyhow::bail!("managed session '{id}' not found");
-    }
-    // #5899: decode the typed response and render via the ONE message helper the
-    // routed `tm session decommission` verb also uses — key-fishing through a raw
-    // `serde_json::Value` here, and a hardcoded string there, is how the two paths
-    // drifted into disagreeing about what happened.
-    let outcome: ManagedDecommissionOutcome = resp.error_for_status()?.json().await?;
-    println!(
-        "{}",
-        decommission_message(&outcome.summary.id, outcome.workspace_removed)
-    );
-    if outcome.workspace_removed == Some(true) {
-        // Prune the parent of the (now-deleted) workspace so the base repo's
-        // worktree bookkeeping is cleaned up immediately.
-        if let Some(ws_was) = outcome.workspace_path_was.as_deref() {
-            let parent = std::path::Path::new(ws_was)
-                .parent()
-                .unwrap_or(std::path::Path::new(ws_was));
-            let _ = std::process::Command::new("git")
-                .args(["-C", &parent.to_string_lossy(), "worktree", "prune"])
-                .output();
-        }
-    }
+    println!("{}", session_decommission_line(client, url, &id).await?);
     Ok(())
 }
 
