@@ -199,13 +199,17 @@ pub enum Verb {
 /// (#5822).
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum AddTarget {
-    /// A GitHub repository, checked with your `gh` credential.
+    /// A repository — on GitHub, or already checked out on this machine.
     ///
     /// Application, database-schema and migration, infrastructure, shared-library
     /// and config repositories all belong here.
+    ///
+    /// #6001: an ABSOLUTE path names a checkout on disk, checked by reading it
+    /// rather than with your `gh` credential; anything else is a GitHub
+    /// owner/name. The audit clones from the path and never modifies it.
     Repo {
-        /// The repository, as owner/name.
-        #[arg(value_name = "OWNER/NAME")]
+        /// The repository, as owner/name or an absolute path to a checkout.
+        #[arg(value_name = "OWNER/NAME|PATH")]
         name: String,
     },
     /// A JIRA project or Linear team, checked with the configured credential.

@@ -318,6 +318,9 @@ fn split_targets(
         .iter()
         .filter_map(|target| match target {
             Target::Repo { name_with_owner } => Some(name_with_owner.clone()),
+            // #6001: a local target's id IS its path, which is exactly the spec
+            // `clone_all` resolves — so acquisition takes one list, not two.
+            Target::LocalRepo { .. } => Some(target.id()),
             Target::Board { .. } => None,
         })
         .collect();

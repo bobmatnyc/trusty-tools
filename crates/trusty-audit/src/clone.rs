@@ -13,11 +13,15 @@
 //! step. Two further facts settle the mechanism rather than merely permitting
 //! it. `gh repo clone` configures that helper itself, so a private repository
 //! clones with no token ever passing through this crate's hands or its argv.
-//! And this workspace has no common entry point for spawning `git` —
-//! `git grep 'Command::new("git")' -- crates/*/src` returns nothing — so
-//! reaching for `git` directly would mean founding a second process-spawning
-//! domain, which is exactly what CLAUDE.md's common-entry-point rule forbids
-//! doing casually. `gh` already has one: `trusty_common::gh::GhCommand` (#5475).
+//! And `gh` has a common entry point in this workspace —
+//! `trusty_common::gh::GhCommand` (#5475) — while `git` has none, so reaching
+//! for `git` where `gh` answers would be a second implementation of one
+//! capability. That reasoning holds for a REMOTE and stops there: `gh repo
+//! clone` takes an `owner/repo` and cannot address a path, so #6001's local
+//! source spawns `git` in the one function [`crate::local_repo`] keeps it in.
+//! `trusty-audit` is a leaf crate and that spawn is not shared with any other,
+//! so consolidating it is a question for whoever founds a common `git` entry
+//! point, not a reason to leave a 1.4 GB checkout unreadable.
 //!
 //! **What a caller may assume, and may not.** A directory under
 //! [`Area::Repos`] is a COMPLETED, VERIFIED checkout, always. Work happens
@@ -32,6 +36,14 @@
 //! sequence aborts only when EVERY repository failed, which is the one case
 //! where continuing would produce a report about nothing.
 //!
+//! **Two kinds of source, one downstream** (#6001). An entry in the request is
+//! either a GitHub `owner/repo` or an ABSOLUTE path to a checkout already on
+//! disk — [`crate::local_repo::is_local_spec`] owns that decision, and
+//! [`crate::local_repo`] owns the invariant that the operator's checkout is
+//! never modified. The fork lives in [`resolve`] and [`acquire`] and nowhere
+//! else: a local source is acquired into staging, verified and promoted by the
+//! same three steps, so nothing past this module can tell the two apart.
+//!
 //! **Acquiring is selecting** (#5556). What lands here is what the sweep audits:
 //! [`clone_all`] records the usable checkouts in `state/`[`run::SELECTION_FILE`]
 //! so `taudit clone …` and `taudit run` are one chain rather than two stages
@@ -42,9 +54,10 @@
 
 use std::path::{Path, PathBuf};
 
-use trusty_common::gh::{GhCommand, GhError};
+use trusty_common::gh::GhCommand;
 
 use crate::error::AuditError;
+use crate::local_repo;
 use crate::progress::{Operation, Progress, UnitOutcome};
 use crate::run::{self, SelectedRepo};
 use crate::workdir::{Area, WorkDir};
@@ -193,6 +206,74 @@ pub struct CloneReport {
 pub fn destination(work: &WorkDir, name_with_owner: &str) -> Result<PathBuf, AuditError> {
     let (owner, name) = split_name(name_with_owner)?;
     Ok(work.path(Area::Repos).join(owner).join(name))
+}
+
+/// Where one acquisition spec comes from, and what it is audited as.
+///
+/// Why: #6001 — an entry in the request is now either a GitHub `owner/repo` or
+/// an absolute path to a checkout already on disk, and the fork has to be made
+/// exactly once. Resolving it here, ahead of the loop, is what lets every name
+/// be validated and every destination be checked for collisions before ANY
+/// clone runs — the property `a_bad_name_is_refused_before_any_clone_runs`
+/// already held for names.
+/// Test: `super::clone_tests::a_local_path_is_acquired_under_the_local_owner`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Source {
+    /// `gh repo clone <owner/name>`.
+    Remote,
+    /// `git clone <path>`, reading the operator's checkout and never writing it.
+    Local(PathBuf),
+}
+
+/// Split one request entry into what it is audited as and where it comes from.
+///
+/// [`local_repo::is_local_spec`] owns the disambiguation, so `registry::parse`
+/// and this cannot decide differently about the same string.
+fn resolve(spec: &str) -> Result<(String, Source), AuditError> {
+    if !local_repo::is_local_spec(spec) {
+        return Ok((spec.to_owned(), Source::Remote));
+    }
+    let path = local_repo::normalize(spec);
+    let name = local_repo::derive_name(&path)?;
+    Ok((name, Source::Local(path)))
+}
+
+/// Refuse a request in which two entries would occupy one checkout directory.
+///
+/// Why: #6001. `clone_all` REUSES a directory that is already under `repos/`,
+/// which is correct for a re-run and wrong for a collision — `/srv/a/apex` and
+/// `/srv/b/apex` both derive `local/apex`, so the second would be reported as
+/// audited having read the first one's history. Refusing the whole request is
+/// the same shape as the name check beside it: nothing is acquired when the
+/// request cannot be honoured as asked.
+/// Test: `super::clone_tests::two_paths_with_one_basename_are_refused_together`.
+fn refuse_collisions(planned: &[(String, Source, PathBuf, PathBuf)]) -> Result<(), AuditError> {
+    for (index, (name, source, dest, _)) in planned.iter().enumerate() {
+        for (other_name, other_source, other_dest, _) in &planned[index + 1..] {
+            if dest != other_dest {
+                continue;
+            }
+            // The same repository listed twice is the idempotent case, not a
+            // collision: it is one checkout either way.
+            if source == other_source {
+                continue;
+            }
+            return Err(AuditError::CollidingCheckouts {
+                first: spec_of(name, source),
+                second: spec_of(other_name, other_source),
+                name: name.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// What an operator typed for this entry, for a message that points at it.
+fn spec_of(name: &str, source: &Source) -> String {
+    match source {
+        Source::Remote => name.to_owned(),
+        Source::Local(path) => path.display().to_string(),
+    }
 }
 
 /// Where a clone is built before it is renamed into place.
@@ -381,13 +462,15 @@ fn verify_checkout(tree: &Path) -> Result<(), String> {
 /// Test: `super::clone_tests::a_failed_clone_leaves_nothing_behind`,
 /// `super::clone_tests::a_successful_clone_is_renamed_into_place`,
 /// `super::clone_tests::a_commitless_clone_is_not_a_usable_checkout`.
-fn finish_one(dest: &Path, staged: &Path, outcome: Result<(), GhError>) -> (CloneState, u64, bool) {
+fn finish_one(dest: &Path, staged: &Path, outcome: Result<(), String>) -> (CloneState, u64, bool) {
     let discard = |state: CloneState| {
         let _ = std::fs::remove_dir_all(staged);
         (state, 0, true)
     };
-    if let Err(source) = outcome {
-        return discard(CloneState::Failed(source.to_string()));
+    // #6001: the reason arrives as a string rather than a `GhError`, because
+    // acquisition now has two mechanisms and only one of them is `gh`.
+    if let Err(reason) = outcome {
+        return discard(CloneState::Failed(reason));
     }
     // #5215: verify BEFORE the rename, so an unusable tree never occupies the
     // destination even briefly.
@@ -504,9 +587,12 @@ fn record_selection(work: &WorkDir, report: &CloneReport) -> Result<(), AuditErr
 ///
 /// [`AuditError::UnsafeArea`] for a `repos/` area, owner directory, or
 /// destination that is not a real directory, [`AuditError::InvalidRepoName`]
-/// for anything that is not a plain `owner/name`, [`AuditError::WorkDir`] for a
-/// directory that cannot be made or a selection that cannot be recorded, and
-/// [`AuditError::AllClonesFailed`] when nothing at all could be cloned.
+/// for anything that is neither a plain `owner/name` nor an absolute path,
+/// [`AuditError::LocalRepoUnusable`] for a path with no name a checkout can be
+/// made under, [`AuditError::CollidingCheckouts`] when two entries would occupy
+/// one destination, [`AuditError::WorkDir`] for a directory that cannot be made
+/// or a selection that cannot be recorded, and [`AuditError::AllClonesFailed`]
+/// when nothing at all could be cloned.
 pub async fn clone_all(
     work: &WorkDir,
     repos: &[String],
@@ -522,10 +608,23 @@ pub async fn clone_all(
 
     // #5215: every name is validated before ANY clone runs, so a typo in the
     // last entry cannot leave the first ten half-acquired.
-    let planned: Vec<(String, PathBuf, PathBuf)> = repos
+    // #6001: and every spec is resolved to its source in the same pass, so the
+    // two shapes diverge exactly once.
+    let planned: Vec<(String, Source, PathBuf, PathBuf)> = repos
         .iter()
-        .map(|r| Ok((r.clone(), destination(work, r)?, staging(work, r)?)))
+        .map(|spec| {
+            let (name, source) = resolve(spec)?;
+            Ok((
+                name.clone(),
+                source,
+                destination(work, &name)?,
+                staging(work, &name)?,
+            ))
+        })
         .collect::<Result<_, AuditError>>()?;
+    // #6001: two entries sharing a destination is refused here rather than
+    // silently reused as one another's checkout.
+    refuse_collisions(&planned)?;
 
     // #5823: announced only once every name has validated, so a display never
     // opens on an acquisition that a typo is about to refuse.
@@ -533,7 +632,7 @@ pub async fn clone_all(
     progress.operation_started(Operation::CloneRepos, total);
     let mut out = Vec::with_capacity(total);
     let mut spent: u64 = 0;
-    for (index, (name_with_owner, dest, staged)) in planned.into_iter().enumerate() {
+    for (index, (name_with_owner, source, dest, staged)) in planned.into_iter().enumerate() {
         progress.unit_started(
             Operation::CloneRepos,
             name_with_owner.as_str(),
@@ -585,11 +684,7 @@ pub async fn clone_all(
             })?;
         }
 
-        let ran = clone_command(&name_with_owner, &staged)
-            .output()
-            .await
-            .and_then(|o| o.ok())
-            .map(|_| ());
+        let ran = acquire(&name_with_owner, &source, &staged).await;
         let (state, bytes, complete) = finish_one(&dest, &staged, ran);
         spent = spent.saturating_add(bytes);
         announce(progress, &name_with_owner, &state);
@@ -606,6 +701,36 @@ pub async fn clone_all(
     let report = summarize(out)?;
     record_selection(work, &report)?;
     Ok(report)
+}
+
+/// Fetch one repository into `staged`, whichever kind of source it has.
+///
+/// Why: #6001 — the one place the two mechanisms differ. A LOCAL source is
+/// re-inspected here even though registration already proved it: a sweep runs
+/// hours after an `add`, and a source that has since been deleted, replaced
+/// with a shallow clone, or truncated must become a named gap rather than a
+/// thin report. That check is cheap (three `git rev-parse` reads) against a
+/// clone that is not.
+/// What: `gh repo clone` for a remote, `git clone <path>` for a local one.
+/// Either failure comes back as the reason `finish_one` records, so a bad
+/// source is one repository's gap and not the sweep's abort.
+/// Test: `super::clone_tests::a_local_path_is_acquired_under_the_local_owner`,
+/// `super::clone_tests::a_source_that_went_bad_after_registration_is_a_gap`.
+async fn acquire(name_with_owner: &str, source: &Source, staged: &Path) -> Result<(), String> {
+    match source {
+        Source::Remote => clone_command(name_with_owner, staged)
+            .output()
+            .await
+            .and_then(|o| o.ok())
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        Source::Local(path) => {
+            local_repo::inspect(path)
+                .await
+                .map_err(|reason| format!("{} is no longer usable: {reason}", path.display()))?;
+            local_repo::clone_into(path, staged).await
+        }
+    }
 }
 
 /// Tell a watching front end how one repository ended.
@@ -632,6 +757,8 @@ fn announce(progress: &Progress, name_with_owner: &str, state: &CloneState) {
 #[cfg(test)]
 mod clone_tests {
     use super::*;
+    use crate::local_repo::local_repo_tests::{run_git, source_repo};
+    use trusty_common::gh::GhError;
 
     fn work_in(dir: &Path) -> WorkDir {
         let work = WorkDir::new(dir.join("work"));
@@ -965,7 +1092,7 @@ mod clone_tests {
         plant_checkout(&staged);
         std::fs::write(staged.join("README.md"), b"partial").expect("write");
 
-        let (state, bytes, _) = finish_one(&dest, &staged, Err(gh_failure()));
+        let (state, bytes, _) = finish_one(&dest, &staged, Err(gh_failure().to_string()));
         assert!(matches!(state, CloneState::Failed(_)), "{state:?}");
         assert_eq!(bytes, 0);
         assert!(
@@ -1145,6 +1272,150 @@ mod clone_tests {
             report.total_bytes
         );
     }
+    /// 🔴 #6001: the whole local path, end to end. A path registers, clones into
+    /// `repos/local/<basename>`, verifies, and is recorded as the sweep's
+    /// selection — indistinguishable downstream from a remotely-cloned one.
+    ///
+    /// Against `7eef4bb9b` the spec reaches `split_name`, which refuses a
+    /// leading `/`, so `clone_all` returns `InvalidRepoName` and nothing is
+    /// acquired at all.
+    #[tokio::test]
+    async fn a_local_path_is_acquired_under_the_local_owner() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let src = tmp.path().join("apex");
+        source_repo(&src);
+
+        let report = clone_all(
+            &work,
+            &[src.display().to_string()],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("a local checkout is a usable source");
+
+        assert_eq!(report.repos[0].state, CloneState::Cloned);
+        assert_eq!(report.repos[0].name_with_owner, "local/apex");
+        assert_eq!(
+            report.repos[0].path,
+            work.path(Area::Repos).join("local/apex")
+        );
+        assert!(report.gaps.is_empty(), "{:?}", report.gaps);
+        assert!(report.total_bytes > 0, "the report must state disk use");
+
+        // The acquired tree is a whole checkout with the source's history, not
+        // a truncated one — #5916's contract, held for this mechanism too.
+        let acquired = &report.repos[0].path;
+        assert!(!acquired.join(".git/shallow").exists());
+        assert_eq!(run_git(acquired, &["rev-list", "--count", "HEAD"]), "2");
+
+        // #5556: acquiring is selecting, on this path as much as the other.
+        let selected = run::load_selection(&work).expect("the sweep's input is there");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "local/apex");
+        assert_eq!(selected[0].path, Path::new("repos/local/apex"));
+    }
+
+    /// 🔴 Two local paths with one basename derive one destination, and
+    /// `clone_all` REUSES a directory that is already there — so without this
+    /// guard the second is reported as audited having read the first one's
+    /// history. Refused as a whole request, nothing acquired.
+    #[tokio::test]
+    async fn two_paths_with_one_basename_are_refused_together() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let first = tmp.path().join("a/apex");
+        let second = tmp.path().join("b/apex");
+        source_repo(&first);
+        source_repo(&second);
+
+        let err = clone_all(
+            &work,
+            &[first.display().to_string(), second.display().to_string()],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect_err("one destination for two repositories must be refused");
+        let AuditError::CollidingCheckouts { name, .. } = &err else {
+            panic!("expected CollidingCheckouts, got {err:?}");
+        };
+        assert_eq!(name, "local/apex");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(&first.display().to_string()),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&second.display().to_string()),
+            "{rendered}"
+        );
+        assert!(
+            !work.path(Area::Repos).join("local").exists(),
+            "nothing may be acquired when the request is refused"
+        );
+    }
+
+    /// The same path twice is one checkout, not a collision — a `repos.txt` an
+    /// operator listed twice must still run.
+    #[tokio::test]
+    async fn the_same_path_twice_is_not_a_collision() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let src = tmp.path().join("apex");
+        source_repo(&src);
+        let spec = src.display().to_string();
+
+        let report = clone_all(
+            &work,
+            &[spec.clone(), format!("{spec}/")],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("one repository listed twice is one repository");
+        assert_eq!(report.repos[0].state, CloneState::Cloned);
+        assert_eq!(report.repos[1].state, CloneState::Reused);
+    }
+
+    /// 🔴 A source that was fine at registration and is not fine at sweep time
+    /// becomes a NAMED gap. Reporting it as cloned is the fail-open this crate
+    /// has shipped three times.
+    #[tokio::test]
+    async fn a_source_that_went_bad_after_registration_is_a_gap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        let good = tmp.path().join("apex");
+        source_repo(&good);
+        let gone = tmp.path().join("deleted-since");
+
+        let report = clone_all(
+            &work,
+            &[good.display().to_string(), gone.display().to_string()],
+            &CloneOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("one usable source keeps the sequence going");
+        assert_eq!(report.repos[0].state, CloneState::Cloned);
+        assert!(
+            matches!(report.repos[1].state, CloneState::Failed(_)),
+            "{:?}",
+            report.repos[1].state
+        );
+        assert_eq!(report.gaps.len(), 1);
+        assert!(
+            report.gaps[0].contains("does not exist"),
+            "{:?}",
+            report.gaps
+        );
+        assert!(
+            !work.path(Area::Repos).join("local/deleted-since").exists(),
+            "a failed source must not appear as a checkout"
+        );
+    }
+
     /// Why (#5823): every arm of the acquisition loop ends a unit, and two of
     /// them return early. A missed one leaves a display holding a repository
     /// the loop moved past minutes ago — and reports it as still cloning.

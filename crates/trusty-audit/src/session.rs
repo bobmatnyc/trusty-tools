@@ -648,15 +648,15 @@ impl Session {
                 path: self.config_path.clone(),
             }
         })?;
-        if registry::engagement_targets(Some(&config), &self.work)?
-            .iter()
-            .any(|t| t.same_as(&target))
-        {
+        let registered = registry::engagement_targets(Some(&config), &self.work)?;
+        if registered.iter().any(|t| t.same_as(&target)) {
             return Ok(Registration {
                 target,
                 already_registered: true,
             });
         }
+        // #6001: two local paths sharing a basename share a checkout directory.
+        Self::refuse_shared_checkout(&registered, &target)?;
         // #5822: validation runs OUTSIDE the lock — it reaches the network under
         // a 30s ceiling, and holding the lock across that would stall every
         // other `add` for this engagement behind one unreachable site.
@@ -677,6 +677,47 @@ impl Session {
             // first; from this call's side that is the idempotent no-op.
             already_registered: !inserted,
         })
+    }
+
+    /// Refuse a registration that would share a checkout directory with an
+    /// existing one.
+    ///
+    /// Why: #6001. A local path is audited under `local/<basename>`, so
+    /// `/srv/a/apex` and `/srv/b/apex` are two distinct targets — different
+    /// ids, so [`Target::same_as`] correctly says they are not the same thing —
+    /// that resolve to ONE destination. `crate::clone::clone_all` then reuses
+    /// whichever landed first and reports the second as audited, having read the
+    /// first one's history. Catching it at registration is what puts the refusal
+    /// in front of the operator who can still choose, rather than in a gap line
+    /// an hour into a sweep.
+    ///
+    /// [`crate::clone::clone_all`] refuses the same shape independently, because
+    /// a hand-edited `engagement.toml` never passes through here.
+    /// What: compares derived names, and only among local targets — a remote
+    /// `owner/repo` cannot collide with a path, because its owner is GitHub's
+    /// and a local one is always `local/`.
+    /// Test: `super::session_tests::a_second_local_path_with_the_same_basename_is_refused`.
+    fn refuse_shared_checkout(
+        registered: &[registry::Target],
+        incoming: &registry::Target,
+    ) -> Result<(), AuditError> {
+        let registry::Target::LocalRepo { path } = incoming else {
+            return Ok(());
+        };
+        let name = crate::local_repo::derive_name(path)?;
+        for existing in registered {
+            let registry::Target::LocalRepo { path: other } = existing else {
+                continue;
+            };
+            if crate::local_repo::derive_name(other).ok().as_deref() == Some(name.as_str()) {
+                return Err(AuditError::CollidingCheckouts {
+                    first: other.display().to_string(),
+                    second: path.display().to_string(),
+                    name,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Run one registry critical section off the async runtime's thread.
@@ -1874,6 +1915,76 @@ trusty-review = "0.15.1"
             !Registry::path(session.work_dir()).exists(),
             "a refused repository registration wrote a registry file"
         );
+    }
+
+    /// 🔴 #6001: registering a local checkout, end to end through the one door
+    /// every front end gets — with a `gh` that cannot answer, because the
+    /// machine this exists for reaches no GitHub at all.
+    #[tokio::test]
+    async fn a_local_checkout_registers_with_no_github_credential() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("apex");
+        crate::local_repo::local_repo_tests::source_repo(&src);
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS)
+            .with_repo_probe(validate::RepoProbe::unusable());
+
+        let outcome = session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: src.display().to_string(),
+            })
+            .await
+            .expect("a real checkout registers without a credential");
+        let Outcome::Registered(registration) = outcome else {
+            panic!("AddTarget must yield a Registered outcome");
+        };
+        assert!(!registration.already_registered);
+        assert_eq!(registration.target.id(), src.display().to_string());
+    }
+
+    /// 🔴 Two checkouts with one basename would share `repos/local/apex`, so the
+    /// second would be reported as audited having read the first's history.
+    /// Refused at registration, naming both paths; nothing is written.
+    #[tokio::test]
+    async fn a_second_local_path_with_the_same_basename_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = tmp.path().join("a/apex");
+        let second = tmp.path().join("b/apex");
+        crate::local_repo::local_repo_tests::source_repo(&first);
+        crate::local_repo::local_repo_tests::source_repo(&second);
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS)
+            .with_repo_probe(validate::RepoProbe::unusable());
+
+        for path in [&first, &second] {
+            let outcome = session
+                .execute(Command::AddTarget {
+                    kind: TargetKind::Repo,
+                    spec: path.display().to_string(),
+                })
+                .await;
+            if path == &first {
+                outcome.expect("the first registers");
+                continue;
+            }
+            let err = outcome.expect_err("the second must not share the first's checkout");
+            let AuditError::CollidingCheckouts { name, .. } = &err else {
+                panic!("expected CollidingCheckouts, got {err:?}");
+            };
+            assert_eq!(name, "local/apex");
+            assert!(
+                err.to_string().contains(&first.display().to_string()),
+                "{err}"
+            );
+        }
+
+        let registered = session
+            .execute(Command::ListTargets)
+            .await
+            .expect("the listing reads");
+        let Outcome::Targets(list) = registered else {
+            panic!("ListTargets must yield a Targets outcome");
+        };
+        assert_eq!(list.targets.len(), 1, "{:?}", list.targets);
     }
 
     /// The message names the field to set — the recipient is not the author of

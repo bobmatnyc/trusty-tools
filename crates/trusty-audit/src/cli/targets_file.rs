@@ -38,7 +38,8 @@ pub const REPOS_FILE: &str = "repos.txt";
 pub const BOARDS_FILE: &str = "boards.txt";
 
 /// The shape a repository line may take, quoted back on a refusal.
-const REPO_SHAPE: &str = "expected owner/repo, or a https://github.com/owner/repo URL";
+const REPO_SHAPE: &str = "expected owner/repo, an absolute path to a checkout on this machine, \
+                          or a https://github.com/owner/repo URL";
 
 /// What a repository URL that is not GitHub's is told.
 const NOT_GITHUB: &str = "only github.com repository URLs are read — expected \
@@ -260,6 +261,15 @@ fn spec_of(kind: TargetKind, entry: &str) -> Result<String, String> {
 /// literal repository name `api.git`, a target that looks valid and clones
 /// nothing.
 fn repo_spec(entry: &str) -> Result<String, &'static str> {
+    // #6001: an absolute path is a checkout on disk and reaches `registry::parse`
+    // verbatim. It must skip every normalization below — `/srv/apex.git` is a
+    // bare mirror whose directory really is named `apex.git`, and the owner/name
+    // split would make `srv` an owner. The parse stays all-or-nothing either
+    // way: a path that is not a repository is refused by `crate::validate` at
+    // registration, naming which condition failed.
+    if crate::local_repo::is_local_spec(entry) {
+        return Ok(entry.to_owned());
+    }
     let (path, from_url) = match scheme_stripped(entry) {
         Some(rest) => (github_path(rest)?, true),
         None => (entry, false),
@@ -475,6 +485,41 @@ mod targets_file_tests {
         );
     }
 
+    /// 🔴 #6001: a `repos.txt` line may be an absolute path, and it must reach
+    /// the registry VERBATIM — no `.git` stripping, no owner/name split.
+    ///
+    /// The parse is all-or-nothing, so against `7eef4bb9b` one path line
+    /// refuses every repository in the file: `/srv/apex` splits to an empty
+    /// owner and `registry::parse` rejects it. `/srv/apex.git` is the sharper
+    /// case — the normalization would rewrite it to a directory that does not
+    /// exist, and the operator would get a refusal naming a path they never
+    /// listed.
+    #[test]
+    fn an_absolute_path_reaches_the_registry_unchanged() {
+        for entry in ["/srv/apex", "/srv/apex.git", "/srv/deep/nested/apex"] {
+            assert_eq!(
+                spec_of(TargetKind::Repo, entry),
+                Ok(entry.to_owned()),
+                "{entry} must reach the registry verbatim"
+            );
+        }
+    }
+
+    /// And a file mixing the two forms parses as one list, because a path line
+    /// halting the read is the same all-or-nothing failure a bad line is.
+    #[test]
+    fn a_path_and_a_remote_are_read_from_one_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            specs(detected(
+                tmp.path(),
+                Some("acme/api\n/srv/apex\nhttps://github.com/acme/web.git\n"),
+                None
+            )),
+            ["acme/api", "/srv/apex", "acme/web"]
+        );
+    }
+
     /// A URL and its short form are the same target, so a file mixing the two
     /// registers one entry per repository rather than two.
     #[test]
@@ -486,6 +531,12 @@ mod targets_file_tests {
     }
 
     /// Every refusal, each naming what it wanted instead.
+    ///
+    /// #6001 moved `/acme/api` out of this list: an absolute path is now a
+    /// checkout on disk, and whether THAT path is a usable repository is
+    /// `crate::validate`'s question — asked at registration, where the refusal
+    /// can name the condition that failed. A relative `acme/../etc` is still a
+    /// malformed `owner/repo` and still refused here.
     #[test]
     fn entries_that_are_not_targets_are_refused() {
         for entry in [
@@ -493,7 +544,6 @@ mod targets_file_tests {
             "acme/api/tree/main",
             "https://gitlab.com/acme/api",
             "https://github.com/acme",
-            "/acme/api",
             "acme/../etc",
         ] {
             assert!(

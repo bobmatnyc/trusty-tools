@@ -689,6 +689,53 @@ pub enum AuditError {
         reason: String,
     },
 
+    /// A local path was registered and it is not a source this audit can read.
+    ///
+    /// Why: #6001. A remote repository is proved by a GitHub probe, and a path
+    /// has no such authority to ask — so the checks are the ones that decide
+    /// whether the sweep would produce a report worth anything, and every one of
+    /// them refuses rather than degrades. "Registered, then silently empty" is
+    /// the fail-open shape this crate has already shipped three times (#5215,
+    /// #5916, #5896).
+    /// What: names the path and the ONE condition that failed, in
+    /// `crate::local_repo::inspect`'s own words — "it has no commits", "it is a
+    /// shallow clone", "it is a subdirectory of the repository at …".
+    /// Test: `crate::local_repo::local_repo_tests::every_unusable_source_is_refused_by_name`,
+    /// `crate::validate::validate_tests::an_unusable_local_source_names_what_failed`.
+    #[error("{path} is not a repository this audit can read: {reason}; nothing was registered")]
+    LocalRepoUnusable {
+        /// The path that was refused.
+        path: PathBuf,
+        /// Which condition failed, as one clause.
+        reason: String,
+    },
+
+    /// Two registered targets would be acquired into one checkout directory.
+    ///
+    /// Why: #6001. A local path is audited under `local/<basename>`, so
+    /// `/srv/a/apex` and `/srv/b/apex` derive one name and one destination —
+    /// and [`crate::clone::clone_all`] reuses a directory that is already
+    /// there, so the second registration would be reported as audited having
+    /// read the first one's history. That is the wrong-corpus failure #5896
+    /// produced, so it is a refusal at both gates rather than a rename.
+    /// What: names both specs and the destination they share. Nothing was
+    /// registered, and nothing was acquired.
+    /// Test: `crate::clone::clone_tests::two_paths_with_one_basename_are_refused_together`,
+    /// `crate::session::session_tests::a_second_local_path_with_the_same_basename_is_refused`.
+    #[error(
+        "{first} and {second} would both be audited as {name}, so one would be reported \
+         having read the other's history — register one of them under a different \
+         directory name; nothing was changed"
+    )]
+    CollidingCheckouts {
+        /// The target that claimed the name first.
+        first: String,
+        /// The target that would have shared it.
+        second: String,
+        /// The `owner/name` both resolve to.
+        name: String,
+    },
+
     /// The target registry carries fewer entries than it declares.
     ///
     /// The registry's half of [`AuditError::TruncatedSelection`], for the same
