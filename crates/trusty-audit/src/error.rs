@@ -571,7 +571,7 @@ pub enum AuditError {
     /// its own reason. The entry is quoted; a targets file holds no credential.
     /// Test: `crate::cli::targets_file::targets_file_tests::one_bad_line_refuses_the_whole_read`.
     #[error(
-        "these lines are not audit targets:\n{bad}\n\nNothing was registered. Fix them and run \
+        "these lines are not audit targets:\n{bad}\nNothing was registered. Fix them and run \
          `trusty-audit` again — your OpenRouter key is saved, so you will not be asked for it \
          again."
     )]

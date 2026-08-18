@@ -280,9 +280,12 @@ pub async fn register_targets(
 /// not configured — is the ordinary refusal the prompt loop already tolerates,
 /// and the counts on the review menu are where the operator sees the shortfall.
 /// What: one [`register_one`] per spec, then the lines to show: every refusal,
-/// then where the list came from and what it produced. Returning the lines
-/// rather than printing them is what lets the no-terminal launch print the same
-/// text to stderr (`main.rs`).
+/// then where the list came from. It states no COUNT — the caller does, from
+/// the registry rather than from the lines read. A file naming one repository
+/// twice, in two spellings, reads as two lines and registers one target, and a
+/// count taken from the lines would tell the operator two repositories will be
+/// cloned. Returning the lines rather than printing them is what lets the
+/// no-terminal launch print the same text to stderr (`main.rs`).
 /// Test: `super::registration_tests::a_targets_file_registers_without_prompting`,
 /// `super::registration_tests::a_refused_line_does_not_stop_the_rest_of_the_file`.
 ///
@@ -295,18 +298,12 @@ pub async fn adopt(
     detected: &targets_file::Detected,
 ) -> Result<Vec<String>, AuditError> {
     let mut lines = Vec::new();
-    let mut registered = Vec::new();
     for spec in &detected.specs {
-        match register_one(session, spec).await {
-            Ok(target) => registered.push(target),
-            Err(refusal) => lines.push(format!("not registered: {refusal}")),
+        if let Err(refusal) = register_one(session, spec).await {
+            lines.push(format!("not registered: {refusal}"));
         }
     }
-    lines.push(format!(
-        "Read {} from {}.",
-        review::summary(&registered),
-        detected.named()
-    ));
+    lines.push(format!("Read the targets from {}.", detected.named()));
     Ok(lines)
 }
 
@@ -334,8 +331,10 @@ pub async fn adopt_without_a_terminal(
         return Ok(None);
     };
     let mut lines = adopt(session, &detected).await?;
-    // The full list, because nobody can ask for it here.
+    // The counts and the full list, because nobody can ask for either here.
+    // Both come from the registry, which is what the sweep will read.
     let registered = review::registered(session).await?;
+    lines.push(review::summary(&registered));
     if !registered.is_empty() {
         lines.push(review::listing(&registered));
     }
@@ -759,10 +758,38 @@ pub(crate) mod registration_tests {
             "{lines:?}"
         );
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("2 repositories to clone, 0 boards to collect from")),
-            "the counts must state what actually landed: {lines:?}"
+            lines.iter().any(|l| l.contains(targets_file::REPOS_FILE)),
+            "the operator must be told where the list came from: {lines:?}"
+        );
+    }
+
+    /// 🔴 The counts come from the REGISTRY, never from the lines read.
+    ///
+    /// A file naming one repository twice — the URL an operator pasted and the
+    /// short form they typed — is two lines and one target. A count taken from
+    /// the lines tells them two repositories will be cloned, which is the
+    /// misreported coverage this feature exists to remove, one direction over.
+    /// Found by a smoke run of the real binary against a real `repos.txt`.
+    #[tokio::test]
+    async fn one_repository_named_twice_counts_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = accepting_session(tmp.path());
+        seed_targets_file(
+            &session,
+            targets_file::REPOS_FILE,
+            "https://github.com/acme/api.git\nacme/api\n",
+        );
+
+        let lines = adopt_without_a_terminal(&session)
+            .await
+            .expect("adoption runs")
+            .expect("the file is present");
+
+        assert_eq!(registered_ids(&session), vec!["acme/api"]);
+        let shown = lines.join("\n");
+        assert!(
+            shown.contains("1 repository to clone"),
+            "two spellings of one repository must count once: {shown}"
         );
     }
 
