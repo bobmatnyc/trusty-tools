@@ -54,7 +54,7 @@ pub(crate) const MCP_SERVER_KEY: &str = "trusty-memory";
 /// registration a client lists as enabled while the process behind it either
 /// never initializes MCP or carries a flag that is about to stop parsing.
 /// What: the single element `serve`.
-/// Test: `patch_one_writes_the_bare_serve_entrypoint`,
+/// Test: `patch_one_repairs_a_legacy_serve_stdio_entry`,
 /// `setup_codex_writes_the_serve_entrypoint`,
 /// `setup_codex_repairs_a_legacy_stdio_registration`.
 pub(crate) const MCP_SERVER_ARGS: &[&str] = &["serve"];
