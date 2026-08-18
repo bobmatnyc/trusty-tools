@@ -305,24 +305,30 @@ impl DaemonClient {
     /// decommission claim removal (#5899).
     /// What: POSTs to the decommission endpoint and returns the whole response —
     /// tombstone summary plus `workspace_removed` / `workspace_path_was` — as a
-    /// [`ManagedDecommissionOutcome`].
+    /// [`ManagedDecommissionOutcome`]. A 404 becomes an `Err` naming the id, so
+    /// every decommission caller inherits one "missing session is a hard failure"
+    /// contract instead of restating it (#5913).
     /// Test: `executor_decommission_reports_daemon_workspace_verdict` (real
-    /// daemon round-trip), `decommission_outcome_round_trips_daemon_response`;
+    /// daemon round-trip), `decommission_outcome_round_trips_daemon_response`,
+    /// `session_decommission_not_found_errors`;
     /// live HTTP via `tests/session_manager_mvp.rs`.
     pub async fn decommission_managed_session(
         &self,
         id: &str,
     ) -> anyhow::Result<ManagedDecommissionOutcome> {
         let url = format!("{}/api/v1/sessions/managed/{id}/decommission", self.base);
-        let resp = self
-            .http
-            .post(&url)
-            .send()
-            .await?
+        let resp = self.http.post(&url).send().await?;
+        // #5913: name the 404 here, once. `prune.rs`'s sweep records the resulting
+        // `Err` as a failed row (#2457), and that fail-closed behaviour must not
+        // depend on which entry point issued the request.
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("managed session '{id}' not found");
+        }
+        let outcome = resp
             .error_for_status()?
             .json()
             .await
             .context("decoding decommission response body")?;
-        Ok(resp)
+        Ok(outcome)
     }
 }

@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::AuditError;
+use crate::registry::Target;
 
 /// An API key read from the engagement config.
 ///
@@ -345,6 +346,19 @@ pub struct EngagementConfig {
     /// engagement registers no boards.
     #[serde(default)]
     pub boards: BoardCredentials,
+    /// What this engagement audits (#5979).
+    ///
+    /// Absent and empty are DIFFERENT states, which is why this is an `Option`
+    /// rather than a defaulted `Vec`. Absent means no version of this file ever
+    /// declared a target set, so [`crate::registry::engagement_targets`] adopts
+    /// whatever `state/audit-targets.toml` holds. `targets = []` means the
+    /// operator removed their last target, and the answer is zero. Collapsing
+    /// the two would either lose an upgrading operator's registrations or
+    /// resurrect the ones they just deleted.
+    ///
+    /// Read it through [`EngagementConfig::declared_targets`].
+    #[serde(default)]
+    pub targets: Option<Vec<Target>>,
     /// Client name, when the generator recorded one.
     #[serde(default)]
     pub client: Option<String>,
@@ -356,6 +370,14 @@ pub struct EngagementConfig {
 impl EngagementConfig {
     /// Filename the handoff package uses.
     pub const FILE_NAME: &'static str = "engagement.toml";
+
+    /// The target set this file declares, or `None` when it declares none.
+    ///
+    /// `Some(&[])` is a declaration of zero targets; `None` is the absence of a
+    /// declaration. See [`EngagementConfig::targets`].
+    pub fn declared_targets(&self) -> Option<&[Target]> {
+        self.targets.as_deref()
+    }
 
     /// Parse a config from TOML text.
     ///
@@ -524,9 +546,173 @@ pub fn generate(template: &str, key: &SecretKey, path: &Path) -> Result<String, 
     Ok(rendered)
 }
 
+/// The TOML key holding the engagement's target set.
+///
+/// Named once so [`with_targets`] and the schema cannot drift apart.
+pub const TARGETS_FIELD: &str = "targets";
+
+/// Re-render `template` with `targets` as its declared target set (#5979).
+///
+/// Why: `engagement.toml` is now what an engagement's targets are declared in,
+/// so `taudit add repo` has to write this file. It cannot be produced by a
+/// derive — [`SecretKey`] has no `Serialize`, deliberately — so this is a
+/// substitution over the parsed table, the same shape [`generate`] uses one
+/// field over. Everything the recipient or a newer generator put in the file
+/// survives verbatim, which is what stops a registration quietly dropping the
+/// pins or a board credential.
+///
+/// The existing `openrouter_key` passes through as the `toml::Value::String` it
+/// parsed to and is never re-serialized from a [`SecretKey`], so this function
+/// adds no second way for a credential to be written.
+///
+/// What: replaces [`TARGETS_FIELD`] and re-renders. An EMPTY slice writes
+/// `targets = []` rather than removing the key — the difference between a
+/// declared-empty engagement and one that never declared anything is what
+/// [`EngagementConfig::targets`] turns into "adopt the old registry" or "the
+/// answer is zero". The result is parsed back through
+/// [`EngagementConfig::from_toml`], so a substitution that would produce an
+/// unloadable config fails HERE, before anything is written.
+/// Test: `config_tests::writing_targets_preserves_every_other_field`,
+/// `config_tests::an_emptied_target_list_is_declared_rather_than_dropped`,
+/// `config_tests::the_target_list_is_rendered_ahead_of_the_required_pins`.
+///
+/// # Errors
+///
+/// [`AuditError::Parse`] when `template` is not TOML, or when the substituted
+/// result is not a loadable engagement config; [`AuditError::Render`] when the
+/// targets or the table cannot be serialized.
+pub fn with_targets(template: &str, targets: &[Target], path: &Path) -> Result<String, AuditError> {
+    let mut table: toml::Table = toml::from_str(template).map_err(|source| AuditError::Parse {
+        path: path.to_path_buf(),
+        what: "engagement config",
+        source: Box::new(source),
+    })?;
+    let value = toml::Value::try_from(targets).map_err(|source| AuditError::Render {
+        what: "engagement targets",
+        source: Box::new(source),
+    })?;
+    table.insert(TARGETS_FIELD.to_owned(), value);
+    let rendered = toml::to_string_pretty(&table).map_err(|source| AuditError::Render {
+        what: "engagement config",
+        source: Box::new(source),
+    })?;
+    EngagementConfig::from_toml(&rendered, path)?;
+    Ok(rendered)
+}
+
 #[cfg(test)]
 mod config_tests {
     use super::*;
+    use crate::registry::BoardProvider;
+
+    fn repo(name: &str) -> Target {
+        Target::Repo {
+            name_with_owner: name.to_owned(),
+        }
+    }
+
+    /// A registration must not cost the recipient their pins, their models, or
+    /// a board credential — the whole file survives the substitution.
+    #[test]
+    fn writing_targets_preserves_every_other_field() {
+        let source = format!("{SAMPLE}\n[boards.linear]\napi_key = \"lin_api_secret\"\n");
+        let path = Path::new("engagement.toml");
+        let text = with_targets(
+            &source,
+            &[
+                repo("acme/api"),
+                Target::Board {
+                    provider: BoardProvider::Jira,
+                    key: "ACME".to_owned(),
+                },
+            ],
+            path,
+        )
+        .expect("writes");
+
+        let loaded = EngagementConfig::from_toml(&text, path).expect("loads");
+        let declared = loaded.declared_targets().expect("targets are declared");
+        assert_eq!(
+            declared.iter().map(Target::id).collect::<Vec<_>>(),
+            vec!["acme/api", "jira:ACME"]
+        );
+        assert_eq!(loaded.openrouter_key.expose(), "sk-or-v1-not-a-real-key");
+        assert_eq!(loaded.tools.trusty_review.version(), "0.15.1");
+        assert_eq!(loaded.client.as_deref(), Some("Acme"));
+        assert_eq!(
+            loaded
+                .boards
+                .linear
+                .as_ref()
+                .expect("linear survives")
+                .api_key
+                .expose(),
+            "lin_api_secret"
+        );
+    }
+
+    /// Removing the last target declares zero, and must not read as a file that
+    /// never declared anything — that would resurrect the old registry.
+    #[test]
+    fn an_emptied_target_list_is_declared_rather_than_dropped() {
+        let path = Path::new("engagement.toml");
+        let text = with_targets(SAMPLE, &[], path).expect("writes");
+        let loaded = EngagementConfig::from_toml(&text, path).expect("loads");
+        assert_eq!(loaded.declared_targets(), Some(&[][..]));
+
+        let untouched = EngagementConfig::from_toml(SAMPLE, path).expect("loads");
+        assert_eq!(untouched.declared_targets(), None);
+    }
+
+    /// 🔴 #5979: what replaces the registry's `count` guard. A truncation that
+    /// loses the tail of the target list also loses `[tools]`, whose four pins
+    /// are required — so a partial file refuses to load rather than reading as a
+    /// smaller-but-complete engagement.
+    ///
+    /// The ordering is `toml::to_string_pretty`'s, and asserting it is the
+    /// point: a serializer change that moved `[tools]` above `[[targets]]` would
+    /// silently retire the guard.
+    #[test]
+    fn the_target_list_is_rendered_ahead_of_the_required_pins() {
+        let path = Path::new("engagement.toml");
+        let text =
+            with_targets(SAMPLE, &[repo("acme/api"), repo("acme/web")], path).expect("writes");
+        let targets = text.find("[[targets]]").expect("targets are rendered");
+        let tools = text.find("[tools]").expect("tools are rendered");
+        assert!(targets < tools, "{text}");
+
+        // Cut the file at the first target: what is left is not an engagement.
+        let truncated = &text[..targets];
+        EngagementConfig::from_toml(truncated, path)
+            .expect_err("a truncated config must not read as a smaller target set");
+    }
+
+    /// A hand-written `[[targets]]` block loads with the same spelling
+    /// `crate::registry` writes, so the file stays one an operator can edit.
+    #[test]
+    fn a_hand_written_target_block_loads() {
+        let text = format!(
+            "{SAMPLE}\n[[targets]]\nkind = \"repo\"\nname_with_owner = \"acme/api\"\n\
+             \n[[targets]]\nkind = \"board\"\nprovider = \"linear\"\nkey = \"ENG\"\n"
+        );
+        let loaded =
+            EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("parses");
+        let declared = loaded.declared_targets().expect("declared");
+        assert_eq!(
+            declared.iter().map(Target::id).collect::<Vec<_>>(),
+            vec!["acme/api", "linear:ENG"]
+        );
+    }
+
+    /// A target block that names no known kind is a refusal, not a skipped
+    /// entry — a silently dropped target is an unaudited one.
+    #[test]
+    fn an_unknown_target_kind_is_a_parse_error() {
+        let text = format!("{SAMPLE}\n[[targets]]\nkind = \"gitlab\"\nname_with_owner = \"a/b\"\n");
+        let err = EngagementConfig::from_toml(&text, Path::new("engagement.toml"))
+            .expect_err("`gitlab` is not a target kind");
+        assert!(matches!(err, AuditError::Parse { .. }), "{err:?}");
+    }
 
     const SAMPLE: &str = r#"
 openrouter_key = "sk-or-v1-not-a-real-key"

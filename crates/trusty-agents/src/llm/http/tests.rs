@@ -735,3 +735,134 @@ fn fireworks_live_completion_still_round_trips() {
     assert!(usage.prompt_tokens > 0, "{usage:?}");
     eprintln!("live fireworks ok — model={model} text={text:?} usage={usage:?}");
 }
+
+// --- #5943: the shared LLM client is bounded ---------------------------------
+
+/// Bind a loopback listener that accepts connections and then answers nothing.
+///
+/// Why: #5943's failure shape is a LIVE-but-unresponsive endpoint — the real
+/// one was `ollama` LISTENing on :11434 while `curl -m 3` timed out against it.
+/// A closed port is a different shape entirely (connection refused, which
+/// already failed fast and is covered by `transport_error_detects_connect_failure`),
+/// so this regression needs a socket that completes the handshake and then goes
+/// silent. Binding one here keeps the test hermetic: it behaves identically
+/// whether or not a real ollama is running on the machine.
+/// What: binds `127.0.0.1:0`, spawns a task that accepts forever and parks each
+/// accepted stream — never reading the request, never writing a byte — and
+/// returns the bound `http://127.0.0.1:<port>` base URL.
+/// Test: used by `llm_client_gives_up_on_a_listener_that_never_responds` and
+/// `a_read_timeout_is_not_retried`.
+async fn spawn_silent_listener() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let addr = listener.local_addr().expect("listener local addr");
+    tokio::spawn(async move {
+        let mut parked = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            // Hold the stream. Dropping it closes the connection and the client
+            // sees a reset instead of the silence this test is about.
+            parked.push(stream);
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// The client abandons a connection that is established but never answers.
+///
+/// Why: #5943 — `HTTP_CLIENT` was `reqwest::Client::new()`, which sets no
+/// deadline, so this request never returned at all. The only thing bounding it
+/// was a caller-supplied wrapper, and the one caller that had a wrapper threw
+/// its result away. Run against the pre-fix client this test fails on the outer
+/// `expect` below: the wrapper fires, which is exactly the rescue the fix has
+/// to make unnecessary.
+/// What: points a client built by `build_llm_client` — the same constructor
+/// `http_client()` uses, with a sub-second budget instead of the production
+/// five minutes — at a listener that accepts and stays silent, and asserts the
+/// request ends in a timeout of the client's own making.
+/// Test: itself.
+#[tokio::test]
+async fn llm_client_gives_up_on_a_listener_that_never_responds() {
+    let url = spawn_silent_listener().await;
+    let client = build_llm_client(Duration::from_millis(500), Duration::from_millis(300))
+        .expect("build llm client");
+
+    let started = std::time::Instant::now();
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.post(format!("{url}/v1/chat/completions")).send(),
+    )
+    .await
+    .expect("the client must give up on its own — this wrapper is the rescue #5943 removed")
+    .expect_err("a listener that answers nothing must not yield a response");
+
+    assert!(
+        err.is_timeout(),
+        "the request must end in a timeout, not some other transport error: {err}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the read budget was 300ms; giving up took {:?}",
+        started.elapsed()
+    );
+}
+
+/// The process-wide client is built with the production LLM budget.
+///
+/// Why: #5943 — a `build_llm_client` that nobody wires into `HTTP_CLIENT`
+/// fixes nothing, and that is the half of the defect a behavioural test on the
+/// constructor cannot see. `reqwest::Client`'s `Debug` prints `read_timeout`
+/// only when one is configured, so comparing the shared client against a
+/// freshly built one pins both that a budget exists and that it is the intended
+/// one. Against the pre-fix `OnceLock::get_or_init(reqwest::Client::new)` the
+/// two render differently and this fails.
+/// What: asserts `http_client()` renders identically to
+/// `build_llm_client(LLM_CONNECT_TIMEOUT, LLM_READ_TIMEOUT)`.
+/// Test: itself.
+#[test]
+fn shared_http_client_carries_the_llm_timeout_budget() {
+    let expected = build_llm_client(LLM_CONNECT_TIMEOUT, LLM_READ_TIMEOUT)
+        .expect("build llm client with the production budget");
+    assert_eq!(
+        format!("{:?}", http_client()),
+        format!("{expected:?}"),
+        "the shared client must carry the LLM connect/read budget, not reqwest defaults"
+    );
+}
+
+/// A timeout is not retried, but is still recognised as a transport failure.
+///
+/// Why: #5943 — `with_llm_retry` makes four attempts, so a retryable timeout
+/// multiplies the wait it was added to bound: twenty minutes against a wedged
+/// endpoint rather than five. An endpoint that produced no byte for the whole
+/// budget does not produce one on the immediate retry, so the classifier stops.
+/// The second assertion guards the boundary that change runs along: #3766's
+/// local-failure recovery keys off `is_transport_error`, which must keep
+/// firing — otherwise a timed-out ollama would propagate its raw reqwest error
+/// to the user instead of the explanation that path builds.
+/// What: produces a genuine `reqwest` timeout against the silent listener,
+/// wraps it the way the call sites do, and asserts `is_transient_anyhow_error`
+/// is false while `is_transport_error` stays true.
+/// Test: itself.
+#[tokio::test]
+async fn a_read_timeout_is_not_retried() {
+    let url = spawn_silent_listener().await;
+    let client = build_llm_client(Duration::from_millis(500), Duration::from_millis(200))
+        .expect("build llm client");
+    let err = client
+        .post(format!("{url}/v1/chat/completions"))
+        .send()
+        .await
+        .expect_err("a silent listener must time out");
+    assert!(err.is_timeout(), "expected a timeout error, got: {err}");
+
+    let wrapped = anyhow::Error::new(err).context("raw chat completion POST failed");
+    assert!(
+        !is_transient_anyhow_error(&wrapped),
+        "a timeout must not be retried — each retry spends another full budget: {wrapped:#}"
+    );
+    assert!(
+        is_transport_error(&wrapped),
+        "a timeout is still a transport failure, or #3766's local recovery stops firing: {wrapped:#}"
+    );
+}

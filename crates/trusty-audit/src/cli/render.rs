@@ -143,8 +143,16 @@ pub fn render(outcome: &Outcome) -> String {
             out
         }
         Outcome::Repos(repos) => {
+            // #5885: this reads the companion manifest, which `tga audit`
+            // writes once a sweep COMPLETES — so it is empty however many
+            // targets are registered. The old wording ("run the guided flow to
+            // pick them") sent an operator who had just registered several
+            // repositories back to do it again, reading their success as a
+            // failure. It names `targets`, which answers the question they
+            // actually asked.
             if repos.is_empty() {
-                return "No repositories configured yet — run the guided flow to pick them.\n"
+                return "No sweep has recorded any repositories yet — `trusty-audit targets` \
+                        lists what this engagement is registered to audit.\n"
                     .to_string();
             }
             repos
@@ -364,6 +372,13 @@ fn render_package(package: &crate::package::ReturnPackage) -> String {
 /// `super::cli_tests::a_resumed_sweep_says_what_it_carried_over_and_what_it_audited`.
 fn render_run(report: &crate::run::RunReport) -> String {
     let mut out = String::new();
+    // #5982: a registered board this sweep will not collect, stated before the
+    // per-repository lines because it is a dimension of the whole sweep rather
+    // than of any one repository. Empty on the chain path, which states the same
+    // gaps in its own roll-up below — see `crate::run::RunReport::board_gaps`.
+    for gap in &report.board_gaps {
+        out.push_str(&format!("Not audited: {gap}\n"));
+    }
     for run in &report.repos {
         match &run.result {
             // #5494: a repository this run carried over from an earlier

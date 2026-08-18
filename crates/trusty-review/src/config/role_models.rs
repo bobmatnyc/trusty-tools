@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use trusty_common::inference::ModelTier;
 
 use super::Provider;
 
@@ -80,8 +81,21 @@ impl RoleModels {
     /// What: each role's fields are resolved independently.  `cli_overrides`
     /// carries any values the caller parsed from `--reviewer-model` etc.
     /// `file_models` carries parsed TOML table values.  Both may be `None` to
-    /// skip that layer.
-    /// Test: unit tests in `config::tests` cover all four precedence levels.
+    /// skip that layer.  The built-in default is a `ModelTier` (#5971): the
+    /// reviewer asks for `Analysis`, the verifier and summarizer for
+    /// `Classification`, and the tier resolves against whichever provider won
+    /// its own chain.
+    ///
+    /// The verifier and summarizer take `Classification` for its COST, not
+    /// because verifying or summarising IS classification (#5987).  The owner
+    /// ruling is that the model doing the judging is opus while not every
+    /// inference in the chain needs to be, and `Classification` is the cheapest
+    /// tier — the two roles land there for that reason alone.  Classification
+    /// as a workload is a separate concern that happens to resolve the same
+    /// model today; if the tiers diverge, revisit which one these roles want
+    /// rather than assuming this mapping still follows.
+    /// Test: unit tests in `config::tests` cover all four precedence levels;
+    /// the tier layer by `role_models_openrouter_*` / `role_models_bedrock_*`.
     pub fn resolve(
         cli_overrides: Option<&RoleCliOverrides>,
         env: &RoleEnv,
@@ -93,6 +107,7 @@ impl RoleModels {
             env.reviewer_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.reviewer.as_ref()),
+            ModelTier::Analysis,
             crate::llm::models::DEFAULT_REVIEWER_MODEL,
             Provider::Bedrock,
             0.3,
@@ -104,6 +119,7 @@ impl RoleModels {
             env.verifier_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.verifier.as_ref()),
+            ModelTier::Classification,
             crate::llm::models::DEFAULT_VERIFIER_MODEL,
             Provider::Bedrock,
             1.0,
@@ -115,6 +131,7 @@ impl RoleModels {
             env.summarizer_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.summarizer.as_ref()),
+            ModelTier::Classification,
             crate::llm::models::DEFAULT_SUMMARIZER_MODEL,
             Provider::Bedrock,
             0.0,
@@ -243,9 +260,14 @@ fn parse_provider_layer(raw: Option<&str>, source: &str) -> Option<Provider> {
 /// What: each parameter is one precedence level; the first `Some` wins.  For
 /// `provider`, a layer that is present but does not parse as a `Provider`
 /// counts as absent and yields to the next layer (#5679) — it never consumes
-/// the chain.
+/// the chain.  The provider is resolved BEFORE the model so the built-in model
+/// default can be a tier lookup against the resolved provider (#5971); the
+/// three explicit layers above it are unaffected, because the tier is only
+/// consulted once CLI, env, and config file have all declined.
 /// Test: covered indirectly by `RoleModels` unit tests; the provider
-/// parse-failure arm is covered by the `role_models_unparsable_*` tests.
+/// parse-failure arm is covered by the `role_models_unparsable_*` tests; the
+/// tier arm by `role_models_openrouter_reviewer_resolves_opus_tier` and
+/// `role_models_bedrock_reviewer_keeps_sonnet_default`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_role(
     cli_model: Option<&str>,
@@ -253,18 +275,12 @@ pub(super) fn resolve_role(
     env_model: Option<&str>,
     env_provider: Option<&str>,
     file: Option<&RoleConfigOverride>,
+    default_tier: ModelTier,
     default_model: &str,
     default_provider: Provider,
     default_temp: f32,
     default_max_tokens: u32,
 ) -> RoleConfig {
-    // Model: CLI → env → config file → built-in default.
-    let model = cli_model
-        .or(env_model)
-        .or(file.and_then(|f| f.model.as_deref()))
-        .unwrap_or(default_model)
-        .to_string();
-
     // Provider: CLI → env → config file → built-in default.
     // #5679: each layer parses on its own so a bad value yields the next layer, not the default.
     let provider = parse_provider_layer(cli_provider, "--provider")
@@ -276,6 +292,18 @@ pub(super) fn resolve_role(
             )
         })
         .unwrap_or(default_provider);
+
+    // Model: CLI → env → config file → tier default → pinned built-in default.
+    // #5971: the tier is the built-in layer, so an explicitly-named id at any of
+    // the three layers above still wins. `default_model` remains the fallback
+    // for a (tier, provider) pair with no verified id — notably Bedrock's opus
+    // tiers, which are deliberately unmapped.
+    let model = cli_model
+        .or(env_model)
+        .or(file.and_then(|f| f.model.as_deref()))
+        .or_else(|| default_tier.resolve(provider.provider_id()))
+        .unwrap_or(default_model)
+        .to_string();
 
     // Temperature: config file → built-in default.
     let temperature = file.and_then(|f| f.temperature).unwrap_or(default_temp);

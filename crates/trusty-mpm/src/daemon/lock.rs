@@ -1,60 +1,47 @@
-//! Daemon lock file: written on bind, deleted on shutdown.
+//! Daemon lock file: written on bind, removed on shutdown by its owner.
 //!
-//! Why: Clients use the lock file to discover the daemon's actual address
-//! (which may differ from the configured port if auto-selection kicked in).
-//! The file lives at `~/.trusty-mpm/daemon.lock` — the same framework root
-//! every other artifact uses — so the daemon and its clients always agree on
-//! its location.
-//! What: `write_lock` creates the TOML file; `remove_lock` deletes it.
-//! Both are best-effort — errors are logged but not fatal.
-//! Test: `write_lock` / `remove_lock` round-trip covered below.
+//! Why: clients discover the daemon's actual bound address here, which differs
+//! from the compiled-in default whenever port auto-selection kicked in.
+//! What: a thin daemon-side facade over [`crate::core::daemon_identity`], which
+//! owns the record format, the product-magic check, and the ownership rule for
+//! removal. This module exists so the daemon's call sites read as
+//! `lock::write_lock(&url)` rather than reaching across into `core`.
+//! Test: the record's behaviour is covered hermetically in
+//! `core::daemon_identity`. This facade carries no test of its own — the note
+//! at the foot of this file says why (#1731).
 
-use crate::core::lock_file_path;
+use crate::core::daemon_identity;
 
-/// Write the daemon lock file with the actual bound address and current PID.
+/// Write the lock file with the actual bound address and this process's PID.
 ///
-/// Why: Must be called after `TcpListener::local_addr()` is known. As of
+/// Why: must be called after `TcpListener::local_addr()` is known. As of
 /// ADR-0011's loopback-only doctrine (issue #3330) the daemon never binds a
-/// second (Tailscale) listener, so the lock file no longer carries an
-/// optional `tailscale_addr` field.
-/// What: Creates parent dirs if needed, writes TOML, logs on error.
+/// second (Tailscale) listener, so the record carries no `tailscale_addr`.
+/// What: delegates to [`daemon_identity::write_lock`]; best-effort.
+/// Test: `read_lock_returns_written_record` in `core::daemon_identity`.
 pub fn write_lock(addr: &str) {
-    let path = lock_file_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let pid = std::process::id();
-    let started_at = chrono::Utc::now().to_rfc3339();
-    let content = format!("pid = {pid}\naddr = \"{addr}\"\nstarted_at = \"{started_at}\"\n");
-    if let Err(e) = std::fs::write(&path, content) {
-        tracing::warn!("failed to write daemon lock file {}: {e}", path.display());
-    } else {
-        tracing::debug!("lock file written: {}", path.display());
-    }
+    daemon_identity::write_lock(addr);
 }
 
-/// Remove the daemon lock file on clean shutdown.
+/// Remove the lock file on clean shutdown — but only if it still names us.
 ///
-/// Why: A deleted lock file signals that no daemon is running, avoiding stale
-/// reads by clients that check the file before falling back to the default URL.
-/// What: Best-effort `fs::remove_file`; silently ignores "not found".
+/// Why (#1731): this used to delete whatever file sat at the path. During a
+/// restart the incoming daemon binds and writes its own record while the
+/// outgoing daemon is still running its shutdown handler, so an unconditional
+/// delete left a live daemon with no lock file — the state the reopened issue
+/// reports.
+/// What: delegates to [`daemon_identity::remove_lock_owned_by`] naming this
+/// process, so a successor's record survives.
+/// Test: `remove_lock_owned_by_keeps_newer_daemons_record` in
+/// `core::daemon_identity`.
 pub fn remove_lock() {
-    let path = lock_file_path();
-    match std::fs::remove_file(&path) {
-        Ok(()) => tracing::debug!("lock file removed"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!("failed to remove lock file: {e}"),
-    }
+    daemon_identity::remove_lock_owned_by(&[std::process::id()]);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn write_and_remove_round_trip() {
-        // Just verify the functions don't panic on a writable path.
-        write_lock("http://127.0.0.1:7880");
-        remove_lock();
-    }
-}
+// #1731: there is deliberately no test here. The test this file used to carry
+// called `write_lock` / `remove_lock` against the REAL `~/.trusty-mpm/daemon.lock`
+// to prove they "don't panic" — so every `cargo test -p trusty-mpm` run
+// overwrote a live daemon's record with the test process's PID and then deleted
+// it, leaving a running daemon with no lock file. That is the reported state.
+// The behaviour these two functions delegate to is covered hermetically, against
+// a tempdir path, in `core::daemon_identity`.

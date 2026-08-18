@@ -25,14 +25,60 @@ Two constraints are permanent, not phases:
 
 ## Running it
 
-A bare invocation is the entry point. It starts the guided flow, which walks the
-pre-run steps in order (repository selection first, then tooling); it does not
-launch an unattended sweep.
+A bare invocation is the entry point, and on a terminal it is the whole
+engagement: it asks for the audit targets one at a time, registers each as you
+enter it, installs the pinned tools, and then asks before starting the sweep.
+
+## Handing over the target list instead of typing it
+
+Put a `repos.txt` or a `boards.txt` beside `engagement.toml` — the directory you
+run from, or wherever `--config` points — and the launch reads it instead of
+asking for each target. One per line; `#` starts a comment. Both short forms and
+the URLs you copy out of a browser are accepted, and a `.git` suffix, a
+`/tree/<branch>` path and a Linear issue number are all stripped:
 
 ```
-trusty-audit                    # guided flow
+# repos.txt
+acme/api
+https://github.com/acme/web.git
+https://github.com/acme/iac/tree/main
+
+# boards.txt
+linear:ENG
+https://linear.app/acme/team/PLATFORM/active
+https://acme.atlassian.net/browse/OPS-412
+```
+
+One line that is not a target stops the whole read: nothing from either file is
+registered, every bad line is named with its number and its own reason, and you
+fix them and run again. Your OpenRouter key is already saved by then, so the
+second run does not ask for it. Partial registration is what the rule exists to
+prevent — an audit covering nineteen of twenty repositories still reports
+success, over the one it never saw.
+
+Either way the launch ends on the same review menu, which states how many
+repositories it will clone and how many boards it will collect from, and offers
+add, delete and proceed. Those counts are the point: `17 repositories, 2 boards`
+catches a truncated file at a glance. Add and delete write through to
+`engagement.toml`. With no terminal there is no menu — the counts and the full
+list are printed and the run proceeds.
+
+Two ways to get the status card instead, prompting for nothing: run
+`trusty-audit guided`, which is the named verb for exactly that, or run the bare
+invocation with no controlling terminal — a script, a cron entry, a CI job.
+`TRUSTY_AUDIT_NO_LAUNCH=1` is not one of them: it is read by `install.sh`, where
+it decides whether the installer starts the binary at all, and the binary itself
+never reads it.
+
+```
+trusty-audit                    # guided flow: register targets, install, sweep
 trusty-audit workdir            # create the working directory, print what lands where
-trusty-audit repos              # repositories this engagement is configured to audit
+trusty-audit add repo OWNER/NAME    # register a repository, after checking it can be read
+trusty-audit add board jira:KEY     # register a JIRA project or Linear team
+trusty-audit targets            # what this engagement is registered to audit
+trusty-audit remove TARGET      # drop a registered target
+trusty-audit repos              # repositories the companion manifest.toml records,
+                                #   which a completed sweep writes — NOT the registry
 trusty-audit tools              # which pinned tools are installed, at which versions
 trusty-audit install            # download and verify the pinned tools
 trusty-audit manifest           # engagement metadata from the companion manifest.toml
@@ -42,6 +88,12 @@ trusty-audit run --fresh        # audit every selected repository again
 trusty-audit package            # assemble the deliverable zip to send back
 trusty-audit audit              # all four of the above, in one invocation
 ```
+
+`targets` and `repos` answer different questions, and reaching for the wrong one
+is the mistake worth naming. `targets` lists the REGISTRY — what `add` wrote, and
+what the sweep will cover. `repos` reads the companion `manifest.toml`, which
+`tga audit` writes once a sweep completes, so before any sweep it is empty no
+matter how many targets are registered.
 
 ## The one-shot run
 

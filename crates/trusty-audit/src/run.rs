@@ -64,7 +64,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::config::EngagementConfig;
 use crate::error::AuditError;
@@ -108,144 +108,18 @@ mod pins;
 // needs somewhere to be explained and asserted.
 mod approve;
 
+// #5982: the values a sweep produces, split out when `RunReport::board_gaps`
+// crossed the 500-SLOC production cap. Re-exported, so `crate::run::RunReport`
+// and friends stay where every caller already names them.
+mod report;
+
 use approve::approve_for_indexing;
 use pins::{PinnedBinaries, pinned_binaries};
 use verify::verify_output;
 
 pub use checkpoint::{PROGRESS_FILE, Recollect, RunProgress, progress_path, read_progress};
+pub use report::{RepoResult, RepoRun, RunOptions, RunReport, RunStatus};
 pub use selection::{SELECTION_FILE, SelectedRepo, load_selection, save_selection, selection_path};
-
-/// What happened to one repository.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum RepoResult {
-    /// `tga audit` exited 0 for this repository.
-    Succeeded,
-    /// It did not. The reason is the child's status, or why it never started.
-    Failed {
-        /// One line naming what went wrong, safe to show the recipient.
-        reason: String,
-    },
-}
-
-impl RepoResult {
-    /// Whether this repository was audited successfully.
-    pub fn succeeded(&self) -> bool {
-        matches!(self, RepoResult::Succeeded)
-    }
-}
-
-/// One repository's run: where its output and log landed, and how it ended.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct RepoRun {
-    /// The repository, as selected.
-    pub repo: SelectedRepo,
-    /// Directory under `out/` holding this repository's audit output.
-    pub output: PathBuf,
-    /// File under `logs/` holding the child's combined stdout and stderr.
-    pub log: PathBuf,
-    /// Gaps `tga audit` stated in this repository's manifest (DOC-67 §9).
-    ///
-    /// A gap is a dimension the sweep could not assess — an unconfigured JIRA
-    /// project, a repository that could not be fetched from its remote. It is
-    /// ordinary for a successful run to state some, so a gap does not by itself
-    /// fail the repository; see [`verify_output`] for which ones do.
-    #[serde(default)]
-    pub gaps: Vec<String>,
-    /// Whether this entry was carried over from an earlier sweep (#5494).
-    ///
-    /// `true` means no `tga audit` child ran for this repository in the sweep
-    /// that produced this report — an earlier run audited it, and the output it
-    /// left is still on disk and still passes [`verify_output`]. It is recorded
-    /// so a re-run reads as a resume rather than as work that went suspiciously
-    /// fast.
-    #[serde(default)]
-    pub resumed: bool,
-    /// How it ended.
-    pub result: RepoResult,
-}
-
-/// Whether the sweep succeeded, partly succeeded, or failed outright.
-///
-/// Why: closure condition 3 of #5555, and DOC-67 §9's failed-but-continuing
-/// model. "One repository of six failed" and "every repository failed" call for
-/// different actions from the recipient, and collapsing them into a boolean is
-/// how a partial run gets delivered as a whole one.
-/// What: three states over the per-repo results. An empty sweep never reaches
-/// here — no selection is an error, not an [`AllSucceeded`](Self::AllSucceeded).
-/// Test: `super::run_tests::status_distinguishes_partial_from_total_failure`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum RunStatus {
-    /// Every selected repository was audited.
-    AllSucceeded,
-    /// Some repositories were audited and some were not.
-    Partial,
-    /// No repository was audited.
-    AllFailed,
-}
-
-/// The result of one sweep.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct RunReport {
-    /// One entry per selected repository, in selection order.
-    pub repos: Vec<RepoRun>,
-    /// The sweep's overall verdict.
-    pub status: RunStatus,
-}
-
-impl RunReport {
-    /// Build a report and derive its status from the per-repo results.
-    ///
-    /// Why: the status is DERIVED, never passed in, so no caller can construct
-    /// a report claiming a status its per-repo results do not support.
-    /// Test: `super::run_tests::status_distinguishes_partial_from_total_failure`.
-    pub fn of(repos: Vec<RepoRun>) -> Self {
-        let succeeded = repos.iter().filter(|r| r.result.succeeded()).count();
-        let status = if succeeded == repos.len() {
-            RunStatus::AllSucceeded
-        } else if succeeded == 0 {
-            RunStatus::AllFailed
-        } else {
-            RunStatus::Partial
-        };
-        Self { repos, status }
-    }
-
-    /// The repositories that failed.
-    pub fn failures(&self) -> impl Iterator<Item = &RepoRun> {
-        self.repos.iter().filter(|r| !r.result.succeeded())
-    }
-
-    /// The repositories an earlier sweep audited and this one carried over.
-    pub fn resumed(&self) -> impl Iterator<Item = &RepoRun> {
-        self.repos.iter().filter(|r| r.resumed)
-    }
-}
-
-/// How to run the sweep.
-///
-/// Why: a struct rather than a bare `bool` argument, matching
-/// [`crate::clone::CloneOptions`] — the flag is operator-facing and reaches
-/// this crate through [`crate::session::Command::Run`], so it will grow
-/// neighbours (an audit window, a repository subset) and a positional boolean
-/// at every call site is where those go wrong.
-/// What: one field today. [`RunOptions::default`] is the resuming behaviour.
-/// Test: `super::run_tests::a_fresh_run_re_audits_everything`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct RunOptions {
-    /// Ignore the recorded progress and audit every selected repository again.
-    ///
-    /// Why: resume is a judgement about what is still valid, and an operator
-    /// who disagrees with that judgement needs a way to overrule it — a
-    /// recipient who has re-cloned their repositories has outputs that verify
-    /// fine and describe source that has moved on. Defaults to `false`, because
-    /// the expensive direction has to be the one asked for by name.
-    pub fresh: bool,
-}
 
 /// A filename-safe, collision-free stem for one repository's files.
 ///
@@ -468,11 +342,20 @@ where
     // is not reported ahead of a missing tool. Every child gets the same
     // sections: a board is a dimension of the engagement, not a unit of the
     // sweep, and tga correlates it against whichever repository it is auditing.
+    // #5982: only the arm that resolves states the gaps — see
+    // `RunReport::board_gaps`.
+    let mut board_gaps = Vec::new();
     let owned;
     let boards = match resolved {
         Some(boards) => boards,
         None => {
-            owned = boards::resolve(registry::Registry::load(work)?.targets(), &config.boards);
+            // #5979: the engagement config declares the targets; the working
+            // copy answers only for an engagement that has declared none.
+            owned = boards::resolve(
+                &registry::engagement_targets(Some(config), work)?,
+                &config.boards,
+            );
+            board_gaps.clone_from(&owned.gaps);
             &owned
         }
     };
@@ -513,7 +396,7 @@ where
         checkpoint::write_progress(work, &RunProgress::checkpoint(&decided(&runs)))?;
     }
 
-    let report = RunReport::of(decided(&runs));
+    let report = RunReport::of(decided(&runs)).stating(board_gaps);
     progress.operation_finished(
         Operation::Sweep,
         report.repos.iter().filter(|r| r.result.succeeded()).count(),
@@ -1703,6 +1586,93 @@ trusty-review = "0.15.1"
                 path.display()
             );
         }
+    }
+
+    /// The `taudit run` half of #5982. `boards::resolve` states a gap for a
+    /// board it will not collect, and until now only `crate::chain` read it —
+    /// this path resolved the boards, dropped `Boards::gaps` on the floor, and
+    /// returned `AllSucceeded` with no `linear:` section and nothing said. The
+    /// gap is a dimension of the sweep, not a repository that failed, so the
+    /// status stays `AllSucceeded` and `Outcome::exit_code` is what stops it
+    /// reading as a whole engagement.
+    ///
+    /// Against `9ee9cc386` the `board_gaps` field does not exist.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_board_the_sweep_cannot_collect_is_stated_on_the_run_path() {
+        /// A Linear team id, the shape a registry written before #5982 holds.
+        const TEAM_ID: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+        register_boards(&work, &["linear:ENG", &format!("linear:{TEAM_ID}")]);
+
+        let report = sweep(
+            &work,
+            &board_config(),
+            &RunOptions::default(),
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+
+        assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
+        assert_eq!(report.board_gaps.len(), 1, "{:?}", report.board_gaps);
+        assert!(
+            report.board_gaps[0].contains(TEAM_ID),
+            "{:?}",
+            report.board_gaps
+        );
+        assert_eq!(
+            crate::session::Outcome::Run(report).exit_code(),
+            crate::session::EXIT_INCOMPLETE,
+            "a sweep that skipped a registered board must not chain onward"
+        );
+
+        // The team that CAN collect is untouched by the one that cannot.
+        let generated =
+            std::fs::read_to_string(work.path(Area::State).join("tga-00-acme-api.yaml"))
+                .expect("the generated tga config");
+        assert!(generated.contains("- ENG"), "{generated}");
+        assert!(!generated.contains(TEAM_ID), "{generated}");
+    }
+
+    /// The chain states its own board gaps, so a sweep handed a resolution says
+    /// nothing about it — otherwise `taudit audit` prints each gap twice.
+    ///
+    /// Against `9ee9cc386` the `board_gaps` field does not exist.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sweep_handed_its_boards_leaves_the_gaps_to_the_caller() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest(None));
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let config = board_config();
+        let resolved = boards::resolve(
+            &[
+                registry::parse(None, "linear:a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+                    .expect("parses"),
+            ],
+            &config.boards,
+        );
+        assert_eq!(resolved.gaps.len(), 1, "{resolved:?}");
+
+        let report = sweep_with_boards(
+            &work,
+            &config,
+            &RunOptions::default(),
+            &resolved,
+            &Progress::none(),
+        )
+        .await
+        .expect("the sweep completes");
+        assert!(report.board_gaps.is_empty(), "{:?}", report.board_gaps);
     }
 
     /// A stub that records the board variables it was handed.

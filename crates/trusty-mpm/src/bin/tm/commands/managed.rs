@@ -31,7 +31,7 @@
 
 use std::io::IsTerminal as _;
 
-use trusty_mpm::client::{ManagedDecommissionOutcome, ManagedSessionSummary};
+use trusty_mpm::client::ManagedSessionSummary;
 
 use super::managed_route::decommission_message;
 use crate::cli::CatalogAction;
@@ -63,46 +63,39 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
 
 /// Return true when a session row should be shown in the default picker/list view.
 ///
-/// Why: reconciles two independent, otherwise-contradictory directives that
-/// both landed on `"deleted"` wire rows. Main's #3302 hardening commit
-/// (`51243ea5`, addressing a code-critic CRITICAL finding) wanted a real,
-/// still-in-store record whose lifecycle state is `Deleted` (soft-deleted via
-/// `tm sessions delete`, #2012) hidden from the default view exactly like
-/// `"decommissioned"` — surfacing it risked flowing through the zombie-reconcile
-/// path and resurrecting it. #3034/#3044 (this PR) needs the OPPOSITE for a
-/// stable-numbering SLOT TOMBSTONE: it must render at its exact slot position
-/// in the default view, or the entire point of stable numbering (an operator
-/// seeing exactly why a captured number no longer resolves) is defeated.
+/// Why: four directives have landed on this one predicate. Every one of them is
+/// a VISIBILITY rule — no record is deleted, decommissioned, or mutated here,
+/// and `tm ls --all` still lists everything this returns `false` for.
+///   * #1809 — a `"decommissioned"` record is soft-retired and never belongs in
+///     the default view.
+///   * #3302 (`51243ea5`, a code-critic CRITICAL) — a real, still-in-store
+///     record soft-deleted via `tm sessions delete` (#2012) carries wire
+///     `state == "deleted"` too, and surfacing it risked the zombie-reconcile
+///     path resurrecting it.
+///   * #4994 — a record whose tmux pane is gone AND whose workspace directory
+///     no longer exists anywhere on disk took the catch-all arm into the
+///     default view. Six such rows sat in the owner's `tm ls`, each already
+///     rendered `[dead]`.
+///   * #5952 — a #3034 numbered-slot tombstone (the placeholder
+///     `daemon::managed_routes::summary::tombstone_summary` emits for every
+///     slot the registry still holds whose record has left the store,
+///     `ManagedSessionSummary::deleted == true`) was the one row that still
+///     passed through. At 44 tombstones in a 130-row listing it was a third of
+///     the table, so it now follows the same `--all` opt-in as the other three.
 ///
-/// Both rows serialize `state == "deleted"` on the wire, but only the slot
-/// tombstone sets the dedicated `deleted: bool` field
-/// ([`ManagedSessionSummary::deleted`], set exclusively by
-/// `daemon::managed_routes::summary::tombstone_summary`) — a soft-deleted
-/// real record's `deleted` field stays `false` even though its `state` string
-/// is `"deleted"`. Threading that flag through as `is_slot_tombstone`
-/// disambiguates the two without touching the wire shape or either directive:
-/// the slot tombstone (`is_slot_tombstone == true`) passes through and stays
-/// visible; the soft-deleted-in-store record (`is_slot_tombstone == false`)
-/// is hidden alongside `"decommissioned"`.
+/// #5952 is why this predicate no longer takes an `is_slot_tombstone` input:
+/// that flag existed only to tell the slot tombstone apart from the
+/// soft-deleted record so the two could be shown differently, and both are now
+/// hidden by default and shown by `--all`.
 ///
-/// Resurrection-safety for a VISIBLE slot tombstone is unaffected by this
-/// visibility change — it is enforced independently, by two separate guards
-/// that never consult this predicate: the picker's `decide_for_index`
-/// (`session_picker.rs`) checks `ManagedSessionSummary::deleted` FIRST, ahead
-/// of every other branch, and returns `PickerDecision::SlotDeleted` rather
-/// than ever reaching `Resume`/`ConfirmRestart`; and
-/// `guided_resume::resume_guided_session`'s terminal-state refusal
-/// (`plan_resume` → `ResumeAction::Terminal`) independently refuses to attach
-/// to or restart any `"decommissioned"`/`"deleted"` session before any daemon
-/// round-trip. Both guards key off the session's own state/flags, not off
-/// whether this predicate decided to show or hide the row.
-/// #4994 adds the third input, `classified_dead`. Until it did, this predicate
-/// consulted lifecycle state alone and never asked whether the session still
-/// existed: a record with `state == "stopped"` whose tmux pane is gone AND whose
-/// workspace directory no longer exists anywhere on disk took the catch-all
-/// `true` arm into the default view. Six such rows sat in the owner's default
-/// `tm ls`, each already rendered `[dead]`. Hiding them is a VISIBILITY change
-/// only; the records are untouched and `tm ls --all` still lists every one.
+/// 🔴 #3034's no-silent-reuse guarantee is untouched. The slot registry, slot
+/// release, and `SessionManager::numbered_snapshot` are unchanged, so a slot
+/// number is still never reused and never reassigned; a hidden slot still
+/// leaves a visible gap in the table's NUM column; and `--all` still renders
+/// the tombstone at its ORIGINAL slot position, because
+/// [`crate::commands::session_picker::scope_for_display`] deliberately excludes
+/// tombstones from its sink-to-bottom sort. What #5952 changes is only whether
+/// the placeholder occupies a row in the DEFAULT table.
 ///
 /// 🔴 `classified_dead` is the listing-time sweep's own verdict
 /// ([`AutoPruneOutcome::dead_ids`](crate::commands::session_picker_prune::AutoPruneOutcome::dead_ids)),
@@ -119,28 +112,27 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
 /// outcome those guards exist to prevent. Keying off the classification instead
 /// makes `hidden ⟺ prunable` hold by construction.
 ///
-/// The `classified_dead` arm sits deliberately BELOW the `"deleted"` arm, so a
-/// #3034 slot tombstone still renders at its slot regardless.
-/// What: returns `false` for `"decommissioned"` (always hidden), for
-/// `"deleted"` when `is_slot_tombstone` is `false` (a soft-deleted,
-/// still-in-store record), and for any other state when `classified_dead` is
-/// `true` (#4994); returns `true` otherwise — including for `"deleted"` when
-/// `is_slot_tombstone` is `true` (a #3034 numbered-slot tombstone).
+/// Resurrection-safety for a tombstone the operator DOES see (under `--all`)
+/// never depended on this predicate: the picker's `decide_for_index` checks
+/// `ManagedSessionSummary::deleted` ahead of every other branch and returns
+/// `PickerDecision::SlotDeleted`, and `guided_resume`'s terminal-state refusal
+/// (`plan_resume` → `ResumeAction::Terminal`) refuses to attach to or restart
+/// any `"decommissioned"`/`"deleted"` session before any daemon round-trip.
+/// What: returns `false` for `"decommissioned"`, for `"deleted"` (both the
+/// soft-deleted record and the #3034 slot tombstone, #5952), and for any other
+/// state the sweep classified dead (#4994); returns `true` otherwise.
 /// Test: `picker_filter_excludes_decommissioned_keeps_active`,
 /// `is_live_session_state_excludes_soft_deleted_record`,
-/// `is_live_session_state_keeps_slot_tombstone_visible`,
+/// `is_live_session_state_hides_slot_tombstone_from_default_view`,
 /// `is_live_session_state_hides_a_record_the_prune_classified_dead`,
 /// `is_live_session_state_keeps_resumable_stopped_record`,
-/// `is_live_session_state_keeps_slot_tombstone_even_when_classified_dead` in
+/// `scope_for_display_hides_tombstone_by_default_and_all_shows_it` in
 /// `tests_behavior_e_tests.rs`.
-pub(crate) fn is_live_session_state(
-    state: &str,
-    is_slot_tombstone: bool,
-    classified_dead: bool,
-) -> bool {
+pub(crate) fn is_live_session_state(state: &str, classified_dead: bool) -> bool {
     match state {
-        "decommissioned" => false,
-        "deleted" => is_slot_tombstone,
+        // #5952: "deleted" covers BOTH the soft-deleted in-store record (#3302)
+        // and the #3034 slot tombstone; `--all` is the way to see either one.
+        "decommissioned" | "deleted" => false,
         // #4994: the sweep confirmed no pane and no workspace on disk, so this
         // row is hidden from the default view exactly like `decommissioned`.
         _ => !classified_dead,
@@ -151,10 +143,9 @@ pub(crate) fn is_live_session_state(
 ///
 /// Why: the picker must never show decommissioned tombstones (or a
 /// soft-deleted, still-in-store record, or — since #4994 — a record the
-/// listing-time sweep classified dead) by default; the `--all` opt-in
-/// re-enables them for `tm session ls` via this module's path. A #3034
-/// numbered-slot tombstone (`ManagedSessionSummary::deleted == true`) is
-/// deliberately kept regardless — see [`is_live_session_state`]'s doc.
+/// listing-time sweep classified dead, or — since #5952 — a #3034 numbered-slot
+/// tombstone) by default; the `--all` opt-in re-enables all four for `tm ls` and
+/// `tm session ls` via this module's path. See [`is_live_session_state`]'s doc.
 ///
 /// 🔴 `dead_ids` must come from the SAME sweep that just ran over this list —
 /// see [`crate::commands::session_picker::scope_for_display`]. That forces two
@@ -162,10 +153,11 @@ pub(crate) fn is_live_session_state(
 /// upstream would starve the sweep of the records it exists to reap, so they
 /// would accumulate in the store forever, now invisibly), and it hides only
 /// what the sweep is willing to reap.
-/// What: retains only sessions whose `(state, deleted, dead_ids-membership)`
-/// triple passes [`is_live_session_state`].
+/// What: retains only sessions whose `(state, dead_ids-membership)` pair passes
+/// [`is_live_session_state`].
 /// Test: `picker_filter_excludes_decommissioned_keeps_active`,
 /// `picker_filter_hides_only_what_the_prune_classified_dead`,
+/// `picker_filter_hides_slot_tombstone_and_soft_deleted_record`,
 /// `picker_filter_keeps_a_live_row_flagged_unresumable`.
 pub(crate) fn filter_live_sessions(
     sessions: Vec<ManagedSessionSummary>,
@@ -173,7 +165,7 @@ pub(crate) fn filter_live_sessions(
 ) -> Vec<ManagedSessionSummary> {
     sessions
         .into_iter()
-        .filter(|s| is_live_session_state(&s.state, s.deleted, dead_ids.contains(&s.id)))
+        .filter(|s| is_live_session_state(&s.state, dead_ids.contains(&s.id)))
         .collect()
 }
 
@@ -184,10 +176,11 @@ pub(crate) fn filter_live_sessions(
 /// What: GETs `/api/v1/sessions/managed` (with an optional `?source_id=` filter
 /// that the daemon already supports) and prints a table with id, state, name,
 /// task (truncated to 30 chars), and created_at; or raw JSON with `--json`.
-/// By default, decommissioned tombstone sessions (#1809) and dead `unresumable`
-/// records (#4994) are hidden from the table; `--all` (i.e. `all=true`) opts in
-/// to the full unfiltered list. The `--json`
-/// path always returns the raw daemon response unfiltered.
+/// By default, decommissioned tombstone sessions (#1809), dead `unresumable`
+/// records (#4994), and deleted-slot tombstones (#5952) are hidden from the
+/// table; `--all` (i.e. `all=true`) opts in to the full unfiltered list. The
+/// `--json` path always returns the raw daemon response unfiltered — a script
+/// parsing it sees every row it saw before #5952.
 /// The source_id filter is passed straight through as a query parameter rather
 /// than doing client-side filtering so callers get the daemon's authoritative view.
 /// `sort`/`term` (#3483 — the `tm ls [recent|alpha] [filter]` inline
@@ -525,25 +518,55 @@ pub(crate) async fn session_resume(
     Ok(())
 }
 
+/// Decommission `id` and return the one line the CLI reports for it.
+///
+/// Why (#5913): this used to be a second, hand-rolled `reqwest` POST to the
+/// decommission endpoint, independent of the routed
+/// `tm session decommission <id>` verb. Two paths to one endpoint is what let
+/// #5899's wording divergence happen, and the routing carried a second
+/// divergence with it: only this path repaired the base repo's worktree
+/// bookkeeping. Both now call
+/// [`CommandExecutor::decommission_managed_id`](trusty_mpm::client::CommandExecutor::decommission_managed_id).
+/// Splitting the line's construction from its `println!` is the same pattern
+/// [`deprecation_message`] uses, and it is what lets
+/// `decommission_entry_points_agree_on_every_verdict` compare this path's output
+/// against the routed one without capturing process stdout.
+/// What: calls the shared implementation with the canonical id the caller
+/// already holds — no fuzzy resolution, so the bulk sweep still costs one
+/// request per session — and renders the verdict through
+/// [`super::managed_route::decommission_message`], the same renderer
+/// [`super::managed_route::render_cli`] uses. A missing id propagates the shared
+/// transport's `Err` (#2457); `prune.rs`'s sweep records that as a failed row.
+/// Test: `decommission_entry_points_agree_on_every_verdict`;
+/// `session_decommission_not_found_errors`.
+async fn session_decommission_line(
+    client: &reqwest::Client,
+    url: &str,
+    id: &str,
+) -> anyhow::Result<String> {
+    let outcome = super::managed_route::executor(client, url)
+        .decommission_managed_id(id)
+        .await?;
+    Ok(decommission_message(
+        &outcome.summary.id,
+        outcome.workspace_removed,
+    ))
+}
+
 /// `tm session decommission <id>` — full teardown (may or may not remove workspace).
 ///
 /// Why: an adopted or local-path workspace was never tm's to delete, a worktree
 /// holding unsaved work is refused, and a removal can fail — so decommission
 /// often leaves the workspace on disk, and only the daemon knows which happened.
-/// This handler reports that verdict rather than assuming removal. When the
-/// workspace WAS removed and a pre-decommission path came back, it also runs
-/// `git worktree prune` on the parent directory so the base repo's worktree
-/// bookkeeping is cleaned up immediately instead of at the next GC pass.
-/// What: POSTs `/api/v1/sessions/managed/{id}/decommission`, decodes the typed
-/// [`ManagedDecommissionOutcome`], and prints
-/// [`super::managed_route::decommission_message`]'s line for the verdict it
-/// carries. Only `workspace_removed == Some(true)` triggers the
-/// `git worktree prune` (best-effort; errors are suppressed).
+/// This handler reports that verdict rather than assuming removal.
+/// What: prints [`session_decommission_line`]'s rendering of the daemon's
+/// verdict. The daemon call and the base-repo worktree cleanup both live in the
+/// shared implementation that helper calls (#5913).
 /// A missing id is a genuine failure to decommission the requested session
 /// (#2457) — printing "not found" and returning `Ok(())` let a script/CI
-/// check treat it as success, so this now returns `Err` (non-zero exit)
-/// instead. `prune.rs`'s bulk teardown loop (the only other caller) already
-/// propagates this `Err` with `?`, matching its established fail-closed
+/// check treat it as success, so this returns `Err` (non-zero exit) instead.
+/// `prune.rs`'s bulk teardown loop (the only other caller) catches that `Err`
+/// and records the row as failed, matching its established fail-closed
 /// convention (#1508).
 /// Test: `session_decommission_prints_daemon_verdict_over_http`;
 /// `session_decommission_not_found_errors` covers the #2457 exit-code fix; the
@@ -553,34 +576,7 @@ pub(crate) async fn session_decommission(
     url: &str,
     id: String,
 ) -> anyhow::Result<()> {
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/decommission"))
-        .send()
-        .await?;
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        anyhow::bail!("managed session '{id}' not found");
-    }
-    // #5899: decode the typed response and render via the ONE message helper the
-    // routed `tm session decommission` verb also uses — key-fishing through a raw
-    // `serde_json::Value` here, and a hardcoded string there, is how the two paths
-    // drifted into disagreeing about what happened.
-    let outcome: ManagedDecommissionOutcome = resp.error_for_status()?.json().await?;
-    println!(
-        "{}",
-        decommission_message(&outcome.summary.id, outcome.workspace_removed)
-    );
-    if outcome.workspace_removed == Some(true) {
-        // Prune the parent of the (now-deleted) workspace so the base repo's
-        // worktree bookkeeping is cleaned up immediately.
-        if let Some(ws_was) = outcome.workspace_path_was.as_deref() {
-            let parent = std::path::Path::new(ws_was)
-                .parent()
-                .unwrap_or(std::path::Path::new(ws_was));
-            let _ = std::process::Command::new("git")
-                .args(["-C", &parent.to_string_lossy(), "worktree", "prune"])
-                .output();
-        }
-    }
+    println!("{}", session_decommission_line(client, url, &id).await?);
     Ok(())
 }
 

@@ -2282,6 +2282,36 @@ fn pm_guard_denies_a_granted_dispatch_beside_a_live_writer() {
 }
 
 #[test]
+fn pm_guard_denies_a_granted_dispatch_when_the_daemon_does_not_answer() {
+    // #5923, in the second place it lived. The grant path read a daemon that
+    // accepted the connection and never answered as an empty checkout and
+    // emitted the worktree grant. ADR-0048 puts the #4480 verdict in this same
+    // call — "a dispatch made into a checkout another writer holds is denied,
+    // and only an empty answer is granted" — and the grant it would emit is a
+    // rewrite of the dispatch's arguments this binary cannot confirm the
+    // harness applies. Against the pre-fix binary this prints the grant JSON
+    // with `updatedInput`, which is the ALLOW this closes.
+    let url = spawn_silent_mock();
+    let (_dir, repo) = main_checkout_fixture();
+    let payload = tool_payload_at(
+        "Agent",
+        r#"{"subagent_type":"rust-engineer","prompt":"do the thing"}"#,
+        &repo,
+        r#""session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_grant","#,
+    );
+    let stdout = run_pm_guard_at(&payload, &url, &repo);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("#5923") && stdout.contains("ADR-0048"),
+        "the deny must name the rule it is enforcing and the ADR that puts it here: {stdout}"
+    );
+    assert!(
+        !stdout.contains("updatedInput"),
+        "a denied dispatch must not also be granted a worktree: {stdout}"
+    );
+}
+
+#[test]
 fn pm_guard_records_the_granted_isolation_it_emits() {
     // #5769 finding 1: the grant is worth nothing to the daemon unless the
     // daemon hears about it — the tracker records the ORIGINAL payload, so the

@@ -12,8 +12,10 @@
 //! What: writes a throwaway agent package declaring one `[[plugins.python]]`
 //! tool with a package-relative `script`, points `TAGENT_CONFIG_DIR` and
 //! `$HOME` at it, captures `trusty_agents` tracing output, and calls the
-//! dispatch function. The LLM leg is deliberately routed at a local (absent)
-//! Ollama endpoint via `SessionOverrides::provider = "local"`, so the turn
+//! dispatch function. The LLM leg is deliberately routed at a local, absent
+//! Ollama endpoint — `SessionOverrides::provider = "local"` plus an
+//! `OLLAMA_HOST` pinned at a reserved dead port, so "absent" holds whatever
+//! the developer has running on :11434 (#5943) — so the turn
 //! fails AFTER the registry is built and no external network call is made; a
 //! placeholder `OPENROUTER_API_KEY` satisfies `llm::create_client`'s
 //! before-the-registry credential check without ever being transmitted. The
@@ -56,6 +58,15 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
         self.clone()
     }
 }
+
+/// How long the whole dispatch turn gets before this test calls it stalled.
+///
+/// Why: #5943 — the old 120s was load-bearing. It was the only bound on an
+/// LLM call that had none of its own, and its expiry was discarded, so the
+/// test passed BY exhausting it. With `OLLAMA_HOST` pinned at a dead port the
+/// turn fails at connect in milliseconds; 30s is slack for a loaded CI box,
+/// not a wait anything is expected to use.
+const TURN_BUDGET: Duration = Duration::from_secs(30);
 
 /// A persona declaring `[[plugins.python]]` gets that tool registered AND
 /// advertised by the production dispatch path (#446).
@@ -134,10 +145,28 @@ content = "Probe persona. Call demo_python_echo."
     // CI run of this test failed while passing on a developer box that happened
     // to have a real key exported. Set unconditionally (not only when unset) so
     // the test behaves identically in both environments.
+    //
+    // `OLLAMA_HOST` is pinned at a RESERVED, never-listening port (#5943). The
+    // doc above says this test routes the chat leg at an "absent" Ollama, but
+    // nothing made that true — it read whatever the developer had on :11434.
+    // On the machine that filed #5943 that was a live-but-wedged `ollama`
+    // process, which accepted the connection and then answered nothing, and
+    // the turn hung for the full 120s below. Port 1 on loopback gives a
+    // deterministic `Connection refused` instead, so this test behaves the
+    // same whether the developer has ollama running, stopped, or wedged.
+    //
+    // `OPENROUTER_BASE_URL` is pinned at the same dead port so the module doc's
+    // "no external network call is made" is enforced rather than assumed. It
+    // used to hold only by accident: the local leg hung forever, so nothing
+    // downstream of it ever ran. Now that the leg fails in milliseconds, the
+    // remote fallback below it is reachable, and the placeholder key would go
+    // to a real host.
     unsafe {
         std::env::set_var("TAGENT_CONFIG_DIR", &agents_dir);
         std::env::set_var("HOME", project.path());
         std::env::set_var("OPENROUTER_API_KEY", "placeholder-never-transmitted");
+        std::env::set_var("OLLAMA_HOST", "http://127.0.0.1:1");
+        std::env::set_var("OPENROUTER_BASE_URL", "http://127.0.0.1:1/api/v1");
     }
 
     // `provider = "local"` forces the Ollama routing branch, so the eventual
@@ -150,10 +179,18 @@ content = "Probe persona. Call demo_python_echo."
     };
 
     // The turn is EXPECTED to fail (no local model server). The registry is
-    // built well before that, which is all this test observes. A generous
-    // timeout keeps a hung network probe from wedging CI instead of failing.
-    let _ = tokio::time::timeout(
-        Duration::from_secs(120),
+    // built well before that, which is all this test observes — so the inner
+    // `Result` is discarded, but the OUTER one is not.
+    //
+    // #5943: it used to be. `let _ = tokio::time::timeout(120s, ...).await`
+    // threw away the one value that says whether the operation finished, and
+    // the assertions below ran either way — so this test reported success
+    // after burning exactly 120.01s on a call that never returned. Expiry is
+    // now a failure with its own message. The budget is 30s rather than 120
+    // because a refused connection settles in milliseconds; anything near it
+    // means the dispatch path is stalling somewhere it should not.
+    tokio::time::timeout(
+        TURN_BUDGET,
         run_pm_task_with_persona(
             project.path(),
             "pyplug-probe",
@@ -163,7 +200,15 @@ content = "Probe persona. Call demo_python_echo."
             overrides,
         ),
     )
-    .await;
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "run_pm_task_with_persona did not return within {TURN_BUDGET:?} — the turn stalled, \
+             and asserting on captured logs anyway is what made this test report success from a \
+             timed-out run (#5943)"
+        )
+    })
+    .ok();
 
     let logs =
         String::from_utf8_lossy(&buffer.lock().unwrap_or_else(|e| e.into_inner())).to_string();

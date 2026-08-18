@@ -31,7 +31,7 @@ use crate::error::AuditError;
 use crate::manifest::{AuditManifest, RepositoryEntry};
 use crate::package::{self, ReturnPackage};
 use crate::progress::{Progress, ProgressSink};
-use crate::registry::{self, Registration, Registry, Removal, TargetKind, TargetList};
+use crate::registry::{self, Registration, Removal, TargetKind, TargetList};
 use crate::run::{self, RunOptions, RunReport};
 use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
 use crate::validate;
@@ -207,7 +207,8 @@ pub struct WorkDirReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NextStep {
-    /// No repositories are known yet; selection comes first (#5487, #5497).
+    /// Nothing is registered and no manifest names a repository, so naming what
+    /// the engagement covers comes first (#5487, #5497, #5885).
     SelectRepositories,
     /// Repositories are known but tooling is missing (#5491, #5495).
     ///
@@ -319,19 +320,27 @@ impl Outcome {
     /// next stage over a set the operator never actually got (#5215 review,
     /// #5555).
     /// What: [`EXIT_PARTIAL`] for a [`RunReport`] that did not fully succeed;
-    /// [`EXIT_INCOMPLETE`] for a [`CloneReport`] that carries gaps, and for a
-    /// [`ReturnPackage`] that does not cover every repository the sweep
-    /// attempted (#5499 — the package is still worth sending, and it is still
-    /// not the whole engagement); 0 otherwise. The policy lives here rather than
-    /// in `main.rs` so the Tauri shell reads the same judgement rather than
-    /// re-deriving it.
+    /// [`EXIT_INCOMPLETE`] for a [`CloneReport`] that carries gaps, for a
+    /// [`RunReport`] whose repositories all succeeded and which skipped a
+    /// registered board (#5982), and for a [`ReturnPackage`] that does not cover
+    /// every repository the sweep attempted (#5499 — the package is still worth
+    /// sending, and it is still not the whole engagement); 0 otherwise. The
+    /// policy lives here rather than in `main.rs` so the Tauri shell reads the
+    /// same judgement rather than re-deriving it.
     /// Test: `crate::cli::cli_tests::a_partial_sweep_does_not_exit_zero`,
     /// `crate::cli::cli_tests::a_run_with_gaps_exits_non_zero`,
+    /// `crate::cli::cli_tests::a_sweep_that_skipped_a_board_does_not_exit_zero`,
     /// `crate::cli::cli_tests::a_package_that_omits_a_repository_does_not_exit_zero`,
     /// `crate::chain::chain_tests::a_partly_failed_chain_packages_and_still_does_not_exit_zero`.
     pub fn exit_code(&self) -> i32 {
         match self {
             Outcome::Run(report) if report.status != run::RunStatus::AllSucceeded => EXIT_PARTIAL,
+            // #5982: a registered board the sweep could not collect is the same
+            // shape as a `Cloned` gap — every repository was audited and the
+            // engagement still did not cover what was registered. Without this,
+            // `taudit run` over a legacy `linear:<team-id>` exits 0 and chains
+            // onward over a board nobody read.
+            Outcome::Run(report) if !report.board_gaps.is_empty() => EXIT_INCOMPLETE,
             Outcome::Cloned(report) if !report.gaps.is_empty() => EXIT_INCOMPLETE,
             Outcome::Package(package) if !package.excluded.is_empty() => EXIT_INCOMPLETE,
             // #5824: the chain reports the sweep's verdict for the same reason
@@ -531,6 +540,15 @@ impl Session {
         &self.config_path
     }
 
+    /// Whether this session may download the pinned tools on its own (#5970).
+    ///
+    /// The cold-start launch reads it to decide whether to preflight and install
+    /// after writing the config, so `--no-install` means the same thing there as
+    /// it does in [`Session::guided`] rather than only in one of the two.
+    pub fn auto_install(&self) -> bool {
+        self.auto_install
+    }
+
     /// Run one capability.
     ///
     /// Why: the single entry point. Every front end goes through here, so a
@@ -605,31 +623,52 @@ impl Session {
     /// What: [`registry::parse`] owns the spec, [`validate::validate`] owns the
     /// access check, and [`registry::register`] owns the write — including the
     /// lock that stops two concurrent `add` runs discarding each other's target.
+    ///
+    /// #5982: what is written is the target validation ANSWERED with, not the
+    /// one parsed from argv. `linear:<team-id>` names a readable team and is not
+    /// a key the sweep can collect against, so validation resolves it to the
+    /// team key while it already has Linear's team list in hand. The
+    /// [`Registration`] reports that same resolved target, so an operator who
+    /// typed an id is shown what was actually registered.
+    ///
+    /// #5979: the config is REQUIRED here, where it used to be optional. It is
+    /// the file a target is now declared in, so an absent one is
+    /// [`AuditError::NoEngagementConfig`] rather than a registration that lands
+    /// somewhere no longer authoritative. The check runs before validation, so a
+    /// directory that is not an engagement is told so without a network round
+    /// trip first.
     /// Test: `super::session_tests::a_rejected_target_is_not_persisted`,
     /// `super::session_tests::re_adding_a_registered_target_changes_nothing`,
     /// `crate::registry::registry_tests::concurrent_registrations_keep_every_target`.
     async fn add_target(&self, kind: TargetKind, spec: &str) -> Result<Registration, AuditError> {
         let target = registry::parse(Some(kind), spec)?;
         self.work.create()?;
-        if Registry::load(&self.work)?.contains(&target) {
+        let config = EngagementConfig::load_if_present(&self.config_path)?.ok_or_else(|| {
+            AuditError::NoEngagementConfig {
+                path: self.config_path.clone(),
+            }
+        })?;
+        if registry::engagement_targets(Some(&config), &self.work)?
+            .iter()
+            .any(|t| t.same_as(&target))
+        {
             return Ok(Registration {
                 target,
                 already_registered: true,
             });
         }
-        // Absent rather than required: a repository target needs no config at
-        // all, and a board target's refusal names the field to set (#5822).
-        let config = EngagementConfig::load_if_present(&self.config_path)?;
-        // #5822: validation runs OUTSIDE the registry's lock — it reaches the
-        // network under a 30s ceiling, and holding the lock across that would
-        // stall every other `add` in this working directory behind one
-        // unreachable site. `register` re-reads the file, so the append is
-        // decided against the snapshot current at write time.
-        validate::validate(&target, config.as_ref(), self.repo_probe).await?;
+        // #5822: validation runs OUTSIDE the lock — it reaches the network under
+        // a 30s ceiling, and holding the lock across that would stall every
+        // other `add` for this engagement behind one unreachable site.
+        // `register` re-reads the config, so the append is decided against the
+        // snapshot current at write time.
+        // #5982: what gets persisted is what validation resolved, not what was
+        // typed — a Linear team id would otherwise be stored and never collect.
+        let target = validate::validate(&target, Some(&config), self.repo_probe).await?;
         let inserted = self
             .under_registry_lock({
-                let target = target.clone();
-                move |work| registry::register(work, &target)
+                let (target, config_path) = (target.clone(), self.config_path.clone());
+                move |work| registry::register(&config_path, work, &target)
             })
             .await?;
         Ok(Registration {
@@ -658,17 +697,21 @@ impl Session {
         tokio::task::spawn_blocking(move || f(&work))
             .await
             .map_err(|source| AuditError::RegistryLock {
-                path: Registry::path(&self.work),
+                path: self.config_path.clone(),
                 source: std::io::Error::other(source),
             })?
     }
 
-    /// What is registered, plus the selection file the sweep still reads.
+    /// What the engagement declares, plus the selection file the sweep reads.
     ///
-    /// See [`registry::legacy_selection`] for why both are reported.
+    /// See [`registry::legacy_selection`] for why both are reported, and
+    /// [`registry::engagement_targets`] for what a config that declares nothing
+    /// falls back to. Listing never writes, so a report on an engagement that
+    /// has not been migrated yet leaves it exactly as it was.
     fn list_targets(&self) -> Result<TargetList, AuditError> {
+        let config = EngagementConfig::load_if_present(&self.config_path)?;
         Ok(TargetList {
-            targets: Registry::load(&self.work)?.targets().to_vec(),
+            targets: registry::engagement_targets(config.as_ref(), &self.work)?,
             legacy_selection: registry::legacy_selection(&self.work)?,
         })
     }
@@ -676,13 +719,14 @@ impl Session {
     /// Drop one target. Removing one that is not registered writes nothing.
     ///
     /// Under the same lock `add` takes (#5822): a removal is the same
-    /// load-mutate-save, so an unserialised one discards a concurrent add.
+    /// load-mutate-save, so an unserialised one discards a concurrent add. The
+    /// config is required for the same reason it is in `add` (#5979).
     async fn remove_target(&self, spec: &str) -> Result<Removal, AuditError> {
         let target = registry::parse(None, spec)?;
         let was_registered = self
             .under_registry_lock({
-                let target = target.clone();
-                move |work| registry::deregister(work, &target)
+                let (target, config_path) = (target.clone(), self.config_path.clone());
+                move |work| registry::deregister(&config_path, work, &target)
             })
             .await?;
         Ok(Removal {
@@ -856,12 +900,32 @@ impl Session {
     async fn guided(&self) -> Result<GuidedStatus, AuditError> {
         self.work.create()?;
         let manifest = AuditManifest::load_if_present(&self.manifest_path)?;
+        // #5979: read ONCE here rather than twice below — the flow's repository
+        // check and its auto-install both need it, and reading the file twice
+        // lets the two disagree about an engagement edited in between.
+        let config = EngagementConfig::load_if_present(&self.config_path)?;
 
         // #5502: the epic's pre-sweep order is repo selection, then tooling —
         // so a missing repository set outranks a missing binary.
+        //
+        // #5885: the REGISTRY counts, not only the manifest. `SelectRepositories`
+        // tells the operator to run `add`, and `add` writes the registry — so
+        // reading only the manifest left the flow repeating that instruction
+        // after they had done it, with the manifest not written until a sweep
+        // finishes. Either record means the operator has named an engagement.
+        //
+        // #5896 review: REPOSITORIES, not any target. `Registry::targets` mixes
+        // repositories and boards, so `taudit add board jira:ACME` against an
+        // otherwise empty registry skipped `SelectRepositories`, triggered a
+        // real multi-tool download through `auto_install_tools`, and reported
+        // `ReadyForRun` over an engagement with nothing to sweep. A board is not
+        // a unit of the sweep — `crate::chain::split_targets` says the same.
         let repos_known = manifest
             .as_ref()
-            .is_some_and(|m| !m.repositories.is_empty());
+            .is_some_and(|m| !m.repositories.is_empty())
+            || registry::engagement_targets(config.as_ref(), &self.work)?
+                .iter()
+                .any(|target| target.kind() == TargetKind::Repo);
 
         // #5797: install at the point the flow would otherwise have printed
         // "now go run `install`", and not one step earlier. Repository selection
@@ -869,7 +933,7 @@ impl Session {
         // its state without this process reaching the network — the operator
         // has not committed to an engagement here.
         let installed = if self.auto_install && repos_known {
-            self.auto_install_tools().await?
+            self.auto_install_tools(config.as_ref()).await?
         } else {
             None
         };
@@ -922,13 +986,17 @@ impl Session {
     /// declines to install and the flow names the step, exactly as before.
     ///
     /// A config that is PRESENT and unreadable or malformed is not that case and
-    /// propagates: `load_if_present` tolerates only absence.
-    /// What: `Ok(None)` when there is no config or the set was already
-    /// satisfied; `Ok(Some(installed))` naming what this call placed.
+    /// propagates: the caller's `load_if_present` tolerates only absence.
+    /// What: takes the config [`Session::guided`] already read, so the two
+    /// cannot see different files. `Ok(None)` when there is no config or the set
+    /// was already satisfied; `Ok(Some(installed))` naming what this call placed.
     /// Test: `super::session_tests::guided_without_a_config_still_names_the_step`,
     /// `super::session_tests::guided_propagates_a_malformed_config`.
-    async fn auto_install_tools(&self) -> Result<Option<Vec<InstalledTool>>, AuditError> {
-        let Some(config) = EngagementConfig::load_if_present(&self.config_path)? else {
+    async fn auto_install_tools(
+        &self,
+        config: Option<&EngagementConfig>,
+    ) -> Result<Option<Vec<InstalledTool>>, AuditError> {
+        let Some(config) = config else {
             return Ok(None);
         };
         tools::ensure(&self.work, &config.tools, &self.progress).await
@@ -938,6 +1006,7 @@ impl Session {
 #[cfg(test)]
 mod session_tests {
     use super::*;
+    use crate::registry::Registry;
 
     const MANIFEST: &str = r#"
 [report]
@@ -1010,6 +1079,49 @@ trusty-review = "0.0.0-never-published"
         assert_eq!(status.next, NextStep::SelectRepositories);
         assert!(status.manifest.is_none());
         assert!(status.tools.iter().all(|s| !s.installed));
+    }
+
+    /// #5896 review: a BOARD is not a repository. `Registry::targets` mixes the
+    /// two, so a board-only registry looked like a named engagement — the flow
+    /// skipped `SelectRepositories`, `auto_install_tools` started a real
+    /// multi-tool download, and it reported `ReadyForRun` over a sweep with
+    /// nothing to run on.
+    ///
+    /// `with_auto_install(false)` here so the assertion is about the STEP: with
+    /// the defect present and auto-install on, this test would reach the network
+    /// rather than fail.
+    ///
+    /// Against `501b6dae5` this fails with `NextStep::InstallTools(…)`.
+    #[tokio::test]
+    async fn a_board_only_registry_still_asks_for_repositories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path()).with_auto_install(false);
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+
+        let mut registry = Registry::default();
+        registry.insert(registry::parse(Some(TargetKind::Board), "jira:ACME").expect("parses"));
+        registry.save(session.work_dir()).expect("write registry");
+
+        let Outcome::Guided(status) = session.execute(Command::Guided).await.expect("runs") else {
+            panic!("Guided command must yield a Guided outcome");
+        };
+        assert_eq!(
+            status.next,
+            NextStep::SelectRepositories,
+            "a board is not a unit of the sweep — there is still nothing to audit"
+        );
+
+        // And one repository beside it is: the guard must not have gone the
+        // other way and started ignoring the registry.
+        registry.insert(registry::parse(Some(TargetKind::Repo), "acme/api").expect("parses"));
+        registry.save(session.work_dir()).expect("write registry");
+        let Outcome::Guided(status) = session.execute(Command::Guided).await.expect("runs") else {
+            panic!("Guided command must yield a Guided outcome");
+        };
+        assert_ne!(status.next, NextStep::SelectRepositories);
     }
 
     #[tokio::test]
@@ -1747,7 +1859,8 @@ trusty-review = "0.15.1"
     #[tokio::test]
     async fn a_refused_repository_registration_writes_nothing() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let session = session_in(tmp.path()).with_repo_probe(validate::RepoProbe::unusable());
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS)
+            .with_repo_probe(validate::RepoProbe::unusable());
 
         let err = session
             .execute(Command::AddTarget {
@@ -1797,6 +1910,156 @@ trusty-review = "0.15.1"
             .expect_err("a traversing name must not register");
         assert!(matches!(err, AuditError::InvalidRepoName { .. }), "{err:?}");
         assert!(!Registry::path(session.work_dir()).exists());
+    }
+
+    /// 🔴 #5979, through the door a front end actually uses: a target added by
+    /// `Command::AddTarget` is DECLARED in `engagement.toml`, reads back from
+    /// it, and the working copy mirrors it.
+    ///
+    /// Against `87b55c367` the config is never written, so the first assertion
+    /// fails.
+    #[tokio::test]
+    async fn a_target_added_through_the_session_is_declared_in_the_engagement() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS)
+            .with_repo_probe(validate::RepoProbe::accepting());
+
+        let Outcome::Registered(first) = session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: "acme/api".to_owned(),
+            })
+            .await
+            .expect("registers")
+        else {
+            panic!("AddTarget must yield a Registered outcome");
+        };
+        assert!(!first.already_registered);
+
+        let config = EngagementConfig::load(session.config_path()).expect("the config reloads");
+        assert_eq!(
+            config
+                .declared_targets()
+                .expect("the engagement declares its targets")
+                .iter()
+                .map(crate::registry::Target::id)
+                .collect::<Vec<_>>(),
+            vec!["acme/api"]
+        );
+        assert_eq!(registry_of(&session), vec!["acme/api"]);
+        // The rest of the file is intact — a registration must not cost the
+        // recipient their pins or their key.
+        assert_eq!(config.openrouter_key.expose(), "sk-or-v1-not-a-real-key");
+        assert_eq!(config.tools.trusty_review.version(), "0.15.1");
+
+        // And removing it declares zero rather than reverting to the mirror.
+        session
+            .execute(Command::RemoveTarget {
+                spec: "ACME/API".to_owned(),
+            })
+            .await
+            .expect("removes");
+        let after = EngagementConfig::load(session.config_path()).expect("reloads");
+        assert_eq!(after.declared_targets(), Some(&[][..]));
+        assert!(registry_of(&session).is_empty());
+    }
+
+    /// 🔴 The file `add` now rewrites carries the OpenRouter key, so the whole
+    /// `execute` path has to leave it owner-only. Seeded at 0644 so the
+    /// assertion proves this write NARROWS the mode.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adding_a_target_leaves_the_engagement_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS)
+            .with_repo_probe(validate::RepoProbe::accepting());
+        std::fs::set_permissions(
+            session.config_path(),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod");
+
+        session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: "acme/api".to_owned(),
+            })
+            .await
+            .expect("registers");
+
+        let mode = std::fs::metadata(session.config_path())
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+    }
+
+    /// 🔴 There is nowhere to declare a target without an engagement. The
+    /// refusal comes BEFORE validation, so a directory that is not an
+    /// engagement is told so without a network round trip first.
+    #[tokio::test]
+    async fn adding_a_target_without_an_engagement_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path()).with_repo_probe(validate::RepoProbe::unusable());
+
+        let err = session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: "acme/api".to_owned(),
+            })
+            .await
+            .expect_err("no engagement, nothing to declare");
+        assert!(
+            matches!(err, AuditError::NoEngagementConfig { .. }),
+            "{err:?}"
+        );
+        assert!(!Registry::path(session.work_dir()).exists());
+        assert!(!session.config_path().exists());
+    }
+
+    /// The migration, seen from a front end: an engagement upgraded from before
+    /// #5979 keeps every target its working copy holds, and the first write
+    /// persists them into the config.
+    #[tokio::test]
+    async fn an_upgraded_engagement_keeps_the_targets_it_had() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS)
+            .with_repo_probe(validate::RepoProbe::accepting());
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
+        let mut legacy = Registry::default();
+        legacy.insert(crate::registry::parse(None, "acme/api").expect("parses"));
+        legacy.insert(crate::registry::parse(None, "acme/web").expect("parses"));
+        legacy
+            .save(session.work_dir())
+            .expect("a pre-#5979 registry");
+
+        let Outcome::Targets(listed) = session.execute(Command::ListTargets).await.expect("lists")
+        else {
+            panic!("ListTargets must yield a Targets outcome");
+        };
+        assert_eq!(listed.targets.len(), 2, "an upgrade must not read as empty");
+
+        session
+            .execute(Command::AddTarget {
+                kind: TargetKind::Repo,
+                spec: "acme/schema".to_owned(),
+            })
+            .await
+            .expect("registers");
+
+        let declared: Vec<String> = EngagementConfig::load(session.config_path())
+            .expect("reloads")
+            .declared_targets()
+            .expect("declared")
+            .iter()
+            .map(crate::registry::Target::id)
+            .collect();
+        assert_eq!(declared, vec!["acme/api", "acme/web", "acme/schema"]);
     }
 
     /// Registration is additive and idempotent, and a repeat does not
@@ -1892,7 +2155,7 @@ trusty-review = "0.15.1"
     #[tokio::test]
     async fn removing_operates_on_the_same_registry() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let session = session_in(tmp.path());
+        let session = session_with_config(tmp.path(), CONFIG_WITHOUT_BOARDS);
         session
             .execute(Command::WorkDir)
             .await

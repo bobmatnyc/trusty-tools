@@ -125,6 +125,17 @@ pub struct HealthResult {
 pub trait ProcessProber: Send + Sync {
     /// Run `pgrep -f <pattern>` and return the first matched PID.
     fn pgrep(&self, pattern: &str) -> Option<u32>;
+
+    /// PID of the process listening on `port`, if any.
+    ///
+    /// Why (#5951): name matching cannot tell a daemon from a same-named
+    /// sibling; the process holding the listening socket can. Defaults to
+    /// `None` so a prober that cannot answer falls back to `pgrep`.
+    /// Test: `pid_prefers_port_owner_over_name_match`.
+    fn pid_listening_on(&self, port: u16) -> Option<u32> {
+        let _ = port;
+        None
+    }
 }
 
 /// Trait for port file reading.
@@ -190,6 +201,10 @@ impl ProcessProber for RealProcessProber {
             .next()
             .and_then(|s| s.parse::<u32>().ok())
     }
+
+    fn pid_listening_on(&self, port: u16) -> Option<u32> {
+        crate::core::daemon_identity::pid_listening_on(port)
+    }
 }
 
 /// Production port prober — reads a `host:port` file.
@@ -212,35 +227,51 @@ impl PortProber for RealPortProber {
 
 /// Production HTTP health prober using `reqwest::blocking`.
 ///
-/// Why: reqwest is already a workspace dep; blocking client avoids async
-/// complexity in the prober trait while keeping the caller async-friendly.
-/// What: issues GET to `url` with the given timeout; 2xx → Ok, non-2xx → Fail
-/// with status code, connection error → Fail with error text.
-/// Test: `probe_health_ok_on_2xx`, `probe_health_fail_on_503`.
+/// Why: the prober trait is synchronous, so the client has to be blocking — but
+/// `tm`'s `main` is `#[tokio::main]`, so every caller reaches this from inside a
+/// runtime. Building `reqwest::blocking`'s internal runtime there panics with
+/// "Cannot drop a runtime in a context where blocking is not allowed", and even
+/// in release (where reqwest's tripwire compiles out) it parks the calling
+/// thread from inside `poll`. #5965: run the client on a dedicated OS thread and
+/// join it, so the nested runtime never touches an async worker. Same remedy,
+/// same reason as `trusty_common::search_index::best_effort_create_index`.
+/// What: issues GET to `url` with the given timeout on a spawned thread; 2xx →
+/// Ok, non-2xx → Fail with status code, connection error → Fail with error text,
+/// worker panic → Fail.
+/// Test: `probe_health_ok_on_2xx`, `probe_health_fail_on_503`,
+/// `real_http_prober_survives_being_called_inside_a_tokio_runtime`.
 pub struct RealHttpProber;
 
 impl HttpProber for RealHttpProber {
     fn get_health(&self, url: &str, timeout: Duration) -> HealthState {
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return HealthState::Fail {
-                    detail: format!("failed to build HTTP client: {e}"),
-                };
+        let url = url.to_string();
+        // #5965: the blocking client builds its own runtime, which cannot be
+        // dropped inside an async context — keep it off the caller's thread.
+        let worker = std::thread::spawn(move || {
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(timeout)
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    return HealthState::Fail {
+                        detail: format!("failed to build HTTP client: {e}"),
+                    };
+                }
+            };
+            match client.get(&url).send() {
+                Ok(resp) if resp.status().is_success() => HealthState::Ok,
+                Ok(resp) => HealthState::Fail {
+                    detail: format!("HTTP {}", resp.status()),
+                },
+                Err(e) => HealthState::Fail {
+                    detail: e.to_string(),
+                },
             }
-        };
-        match client.get(url).send() {
-            Ok(resp) if resp.status().is_success() => HealthState::Ok,
-            Ok(resp) => HealthState::Fail {
-                detail: format!("HTTP {}", resp.status()),
-            },
-            Err(e) => HealthState::Fail {
-                detail: e.to_string(),
-            },
-        }
+        });
+        worker.join().unwrap_or_else(|_| HealthState::Fail {
+            detail: "health probe thread panicked".to_string(),
+        })
     }
 }
 
@@ -440,8 +471,8 @@ impl Discoverer {
     /// What: runs process, port, health, version, and uptime probes in sequence.
     /// Test: covered by the mock-based discoverer unit tests.
     fn probe(&mut self, name: &str, decl: &ServiceDecl) -> ServiceStatus {
-        let pid = self.probe_process(decl);
         let port = self.probe_port(decl);
+        let pid = self.probe_pid(decl, port);
         let url = port.map(|p| format!("http://localhost:{p}"));
 
         let health = if let Some(u) = &url {
@@ -493,6 +524,28 @@ impl Discoverer {
             log_path,
             uptime_secs,
         }
+    }
+
+    /// PID of the service: the port's owner when there is one, else a name match.
+    ///
+    /// Why (#5951): `tm services list` reported `trusty-mpm-daemon` as PID 7009,
+    /// a `trusty-mpm serve --stdio` MCP bridge, because the manifest's
+    /// `process_match: "trusty-mpm"` is a substring every sibling shares and
+    /// `pgrep` returns the lowest PID first. Four independent sources —
+    /// `launchctl list`, `ps`, the daemon's `/health`, and the console
+    /// gateway — named the daemon, and `tm` named something else. Operators are
+    /// told to use `tm services` instead of raw `ps`/`lsof`, so the wrong PID
+    /// here is a PID somebody signals.
+    /// What: when the service has a resolved port, the process holding its
+    /// listening socket is the service, definitionally. Name matching stays the
+    /// fallback for portless services (`trusty-embedderd`), for a port nothing
+    /// is listening on, and for a host without `lsof`.
+    /// Test: `pid_prefers_port_owner_over_name_match`,
+    /// `pid_falls_back_to_name_match_without_port`,
+    /// `pid_falls_back_to_name_match_when_port_unowned`.
+    fn probe_pid(&self, decl: &ServiceDecl, port: Option<u16>) -> Option<u32> {
+        port.and_then(|p| self.process_prober.pid_listening_on(p))
+            .or_else(|| self.probe_process(decl))
     }
 
     /// Run pgrep for the service's `process_match` pattern.

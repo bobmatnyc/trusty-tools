@@ -313,7 +313,23 @@ pub fn exit_code(outcome: &Outcome) -> i32 {
 // past the 500-SLOC production cap. Re-exported, so `crate::cli::render` stays
 // the name every caller and test already uses.
 pub mod credential;
+// #5970: a launch in a directory with no `engagement.toml` creates one instead
+// of registering targets against an engagement that does not exist. Beside
+// `credential` for the same reason: it prompts, and a prompt is a front-end
+// concern the library must never acquire.
+pub mod bootstrap;
+// #5885: the launch walks the operator into registration rather than naming a
+// command for them to run next. Beside `credential` because both are prompts,
+// and a prompt is a front-end concern the library must never acquire.
+pub mod registration;
 mod render;
+// #5978: `repos.txt` / `boards.txt` are the target list when they are present,
+// so the per-target prompt loop is skipped rather than seeded. Parsing only —
+// registering stays in `registration`, which owns the one path a target takes.
+pub mod targets_file;
+// #5978: one confirmation surface, reached two ways — the operator who supplied
+// a targets file and the operator who typed targets both end at the same menu.
+pub mod review;
 
 pub use render::render;
 
@@ -492,10 +508,17 @@ mod cli_tests {
         assert!(text.contains("trusty-search index remove"), "{text}");
     }
 
+    /// #5885: `repos` reads the manifest a completed sweep writes, so it is
+    /// empty however many targets are registered. It must point at `targets`,
+    /// not send the operator back to register what they already registered.
     #[test]
     fn rendering_an_empty_repo_list_says_what_to_do() {
         let text = render(&Outcome::Repos(Vec::new()));
-        assert!(text.contains("guided flow"), "{text}");
+        assert!(text.contains("trusty-audit targets"), "{text}");
+        assert!(
+            !text.contains("configured yet"),
+            "a successful registration must not read as a failure: {text}"
+        );
     }
 
     #[tokio::test]
@@ -525,6 +548,12 @@ mod cli_tests {
         assert!(text.contains("Coverage: "), "{text}");
         assert!(text.contains("database schema or migrations"), "{text}");
         assert!(text.contains("ticketing board"), "{text}");
+        // #5885: the paragraph ends a sentence. A trailing colon reads as
+        // "…and here it comes", with nothing after it.
+        assert!(
+            !text.trim_end().ends_with(':'),
+            "the card ends with a stray colon: {text}"
+        );
         // #5884: the "Next:" line must name the registering path, not the
         // listing one — `repos` lists what `add` already registered.
         assert!(text.contains("Next: register"), "{text}");
@@ -819,6 +848,38 @@ mod cli_tests {
             "{}",
             render(&total)
         );
+    }
+
+    /// #5982: every repository succeeded and a registered board was skipped, so
+    /// this is `AllSucceeded` and still not a whole engagement. Before the
+    /// `board_gaps` wiring, `taudit run` over a legacy `linear:<team-id>` exited
+    /// 0 and rendered nothing at all about the board — the silent-empty shape
+    /// `boards::resolve`'s gap lines exist to replace.
+    ///
+    /// Against `9ee9cc386` the `RunReport::stating` constructor does not exist.
+    #[test]
+    fn a_sweep_that_skipped_a_board_does_not_exit_zero() {
+        use crate::run::{RepoRun, RunReport, SelectedRepo};
+
+        let audited = RepoRun {
+            repo: SelectedRepo {
+                name: "acme-api".to_owned(),
+                path: PathBuf::from("repos/acme-api"),
+            },
+            output: PathBuf::from("/work/out/00-acme-api"),
+            log: PathBuf::from("/work/logs/00-acme-api.log"),
+            gaps: Vec::new(),
+            resumed: false,
+            result: RepoResult::Succeeded,
+        };
+        let gap = "linear:a1b2c3d4 was not audited — re-register it (#5982)";
+        let outcome = Outcome::Run(RunReport::of(vec![audited]).stating(vec![gap.to_owned()]));
+
+        let text = render(&outcome);
+        assert!(text.contains(&format!("Not audited: {gap}")), "{text}");
+        // The board is not a repository that failed: the verdict is unchanged.
+        assert!(text.contains("Audited 1 repository"), "{text}");
+        assert_eq!(exit_code(&outcome), EXIT_INCOMPLETE);
     }
 
     /// #5494: silent skipping is the defect. A resumed sweep finishes in

@@ -314,6 +314,10 @@ the real-time channel. Before dispatching multi-agent work on an area:
    refs, expected-land condition.
 3. Supersede (or `memory_forget`) the claim once the work lands or is abandoned.
 
+A claim drawer covers the work area, never the merge queue. Who may merge on a
+shared repository is its own claim: `Skill(skill="tm-workflow")`,
+"Merge-Queue Ownership".
+
 ## Long-Wait Delegation (issues #2833, #4792)
 
 A delegated agent's own gate (`cargo test -p <crate>`, a release build) blocks in

@@ -42,7 +42,7 @@
 use serde::Serialize;
 
 use crate::config::BoardCredentials;
-use crate::registry::{BoardProvider, Target};
+use crate::registry::{self, BoardProvider, Target};
 
 /// The variable the JIRA API token reaches the child under.
 pub const ENV_JIRA_TOKEN: &str = "TRUSTY_AUDIT_JIRA_TOKEN";
@@ -150,7 +150,14 @@ impl Boards {
 /// registered. Linear teams accumulate into one section, because tga's
 /// `linear.team_keys` is a list. A SECOND JIRA project is a gap: tga's
 /// `jira.project_key` is a single value, so the extra board would otherwise be
-/// silently dropped.
+/// silently dropped. A Linear team key is UPPERCASED on the way into
+/// `team_keys`, because tga's collector matches it case-insensitively and its
+/// classifier matches it exactly — so a lowercase key collected issues and
+/// classified none, and uppercasing is what makes one stored key mean one thing
+/// to both. A key that is not a team key [`registry::is_linear_team_key`]
+/// recognises even uppercased is a gap: it would otherwise reach `team_keys`,
+/// match no issue, and be reported as a covered board that happened to be quiet
+/// (#5982).
 /// Test: `super::boards_tests`.
 pub fn resolve(targets: &[Target], credentials: &BoardCredentials) -> Boards {
     let mut resolved = Boards::default();
@@ -174,7 +181,22 @@ pub fn resolve(targets: &[Target], credentials: &BoardCredentials) -> Boards {
             },
             BoardProvider::Linear => match credentials.linear.as_ref() {
                 None => resolved.gaps.push(unconfigured(target, *provider)),
-                Some(_) => linear_teams.push(key.clone()),
+                // #5982: uppercase first, gap only on what uppercasing cannot
+                // save. tga reads a stored key twice and disagrees with itself:
+                // `collect::linear::client::fetch_referenced_issues` compares
+                // `team_keys` with `eq_ignore_ascii_case`, so `eng` collected
+                // `ENG-1234`, while `classify::sources::linear::matches_team_key`
+                // compares exactly, so the same issue classified as nothing.
+                // Uppercasing keeps the collection and adds the classification;
+                // gapping a lowercase key would have taken the collection away.
+                Some(_) => {
+                    let key = key.to_ascii_uppercase();
+                    if registry::is_linear_team_key(&key) {
+                        linear_teams.push(key);
+                    } else {
+                        resolved.gaps.push(uncollectable_linear(target));
+                    }
+                }
             },
         }
     }
@@ -194,6 +216,31 @@ fn unconfigured(target: &Target, provider: BoardProvider) -> String {
     )
 }
 
+/// The gap for a Linear board stored as something no issue can carry.
+///
+/// #5982 reached this state through registration, which accepted a team id and
+/// wrote it down; that half is fixed at the source now. This stays because the
+/// file outlives the fix — a target registered by id before it is still on disk,
+/// and a run that skipped it silently is the failure this line replaces on the
+/// paths that state gaps: `taudit audit`, and `taudit run` via
+/// [`crate::run::RunReport::board_gaps`].
+///
+/// The line names the SHAPE rather than guessing what the stored key is. It is
+/// reached by a team id, by an over-long key, and by anything carrying a
+/// character a Linear identifier cannot — calling every one of them a team id
+/// was wrong. It also names BOTH halves of the remedy: registering the team key
+/// leaves the old entry in place, and a registry still holding it keeps
+/// answering [`crate::session::EXIT_INCOMPLETE`] for a board that is now
+/// audited.
+fn uncollectable_linear(target: &Target) -> String {
+    format!(
+        "{target} was not audited — `tga audit` matches Linear issues by team key (the `ENG` in \
+         `ENG-1234`), which is one to ten characters of A-Z and 0-9 starting with a letter, and \
+         that key is not; re-register it as `linear:<TEAM-KEY>` AND drop this entry with `taudit \
+         remove {target}`, or every later run keeps reporting it (#5982)"
+    )
+}
+
 fn second_jira(target: &Target) -> String {
     format!(
         "{target} was not audited — `tga audit` takes one JIRA project per run, and another was \
@@ -209,6 +256,9 @@ mod boards_tests {
 
     const JIRA_TOKEN: &str = "jira-token-do-not-write-me-down";
     const LINEAR_KEY: &str = "lin_api_do-not-write-me-down";
+
+    /// A Linear team id, in the shape the API returns one. See #5982.
+    const TEAM_ID: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
 
     fn board(spec: &str) -> Target {
         registry::parse(Some(TargetKind::Board), spec).expect("parses")
@@ -267,6 +317,67 @@ mod boards_tests {
         let linear = resolved.linear.expect("a configured Linear board");
         assert_eq!(linear.team_keys, vec!["ENG".to_owned(), "FE".to_owned()]);
         assert!(resolved.gaps.is_empty(), "{:?}", resolved.gaps);
+    }
+
+    /// A team id is what #5982 names: `crate::validate` accepted one, and tga
+    /// compares `team_keys` against the text before the hyphen in `ENG-1234`,
+    /// where a UUID never appears. The id used to reach `team_keys` and the run
+    /// reported a covered board that contributed nothing — indistinguishable
+    /// from a team with no issues.
+    #[test]
+    fn a_registered_team_id_is_a_gap_rather_than_a_team_that_collects_nothing() {
+        let resolved = resolve(&[board(&format!("linear:{TEAM_ID}"))], &both());
+        assert!(resolved.linear.is_none(), "{:?}", resolved.linear);
+        assert_eq!(resolved.gaps.len(), 1, "{:?}", resolved.gaps);
+        assert!(resolved.gaps[0].contains(TEAM_ID), "{:?}", resolved.gaps);
+        assert!(resolved.gaps[0].contains("#5982"), "{:?}", resolved.gaps);
+    }
+
+    /// The lowercase key #5982's fix must not cost anything. tga's collector
+    /// (`fetch_referenced_issues`) compares `team_keys` with
+    /// `eq_ignore_ascii_case`, so `linear:eng` already collected `ENG-1234`;
+    /// only its classifier (`matches_team_key`) compared exactly and matched
+    /// nothing. Gapping the key would have turned partial collection into none.
+    /// Uppercasing keeps the collection and adds the classification.
+    #[test]
+    fn a_lowercase_legacy_key_collects_uppercased_rather_than_gapping() {
+        let resolved = resolve(&[board("linear:eng")], &both());
+        let linear = resolved
+            .linear
+            .expect("a lowercase key still reaches the child");
+        assert_eq!(linear.team_keys, vec!["ENG".to_owned()]);
+        assert!(resolved.gaps.is_empty(), "{:?}", resolved.gaps);
+    }
+
+    /// The remedy the gap line states has two halves, and stating only the
+    /// first leaves the registry answering `EXIT_INCOMPLETE` forever for a board
+    /// the operator has since re-registered correctly. The line also describes
+    /// the key SHAPE rather than asserting the stored key is a team id — it is
+    /// reached by an over-long key too.
+    #[test]
+    fn the_gap_line_states_the_shape_and_both_halves_of_the_remedy() {
+        let resolved = resolve(&[board("linear:ABCDEFGHIJK")], &both());
+        assert!(resolved.linear.is_none(), "{:?}", resolved.linear);
+        let gap = &resolved.gaps[0];
+        assert!(!gap.contains("that is a team id"), "{gap}");
+        assert!(
+            gap.contains("re-register it as `linear:<TEAM-KEY>`"),
+            "{gap}"
+        );
+        assert!(gap.contains("`taudit remove linear:ABCDEFGHIJK`"), "{gap}");
+    }
+
+    /// The gap costs the teams around it nothing: a stale id alongside a real
+    /// team key leaves that team collecting exactly as it did.
+    #[test]
+    fn a_team_id_does_not_displace_the_team_keys_that_do_collect() {
+        let resolved = resolve(
+            &[board("linear:ENG"), board(&format!("linear:{TEAM_ID}"))],
+            &both(),
+        );
+        let linear = resolved.linear.clone().expect("ENG still collects");
+        assert_eq!(linear.team_keys, vec!["ENG".to_owned()]);
+        assert_eq!(resolved.gaps.len(), 1, "{:?}", resolved.gaps);
     }
 
     /// `jira.project_key` is one value, so the second project has nowhere to go.

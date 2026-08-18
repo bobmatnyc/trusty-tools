@@ -107,12 +107,26 @@ if [ -n "$FROM_LIST" ]; then
   cp "$FROM_LIST" "$TMP_LIST"
 else
   echo "==> enumerating ignored tests (cargo nextest list --run-ignored ignored-only)" >&2
+  # #5890: stderr used to go to /dev/null here, with no comment recorded
+  # anywhere justifying the discard (checked git blame on this line — it has
+  # had exactly one author, in the commit that introduced this file, #5731).
+  # `--message-format json` on STDOUT is what the STEP 2 parser reads, so that
+  # redirect stays; STDERR is left to inherit the script's own stderr instead.
+  # Cargo's non-tty build output is one "Compiling <crate>" line per crate as
+  # each finishes — exactly the periodic progress signal that tells a slow
+  # build apart from a hang — and on a failure those lines are the compiler
+  # diagnostics that used to be thrown away, already sitting in the job log
+  # above the [FAIL] line below rather than needing to be captured and
+  # replayed. Letting it inherit is not noise: it is the same build log any
+  # plain `cargo build` in CI would print, and there is no cap to size because
+  # nothing here re-buffers or truncates it.
   rc=0
   SKIP_UI_BUILD=1 cargo nextest list --workspace --locked "${EXCLUDES[@]}" \
-    --run-ignored ignored-only --message-format json > "$TMP_LIST" 2>/dev/null || rc=$?
+    --run-ignored ignored-only --message-format json > "$TMP_LIST" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "[FAIL] ignored-tests: 'cargo nextest list' exited ${rc} — the gate enumerated nothing." >&2
-    echo "       A zero count from a failed enumeration is not a finding. Fix the build and re-run." >&2
+    echo "       A zero count from a failed enumeration is not a finding. See the compiler output" >&2
+    echo "       above for why the build failed, fix it, and re-run." >&2
     exit 3
   fi
 fi

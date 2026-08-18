@@ -266,3 +266,71 @@ async fn mock_http_server_serves_response() {
     let resp: ChatResponse = serde_json::from_str(&raw).expect("parse as ChatResponse");
     assert_eq!(resp.first_text().as_deref(), Some("from mock"));
 }
+
+// ─── Model-tier resolution (#5971) ───────────────────────────────────────────
+
+/// Why: `trusty-review` imports `ModelTier` from the flat `inference::`
+/// re-export, so the surface a consumer actually uses is what needs proving —
+/// the inline unit tests reach the module directly and would still pass if the
+/// re-export were dropped.
+/// What: resolves all three tiers through the public path for the two providers
+/// that have verified ids.
+#[test]
+fn model_tier_resolves_through_the_public_reexport() {
+    use trusty_common::inference::ModelTier;
+
+    assert_eq!(
+        ModelTier::Analysis.resolve(ProviderId::OpenRouter),
+        Some("anthropic/claude-opus-4.8")
+    );
+    assert_eq!(
+        ModelTier::Interaction.resolve(ProviderId::OpenRouter),
+        Some("anthropic/claude-sonnet-4.6")
+    );
+    assert_eq!(
+        ModelTier::Classification.resolve(ProviderId::OpenRouter),
+        Some("anthropic/claude-haiku-4.5")
+    );
+    assert_eq!(
+        ModelTier::Analysis.resolve(ProviderId::Anthropic),
+        Some("claude-opus-4-8")
+    );
+    assert_eq!(
+        ModelTier::Interaction.resolve(ProviderId::Anthropic),
+        Some("claude-sonnet-4-6")
+    );
+    assert_eq!(
+        ModelTier::Classification.resolve(ProviderId::Anthropic),
+        Some("claude-haiku-4-5-20251001")
+    );
+}
+
+/// Why: a later change that "completes the table" by guessing Bedrock's Opus
+/// 4.8 inference-profile id would ship a string that fails at call time, not
+/// compile time. The gap is the ruled outcome (#5971), so it is asserted.
+/// What: the analysis arm is `None` on Bedrock through the public re-export.
+#[test]
+fn model_tier_bedrock_analysis_stays_unmapped() {
+    use trusty_common::inference::ModelTier;
+
+    assert_eq!(ModelTier::Analysis.resolve(ProviderId::Bedrock), None);
+}
+
+/// Why: the two mapped Bedrock arms spell their profiles differently — Sonnet
+/// bare, Haiku date-stamped and version-suffixed — so pinning both together
+/// catches a change that normalises one onto the other's shape (#5987).
+/// What: the interaction and classification arms resolve through the public
+/// re-export, each to its own verified profile form.
+#[test]
+fn model_tier_bedrock_sonnet_and_haiku_resolve() {
+    use trusty_common::inference::ModelTier;
+
+    assert_eq!(
+        ModelTier::Interaction.resolve(ProviderId::Bedrock),
+        Some("us.anthropic.claude-sonnet-4-6")
+    );
+    assert_eq!(
+        ModelTier::Classification.resolve(ProviderId::Bedrock),
+        Some("us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    );
+}

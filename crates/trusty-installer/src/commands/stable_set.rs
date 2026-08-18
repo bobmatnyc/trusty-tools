@@ -204,7 +204,7 @@ impl StableMember {
 /// Why (#5806): `filter(|r| required(r)).all(ok)` over zero required rows is
 /// vacuously `true`, so a selection of only OPTIONAL members reported success
 /// no matter what happened. The rule was written twice — once in
-/// [`super::install_report::InstallReport::build`] for `all_ok`, once in
+/// `install::install_report::InstallReport::build` for `all_ok`, once in
 /// [`super::verify_tail::VerifyTailReport::build`] for `verified` — and the
 /// first was fixed while the second kept failing open. It lives here now, so a
 /// third consumer inherits the fix rather than the bug.
@@ -329,7 +329,7 @@ pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
 /// the run or print a scary FAILED/exit-2 verdict. trusty-installer is
 /// OPTIONAL for a second reason: a bulk `tctl install` runs FROM a working
 /// installer, so failing to refresh that copy leaves the stack usable. Naming
-/// it explicitly is the different case, and [`super::install_report`]'s
+/// it explicitly is the different case, and `install::install_report`'s
 /// `all_ok` derivation handles it — a selection with no REQUIRED member gates
 /// on every member instead of vacuously passing.
 ///

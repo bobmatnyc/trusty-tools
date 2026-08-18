@@ -1,6 +1,6 @@
 [package]
 name = "trusty-audit"
-version = "0.2.0"
+version = "0.5.3"
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
@@ -44,6 +44,15 @@ dirs = { workspace = true }
 # Argument parsing. The parser lives in the LIBRARY (`cli.rs`) so every CLI
 # invocation is unit-testable without spawning the binary.
 clap = { workspace = true }
+# POSIX job control and terminal-queue calls the prompt path needs, none of
+# which `std` exposes. `tcgetpgrp`/`getpgrp` refuse a terminal this process is
+# in a BACKGROUND group of — reading one raises SIGTTIN and stops the job with
+# no diagnostic — and `tcflush(TCIFLUSH)` discards typeahead before the question
+# that commits to an hours-long sweep (both #5896 review). `rpassword` still
+# owns every echo-suppression call, so this crate spells no `termios` of its
+# own. Also `setsid(2)` in `tests/guided_launch.rs`, which needs a child with no
+# controlling terminal at all.
+libc = { workspace = true }
 # Reading the companion engagement config and tga's `manifest.toml`.
 serde = { workspace = true }
 toml = { workspace = true }

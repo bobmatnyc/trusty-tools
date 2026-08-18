@@ -43,7 +43,7 @@ use trusty_common::gh::GhCommand;
 use crate::config::{EngagementConfig, JiraCredentials, LinearCredentials};
 use crate::discover;
 use crate::error::AuditError;
-use crate::registry::{BoardProvider, Target};
+use crate::registry::{BoardProvider, Target, is_linear_team_key};
 
 /// Ceiling on one validation request.
 ///
@@ -83,6 +83,9 @@ pub struct RepoProbe {
     credential: fn() -> GhCommand,
     /// Builds the repository read for one `owner/name`.
     view: fn(&str) -> GhCommand,
+    /// Test-only: answer `Ok` without running `gh`. See [`RepoProbe::accepting`].
+    #[cfg(test)]
+    accepts_everything: bool,
 }
 
 impl RepoProbe {
@@ -92,6 +95,30 @@ impl RepoProbe {
         Self {
             credential: discover::credential_probe,
             view: view_command,
+            #[cfg(test)]
+            accepts_everything: false,
+        }
+    }
+
+    /// A probe that accepts every repository, for driving the path where a
+    /// registration SUCCEEDS.
+    ///
+    /// Why: [`RepoProbe::unusable`] made the refusal provable offline and left
+    /// the opposite half with no equivalent — every repository registration in a
+    /// default `cargo test -p trusty-audit` failed, so nothing could drive a
+    /// session in which one entry lands and the next is refused. The guided
+    /// registration loop (#5885) is exactly that shape.
+    ///
+    /// Expressed as a flag rather than a `gh` invocation because there is no
+    /// argv that succeeds AND prints `{"nameWithOwner": …}` without a network
+    /// and an authenticated account. `#[cfg(test)]`, so no shipped build carries
+    /// either the field or the branch that reads it.
+    /// Test: `crate::cli::registration::registration_tests`.
+    #[cfg(test)]
+    pub(crate) fn accepting() -> Self {
+        Self {
+            accepts_everything: true,
+            ..Self::real()
         }
     }
 
@@ -109,6 +136,7 @@ impl RepoProbe {
         Self {
             credential: || GhCommand::new([NO_SUCH_SUBCOMMAND]),
             view: |_| GhCommand::new([NO_SUCH_SUBCOMMAND]),
+            accepts_everything: false,
         }
     }
 }
@@ -117,17 +145,34 @@ impl RepoProbe {
 #[cfg(test)]
 const NO_SUCH_SUBCOMMAND: &str = "no-such-subcommand-5822";
 
-/// Prove `target` can be read with the credential the sweep will use.
+/// Prove `target` can be read, and answer with the spelling to persist.
 ///
-/// Why: the gate `crate::registry` runs before it persists anything. Returning
-/// `Ok(())` rather than data is deliberate — this answers one question, and a
-/// caller that also wanted the project's name would be tempted to make this a
-/// second collector.
-/// What: dispatches on the target. A board whose provider has no credential in
-/// the engagement config is refused HERE rather than at the request, so the
-/// message names the config field instead of an HTTP 401. `gh` carries the
-/// repository arm's invocations — see [`RepoProbe`].
+/// Why: the gate `crate::registry` runs before it persists anything. It returns
+/// the target rather than `()` because for Linear the two are not the same
+/// string: `taudit add board linear:<team-id>` names a team the credential can
+/// read, and the id is not what the sweep can collect against. Resolving it
+/// HERE — against the team list this check already fetches — is what keeps
+/// validation and collection agreeing on what identifies a board (#5982). The
+/// same round trip also canonicalises case, which `tga`'s exact-match filter
+/// is equally sensitive to.
+///
+/// What: dispatches on the target. A repository and a JIRA project are returned
+/// unchanged; a Linear board comes back carrying the team key Linear itself
+/// reports. A board whose provider has no credential in the engagement config is
+/// refused HERE rather than at the request, so the message names the config
+/// field instead of an HTTP 401. `gh` carries the repository arm's invocations —
+/// see [`RepoProbe`].
+///
+/// # Postconditions
+/// The returned target has the same [`Target::kind`] as `target`, and for a
+/// Linear board its key satisfies [`is_linear_team_key`] — which is the property
+/// `crate::run::boards::resolve` requires before a board reaches
+/// `linear.team_keys`. [`resolve_team_key`] is what enforces it; before #5982 it
+/// was a claim about a string this function echoed from the reply unchecked.
+///
 /// Test: `super::validate_tests::a_board_with_no_credential_names_the_field`,
+/// `super::validate_tests::a_team_id_registers_as_the_team_key_that_collects`,
+/// `super::validate_tests::a_team_whose_key_the_sweep_cannot_match_is_refused`,
 /// and the `#[ignore]`d live probes.
 ///
 /// # Errors
@@ -140,23 +185,31 @@ pub async fn validate(
     target: &Target,
     config: Option<&EngagementConfig>,
     gh: RepoProbe,
-) -> Result<(), AuditError> {
+) -> Result<Target, AuditError> {
     match target {
-        Target::Repo { name_with_owner } => validate_repo(name_with_owner, gh).await,
+        Target::Repo { name_with_owner } => validate_repo(name_with_owner, gh)
+            .await
+            .map(|()| target.clone()),
         Target::Board { provider, key } => match provider {
             BoardProvider::Jira => {
                 let creds = config
                     .and_then(|c| c.boards.jira.as_ref())
                     .filter(|c| !c.token.is_empty() && !c.url.trim().is_empty())
                     .ok_or_else(|| missing(*provider, key))?;
-                validate_jira(creds, key).await
+                validate_jira(creds, key).await.map(|()| target.clone())
             }
             BoardProvider::Linear => {
                 let creds = config
                     .and_then(|c| c.boards.linear.as_ref())
                     .filter(|c| !c.api_key.is_empty())
                     .ok_or_else(|| missing(*provider, key))?;
-                validate_linear(creds, key, LINEAR_GRAPHQL_URL).await
+                // #5982: what gets stored is the team key Linear reports, not
+                // the id or the casing the operator happened to type.
+                let resolved = validate_linear(creds, key, LINEAR_GRAPHQL_URL).await?;
+                Ok(Target::Board {
+                    provider: *provider,
+                    key: resolved,
+                })
             }
         },
     }
@@ -199,6 +252,11 @@ async fn validate_repo(name_with_owner: &str, gh: RepoProbe) -> Result<(), Audit
         name_with_owner: name_with_owner.to_owned(),
         source: Box::new(source),
     };
+    // #5885: the accepted half of the same seam — see `RepoProbe::accepting`.
+    #[cfg(test)]
+    if gh.accepts_everything {
+        return Ok(());
+    }
     // #5822: both invocations come from the probe, so a test can supply a pair
     // that cannot answer and prove the refusal offline.
     (gh.credential)().nonempty_stdout().await.map_err(refuse)?;
@@ -273,18 +331,64 @@ struct Team {
     key: String,
 }
 
-/// Prove the configured Linear credential can read this team.
+/// The team key to register, given what the operator typed.
+///
+/// Why: #5982. A registered board is matched downstream by team key alone, so
+/// the id and the lowercase spelling Linear accepts here are both dead on
+/// arrival at collection. This is the only place that knows both what was typed
+/// and what Linear calls the team, so it is where the two are reconciled.
+///
+/// What: the first team whose `key` or `id` equals `typed` ignoring ASCII case,
+/// answered with that team's OWN `key` — never the caller's string, and only
+/// once uppercased — the same normalisation [`crate::run::boards::resolve`]
+/// applies to a key already on disk — and only when the result satisfies
+/// [`is_linear_team_key`]. Answering with the reply's
+/// key unchecked is what made [`validate`]'s postcondition a claim nothing
+/// enforced: [`Team::key`] is `#[serde(default)]`, so a reply that omits the
+/// field yields `""`, and an empty key registers green, can never collect, and
+/// cannot be removed either — `registry::parse(None, "linear:")` is an error, so
+/// the operator has no spelling that names the entry to drop. The `Err` is the
+/// reason [`board_refusal`] states, so the two failures read differently: the
+/// credential sees no such team, or it sees the team and Linear calls it
+/// something the sweep cannot match.
+///
+/// Test: `super::validate_tests::a_team_id_registers_as_the_team_key_that_collects`,
+/// `super::validate_tests::a_team_whose_key_the_sweep_cannot_match_is_refused`.
+fn resolve_team_key(teams: &[Team], typed: &str) -> Result<String, String> {
+    let Some(team) = teams
+        .iter()
+        .find(|t| t.key.eq_ignore_ascii_case(typed) || t.id.eq_ignore_ascii_case(typed))
+    else {
+        return Err(format!(
+            "the credential reaches {} team(s), and none of them is that one",
+            teams.len()
+        ));
+    };
+    let key = team.key.to_ascii_uppercase();
+    if is_linear_team_key(&key) {
+        return Ok(key);
+    }
+    Err(format!(
+        "Linear reports that team's key as `{}`, and `tga audit` matches issues by a key like the \
+         `ENG` in `ENG-1234` — one to ten characters of A-Z and 0-9 starting with a letter (#5982)",
+        team.key
+    ))
+}
+
+/// Prove the configured Linear credential can read this team, and name it.
 ///
 /// One query lists the teams the key can see, and the match is made here rather
 /// than by a server-side filter: that answers "is the credential usable" and "is
 /// this team visible to it" in a single round trip, and a workspace whose team
 /// list is empty is then distinguishable from one where the key simply does not
-/// match. `endpoint` is a parameter so the live probe below can point elsewhere.
+/// match. Having the whole list is also what lets [`resolve_team_key`] answer
+/// with the team key rather than echoing what was typed. `endpoint` is a
+/// parameter so the live probe below can point elsewhere.
 async fn validate_linear(
     creds: &LinearCredentials,
     key: &str,
     endpoint: &str,
-) -> Result<(), AuditError> {
+) -> Result<String, AuditError> {
     let query = format!("query {{ teams(first: {LINEAR_TEAM_PAGE}) {{ nodes {{ id key }} }} }}");
     let response = trusty_installer::download::http_client()
         .post(endpoint)
@@ -322,20 +426,10 @@ async fn validate_linear(
         ));
     }
     let teams = reply.data.map(|d| d.teams.nodes).unwrap_or_default();
-    if teams
-        .iter()
-        .any(|t| t.key.eq_ignore_ascii_case(key) || t.id.eq_ignore_ascii_case(key))
-    {
-        return Ok(());
-    }
-    Err(board_refusal(
-        BoardProvider::Linear,
-        key,
-        format!(
-            "the credential reaches {} team(s), and none of them is that one",
-            teams.len()
-        ),
-    ))
+    // #5982: the resolver owns both outcomes, so a team the sweep could never
+    // match is refused here rather than persisted as a green registration.
+    resolve_team_key(&teams, key)
+        .map_err(|reason| board_refusal(BoardProvider::Linear, key, reason))
 }
 
 fn board_refusal(provider: BoardProvider, key: &str, reason: String) -> AuditError {
@@ -500,6 +594,63 @@ trusty-review = "0.15.1"
             matches!(err, AuditError::BoardCredentialMissing { .. }),
             "{err:?}"
         );
+    }
+
+    /// #5982: registration used to store whatever the operator typed, so
+    /// `linear:<team-id>` validated green and then matched no issue. Resolution
+    /// happens against the team list the check already has, and the property the
+    /// collector needs is asserted on the answer rather than assumed.
+    #[test]
+    fn a_team_id_registers_as_the_team_key_that_collects() {
+        const TEAM_ID: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        let teams = vec![
+            Team {
+                id: TEAM_ID.to_owned(),
+                key: "ENG".to_owned(),
+            },
+            Team {
+                id: "99999999-0000-0000-0000-000000000000".to_owned(),
+                key: "FE".to_owned(),
+            },
+        ];
+
+        for typed in [TEAM_ID, "ENG", "eng"] {
+            let resolved = resolve_team_key(&teams, typed).expect("the team is visible");
+            assert_eq!(resolved, "ENG", "typed {typed}");
+            assert!(
+                crate::registry::is_linear_team_key(&resolved),
+                "the sweep cannot collect against {resolved}"
+            );
+        }
+        for (teams, typed) in [(teams.as_slice(), "OPS"), (&[], TEAM_ID)] {
+            let reason = resolve_team_key(teams, typed).expect_err("no such team");
+            assert!(reason.contains("none of them is that one"), "{reason}");
+        }
+    }
+
+    /// The postcondition `validate` states, which nothing enforced: the reply's
+    /// `key` was echoed verbatim, and `Team::key` is `#[serde(default)]`, so a
+    /// reply that omits the field registered an empty key. That entry validated
+    /// green, could never collect, and could not be removed either —
+    /// `registry::parse(None, "linear:")` is an error, so no spelling names it.
+    /// Refusing at registration is the only point where the operator can still
+    /// act on it. See #5982.
+    #[test]
+    fn a_team_whose_key_the_sweep_cannot_match_is_refused() {
+        const TEAM_ID: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        for key in ["", "eng-team", "ABCDEFGHIJK", "1ENG"] {
+            let teams = vec![Team {
+                id: TEAM_ID.to_owned(),
+                key: key.to_owned(),
+            }];
+            let reason = resolve_team_key(&teams, TEAM_ID)
+                .expect_err("a key the sweep cannot match is not a registration");
+            assert!(reason.contains("#5982"), "key {key:?}: {reason}");
+            assert!(
+                reason.contains("matches issues by a key"),
+                "key {key:?}: {reason}"
+            );
+        }
     }
 
     /// The credential must not reach an error string, asserted directly rather

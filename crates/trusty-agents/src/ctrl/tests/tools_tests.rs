@@ -14,7 +14,7 @@ use super::super::handlers::{
     TaskStatusTool,
 };
 use super::super::state::PmMsg;
-use super::super::util::detect_self_project_with_hint;
+use super::super::util::{detect_self_project_with_hint, self_project_from_exe};
 use super::make_fake_self_project;
 
 use crate::tools::traits::ToolExecutor;
@@ -77,6 +77,70 @@ fn detect_self_project_ignores_unresolvable_hint() {
         detected,
         Some(missing),
         "a hint that does not resolve must not be returned verbatim"
+    );
+}
+
+/// (#5944) The exe walk-up must not climb past the checkout the binary was
+/// built from.
+///
+/// Why: this is the reported defect in fixture form. `cargo test` puts the
+/// running binary at `<checkout>/target/debug/deps/…`, and the old unbounded
+/// climb went `deps` -> `debug` -> `target` -> `<checkout>` -> … -> `$HOME`,
+/// matching the developer's real `~/.trusty-agents/agents/pm.toml`. A harness
+/// that pinned `$HOME` to a tempdir got the real home back regardless.
+/// What: the marker sits ABOVE the build root and nowhere inside it, so any
+/// result at all means the walk escaped. Fully hermetic — the fixture is a
+/// tempdir, so this fails on a machine with no real `~/.trusty-agents` too.
+/// Test: itself.
+#[test]
+fn exe_inference_stops_at_the_build_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let escaped = make_fake_self_project(tmp.path());
+    let checkout = tmp.path().join("checkout");
+    let exe = checkout.join("target").join("debug").join("deps").join("t");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+
+    assert_eq!(
+        self_project_from_exe(&exe),
+        None,
+        "the walk-up must not reach {} — an ancestor of the build root is not the project",
+        escaped.display()
+    );
+}
+
+/// (#5944) The case the exe walk-up exists for still works: a binary built into
+/// `<checkout>/target/<profile>/` resolves `<checkout>`, so `cargo run` and a
+/// release binary invoked from an unrelated cwd both still self-detect.
+#[test]
+fn exe_inference_finds_the_checkout_it_was_built_from() {
+    let tmp = tempfile::tempdir().unwrap();
+    let checkout = make_fake_self_project(tmp.path());
+    let exe = checkout.join("target").join("release").join("tagent");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+
+    assert_eq!(
+        self_project_from_exe(&exe),
+        Some(checkout),
+        "a binary under <checkout>/target/ must still resolve <checkout>"
+    );
+}
+
+/// (#5944, #4826) An installed binary has no `target/` ancestor, so it has no
+/// knowable build checkout and inference declines rather than climbing into the
+/// install directory's parents. This is the exact shape that made the Slack
+/// gateway resolve `$HOME` as the project: `~/.cargo/bin/tagent` climbing to a
+/// home that carries the user-level `.trusty-agents/agents/pm.toml`.
+#[test]
+fn exe_inference_declines_an_installed_binary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = make_fake_self_project(tmp.path());
+    let exe = home.join(".cargo").join("bin").join("tagent");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+
+    assert_eq!(
+        self_project_from_exe(&exe),
+        None,
+        "an installed binary must not resolve its install directory's ancestors"
     );
 }
 
