@@ -14,7 +14,7 @@ name        = "trusty-review"
 # synthesize_prompt.rs's prompt text (adds a coverage-gaps instruction). No
 # public API changed; the `PR version bump vs crates.io` gate (#4421) still
 # requires the bump since `src/**` changed.
-version     = "0.19.0"
+version     = "0.19.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

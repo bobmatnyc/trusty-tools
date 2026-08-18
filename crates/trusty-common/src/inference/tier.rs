@@ -7,7 +7,7 @@
 //! override, because the pin was doing the work an alias should have done. A
 //! consumer that asks for a TIER instead of an id moves with the tier.
 //!
-//! What: [`ModelTier`] (three tiers — analysis, interaction, haiku) and
+//! What: [`ModelTier`] (three tiers — analysis, interaction, classification) and
 //! [`ModelTier::resolve`], which maps a tier plus a [`ProviderId`] to a concrete
 //! model id. Resolution is provider-dependent because the same model wears a
 //! different id per provider: Bedrock inference profiles are `us.anthropic.…`,
@@ -39,6 +39,13 @@ use super::registry::ProviderId;
 /// response, 2026-08-18.
 const OPENROUTER_OPUS_4_8: &str = "anthropic/claude-opus-4.8";
 
+/// OpenRouter slug for Claude Sonnet 4.6.
+///
+/// Confirmed present in a live `GET https://openrouter.ai/api/v1/models`
+/// response, 2026-08-18. Same id `trusty-audit` verified on 2026-08-13 and used
+/// as its `DEFAULT_REVIEWER_MODEL` until earlier that day (#5987).
+const OPENROUTER_SONNET_4_6: &str = "anthropic/claude-sonnet-4.6";
+
 /// OpenRouter slug for Claude Haiku 4.5.
 ///
 /// Confirmed present in a live `GET https://openrouter.ai/api/v1/models`
@@ -49,6 +56,14 @@ const OPENROUTER_HAIKU_4_5: &str = "anthropic/claude-haiku-4.5";
 ///
 /// From the `claude-api` model reference.
 const ANTHROPIC_OPUS_4_8: &str = "claude-opus-4-8";
+
+/// Anthropic first-party API id for Claude Sonnet 4.6.
+///
+/// From the `claude-api` model reference, which states the first-party ids are
+/// complete as written and must never carry a date suffix — so this is
+/// `claude-sonnet-4-6`, not a dated variant, and it is NOT derived from the
+/// OpenRouter spelling above (#5987).
+const ANTHROPIC_SONNET_4_6: &str = "claude-sonnet-4-6";
 
 /// Anthropic first-party API id for Claude Haiku 4.5.
 ///
@@ -68,11 +83,13 @@ const BEDROCK_HAIKU_4_5: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 ///
 /// Why: a role should declare the class of model its work needs, so that moving
 /// the whole workspace to a newer model is one edit to [`ModelTier::resolve`]
-/// rather than a grep for every pinned id.
-/// What: three tiers. [`Self::Analysis`] and [`Self::Interaction`] resolve to
-/// the same model today (owner ruling, 2026-08-18) and are deliberately kept as
-/// two arms so they can diverge without touching a caller. [`Self::Haiku`] is
-/// the cheap high-volume tier for short, low-stakes calls.
+/// rather than a grep for every pinned id. Every variant therefore names a
+/// PURPOSE, never a model — a variant named for the model it currently resolves
+/// to goes stale the moment that workload moves, which is the pin-shaped mistake
+/// this layer exists to remove (#5987).
+/// What: three tiers, resolving to three different models under the owner ruling
+/// of 2026-08-18 — [`Self::Analysis`] to Opus 4.8, [`Self::Interaction`] to
+/// Sonnet 4.6, [`Self::Classification`] to Haiku 4.5.
 /// Test: `analysis_and_interaction_are_distinct_variants`,
 /// `every_tier_resolves_on_openrouter`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -83,9 +100,10 @@ pub enum ModelTier {
     Analysis,
     /// Conversational turns with a user.
     Interaction,
-    /// Short, high-volume, low-stakes calls — per-finding verification,
-    /// classification, summarisation.
-    Haiku,
+    /// Sorting inputs into categories — labelling, routing, triage. Also the
+    /// cheapest tier, which is why cost-driven callers select it; see
+    /// `trusty-review`'s `RoleModels::resolve` for that distinction.
+    Classification,
 }
 
 impl ModelTier {
@@ -102,24 +120,29 @@ impl ModelTier {
     /// whatever default it had. Providers that host no Claude model
     /// (`OpenAI`, `Fireworks`, `Together`, `AtlasCloud`, `Local`) return `None`
     /// for every tier.
-    /// Test: `bedrock_opus_tiers_are_unmapped`, `bedrock_haiku_resolves`,
+    /// Test: `bedrock_opus_tiers_are_unmapped`, `bedrock_classification_resolves`,
     /// `every_tier_resolves_on_openrouter`, `every_tier_resolves_on_anthropic`,
     /// `non_claude_providers_resolve_nothing`.
     pub fn resolve(self, provider: ProviderId) -> Option<&'static str> {
         match provider {
             ProviderId::OpenRouter => Some(match self {
-                Self::Analysis | Self::Interaction => OPENROUTER_OPUS_4_8,
-                Self::Haiku => OPENROUTER_HAIKU_4_5,
+                Self::Analysis => OPENROUTER_OPUS_4_8,
+                Self::Interaction => OPENROUTER_SONNET_4_6,
+                Self::Classification => OPENROUTER_HAIKU_4_5,
             }),
             ProviderId::Anthropic => Some(match self {
-                Self::Analysis | Self::Interaction => ANTHROPIC_OPUS_4_8,
-                Self::Haiku => ANTHROPIC_HAIKU_4_5,
+                Self::Analysis => ANTHROPIC_OPUS_4_8,
+                Self::Interaction => ANTHROPIC_SONNET_4_6,
+                Self::Classification => ANTHROPIC_HAIKU_4_5,
             }),
             // #5971: Bedrock's Opus 4.8 inference-profile id is unmapped by
             // owner ruling — it could not be verified and must not be guessed.
+            // #5987 moved interaction to Sonnet 4.6 but left this arm alone:
+            // the ruling covers the OpenRouter and Anthropic providers only, so
+            // adding a Bedrock sonnet mapping here needs its own decision.
             ProviderId::Bedrock => match self {
                 Self::Analysis | Self::Interaction => None,
-                Self::Haiku => Some(BEDROCK_HAIKU_4_5),
+                Self::Classification => Some(BEDROCK_HAIKU_4_5),
             },
             ProviderId::OpenAI
             | ProviderId::Fireworks
@@ -137,7 +160,7 @@ mod tests {
     const ALL_TIERS: &[ModelTier] = &[
         ModelTier::Analysis,
         ModelTier::Interaction,
-        ModelTier::Haiku,
+        ModelTier::Classification,
     ];
 
     #[test]
@@ -148,10 +171,10 @@ mod tests {
         );
         assert_eq!(
             ModelTier::Interaction.resolve(ProviderId::OpenRouter),
-            Some("anthropic/claude-opus-4.8")
+            Some("anthropic/claude-sonnet-4.6")
         );
         assert_eq!(
-            ModelTier::Haiku.resolve(ProviderId::OpenRouter),
+            ModelTier::Classification.resolve(ProviderId::OpenRouter),
             Some("anthropic/claude-haiku-4.5")
         );
     }
@@ -164,12 +187,31 @@ mod tests {
         );
         assert_eq!(
             ModelTier::Interaction.resolve(ProviderId::Anthropic),
-            Some("claude-opus-4-8")
+            Some("claude-sonnet-4-6"),
+            "the first-party id carries no date suffix, and is not derived from \
+             the OpenRouter spelling"
         );
         assert_eq!(
-            ModelTier::Haiku.resolve(ProviderId::Anthropic),
+            ModelTier::Classification.resolve(ProviderId::Anthropic),
             Some("claude-haiku-4-5-20251001")
         );
+    }
+
+    /// Why: the three tiers resolved to two distinct models before #5987 and
+    /// three after, so a refactor that re-groups the match arms could silently
+    /// collapse interaction back onto analysis. Asserting the values differ
+    /// pins the ruling rather than the arm layout.
+    /// What: on both mapped providers, no two tiers resolve to the same id.
+    #[test]
+    fn the_three_tiers_resolve_three_distinct_models() {
+        for provider in [ProviderId::OpenRouter, ProviderId::Anthropic] {
+            let analysis = ModelTier::Analysis.resolve(provider);
+            let interaction = ModelTier::Interaction.resolve(provider);
+            let classification = ModelTier::Classification.resolve(provider);
+            assert_ne!(analysis, interaction, "{provider:?}");
+            assert_ne!(interaction, classification, "{provider:?}");
+            assert_ne!(analysis, classification, "{provider:?}");
+        }
     }
 
     /// Why: guessing an unverified Bedrock inference-profile id fails at call
@@ -183,9 +225,9 @@ mod tests {
     }
 
     #[test]
-    fn bedrock_haiku_resolves() {
+    fn bedrock_classification_resolves() {
         assert_eq!(
-            ModelTier::Haiku.resolve(ProviderId::Bedrock),
+            ModelTier::Classification.resolve(ProviderId::Bedrock),
             Some("us.anthropic.claude-haiku-4-5-20251001-v1:0"),
             "the date-stamped, version-suffixed profile is the only form Bedrock accepts"
         );
@@ -210,17 +252,17 @@ mod tests {
         }
     }
 
-    /// Why: the two tiers name the same model today and the obvious
-    /// simplification is to collapse them into one variant. The split is the
-    /// point — it lets analysis and interaction diverge later without touching
-    /// a caller — so a test pins that they stay separate values (#5971).
+    /// Why: the two tiers resolved to the same model when the split was
+    /// introduced, so #5971 pinned that they stayed separate variants against a
+    /// collapse. #5987 gave them different models, which is the divergence the
+    /// split existed to allow — the assertion now checks that it happened.
     #[test]
     fn analysis_and_interaction_are_distinct_variants() {
         assert_ne!(ModelTier::Analysis, ModelTier::Interaction);
-        assert_eq!(
+        assert_ne!(
             ModelTier::Analysis.resolve(ProviderId::OpenRouter),
             ModelTier::Interaction.resolve(ProviderId::OpenRouter),
-            "both resolve to Opus 4.8 today (owner ruling 2026-08-18)"
+            "analysis is Opus 4.8 and interaction is Sonnet 4.6 (owner ruling 2026-08-18)"
         );
     }
 }
