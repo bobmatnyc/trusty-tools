@@ -400,6 +400,34 @@ pub enum AuditError {
         path: PathBuf,
     },
 
+    /// A repository the package includes a report for has no collection
+    /// database to go with it.
+    ///
+    /// Why: the owner's ruling on the deliverable (2026-08-18) is "the
+    /// collection db plus the detailed templated reports" — the two travel
+    /// together, not one without the other. `collect_extract` used to return
+    /// `Ok(())` whenever `work.path(Area::Extract)` held no `<stem>.db` for an
+    /// audited repository — both when the directory itself was absent and
+    /// when it existed but named nothing for this repository — so a report
+    /// could ship with its database silently missing and nothing in the
+    /// package said so (#5862). This refuses the whole assembly instead, the
+    /// same posture as [`AuditError::CredentialInPackage`] and
+    /// [`AuditError::UnsafePackageEntry`]: a package this crate is unsure
+    /// about is not one it writes.
+    /// What: names the repository and the database path that was expected.
+    /// Test: `crate::package::package_tests::an_audited_repo_with_no_extract_database_is_refused`,
+    /// `crate::package::package_tests::an_audited_repo_with_no_extract_directory_at_all_is_refused`.
+    #[error(
+        "{repo} was audited but has no collection database at {expected} — the delivery is the \
+         database and the report together, so no package was written"
+    )]
+    MissingExtractDatabase {
+        /// The repository whose database is missing.
+        repo: String,
+        /// Where the database was expected.
+        expected: PathBuf,
+    },
+
     /// The return package could not be read, written, or renamed into place.
     #[error("return package {path}: {source}")]
     Package {
