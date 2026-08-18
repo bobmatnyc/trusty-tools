@@ -74,13 +74,19 @@ pub(crate) fn load_prior_index_count() -> usize {
 /// `indexes_lazy` is stored in the summary and reflects the count at warm-boot
 /// completion; the health handler re-reads from `cold_store.len()` live so the
 /// value decreases as lazy loads occur.
-/// Test: covered indirectly by the warm-boot integration tests in `start.rs`.
+/// `total_skipped_unapproved` (#5926) counts entries the allowlist gate excluded
+/// before restore ever ran. It degrades the boot on its own AND redirects the
+/// 80%-of-prior message away from Full Disk Access, which is never the cause
+/// when it is non-zero.
+/// Test: covered indirectly by the warm-boot integration tests in `start.rs`;
+/// `warmboot_summary_unapproved_sets_degraded_flag` below.
 pub(crate) fn record_warm_boot_result(
     state: &crate::service::SearchAppState,
     total: usize,
     total_skipped_tcc: usize,
     total_skipped_timeout: usize,
     indexes_lazy: usize,
+    total_skipped_unapproved: usize,
 ) {
     let prior_count = state
         .prior_index_count
@@ -89,15 +95,20 @@ pub(crate) fn record_warm_boot_result(
     // Issue #1091: scan timeouts must also set warm_boot_degraded so monitors
     // can distinguish "timed-out index (0 chunks)" from "healthy empty index".
     let degraded_by_timeout = total_skipped_timeout > 0;
+    // #5926: an allowlist exclusion is a real drop in served indexes and must
+    // raise the same machine-readable signal as a TCC denial or a timeout.
+    let degraded_by_unapproved = total_skipped_unapproved > 0;
     // Single source of truth for the 80%-of-prior threshold (issue #873 review nit).
     let degraded_by_count = prior_count > 0 && total < prior_count * 4 / 5;
-    let warm_boot_degraded = degraded_by_tcc || degraded_by_timeout || degraded_by_count;
+    let warm_boot_degraded =
+        degraded_by_tcc || degraded_by_timeout || degraded_by_unapproved || degraded_by_count;
 
     if let Ok(mut summary) = state.warmboot_summary.lock() {
         *summary = crate::service::server::WarmBootSummary {
             indexes_loaded: total,
             indexes_skipped_tcc: total_skipped_tcc,
             indexes_skipped_timeout: total_skipped_timeout,
+            indexes_skipped_unapproved: total_skipped_unapproved,
             warm_boot_degraded,
             // Issue #993: stored at boot-completion; health handler re-reads
             // from cold_store.len() live so it decreases as lazy loads happen.
@@ -136,17 +147,46 @@ pub(crate) fn record_warm_boot_result(
         );
     }
 
+    // #5926: the allowlist gate gets its own error line, and it must be emitted
+    // whether or not the drop also crossed the 80%-of-prior threshold — an
+    // upgrade can exclude a large cohort on a box with no prior count recorded.
+    if degraded_by_unapproved {
+        tracing::error!(
+            loaded = total,
+            skipped_unapproved = total_skipped_unapproved,
+            "warm-boot DEGRADED: {total_skipped_unapproved} registered index(es) were NOT \
+             loaded because the #767 allowlist does not approve their root. This is a \
+             CONFIGURATION decision, not a permissions failure — Full Disk Access is \
+             irrelevant here. The indexes are still registered in indexes.toml and their \
+             on-disk data is intact. Review the approved set with `trusty-search index list` \
+             and re-approve what you want served with `trusty-search index add <path>`. \
+             The per-index warn! lines above name each excluded root. (#5926)"
+        );
+    }
+
     if degraded_by_count {
+        // #5926: the FDA remedy is the right first guess ONLY when nothing else
+        // already explains the drop. Leading with it while
+        // `indexes_skipped_unapproved` was non-zero sent an operator to System
+        // Settings over an allowlist decision, and `skipped_tcc: 0` in the same
+        // line was the evidence against it.
+        let cause = if degraded_by_unapproved {
+            "The allowlist error above already accounts for indexes that were excluded; \
+             re-approve them rather than touching Full Disk Access."
+        } else {
+            "If you just ran `cargo install trusty-search`, macOS TCC likely revoked \
+             Full Disk Access because the new binary has a different cdhash. \
+             ACTION REQUIRED: re-grant Full Disk Access in \
+             System Settings → Privacy & Security → Full Disk Access → \
+             remove and re-add ~/.cargo/bin/trusty-search."
+        };
         tracing::error!(
             loaded = total,
             prior = prior_count,
             skipped_tcc = total_skipped_tcc,
+            skipped_unapproved = total_skipped_unapproved,
             "warm-boot DEGRADED: only {total}/{prior_count} indexes loaded (< 80% of prior). \
-             If you just ran `cargo install trusty-search`, macOS TCC likely revoked \
-             Full Disk Access because the new binary has a different cdhash. \
-             ACTION REQUIRED: re-grant Full Disk Access in \
-             System Settings → Privacy & Security → Full Disk Access → \
-             remove and re-add ~/.cargo/bin/trusty-search. \
+             {cause} \
              This is NOT data loss — all on-disk indexes are intact. (issue #873)"
         );
     }
@@ -189,7 +229,7 @@ mod tests {
     fn warmboot_summary_timeout_sets_degraded_flag() {
         let state = make_state();
         // 5 loaded, 1 timed out, 0 TCC denials, prior count = 0 (first run).
-        record_warm_boot_result(&state, 5, 0, 1, 0);
+        record_warm_boot_result(&state, 5, 0, 1, 0, 0);
         let summary = state.warmboot_summary.lock().unwrap().clone();
         assert_eq!(summary.indexes_loaded, 5, "loaded count must be recorded");
         assert_eq!(
@@ -210,11 +250,37 @@ mod tests {
     #[test]
     fn warmboot_summary_tcc_skip_sets_degraded_flag() {
         let state = make_state();
-        record_warm_boot_result(&state, 5, 1, 0, 0);
+        record_warm_boot_result(&state, 5, 1, 0, 0, 0);
         let summary = state.warmboot_summary.lock().unwrap().clone();
         assert!(
             summary.warm_boot_degraded,
             "warm_boot_degraded must be true when TCC skips occurred"
+        );
+    }
+
+    /// Why (#5926): an allowlist exclusion must raise `warm_boot_degraded` on
+    /// its own, exactly as a TCC denial or a scan timeout does. Before this,
+    /// nothing read the exclusion at all: a boot that dropped 103 of 121
+    /// registered indexes surfaced as `indexes_skipped_tcc: 0` and a generic
+    /// "< 80% of prior" error, and on a box with no prior count recorded it
+    /// would not have surfaced on `/health` at all. Note the prior count is 0
+    /// here and `indexes_loaded` is 5 — the 80% rule cannot fire, so the flag
+    /// can only come from the new counter.
+    /// What: 5 loaded, 0 TCC, 0 timeouts, 2 excluded by the allowlist.
+    /// Test: this test.
+    #[test]
+    fn warmboot_summary_unapproved_sets_degraded_flag() {
+        let state = make_state();
+        record_warm_boot_result(&state, 5, 0, 0, 0, 2);
+        let summary = state.warmboot_summary.lock().unwrap().clone();
+        assert_eq!(
+            summary.indexes_skipped_unapproved, 2,
+            "the allowlist exclusion count must be recorded"
+        );
+        assert_eq!(summary.indexes_skipped_tcc, 0, "tcc count must be 0");
+        assert!(
+            summary.warm_boot_degraded,
+            "warm_boot_degraded must be true when the allowlist excluded a registered index"
         );
     }
 
@@ -228,7 +294,7 @@ mod tests {
         state
             .prior_index_count
             .store(5, std::sync::atomic::Ordering::Relaxed);
-        record_warm_boot_result(&state, 5, 0, 0, 0);
+        record_warm_boot_result(&state, 5, 0, 0, 0, 0);
         let summary = state.warmboot_summary.lock().unwrap().clone();
         assert!(
             !summary.warm_boot_degraded,
@@ -246,7 +312,7 @@ mod tests {
         state
             .prior_index_count
             .store(10, std::sync::atomic::Ordering::Relaxed);
-        record_warm_boot_result(&state, 7, 0, 0, 0);
+        record_warm_boot_result(&state, 7, 0, 0, 0, 0);
         let summary = state.warmboot_summary.lock().unwrap().clone();
         assert!(
             summary.warm_boot_degraded,
