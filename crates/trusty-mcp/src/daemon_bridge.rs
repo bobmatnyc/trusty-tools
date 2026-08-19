@@ -26,7 +26,13 @@ use anyhow::{Result, anyhow};
 /// Why: a hung or half-started daemon must not block the stdio bridge indefinitely
 /// on a single TCP connect.  750 ms is short enough to keep the bridge snappy
 /// while being long enough for a busy machine to accept the connection.
-/// Test: `fast_path_returns_quickly_for_live_listener` verifies the bound holds.
+/// What: applied as both the request timeout and the connect timeout of the
+/// one-shot client built in `probe_health_once`, so neither a silent TCP connect
+/// nor a stalled response body can outlast it.
+/// Test: `probe_health_once_returns_false_on_refused` asserts the probe returns
+/// bounded rather than hanging against an unbound port;
+/// `ensure_daemon_up_returns_ok_when_already_healthy` covers the fast path
+/// against a live listener.
 const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// Default polling interval between health probes while waiting for the daemon.
