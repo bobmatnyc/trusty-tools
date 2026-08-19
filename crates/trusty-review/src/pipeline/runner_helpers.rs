@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::integrations::github::{
     AuthStrategy, CommentableLines, GithubClient, GithubError, RunMode, build_inline_plan,
@@ -229,6 +229,37 @@ pub(super) enum DedupClaim {
     Held,
     /// This review never acquired the claim; the abort must not write.
     NotHeld,
+}
+
+/// Mark a review aborted because it has no head SHA to key its dedup claim to.
+///
+/// Why: the claim in `run_review` and the `complete()` in `finalize_review` are
+/// both keyed on the head SHA, and `decide_action` never reads it — so a failed
+/// `fetch_github_pr_meta` used to leave an empty SHA and still reach
+/// `FinalizeAction::Post`, posting with the claim never taken and never
+/// completed (#6062). The caller decides the post path is reachable and then
+/// calls this; it lives here to keep `runner.rs` under its SLOC cap.
+/// What: logs the abort and writes the verdict and the operator-facing reason
+/// onto `result`, appending the metadata-fetch error when there is one so the
+/// message names the cause as well as the consequence. The caller still owns
+/// the `abort_dry` exit, which releases nothing (the claim was never held).
+/// Test: `run_review_empty_head_sha_fails_closed_before_posting`,
+/// `run_review_serve_mode_empty_token_fails_closed_with_actionable_error`.
+pub(super) fn mark_no_head_sha_abort(result: &mut ReviewResult, meta_error: Option<&str>) {
+    error!(
+        owner = %result.owner,
+        repo = %result.repo,
+        pr = result.pr_number,
+        "PR metadata carried no head SHA and posting is enabled — aborting without posting (#6062)"
+    );
+    result.verdict = Verdict::Unknown;
+    let cause = meta_error
+        .map(|e| format!("; PR metadata fetch failed: {e}"))
+        .unwrap_or_default();
+    result.error = Some(format!(
+        "not reviewed: the PR metadata fetch produced no head SHA, so the dedup claim cannot \
+         be keyed and a re-run could post a duplicate comment (#6062){cause}"
+    ));
 }
 
 /// Finalise an *aborted* review as dry-run only, releasing the dedup claim.

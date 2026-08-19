@@ -105,7 +105,7 @@ author has openly hedged is a false positive.
 ## Inline citation grammar (prose traceability)
 When your prose (`review_body`, or a finding's `body`/`consequence`) references a
 specific piece of grounding context, cite it inline using EXACTLY one of these
-four bracket forms — no other bracket-citation form is valid:
+five bracket forms — no other bracket-citation form is valid:
 - [code: `path/to/File.ext:42` — "brief excerpt"] — a specific file/line in the
   diff or repository.
 - [jira: TICKET-123 — "brief excerpt from the ticket"] — a JIRA ticket present
@@ -115,6 +115,8 @@ four bracket forms — no other bracket-citation form is valid:
   the same citation form used there — do not invent a different one).
 - [gh: #123 — "brief excerpt from the issue/PR"] — a linked GitHub issue or PR
   present in the provided context.
+- [confluence: "Page Title" — "brief excerpt"] — a Confluence page present in
+  the provided context.
 
 **Distinct from `source_citation`.** These bracket forms are INLINE prose
 citations — they make the rendered review text traceable to its source. They are

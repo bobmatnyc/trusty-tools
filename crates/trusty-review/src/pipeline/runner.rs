@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use super::runner_coverage::load_coverage_contrib;
 use super::runner_helpers::{
     DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
-    fetch_github_pr_meta, finalize_run, resolve_diff_token,
+    fetch_github_pr_meta, finalize_run, mark_no_head_sha_abort, resolve_diff_token,
 };
 use crate::{
     config::{
@@ -170,7 +170,8 @@ pub struct ReviewDeps {
 /// Test: `run_review_with_fake_provider_approves`, `run_review_fail_safe_on_llm_error`,
 /// `run_review_search_down_skips_when_required`,
 /// `run_review_search_down_degraded_when_optout`,
-/// `run_review_posting_without_dedup_store_fails_closed`.
+/// `run_review_posting_without_dedup_store_fails_closed`,
+/// `run_review_empty_head_sha_fails_closed_before_posting`.
 pub async fn run_review(
     config: &ReviewConfig,
     input: ReviewInput,
@@ -243,11 +244,14 @@ pub async fn run_review(
     }
 
     // ── Step 2: fetch PR metadata (skip for local-diff mode) ──────────────
-    let (pr_meta, head_sha): (ReviewPrMeta, String) = if is_local {
-        (ReviewPrMeta::default(), String::new())
+    // #6062: the fetch failure's own reason travels with the empty head SHA —
+    // the guard below reports both the consequence and the cause, so a run that
+    // stops for a missing SHA still names the config an operator has to fix.
+    let (pr_meta, head_sha, meta_error): (ReviewPrMeta, String, Option<String>) = if is_local {
+        (ReviewPrMeta::default(), String::new(), None)
     } else {
         match fetch_github_pr_meta(config, &owner, &repo, pr_number, input.run_mode).await {
-            Ok((m, sha)) => (m, sha),
+            Ok((m, sha)) => (m, sha, None),
             Err(e) => {
                 warn!("failed to fetch PR metadata: {e} — using empty metadata");
                 (
@@ -258,6 +262,7 @@ pub async fn run_review(
                         url: pr_url.clone(),
                     },
                     String::new(),
+                    Some(e.to_string()),
                 )
             }
         }
@@ -272,6 +277,23 @@ pub async fn run_review(
         pr_url,
     );
     result.head_sha = head_sha.clone();
+
+    // ── Step 2a: no head SHA, no post (#6062) ─────────────────────────────
+    // The claim below and `finalize_review`'s `complete()` both key on the head
+    // SHA, and `decide_action` never reads it — so a failed metadata fetch used
+    // to review and post with the claim never taken and never completed, and a
+    // retry after the same failure posted a duplicate. Ask `decide_action`
+    // whether the post path is reachable, exactly as the #5113 guard does.
+    if !is_local
+        && head_sha.is_empty()
+        && decide_action(config.dry_run, input.trigger, input.allow_posting, true)
+            == FinalizeAction::Post
+    {
+        // #6062: empty head_sha is fail-closed — no claim, no post
+        mark_no_head_sha_abort(&mut result, meta_error.as_deref());
+        // NotHeld — no claim was ever attempted, let alone acquired.
+        return abort_dry(result, config, &input, &deps, DedupClaim::NotHeld).await;
+    }
 
     // ── Step 2b: dedup claim (Phase 1, #582) ──────────────────────────────
     // Claim the (owner,repo,pr,head_sha) slot before doing expensive work.  A

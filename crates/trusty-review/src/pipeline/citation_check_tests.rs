@@ -418,6 +418,38 @@ fn extract_spans_skips_prompt_mandated_citation_grammar() {
     assert!(extracted.code_citations.is_empty());
 }
 
+/// REGRESSION (#5022): a `[confluence: …]` citation is stripped like the other
+/// bracket forms, so its excerpt never reaches the generic quote scan.
+///
+/// Why: `duettoresearch/code-intelligence` emits this fifth form
+/// (`pr_review_service.py:377,909`). `BRACKET_CITATION_RE` matched only four,
+/// so the excerpt inside the bracket survived the strip and was scanned as an
+/// ungrounded free-text code quote — tripping the #4042 fabrication check on
+/// prose the model cited correctly.
+/// What: a finding whose description carries only a `[confluence: …]` citation
+/// must extract no generic spans and no code citations.
+/// Test: this test. Fails pre-fix on the generic assertion — both the page
+/// title and the excerpt were extracted as quotes.
+#[test]
+fn extract_spans_skips_confluence_citation_form() {
+    let f = Finding::new(
+        "f",
+        "k",
+        "See [confluence: \"Rate Plan Ingestion Design\" — \"the loader retries \
+         each shard twice\"].",
+        "s",
+        0.5,
+        Effort::Low,
+    );
+    let extracted = extract_citations(&f);
+    assert!(
+        extracted.generic.is_empty(),
+        "a confluence citation's contents must not be treated as generic quotes: {:?}",
+        extracted.generic
+    );
+    assert!(extracted.code_citations.is_empty());
+}
+
 #[test]
 fn extract_spans_pulls_backtick_and_quotes() {
     let mut f = Finding::new(
