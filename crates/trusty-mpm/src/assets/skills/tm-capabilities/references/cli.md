@@ -51,7 +51,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `launch` — Launch a session with full setup: deploys instructions, agents, and skills, then starts Claude
 - `load` — Clone or refresh the managed workspace for a registered alias (DOC-24)
 - `login` — One-time keychain login for managed `tm run` sessions (WI-10, DOC-24)
-- `ls` — Interactive managed-session connector — list sessions and connect (#2311)
+- `ls` — Interactive managed-session connector — list sessions and connect (#2311). Auto-prunes dead records; `--no-prune` for a read that changes nothing
 - `manager` — Layer-3 portfolio manager — cross-project status, digest, and chat (DOC-36, epic #2109, WI-6 #2583)
   - `chat` — One-shot chat turn against the portfolio manager persona
   - `digest` — LLM-authored portfolio (or single-project) narrative, with a deterministic fallback when no inference provider is configured
@@ -135,7 +135,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `info` — Show detailed info for a specific session
   - `instructions` — Print the composed launch instructions a session would receive
   - `list` — List sessions for the current project
-  - `ls` — List managed sessions (session-manager MVP)
+  - `ls` — List managed sessions (session-manager MVP). Auto-prunes dead records; pass `--no-prune` for a read that changes nothing
   - `managed-resume` — \[DEPRECATED\] Resume a stopped managed session — use `resume` instead
   - `managed-stop` — \[DEPRECATED\] Stop a managed session's runtime — use `stop` instead
   - `new` — Spawn a new managed session from a repo + ref (session-manager MVP)
@@ -168,7 +168,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `info` — Show detailed info for a specific session
   - `instructions` — Print the composed launch instructions a session would receive
   - `list` — List sessions for the current project
-  - `ls` — List managed sessions (session-manager MVP)
+  - `ls` — List managed sessions (session-manager MVP). Auto-prunes dead records; pass `--no-prune` for a read that changes nothing
   - `managed-resume` — \[DEPRECATED\] Resume a stopped managed session — use `resume` instead
   - `managed-stop` — \[DEPRECATED\] Stop a managed session's runtime — use `stop` instead
   - `new` — Spawn a new managed session from a repo + ref (session-manager MVP)
