@@ -54,6 +54,8 @@ pub fn polish(rendered: &str) -> String {
 pub fn polish_with_gaps(rendered: &str, declared: &[String]) -> String {
     let stripped = strip_template_comments(rendered);
     let (body, gaps) = omit_empty(&stripped);
+    // #6039: a gap recorded mid-pass is stale once the section fills in.
+    let gaps = drop_populated_section_gaps(&body, gaps);
     let out = render_gaps_section(&body, &gaps, declared);
     // The line-based passes join with `\n` and drop the trailing newline; restore
     // it when the input had one so exact-output expectations hold.
@@ -677,6 +679,79 @@ fn push_gap(gaps: &mut Vec<String>, label: &str) {
     if !label.is_empty() {
         gaps.push(label.to_string());
     }
+}
+
+/// Drop every gap label naming a section the polished body renders with content.
+///
+/// Why: gaps are recorded as the pass walks the document, so a label written
+/// while one part of a section was being dropped outlives the rest of the
+/// section filling in. The Authorship & Key-Person Risk section rendered six
+/// authors, a bus factor and a trajectory, and the same report's Data gaps line
+/// still counted it among 18 unpopulated sections — its unsynthesised narrative
+/// paragraph was the honesty marker, and dropping that paragraph recorded the
+/// enclosing HEADING as the gap (#6039). Same stale-emptiness class as #6029.
+/// What: reads the final body — the only authority on what the reader sees —
+/// and removes any label equal to a heading whose span carries content. A
+/// collapsed section's span holds only [`COLLAPSE_LINE`], so its gap survives;
+/// a row label (`Client`) matches no heading and is untouched.
+/// Test: `polish_tests.rs::{populated_section_is_not_listed_as_a_data_gap,
+/// collapsed_section_is_still_listed_when_a_sibling_is_populated}`.
+fn drop_populated_section_gaps(body: &str, gaps: Vec<String>) -> Vec<String> {
+    if gaps.is_empty() {
+        return gaps;
+    }
+    let populated = populated_sections(body);
+    gaps.into_iter()
+        .filter(|g| !populated.contains(g.as_str()))
+        .collect()
+}
+
+/// The headings (real and bold pseudo) whose spans carry rendered content.
+fn populated_sections(body: &str) -> std::collections::HashSet<String> {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut out = std::collections::HashSet::new();
+    let mut in_fence = false;
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if let Some((level, heading)) = boundary(trimmed)
+            && span_has_content(&lines[idx + 1..], level)
+        {
+            out.insert(heading.to_string());
+        }
+    }
+    out
+}
+
+/// True when a level-`level` boundary's span holds a line the reader reads as
+/// data — anything non-empty that is neither a nested heading nor the collapse
+/// line. A nested deeper section's own content counts toward its parent.
+fn span_has_content(rest: &[&str], level: usize) -> bool {
+    for line in rest {
+        let t = line.trim();
+        if t.starts_with("```") {
+            return true; // a fenced block is content, whatever it holds
+        }
+        if t == "---" {
+            return false;
+        }
+        if let Some((child_level, _)) = boundary(t) {
+            if child_level <= level {
+                return false;
+            }
+            continue; // a child's heading alone is not the parent's content
+        }
+        if !t.is_empty() && t != COLLAPSE_LINE {
+            return true;
+        }
+    }
+    false
 }
 
 /// De-duplicate gap labels, preserving first-seen order.

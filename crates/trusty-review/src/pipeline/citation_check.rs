@@ -58,18 +58,23 @@ use tracing::warn;
 use crate::models::{Finding, UNKNOWN_FILE_PLACEHOLDER};
 use crate::pipeline::diff_analyzer::models::{FileDisposition, FilteredDiff};
 
-/// The four inline bracket-citation forms the system prompt mandates
-/// (`[code: … ]`, `[jira: … ]`, `[gh: … ]`, `[apex: … ]`).
+/// The five inline bracket-citation forms the system prompt mandates
+/// (`[code: … ]`, `[jira: … ]`, `[gh: … ]`, `[apex: … ]`, `[confluence: … ]`).
 ///
 /// Why: used to strip ALL bracket citations before the generic backtick/quote
 /// scan, so a citation's `path:line` locator token is never mistaken for a
-/// free-text code quote. `jira:`/`gh:`/`apex:` citations ground in context
-/// (ticket/PR/spec-snippet text) this module has no index for and are left
-/// untouched (fail-open); `code:` citations are extracted and verified
+/// free-text code quote. `jira:`/`gh:`/`apex:`/`confluence:` citations ground
+/// in context (ticket/PR/spec/wiki-page text) this module has no index for and
+/// are left untouched (fail-open); `code:` citations are extracted and verified
 /// SEPARATELY, before this strip runs (see [`CODE_CITATION_RE`]).
-/// Test: `extract_spans_skips_prompt_mandated_citation_grammar`.
+/// This list and the prompt's grammar section
+/// (`assets/prompts/system_prompt_stock.md`) must stay in step — a form the
+/// prompt permits but this regex omits is scanned as an ungrounded quote.
+/// Test: `extract_spans_skips_prompt_mandated_citation_grammar`,
+/// `extract_spans_skips_confluence_citation_form`.
 static BRACKET_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\[(?:code|jira|gh|apex):[^\]]*\]")
+    // #5022: `confluence:` is the fifth form — code-intelligence emits it.
+    Regex::new(r"(?i)\[(?:code|jira|gh|apex|confluence):[^\]]*\]")
         .expect("bracket-citation regex is a valid literal")
 });
 

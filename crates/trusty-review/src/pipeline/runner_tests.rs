@@ -1328,6 +1328,10 @@ async fn run_review_serve_mode_empty_token_fails_closed_with_actionable_error() 
     // must fail CLOSED with an actionable error field — never proceed to
     // `load_diff` with an empty bearer token (which previously surfaced as an
     // opaque `401 Bad credentials` from GitHub instead of a clear diagnostic).
+    // #6062 moved the stop one step earlier: the same missing credentials fail
+    // the PR-metadata fetch first, so the run now halts on the empty head SHA
+    // and carries that fetch error's text along — which is what keeps the
+    // assertion below meaningful.
     let mut config = default_config();
     config.github_app_id = None;
     config.github_app_private_key = None;
@@ -2379,6 +2383,117 @@ async fn run_review_posting_without_dedup_store_fails_closed() {
     assert!(
         error.contains("dedup claim store"),
         "the error must name the missing claim gate so an operator can wire it: {error}"
+    );
+}
+
+// ─── #6062: an empty head SHA is fail-closed on a posting run ───────────────
+
+/// A config with no GitHub App credentials, so serve-mode token resolution —
+/// and therefore `fetch_github_pr_meta` — fails without touching the network.
+fn config_without_app_creds() -> ReviewConfig {
+    let mut config = ReviewConfig::load(None);
+    config.github_app_id = None;
+    config.github_app_private_key = None;
+    config.github_installations = Vec::new();
+    config
+}
+
+/// REGRESSION (#6062): a posting run whose PR-metadata fetch produced no head
+/// SHA aborts before the review runs, rather than proceeding unkeyed.
+///
+/// Why: `fetch_github_pr_meta` failing falls back to `head_sha = String::new()`
+/// and continues. Both the claim in `run_review` and the `complete()` in
+/// `finalize_review` gate on `!head_sha.is_empty()`, and `decide_action` never
+/// reads the SHA at all — so the run reached `FinalizeAction::Post` and posted
+/// live with the dedup claim never taken and never completed. A retry after the
+/// same fetch failure posts a duplicate.
+/// What: a GitHub source in serve mode with no App credentials (so the metadata
+/// fetch fails offline), `allow_posting: true`, `dry_run: false`, and a real
+/// dedup store present so the #5113 guard is not the one firing. The run must
+/// return UNKNOWN with an error naming the missing head SHA, and must not post.
+/// Test: this test. Fails pre-fix: the run continued past the fetch and the
+/// error named GitHub token resolution instead of the missing head SHA.
+#[tokio::test]
+async fn run_review_empty_head_sha_fails_closed_before_posting() {
+    use crate::store::DedupStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_without_app_creds();
+    config.dry_run = false; // the post path is reachable
+    config.log_dir = dir.path().to_path_buf();
+
+    let input = ReviewInput {
+        diff_source: DiffSource::Github {
+            owner: "acme".to_string(),
+            repo: "backend".to_string(),
+            pr: 42,
+            token: String::new(),
+        },
+        reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Serve,
+        allow_posting: true,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+    let mut deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+    deps.dedup = Some(Arc::new(
+        DedupStore::open(&dir.path().join("dedup.redb")).expect("open"),
+    ));
+
+    let result = run_review(&config, input, deps).await;
+
+    assert!(
+        !result.posted,
+        "a run with no dedup key must never post — a retry would duplicate it"
+    );
+    assert_eq!(
+        result.verdict,
+        Verdict::Unknown,
+        "a run that never happened must not report a verdict"
+    );
+    let error = result.error.expect("the abort must explain itself");
+    assert!(
+        error.contains("head SHA"),
+        "the error must name the missing dedup key, not a downstream symptom: {error}"
+    );
+}
+
+/// Why: the #6062 guard must not fire where nothing can be posted — a local
+/// diff has no head SHA by construction and reviews normally.
+/// What: a local diff source with `allow_posting: true` and `dry_run: false`
+/// must review rather than abort on the empty SHA.
+/// Test: this test.
+#[tokio::test]
+async fn run_review_local_source_with_empty_head_sha_is_not_blocked() {
+    let (source, _tmp) = local_diff_source("+fn x() {}\n");
+    let mut config = default_config();
+    config.dry_run = false;
+
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: true,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+
+    let result = run_review(&config, input, deps).await;
+
+    assert!(
+        !result
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("head SHA")),
+        "a local diff has no head SHA and nowhere to post: {:?}",
+        result.error
     );
 }
 

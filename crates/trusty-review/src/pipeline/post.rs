@@ -199,7 +199,9 @@ pub struct PostContext<'a> {
     pub repo: &'a str,
     /// Pull request number.
     pub pr: u64,
-    /// Head commit SHA (dedup key); empty when unknown.
+    /// Head commit SHA (dedup key). Empty when the PR-metadata fetch failed —
+    /// `finalize_review` then refuses to post, because an unkeyed claim cannot
+    /// be completed and a re-run would duplicate the comment (#6062).
     pub head_sha: &'a str,
     /// Run mode selecting the auth strategy (CLI=PAT/`gh`, Serve=App).
     pub run_mode: RunMode,
@@ -211,7 +213,10 @@ pub struct PostContext<'a> {
 ///
 /// Why: the single exit point for `run_review` so every code path applies the
 /// same post-or-log policy and the same fail-safe error handling.
-/// What: computes the action via `decide_action`; on `Post`, resolves a token
+/// What: computes the action via `decide_action`, then downgrades `Post` to
+/// `LogOnly` when the context carries no head SHA — the dedup claim is keyed on
+/// it, so posting unkeyed leaves the run with no defence against a duplicate on
+/// re-run (#6062). On `Post`, resolves a token
 /// through the auth abstraction and posts a PR review comment (setting
 /// `posted=true`, `dry_run=false` and marking the dedup claim complete on
 /// success); on `LogOnly` (or any post failure) writes the dry-run log.  Prints
@@ -220,7 +225,8 @@ pub struct PostContext<'a> {
 /// `findings.len()` (#1877) so every completed review (unified or map-reduce)
 /// carries the authoritative count regardless of exit path.
 /// Test: `decide_action_*` cover the branch; the live post is `#[ignore]`;
-/// `findings_count_matches_len_on_completed_review`.
+/// `findings_count_matches_len_on_completed_review`,
+/// `finalize_review_does_not_post_without_a_head_sha`.
 pub async fn finalize_review(
     mut result: ReviewResult,
     config: &ReviewConfig,
@@ -266,7 +272,25 @@ pub async fn finalize_review(
     result.review_body.push_str(&footer);
 
     let is_github = !post_ctx.owner.is_empty() && post_ctx.owner != "local";
-    let action = decide_action(config.dry_run, trigger, allow_posting, is_github);
+    let mut action = decide_action(config.dry_run, trigger, allow_posting, is_github);
+
+    // #6062: empty head_sha is fail-closed — no claim, no post
+    if action == FinalizeAction::Post && post_ctx.head_sha.is_empty() {
+        error!(
+            owner = post_ctx.owner,
+            repo = post_ctx.repo,
+            pr = post_ctx.pr,
+            "no head SHA to key the dedup claim — logging instead of posting (#6062)"
+        );
+        if result.error.is_none() {
+            result.error = Some(
+                "not posted: no head SHA, so the dedup claim cannot be completed and a \
+                 re-run could post a duplicate comment (#6062)"
+                    .to_string(),
+            );
+        }
+        action = FinalizeAction::LogOnly;
+    }
 
     match action {
         FinalizeAction::Post => {
@@ -383,6 +407,56 @@ mod tests {
         ];
         assert_eq!(count_unverified(&findings), 3);
         assert_eq!(count_unverified(&[]), 0);
+    }
+
+    // ── #6062: an empty head SHA is fail-closed ───────────────────────────────
+
+    /// REGRESSION (#6062): `finalize_review` never posts a review it cannot key
+    /// a dedup claim to.
+    ///
+    /// Why: `decide_action` reads only `is_github`, `allow_posting`, `trigger`
+    /// and `dry_run`, so a GitHub run whose PR-metadata fetch failed reached
+    /// `FinalizeAction::Post` with an empty `head_sha`; the `complete()` call is
+    /// itself gated on `!head_sha.is_empty()`, so the comment posted with the
+    /// claim never taken and never completed.
+    /// What: a GitHub `PostContext` with an empty `head_sha`, `allow_posting`
+    /// true and `dry_run` false — the exact shape that selects `Post`. The
+    /// result must stay unposted and say why.
+    /// Test: this test. Fails pre-fix: `post_live` ran and the error read
+    /// `post failed: …` rather than naming the missing head SHA.
+    #[tokio::test]
+    async fn finalize_review_does_not_post_without_a_head_sha() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = ReviewConfig::load(None);
+        config.dry_run = false;
+        config.log_dir = dir.path().to_path_buf();
+
+        let result = ReviewResult::new("acme", "backend", 42, "t", "u");
+        let out = finalize_review(
+            result,
+            &config,
+            TriggerDecision::None,
+            true,
+            false,
+            false,
+            PostContext {
+                owner: "acme",
+                repo: "backend",
+                pr: 42,
+                head_sha: "",
+                run_mode: RunMode::Serve,
+                dedup: None,
+            },
+        )
+        .await;
+
+        assert!(!out.posted, "an unkeyed review must never post");
+        assert!(out.dry_run, "the fail-closed path stays dry-run");
+        let error = out.error.expect("the downgrade must explain itself");
+        assert!(
+            error.contains("head SHA"),
+            "the error must name the missing dedup key: {error}"
+        );
     }
 
     // ── Footer rendering ──────────────────────────────────────────────────────

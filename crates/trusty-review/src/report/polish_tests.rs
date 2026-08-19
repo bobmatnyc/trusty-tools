@@ -179,6 +179,58 @@ fn collapses_empty_section() {
     assert!(out.contains("content"));
 }
 
+/// REGRESSION (#6039): a section that renders populated is never named in the
+/// Data gaps list, even when one part of it was dropped as empty.
+///
+/// Why: the Authorship & Key-Person Risk section rendered six authors, a bus
+/// factor and a trajectory, and the same report's Data gaps line still counted
+/// it among "18 unpopulated fields/sections". Its unsynthesised narrative
+/// paragraph was the honesty marker, so the drop recorded the SECTION heading
+/// as the gap label — bookkeeping that nothing revisited once the section's
+/// table filled in. Same stale-emptiness class as #6029.
+/// What: a section whose narrative paragraph is the marker but whose table has
+/// real rows. The rows must survive and the gaps line must not name the
+/// section.
+/// Test: this test. Fails pre-fix: the gaps line reads `Data gaps: 1
+/// unpopulated field/section — Authorship & Key-Person Risk.`
+#[test]
+fn populated_section_is_not_listed_as_a_data_gap() {
+    let input = format!(
+        "## Authorship & Key-Person Risk\n\n{HONESTY_MARKER}\n\n\
+         | Application | Distinct authors | Bus factor |\n|---|---|---|\n\
+         | backend | 6 | 1 |\n\n## 8. Gaps & Caveats\n\nplaceholder\n"
+    );
+    let out = polish(&input);
+    assert!(
+        out.contains("| backend | 6 | 1 |"),
+        "the measured row must survive: {out}"
+    );
+    let gaps_line = out
+        .lines()
+        .find(|l| l.starts_with("Data gaps:"))
+        .unwrap_or("No material data gaps");
+    assert!(
+        !gaps_line.contains("Authorship & Key-Person Risk"),
+        "a section the report renders populated must not be listed as a gap: {gaps_line}"
+    );
+}
+
+/// Why: dropping stale section gaps must not disarm the case the gaps list
+/// exists for — a section that really did collapse still has to be named.
+/// What: one collapsed section beside one populated section; only the collapsed
+/// one is listed.
+/// Test: this test.
+#[test]
+fn collapsed_section_is_still_listed_when_a_sibling_is_populated() {
+    let input = "## 6. Risk Registers\n\n## 7. Appendix\n\ncontent\n\n\
+                 ## 8. Gaps & Caveats\n\nplaceholder\n";
+    let out = polish(input);
+    assert!(
+        out.contains("Data gaps: 1 unpopulated field/section — 6. Risk Registers."),
+        "a genuinely empty section must still be named: {out}"
+    );
+}
+
 /// Why: the Gaps & Caveats section must list every dropped field compactly rather
 /// than as a wall of markers.
 /// What: asserts dropped fields from multiple sources appear in one Data gaps line
