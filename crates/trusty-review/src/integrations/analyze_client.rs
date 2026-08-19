@@ -232,11 +232,14 @@ impl HttpAnalyzeClient {
     pub fn new(base_url: impl Into<String>) -> Result<Self, AnalyzeClientError> {
         let raw = base_url.into();
         let base_url = raw.trim_end_matches('/').to_string();
-        let probe_http = reqwest::Client::builder()
+        // #6038: both clients talk to the loopback analyze daemon, so both go
+        // through the shared constructor that applies `.no_proxy()` (#4392) —
+        // a bare builder here sends 127.0.0.1 to an exported HTTP_PROXY.
+        let probe_http = trusty_common::http_client::loopback_client_builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .map_err(|e| AnalyzeClientError::ClientInit(e.to_string()))?;
-        let analysis_http = reqwest::Client::builder()
+        let analysis_http = trusty_common::http_client::loopback_client_builder()
             .timeout(std::time::Duration::from_secs(180))
             .build()
             .map_err(|e| AnalyzeClientError::ClientInit(e.to_string()))?;

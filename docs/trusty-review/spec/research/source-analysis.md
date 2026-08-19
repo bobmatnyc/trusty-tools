@@ -379,7 +379,7 @@ Multiple named `VectorSearchAdapter` instances used for different index targets:
 
 ### 6.2 trusty-analyze Adapter (`adapters/analyzer_adapter.py`)
 
-HTTP client for `PR_INTELLIGENCE_ANALYZER_URL` (default `http://localhost:7879`). Index from `TRUSTY_SEARCH_INDEX`.
+HTTP client for `PR_INTELLIGENCE_ANALYZER_URL` (default `http://127.0.0.1:7879`). Index from `TRUSTY_SEARCH_INDEX`.
 
 | Method | Endpoint | Timeout | Notes |
 |---|---|---|---|
@@ -487,7 +487,7 @@ Dispatch: prefers `SLACK_NOTIFICATION_CHANNEL` + `SLACK_BOT_TOKEN` (chat.postMes
 | `PR_INTELLIGENCE_EXCLUDED_AUTHORS` | `""` | Bot logins to skip (e.g. `duetto-snyk-svc`) |
 | `PR_REVIEW_BOT_USERNAME` | `""` | GitHub App login; triggers manual/live mode when requested as reviewer |
 | `PR_INTELLIGENCE_LOG_DIR` | `/data/app/data/pr-reviews` | Dry-run log directory |
-| `PR_INTELLIGENCE_ANALYZER_URL` | `http://localhost:7879` | trusty-analyze sidecar URL |
+| `PR_INTELLIGENCE_ANALYZER_URL` | `http://127.0.0.1:7879` | trusty-analyze sidecar URL |
 | `PR_INTELLIGENCE_EVAL_MODEL` | (varies) | Secondary model for eval comparisons (dry-run only) |
 | `PR_INTELLIGENCE_MIN_FINDINGS_TO_POST` | `1` | Global min findings gate (overrideable per-repo) |
 | `PR_INTELLIGENCE_SUPPRESS_ADVISORY_REVIEWS` | `false` | Global suppress_advisory flag |

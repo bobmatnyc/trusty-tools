@@ -7,6 +7,7 @@
 //! Test: this file.
 
 use super::*;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 // ─── Severity map ────────────────────────────────────────────────────────────
 
@@ -260,6 +261,116 @@ async fn fetch_returns_none_on_unreachable_daemon() {
     // Port 1 is never listening; the probe fails and fetch swallows it.
     let src = HttpAnalyzeMetricsSource::new("http://127.0.0.1:1").unwrap();
     assert!(src.fetch("demo").await.is_none());
+}
+
+/// A loopback stub that closes a connection part-way through a request instead
+/// of answering it, and counts how many connections it accepted.
+///
+/// Why (#6038): this is the failure the field hit. HTTP/1.1 keep-alive lets the
+/// server close a connection the client still believes is reusable, and the
+/// close races the client's next write — so the client sees the socket go away
+/// after it has already committed the request. Closing on the Nth request of a
+/// connection (rather than right after a response) makes the race
+/// deterministic: the connection is provably still in the client's pool when
+/// the next GET is checked out.
+/// What: binds `127.0.0.1:0` and serves `[]` to every request except the
+/// `poison_at`-th on each connection, which it answers by shutting the socket
+/// down. Returns `host:port` plus the accepted-connection counter.
+/// Test: `transport_failure_on_a_reused_connection_retries_once`,
+/// `a_connection_that_keeps_dying_is_retried_exactly_once`.
+async fn closing_stub(poison_at: u32) -> (String, std::sync::Arc<AtomicU32>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback stub");
+    let addr = listener.local_addr().expect("stub addr").to_string();
+    let connections = std::sync::Arc::new(AtomicU32::new(0));
+    let counter = std::sync::Arc::clone(&connections);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut seen = 0u32;
+                let mut buf = [0u8; 1024];
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {}
+                    }
+                    seen += 1;
+                    if seen == poison_at {
+                        // The close the client cannot anticipate: the request
+                        // is already on the wire, and no response follows it.
+                        let _ = stream.shutdown().await;
+                        return;
+                    }
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]")
+                        .await;
+                }
+            });
+        }
+    });
+    (addr, connections)
+}
+
+/// Why (#6038): every `--analyze` render degraded to scan because one closed
+/// pooled connection was surfaced as a terminal transport error. The adapter
+/// issues three GETs back to back on one keep-alive connection, and the second
+/// one landing on a connection the daemon had closed collapsed the whole fetch.
+/// What: drives two `get_json` calls against a stub that closes the connection
+/// under the second; the first must succeed, and the second must succeed too —
+/// on the fresh connection the retry opens.
+/// Test: This is the test. Without the retry the second call returns
+/// `AnalyzeAdapterError::Transport`.
+#[tokio::test]
+async fn transport_failure_on_a_reused_connection_retries_once() {
+    let (addr, connections) = closing_stub(2).await;
+    let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
+
+    let first: serde_json::Value = src
+        .get_json("/indexes")
+        .await
+        .expect("the first GET opens a connection and is answered");
+    assert_eq!(first, serde_json::json!([]));
+
+    let second: serde_json::Value = src
+        .get_json("/indexes/demo/diagnostics")
+        .await
+        .expect("a closed pooled connection must be retried on a fresh one");
+    assert_eq!(second, serde_json::json!([]));
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        2,
+        "the retry must open exactly one replacement connection"
+    );
+}
+
+/// Why (#6038): "retry once" is a bound, not a loop. A peer that closes every
+/// connection must still fail-open promptly rather than spinning; the report
+/// falls back to scan either way and an unbounded retry only delays it.
+/// What: points the adapter at a stub that closes every connection on its first
+/// request, and asserts the call fails after exactly two connection attempts.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_connection_that_keeps_dying_is_retried_exactly_once() {
+    let (addr, connections) = closing_stub(1).await;
+    let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
+
+    let err = src
+        .get_json::<serde_json::Value>("/indexes")
+        .await
+        .expect_err("a peer that answers nothing cannot succeed");
+    assert!(
+        matches!(err, AnalyzeAdapterError::Transport(_)),
+        "expected a transport error, got {err:?}"
+    );
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        2,
+        "one original attempt plus one retry, and no more"
+    );
 }
 
 #[test]

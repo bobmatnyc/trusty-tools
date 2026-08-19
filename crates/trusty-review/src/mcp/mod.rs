@@ -219,7 +219,7 @@ pub(crate) async fn dispatch_deferred(
 /// builds the verifier provider (degrading to `None` on failure — embedded use
 /// must not hard-fail a host daemon over a missing verifier model), builds the
 /// HTTP search + analyze clients from config (the analyze client defaults to
-/// `http://localhost:7879`, i.e. loopback to the hosting analyze daemon, so
+/// [`crate::config::DEFAULT_ANALYZER_URL`], i.e. loopback to the hosting analyze daemon, so
 /// embedded reviews get authoritative static-analysis context), and returns the
 /// assembled `AppState`. #5064: the dedup requirement is declared through
 /// `DedupNeed::NotNeeded` rather than by passing a bare `None` — embedded

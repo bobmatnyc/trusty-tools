@@ -293,7 +293,7 @@ proceeds **DEGRADED** and is loudly labelled non-authoritative.
 
 ### 6.3 trusty-analyze client (`integrations/analyze_client.rs`)
 
-`HttpAnalyzeClient` over `PR_INTELLIGENCE_ANALYZER_URL` (default `http://localhost:7879`).
+`HttpAnalyzeClient` over `PR_INTELLIGENCE_ANALYZER_URL` (default `http://127.0.0.1:7879`).
 
 | Method | Endpoint | Timeout | Notes |
 |--------|----------|---------|-------|
@@ -365,7 +365,7 @@ Config file location: `--config <path>` flag or `$XDG_CONFIG_HOME/trusty-review/
 | `PR_INTELLIGENCE_EXCLUDED_AUTHORS` | `""` | Bot logins to skip |
 | `PR_REVIEW_BOT_USERNAME` | `""` | App login; triggers manual/live when requested as reviewer |
 | `PR_INTELLIGENCE_LOG_DIR` | `/data/app/data/pr-reviews` | Review log + dedup store directory |
-| `PR_INTELLIGENCE_ANALYZER_URL` | `http://localhost:7879` | trusty-analyze URL |
+| `PR_INTELLIGENCE_ANALYZER_URL` | `http://127.0.0.1:7879` | trusty-analyze URL |
 | `PR_INTELLIGENCE_MIN_FINDINGS_TO_POST` | `1` | Global min-findings gate |
 | `PR_INTELLIGENCE_SUPPRESS_ADVISORY_REVIEWS` | `false` | Global `suppress_advisory` |
 
