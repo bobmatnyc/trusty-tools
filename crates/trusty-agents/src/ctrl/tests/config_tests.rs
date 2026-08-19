@@ -6,7 +6,7 @@ use crate::llm;
 use super::super::claude_cli::{filter_project_index_in_prompt, strip_cli_artifacts};
 use super::super::config::{
     AgentIdentity, apply_credential_routing, build_deployment_footer, build_user_context_prefix,
-    render_user_context_block, render_user_datetime, resolve_agent_config,
+    recall_project_memories, render_user_context_block, render_user_datetime, resolve_agent_config,
 };
 
 /// Fixed identity used by tests that don't care about its specific values —
@@ -496,5 +496,138 @@ fn provider_override_still_works_on_an_unpinned_agent() {
         cfg.agent.model.starts_with("bedrock/"),
         "{}",
         cfg.agent.model
+    );
+}
+
+/// audit 2026-08-19 (finding 18): `/provider bedrock` and `/provider local`
+/// get credential variants that name their real transport.
+///
+/// Why: both used to return `LlmCredentials::OpenRouter` as a placeholder, so
+/// the credential type disagreed with the transport the adapter actually used.
+/// What: asserts the variant, the model prefix that drives dispatch, and — the
+/// part that matters — that `apply_credential_routing` still does nothing for
+/// either: no `use_anthropic_direct`, no claude-CLI short-circuit, no model
+/// rewrite. That triple is the routing behavior the placeholder produced.
+/// Test: itself.
+#[test]
+fn provider_override_bedrock_and_local_get_their_own_variants() {
+    use llm::credentials::LlmCredentials;
+
+    for (override_name, expected, prefix, label) in [
+        ("bedrock", LlmCredentials::Bedrock, "bedrock/", "bedrock"),
+        ("local", LlmCredentials::Ollama, "ollama/", "ollama"),
+    ] {
+        let mut cfg = AgentConfig::ctrl_default();
+        cfg.agent.provider_id = None;
+        cfg.llm.use_anthropic_direct = false;
+
+        let creds =
+            super::super::config::resolve_overridden_credentials(&mut cfg, Some(override_name))
+                .expect("override resolves");
+        assert_eq!(creds, expected, "/provider {override_name}");
+        assert_eq!(creds.label(), label);
+        assert!(
+            cfg.agent.model.starts_with(prefix),
+            "dispatch is prefix-driven: {}",
+            cfg.agent.model
+        );
+
+        let model_before = cfg.agent.model.clone();
+        let short_circuit = apply_credential_routing(&mut cfg, &creds);
+        assert!(!short_circuit, "{override_name} never uses the claude CLI");
+        assert!(
+            !cfg.llm.use_anthropic_direct,
+            "{override_name} must not flip use_anthropic_direct"
+        );
+        assert_eq!(
+            cfg.agent.model, model_before,
+            "{override_name} model id must survive routing untouched"
+        );
+    }
+}
+
+/// Collects every WARN-level event emitted while it is the default
+/// subscriber, flattening each event's fields into one string.
+///
+/// Why: `recall_project_memories` is fail-open by design — it returns an empty
+/// `Vec` on every error path — so the ONLY observable difference between "the
+/// store is broken" and "this project has no memories yet" is the log record.
+/// Asserting on the returned value can therefore never catch the regression;
+/// the test has to read the tracing event itself.
+/// What: a `tracing_subscriber::Layer` that pushes the field set of each WARN
+/// event into a shared `Vec<String>`.
+#[derive(Default, Clone)]
+struct WarnCollector(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCollector {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if *event.metadata().level() != tracing::Level::WARN {
+            return;
+        }
+        struct Flatten(String);
+        impl tracing::field::Visit for Flatten {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!("{}={:?} ", field.name(), value));
+            }
+        }
+        let mut flat = Flatten(String::new());
+        event.record(&mut flat);
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(flat.0);
+    }
+}
+
+/// audit 2026-08-19 (finding 19): a store-open failure must reach operator
+/// logs at WARN, not vanish at `debug!`.
+///
+/// Why: before the fix every error arm logged at `debug!`, so a corrupted or
+/// misconfigured store produced an agent with no memory context and no signal
+/// anywhere at the default log level — indistinguishable from a cold project.
+/// What: injects a store-open failure by making `sessions/default` a regular
+/// FILE, so the `exists()` guard passes and `RedbUsearchStore::open`'s
+/// `create_dir_all` fails. Asserts the empty-Vec fallback is UNCHANGED (recall
+/// stays best-effort) and that a WARN event naming the failure was emitted.
+/// Test: itself.
+#[test]
+fn recall_project_memories_warns_when_store_open_fails() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sessions = tmp.path().join(".trusty-agents").join("sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions dir");
+    // A FILE where the store expects a directory: `session_dir.exists()` is
+    // true, so recall proceeds, and the store open then fails.
+    std::fs::write(sessions.join("default"), b"not a directory").expect("write blocker file");
+
+    let collector = WarnCollector::default();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("current-thread runtime");
+    let out = {
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(collector.clone()),
+        );
+        rt.block_on(recall_project_memories(tmp.path(), "anything", 3))
+    };
+
+    assert!(
+        out.is_empty(),
+        "recall stays fail-open: the empty-Vec fallback must not change"
+    );
+    let warnings = collector
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert!(
+        warnings.iter().any(|w| w.contains("store open failed")),
+        "a store-open failure must be visible at WARN with its error chain; \
+         captured WARN events: {warnings:?}"
     );
 }
