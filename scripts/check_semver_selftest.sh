@@ -313,7 +313,16 @@ if [[ "${1:-}" == "semver-checks" ]]; then
   if [[ -n "${SEMVER_SELFTEST_ENV_OUT:-}" ]]; then
     {
       echo "RUSTC_WRAPPER=${RUSTC_WRAPPER:-}"
-      echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-}"
+      # PRESENCE, not value. `env -u CARGO_TARGET_DIR` and `CARGO_TARGET_DIR=`
+      # both yield an empty ${CARGO_TARGET_DIR:-}, and only the first is
+      # correct — cargo rejects an empty value outright. This stub replaces the
+      # real cargo, so it is the only place that difference is observable at
+      # all; recording `${VAR+x}` is what lets cases 25 and 28 tell them apart.
+      if [[ -n "${CARGO_TARGET_DIR+x}" ]]; then
+        echo "CARGO_TARGET_DIR_PRESENT=yes(${CARGO_TARGET_DIR})"
+      else
+        echo "CARGO_TARGET_DIR_PRESENT=no"
+      fi
       echo "SKIP_UI_BUILD=${SKIP_UI_BUILD:-}"
     } > "$SEMVER_SELFTEST_ENV_OUT"
   fi
@@ -821,7 +830,7 @@ elif [[ "$rc" -ne 0 ]]; then
   fail_case "accel/applied: a clean run under the wrapper exited ${rc}" "$out"
 elif ! grep -qx "RUSTC_WRAPPER=${ACCEL_SCCACHE_DIR}/sccache" "$ENV_OUT"; then
   fail_case "accel/applied: RUSTC_WRAPPER never reached the subprocess" "$(cat "$ENV_OUT")" "$out"
-elif ! grep -qx "CARGO_TARGET_DIR=" "$ENV_OUT"; then
+elif ! grep -qx "CARGO_TARGET_DIR_PRESENT=no" "$ENV_OUT"; then
   fail_case "accel/applied: CARGO_TARGET_DIR reached cargo-semver-checks — it relocates the current rustdoc JSON and blinds the type differ" "$(cat "$ENV_OUT")"
 elif ! grep -qx "SKIP_UI_BUILD=1" "$ENV_OUT"; then
   # The env prefix REPLACED an existing `SKIP_UI_BUILD=1 cargo ...` assignment.
@@ -876,6 +885,46 @@ elif ! grep -qx "RUSTC_WRAPPER=${ACCEL_SCCACHE_DIR}/sccache" "$ENV_OUT" 2> /dev/
   fail_case "accel/build-failure: the run was not wrapped, so it did not test the wrapper" "$(cat "$ENV_OUT" 2> /dev/null)"
 else
   pass_case "a build failure under the wrapper still exits 3 (no verdict)"
+fi
+
+# --- 28. AN AMBIENT CARGO_TARGET_DIR DOES NOT REACH THE SUBPROCESS.
+#
+#         Case 25 proves this gate does not ADD one. That is a weaker claim than
+#         it looks, because the damage does not care who set the variable: an
+#         inherited value relocates the current crate's rustdoc JSON to the same
+#         flat, name-keyed path and blinds check_semver_types.sh exactly as a
+#         locally-added one would.
+#
+#         And it is inheritable here in practice, not in theory. DOC-66 §6.2/§6.4
+#         lists a shared CARGO_TARGET_DIR as a sanctioned opt-in disk-saving
+#         strategy for this repo's worktrees, and vmtest-harness/lib/provision.sh
+#         exports one specifically so it survives into cargo's child processes.
+#         A developer who adopts either would silently lose CHECK 5b.
+#
+#         semver_checks_run uses `env -u`, not `CARGO_TARGET_DIR=`: cargo treats
+#         an empty value as a hard error ("the target directory is set to an
+#         empty string in the `CARGO_TARGET_DIR` environment variable", exit
+#         101), so setting it empty would convert an ambient variable into a
+#         failed gate rather than a clean one.
+rm -f "$ENV_OUT"
+rc=0
+out="$(accel_gate \
+  "CARGO_TARGET_DIR=${STUB_DIR}/ambient-target-dir" \
+  "SEMVER_SELFTEST_FIXTURE=${FIXTURES}/clean.out" \
+  "SEMVER_SELFTEST_RC=0")" || rc=$?
+if [[ ! -f "$ENV_OUT" ]]; then
+  fail_case "accel/ambient-target-dir: the gate never reached cargo semver-checks, so this case proves nothing" "$out"
+elif grep -q "CARGO_TARGET_DIR_PRESENT=yes" "$ENV_OUT"; then
+  # Catches BOTH wrong spellings, which is why the stub records presence rather
+  # than value. No neutralisation at all leaves the ambient path visible;
+  # `CARGO_TARGET_DIR=` leaves the variable present-but-empty, which cargo
+  # rejects outright — and the stub replaces cargo, so an empty value would
+  # otherwise sail through this file and fail only at a real release.
+  fail_case "accel/ambient-target-dir: CARGO_TARGET_DIR still reached cargo-semver-checks — it must be UNSET (env -u), not set to empty" "$(cat "$ENV_OUT")"
+elif [[ "$rc" -ne 0 ]]; then
+  fail_case "accel/ambient-target-dir: neutralising the ambient value broke the run (exit ${rc})" "$out"
+else
+  pass_case "an ambient CARGO_TARGET_DIR is unset for the subprocess without failing the run"
 fi
 
 rm -rf "$STUB_DIR"

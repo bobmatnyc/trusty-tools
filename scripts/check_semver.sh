@@ -188,6 +188,8 @@
 #   crate's rustdoc JSON to a flat, name-keyed path, blinding
 #   check_semver_types.sh and letting parallel worktrees overwrite each other's
 #   document. The measurement is in scripts/lib/build_accel.sh; do not re-add it.
+#   An AMBIENT CARGO_TARGET_DIR does the same damage, and this repo sanctions
+#   exporting one, so semver_checks_run unsets it for that subprocess.
 #
 # Exit (#5289 split 1 from 3 — a verdict and a non-verdict are different facts):
 #   0  every checked crate is SemVer-clean, or is a recorded skip.
@@ -1026,16 +1028,29 @@ build_accel_mode_line "$BUILD_ACCEL_SCCACHE"
 # the preflight passes, `cargo publish` included — inherits RUSTC_WRAPPER from
 # here. The acceleration is scoped to the one command it was reasoned about.
 #
-# WHAT IS DELIBERATELY ABSENT: CARGO_TARGET_DIR. It relocates the current crate's
-# rustdoc JSON to a flat, name-keyed path and blinds check_semver_types.sh; the
-# full measurement is in scripts/lib/build_accel.sh. Do not add it here.
+# CARGO_TARGET_DIR IS UNSET, NOT MERELY UNSET-BY-US. Setting it relocates the
+# current crate's rustdoc JSON to a flat, name-keyed path and blinds
+# check_semver_types.sh — the measurement is in scripts/lib/build_accel.sh — and
+# an AMBIENT one does that just as thoroughly as one this script added. This repo
+# sanctions exporting a shared CARGO_TARGET_DIR (DOC-66 §6.2/§6.4 lists it as an
+# opt-in disk-saving strategy; vmtest-harness/lib/provision.sh exports one into
+# cargo's children), so an inherited value is a real configuration, not a
+# hypothetical. `env -u` neutralises it for this subprocess only and leaves the
+# caller's environment alone.
 #
-# The vector always carries `env SKIP_UI_BUILD=1`, so it is never empty and
-# `"${envv[@]}"` is safe under `set -u` on bash 3.2.
+# `env -u`, NOT `CARGO_TARGET_DIR=`. An empty value is not "use the default" to
+# cargo — it is a hard error:
+#     error: the target directory is set to an empty string in the
+#            `CARGO_TARGET_DIR` environment variable
+# (verified against `cargo metadata`, exit 101). Setting it empty would turn an
+# ambient variable into a failed gate.
+#
+# The vector always carries `env -u CARGO_TARGET_DIR SKIP_UI_BUILD=1`, so it is
+# never empty and `"${envv[@]}"` is safe under `set -u` on bash 3.2.
 # ---------------------------------------------------------------------------
 semver_checks_run() {
   local -a envv
-  envv=(env SKIP_UI_BUILD=1)
+  envv=(env -u CARGO_TARGET_DIR SKIP_UI_BUILD=1)
   if [[ -n "$BUILD_ACCEL_SCCACHE" ]]; then
     envv+=("RUSTC_WRAPPER=${BUILD_ACCEL_SCCACHE}")
   fi

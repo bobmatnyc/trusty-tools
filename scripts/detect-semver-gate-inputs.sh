@@ -37,9 +37,9 @@
 #     scripts/check_semver_types.sh             the subject of the type-differ
 #                                               self-test
 #     scripts/lib/build_accel.sh                the build-acceleration resolver
-#                                               check_semver.sh and
-#                                               check_semver_types.sh both source
-#     scripts/build_accel_selftest.sh           its self-test, run at workflow L292
+#                                               check_semver.sh sources
+#     scripts/build_accel_selftest.sh           its self-test, run by the
+#                                               "Build-acceleration selftest" step
 #     scripts/lib/rustdoc_walk.py               the walk check_semver_types.sh
 #                                               imports (ADR-0047)
 #     scripts/semver-checks-*-exclusions.tsv    the crate and feature exclusion

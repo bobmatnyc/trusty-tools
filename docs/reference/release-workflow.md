@@ -318,6 +318,28 @@ The baseline half of the cache (`<target>/semver-checks/cache/`) *is* placed
 correctly under `CARGO_TARGET_DIR`; only the current crate's document moves.
 That asymmetry is why the problem does not show up as an obvious failure.
 
+**An ambient `CARGO_TARGET_DIR` does the same damage, so the gate unsets it.**
+Not setting one ourselves is a weaker guarantee than it looks: an *inherited*
+value relocates the rustdoc JSON identically. This repo sanctions exporting one
+— DOC-66 §6.2/§6.4 lists a shared `CARGO_TARGET_DIR` as an opt-in disk-saving
+strategy for worktrees, and `vmtest-harness/lib/provision.sh` exports one
+specifically so it survives into cargo's children — so a developer who adopts
+either would silently lose CHECK 5b. `semver_checks_run` therefore neutralises
+it for that one subprocess.
+
+It uses `env -u CARGO_TARGET_DIR`, **not** `CARGO_TARGET_DIR=`. An empty value
+is not "use the default" to cargo, it is a hard error:
+
+```
+error: the target directory is set to an empty string in the `CARGO_TARGET_DIR` environment variable
+```
+
+(verified against `cargo metadata`, exit 101). The empty spelling would turn an
+ambient variable into a failed gate. Verified end to end: with
+`CARGO_TARGET_DIR=/tmp/ambient-ctd` exported, the gate passes, the rustdoc JSON
+lands at the versioned path under `<repo>/target/semver-checks/`, the differ
+compares 143 items and exits 0, and `/tmp/ambient-ctd/doc/` is never created.
+
 **Tested by** `scripts/build_accel_selftest.sh` (detection, the opt-out, the
 mode line, and an assertion that the library sets no `CARGO_TARGET_DIR`) and
 `scripts/check_semver_selftest.sh` cases 25-27 (the wiring: that the wrapper
