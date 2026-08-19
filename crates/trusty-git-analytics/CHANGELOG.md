@@ -6,6 +6,229 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.1.0] — 2026-08-19
+
+### Breaking
+
+- `AgenticMode` is now `#[non_exhaustive]` and gained a variant, so external
+  `match` sites need a `_ =>` arm. tga goes to 3.0.0: adding a variant to an
+  exhaustive public enum is a major break under `cargo-semver-checks`, and the
+  attribute keeps the next addition (#5251) a minor bump.
+
+### Added
+
+- JIRA and GitHub Issues now write rows into `work_items`, and Azure DevOps writes them through the same code path (#5219). `tga collect` gains one provider-agnostic pass, `collect::work_item_pipeline`, which asks each configured `PmAdapter` what references its own syntax finds in the commit corpus, batch-fetches them, and writes one `work_items` row plus a `commit_work_items` link per resolved reference. This is the first production caller of `build_adapters` — until now the trait, the factory and all four adapters were built, configured, validated at `Config::load`, and reachable only from their own tests.
+
+  `github.ticket_regex` and `jira.ticket_regex` are live as a result. Both were validated at config load and then read by nothing, so setting either had no effect on any `tga collect` output. `pm.azure_devops.ticket_regex` stays live: `build_adapters` now forwards it to the ADO adapter, which previously ignored it in favour of a hardcoded `AB#N` pattern.
+
+  **Upgrade note — this starts fetching without any config change.** `github.fetch_on_reference` and `jira.fetch_on_reference` are new and default to `true`, matching `linear.fetch_on_reference` and `pm.azure_devops.fetch_on_reference`, which already did. An existing config that names a `github:` or `jira:` section begins populating `work_items` on the next `tga collect`, issuing one issue lookup per detected reference against that token's rate budget — including for a config that names GitHub only to fetch pull requests. Set the flag to `false` on a provider to opt out. Uniform defaults are deliberate: #5219 was reopened because `github.ticket_regex` validated cleanly and changed no output, and shipping a writer that defaults off reproduces exactly that.
+
+  Every failure is recorded at the severity its blast radius earns. A provider that fetched nothing while reporting at least one error has lost its whole corpus and fails the stage, which makes `tga collect` exit non-zero; a provider that resolved some references and errored on others records an item skip and keeps the rows it did get. A reference the provider authoritatively does not have returns not-found and is not a fault.
+
+  Linear keeps `collect::linear_pipeline`, because it writes the provider-specific `linear_issues` table in the same pass — routing only its `work_items` half through the shared pass would fetch every Linear issue twice per run. Its `linear.team_keys` pre-fetch filter has no shared equivalent yet either, though that is an implementation gap rather than a limit of `PmAdapter`: `with_ticket_regex` already shows how per-provider config threads in at construction.
+- `AgenticMode::Unknown` — a fourth agentic mode for commits whose message git
+  or a forge composed, so a marker the author emitted was discarded before the
+  commit object existed. It separates "we read the author's message and found
+  no AI marker" from "the message we hold was never the author's".
+  - Detection reaches it only when no marker matched and the message shows a
+    rewrite fingerprint: a git/GitHub merge summary (`Merge branch 'x'`,
+    `Merge pull request #N from …`), or a `(#N)` squash subject whose body was
+    replaced by synthesized trailers. A marker always wins.
+  - "No marker matched" means BOTH the builtin and the operator sets (#5414)
+    came up empty. An operator marker still classifies a merge-summary-shaped
+    commit; the `Unknown` verdict is decided once, after both scans, so it
+    never pre-empts the operator set.
+  - No migration: `commits.agentic_mode` is `TEXT NOT NULL DEFAULT 'none'` with
+    no CHECK constraint, so `'unknown'` was already schema-legal.
+  - `agentic_pct` in `fact_weekly_engineer` keeps `unknown` in the
+    `net_commits` denominator and out of both numerators, which makes it an
+    explicit lower bound. `persist_weekly_engineer`'s doc states this.
+  - Reading an unrecognised `agentic_mode` string back from SQLite now yields
+    `Unknown` rather than `None`.
+- `tga audit`'s sweep now runs the commit ↔ board-item correlation pass as a
+  ninth stage, immediately after collection. It previously ran only from `tga
+  tui`, so an audit synced board data and never joined it to the commits it
+  walked.
+- The sweep writes `ticketing.json` beside `manifest.toml` and names it in the
+  manifest's `[report]` section, carrying the correlation counts and the boards
+  they came from to the due-diligence report. A run whose correlation stage
+  failed writes no artifact and declares no key, so the report states the
+  omission under Gaps & Caveats instead of rendering an empty section.
+- `tga audit` writes one authorship artifact per repository (#5453, #6004):
+  ownership concentration, bus factor, single-author subsystems, and a
+  trailing-12-month monthly trajectory, derived from `commits JOIN files`.
+  Bot commits and merge commits are excluded from every figure. Authors are
+  grouped by the collection pass's own identity resolver
+  (`commits.author_id → authors.canonical_email`), so one person's aliases
+  collapse to one author; a commit the resolver never linked keeps its raw
+  email and is counted into the new `unresolved_authors` figure, which earns
+  its own caveat naming the count. Squash-merge attribution and vendored-path
+  exclusion are NOT corrected for and are caveated verbatim in the artifact
+  (derivation lives in tga per #5468's ruling, never in trusty-review). The DD
+  manifest's `[[repositories]]` entries gain a new, additive `authorship` path
+  field mirroring the DOC-67 §8 `velocity` field precedent; a repository whose
+  artifact fails to write states that as a named gap on the manifest rather
+  than aborting the run.
+- A repository name that matches no `commits.repository` value now states a
+  named gap instead of rendering "0 authors, bus factor 0" (#5453). The
+  aggregation cannot tell an unmatched name from an empty repository — both
+  count zero rows — so `tga audit` probes for the name first and, when nothing
+  matched, names the repository names the database actually holds.
+- Longitudinal contributor profiling — the data and orchestration layer (closes #5463, part of epic #5468): new `tga::profile` module. `selector` resolves a GitHub login, display name, or email to a canonical `authors` identity and finds the org-wide database; `batch` buckets that contributor's history into quarterly/monthly/weekly/custom `PeriodBatch` windows; `diff_sampler` attaches a category-stratified sample of real diffs per period, skipping repositories with no local checkout rather than failing the run; `synthesizer` clusters findings across periods by token-set Jaccard similarity and tags each `Recurring`/`New`/`Resolved`/`Worsening`, then derives the quality trajectory from the score slope; `reporter` writes `profile.json` and a Markdown report. Ported from trusty-review's `src/profile/`, which keeps its copy until #5466 removes it — a window where profiling exists in both crates is expected.
+
+  Contributor profiling is tga's domain (owner ruling, #5468). trusty-review currently declares `tga` as a Cargo dependency while the runtime edge already runs the other way; this port is the first of three additive steps that let #5466 delete the backwards edge.
+
+  **Not in this port, by scope.** The LLM transport lands in #5464 on top of `trusty_common::inference`; the GitHub issue write path and the `tga profile` subcommand land in #5465. What ships here is everything on either side of a model call: `batch_reviewer` builds the per-period prompt and parses the response body (taking a `&str`, so no client type is needed), and `synthesizer` supplies `apply_deterministic_synthesis`, `apply_synthesis_json`, and `apply_fallback_narrative`. A run with no model still produces a complete profile — scores, trend tags, trajectory, and a fallback narrative that says it is one.
+
+  **Three deliberate divergences from the trusty-review original.** (1) `profile::types::Finding` and `Effort` are tga-native DTOs, not `trusty_review::models::{Finding, Effort}` — the review type carries citation flags, verification outcome, and issue eligibility that profiling never reads, and depending on it would recreate the edge this epic reverses. (2) `PROFILE_VERSION` is `"tga-profile-0.1"`, not `"tr-profile-0.1"`: the finding shape differs, so the two artefacts are not interchangeable on the wire and must not claim to be. (3) The database-path environment variable is `TGA_DB`, not `TRUSTY_REVIEW_TGA_DB`; a blank or whitespace-only value falls through to `<data-dir>/tga/tga.db` instead of resolving to an empty path.
+
+  **Test coverage moved with the code** — 69 tests, ported rather than rewritten. Five from the original are held back with the code they guard: the `bedrock/`/`openrouter/` model-prefix-stripping regressions (two in `batch_reviewer`, two in `synthesizer`) belong with the provider routing in #5464, and the GitHub issue request construction belongs with the write path in #5465. Seven are new, covering paths the port introduced or the original left open: `Finding` confidence clamping, `Effort` serde, the `Worsening` tag, prose-response fail-safe, unknown-trajectory rejection, Markdown pipe escaping, and blank-`TGA_DB` fallthrough.
+
+  No existing tga public item changed shape; the module is purely additive.
+- Contributor profiling can now reach a model (closes #5464, part of epic #5468). `profile::batch_reviewer` gains `build_period_request` and `PeriodReviewer`: the period prompt is assembled into a `trusty_common::inference::ChatRequest` and sent through an `InferenceAdapter`, so the transport is the workspace's shared inference stack — the same one `classify::tiers::bedrock` already uses. `PeriodReviewer::from_slug` resolves the slug through the commons `Configurator` and credential store (plus the Bedrock Converse factory under `--features bedrock`); `PeriodReviewer::with_adapter` binds an already-built adapter. The call is fail-safe: a provider failure logs, bills nothing, and costs that period's findings rather than the run.
+
+  tga takes NO dependency on trusty-review. The two remain separate processes: `tga audit` already spawns the `trusty-review` binary and hands it a TOML manifest, and that file is the seam. Nothing in this change adds a Cargo edge, and the residual seam question #5464 left open is answered the same way — a process boundary (the `review_diff` MCP tool or the binary tga already spawns), never a manifest entry.
+
+  Model slugs are passed through untouched. `provider_for` routes on the `bedrock/` or `openrouter/` prefix and the adapter strips it for the wire in `ProviderId::wire_model_id`, so the prefix-stripping the trusty-review original did locally is now the commons' job; `period_request_preserves_routing_prefix` pins tga out of that business. `ChatRequest` carries no structured-output field, so the findings JSON Schema is stated in the system turn instead — the direct-JSON path in `parse_period_findings` stays the expected outcome rather than the lucky one.
+- `GitHubClient` gains issue WRITE methods (part of #5465, epic #5468): `search_issues`, `create_issue`, `create_issue_comment`, and `upsert_issue_thread`, which composes the three into find-or-create. They live in a new `collect::github::issue_writer` module rather than in `client.rs`, which was already at 289 of its 500 SLOC — this repo splits at the PR that grows the file, not in a follow-up. Every method is an inherent `impl GitHubClient`, so callers still see one client.
+
+  `upsert_issue_thread` finds a contributor's existing thread by a marker embedded in the title and comments on it, opening a new issue only when there is none. A failed search aborts instead of falling through to create: a transient 5xx read as "no thread exists" would open a duplicate issue on every hiccup, which needs manual cleanup to undo.
+
+  Writes reuse the client's existing `Authorization: Bearer <token>` header — the same personal access token the read path already sends. Nothing in the write path inspects the credential, so moving it onto a GitHub App installation token is a change to how the client is built.
+
+- `GitHubClient::with_api_base` points a client at a REST root other than `https://api.github.com`, which is what lets the write tests run against a local `wiremock` server instead of github.com. The read methods take the same root, so a GitHub Enterprise host would work through one seam rather than two.
+- `tga profile <contributor>` (closes #5465, part of epic #5468). One command runs the whole pipeline: identity resolution, period batches, diff sampling, per-period review through `trusty_common::inference`, cross-period synthesis, and a JSON/Markdown report. `--dry-run` produces a deterministic model-free profile; `--github-issue --github-repo <owner/repo>` publishes the report to a per-contributor GitHub issue thread. This is the tga-side equivalent of trusty-review's `profile` subcommand, which #5466 removes.
+
+  The command is the first caller of `PeriodReviewer::review_period`, and it honours what #5464 built: a period whose provider call failed is reported as SKIPPED, never as a period with no findings. `profile::PeriodRunSummary` folds each review in, counts the two outcomes apart, and prints a coverage line; when any period was skipped the report itself carries a Coverage section naming them and stating they are not evidence of clean work. Without that, an outage across twelve quarters renders as twelve clean quarters and the trajectory covers a sample the reader cannot see is smaller.
+
+- `profile::Synthesizer` runs the narrative pass over the same shared-inference adapter, so the profile's prose no longer needs trusty-review. A provider failure writes the deterministic fallback narrative AND returns the error, so a caller can say the narrative is a fallback rather than presenting it as the model's.
+
+- `profile::reporter_github` publishes a rendered profile to a GitHub issue thread — `GithubIssueConfig`, `issue_title`, and `upsert_profile_issue`. The title embeds the canonical email, which is what the next run searches for, so a contributor accumulates one thread rather than one issue per run.
+
+- `Reporter::render` exposes the Markdown the reporter writes, and `Reporter::with_coverage_note` splices the skipped-period note above the first section. The GitHub issue body is that exact text, so the file on disk and the posted comment cannot drift.
+- Pull requests now carry their source branch (`head_ref`) and the issue their body declares (`body_ticket_id`), and both feed the same ticket extraction as commit subjects. Schema migration v24 adds the two columns; existing databases keep their rows and read the new columns as "no claim made".
+- `correlate_commits` resolves a commit's ticket key through a stated precedence — the commit's own text, then the branch name of the pull request that carried it, then that pull request's body. A key the commit declares is never displaced by either new source.
+- `CorrelationOutcome` reports `from_branch` and `from_pr_body`, and the summary line prints both even when they are zero, so a source that harvests nothing is distinguishable from one that was never consulted.
+- `branch_ticket_key` and `pr_body_ticket_key` apply the #5199 rejection rules unchanged: a branch such as `fix/ADR-0029-followup` yields nothing, and no JIRA-shaped token is ever read from a pull-request body. Measured over this repository's 2376 merged pull requests, that keeps out 2501 false keys across 423 distinct prefixes and recovers a genuine issue reference for 51 commits whose subject declared none.
+- Azure DevOps pull requests now persist the `sourceRefName` they already parsed, so the branch harvest works there too.
+- `tga audit` writes its per-stage progress events to stderr as machine-readable
+  lines when the parent process sets `TRUSTY_PROGRESS_RELAY`, so a spawning tool
+  can show what the sweep is doing. Unset, nothing is emitted and the command
+  behaves exactly as before; a parent that sets it against an older `tga` gets
+  no events rather than a failed run
+  ([#5823](https://github.com/bobmatnyc/trusty-tools/issues/5823))
+- The two phases after the sweep — indexing every checkout, then rendering the
+  report — announce themselves on the same bus. They had no instrumentation at
+  all, so a watcher's display stopped while the process ran on for minutes
+
+### Fixed
+
+- **`extract_ticket_id` read a JIRA/Linear key from anywhere in the commit message (#5199)** — the pattern `\b[A-Z][A-Z0-9]*-\d+\b` matches any hyphenated uppercase token, so `ADR-0034`, `DOC-67`, `UTF-8`, `SHA-256`, `RUSTSEC-2026` and `GCC-11` in a commit body all became ticket keys, overriding the GitHub issue the subject actually named. `correlate_commits` then reported those as coverage gaps against tickets that exist on no board. A JIRA/Linear key is now read from the subject line only — the first token after an optional conventional-commit prefix and an optional `[` — and the documentation prefixes `ADR`, `DOC`, `RFC` and `SPEC` are rejected outright. Measured over this repo's own 2633 commits: JIRA-shaped extractions fall from 466 across 178 distinct keys to 21 across 17, none of them a documentation citation, and 384 commits now resolve to the GitHub issue they cite instead of a hijacked one. Subject forms `PROJ-1: x`, `PROJ-1 x`, `fix(scope): PROJ-1 x` and `[PROJ-1] x` all still extract; `AB#N` and bare `#N` handling is unchanged.
+- A failed Azure DevOps work-item fetch now fails the collection stage instead of being swallowed (#5219). `collect` caught the error from the `workitemsbatch` call, logged it at warn level, and returned success, so `tga collect` exited 0 with an empty `work_items` table and no way to tell that from a run that legitimately found no `AB#` references. The failure is now recorded as a stage failure, which `tga collect` turns into a non-zero exit (#5655). Linear already did this at every one of its failure arms; ADO — the writer everyone treats as precedent — did not.
+- Linear collection now writes the source-agnostic `work_items` corpus, not only its own `linear_issues` table (#5219). Each fetched issue becomes one `work_items` row under `source = 'linear'`, keyed on the Linear identifier — the same string `LinearClient::extract_issue_ids` pulls out of a commit message, so the two sides match — and every commit that mentions a fetched identifier gets a `commit_work_items` link. Before this, only Azure DevOps wrote `work_items` in production, and every `tga.db` on the owner's machine had `work_items = 0`, so commit-to-board correlation had nothing to correlate against for Linear.
+
+  `linear_issues` is unchanged and still written. It carries Linear-specific columns (`team_key`, `priority`, `assignee`) that `work_items` has no place for, and retiring it would drop those with no consumer asking for it; the two are written in the same pass, so they cannot drift.
+
+  The commit query moved from `SELECT message` to `SELECT sha, message`. The SHA is what the join table needs, and reading messages alone made a per-commit link impossible even once the issues were known.
+
+  `work_items.project` is left null. Linear's project lives behind a GraphQL field this crate does not query, and DOC-70 §6 routes project resolution through trusty-common's client instead — writing the team name into that column would fill the field DOC-70 filters on with something that is not a project.
+
+  A failed `work_items` write is recorded in the run's error list and returned as an error from the writer, never downgraded to a zero count. Both tables are written inside one transaction, so a failure leaves neither half-written.
+- Tilde expansion, `${VAR}` placeholder expansion, and the GitHub-token
+  validation check each take the value they used to read from the process
+  environment as a parameter, so their tests no longer mutate `std::env`.
+  Two of those tests both set `HOME`, and one would read the other's value:
+  `alias_file_path_expansion` failed twice in 200 paired runs with
+  `failed to read aliases file /home/testuser/aliases.yaml`. Behaviour and the
+  public API are unchanged — `expand_path`, `AliasFile::load`,
+  `database_path::resolve`, and `expand_env_var` still read the same variables
+  and still return the same results.
+- `GitCollector` and the DD manifest derive a repository's name through one
+  function (#5453). The collector had its own copy, which disagreed with the
+  manifest's whenever a configured name was blank or whitespace — and a name
+  the two sides spell differently joins zero rows rather than erroring, so the
+  authorship section rendered confident zeroes instead of an error.
+- **`core::config` and `core::config::validator` doctests no longer fail under `cargo test -p tga --doc -- --include-ignored`** (closes [#5460](https://github.com/bobmatnyc/trusty-tools/issues/5460)). Both module-level examples were fenced ` ```ignore ` as illustrative, non-runnable snippets, but rustdoc implements the `ignore` fence as `#[ignore]` on the generated test function — `--include-ignored` forces it to compile and execute anyway, producing an `E0277` (bare `?` in a `()`-returning fn) in `validator.rs` and a `Config::load` panic against a nonexistent `config.yaml` in `mod.rs`. Both are switched to ` ```no_run `: real, correctly-typed calls against `Config::load` / `ConfigValidator::new`/`.validate()` that rustdoc still compile-checks but never executes, so a signature change is still caught while the example stays safe to force-run.
+- A provider failure during a period review no longer reads as a clean period. `PeriodReviewer::review_period` returns a `PeriodReview` — the findings plus a `skipped` field carrying the provider error — instead of a bare `Vec<LongitudinalFinding>` whose only failure signal was a `warn!` log. Zero findings and an unreachable provider were the same value, so a Bedrock outage across twelve quarters would have rendered as twelve clean quarters, and the trajectory derived from that would be a trend over a silently smaller sample.
+
+  The shape was inherited from trusty-review's original `review_period`, and it is fixed here rather than after #5465 wires the first real caller to it. `PeriodReview` is deliberately not a `Result`: no caller can `?` one period's outage into aborting the whole run, which is the property the audit depends on. It is `#[non_exhaustive]`, so the parse-failure case can join it once `ChatRequest` can enforce a schema.
+
+- `PeriodReviewer::from_slug_with_store` resolves a slug against an explicit `KeyStore`; `from_slug` is now that call with `default_store()`. `default_store` reads the machine's real keychain, so credential resolution had no deterministic test — both arms are covered now, matching the injection `trusty_common`'s own `provider_for` tests use.
+- The profile-issue thread lookup could comment on the WRONG contributor's issue. `find_thread_by_marker` matched with a bare `title.contains(marker)`, and one email address can be a substring of another — `"[dev-profile] Bob Jones <bob.jones@x.com>".contains("jones@x.com")` is `true`. Since `in:title` is a token index and the two addresses share every token, a single search plausibly returns both issues, so Jones's performance profile could be appended to Bob Jones's thread. The match is now anchored on `<marker>`, which angle brackets close because they cannot appear inside an email address, and `upsert_issue_thread` refuses a title that does not carry the anchor — an issue opened under such a title is invisible to the next run, which would then open another.
+
+- The same lookup read only the first page of search results. `in:title alice@example.com` also matches every colleague at `example.com`, so in an org with hundreds of profiled contributors the real thread sits past page one and the upsert would conclude "no thread exists" and open a duplicate. The search now walks up to 10 pages of 100 — GitHub's whole reachable result set — and when `total_count` exceeds what the walk could read it returns the new `CollectError::GithubSearchInconclusive` rather than creating.
+
+  Both are the same class of defect: an ambiguity resolved toward `create`. Writes land on a live tracker and re-running undoes neither a wrong comment nor a duplicate issue, so every uncertain path is now an error.
+- `tga collect` now exits non-zero when a collection stage's write or fetch path failed, instead of printing the failure as a warning and exiting 0 over a partially persisted database (#5655). `tga analyze` reports the same failures after its report stage, so the reports are still written.
+- Every fault a provider records now carries a severity. A stage that never persisted its data (`StageFailed`) reaches the exit code; a single skipped record (`ItemSkipped`) is reported and never fails a long sweep. The split applies to ADO, Linear, GitHub, and Bitbucket alike.
+- Linear `fetch_issue` no longer reports an auth or HTTP failure as `Ok(None)`. A non-2xx response is an error carrying the status and Linear's own message, so a rejected API key is no longer indistinguishable from an absent issue (#5665).
+- The Linear response body carried into that error is scrubbed of the configured API key before it is truncated, so a provider that echoes the rejected key back cannot put it in the collection summary. Scrubbing runs through `trusty_common::credentials::scrub_secrets` and precedes truncation, so a key straddling the cut cannot survive as an unmatchable fragment (#5239).
+- `fetch_referenced_issues` returns `Result<Vec<LinearIssue>>` and stops at the first failure instead of returning an empty vec. A run against an invalid-but-present key now records `Linear: fetch issues failed: …` as a stage failure (#5727), so it reaches both the collection summary and the exit code rather than writing zero rows and exiting 0 with no diagnostic. This changes the public signature of `LinearClient::fetch_referenced_issues`.
+- **`tga audit` now indexes each audited repository in trusty-search before rendering the report** (refs [#5670](https://github.com/bobmatnyc/trusty-tools/issues/5670)). `trusty-review report --analyze` looks an index up by the checkout path's basename and fails open when the daemon does not serve it — one gap line, exit 0, and the findings table, complexity distribution and health factors all empty. Nothing in the audit path indexed anything, so an unindexed repository produced a hollow report over a clean exit. The new `audit::ensure_repositories_indexed` probes each repository with `trusty-search index-status <id>` and, on a miss, runs `trusty-search index <path> --name <id>` — the id derived from the same manifest entry the renderer reads, so the two cannot disagree. The binary resolves from `TRUSTY_SEARCH_BIN`, else `trusty-search` on PATH.
+- **A repository that will not index is named in Gaps & Caveats instead of silently degrading** (refs [#5670](https://github.com/bobmatnyc/trusty-tools/issues/5670)). Per DOC-67 §9 the failure excludes that repository and the run continues: `audit::index_gap_lines` adds one line per distinct cause, naming every affected application, and the audit's exit status is unchanged. Reasons are scrubbed of configured credentials before they are excerpted.
+- `tga audit` now starts the `trusty-analyze` daemon its report is built from, and refuses the run when it cannot. Nothing started it before: the command always renders with `trusty-review report --analyze`, DOC-67 §8 sources the findings table, the complexity distribution and the health factors from that daemon and nowhere else, and the renderer's client only ever issues GETs. On a machine with no daemon running — the ordinary case for an unattended sweep — every audit produced a report with those three sections empty and exited 0, with only a gap line inside the artifact to show it.
+
+  The new preflight (`audit::ensure_analyze_daemon`) sits beside the two already there, the inference credential and the renderer version, for the same reason: DOC-67 §2 gives the sweep one non-interactive shot, and this precondition is knowable in milliseconds but was being discovered after minutes of collection. It probes `/health`, spawns `<binary> serve --port <port>` detached on a miss, and polls until ready, all through `trusty_common::daemon_guard`. Neither failure arm is fail-open — a spawn that fails and a daemon that never answers both stop the run, with a message naming `trusty-search`, which `trusty-analyze serve` exits on when unreachable.
+
+  The binary is `TRUSTY_ANALYZE_BIN` else PATH, which is what makes `trusty-audit`'s existing export of that variable load-bearing on this path for the first time (#5663 set it believing it already was). The address is `PR_INTELLIGENCE_ANALYZER_URL` else `http://localhost:7879` — the same variable `trusty-review` reads, so the daemon started and the daemon queried are the same process by construction.
+
+  The daemon is necessary, not sufficient: a repository still has to be indexed in trusty-search for the fetch to return metrics, and nothing in the audit path indexes anything. That remains open.
+- `tga audit` now starts the `trusty-search` daemon before its sweep, ahead of the
+  `trusty-analyze` preflight. `trusty-analyze serve` exits at its own trusty-search
+  check, so on a machine with no search daemon the audit refused outright and the
+  operator had to run `trusty-search start` by hand.
+- A stale `trusty-analyze` that had been up for days on top of a dead
+  trusty-search also refused every run: it answers `503 degraded` while the search
+  daemon is unreachable, which the readiness probe reads as no daemon at all. The
+  search guard running first recovers it.
+- The daemon address comes from `trusty_common`'s shared `DaemonAddrLayout`
+  resolver rather than a hard-coded `127.0.0.1:7878`, so an auto-ported or
+  `TRUSTY_DATA_DIR`-isolated instance is found. The binary honours
+  `TRUSTY_SEARCH_BIN`, else PATH.
+- **The Linear API key no longer reaches operator-visible output through `LinearClient` (#5733).** Two paths carried it. `LinearClient` derived `Debug` while holding `api_key: String`, so any `{:?}` of the client — a `tracing` field, an `anyhow` context, a panic message — printed the live key verbatim; nothing formatted the client at the time, so the exposure lived in the type rather than in a log anyone had written. `Debug` is now implemented by hand: it renders `endpoint` and replaces the key with a fixed `<redacted>` marker. The mask is unconditional — no prefix, no length, nothing derived from the value — because `LinearConfig::api_key` is an unvalidated `Option<String>`: a fingerprint that echoed a fixed-length head would be safe only for `lin_`-prefixed keys and would disclose real entropy for anything else. Separately, `fetch_issue`'s 200-with-GraphQL-errors branch logged Linear's raw `errors` array at warn level, so a provider that quoted the submitted key back put it on stderr on every such response — a routine path, not a rare one. That array now goes through the same `redacted_body_excerpt` the non-2xx body already used, which scrubs before truncating. The branch's `Ok(None)` return is unchanged: Linear reports entity-not-found this way, and the logging was the defect, not the control flow.
+- Seven config credentials no longer print in `Debug` output. `LinearConfig.api_key`, `GithubConfig.token`, `JiraConfig.token`, `BitbucketConfig.app_password` and `.token`, `AzureDevOpsConfig.pat`, and `ClassificationConfig.openrouter_api_key` were all rendered in the clear by a derived `Debug`, so any `{:?}` of a config section put the live value into a tracing field, an `anyhow` context, a `dbg!`, or a panic message. The OpenRouter key reached furthest: `Config` embeds `ClassificationConfig` and derives `Debug`, and `ClassificationEngineConfig` (`classify::classifier`) holds a clone of the same key, so both are fixed here. Each struct now has a hand-written `Debug` in `core::config::credential_debug` that renders every non-credential field unchanged and replaces the credential with a fixed `<redacted>` marker. The mask carries nothing from the value: none of these fields is format-validated, so a fingerprint that echoed a fixed-length head would disclose real entropy (#5733). An unset `Option` still renders as `None` — whether a credential is configured is the question a reader debug-formats a config to answer. Every impl destructures `Self` exhaustively with no `..`, so a field added to any of these structs fails compilation (`E0027`) until the impl names it, rather than silently vanishing from the output. The module-private `BbAuth` enum (`collect::bitbucket::client`) carried the same Bitbucket credential one layer down and derived `Debug` over both variants; nothing formats it, so the derive is dropped rather than replaced.
+- `GitHubClient::fetch_issue` no longer treats a private repository invisible
+  to the configured credential as "issue not found". GitHub answers every
+  request under such a repo with 404, so a missing token or one that cannot
+  see the repo used to look identical to a genuinely deleted issue and the
+  caller silently collected nothing. A repo-visibility probe now
+  distinguishes the two, cached once per client so it does not repeat on
+  every subsequent lookup, and `fetch_issue` retries on 429/5xx the same as
+  `list_issues` and `fetch_pr_commits` (#5980).
+- `tga audit` defaults the analyze daemon address to `http://127.0.0.1:7879`
+  rather than `http://localhost:7879` (#6038). It must match
+  `trusty-review`'s default, which moved for the same reason: `trusty-analyze
+  serve` binds the IPv4 loopback only, and macOS resolves `localhost` to `::1`
+  first. `PR_INTELLIGENCE_ANALYZER_URL` still overrides it.
+
+### Changed
+
+- Azure DevOps `work_items` rows are now keyed `AB#42` rather than a bare `42` (#5219). `collect::correlate_commits` looks a commit's ticket key up against `work_items.id`, and `collect::ticket::extract_ticket_id` yields `AB#42` for an ADO reference — so no ADO row a previous run wrote could be matched by the correlation pass. The shared writer stores the adapter's canonical id, which is the form correlation searches for.
+
+  The correlation pass was never the only writer, though: the old ADO writer inserted its own `commit_work_items` links directly, under the same bare numeric key. So an existing database holds legacy rows AND legacy links, and the next collect writes the `AB#42` rows beside them rather than replacing them. Delete the children first — `commit_work_items` references `work_items(id, source)` with no `ON DELETE CASCADE`, and every connection runs `PRAGMA foreign_keys = ON`, so removing the parent rows alone fails with `FOREIGN KEY constraint failed`:
+
+  ```sql
+  DELETE FROM commit_work_items WHERE work_item_source = 'azdo' AND work_item_id NOT LIKE 'AB#%';
+  DELETE FROM work_items        WHERE source = 'azdo' AND id NOT LIKE 'AB#%';
+  ```
+
+  Both statements are safe to re-run, and neither touches a correctly-keyed `AB#` row or any other source.
+
+  `PmTicket` gains a `project` field, carrying what ADO reports as `System.TeamProject` into `work_items.project` — the column DOC-70's board axis filters on. The struct is now `#[non_exhaustive]` so the next field is not another break. `PmSource::work_item_source` is new: it returns the database vocabulary, which is `azdo` for Azure DevOps where `PmSource::as_str` returns the display label `azure_devops`.
+- `profile::ProfileError` gains an `Inference` variant wrapping `trusty_common::inference::InferenceError`, raised when `PeriodReviewer::from_slug` finds no credential or no registered factory for a slug's provider family. The enum is `#[non_exhaustive]`, so this is additive.
+- tga enables trusty-common's `inference-client` feature explicitly. `config-cli` already implied it; naming it makes the profile transport's dependency deliberate rather than a side effect of the `config` subcommand staying mounted.
+- `collect::errors::CollectError` gains a `GithubApi { status, endpoint, message }` variant carrying GitHub's response body. `error_for_status()` discards that body, which is where GitHub puts the only actionable part of a write failure ("Resource not accessible by personal access token") — without it a token-scope problem is indistinguishable from any other 403, and the new write path is exactly where that distinction decides what the operator has to fix. The enum is `#[non_exhaustive]`, so this is additive.
+- `CollectionStats::errors` is now `Vec<CollectionFault>` rather than `Vec<String>`, and `CollectionStats::stage_failures()` returns the subset whose data is missing. `CollectionFault` renders as its message, so existing `{e}` formatting is unchanged.
+
+### Documentation
+
+- **`probe_args` in `audit/repo_index.rs` now names the tests that actually cover it.** Its `Test:` pointer cited `the_probe_asks_for_the_index_by_id`, a test that was never written, which broke the `Test pointers` CI gate on `main`. It now cites `the_index_invocation_names_the_path_and_the_id`, which asserts the argument vector without spawning, and `an_already_indexed_repository_is_not_reindexed`, which proves the spawned probe is `index-status <id>` and the only invocation for a served repository.
+- Repaired every broken rustdoc intra-doc link in this crate and added
+  `#![deny(rustdoc::broken_intra_doc_links)]` to its crate root(s), so a new
+  one fails the build instead of shipping as dead text on docs.rs (#5744).
+- **Module docs render once instead of twice.** Four modules carried both an outer `///` on their `mod x;` declaration and their own inner `//!`; rustdoc concatenates the two, so each module page showed two summary lines and two Why/What/Test triples. The outer is gone and the inner `//!` is now the single module doc, per the `//!` convention in `documentation-style` and DOC-38 §3.1 ([#5754](https://github.com/bobmatnyc/trusty-tools/pull/5754))
+  - two were merged rather than deleted: `audit::real_binary_tests` (the outer alone recorded that the module is Unix-only because it drives the binary through a `#!/bin/sh` wrapper) and `collect::bitbucket::tests` (the `#[path]` resolution mechanism)
+
 ## [2.17.0] — 2026-08-12
 
 ### Changed

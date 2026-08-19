@@ -1,9 +1,0 @@
-Fixed
-
-- `tga audit` now starts the `trusty-analyze` daemon its report is built from, and refuses the run when it cannot. Nothing started it before: the command always renders with `trusty-review report --analyze`, DOC-67 §8 sources the findings table, the complexity distribution and the health factors from that daemon and nowhere else, and the renderer's client only ever issues GETs. On a machine with no daemon running — the ordinary case for an unattended sweep — every audit produced a report with those three sections empty and exited 0, with only a gap line inside the artifact to show it.
-
-  The new preflight (`audit::ensure_analyze_daemon`) sits beside the two already there, the inference credential and the renderer version, for the same reason: DOC-67 §2 gives the sweep one non-interactive shot, and this precondition is knowable in milliseconds but was being discovered after minutes of collection. It probes `/health`, spawns `<binary> serve --port <port>` detached on a miss, and polls until ready, all through `trusty_common::daemon_guard`. Neither failure arm is fail-open — a spawn that fails and a daemon that never answers both stop the run, with a message naming `trusty-search`, which `trusty-analyze serve` exits on when unreachable.
-
-  The binary is `TRUSTY_ANALYZE_BIN` else PATH, which is what makes `trusty-audit`'s existing export of that variable load-bearing on this path for the first time (#5663 set it believing it already was). The address is `PR_INTELLIGENCE_ANALYZER_URL` else `http://localhost:7879` — the same variable `trusty-review` reads, so the daemon started and the daemon queried are the same process by construction.
-
-  The daemon is necessary, not sufficient: a repository still has to be indexed in trusty-search for the fetch to return metrics, and nothing in the audit path indexes anything. That remains open.
