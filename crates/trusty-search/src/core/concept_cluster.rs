@@ -273,6 +273,10 @@ mod tests {
             inherits_from: vec![],
             chunk_depth: 0,
             index_id: None,
+            // #5931: `#[serde(default)]` on these two only covers
+            // deserialization; a struct literal must still name them.
+            on_branch: false,
+            archive_reason: None,
         }
     }
 
