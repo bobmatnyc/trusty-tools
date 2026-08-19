@@ -31,12 +31,103 @@ fn main() {
     let dist_dir = ui_dir.join("dist");
 
     println!("cargo:rerun-if-env-changed=SKIP_UI_BUILD");
+    println!("cargo:rerun-if-env-changed=FORCE_UI_BUILD");
     println!("cargo:rerun-if-changed=ui/package.json");
     println!("cargo:rerun-if-changed=ui/vite.config.js");
     println!("cargo:rerun-if-changed=ui/index.html");
     println!("cargo:rerun-if-changed=ui/src");
 
+    // #5078: `cargo test -p trusty-memory` used to run the UI install and
+    // build unconditionally, and both write files git tracks — `vite build`
+    // empties `ui/dist/` (taking `ui-source-hash.txt` with it) and an `npm`
+    // fallback install rewrites `ui/package-lock.json` with the host
+    // platform's optional-dependency set. The committed bundle already
+    // matches the committed source in every checkout that is not mid-UI-edit,
+    // so rebuilding it is work that only dirties the tree.
+    if std::env::var("FORCE_UI_BUILD").as_deref() != Ok("1")
+        && committed_bundle_is_fresh(&crate_root, &dist_dir)
+    {
+        return;
+    }
+
     build_svelte_ui(&ui_dir, &dist_dir, "trusty-memory");
+    restamp_bundle(&crate_root);
+}
+
+/// Whether the committed `ui/dist/` bundle was built from the UI source now on
+/// disk, so rebuilding it would produce the same thing.
+///
+/// Why: see the `#5078` note in `main`. The freshness question already has one
+/// answer in this repo — `scripts/check-ui-bundle-freshness.sh`, which
+/// preflight-publish.sh runs as CHECK 7 — so this asks that script rather than
+/// minting a second definition of "fresh" that could disagree with it.
+/// What: `true` when the script reports the bundle fresh, when it is absent
+/// (a published tarball ships the bundle and has no `scripts/`), or when it
+/// cannot answer; `false` only on exit 1, the script's "stale bundle" finding.
+/// Skipping on an unreadable answer keeps the tree clean, which is the
+/// invariant #5078 asks for; the publish-time gate still refuses a stale
+/// bundle either way.
+/// Test: `git status --porcelain` is empty after `cargo test -p trusty-memory`.
+fn committed_bundle_is_fresh(crate_root: &Path, dist_dir: &Path) -> bool {
+    if !dist_dir.join("index.html").exists() {
+        return false;
+    }
+    let Some(repo_root) = crate_root.parent().and_then(Path::parent) else {
+        return true;
+    };
+    let script = repo_root.join("scripts/check-ui-bundle-freshness.sh");
+    if !script.exists() {
+        return true;
+    }
+    match Command::new("bash")
+        .arg(&script)
+        .arg("trusty-memory")
+        .current_dir(repo_root)
+        .output()
+    {
+        Ok(out) if out.status.success() => true,
+        Ok(out) if out.status.code() == Some(1) => false,
+        _ => {
+            println!(
+                "cargo:warning=trusty-memory: could not check UI bundle freshness — \
+                 keeping the committed ui/dist/ (set FORCE_UI_BUILD=1 to rebuild)."
+            );
+            true
+        }
+    }
+}
+
+/// Record which UI source the bundle just built came from.
+///
+/// Why: `vite build` empties `ui/dist/`, so a build that ran leaves the
+/// freshness stamp deleted — a tracked-file deletion that lands in whatever
+/// commit follows. Re-stamping leaves a coherent bundle instead: unchanged
+/// source rewrites the same bytes, changed source writes the digest the
+/// publish gate will look for.
+/// What: runs `scripts/stamp-ui-bundle.sh trusty-memory`, warning if it fails.
+/// Test: `git status --porcelain` is empty after `FORCE_UI_BUILD=1 cargo build
+/// -p trusty-memory` with no UI source edit.
+fn restamp_bundle(crate_root: &Path) {
+    let Some(repo_root) = crate_root.parent().and_then(Path::parent) else {
+        return;
+    };
+    let script = repo_root.join("scripts/stamp-ui-bundle.sh");
+    if !script.exists() {
+        return;
+    }
+    let ok = Command::new("bash")
+        .arg(&script)
+        .arg("trusty-memory")
+        .current_dir(repo_root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        println!(
+            "cargo:warning=trusty-memory: ui/dist/ was rebuilt but stamp-ui-bundle.sh \
+             failed — run it by hand before committing the bundle."
+        );
+    }
 }
 
 // ── CANONICAL BLOCK BEGIN (kept in sync by scripts/check_buildrs_sync.sh) ──
