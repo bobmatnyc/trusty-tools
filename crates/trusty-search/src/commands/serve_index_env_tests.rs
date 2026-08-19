@@ -206,13 +206,19 @@ fn explicit_flag_alone_pins_the_index() {
 /// What: asserts neither source resolves anything when both are absent, so the
 /// arm still falls through to the `--project` derivation, and that the
 /// derivation itself still runs.
+///
+/// #5709 note on shape: both rows run in a child, because both describe an
+/// absent `TRUSTY_INDEX` and neither passes `--index`. An in-process row cannot
+/// state that — clap reads `env` from the live process environment, so the
+/// first row asserted `None` against whatever the invoking shell exported, and
+/// the second passed on the environment value rather than on the `--project`
+/// derivation it names.
 /// Test: this function.
 #[test]
 fn neither_source_leaves_the_project_fallback_intact() {
-    assert_eq!(parse(&["trusty-search", "serve"]).pin, None);
     assert_eq!(parse_with_env(None, "serve").pin, None);
 
-    let derived = parse(&["trusty-search", "serve", "--project", "/tmp/some-project"]).pin;
+    let derived = parse_with_env(None, "serve --project /tmp/some-project").pin;
     assert!(
         derived.is_some(),
         "--project must still derive an index id when nothing else pins one (#1373)"

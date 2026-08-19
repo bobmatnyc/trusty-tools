@@ -1,0 +1,3 @@
+Fixed
+
+- **`neither_source_leaves_the_project_fallback_intact` read the invoking shell's `TRUSTY_INDEX` instead of the clean environment it asserts.** Two of its rows parsed in-process, and clap resolves `env = "TRUSTY_INDEX"` from the live process environment during `try_parse_from`. The first row failed outright under any shell that exports the variable. The second masked more than it reported: it asserts that `--project` still derives an index id when nothing else pins one (#1373), and with the variable set it passed on the environment value, so the derivation it names was never exercised. Both rows now spawn the clean child process the module's other rows already use (closes [#5709](https://github.com/bobmatnyc/trusty-tools/issues/5709))
