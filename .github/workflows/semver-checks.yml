@@ -289,6 +289,14 @@ jobs:
         if: steps.crate.outputs.have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'
         run: bash scripts/check_semver_types_selftest.sh
 
+      # The build-acceleration resolver both scripts above source. It compiles
+      # nothing and reaches no network, so it is gated only to keep the step list
+      # consistent with its siblings, not for cost. Ungated by the toolchain step
+      # for the same reason: none of its cases needs a cargo.
+      - name: Build-acceleration selftest (an absent accelerator must change nothing)
+        if: steps.crate.outputs.have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'
+        run: bash scripts/build_accel_selftest.sh
+
       # The two nonzero statuses are annotated differently ON PURPOSE (#5289).
       # Exit 1 is a computed verdict that says break; exit 3 means the gate never
       # compared anything, and reporting that as "your API changed" is the lie

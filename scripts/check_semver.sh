@@ -168,6 +168,26 @@
 #   SEMVER_GATE_TOOLCHAIN_BIN=       (set but empty) keep the ambient toolchain.
 #   SEMVER_GATE_CRATE_EXCLUSIONS=<file>  read crate exclusions from <file>. A
 #                                    self-test seam; no caller sets it.
+#   PREFLIGHT_NO_SCCACHE=1           do not wrap rustc with sccache even when it
+#                                    is installed.
+#
+# Build acceleration: when sccache is on PATH this gate runs cargo-semver-checks
+#   under RUSTC_WRAPPER=sccache, so a fresh worktree gets its dependency closure
+#   from cache instead of recompiling openssl-sys and the rest. It is applied
+#   ONLY to that subprocess, as an `env` prefix — see semver_checks_run below —
+#   and never exported, so nothing else this script or its callers spawn inherits
+#   it. No sccache means this gate issues exactly the command it issued before.
+#
+#   IT CANNOT MAKE THE GATE PASS. A wrapper changes which process invokes rustc,
+#   not what rustc is invoked on. A cache that served a wrong object fails the
+#   build, which prints no `N checks:` summary, which verdict_computed
+#   classifies as NO VERDICT — the same loud exit 3 a rustdoc crash gets, never
+#   a skip and never a pass. check_semver_selftest.sh case 27 pins that.
+#
+#   A persistent CARGO_TARGET_DIR was tried and rejected: it moves the current
+#   crate's rustdoc JSON to a flat, name-keyed path, blinding
+#   check_semver_types.sh and letting parallel worktrees overwrite each other's
+#   document. The measurement is in scripts/lib/build_accel.sh; do not re-add it.
 #
 # Exit (#5289 split 1 from 3 — a verdict and a non-verdict are different facts):
 #   0  every checked crate is SemVer-clean, or is a recorded skip.
@@ -207,6 +227,12 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+
+# Build acceleration (sccache wrapper). Resolves to empty on a machine without
+# sccache, and empty means this gate runs exactly the command it ran before.
+# See scripts/lib/build_accel.sh.
+# shellcheck source=lib/build_accel.sh
+. "${REPO_ROOT}/scripts/lib/build_accel.sh"
 
 BASE="${SEMVER_GATE_BASE:-origin/main}"
 EXPLICIT_CRATES=""
@@ -979,6 +1005,43 @@ inventory_blind=0
 # scan for every candidate would just re-answer the same question.
 select_toolchain
 
+# Resolved once for the same reason, and printed for the same reason the
+# toolchain line is printed: which environment a release-blocking gate ran under
+# is part of its result. Empty means no sccache, and no sccache means the run is
+# byte-for-byte the one this gate made before the knob existed.
+BUILD_ACCEL_SCCACHE="$(build_accel_sccache)"
+build_accel_mode_line "$BUILD_ACCEL_SCCACHE"
+
+# ---------------------------------------------------------------------------
+# semver_checks_run <args...> — `cargo semver-checks <args>` under the resolved
+# acceleration environment.
+#
+# Why a wrapper rather than an inline env prefix: the two call sites below must
+# not drift, and `${VAR:+NAME="$VAR"}` word-splits a path containing a space,
+# which an sccache installed under a home directory can carry. Building the
+# prefix as an `env` argument vector quotes each assignment exactly once.
+#
+# Why `env` and not `export`: the assignment reaches THIS subprocess and nothing
+# else. Nothing the preflight spawns afterwards — and nothing a human runs after
+# the preflight passes, `cargo publish` included — inherits RUSTC_WRAPPER from
+# here. The acceleration is scoped to the one command it was reasoned about.
+#
+# WHAT IS DELIBERATELY ABSENT: CARGO_TARGET_DIR. It relocates the current crate's
+# rustdoc JSON to a flat, name-keyed path and blinds check_semver_types.sh; the
+# full measurement is in scripts/lib/build_accel.sh. Do not add it here.
+#
+# The vector always carries `env SKIP_UI_BUILD=1`, so it is never empty and
+# `"${envv[@]}"` is safe under `set -u` on bash 3.2.
+# ---------------------------------------------------------------------------
+semver_checks_run() {
+  local -a envv
+  envv=(env SKIP_UI_BUILD=1)
+  if [[ -n "$BUILD_ACCEL_SCCACHE" ]]; then
+    envv+=("RUSTC_WRAPPER=${BUILD_ACCEL_SCCACHE}")
+  fi
+  "${envv[@]}" cargo semver-checks "$@"
+}
+
 while IFS= read -r crate; do
   [[ -z "$crate" ]] && continue
 
@@ -1095,7 +1158,7 @@ while IFS= read -r crate; do
     echo "INVENTORY ${crate}: ${baseline} -> ${current} is already a breaking release — no bump can be owed, so this run is advisory: what does it break?"
     rc=0
     RUN_LOG="${SCRATCH}/inventory-${crate}.txt"
-    SKIP_UI_BUILD=1 cargo semver-checks \
+    semver_checks_run \
       --package "$crate" \
       --baseline-version "$baseline" \
       --release-type minor \
@@ -1127,7 +1190,7 @@ while IFS= read -r crate; do
   # printed, and so preflight-publish.sh's captured log is unchanged in content.
   rc=0
   RUN_LOG="${SCRATCH}/run-${crate}.txt"
-  SKIP_UI_BUILD=1 cargo semver-checks \
+  semver_checks_run \
     --package "$crate" \
     --baseline-version "$baseline" \
     --only-explicit-features "$@" > "$RUN_LOG" 2>&1 || rc=$?

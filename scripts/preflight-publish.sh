@@ -545,6 +545,17 @@ check4_version_not_live() {
 # inventing a result, and telling the operator to bump the breaking position
 # would be advising a version change on no evidence. Either way the publish
 # still stops.
+#
+# BUILD ACCELERATION. check_semver.sh is the only compiling step on this whole
+# path, and when sccache is installed it runs its own `cargo semver-checks`
+# subprocess under RUSTC_WRAPPER=sccache — see scripts/lib/build_accel.sh and the
+# `build-accel:` line in the log. It is applied as an `env` prefix on that one
+# command and never exported, so the `cargo publish` a human runs after this
+# script passes inherits nothing from it. It cannot move a verdict: a wrapper
+# changes which process invokes rustc, not what rustc is invoked on, and a cache
+# that served a wrong object fails the build — which prints no summary line, and
+# that is the NO VERDICT above rather than a skip. No sccache on the machine is
+# byte-for-byte the previous behaviour.
 check5_semver() {
   local log="${TMP_SEMVER}" rc=0 decision=0
 

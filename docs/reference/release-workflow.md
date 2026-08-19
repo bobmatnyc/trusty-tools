@@ -215,6 +215,116 @@ dependency of the binary build/release jobs (a failing crates.io dry-run says
 nothing about whether the GitHub binary tarball is safe to build), but its
 own failure still turns the tag's workflow run red.
 
+## Preflight Build Acceleration
+
+The preflight's one compiling step is CHECK 5, which runs `cargo semver-checks`
+through `scripts/check_semver.sh`. It builds rustdoc for the crate under test
+and for its whole dependency closure. A fresh worktree has no `target/`, so it
+compiles `openssl-sys` and the rest of the closure from zero — and this repo's
+worktree discipline makes fresh worktrees the normal case.
+
+When `sccache` is on PATH, that subprocess runs under `RUSTC_WRAPPER=sccache`.
+sccache caches compiler outputs keyed by input hash, so a worktree cargo has
+never seen still gets its dependency closure from cache instead of recompiling
+it. `scripts/lib/build_accel.sh` resolves it; `scripts/check_semver.sh` prints
+one `build-accel:` line per run saying which mode it is in.
+
+| Knob | Default | Turn it off with |
+|---|---|---|
+| `RUSTC_WRAPPER=sccache` on the semver-checks subprocess | on when `sccache` is on PATH | `PREFLIGHT_NO_SCCACHE=1` |
+
+`PREFLIGHT_NO_SCCACHE=0` is **not** an opt-out — only a non-empty value other
+than `0` disables the wrapper.
+
+**One-time per-machine prerequisite.** sccache is not vendored and nothing
+installs it for you. On a laptop that wants the speedup:
+
+```bash
+brew install sccache
+```
+
+Nothing else to configure. A machine without it runs the preflight exactly as
+before and says so in the `build-accel:` line; that is not a warning to act on.
+
+Measured on this workspace, `bash scripts/check_semver.sh --crate
+trusty-embedderd` (196 checks, gate green in every row):
+
+| State | Wall clock |
+|---|---|
+| Cold `target/`, cold sccache | 49.8s |
+| Cold `target/`, warm sccache — 347 of 347 compile requests served from cache | 18.9s |
+| Warm `target/` (cargo's own reuse, unchanged by this) | 3.1s |
+
+The middle row is what the wrapper buys: a target directory cargo has never seen
+still gets its dependency closure from cache rather than rebuilding it. The
+third row is cargo's existing behaviour within one checkout and owes nothing to
+sccache.
+
+**It cannot change a verdict.** A wrapper changes which process invokes rustc,
+not what rustc is invoked on, what the crate's public API is, or what
+cargo-semver-checks compares. A cache that served a wrong object would fail the
+build; a failed build prints no `N checks:` summary line; and
+`check_semver.sh` classifies a missing summary as NO VERDICT (exit 3) — the same
+loud stop a rustdoc crash gets, never a skip and never a pass. The `0 compared`
++ `[PASS]`-is-unreachable contract (#5620) is untouched.
+
+**Nothing is exported.** The assignment is built as an `env` prefix on the
+`cargo semver-checks` subprocess alone, so the `cargo publish` you run after the
+preflight passes inherits nothing from it.
+
+### Why there is no persistent target directory
+
+A persistent `CARGO_TARGET_DIR` for the SemVer gate was built, measured, and
+rejected. This section records the measurement so it is not re-attempted.
+
+`cargo-semver-checks` 0.50.0 has **no `--target-dir` flag** — checked against
+the installed binary's `check-release --help`. The only mechanism is the
+`CARGO_TARGET_DIR` environment variable, and the tool's *inner* `cargo doc`
+invocation honours it too. Setting it moves the current crate's rustdoc JSON
+out of
+
+```
+<target>/semver-checks/local-<pkg>-<ver>-<triple>-<hash>/target/doc/<pkg>.json
+```
+
+and into a flat
+
+```
+<target>/doc/<pkg>.json
+```
+
+keyed by crate **name alone** — no version, no feature-set hash. Verified in
+both directions on `trusty-embedderd`: with the variable unset the differ reads
+the versioned path and exits 0 having compared 143 public items; with it set the
+versioned directory contains only `Cargo.toml`, `lib.rs` and `Cargo.lock`, and
+the differ exits 3. Two consequences:
+
+1. `scripts/check_semver_types.sh` globs the versioned path, finds nothing, and
+   reports NO VERDICT. Preflight CHECK 5b is advisory, so it does not block a
+   publish — it just silently stops covering the type substitutions
+   `cargo-semver-checks` is known to miss.
+2. The flat path is **shared**. The whole point of a persistent directory is
+   that worktrees share it, and this repo runs gates in parallel worktrees. Two
+   concurrent runs on the same crate write the same file, so the differ can read
+   another worktree's source and report a result about the wrong tree.
+
+The differ's per-version, per-feature-hash directory and its
+refuse-on-ambiguity guard are what prevent that mixing, and `CARGO_TARGET_DIR`
+flattens both away. A stale cache changing an answer is the one thing this
+change was not allowed to introduce, so the knob was dropped. sccache gets the
+cross-worktree win without moving any artifact.
+
+The baseline half of the cache (`<target>/semver-checks/cache/`) *is* placed
+correctly under `CARGO_TARGET_DIR`; only the current crate's document moves.
+That asymmetry is why the problem does not show up as an obvious failure.
+
+**Tested by** `scripts/build_accel_selftest.sh` (detection, the opt-out, the
+mode line, and an assertion that the library sets no `CARGO_TARGET_DIR`) and
+`scripts/check_semver_selftest.sh` cases 25-27 (the wiring: that the wrapper
+reaches the cargo subprocess and `CARGO_TARGET_DIR` does not, that the opt-out
+reaches it, and that a build failure under the wrapper still exits 3). Both run
+in `.github/workflows/semver-checks.yml`.
+
 ## macOS Code-Signing Critical Alert
 
 🔴 **Never `cp target/release/<binary> ~/.cargo/bin/<binary>` on macOS.**
