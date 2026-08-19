@@ -701,13 +701,16 @@ pub mod session_naming;
 /// What: Exposes [`palace_id::derive_palace_id`],
 /// [`palace_id::owner_repo_from_git_remote`], [`palace_id::parent_dir_slug`],
 /// and the [`palace_id::PALACE_OVERRIDE_ENV`] / [`palace_id::palace_override_from_env`]
-/// env helpers.
+/// env helpers, plus the id-shape contract [`palace_id::palace_id_is_valid`] /
+/// [`palace_id::clamp_palace_id`] / [`palace_id::PALACE_ID_MAX_LEN`] that
+/// trusty-memory's creation gate reads (#2443).
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// palace_id::tests`.
 pub mod palace_id;
 pub use palace_id::{
-    PALACE_OVERRIDE_ENV, derive_palace_id, owner_repo_from_git_remote, palace_override_from_env,
-    parent_dir_slug, repo_slug_from_git_remote,
+    PALACE_ID_MAX_LEN, PALACE_OVERRIDE_ENV, clamp_palace_id, derive_palace_id,
+    owner_repo_from_git_remote, palace_id_is_valid, palace_override_from_env, parent_dir_slug,
+    repo_slug_from_git_remote,
 };
 
 /// The single entry point for "which palace does this project use?" (#5811).

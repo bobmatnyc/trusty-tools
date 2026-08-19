@@ -41,7 +41,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::palace_id::{derive_palace_id, palace_override_from_env};
+use crate::palace_id::{clamp_palace_id, derive_palace_id, palace_override_from_env};
 use crate::slug::slugify_string;
 
 /// The `.trusty-tools/` directory name, used as a project-root marker.
@@ -314,7 +314,9 @@ pub fn resolve_palace_with_remote(
 
     // Level 1: the operator escape hatch.
     if let Some(raw) = palace_override_from_env() {
-        let slug = slugify_string(&raw);
+        // #2443: this level slugifies but never went through the pure core, so
+        // it was the one derived id that kept no length bound.
+        let slug = clamp_palace_id(&slugify_string(&raw));
         if !slug.is_empty() {
             // #5811: the disagreement that hid the original defect. A human
             // setting the variable is legitimate; a producer laundering a

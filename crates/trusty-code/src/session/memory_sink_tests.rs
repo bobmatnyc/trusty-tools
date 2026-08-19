@@ -745,6 +745,39 @@ fn derive_palace_id_for_project_agrees_with_derive_palace_id_no_remote_no_env() 
     );
 }
 
+/// A long project directory still derives an id `palace_create` accepts
+/// (#2443).
+///
+/// Why: derivation had no length bound while trusty-memory's format gate caps a
+/// slug at 63 bytes, so a project under a long directory name derived an id the
+/// daemon refused. `ensure_palace` then failed on every turn and this sink
+/// recorded nothing for that project, warning only.
+/// What: derives from a 90-character directory under a plain (non-git) temp
+/// dir — the `parent/dir` branch, the one a project with no remote takes — and
+/// asserts the result satisfies the shared contract the daemon's
+/// `validate_slug_format` reads.
+/// Test: itself.
+#[test]
+fn a_long_project_dir_derives_an_acceptable_palace_id() {
+    // SAFETY: no other test in this crate mutates TRUSTY_MEMORY_PALACE.
+    unsafe {
+        std::env::remove_var(trusty_common::PALACE_OVERRIDE_ENV);
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    let long_dir = tmp.path().join(
+        "a-project-with-an-unreasonably-long-directory-name-nobody-would-type-on-purpose-really",
+    );
+    std::fs::create_dir_all(&long_dir).expect("create long project dir");
+
+    let id = derive_palace_id_for_project(&long_dir).expect("a long dir still resolves");
+
+    assert!(
+        trusty_common::palace_id_is_valid(&id),
+        "derived id must pass the daemon's creation gate, got {id:?} ({} bytes)",
+        id.len()
+    );
+}
+
 /// Write a project root whose committed pin exists but does not parse.
 ///
 /// Why: three of the four palace-resolution failures are pin-trust failures, and
