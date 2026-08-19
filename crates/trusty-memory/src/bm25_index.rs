@@ -41,6 +41,18 @@ use crate::bm25_lane::BM25Hit;
 /// Test: `snapshot_written_by_the_daemon_is_read_in_place`.
 pub const SNAPSHOT_FILENAME: &str = "bm25_index.json";
 
+/// Suffix prepended to the millisecond timestamp when a corrupt snapshot is
+/// moved aside.
+///
+/// Why (#5909): starting empty is only safe if the bytes that failed to parse
+/// stop being the file the next [`PalaceBm25Index::flush`] overwrites. Moving
+/// them to `bm25_index.json.corrupt-<millis>` keeps them for an operator while
+/// leaving the live path free for the rebuilt corpus.
+/// What: the constant is the literal `.corrupt-`; the full name is
+/// `<snapshot>.corrupt-<unix millis>`.
+/// Test: `a_corrupt_snapshot_is_quarantined_before_the_next_flush_can_overwrite_it`.
+const CORRUPT_SUFFIX: &str = ".corrupt-";
+
 /// One row of the persistent snapshot.
 ///
 /// Why: serialising raw `BM25Index` internals would couple the on-disk format to
@@ -85,12 +97,21 @@ impl PalaceBm25Index {
     /// loses a corpus nor needs a conversion pass.
     /// What: ensures `data_dir` exists, reads `<data_dir>/bm25_index.json` when
     /// present, replays each `Document` through `upsert_document`. A missing
-    /// snapshot is the fresh-install case (no error); a corrupt one is logged and
-    /// the index starts empty so recall still comes up. An I/O error other than
-    /// `NotFound` propagates — refusing to start beats silently dropping a corpus
-    /// the operator can still see on disk.
+    /// snapshot is the fresh-install case (no error). A corrupt one is
+    /// QUARANTINED — renamed to `<snapshot>.corrupt-<millis>` — and only then
+    /// does the index start empty, so recall still comes up while the bytes the
+    /// operator can still see on disk survive the next flush (#5909). An I/O
+    /// error other than `NotFound`, and a quarantine rename that fails,
+    /// propagate: refusing to start beats silently dropping a corpus.
+    ///
+    /// Starting empty is recoverable because the corpus is rebuilt from redb by
+    /// [`crate::bm25_backfill::spawn_startup_backfill`]; the on-disk snapshot is
+    /// a cache, not the record of truth. What is NOT recoverable is the flush
+    /// that overwrites the corrupt file before anyone reads it.
     /// Test: `snapshot_written_by_the_daemon_is_read_in_place`,
     /// `load_recovers_from_a_corrupt_snapshot`,
+    /// `a_corrupt_snapshot_is_quarantined_before_the_next_flush_can_overwrite_it`,
+    /// `an_unquarantinable_corrupt_snapshot_fails_the_load`,
     /// `load_propagates_an_unreadable_snapshot`.
     pub fn load_or_create(data_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(data_dir)
@@ -114,9 +135,14 @@ impl PalaceBm25Index {
                     );
                 }
                 Err(e) => {
+                    // #5909: move the unparseable bytes aside BEFORE returning an
+                    // empty index, or the next flush publishes empty over them.
+                    let quarantined = quarantine_corrupt_snapshot(&snapshot_path)?;
                     tracing::warn!(
                         path = %snapshot_path.display(),
-                        "corrupt BM25 snapshot ({e}); starting with empty index"
+                        quarantined = %quarantined.display(),
+                        "corrupt BM25 snapshot ({e}); moved aside and starting with an \
+                         empty index — the corpus is rebuilt from redb by the backfill"
                     );
                 }
             },
@@ -270,6 +296,39 @@ impl PalaceBm25Index {
         );
         Ok(())
     }
+}
+
+/// Move a snapshot that failed to parse out of the live path.
+///
+/// Why (#5909): the corrupt file still holds the palace's last-known corpus in
+/// readable text, and it is the only copy outside redb. Leaving it at
+/// `snapshot_path` while serving an empty index means the first subsequent write
+/// dirties the index and the next [`PalaceBm25Index::flush`] renames a
+/// one-document snapshot over it — silent, permanent, and reported nowhere.
+/// What: renames to `<snapshot_path><CORRUPT_SUFFIX><unix millis>` and returns
+/// the new path. A rename failure is propagated rather than logged, because the
+/// caller's next step is to hand back an index whose flush would destroy the
+/// file this rename was supposed to protect.
+/// Test: `a_corrupt_snapshot_is_quarantined_before_the_next_flush_can_overwrite_it`,
+/// `an_unquarantinable_corrupt_snapshot_fails_the_load`.
+fn quarantine_corrupt_snapshot(snapshot_path: &Path) -> Result<PathBuf> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+
+    let mut name = snapshot_path.as_os_str().to_os_string();
+    name.push(format!("{CORRUPT_SUFFIX}{millis}"));
+    let quarantine_path = PathBuf::from(name);
+
+    std::fs::rename(snapshot_path, &quarantine_path).with_context(|| {
+        format!(
+            "quarantine corrupt BM25 snapshot {} → {}",
+            snapshot_path.display(),
+            quarantine_path.display()
+        )
+    })?;
+    Ok(quarantine_path)
 }
 
 #[cfg(test)]

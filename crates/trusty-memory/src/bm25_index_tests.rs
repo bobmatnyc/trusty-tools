@@ -12,6 +12,26 @@ fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
 }
 
+/// The quarantine file `load_or_create` moved a corrupt snapshot to, if any.
+///
+/// Why: the name carries a wall-clock millisecond stamp, so a test cannot spell
+/// it out; it can only look for the one entry carrying the prefix.
+/// Test: used by `a_corrupt_snapshot_is_quarantined_before_the_next_flush_can_overwrite_it`.
+fn quarantined_snapshots(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let prefix = format!("{SNAPSHOT_FILENAME}{CORRUPT_SUFFIX}");
+    let mut found: Vec<_> = std::fs::read_dir(dir)
+        .expect("read tempdir")
+        .map(|e| e.expect("dir entry").path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// Why: this is the migration contract. #5329 promises an operator who set
 /// `TRUSTY_BM25_DAEMON=1` keeps their corpus with no conversion step, and the
 /// only way to prove it is to write the daemon's exact bytes and read them back
@@ -171,6 +191,94 @@ fn load_recovers_from_a_corrupt_snapshot() {
     std::fs::write(dir.path().join(SNAPSHOT_FILENAME), b"not valid json").unwrap();
     let idx = PalaceBm25Index::load_or_create(dir.path()).unwrap();
     assert_eq!(idx.doc_count(), 0);
+}
+
+/// Why (#5909): starting empty on a corrupt snapshot is only survivable while
+/// the unparseable bytes stay reachable. They did not: `dirty` starts `false`,
+/// but the first write flips it, and the next `flush` renamed a one-document
+/// snapshot over the file holding the rest of the corpus. Nothing logged it and
+/// nothing errored.
+/// What: writes a snapshot that is truncated mid-array — unparseable, yet still
+/// carrying both drawers' text — loads it, writes one unrelated document,
+/// flushes, then asserts the original bytes are still on disk under the
+/// quarantine name and the live snapshot holds only the new document.
+/// Test: this test itself.
+#[test]
+fn a_corrupt_snapshot_is_quarantined_before_the_next_flush_can_overwrite_it() {
+    const TRUNCATED: &[u8] = br#"[{"doc_id":"drawer-a","text":"the quick brown fox"},
+        {"doc_id":"drawer-b","text":"lazy dog sleep"#;
+
+    let dir = tempdir();
+    std::fs::write(dir.path().join(SNAPSHOT_FILENAME), TRUNCATED).unwrap();
+
+    let mut idx = PalaceBm25Index::load_or_create(dir.path()).unwrap();
+    assert_eq!(idx.doc_count(), 0, "the corrupt corpus is not readable");
+
+    idx.index_doc("drawer-c", "a write that arrives after the failed load");
+    idx.flush().expect("flush");
+
+    let quarantined = quarantined_snapshots(dir.path());
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "the corrupt snapshot must be moved aside, got: {quarantined:?}"
+    );
+    assert_eq!(
+        std::fs::read(&quarantined[0]).unwrap(),
+        TRUNCATED,
+        "the quarantined file must hold the original bytes verbatim"
+    );
+
+    let live = std::fs::read_to_string(idx.snapshot_path()).unwrap();
+    assert!(live.contains("drawer-c"), "got: {live}");
+    assert!(
+        !live.contains("drawer-a"),
+        "the rebuilt snapshot is genuinely empty-plus-one — that is why the \
+         quarantine copy is the only thing standing between this flush and the \
+         corpus; got: {live}"
+    );
+}
+
+/// Why (#5909): the quarantine rename is the whole guarantee. If it fails and
+/// the load carries on anyway, the caller gets an index whose first flush
+/// destroys exactly the file the rename existed to protect — a failure branch
+/// that downgrades an error while state advances.
+/// What: makes the palace directory unwritable so the rename cannot succeed,
+/// asserts the load fails, and asserts the corrupt snapshot is untouched.
+/// Test: this test itself.
+#[test]
+#[cfg(unix)]
+fn an_unquarantinable_corrupt_snapshot_fails_the_load() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempdir();
+    let snap = dir.path().join(SNAPSHOT_FILENAME);
+    std::fs::write(&snap, b"not valid json").unwrap();
+
+    // r-x: the snapshot is still readable, but nothing can be renamed or created.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = PalaceBm25Index::load_or_create(dir.path());
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let err = result
+        .err()
+        .expect("a corrupt snapshot that cannot be moved aside must fail the load");
+    assert!(
+        format!("{err:#}").contains("quarantine corrupt BM25 snapshot"),
+        "got: {err:#}"
+    );
+    assert_eq!(
+        std::fs::read(&snap).unwrap(),
+        b"not valid json",
+        "the corrupt snapshot must survive a failed quarantine"
+    );
+    assert!(
+        quarantined_snapshots(dir.path()).is_empty(),
+        "no quarantine file can exist when the rename failed"
+    );
 }
 
 /// Why: a snapshot that exists but cannot be READ is different from one that is
