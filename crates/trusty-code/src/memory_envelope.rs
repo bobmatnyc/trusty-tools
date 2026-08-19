@@ -16,7 +16,7 @@
 //! What: [`tools_call_params`] builds the request params;
 //! [`parse_tools_call_envelope`] unwraps a response envelope;
 //! [`call_tool_wrapped`] composes both around
-//! `trusty_common::mcp::memory_rpc::call_memory_tool_at` for callers that
+//! `trusty_common::memory_rpc::call_memory_tool_at` for callers that
 //! want a one-shot "call this tool, give me its parsed result" helper.
 //! Test: `memory_envelope::tests::*`.
 //!
@@ -26,7 +26,7 @@
 
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
-use trusty_common::mcp::memory_rpc::call_memory_tool_at;
+use trusty_common::memory_rpc::call_memory_tool_at;
 
 /// Build the `params` object for a JSON-RPC `tools/call` request.
 ///

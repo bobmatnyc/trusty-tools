@@ -3,7 +3,7 @@
 //! Why: matches the ecosystem's line-delimited JSON-RPC-over-stdio framing
 //! — the same convention `trusty-search` (`mcp::stdio::run`) and
 //! `trusty-memory` (`commands::serve_stdio_bridge::run_stdio_bridge`) use,
-//! both built on the shared `trusty_common::mcp` primitives — while adding
+//! both built on the shared `trusty_mcp` primitives — while adding
 //! graceful shutdown per the workspace's connection-safe daemon-restart
 //! convention (issue #534): the loop stops accepting new input on SIGTERM/
 //! SIGINT but always finishes whatever request is already in-flight before
@@ -176,7 +176,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tokio::io::AsyncReadExt;
-    use trusty_common::mcp::error_codes;
+    use trusty_mcp::error_codes;
 
     fn router_with_ping() -> Arc<Router> {
         let mut router = Router::new();

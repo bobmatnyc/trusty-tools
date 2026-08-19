@@ -11180,6 +11180,7 @@ dependencies = [
  "trusty-common",
  "trusty-gworkspace",
  "trusty-kb",
+ "trusty-mcp",
  "trusty-memory",
  "trusty-search",
  "usearch",
@@ -11289,6 +11290,7 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "trusty-common",
+ "trusty-mcp",
  "trusty-review",
  "which 6.0.3",
  "xxhash-rust",
@@ -11347,6 +11349,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trusty-common",
+ "trusty-mcp",
  "wiremock",
 ]
 
@@ -11379,6 +11382,7 @@ dependencies = [
  "tracing-subscriber",
  "trusty-agents-common",
  "trusty-common",
+ "trusty-mcp",
  "trusty-tui",
  "uuid",
  "wiremock",
@@ -11473,6 +11477,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "trusty-mcp",
  "unicode-normalization",
  "uuid",
  "walkdir",
@@ -11557,7 +11562,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-gworkspace"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -11576,6 +11581,7 @@ dependencies = [
  "tracing",
  "tracing-test",
  "trusty-common",
+ "trusty-mcp",
  "uuid",
  "wiremock",
 ]
@@ -11623,8 +11629,22 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
- "trusty-common",
+ "trusty-mcp",
  "walkdir",
+]
+
+[[package]]
+name = "trusty-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 5.0.1",
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -11666,6 +11686,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "trusty-common",
+ "trusty-mcp",
  "uuid",
 ]
 
@@ -11719,6 +11740,7 @@ dependencies = [
  "tracing-subscriber",
  "trusty-agents-common",
  "trusty-common",
+ "trusty-mcp",
  "trusty-progress",
  "trusty-review",
  "unicode-width 0.2.0",
@@ -11797,6 +11819,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trusty-common",
+ "trusty-mcp",
 ]
 
 [[package]]
@@ -11885,6 +11908,7 @@ dependencies = [
  "trusty-common",
  "trusty-embedderd",
  "trusty-embedderd-py",
+ "trusty-mcp",
  "usearch",
  "uuid",
  "walkdir",

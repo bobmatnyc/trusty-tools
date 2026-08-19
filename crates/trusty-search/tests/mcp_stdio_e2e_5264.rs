@@ -175,7 +175,7 @@ impl Session {
 
     /// Send one JSON-RPC request and read its response.
     ///
-    /// The stdio transport is line-delimited JSON (`trusty_common::mcp::
+    /// The stdio transport is line-delimited JSON (`trusty_mcp::
     /// run_stdio_loop`), so one line out is exactly one response.
     fn call(&mut self, method: &str, params: Value) -> Value {
         self.next_id += 1;

@@ -20,7 +20,7 @@
 //! in `search.write`.
 
 use serde_json::Value;
-use trusty_common::mcp::openrpc::discover_response;
+use trusty_mcp::openrpc::discover_response;
 
 use crate::mcp::tools::tool_descriptors;
 

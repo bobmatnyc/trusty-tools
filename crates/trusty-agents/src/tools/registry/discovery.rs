@@ -92,7 +92,7 @@ fn default_protocol_version() -> String {
 ///
 /// Why (#3577): every real `rpc.discover` implementation in this repo
 /// (`trusty-memory`, `trusty-search` — both via the shared
-/// `trusty_common::mcp::openrpc::discover_response` builder — and
+/// `trusty_mcp::openrpc::discover_response` builder — and
 /// `trusty-gworkspace`, which predates that helper but emits the
 /// structurally identical envelope) is standard OpenRPC 1.3.2:
 /// `{ "openrpc": "1.3.2", "info": {...}, "methods": [...] }`. No endpoint
@@ -196,7 +196,7 @@ pub fn parse_manifest(endpoint: &str, raw: &Value) -> Result<EndpointManifest> {
 /// OpenAI-style function parameters (`adapter.rs`). Scope resolution
 /// prefers the generic `x-scopes` extension (already a dotted string,
 /// emitted by `trusty-memory`/`trusty-search` via the shared
-/// `trusty_common::mcp::openrpc` builder) and falls back to
+/// `trusty_mcp::openrpc` builder) and falls back to
 /// `x-google-scopes` (OAuth URLs, `trusty-gworkspace`-specific) via
 /// `google_scope::dotted_scope_for_google_scopes`.
 /// What: Rebuilds `input_schema` as `{"type":"object","properties":{...},

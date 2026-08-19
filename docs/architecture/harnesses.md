@@ -240,7 +240,8 @@ Feature-gated modules the harnesses draw on:
 
 | Feature | Module | Purpose |
 |---------|--------|---------|
-| `mcp` | `trusty_common::mcp` | JSON-RPC 2.0 / MCP primitives — envelope types, the stdio dispatch loop, OpenRPC discovery. Every MCP server in the workspace imports from here. |
+| (its own crate) | `trusty_mcp` | JSON-RPC 2.0 / MCP primitives — envelope types, the stdio dispatch loop, OpenRPC discovery, the daemon-bridge startup guard. Every MCP server in the workspace imports from here. ADR-0040 (#5803) extracted it from `trusty_common::mcp`. |
+| `memory-rpc` | `trusty_common::memory_rpc` | Discovery-based JSON-RPC client for the trusty-memory daemon. What `trusty_common::mcp` left behind. |
 | `rpc` | `trusty_common::rpc` | General-purpose JSON-RPC client plus stdio and HTTP transports |
 | `stdio-mcp-client` | `trusty_common::stdio_mcp_client` | Client that spawns and talks to a stdio MCP server |
 | `memory-core` | `trusty_common::memory_core` | Memory palace storage engine — trusty-memory's backend, also used by trusty-agents |

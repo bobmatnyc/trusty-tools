@@ -32,7 +32,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use trusty_common::mcp::Request as McpRequest;
+use trusty_mcp::Request as McpRequest;
 
 use crate::daemon::mcp_backend::StateBackend;
 use crate::daemon::state::DaemonState;
@@ -60,7 +60,7 @@ pub fn is_loopback(addr: &SocketAddr) -> bool {
 /// What: (1) rejects any non-loopback peer with `403 Forbidden` and a short
 /// message — no body is parsed and no tool runs; (2) for a loopback peer, wraps
 /// the daemon state in a [`StateBackend`] and calls [`crate::mcp::dispatch`],
-/// returning the JSON-RPC [`trusty_common::mcp::Response`] as JSON (HTTP 200;
+/// returning the JSON-RPC [`trusty_mcp::Response`] as JSON (HTTP 200;
 /// JSON-RPC errors are carried in the envelope, matching `trusty-memory`).
 /// Test: `rpc_rejects_non_loopback_peer`, `rpc_dispatches_tools_list_for_loopback`.
 pub async fn rpc_handler(

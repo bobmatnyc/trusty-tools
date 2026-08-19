@@ -202,7 +202,6 @@ crates/trusty-common/src/credentials/redact.rs	redact_tests
 crates/trusty-common/src/credentials/resolver.rs	resolver_tests
 crates/trusty-common/src/inference/registry/mod.rs	all_five_providers_seeded
 crates/trusty-common/src/intent_source/spec_resolve.rs	spec_resolve_parse_block_scoped
-crates/trusty-common/src/mcp/daemon_bridge.rs	fast_path_returns_quickly_for_live_listener
 crates/trusty-common/src/memory_core/dream/recall_benchmark.rs	dream_recall_benchmark_compression_ratio_math
 crates/trusty-common/src/memory_core/registry.rs	evict_idle_skips_recently_accessed_handle
 crates/trusty-common/src/memory_core/registry.rs	open_hydrates_persisted_palaces

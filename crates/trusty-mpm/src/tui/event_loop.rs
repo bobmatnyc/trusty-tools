@@ -45,7 +45,7 @@ pub(super) async fn run_loop<B: ratatui::backend::Backend>(
     // poller's `HealthClient` is built with and polls for the TUI's lifetime.
     let mut health_screen = HealthScreen::new(
         health::DEFAULT_SEARCH_URL,
-        trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable(),
+        trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable(),
     );
 
     // The health pollers run on detached tasks and push updates down a channel

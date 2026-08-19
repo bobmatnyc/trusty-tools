@@ -25,7 +25,7 @@
 //! STDOUT hygiene: never writes to stdout — stdout is the JSON-RPC channel in
 //! every caller. All diagnostics go to stderr.
 //!
-//! Test: `crates/trusty-common/tests/single_flight_exclusion.rs` drives N
+//! Test: `crates/trusty-mcp/tests/single_flight_exclusion.rs` drives N
 //! concurrent real processes and asserts exactly one daemon starts; unit tests
 //! below cover lock acquisition, release, and crash safety.
 
@@ -163,7 +163,7 @@ impl Drop for StartLock {
 /// time would reopen the race — a second bridge would acquire, re-probe a daemon
 /// that has not bound yet, and start another.
 ///
-/// Test: `crates/trusty-common/tests/single_flight_exclusion.rs` —
+/// Test: `crates/trusty-mcp/tests/single_flight_exclusion.rs` —
 /// `n_concurrent_bridges_start_exactly_one_daemon`,
 /// `already_running_daemon_is_not_restarted`,
 /// `daemon_that_never_becomes_ready_is_a_hard_error`,

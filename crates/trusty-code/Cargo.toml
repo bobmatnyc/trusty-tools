@@ -85,9 +85,9 @@ globset = { workspace = true }
 # DOC-28 catch-up digest for PM prompt seed context (#1762 PR2), plus the
 # shared JSON-RPC 2.0 / MCP wire types + STDIO loop (#2053) so `tcode serve
 # --stdio` speaks the exact same JSON-RPC-over-STDIO contract as trusty-memory
-# and trusty-search. `catchup` already pulls in `mcp` transitively
-# (`catchup = ["dep:rusqlite", "mcp"]`); `mcp` is listed explicitly too so the
-# direct dependency is documented rather than relying on the transitive edge.
+# and trusty-search. Those wire types now come from the separate `trusty-mcp`
+# crate (ADR-0040, #5803), declared above; `catchup` still brings
+# `trusty-common/memory-rpc` transitively for the trusty-memory client.
 # `axum-server` enables `trusty_common::server::with_standard_middleware`
 # (CORS/trace/gzip) so `tcode serve --http` matches the trusty-memory/
 # trusty-search middleware stack exactly.
@@ -106,7 +106,8 @@ globset = { workspace = true }
 # `crate-config` (#5203): supplies `workspace_layout::workspace_root`, the one
 # resolver the project picker shares with trusty-mpm. serde_yaml + thiserror are
 # already in this crate's dependency graph, so it adds no new transitive deps.
-trusty-common = { workspace = true, features = ["catchup", "mcp", "stdio-mcp-client", "axum-server", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config"] }
+trusty-mcp = { workspace = true }  # JSON-RPC / MCP primitives (ADR-0040, #5803)
+trusty-common = { workspace = true, features = ["catchup", "stdio-mcp-client", "axum-server", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config"] }
 
 # `tui_client::CodeEngine` (#3415, DOC-50 §3.3/§3.4, epic #3411 Slice 3): the
 # shared engine-adapter trait + event vocabulary (`TuiEngine`/`ReplEvent`)

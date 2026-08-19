@@ -60,8 +60,8 @@ pub(crate) fn start_lock_path() -> Option<std::path::PathBuf> {
 /// takes the dynamic walker starting at the canonical 7070 instead.
 /// What: returns the config shared by `handle_start` and the stdio bridge.
 /// Test: `spawn_args_never_bind_port_zero`.
-pub(crate) fn daemon_start_config() -> trusty_common::mcp::DaemonBridgeConfig {
-    trusty_common::mcp::DaemonBridgeConfig {
+pub(crate) fn daemon_start_config() -> trusty_mcp::DaemonBridgeConfig {
+    trusty_mcp::DaemonBridgeConfig {
         service_name: "trusty-memory".to_string(),
         // NEVER `--http 127.0.0.1:0` — see the doc comment above (#1152).
         spawn_args: vec!["serve".to_string(), "--foreground".to_string()],
@@ -86,7 +86,7 @@ pub(crate) fn daemon_start_config() -> trusty_common::mcp::DaemonBridgeConfig {
 /// contender re-probe a dead address and start a second daemon (#1152).
 /// What: if `trusty_common::check_already_running` reports a healthy daemon,
 /// prints its URL and returns without taking the lock. Otherwise delegates to
-/// [`trusty_common::mcp::ensure_daemon_up_single_flight`], which starts
+/// [`trusty_mcp::ensure_daemon_up_single_flight`], which starts
 /// `serve --foreground` at most once across all processes and waits for it to
 /// become ready. Fails closed if it never does.
 /// Test: `spawn_args_never_bind_port_zero`,
@@ -108,7 +108,7 @@ pub async fn handle_start() -> Result<()> {
     let lock_path = start_lock_path()
         .ok_or_else(|| anyhow::anyhow!("could not resolve the trusty-memory data directory"))?;
     let config = daemon_start_config();
-    let url = trusty_common::mcp::ensure_daemon_up_single_flight(&config, &lock_path).await?;
+    let url = trusty_mcp::ensure_daemon_up_single_flight(&config, &lock_path).await?;
     eprintln!("{} trusty-memory daemon ready at {url}", "✓".green());
     Ok(())
 }

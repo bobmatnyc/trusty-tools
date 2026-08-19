@@ -292,7 +292,7 @@ mod tests {
     /// `register` must wire `fs.list_dir` so the router recognises it.
     #[tokio::test]
     async fn register_wires_fs_list_dir() {
-        use trusty_common::mcp::Request;
+        use trusty_mcp::Request;
 
         let mut router = Router::new();
         register(&mut router);
@@ -332,7 +332,7 @@ mod tests {
     /// `register` must wire `fs.list_projects` so the router recognises it.
     #[tokio::test]
     async fn register_wires_fs_list_projects() {
-        use trusty_common::mcp::Request;
+        use trusty_mcp::Request;
 
         let mut router = Router::new();
         register(&mut router);

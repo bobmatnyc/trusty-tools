@@ -26,7 +26,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::time::timeout;
-use trusty_common::mcp::Request;
+use trusty_mcp::Request;
 
 use crate::events::SessionEventEnvelope;
 

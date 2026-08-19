@@ -7,7 +7,7 @@
 //! JSON-RPC dispatcher; `handle_tool_call` is the tool router (19 tools live:
 //! the original nine from #2639 + #2640, plus ten more added by epic #3611 for
 //! claude.ai Slack-connector parity); `run_stdio` wires it into
-//! `trusty_common::mcp::run_stdio_loop`.
+//! `trusty_mcp::run_stdio_loop`.
 //! Test: `handle_message_initialize_returns_server_info`,
 //! `handle_message_tools_list_returns_tools`, and
 //! `tools_call_search_messages_without_user_token_is_internal_error` in `mod tests`.
@@ -19,7 +19,7 @@ use thiserror::Error;
 
 use crate::slack::api::client::BaseClient;
 use crate::slack::api::error::SlackError;
-use trusty_common::mcp::{error_codes, initialize_response, run_stdio_loop, Request, Response};
+use trusty_mcp::{error_codes, initialize_response, run_stdio_loop, Request, Response};
 
 /// Shared state passed to every dispatcher invocation.
 ///

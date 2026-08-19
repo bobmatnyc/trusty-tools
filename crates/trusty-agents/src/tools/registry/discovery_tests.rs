@@ -310,7 +310,7 @@ fn parse_manifest_method_without_scope_extension_gets_empty_scope() {
 
 /// `x-scopes` (the generic dotted-string extension emitted by
 /// `trusty-memory`/`trusty-search` via the shared
-/// `trusty_common::mcp::openrpc` builder) is used as-is with no OAuth
+/// `trusty_mcp::openrpc` builder) is used as-is with no OAuth
 /// translation.
 #[test]
 fn parse_manifest_generic_x_scopes_used_directly() {

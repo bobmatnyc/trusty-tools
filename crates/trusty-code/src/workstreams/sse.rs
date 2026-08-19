@@ -59,7 +59,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use trusty_agents_common::transport::{
     BoxEventStream, EventSource, MembershipProvider, SourceEvent,
 };
-use trusty_common::mcp::Response;
+use trusty_mcp::Response;
 use uuid::Uuid;
 
 use crate::events::Event;

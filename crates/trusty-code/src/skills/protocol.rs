@@ -542,7 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_wires_all_three_methods() {
-        use trusty_common::mcp::Request;
+        use trusty_mcp::Request;
 
         let mut router = Router::new();
         register(&mut router, SkillsCatalogState::new(None));

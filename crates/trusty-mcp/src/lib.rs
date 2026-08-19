@@ -10,21 +10,24 @@
 //! helper to build the `initialize` payload, and an async stdio dispatch
 //! loop that accepts any `Fn(Request) -> Future<Output=Response>`.
 //!
-//! Test: `cargo test -p trusty-common --features mcp mcp` covers Response
-//! construction + the stdio loop round-trip behaviour with an in-memory
-//! dispatcher. (The former `trusty-mcp-core` crate was absorbed into this
-//! module.)
+//! Test: `cargo test -p trusty-mcp` covers Response construction + the stdio
+//! loop round-trip behaviour with an in-memory dispatcher.
 //!
-//! `memory_rpc` (issue #2030) additionally provides discovery-based JSON-RPC
-//! *client* access to the trusty-memory daemon — the shared "resolve address
-//! + POST /rpc" helper every trusty-mpm / trusty-common call site now uses
-//! instead of a hardcoded port.
+//! These primitives lived in `trusty_mcp` until ADR-0040 (#5803) moved
+//! them here. `memory_rpc` did not come with them: it reaches
+//! `trusty_common::daemon_addr` and `trusty_common::data_dir`, so it stays in
+//! `trusty-common` as `trusty_common::memory_rpc`.
+
+// docs.rs builds a release's documentation once, from the uploaded tarball,
+// so a broken intra-doc link is baked into that version forever and only a new
+// release can correct it. Deny keeps this crate at zero rather than letting the
+// ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
+#![deny(rustdoc::broken_intra_doc_links)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub mod daemon_bridge;
-pub mod memory_rpc;
 pub mod openrpc;
 pub mod service;
 pub mod single_flight;

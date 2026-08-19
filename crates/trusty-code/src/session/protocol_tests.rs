@@ -5,7 +5,7 @@
 
 use super::*;
 use tokio::sync::mpsc;
-use trusty_common::mcp::Request;
+use trusty_mcp::Request;
 
 fn test_ctx() -> ConnectionContext {
     let (tx, _rx) = mpsc::unbounded_channel();

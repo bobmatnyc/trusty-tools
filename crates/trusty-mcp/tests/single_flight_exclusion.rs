@@ -8,7 +8,7 @@
 //! test is what keeps that distinction enforced.
 //!
 //! What: spawns N real child processes, each calling the production
-//! [`trusty_common::mcp::ensure_daemon_up_single_flight`] against one shared
+//! [`trusty_mcp::ensure_daemon_up_single_flight`] against one shared
 //! lock file and one shared (initially absent) daemon. The "daemon" is this test
 //! binary re-executed in a daemon role — a real process binding a real TCP port
 //! and serving `/health` — so the spawn, probe, and readiness paths under test
@@ -20,9 +20,7 @@
 //! a count of on-disk artifacts after every child has exited. Nothing depends on
 //! a sleep, a scheduling order, or a race being "won" by anyone in particular.
 //!
-//! Test: `cargo test -p trusty-common --features mcp --test single_flight_exclusion`.
-
-#![cfg(feature = "mcp")]
+//! Test: `cargo test -p trusty-mcp --test single_flight_exclusion`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -30,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use trusty_common::mcp::{DaemonBridgeConfig, ensure_daemon_up_single_flight};
+use trusty_mcp::{DaemonBridgeConfig, ensure_daemon_up_single_flight};
 
 /// Env var naming which role a re-executed copy of this binary should play.
 const ROLE_VAR: &str = "TRUSTY_SF_TEST_ROLE";
@@ -362,8 +360,7 @@ fn crashed_starter_does_not_deadlock_the_next_bridge() {
 
     // The kernel released the flock when the process died: this must not block.
     let start = Instant::now();
-    let acquired =
-        trusty_common::mcp::StartLock::acquire_blocking(&lock).expect("acquire after crash");
+    let acquired = trusty_mcp::StartLock::acquire_blocking(&lock).expect("acquire after crash");
     let elapsed = start.elapsed();
     drop(acquired);
 
@@ -380,7 +377,7 @@ fn lock_holder_entrypoint() {
         return;
     }
     let dir = scratch_dir();
-    let _lock = trusty_common::mcp::StartLock::acquire_blocking(&dir.join("start.lock"))
+    let _lock = trusty_mcp::StartLock::acquire_blocking(&dir.join("start.lock"))
         .expect("holder acquires lock");
     std::fs::write(dir.join("held"), b"1").expect("signal held");
     // Block forever; the parent SIGKILLs us while the lock is still held.

@@ -17,7 +17,7 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use trusty_common::mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
+use trusty_mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
 
 use crate::roots::{Roots, assert_within};
 use crate::schema::Profile;

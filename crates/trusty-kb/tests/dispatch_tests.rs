@@ -5,9 +5,9 @@
 //! tests (which call `KbStore` directly) do not.
 
 use serde_json::{Value, json};
-use trusty_common::mcp::Request;
 use trusty_kb::mcp::{ServerConfig, dispatch_with};
 use trusty_kb::roots::Roots;
+use trusty_mcp::Request;
 
 /// A ServerConfig whose knowledge dir + default root live under a fresh tempdir.
 fn config() -> (tempfile::TempDir, ServerConfig, std::path::PathBuf) {

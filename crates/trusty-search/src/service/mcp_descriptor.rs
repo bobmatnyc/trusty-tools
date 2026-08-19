@@ -16,7 +16,7 @@
 //! Test: see `tests` below — verifies `name`, `tools().len() == 14`, and
 //! that scope mappings match for both read and write tools.
 
-use trusty_common::mcp::ServiceDescriptor;
+use trusty_mcp::ServiceDescriptor;
 
 /// Why: implements `ServiceDescriptor` so trusty-agents can link trusty-search
 /// directly and include its tools in a unified `rpc.discover` document.
