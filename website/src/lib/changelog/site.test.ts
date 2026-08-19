@@ -69,7 +69,7 @@ const failuresOf = (run: () => unknown) => {
 	throw new Error('expected the build to fail, but it succeeded');
 };
 
-describe('the real six-crate corpus', () => {
+describe('the real flagship-crate corpus', () => {
 	let site: ChangelogSite;
 
 	beforeAll(() => {
@@ -112,7 +112,7 @@ describe('the real six-crate corpus', () => {
 	/**
 	 * `beforeAll` already throws if any link in the corpus fails to resolve, so
 	 * this states what a green build means rather than adding new coverage: no
-	 * relative link in the six changelogs escapes the repository or points at a
+	 * relative link in the corpus escapes the repository or points at a
 	 * missing path, and every one that survived is a `blob/main` link.
 	 */
 	it('resolves every relative link in the corpus, none escaping the repository', () => {
@@ -133,15 +133,15 @@ describe('the real six-crate corpus', () => {
 	});
 
 	/**
-	 * trusty-audit is a FLAGSHIP with a page and a card, and still absent here:
-	 * it has no release, so `released` is false and the release-driven surfaces
-	 * skip it. Asserting that explicitly is what keeps a future `released: true`
-	 * from silently landing an empty section.
+	 * trusty-audit's CHANGELOG.md carries a real `## [0.6.0]` release, so it
+	 * joined RELEASED_FLAGSHIPS (`Tool.released`) alongside the others. Only
+	 * non-flagship crates such as `trusty-common` — never carded or paged —
+	 * stay out of this surface.
 	 */
-	it('keeps the unreleased flagship and the other crates out of both surfaces', () => {
+	it('includes every released flagship, and only non-flagship crates stay out', () => {
 		expect(site.crates.map((c) => c.name)).not.toContain('trusty-common');
-		expect(site.crates.map((c) => c.name)).not.toContain('trusty-audit');
-		expect(site.crates).toHaveLength(6);
+		expect(site.crates.map((c) => c.name)).toContain('trusty-audit');
+		expect(site.crates).toHaveLength(RELEASED_FLAGSHIPS.length);
 	});
 });
 
@@ -269,7 +269,7 @@ describe('the landing-page strip', () => {
 		]);
 	});
 
-	it('produces a non-empty strip for all six real crates', () => {
+	it('produces a non-empty strip for every real flagship crate', () => {
 		for (const crate of buildChangelogSite(REPO_ROOT).crates) {
 			const lines = stripItems(crate.latest);
 			expect(lines.length, crate.name).toBeGreaterThan(0);

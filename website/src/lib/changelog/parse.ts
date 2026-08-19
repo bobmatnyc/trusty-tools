@@ -1,5 +1,5 @@
 /**
- * Why: the six flagship `CHANGELOG.md` files ARE the source of truth for what
+ * Why: the flagship `CHANGELOG.md` files ARE the source of truth for what
  * shipped. This site only makes them readable — nothing here writes back to a
  * changelog, and nothing here invents a release. That means the parser has to
  * take the corpus as it actually is rather than as Keep a Changelog describes

@@ -1,5 +1,5 @@
 /**
- * Why: "What's New" is a DERIVED view of six files this site does not own. If
+ * Why: "What's New" is a DERIVED view of files this site does not own. If
  * one of them stops parsing, the honest outcome is a red build — a page that
  * renders an empty strip instead is instrumentation reporting success over a
  * failure, and the reader has no way to tell the difference between "nothing

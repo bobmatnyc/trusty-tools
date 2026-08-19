@@ -1,14 +1,14 @@
 /**
  * Why: the single build-time entry point behind both surfaces — the "What's
- * new" strip on the landing page and the `/whats-new` page. Reading the six
- * files once and memoising is not an optimisation: the landing page and
- * `/whats-new` would otherwise each re-read and re-parse 8 400 lines of
- * markdown to reach the same answer.
+ * new" strip on the landing page and the `/whats-new` page. Reading each
+ * flagship's file once and memoising is not an optimisation: the landing page
+ * and `/whats-new` would otherwise each re-read and re-parse thousands of
+ * lines of markdown to reach the same answer.
  *
  * Scope is the RELEASED FLAGSHIPS and only them (`$lib/site`'s
  * `RELEASED_FLAGSHIPS`). The other crates' changelogs are read in the
  * repository by the people who need them; putting 21 more sections on a
- * marketing page would bury the six that a visitor came for. A flagship that
+ * marketing page would bury the ones a visitor came for. A flagship that
  * has never shipped is excluded by the same rule the NO_RELEASES gate below
  * enforces — it would have nothing to render.
  *
@@ -23,7 +23,7 @@
  *
  * There is no placeholder, no empty-array default, and no "no changes yet"
  * string anywhere below. A green build is therefore itself the evidence that
- * all six sections are populated.
+ * every section is populated.
  *
  * This runs in Node at BUILD time only. Its output is prerendered into static
  * HTML, so the published page reads no file and opens no connection.
@@ -169,8 +169,9 @@ function readChangelog(
 /**
  * How many releases per crate carry their full item detail on `/whats-new`.
  *
- * Why a cap at all: the six changelogs are 672 kB of markdown, and a page
- * carrying every item of all 234 releases weighed 2.4 MB — because SvelteKit
+ * Why a cap at all: the flagship changelogs are hundreds of kB of markdown
+ * combined, and a page carrying every item of all 234 releases weighed
+ * 2.4 MB — because SvelteKit
  * inlines the load's data for hydration ON TOP of the rendered HTML, and emits
  * it a third time as `__data.json`. That is a worse way to read the archive
  * than the file this page already links to. Detail for what shipped recently,
