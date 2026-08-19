@@ -244,7 +244,12 @@ fn manifest_declares_workspace(manifest: &Path) -> bool {
 /// What: reads each line as a cargo build message and converts the wrapped
 /// compiler `message` object. `file` is left as the span's own path (relative
 /// to the cargo root); the caller resolves it.
-/// Test: `parse_clippy_diagnostics_keeps_every_file`.
+/// Test: `parse_clippy_diagnostics_extracts_warning`,
+/// `parse_clippy_diagnostics_skips_notes`,
+/// `parse_clippy_diagnostics_tolerates_garbage`;
+/// `run_project_filters_to_requested_files` covers the no-per-file-filter
+/// property, feeding two files' warnings and asserting the caller drops the
+/// one it did not request.
 fn parse_clippy_diagnostics(stdout: &str) -> Vec<ToolDiagnostic> {
     let mut diags = Vec::new();
     for line in stdout.lines() {
