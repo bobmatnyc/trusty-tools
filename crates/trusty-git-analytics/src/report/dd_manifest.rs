@@ -168,6 +168,21 @@ pub struct DdRepositoryEntry {
     pub name: String,
     /// Local checkout path trusty-review scans.
     pub path: PathBuf,
+    /// Path to this repository's authorship artifact, relative to the
+    /// manifest (#5453/#6004) — mirrors the DOC-67 §8 `velocity` field
+    /// precedent: a new, separate, per-repository optional field rather than
+    /// routing through `metrics` (whose "declared metrics always win"
+    /// precedence would block the live `--analyze` fetch).
+    ///
+    /// Why: [`dd_repository_entries`] stays pure (no I/O, no database), so
+    /// this starts `None` for every entry it builds; the caller
+    /// (`commands::audit`) sets it after writing the artifact, once it has a
+    /// database connection open. Omitted from the TOML when absent — the
+    /// same backward-compatibility shape [`DdReportSection::ticketing`] uses
+    /// — so an older trusty-review, or a manifest whose authorship stage
+    /// failed, sees exactly what it saw before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorship: Option<PathBuf>,
 }
 
 impl DdManifest {
@@ -258,6 +273,7 @@ pub fn dd_repository_entries(cfg: &Config, base_dir: &Path) -> Vec<DdRepositoryE
         .map(|repo| DdRepositoryEntry {
             name: scrub_secrets(&repo_name(repo.name.as_deref(), &repo.path), &secrets),
             path: anchor(base_dir, &repo.path),
+            authorship: None,
         })
         .collect()
 }
@@ -278,13 +294,31 @@ fn anchor(base: &Path, path: &Path) -> PathBuf {
 
 /// The display name for a repository: its configured name, else the directory
 /// basename (`config/mod.rs`'s own documented fallback).
-fn repo_name(configured: Option<&str>, path: &Path) -> String {
+///
+/// Why: this is the ONE derivation of a repository's name in tga, and it has to
+/// be, because two independent copies is a silent-zero join. `commits.
+/// repository` is written by [`crate::collect::git::GitCollector`] at collection
+/// time and read back by an equality filter at report time (#5453's per-repo
+/// authorship artifact) — a name the two sides spell differently matches no rows
+/// and renders a confident "0 authors, bus factor 0" instead of an error. The
+/// collector calls this too since #5453's review; before that it had its own
+/// copy, which disagreed on a configured name that was empty or whitespace.
+/// What: the configured name when it is non-empty after trimming, else the
+/// basename of the tilde-expanded path, else the path itself. Expansion happens
+/// HERE so a caller holding the raw config path and a caller holding an
+/// already-expanded one still agree.
+/// Test: `super::dd_manifest_tests::{names_fall_back_to_the_directory_basename,
+/// a_blank_configured_name_falls_back_the_same_way_for_every_caller}`.
+pub fn repo_name(configured: Option<&str>, path: &Path) -> String {
     match configured.map(str::trim).filter(|n| !n.is_empty()) {
         Some(name) => name.to_string(),
-        None => path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string()),
+        None => {
+            let expanded = crate::core::config::expand_path(path);
+            expanded
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| expanded.display().to_string())
+        }
     }
 }
 

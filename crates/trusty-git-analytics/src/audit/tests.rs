@@ -1405,6 +1405,7 @@ fn repo_entry(name: &str, path: &std::path::Path) -> DdRepositoryEntry {
     DdRepositoryEntry {
         name: name.to_string(),
         path: path.to_path_buf(),
+        authorship: None,
     }
 }
 

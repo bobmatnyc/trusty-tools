@@ -31,6 +31,9 @@ pub const FINDING_ELABORATION: &str = "finding_elaboration";
 pub const CODE_QUALITY_SUMMARY: &str = "code_quality_summary";
 /// Section id: the Security Posture narrative paragraph (#6004).
 pub const SECURITY_SUMMARY: &str = "security_summary";
+/// Section id: the Authorship & Key-Person Risk narrative paragraph
+/// (#5453, #6004).
+pub const AUTHORSHIP_SUMMARY: &str = "authorship_summary";
 
 /// Every recognised section id, in the order they appear in the synthesis output.
 pub const ALL_SECTION_IDS: &[&str] = &[
@@ -39,6 +42,7 @@ pub const ALL_SECTION_IDS: &[&str] = &[
     FINDING_ELABORATION,
     CODE_QUALITY_SUMMARY,
     SECURITY_SUMMARY,
+    AUTHORSHIP_SUMMARY,
 ];
 
 /// True when `id` names a recognised synthesized section.
@@ -103,6 +107,16 @@ pub fn default_instruction(id: &str) -> Option<&'static str> {
              limitation if it changes how a risk should be read. Take the acquirer's \
              skeptical side while still crediting a genuinely clean signal where the data \
              supports it.",
+        ),
+        AUTHORSHIP_SUMMARY => Some(
+            "Write ONE high-level paragraph on the codebase's health from an authorship \
+             perspective, grounded strictly in the bus factor, ownership concentration, \
+             single-author subsystems, and trailing-12-month trajectory data provided. This \
+             is a narrative of development trajectory over the past year, not a data dump — \
+             do not restate every number in the table; characterise the trend and what it \
+             means for continuity risk. Take the acquirer's skeptical side on key-person \
+             risk while crediting genuine strengths (e.g. a widening contributor base) the \
+             data supports, evenhandedly.",
         ),
         _ => None,
     }

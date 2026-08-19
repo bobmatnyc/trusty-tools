@@ -17,6 +17,7 @@ fn repo(metrics: Option<AnalyzeMetrics>) -> RepositoryReport {
         local_path: None,
         scan: None,
         metrics,
+        authorship: None,
     }
 }
 

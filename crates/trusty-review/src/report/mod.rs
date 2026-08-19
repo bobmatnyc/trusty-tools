@@ -14,6 +14,8 @@
 //! lives in `crates/trusty-review/tests/report_e2e.rs`.
 
 pub mod analyze_adapter;
+// #5453/#6004: the tga-authored authorship artifact, receiving half.
+pub mod authorship;
 pub mod benchmark;
 // #6004: exec-summary jump-list — post-render anchor-link injection.
 pub mod contents_links;
@@ -31,6 +33,8 @@ pub mod polish;
 pub mod provenance;
 pub mod redact;
 pub mod reporter;
+// #5453/#6004: Authorship & Key-Person Risk deterministic fill.
+pub mod reporter_authorship;
 // #6004: Code Quality & Architecture / Security Posture deterministic fill.
 pub mod reporter_codesec;
 // #6004: engagement-wide Key Facts block.

@@ -246,6 +246,29 @@ evidence the codebase has been screened for exploitable vulnerabilities.*
 
 {{performance_assessment_note}}
 
+## Authorship & Key-Person Risk
+
+<!-- #5453/#6004: derivation lives in tga, never here (#5468 ruling). Key-man
+     risks render IN this section — bus factor, ownership concentration,
+     single-author subsystems — never scattered across Top Risks. Five known
+     data traps (issue #5453): bot commits and merge commits are excluded by
+     the derivation; squash-merge attribution, missing .mailmap identity
+     merging, and vendored-path exclusion are NOT corrected for and are
+     caveated below verbatim. A repository whose artifact failed to load
+     contributes no row here — its own gap line names the omission under
+     Gaps & Caveats, never a silently absent section. -->
+
+{{authorship_summary_paragraph}}
+
+<!-- High-level trailing-12-month development-trajectory narrative — codebase
+     health from an authorship perspective, not a data dump. -->
+
+| Application | Distinct authors | Bus factor | Top author share | Single-author subsystems | 12-mo trajectory |
+|---|---|---|---|---|---|<!-- BEGIN authorship_row -->
+| {{au_app_name}} | {{au_distinct_authors}} | {{au_bus_factor}} | {{au_top_author_share}} | {{au_single_author_subsystems}} | {{au_trajectory}} |<!-- END authorship_row -->
+
+{{au_caveats}}
+
 ## 6. Risk Registers
 
 ### 6.1 Open-Source / CVE Exposure

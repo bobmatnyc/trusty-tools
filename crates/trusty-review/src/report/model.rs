@@ -183,6 +183,19 @@ pub struct RepositoryReport {
     pub scan: Option<RepoScan>,
     /// Pre-produced trusty-analyze metrics for this repo, if a path was given.
     pub metrics: Option<AnalyzeMetrics>,
+    /// tga's authorship/bus-factor/trajectory figures for this repo, if a path
+    /// was given AND it loaded (#5453/#6004).
+    ///
+    /// Why: unlike `metrics`, a declared-but-unreadable authorship artifact
+    /// does NOT fail the build — [`ReportModel::build`] converts the load
+    /// failure into a named line on [`ReportModel::gaps`] instead, so one
+    /// repository's authorship problem never aborts a report that has real
+    /// data for every other section. `None` therefore means either "no path
+    /// declared" or "declared but failed to load"; the gap line (present only
+    /// in the second case) is what a reader relies on to tell them apart.
+    /// Test: `model_tests::{authorship_loads_when_declared,
+    /// unreadable_authorship_is_a_named_gap_not_a_build_failure}`.
+    pub authorship: Option<super::authorship::AuthorshipSummary>,
 }
 
 impl ReportModel {
@@ -215,8 +228,14 @@ impl ReportModel {
         };
 
         let mut repositories = Vec::with_capacity(manifest.repositories.len());
+        // #5453/#6004: authorship-load failures are fail-open — collected here
+        // rather than propagated, so one repository's unreadable artifact
+        // never aborts a report with real data for every other section.
+        let mut gaps = manifest.report.gaps.clone();
         for entry in &manifest.repositories {
-            repositories.push(build_repository(entry, manifest_dir, &secrets)?);
+            let (repo, authorship_gap) = build_repository(entry, manifest_dir, &secrets)?;
+            gaps.extend(authorship_gap);
+            repositories.push(repo);
         }
 
         Ok(ReportModel {
@@ -233,7 +252,8 @@ impl ReportModel {
             repositories,
             // #5239: the manifest author's own unassessed areas travel with the
             // report; the analyze pass appends its named gaps to the same list.
-            gaps: manifest.report.gaps.clone(),
+            // #5453/#6004: per-repository authorship-load failures joined in above.
+            gaps,
             synthesis: None,
             benchmark: None,
             investigation: None,
@@ -252,19 +272,23 @@ impl ReportModel {
     }
 }
 
-/// Resolve one manifest entry into a [`RepositoryReport`].
+/// Resolve one manifest entry into a [`RepositoryReport`], plus any
+/// authorship-load gap line for it (#5453/#6004).
 ///
 /// Why: keeps `ReportModel::build` readable by isolating per-entry enrichment.
 /// What: records source kind/origin, gathers git info for local checkouts, and
 /// loads metrics (relative paths resolved against `manifest_dir`), scrubbing the
-/// loaded metrics against `secrets` before they reach the model (#5323).
+/// loaded metrics against `secrets` before they reach the model (#5323). A
+/// declared `authorship` path that fails to load returns `(repo, Some(gap))`
+/// rather than an `Err` — the fail-open contract [`ReportModel::build`]'s doc
+/// comment states.
 /// Test: exercised by `build_model_from_manifest` and
 /// `declared_metrics_file_findings_are_scrubbed`.
 fn build_repository(
     entry: &RepositoryEntry,
     manifest_dir: &Path,
     secrets: &[String],
-) -> Result<RepositoryReport> {
+) -> Result<(RepositoryReport, Option<String>)> {
     let (source_kind, git_info, scan, local_path) = match &entry.source {
         RepositorySource::LocalPath { path } => {
             let resolved = resolve(manifest_dir, path);
@@ -289,18 +313,39 @@ fn build_repository(
         None => None,
     };
 
-    Ok(RepositoryReport {
-        name: entry.name.clone(),
-        slug: entry.slug.clone(),
-        source: entry.source.describe(),
-        source_kind: source_kind.to_string(),
-        username: entry.username.clone(),
-        git_ref: entry.git_ref.clone(),
-        git_info,
-        local_path,
-        scan,
-        metrics,
-    })
+    // #5453/#6004: fail-open — a declared-but-unreadable authorship artifact
+    // becomes a named gap on THIS repository, never a build failure.
+    let (authorship, authorship_gap) = match &entry.authorship {
+        Some(p) => match super::authorship::load_authorship(&resolve(manifest_dir, p)) {
+            Ok(a) => (Some(a), None),
+            Err(e) => (
+                None,
+                Some(format!(
+                    "Authorship ({}): could not load the authorship artifact ({e}). The report \
+                     states no authorship/key-person signal for this application.",
+                    entry.name
+                )),
+            ),
+        },
+        None => (None, None),
+    };
+
+    Ok((
+        RepositoryReport {
+            name: entry.name.clone(),
+            slug: entry.slug.clone(),
+            source: entry.source.describe(),
+            source_kind: source_kind.to_string(),
+            username: entry.username.clone(),
+            git_ref: entry.git_ref.clone(),
+            git_info,
+            local_path,
+            scan,
+            metrics,
+            authorship,
+        },
+        authorship_gap,
+    ))
 }
 
 /// Resolve a possibly-relative path against the manifest directory.
@@ -316,3 +361,7 @@ fn resolve(manifest_dir: &Path, path: &Path) -> std::path::PathBuf {
         manifest_dir.join(path)
     }
 }
+
+#[cfg(test)]
+#[path = "model_tests.rs"]
+mod model_tests;

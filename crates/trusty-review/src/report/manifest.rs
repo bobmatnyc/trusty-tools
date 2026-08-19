@@ -161,6 +161,12 @@ pub struct RepositoryEntry {
     pub git_ref: Option<String>,
     /// Optional path to a trusty-analyze metrics JSON file for this repo.
     pub metrics: Option<PathBuf>,
+    /// Optional path to this repository's authorship artifact tga writes
+    /// (#5453/#6004) — mirrors `metrics`'s "declared path, resolved against
+    /// the manifest directory" shape, but a separate field: `metrics`'s
+    /// "declared metrics always win" precedence must not gate the
+    /// authorship load too.
+    pub authorship: Option<PathBuf>,
 }
 
 /// The origin of a repository — a local checkout or a declared remote.
@@ -233,6 +239,8 @@ struct RawRepositoryEntry {
     git_ref: Option<String>,
     #[serde(default)]
     metrics: Option<PathBuf>,
+    #[serde(default)]
+    authorship: Option<PathBuf>,
 }
 
 // ─── Loader ─────────────────────────────────────────────────────────────────
@@ -313,6 +321,7 @@ fn validate(raw: RawManifest) -> std::result::Result<Manifest, ManifestError> {
             username: entry.username,
             git_ref: entry.git_ref,
             metrics: entry.metrics,
+            authorship: entry.authorship,
         });
     }
 

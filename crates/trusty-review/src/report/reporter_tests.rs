@@ -305,6 +305,7 @@ fn reporter_injects_synthesis_prose() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         executive_summary: Some("A grounded acquirer-relevant summary.".to_string()),
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -365,6 +366,7 @@ fn reporter_appends_guardrail_rejection_note() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         notes: vec![
             "synthesis: rejected (unverified figure) in executive summary: 9999".to_string(),
         ],
@@ -513,6 +515,7 @@ fn evidence_renders_as_fenced_block() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -567,6 +570,7 @@ fn evidence_with_blank_line_fences_cleanly() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -624,6 +628,7 @@ fn evidence_containing_triple_backticks_uses_longer_fence() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -700,6 +705,7 @@ fn evidence_with_adjacent_hash_comment_lines_renders_byte_identical() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -765,6 +771,7 @@ fn evidence_with_blank_line_full_render_has_no_fenced_splice() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -941,6 +948,7 @@ fn reporter_merges_synthesis_prose_onto_deterministic_finding() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -1354,6 +1362,7 @@ fn reporter_tags_top_risks_as_inferred() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         executive_summary: Some("Summary.".to_string()),
         top_risks: vec![RiskRow {
             description: "Unpatched dependency chain".to_string(),
@@ -1401,6 +1410,7 @@ fn reporter_renders_all_top_risk_rows() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         executive_summary: Some("Summary.".to_string()),
         top_risks: (1..=5).map(risk).collect(),
         findings: vec![],
@@ -1453,6 +1463,7 @@ fn reporter_collapses_empty_top_risks() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         executive_summary: Some("Summary.".to_string()),
         top_risks: vec![],
         findings: vec![],
@@ -1494,6 +1505,7 @@ fn reporter_renders_defaulted_top_risk_severity_honestly() {
         executive_summary: Some("Summary.".to_string()),
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         top_risks: vec![RiskRow {
             description: "Plaintext secrets at rest".to_string(),
             severity: String::new(),
@@ -1940,6 +1952,7 @@ fn reporter_prefers_synthesis_over_deterministic_summary() {
     model.synthesis = Some(Synthesis {
         code_quality_summary: None,
         security_summary: None,
+        authorship_summary: None,
         executive_summary: Some("An acquirer-relevant judgement.".to_string()),
         top_risks: vec![RiskRow {
             description: "Credential exposure".to_string(),

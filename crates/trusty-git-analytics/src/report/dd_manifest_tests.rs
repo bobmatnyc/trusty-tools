@@ -61,6 +61,7 @@ fn maps_engagement_metadata() {
         vec![DdRepositoryEntry {
             name: "Northwind Web".to_string(),
             path: PathBuf::from("/src/northwind-web"),
+            authorship: None,
         }]
     );
 
@@ -109,6 +110,35 @@ fn names_fall_back_to_the_directory_basename() {
         .collect();
 
     assert_eq!(names, vec!["northwind-web", "billing", "Ledger Service"]);
+}
+
+/// Why (#5453 review): `commits.repository` is written by
+/// [`crate::collect::git::GitCollector`] and read back by an equality filter
+/// when the per-repo authorship artifact is built. The collector used to derive
+/// the name itself, and its copy disagreed with this one on a configured name
+/// that was blank or whitespace — `Some("  ")` gave the collector `"  "` and the
+/// manifest `"billing"`, so the join matched zero rows and the section rendered
+/// a confident "0 authors, bus factor 0". Both sides call this function now, so
+/// the two agree by construction.
+/// What: pins the blank/whitespace cases the two copies disagreed on.
+/// Test: this test itself.
+#[test]
+fn a_blank_configured_name_falls_back_the_same_way_for_every_caller() {
+    use std::path::Path;
+
+    let path = Path::new("/src/billing");
+    for configured in [None, Some(""), Some("  "), Some("\t")] {
+        assert_eq!(
+            super::repo_name(configured, path),
+            "billing",
+            "a blank configured name must fall back to the basename: {configured:?}"
+        );
+    }
+    assert_eq!(
+        super::repo_name(Some("  Ledger Service  "), path),
+        "Ledger Service",
+        "a configured name is trimmed, not taken verbatim"
+    );
 }
 
 /// Why: repository order is the report's application order; a set that reorders

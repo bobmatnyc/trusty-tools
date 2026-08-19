@@ -77,6 +77,11 @@ pub struct Synthesis {
     /// emitted (#6004). Same guardrail path as `executive_summary`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_summary: Option<String>,
+    /// Verified Authorship & Key-Person Risk narrative, or `None` when
+    /// rejected or never emitted (#5453, #6004). Same guardrail path as
+    /// `executive_summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorship_summary: Option<String>,
     /// Verified top-risk rows (rejected rows are dropped).
     #[serde(default)]
     pub top_risks: Vec<RiskRow>,
@@ -443,6 +448,9 @@ struct RawSynthesis {
     /// #6004: same schema/call/guardrail as `executive_summary`.
     #[serde(default)]
     security_summary: String,
+    /// #5453/#6004: same schema/call/guardrail as `executive_summary`.
+    #[serde(default)]
+    authorship_summary: String,
     #[serde(default)]
     top_risks: Vec<RiskRow>,
     #[serde(default)]
@@ -554,13 +562,14 @@ fn parse_markdown_fallback(text: &str) -> Option<RawSynthesis> {
     }
     Some(RawSynthesis {
         executive_summary: exec,
-        // #6004 fields are never recoverable from this free-text fallback —
-        // reconstructing them from prose would mean inventing content the
-        // model never structured; they stay empty and the guardrail leaves
-        // them absent from `Synthesis`, same honesty-marker path as an
-        // outright-rejected field.
+        // #6004/#5453 fields are never recoverable from this free-text
+        // fallback — reconstructing them from prose would mean inventing
+        // content the model never structured; they stay empty and the
+        // guardrail leaves them absent from `Synthesis`, same honesty-marker
+        // path as an outright-rejected field.
         code_quality_summary: String::new(),
         security_summary: String::new(),
+        authorship_summary: String::new(),
         top_risks: Vec::new(),
         findings: Vec::new(),
     })
@@ -659,6 +668,15 @@ fn apply_guardrail(
                 .push(format!("{REJECTED_NOTE} in security summary: {tok}")),
         }
     }
+    let authorship = raw.authorship_summary.trim();
+    if !authorship.is_empty() {
+        match verify_prose(authorship, allowed) {
+            Ok(()) => out.authorship_summary = Some(authorship.to_string()),
+            Err(tok) => out
+                .notes
+                .push(format!("{REJECTED_NOTE} in authorship summary: {tok}")),
+        }
+    }
 
     // Top-risk rows.
     for (i, r) in raw.top_risks.into_iter().enumerate() {
@@ -701,6 +719,7 @@ fn apply_guardrail(
     if out.executive_summary.is_none()
         && out.code_quality_summary.is_none()
         && out.security_summary.is_none()
+        && out.authorship_summary.is_none()
         && out.top_risks.is_empty()
         && out.findings.is_empty()
     {
