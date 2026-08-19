@@ -72,10 +72,13 @@ pub fn index_id_for(project_root: &Path) -> Option<String> {
 /// Keeping it pure (the pin value is passed in already-read) makes both branches
 /// testable without filesystem I/O.
 /// What: returns `Some(pin)` when `pin` is `Some` and non-empty after trimming;
-/// else the slugified basename of `project_root`; else `None` (root-less path or
-/// a basename that slugifies to empty).
+/// else the slugified basename of `project_root`, clamped to
+/// `PALACE_ID_MAX_LEN` so it still matches what the daemon's format gate
+/// accepts (#2443); else `None` (root-less path or a basename that slugifies to
+/// empty).
 /// Test: `tests::palace_slug_prefers_pin`, `tests::palace_slug_falls_back_to_basename`,
-/// `tests::palace_slug_empty_pin_falls_through`.
+/// `tests::palace_slug_empty_pin_falls_through`,
+/// `tests::palace_slug_from_a_long_basename_is_acceptable`.
 pub fn palace_slug(pin: Option<&str>, project_root: &Path) -> Option<String> {
     if let Some(p) = pin {
         let trimmed = p.trim();
@@ -84,7 +87,7 @@ pub fn palace_slug(pin: Option<&str>, project_root: &Path) -> Option<String> {
         }
     }
     let basename = project_root.file_name()?.to_str()?;
-    let slug = slugify_string(basename);
+    let slug = trusty_common::clamp_palace_id(&slugify_string(basename));
     if slug.is_empty() {
         None
     } else {
@@ -131,6 +134,23 @@ mod tests {
         assert_eq!(slugify_string("repo.git"), "repo");
         assert_eq!(slugify_string("  --weird__name--  "), "weird-name");
         assert_eq!(slugify_string("!!!"), "");
+    }
+
+    /// Why (#2443): `ensure` posts this name to the daemon, whose format gate
+    /// caps a slug at 63 bytes. A long directory basename slugified past that
+    /// limit and the create was refused, so the clamp has to apply here too or
+    /// the controller and the daemon disagree again.
+    /// What: a 90-character basename must still yield an acceptable id.
+    /// Test: This is the test.
+    #[test]
+    fn palace_slug_from_a_long_basename_is_acceptable() {
+        let root = PathBuf::from(format!("/Users/bob/Projects/{}", "long-name-".repeat(9)));
+        let slug = palace_slug(None, &root).expect("a long basename still derives");
+        assert!(
+            trusty_common::palace_id_is_valid(&slug),
+            "derived slug must pass the daemon gate, got {slug:?} ({} bytes)",
+            slug.len()
+        );
     }
 
     /// Why: the index id must be the bare directory basename so it matches

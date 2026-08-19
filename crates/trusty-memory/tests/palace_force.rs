@@ -154,3 +154,53 @@ async fn force_flag_rejects_unsafe_slugs() {
         );
     }
 }
+
+/// This gate accepts every palace id derivation produces (#2443).
+///
+/// Why: the two halves used to state the rule independently — derivation had no
+/// length cap, this gate rejected anything over 63 bytes — so a project under a
+/// long directory or repo name derived an id `palace_create` refused. That is
+/// the call trusty-code's turn recorder makes on its first turn, and its failure
+/// left the recorder fail-open for the life of the project. Asserting the round
+/// trip end to end is what makes the two halves provably agree; the unit tests
+/// in `trusty-common` cannot see this gate.
+/// What: derives an id for each of the three derivation levels — explicit
+/// override, git `owner/repo`, and `parent/dir` — from inputs long enough to
+/// have tripped the old limit, then drives the real `palace_create` handler with
+/// `force: true`, exactly as `ensure_palace` does.
+/// Test: this function.
+#[tokio::test]
+async fn a_derived_palace_id_is_accepted() {
+    let (state, _root, cwd) = fixture();
+    let cwd_str = cwd.path().to_string_lossy().to_string();
+
+    let long = "an-organisation-name-that-goes-on-well-past-any-sensible-limit";
+    let root = std::path::PathBuf::from(format!("/Users/bob/{long}/{long}"));
+    let derived = [
+        trusty_common::derive_palace_id(&root, None, Some(&format!("Override {long}")))
+            .expect("override level derives"),
+        trusty_common::derive_palace_id(
+            &root,
+            Some(&format!("git@github.com:{long}/{long}.git")),
+            None,
+        )
+        .expect("git level derives"),
+        trusty_common::derive_palace_id(&root, None, None).expect("parent/dir level derives"),
+    ];
+
+    for id in derived {
+        let created = dispatch_tool(
+            &state,
+            "palace_create",
+            json!({ "name": id, "force": true, "cwd": cwd_str }),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "the daemon must accept a derived palace id, but rejected {id:?} ({} bytes): {e:#}",
+                id.len()
+            )
+        });
+        assert_eq!(created["palace_id"], id);
+    }
+}

@@ -22,30 +22,33 @@ use super::helpers::{open_palace_handle, resolve_palace};
 /// Why: `force=true` bypasses the project-slug enforcement gate but must not
 /// allow arbitrary strings that could cause path traversal, redb table-name
 /// collisions, or filesystem issues. This guard runs unconditionally.
-/// What: Accepts `[a-z0-9][a-z0-9-]{0,62}` — lowercase letters, digits, and
-/// hyphens; must start with a letter or digit; max 63 characters.
-/// Test: indirectly via `force_flag_rejects_unsafe_slugs` in tools tests.
+///
+/// The rule itself is [`trusty_common::palace_id::palace_id_is_valid`], not a
+/// copy of it. This function used to restate the shape independently, and the
+/// deriving side in `trusty_common::palace_id` stated a different one — it had
+/// no length cap — so a long repo or directory name derived an id this gate
+/// refused, and trusty-code's turn recorder stayed fail-open for that project
+/// (#2443). One statement of the rule is what stops the two drifting again.
+/// What: delegates the accept/reject decision, then names which half failed —
+/// length or character shape — in the error text callers already match on.
+/// Test: `force_flag_rejects_unsafe_slugs`, `a_derived_palace_id_is_accepted`
+/// (both in `tests/palace_force.rs`).
 fn validate_slug_format(slug: &str) -> Result<()> {
-    if slug.is_empty() || slug.len() > 63 {
+    use trusty_common::palace_id::{palace_id_is_valid, PALACE_ID_MAX_LEN};
+
+    if palace_id_is_valid(slug) {
+        return Ok(());
+    }
+    if slug.is_empty() || slug.len() > PALACE_ID_MAX_LEN {
         return Err(anyhow!(
-            "palace slug must be 1–63 characters (got {}): {slug:?}",
+            "palace slug must be 1–{PALACE_ID_MAX_LEN} characters (got {}): {slug:?}",
             slug.len()
         ));
     }
-    let is_safe = slug.chars().enumerate().all(|(i, c)| {
-        if i == 0 {
-            c.is_ascii_lowercase() || c.is_ascii_digit()
-        } else {
-            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
-        }
-    });
-    if !is_safe {
-        return Err(anyhow!(
-            "palace slug must match [a-z0-9][a-z0-9-]{{0,62}} \
-             (lowercase letters, digits, hyphens only): {slug:?}"
-        ));
-    }
-    Ok(())
+    Err(anyhow!(
+        "palace slug must match [a-z0-9][a-z0-9-]{{0,62}} \
+         (lowercase letters, digits, hyphens only): {slug:?}"
+    ))
 }
 
 pub(crate) async fn handle_palace_create(state: &AppState, args: Value) -> Result<Value> {

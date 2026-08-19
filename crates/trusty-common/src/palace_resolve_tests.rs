@@ -265,6 +265,50 @@ fn blank_env_override_falls_through_to_pin() {
     assert_eq!(got.source, PalaceSource::PinFile);
 }
 
+/// Why (#2443): this level slugifies the variable itself rather than going
+/// through the pure core, so it was the one derived id with no length bound —
+/// an over-long `TRUSTY_MEMORY_PALACE` reached `palace_create` and was rejected,
+/// leaving the caller's sink dead. Every level must produce an id the daemon's
+/// gate accepts.
+#[test]
+#[serial_test::serial]
+fn an_over_long_env_override_still_resolves_to_an_acceptable_id() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("proj");
+    fs::create_dir_all(root.join(".git")).unwrap();
+
+    let _guard = EnvGuard::set(&"Very_Long Operator Palace Name ".repeat(6));
+    let got = resolve_palace(&root).expect("resolves");
+    assert_eq!(got.source, PalaceSource::EnvOverride);
+    assert!(
+        crate::palace_id::palace_id_is_valid(&got.id),
+        "override-derived id must pass the daemon gate, got {:?} ({} bytes)",
+        got.id,
+        got.id.len()
+    );
+}
+
+/// Why (#2443): the `parent/dir` fallback is what a project with no remote and
+/// no pin gets, and a long directory name pushed it past the daemon's limit.
+#[test]
+#[serial_test::serial]
+fn a_long_project_dir_resolves_to_an_acceptable_id() {
+    let _guard = EnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp
+        .path()
+        .join("a-project-directory-named-far-past-any-reasonable-length-limit-indeed");
+    fs::create_dir_all(root.join(TRUSTY_TOOLS_DIR)).unwrap();
+
+    let got = resolve_palace(&root).expect("resolves");
+    assert!(
+        crate::palace_id::palace_id_is_valid(&got.id),
+        "parent/dir id must pass the daemon gate, got {:?} ({} bytes)",
+        got.id,
+        got.id.len()
+    );
+}
+
 /// Why: a malformed pin must error even when the env override would have won
 /// anyway. The pin is read before precedence is applied precisely so a broken
 /// pin cannot hide behind a variable that happens to be set today and gone

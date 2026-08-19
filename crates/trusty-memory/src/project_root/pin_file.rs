@@ -70,12 +70,14 @@ pub fn write_project_pin(root: &Path, pin: &ProjectPin) -> Result<PathBuf> {
 ///
 /// Why: the resolution order needs the basename derivation without the
 /// pin-file side effects, and both paths must be testable in isolation.
-/// What: slugifies the last path component of `root`. `None` when it is empty
-/// or slugifies to empty.
+/// What: slugifies the last path component of `root` and clamps it to
+/// `PALACE_ID_MAX_LEN` (#2443 — this is the name `validate_palace_name` tells a
+/// caller to use, so an over-long one named a palace the format gate then
+/// refused). `None` when the basename is empty or slugifies to empty.
 /// Test: `project_slug_at_returns_root_basename_slug`.
 pub fn project_slug_from_basename(root: &Path) -> Option<String> {
     let basename = root.file_name()?.to_str()?;
-    let slug = slugify_string(basename);
+    let slug = trusty_common::palace_id::clamp_palace_id(&slugify_string(basename));
     if slug.is_empty() {
         None
     } else {
