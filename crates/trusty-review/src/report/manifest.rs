@@ -5,9 +5,12 @@
 //! optional per-repo metrics.  Making the schema a typed struct with a
 //! `thiserror` loader means every malformed manifest fails loudly with a
 //! correctable message instead of silently producing an empty report.
-//! What: defines [`Manifest`], [`ReportSection`], [`RepositoryEntry`], and the
-//! [`RepositorySource`] enum, plus [`load_manifest`] which reads TOML, validates
-//! the exactly-one-of `path`/`remote` rule, and returns a resolved `Manifest`.
+//! What: defines [`Manifest`], [`ReportSection`], [`RepositoryEntry`],
+//! [`InspectionPriority`], and the [`RepositorySource`] enum, plus
+//! [`load_manifest`] which reads TOML, validates the exactly-one-of
+//! `path`/`remote` rule, and returns a resolved `Manifest`.  Per-repository
+//! `inspect_priority` (#6078) is the stable interface an external ranker writes
+//! its selection intelligence to — see [`InspectionPriority`].
 //! Test: `manifest_tests.rs` covers both source kinds, mutual-exclusion errors,
 //! the empty-manifest error, orphaned-username handling, and slug derivation.
 
@@ -139,13 +142,51 @@ pub struct ReportSection {
     pub analyze_url: Option<String>,
 }
 
+/// The weight the FIRST unweighted `inspect_priority` entry receives (#6078).
+///
+/// Why: a declared priority list is RANKED — entry 0 must be inspected before
+/// entry 1 — but the selection sort breaks weight ties by path, which would
+/// scramble that order. Giving entry `i` the weight `BASE - i` preserves the
+/// declared order exactly for the first 1000 entries and floors the rest at 1,
+/// where they still outrank every heuristic-only file.
+/// What: also the scale an explicit `weight` is written on; higher is inspected
+/// first.
+/// Test: `manifest_tests::inspect_priority_weights_follow_declared_rank`.
+const PRIORITY_BASE_WEIGHT: u32 = 1000;
+
+/// One manifest-declared inspection priority — THE interface external selection
+/// intelligence writes to (#6078, owner ruling 2026-08-19).
+///
+/// Why: `select_files`'s own path-name heuristics are guesses. A tool that has
+/// already ranked a repository by complexity, churn, or search relevance knows
+/// better, and that knowledge must arrive through the manifest rather than
+/// through trusty-review's code — so tuning what gets inspected never rebuilds
+/// this crate. `trusty-audit` is the intended writer; it computes the ranking
+/// and emits it here.
+/// What: `path` is repo-relative and matched against the tracked-file list;
+/// `weight` orders the priorities among themselves. Every priority outranks
+/// every heuristic-only file whatever its weight, and the file/byte budget
+/// still bounds what is actually read. A path matching no tracked file is
+/// inert — it neither errors nor displaces anything.
+/// Test: `manifest_tests::{parse_inspect_priority_shapes,
+/// inspect_priority_weights_follow_declared_rank}`;
+/// `select_tests::manifest_priority_outranks_heuristics`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InspectionPriority {
+    /// Repo-relative path to inspect ahead of the heuristic ranking.
+    pub path: String,
+    /// Relative ordering weight among the priorities; higher goes first.
+    pub weight: u32,
+}
+
 /// One validated repository entry mapping to a single per-application block.
 ///
 /// Why: each entry becomes exactly one `per_application` section in the rendered
 /// report; the renderer iterates these in declared order.
 /// What: `name`/`slug` identify the application; `source` is the validated
 /// local-or-remote origin; `username` and `git_ref` are optional access /
-/// attribution hints; `metrics` optionally points at a trusty-analyze JSON file.
+/// attribution hints; `metrics` optionally points at a trusty-analyze JSON file;
+/// `inspect_priority` carries the external selection ranking (#6078).
 /// Test: `manifest_tests.rs::parse_local_path_entry`, `parse_remote_entry`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RepositoryEntry {
@@ -167,6 +208,10 @@ pub struct RepositoryEntry {
     /// "declared metrics always win" precedence must not gate the
     /// authorship load too.
     pub authorship: Option<PathBuf>,
+    /// Ranked repo-relative paths the investigation pass must inspect first
+    /// (#6078). Empty — the default — leaves selection byte-identical to a
+    /// manifest without the key. See [`InspectionPriority`].
+    pub inspect_priority: Vec<InspectionPriority>,
 }
 
 /// The origin of a repository — a local checkout or a declared remote.
@@ -241,6 +286,53 @@ struct RawRepositoryEntry {
     metrics: Option<PathBuf>,
     #[serde(default)]
     authorship: Option<PathBuf>,
+    /// #6078: `inspect_priority = ["src/a.rs", { path = "src/b.rs", weight = 900 }]`
+    #[serde(default)]
+    inspect_priority: Vec<RawInspectionPriority>,
+}
+
+/// The two spellings one `inspect_priority` entry may take in TOML (#6078).
+///
+/// Why: a hand-written manifest wants a bare path list and takes its ranking
+/// from the declared order; a generator wants to state the weight it computed.
+/// Accepting both keeps the hand-written form short without a second key.
+/// What: a bare string, or a table with `path` and an optional `weight`.
+/// Test: `manifest_tests::parse_inspect_priority_shapes`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawInspectionPriority {
+    /// A bare repo-relative path; its weight comes from its declared position.
+    Path(String),
+    /// A path with an optional explicit weight overriding the positional one.
+    Weighted {
+        /// Repo-relative path to inspect first.
+        path: String,
+        /// Explicit ordering weight; absent falls back to the position.
+        #[serde(default)]
+        weight: Option<u32>,
+    },
+}
+
+impl RawInspectionPriority {
+    /// Resolve one raw entry into its validated form, given its declared index.
+    ///
+    /// An absent `weight` becomes [`PRIORITY_BASE_WEIGHT`] minus the index (min
+    /// 1), which is what preserves the declared rank through the selection sort.
+    fn resolve(self, index: usize) -> InspectionPriority {
+        let positional = PRIORITY_BASE_WEIGHT
+            .saturating_sub(u32::try_from(index).unwrap_or(u32::MAX))
+            .max(1);
+        match self {
+            RawInspectionPriority::Path(path) => InspectionPriority {
+                path,
+                weight: positional,
+            },
+            RawInspectionPriority::Weighted { path, weight } => InspectionPriority {
+                path,
+                weight: weight.unwrap_or(positional),
+            },
+        }
+    }
 }
 
 // ─── Loader ─────────────────────────────────────────────────────────────────
@@ -314,6 +406,14 @@ fn validate(raw: RawManifest) -> std::result::Result<Manifest, ManifestError> {
         }
 
         let slug = entry.slug.unwrap_or_else(|| slugify(&entry.name));
+        // #6078: the declared order IS the ranking, so resolve each entry's
+        // weight from its index before the ordering is lost.
+        let inspect_priority = entry
+            .inspect_priority
+            .into_iter()
+            .enumerate()
+            .map(|(i, raw)| raw.resolve(i))
+            .collect();
         repositories.push(RepositoryEntry {
             name: entry.name,
             slug,
@@ -322,6 +422,7 @@ fn validate(raw: RawManifest) -> std::result::Result<Manifest, ManifestError> {
             git_ref: entry.git_ref,
             metrics: entry.metrics,
             authorship: entry.authorship,
+            inspect_priority,
         });
     }
 

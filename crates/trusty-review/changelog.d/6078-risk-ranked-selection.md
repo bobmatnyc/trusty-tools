@@ -1,0 +1,4 @@
+Added
+- Report manifests may declare a per-repository `inspect_priority` list — ranked repo-relative paths, optionally with an explicit `weight` — that the DD-report investigation inspects ahead of its own path-name heuristics, still bounded by the same file/byte budget. This is the interface an external ranker (trusty-audit) writes its selection intelligence to, so tuning what gets inspected no longer changes trusty-review. Absent the key, selection is byte-identical to before.
+- File selection now folds in the trusty-analyze findings already loaded for a repository: a file a diagnostic or refactor suggestion names outranks an otherwise-equal file the heuristics cannot tell apart.
+- The Investigation Coverage line and the synthesis-prompt coverage summary state the examined share as a percentage alongside the raw counts.

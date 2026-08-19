@@ -97,7 +97,11 @@ fn coverage_section_states_examined_and_rejected() {
     };
     let out = coverage_section(&investigation);
     assert!(out.contains("## Investigation Coverage"));
-    assert!(out.contains("files examined: 12 of 200"));
+    // #6078: the percentage is part of this line, not a new section.
+    assert!(
+        out.contains("files examined: 12 of 200 tracked (6.0% coverage, 188 skipped)"),
+        "coverage line missing the percentage: {out}"
+    );
     assert!(out.contains("NOT investigated: scalability"));
     assert!(out.contains("2 finding(s) rejected (unverifiable evidence)"));
     assert!(out.contains("verified evidence-backed findings: 1"));
@@ -132,9 +136,24 @@ fn coverage_prompt_summary_lists_gaps() {
         )],
     };
     let summary = investigation.coverage_prompt_summary();
-    assert!(summary.contains("examined 12 of 200 files"));
+    // #6078: the exec-summary surface carries the SAME figure as the section.
+    assert!(
+        summary.contains("examined 12 of 200 files (6.0%)"),
+        "prompt summary missing the percentage: {summary}"
+    );
     assert!(summary.contains("not investigated: scalability"));
     assert!(summary.contains("Synthesise the executive summary FROM those findings"));
+}
+
+/// Why: a repository with nothing tracked would divide by zero; `0.0` is the
+/// correct reading (nothing was examined) and must not become `NaN` on the page.
+/// What: `coverage_pct` on a zero denominator, and the rounding of a third.
+/// Test: this test itself.
+#[test]
+fn coverage_percentage_handles_empty_repo() {
+    assert_eq!(coverage_pct(0, 0), "0.0");
+    assert_eq!(coverage_pct(1, 3), "33.3");
+    assert_eq!(coverage_pct(200, 200), "100.0");
 }
 
 /// Why: no dependencies must render an explicit empty note, not a broken table.

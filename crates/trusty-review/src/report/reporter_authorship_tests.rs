@@ -15,6 +15,7 @@ fn repo(authorship: Option<AuthorshipSummary>) -> RepositoryReport {
         scan: None,
         metrics: None,
         authorship,
+        inspect_priority: Vec::new(),
     }
 }
 

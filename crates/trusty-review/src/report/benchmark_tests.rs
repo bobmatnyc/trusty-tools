@@ -90,6 +90,7 @@ fn repo(slug: &str, m: Option<AnalyzeMetrics>) -> RepositoryReport {
         scan: None,
         metrics: m,
         authorship: None,
+        inspect_priority: Vec::new(),
     }
 }
 

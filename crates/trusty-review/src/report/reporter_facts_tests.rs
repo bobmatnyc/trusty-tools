@@ -22,6 +22,7 @@ fn repo_with(metrics: Option<AnalyzeMetrics>, scan: Option<RepoScan>) -> Reposit
         scan,
         metrics,
         authorship: None,
+        inspect_priority: Vec::new(),
     }
 }
 

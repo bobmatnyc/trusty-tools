@@ -221,3 +221,68 @@ fn parse_ticketing_path() {
         "absent key defaults to None, which renders the section as unassessed"
     );
 }
+
+/// Why: `inspect_priority` is the interface trusty-audit writes its selection
+/// ranking to, and it must accept both a bare path list (hand-written) and a
+/// weighted table (generated) without a second key.
+/// What: parses a mixed list and asserts each entry's path and weight.
+/// Test: this test itself.
+#[test]
+fn parse_inspect_priority_shapes() {
+    let toml = r#"
+        [report]
+        title = "Acme DD"
+
+        [[repositories]]
+        name = "Website"
+        path = "/tmp/acme-web"
+        inspect_priority = [
+            "src/auth/login.rs",
+            { path = "src/billing.rs", weight = 5000 },
+            { path = "src/queue.rs" },
+        ]
+    "#;
+    let m = parse(toml).expect("parse ok");
+    let p = &m.repositories[0].inspect_priority;
+    assert_eq!(p.len(), 3);
+    assert_eq!(p[0].path, "src/auth/login.rs");
+    assert_eq!(p[1].path, "src/billing.rs");
+    assert_eq!(
+        p[1].weight, 5000,
+        "an explicit weight wins over the position"
+    );
+    assert_eq!(p[2].path, "src/queue.rs");
+}
+
+/// Why: the declared order IS the ranking, so an unweighted list must come out
+/// strictly descending — otherwise the selection sort breaks ties by path and
+/// scrambles what the ranker asked for.
+/// What: three bare paths get 1000/999/998; an absent key yields an empty list,
+/// which is what keeps selection byte-identical to a pre-#6078 manifest.
+/// Test: this test itself.
+#[test]
+fn inspect_priority_weights_follow_declared_rank() {
+    let toml = r#"
+        [report]
+        title = "Acme DD"
+
+        [[repositories]]
+        name = "Website"
+        path = "/tmp/acme-web"
+        inspect_priority = ["c.rs", "b.rs", "a.rs"]
+    "#;
+    let m = parse(toml).expect("parse ok");
+    let weights: Vec<u32> = m.repositories[0]
+        .inspect_priority
+        .iter()
+        .map(|p| p.weight)
+        .collect();
+    assert_eq!(weights, vec![1000, 999, 998]);
+
+    let none = parse("[report]\ntitle = \"T\"\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n")
+        .expect("parses");
+    assert!(
+        none.repositories[0].inspect_priority.is_empty(),
+        "absent key must leave selection byte-identical to a pre-#6078 manifest"
+    );
+}
