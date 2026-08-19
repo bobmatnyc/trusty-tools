@@ -62,9 +62,12 @@ g() { git -C "$REPO" "$@"; }
 # Fixture: two crates, a branch that touches only crate-a, and a release on
 # main that changes crate-b's source and CONSUMES its fragments.
 # ---------------------------------------------------------------------------
-mkdir -p "$REPO/scripts"
+mkdir -p "$REPO/scripts/lib"
 cp "$SCRIPT_DIR/check_changelog_fragment.sh" "$REPO/scripts/"
 cp "$SCRIPT_DIR/assemble-changelog.sh" "$REPO/scripts/"
+# #5765: the gate sources its path classification from `scripts/lib/` beside
+# itself, so the library travels with it into the synthetic repo.
+cp "$SCRIPT_DIR/lib/source_class.sh" "$REPO/scripts/lib/"
 
 new_crate() {
   local name="$1" dir="$REPO/crates/$1"

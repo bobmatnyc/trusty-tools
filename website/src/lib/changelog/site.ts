@@ -25,6 +25,14 @@
  * string anywhere below. A green build is therefore itself the evidence that
  * every section is populated.
  *
+ * ONE finding is non-fatal and is logged rather than thrown:
+ * `CHANGELOG-ROOT-RELATIVE-LINK`, a link the build resolved against the
+ * repository root because the changelog's own directory could not resolve it
+ * (#5640). It is accepted because refusing it would take the public site down
+ * over a link shape a fragment author writes naturally, and it is logged
+ * because the alternative is a green build quietly publishing a link to a
+ * document nobody chose.
+ *
  * This runs in Node at BUILD time only. Its output is prerendered into static
  * HTML, so the published page reads no file and opens no connection.
  *
@@ -37,7 +45,13 @@ import path from 'node:path';
 
 import { RELEASED_FLAGSHIPS } from '../site';
 import { GITHUB_REPO, findRepoRoot } from '../docs/repo';
-import { CHANGELOG_CODES, throwIfFailed, type ChangelogFailure } from './errors';
+import {
+	CHANGELOG_CODES,
+	reportWarnings,
+	throwIfFailed,
+	type ChangelogFailure,
+	type ChangelogWarning
+} from './errors';
 import { parseChangelog, type ChangelogRelease } from './parse';
 
 export interface CrateChangelog {
@@ -93,6 +107,7 @@ export function buildChangelogSite(repoRootOverride?: string): ChangelogSite {
 
 	const repoRoot = repoRootOverride ?? findRepoRoot();
 	const failures: ChangelogFailure[] = [];
+	const warnings: ChangelogWarning[] = [];
 	const crates: CrateChangelog[] = [];
 
 	for (const flagship of RELEASED_FLAGSHIPS) {
@@ -104,6 +119,7 @@ export function buildChangelogSite(repoRootOverride?: string): ChangelogSite {
 			existsSync(path.join(repoRoot, relative))
 		);
 		failures.push(...parsed.failures);
+		warnings.push(...parsed.warnings);
 
 		const latest = parsed.releases[0];
 		if (!latest) {
@@ -140,6 +156,9 @@ export function buildChangelogSite(repoRootOverride?: string): ChangelogSite {
 		});
 	}
 
+	// Warnings first: a build that is about to throw should still say what it
+	// accepted on the way, and the log is the only channel either report has.
+	reportWarnings(warnings);
 	throwIfFailed(failures);
 
 	const site: ChangelogSite = { crates, cratesDirUrl: CRATES_DIR_URL };

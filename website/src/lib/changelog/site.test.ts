@@ -199,6 +199,49 @@ describe('the build gates', () => {
 		]);
 	});
 
+	/**
+	 * The non-fatal half of the #5640 fix, end to end. A root-resolved link must
+	 * keep the build green — refusing it is what took the public site down — and
+	 * must reach the build log, because a resolution the build chose on the
+	 * author's behalf that nobody can see is the finding this test exists for.
+	 */
+	it('logs a root-resolved link and still builds', () => {
+		const root = fixture({
+			'trusty-mpm':
+				'## [1.0.0] — 2026-01-01\n\n### Added\n\n- see [ADR-0043](docs/adr/0043-cargo-bin-policy.md)\n'
+		});
+		const adr = path.join(root, 'docs/adr/0043-cargo-bin-policy.md');
+		mkdirSync(path.dirname(adr), { recursive: true });
+		writeFileSync(adr, '# ADR-0043\n');
+
+		const logged: string[] = [];
+		const original = console.warn;
+		console.warn = (...args: unknown[]) => void logged.push(args.join(' '));
+		try {
+			const site = buildChangelogSite(root);
+			expect(site.crates).toHaveLength(RELEASED_FLAGSHIPS.length);
+		} finally {
+			console.warn = original;
+		}
+
+		expect(logged).toHaveLength(1);
+		expect(logged[0]).toContain('WARN CHANGELOG-ROOT-RELATIVE-LINK');
+		expect(logged[0]).toContain('crates/trusty-mpm/CHANGELOG.md');
+		expect(logged[0]).toContain('docs/adr/0043-cargo-bin-policy.md');
+	});
+
+	it('logs nothing when every link resolves beside its changelog', () => {
+		const logged: string[] = [];
+		const original = console.warn;
+		console.warn = (...args: unknown[]) => void logged.push(args.join(' '));
+		try {
+			buildChangelogSite(fixture());
+		} finally {
+			console.warn = original;
+		}
+		expect(logged).toEqual([]);
+	});
+
 	it('does not fail on an unrecognised category, which is hand-written history', () => {
 		const site = buildChangelogSite(
 			fixture({ 'trusty-search': '## [1.0.0] — 2026-01-01\n\n### Highlights\n\n- a\n' })

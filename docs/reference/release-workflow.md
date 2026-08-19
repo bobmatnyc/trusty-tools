@@ -44,6 +44,21 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 > scripts/bump-version.sh trusty-git-analytics minor
 > ```
 >
+> 🔴 **A bump that is NOT a release cut takes `--no-changelog`** (issue #5674).
+> Fragment consumption is correct at a release cut and wrong when the bump lands
+> in the same PR as the source change it accompanies — a `cargo-semver-checks`
+> BREAK forcing one mid-PR, say. Those fragments belong to work still in flight,
+> and eating them makes `scripts/check_changelog_fragment.sh` fail the PR for
+> lacking a fragment the bump just deleted. That happened on PR #5673 and was
+> repaired by hand (commit `879b5fe2`). `--no-changelog` bumps the manifest and
+> syncs `Cargo.lock`, leaves `changelog.d/` untouched, and prints no tag
+> command — the release cut still runs the flagless form and assembles the
+> fragments this run left behind.
+>
+> ```bash
+> scripts/bump-version.sh trusty-review minor --no-changelog
+> ```
+>
 > The `--suggest` auto-bump-from-commit-types enhancement noted in #1322/#1345
 > is intentionally deferred and not yet implemented.
 3. Run `cargo test -p <name>` and `cargo clippy --workspace -- -D warnings`.

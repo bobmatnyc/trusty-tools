@@ -244,7 +244,7 @@ fi
 # ===========================================================================
 if want changelog_fragment; then
   f="$(new_fixture)"
-  install_gate "$f" check_changelog_fragment.sh
+  install_gate "$f" check_changelog_fragment.sh lib
   echo "placeholder" > "$f/README.md"
   git -C "$f" add -A && git -C "$f" commit -qm fixture
   expect_rejects "check_changelog_fragment.sh (0 changed paths)" "$f" \
@@ -260,7 +260,7 @@ fi
 # ===========================================================================
 if want pr_version_bump; then
   f="$(new_fixture)"
-  install_gate "$f" check-pr-version-bump.sh
+  install_gate "$f" check-pr-version-bump.sh lib
   echo "placeholder" > "$f/README.md"
   git -C "$f" add -A && git -C "$f" commit -qm fixture
   expect_rejects "check-pr-version-bump.sh (0 changed paths)" "$f" \
@@ -311,7 +311,7 @@ fi
 # ===========================================================================
 if want changelog_fragment_tool_error; then
   f="$(new_fixture)"
-  install_gate "$f" check_changelog_fragment.sh
+  install_gate "$f" check_changelog_fragment.sh lib
   mkdir -p "$f/crates/demo/src" "$f/scripts"
   echo "placeholder" > "$f/README.md"
   printf '[package]\nname = "demo"\n' > "$f/crates/demo/Cargo.toml"

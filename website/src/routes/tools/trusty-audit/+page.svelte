@@ -161,16 +161,16 @@
 		<h2 class="font-display text-2xl font-bold sm:text-3xl">2 · First run</h2>
 		<p class="mt-4 max-w-3xl text-foundry-secondary">
 			Whether the installer launched it for you or you type <code class="text-sm">trusty-audit</code
-			> by itself, a bare invocation is a status check, not a sweep. It reports the working
-			directory it will use, that no audit has run there yet, that none of the four pinned tools are
-			installed, and reminds you to register what to audit. It asks for nothing and downloads
-			nothing yet — that starts with the next two steps.
+			> by itself, a bare invocation is a status check, not a sweep. It reports the working directory
+			it will use, that no audit has run there yet, that none of the four pinned tools are installed,
+			and reminds you to register what to audit. It asks for nothing and downloads nothing yet — that
+			starts with the next two steps.
 		</p>
 		<p class="mt-4 max-w-3xl text-foundry-secondary">
-			It does not need <code class="text-sm">engagement.toml</code> to show you this — only installing
-			tools and running the audit do. Its reminder to register targets does not go away once you have
-			registered some; check <code class="text-sm">trusty-audit targets</code> for the registry itself,
-			not this status line.
+			It does not need <code class="text-sm">engagement.toml</code> to show you this — only
+			installing tools and running the audit do. Its reminder to register targets does not go away
+			once you have registered some; check <code class="text-sm">trusty-audit targets</code> for the registry
+			itself, not this status line.
 		</p>
 	</div>
 
@@ -212,12 +212,12 @@ trusty-audit targets</pre>
 			targets never touch it. The audit renders its report through a language model, so before the
 			sweep can start it resolves a key: an <code class="text-sm">OPENROUTER_API_KEY</code> already
 			exported in your shell wins; otherwise a key already in
-			<code class="text-sm">engagement.toml</code> — your auditor may have put theirs there — is used;
-			otherwise trusty-audit asks at the terminal, with the typing hidden, and asks twice so a mistyped
-			key is caught immediately. Either way the run prints which of the three it used. What you type at
-			the prompt is written back into <code class="text-sm">engagement.toml</code>, readable only by
-			your account, and is not asked for again. The key never reaches a log line, an error message, or
-			the package you send back.
+			<code class="text-sm">engagement.toml</code> — your auditor may have put theirs there — is
+			used; otherwise trusty-audit asks at the terminal, with the typing hidden, and asks twice so a
+			mistyped key is caught immediately. Either way the run prints which of the three it used. What
+			you type at the prompt is written back into <code class="text-sm">engagement.toml</code>,
+			readable only by your account, and is not asked for again. The key never reaches a log line,
+			an error message, or the package you send back.
 		</p>
 		<p class="mt-4 max-w-3xl text-foundry-secondary">
 			If there is no terminal to ask on — a script, a CI job — it refuses and names both ways to

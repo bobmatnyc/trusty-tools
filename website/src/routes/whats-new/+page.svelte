@@ -171,8 +171,8 @@
 	<div class="card">
 		<h2 class="font-display text-xl font-semibold">The rest of the workspace</h2>
 		<p class="mt-2 text-sm text-foundry-secondary">
-			Only the flagship crates are published here. Every other crate keeps its changelog
-			alongside its source — see
+			Only the flagship crates are published here. Every other crate keeps its changelog alongside
+			its source — see
 			<a
 				href={data.cratesDirUrl}
 				rel="noreferrer noopener"

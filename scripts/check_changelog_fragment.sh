@@ -18,7 +18,11 @@
 #   only that a NESTED one (`crates/trusty-audit/ui/src-tauri/src/main.rs`,
 #   `crates/trusty-agents/ui/src/App.svelte`) is now attributed to the crate that
 #   ships it instead of being silently dropped. See ATTRIBUTION BY STRUCTURE.
-#   Accepted evidence, per crate:
+#   Test files under src/** are EXEMPT, and what counts as one is
+#   `scripts/lib/source_class.sh` — shared with
+#   `scripts/check-pr-version-bump.sh`, which reads the same definition and
+#   deliberately does not apply the exemption (#5765; the ruling is in that
+#   file). Accepted evidence, per crate:
 #     1. an ADDED-or-MODIFIED `crates/<crate>/changelog.d/<name>.md` fragment
 #        that the release assembler ACCEPTS                        (the rule)
 #     2. a `crates/<crate>/CHANGELOG.md` edit that adds a bullet   (TRANSITIONAL)
@@ -140,8 +144,9 @@
 #   scripts/check_changelog_attribution_selftest.sh replays the #4576 shape:
 #   a nested crate source path must be attributed, not dropped, and an
 #   unattributable one must fail the gate. Fragment validation is covered by
-#   scripts/assemble_changelog_selftest.sh and the scan floor by
-#   scripts/check_scan_floor_selftest.sh.
+#   scripts/assemble_changelog_selftest.sh, the scan floor by
+#   scripts/check_scan_floor_selftest.sh, and the shared test-file
+#   classification by scripts/check_source_class_selftest.sh.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   only — `git`, `grep`, `sed`, `sort`.
@@ -149,6 +154,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+# The shared source/test path classification (#5765). Sourced from this script's
+# OWN directory, not from $REPO_ROOT, so a copy of the gate run out of tree
+# picks up the library beside it rather than a different checkout's.
+# shellcheck source=lib/source_class.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/source_class.sh"
 cd "$REPO_ROOT"
 
 BASE="${CHANGELOG_GATE_BASE:-origin/main}"
@@ -286,22 +296,14 @@ else
   TRANSITIONAL=1
 fi
 
-# Why: a test-only edit under src/** has no user-visible change to describe.
-# Classification is copied from check_line_cap.sh so the two gates agree on what
-# "a test file" means.
-# What: returns 0 when $1 is a test/benchmark path.
-is_test_path() {
-  local path="$1" base
-  base="$(basename "$path")"
-  [[ "$base" == "tests.rs" ]] && return 0
-  case "$base" in
-    *_test.rs | *_tests.rs) return 0 ;;
-  esac
-  case "$path" in
-    */tests/* | */benches/* | */testdata/*) return 0 ;;
-  esac
-  return 1
-}
+# #5765: `is_test_path` used to be a private copy here, and
+# scripts/check-pr-version-bump.sh carried a different match with no test arm at
+# all — so the two gates disagreed about the same path and nothing recorded
+# which was meant to. Both now read the definition from
+# scripts/lib/source_class.sh, whose THE RULING section states why this gate
+# EXEMPTS a test file (a test-only edit has no user-visible change to describe)
+# while the version-bump gate counts one as source (a crates.io tarball ships
+# it). Sourced above with the rest of this gate's setup.
 
 # #4576: attribute a source path to its crate by STRUCTURE, not by path depth.
 #
