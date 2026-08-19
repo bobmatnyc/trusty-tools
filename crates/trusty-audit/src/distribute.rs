@@ -125,6 +125,12 @@ pub struct InstallPackage {
     /// Whether the credential came from the environment rather than the
     /// template. Recorded so the operator can see which one they shipped.
     pub key_from_environment: bool,
+    /// Board-credential fields the template held that did NOT ship (#5861).
+    ///
+    /// Empty for a template that names no board. Reported rather than silent:
+    /// an auditor whose template carries `[boards.jira]` would otherwise assume
+    /// the recipient can collect that board on the first run.
+    pub dropped_board_credentials: Vec<String>,
 }
 
 /// The host this build of the packaging binary targets.
@@ -285,7 +291,10 @@ pub fn assemble(
         })?;
     let template = EngagementConfig::from_toml(&template_text, template_path)?;
     let (key, key_from_environment) = resolve_key(supplied_key, &template, template_path)?;
-    let config_text = config::generate(&template_text, &key, template_path)?;
+    // #5861: this config belongs to an engagement the template does not, so the
+    // template's board credentials — the previous CLIENT's — never travel.
+    let (config_text, dropped_board_credentials) =
+        config::generate_for_new_engagement(&template_text, &key, template_path)?;
 
     let platform = host_platform();
     let readme = render_readme(&template, &platform, options.binary.is_some());
@@ -318,6 +327,7 @@ pub fn assemble(
         packaged_bytes,
         platform,
         key_from_environment,
+        dropped_board_credentials,
     })
 }
 
@@ -876,6 +886,81 @@ trusty-review = "0.16.0"
             .expect("the generated config loads on the recipient's machine");
         assert_eq!(loaded.openrouter_key.expose(), "sk-or-v1-template-key");
         assert_eq!(loaded.tools.tga.version(), "2.9.4");
+    }
+
+    /// An auditor's template as it looks after a previous engagement: the last
+    /// client's board credentials are still in it.
+    const TEMPLATE_WITH_STALE_BOARDS: &str = r#"
+openrouter_key = "sk-or-v1-template-key"
+instructions = "Assess the last 52 weeks."
+client = "Acme"
+
+[tools]
+tga = "2.9.4"
+trusty-search = "0.4.0"
+trusty-analyze = "0.9.2"
+trusty-review = "0.16.0"
+
+[boards.jira]
+url = "https://client-a.atlassian.net"
+email = "auditor@client-a.example"
+token = "jira-token-client-a"
+
+[boards.linear]
+api_key = "lin_api_client_a"
+"#;
+
+    /// 🔴 #5861: the zip that goes to client B must not carry client A's board
+    /// credentials.
+    ///
+    /// This is the leak end to end, through the file that actually ships.
+    /// Against `6d937ba66` `config::generate` copied the template wholesale, so
+    /// `engagement.toml` inside the package held `jira-token-client-a` — and
+    /// that file is deliberately readable, which is the whole transparency
+    /// premise of the handoff. `crate::package`'s outbound credential scan
+    /// cannot catch it: that guards the package coming BACK.
+    #[test]
+    fn a_reused_template_never_ships_the_previous_clients_board_credentials() {
+        let fixture = Fixture::new(TEMPLATE_WITH_STALE_BOARDS);
+        let package = fixture.assemble().expect("assembles");
+
+        let text = member(&package.path, "trusty-audit/engagement.toml");
+        for secret in [
+            "jira-token-client-a",
+            "lin_api_client_a",
+            "client-a.atlassian.net",
+            "auditor@client-a.example",
+        ] {
+            assert!(
+                !text.contains(secret),
+                "the package carries the previous client's {secret}: {text}"
+            );
+        }
+        assert_eq!(
+            package.dropped_board_credentials,
+            ["boards.jira", "boards.linear"]
+        );
+
+        // Nothing else about the engagement changed, and the config still runs.
+        let loaded =
+            EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("loads");
+        assert_eq!(loaded.openrouter_key.expose(), "sk-or-v1-template-key");
+        assert_eq!(loaded.tools.tga.version(), "2.9.4");
+        assert!(loaded.boards.jira.is_none());
+        assert!(loaded.boards.linear.is_none());
+    }
+
+    /// A template that names no board reports nothing dropped, so the operator
+    /// only sees the line when it is about their template.
+    #[test]
+    fn a_template_with_no_boards_reports_nothing_dropped() {
+        let fixture = Fixture::new(TEMPLATE);
+        let package = fixture.assemble().expect("assembles");
+        assert!(
+            package.dropped_board_credentials.is_empty(),
+            "{:?}",
+            package.dropped_board_credentials
+        );
     }
 
     #[test]
