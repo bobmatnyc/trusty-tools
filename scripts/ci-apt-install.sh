@@ -24,11 +24,21 @@
 #     CI_APT_ATTEMPTS=3          attempts per phase
 #     CI_APT_UPDATE_TIMEOUT_S=120  per-attempt ceiling for `apt-get update`
 #     CI_APT_INSTALL_TIMEOUT_S=420 per-attempt ceiling for `apt-get install`
-#     CI_APT_RETRY_DELAY_S=5     pause between attempts
+#     CI_APT_RETRY_DELAY_S=5     backoff unit; attempt N waits N*this seconds
 #     CI_APT_TOTAL_BUDGET_S=600  hard ceiling across both phases
+#     CI_APT_DPKG_REPAIR_TIMEOUT_S=120  ceiling for the between-attempt repair
 #
 #   The total budget is the number that answers the issue: worst case is ten
-#   minutes, not thirty, and the ten minutes are spent visibly.
+#   minutes, not thirty, and the ten minutes are spent visibly. Each attempt's
+#   ceiling is clamped to what is left of that budget, so the budget is a real
+#   ceiling rather than a value only sampled between attempts (#6064).
+#
+#   Between attempts the script runs `dpkg --configure -a` (#6064). Killing
+#   `apt-get install` at its ceiling mid-unpack leaves dpkg's database
+#   interrupted, and every later attempt then dies in seconds with "dpkg was
+#   interrupted, you must manually run 'sudo dpkg --configure -a'" — so one
+#   stall used to consume all three attempts. On a healthy system the repair is
+#   a fast no-op.
 #
 #   `timeout` is a GNU coreutils tool. It is present on the hosted Linux
 #   runners this script is written for; when it is absent (a bare macOS shell,
@@ -48,8 +58,9 @@
 #   adopt this the next time one of them is touched.
 #
 # Test: scripts/check-ci-helpers-selftest.sh (`ci-apt-install:` cases) drives
-#   the succeeds-first-try, succeeds-after-a-retry, exhausts-attempts, and
-#   stalls-then-times-out branches against a stubbed `apt-get` on PATH.
+#   the succeeds-first-try, succeeds-after-a-retry, exhausts-attempts,
+#   stalls-then-times-out, and stall-breaks-dpkg-then-recovers branches against
+#   a stubbed `apt-get` and `dpkg` on PATH.
 
 set -uo pipefail
 
@@ -63,6 +74,7 @@ UPDATE_TIMEOUT_S="${CI_APT_UPDATE_TIMEOUT_S:-120}"
 INSTALL_TIMEOUT_S="${CI_APT_INSTALL_TIMEOUT_S:-420}"
 RETRY_DELAY_S="${CI_APT_RETRY_DELAY_S:-5}"
 TOTAL_BUDGET_S="${CI_APT_TOTAL_BUDGET_S:-600}"
+DPKG_REPAIR_TIMEOUT_S="${CI_APT_DPKG_REPAIR_TIMEOUT_S:-120}"
 
 STARTED_AT="$(date +%s)"
 
@@ -78,6 +90,28 @@ if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
 fi
 
+# repair_dpkg — clear a dpkg database left "interrupted" by a killed apt-get.
+#
+# #6064: a `timeout`-killed `apt-get install` poisons every later attempt, which
+# then exits 100 in seconds telling the reader to run this by hand. Nothing is
+# gated on the failure text — on a healthy system the command is a fast no-op,
+# and its own failure is reported but never fatal, because the retry it precedes
+# is still worth making.
+repair_dpkg() {
+  command -v dpkg >/dev/null 2>&1 || return 0
+
+  echo "ci-apt-install: running 'dpkg --configure -a' to clear any interrupted dpkg state before the next attempt." >&2
+  local rc=0
+  if [ -n "$TIMEOUT_BIN" ]; then
+    "$TIMEOUT_BIN" "$DPKG_REPAIR_TIMEOUT_S" ${SUDO:+"$SUDO"} dpkg --configure -a || rc=$?
+  else
+    ${SUDO:+"$SUDO"} dpkg --configure -a || rc=$?
+  fi
+  [ "$rc" -eq 0 ] ||
+    echo "ci-apt-install: 'dpkg --configure -a' exited ${rc}; retrying the phase regardless." >&2
+  return 0
+}
+
 # run_phase <label> <per-attempt-timeout-s> <apt-get args...>
 #
 # Returns 0 on the first attempt that succeeds; 1 once the attempts or the total
@@ -87,7 +121,7 @@ run_phase() {
   local label="$1" per_attempt="$2"
   shift 2
 
-  local attempt=1 rc=0 spent
+  local attempt=1 rc=0 spent delay=0 ceiling="$per_attempt"
   while [ "$attempt" -le "$ATTEMPTS" ]; do
     spent="$(elapsed)"
     if [ "$spent" -ge "$TOTAL_BUDGET_S" ]; then
@@ -95,10 +129,17 @@ run_phase() {
       return 1
     fi
 
-    echo "ci-apt-install: ${label}, attempt ${attempt}/${ATTEMPTS} (${spent}s elapsed, ${per_attempt}s ceiling)" >&2
+    # #6064: clamp the attempt to what is left of the total budget, so a late
+    # attempt cannot run the job past a ceiling only sampled between attempts.
+    ceiling="$per_attempt"
+    if [ "$ceiling" -gt $(( TOTAL_BUDGET_S - spent )) ]; then
+      ceiling=$(( TOTAL_BUDGET_S - spent ))
+    fi
+
+    echo "ci-apt-install: ${label}, attempt ${attempt}/${ATTEMPTS} (${spent}s elapsed, ${ceiling}s ceiling)" >&2
     rc=0
     if [ -n "$TIMEOUT_BIN" ]; then
-      "$TIMEOUT_BIN" "$per_attempt" ${SUDO:+"$SUDO"} "$@" || rc=$?
+      "$TIMEOUT_BIN" "$ceiling" ${SUDO:+"$SUDO"} "$@" || rc=$?
     else
       ${SUDO:+"$SUDO"} "$@" || rc=$?
     fi
@@ -109,16 +150,22 @@ run_phase() {
     fi
 
     if [ "$rc" -eq 124 ]; then
-      echo "ci-apt-install: ${label} attempt ${attempt} STALLED — killed at the ${per_attempt}s ceiling." >&2
+      echo "ci-apt-install: ${label} attempt ${attempt} STALLED — killed at the ${ceiling}s ceiling." >&2
     else
       echo "ci-apt-install: ${label} attempt ${attempt} failed (exit ${rc})." >&2
     fi
 
+    delay=$(( RETRY_DELAY_S * attempt ))
     attempt=$((attempt + 1))
-    [ "$attempt" -le "$ATTEMPTS" ] && sleep "$RETRY_DELAY_S"
+    if [ "$attempt" -le "$ATTEMPTS" ]; then
+      # #6064: repair before the retry, not after the phase — the poisoned
+      # attempts are the ones inside this loop.
+      repair_dpkg
+      [ "$delay" -gt 0 ] && sleep "$delay"
+    fi
   done
 
-  echo "::error::ci-apt-install: ${label} failed ${ATTEMPTS} time(s), last exit ${rc}, $(elapsed)s elapsed. Exit 124 means the mirror stalled and the attempt was killed at its ${per_attempt}s ceiling."
+  echo "::error::ci-apt-install: ${label} failed ${ATTEMPTS} time(s), last exit ${rc}, $(elapsed)s elapsed. Exit 124 means the mirror stalled and the attempt was killed at its ${ceiling}s ceiling."
   return 1
 }
 

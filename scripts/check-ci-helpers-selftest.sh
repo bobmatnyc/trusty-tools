@@ -518,23 +518,38 @@ assert_eq "all five disk-reclaim jobs call the helper" "5" \
 echo
 echo "ci-apt-install:"
 
-# apt_stub_dir <script-body> — a PATH dir holding a fake apt-get with that body
-# plus a `sudo` that just runs its arguments.
+# apt_stub_dir <script-body> — a PATH dir holding a fake apt-get with that body,
+# a `sudo` that just runs its arguments, and a `dpkg` whose `--configure -a`
+# clears the `broken` marker the install stub can set (#6064). The dpkg stub is
+# unconditional so no case reaches the host's real dpkg.
 apt_stub_dir() {
   local dir
   dir="$(mktemp -d "${TMPDIR:-/tmp}/aptstub.XXXXXX")"
   printf '#!/usr/bin/env bash\n%s\n' "$1" > "${dir}/apt-get"
   printf '#!/usr/bin/env bash\nexec "$@"\n' > "${dir}/sudo"
-  chmod +x "${dir}/apt-get" "${dir}/sudo"
+  cat > "${dir}/dpkg" <<'DPKG_STUB'
+#!/usr/bin/env bash
+d="${0%/*}"
+if [ "$1" = "--configure" ]; then
+  echo "configure" >> "${d}/dpkg-calls"
+  rm -f "${d}/broken"
+fi
+exit 0
+DPKG_STUB
+  chmod +x "${dir}/apt-get" "${dir}/sudo" "${dir}/dpkg"
   echo "${dir}"
 }
 
 # apt_run <stub-dir> — exit code of the wrapper, with the stub ahead on PATH.
-# Retry delay 0 and small ceilings so the failing cases cost nothing.
+# Retry delay 0 and small ceilings so the failing cases cost nothing. A caller
+# that asserts an exact attempt COUNT raises the ceiling first: at 2s a loaded
+# machine can take long enough to start the stub that a healthy attempt is
+# killed as a stall, which would add an attempt the case did not ask for.
 apt_run() {
   local dir="$1" rc=0
   PATH="${dir}:${PATH}" CI_APT_RETRY_DELAY_S=0 CI_APT_ATTEMPTS=3 \
-    CI_APT_UPDATE_TIMEOUT_S=2 CI_APT_INSTALL_TIMEOUT_S=2 \
+    CI_APT_UPDATE_TIMEOUT_S="${CI_APT_UPDATE_TIMEOUT_S:-2}" \
+    CI_APT_INSTALL_TIMEOUT_S="${CI_APT_INSTALL_TIMEOUT_S:-2}" \
     bash scripts/ci-apt-install.sh build-essential \
     >"${dir}/out" 2>&1 || rc=$?
   echo "$rc"
@@ -576,6 +591,38 @@ if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; th
   assert_eq "  reported as a stall, not a plain failure" "3" \
     "$(grep -c 'STALLED — killed at the 2s ceiling' "${stall_dir}/out" || true)"
   rm -rf "${stall_dir}"
+
+  # #6064: the stall's aftermath. Killing `apt-get install` mid-unpack leaves
+  # dpkg interrupted, and every later attempt then exits 100 in seconds — so one
+  # stall used to consume the whole three-attempt budget. The stub reproduces
+  # that exactly: attempt 1 marks itself broken and hangs, and only a
+  # `dpkg --configure -a` between attempts clears the marker.
+  dpkg_dir="$(apt_stub_dir '
+d="${0%/*}"
+[ "$1" = "update" ] && exit 0
+if [ -f "${d}/broken" ]; then
+  echo "E: dpkg was interrupted, you must manually run dpkg --configure -a" >&2
+  exit 100
+fi
+if [ ! -f "${d}/stalled-once" ]; then
+  : > "${d}/stalled-once"
+  : > "${d}/broken"
+  exec sleep 300
+fi
+exit 0')"
+  # 6s, not the usual 2s: this case counts attempts, so a stub that is merely
+  # slow to start must not read as a stall and add one.
+  CI_APT_UPDATE_TIMEOUT_S=6
+  CI_APT_INSTALL_TIMEOUT_S=6
+  assert_eq "an interrupted dpkg is repaired, not inherited" "0" "$(apt_run "${dpkg_dir}")"
+  unset CI_APT_UPDATE_TIMEOUT_S CI_APT_INSTALL_TIMEOUT_S
+  assert_eq "  the repair ran once, between attempts"        "1" \
+    "$(grep -c 'to clear any interrupted dpkg state' "${dpkg_dir}/out" || true)"
+  assert_eq "  and dpkg --configure -a was what ran"         "1" \
+    "$(wc -l < "${dpkg_dir}/dpkg-calls" | tr -d ' ')"
+  assert_eq "  so attempt 2 installed instead of exiting 100" "2" \
+    "$(grep -c 'apt-get install, attempt' "${dpkg_dir}/out" || true)"
+  rm -rf "${dpkg_dir}"
 else
   echo "  skip 'stalled mirror' — no timeout(1) on PATH (GNU coreutils; present on the CI runners)"
 fi
