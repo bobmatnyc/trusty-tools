@@ -24,11 +24,15 @@
 //! sibling [`main_checkout`] module carries the rules `pm_guard` calls
 //! directly, ahead of the subagent exemptions: whole-tree-destructive git
 //! verbs aimed at a project's main checkout (ADR-0037), `git commit` there,
-//! and the HEAD-moving `pull`/`merge`/`rebase` (ADR-0048).
+//! and the HEAD-moving `pull`/`merge`/`rebase` (ADR-0048). The sibling
+//! [`heredoc`] module tells the redirection check which bytes are
+//! here-document body content, so a `>` inside a `<<'PY'` script is a
+//! comparison rather than a file write (#5356).
 //! Test: `evaluate_bash_command_*`, `split_shell_segments_*`, and
 //! `has_file_write_redirection_*` in this module's `tests` submodule;
 //! `sed_awk::tests` for the sed/awk-specific safety analysis.
 
+mod heredoc;
 mod main_checkout;
 mod persistence;
 mod sed_awk;
@@ -446,18 +450,32 @@ fn trailing_file_token(command: &str) -> Option<String> {
 /// (`echo x > f`) are unquoted and still caught. NOTE: an in-quote `>` that is
 /// genuinely dangerous — an `awk 'BEGIN{print > "f"}'` in-program file write —
 /// is caught by [`sed_awk::awk_is_readonly`], not here.
+/// Heredoc-aware (#5356): [`QuoteScan`] knows only `'` and `"`, so a `>` in a
+/// here-document body — a `len(k) > 3` comparison in a `python3 <<'PY'`
+/// script, an `->` arrow in `cat <<EOF` prose — read as a redirect and made a
+/// pure read consume the PM's file-change budget. [`heredoc::HeredocBodies`]
+/// marks those bytes as body content; the operator line itself stays live, so
+/// `python3 <<'PY' > out.rs` is still a redirect.
 /// Test: `has_file_write_redirection_detects_write`,
 /// `has_file_write_redirection_detects_append`,
 /// `has_file_write_redirection_ignores_fd_dup`,
 /// `has_file_write_redirection_ignores_dev_null`,
 /// `has_file_write_redirection_ignores_quoted_gt`,
+/// `has_file_write_redirection_ignores_heredoc_body`,
+/// `has_file_write_redirection_detects_redirect_on_a_heredoc_operator_line`,
 /// `has_file_write_redirection_false_for_plain_command`.
 pub(crate) fn has_file_write_redirection(command: &str) -> bool {
     let scan = QuoteScan::new(command);
+    let bodies = heredoc::HeredocBodies::scan(command);
     let bytes = command.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if scan.balanced && !scan.is_unquoted(i) {
+            i += 1;
+            continue;
+        }
+        // #5356: a here-document body is data, not shell syntax.
+        if bodies.contains(i) {
             i += 1;
             continue;
         }
