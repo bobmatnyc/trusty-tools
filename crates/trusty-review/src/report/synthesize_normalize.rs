@@ -38,8 +38,16 @@ type FieldTable = &'static [(&'static str, &'static [&'static str])];
 /// all three #6009 shapes — listed anyway so an unrecognised top-level key is
 /// dropped (and noted) rather than silently retained by serde's default
 /// unknown-field tolerance.
+///
+/// #6004: `code_quality_summary` and `security_summary` are listed here too —
+/// this whitelist is the single gate every top-level key passes through
+/// before `serde_json::from_value`, so a narrative slot absent from this
+/// table is silently dropped as "unrecognized" even though `RawSynthesis`
+/// and [`super::synthesize_prompt::synthesis_schema`] both declare it.
 const TOP_LEVEL_FIELDS: FieldTable = &[
     ("executive_summary", &[]),
+    ("code_quality_summary", &[]),
+    ("security_summary", &[]),
     ("top_risks", &[]),
     ("findings", &[]),
 ];

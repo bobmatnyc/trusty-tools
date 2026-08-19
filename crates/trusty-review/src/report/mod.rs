@@ -15,6 +15,8 @@
 
 pub mod analyze_adapter;
 pub mod benchmark;
+// #6004: exec-summary jump-list — post-render anchor-link injection.
+pub mod contents_links;
 pub mod error;
 pub mod exec_summary;
 pub mod fill;
@@ -29,9 +31,15 @@ pub mod polish;
 pub mod provenance;
 pub mod redact;
 pub mod reporter;
+// #6004: Code Quality & Architecture / Security Posture deterministic fill.
+pub mod reporter_codesec;
+// #6004: engagement-wide Key Facts block.
+pub mod reporter_facts;
 pub mod reporter_fill;
 pub mod reporter_findings;
 pub mod reporter_graph_datasets;
+// #6004: fixed Performance & Scalability gap text.
+pub mod reporter_performance;
 pub mod scan;
 // #5747: the schema-tag parse both artifact loaders decide compatibility from.
 pub(crate) mod schema;

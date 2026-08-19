@@ -69,6 +69,14 @@ pub struct Synthesis {
     /// Verified executive-summary prose, or `None` when the guardrail rejected it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executive_summary: Option<String>,
+    /// Verified Code Quality & Architecture narrative, or `None` when rejected or
+    /// never emitted (#6004). Same guardrail path as `executive_summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_quality_summary: Option<String>,
+    /// Verified Security Posture narrative, or `None` when rejected or never
+    /// emitted (#6004). Same guardrail path as `executive_summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_summary: Option<String>,
     /// Verified top-risk rows (rejected rows are dropped).
     #[serde(default)]
     pub top_risks: Vec<RiskRow>,
@@ -429,6 +437,12 @@ enum Attempt {
 struct RawSynthesis {
     #[serde(default)]
     executive_summary: String,
+    /// #6004: same schema/call/guardrail as `executive_summary`.
+    #[serde(default)]
+    code_quality_summary: String,
+    /// #6004: same schema/call/guardrail as `executive_summary`.
+    #[serde(default)]
+    security_summary: String,
     #[serde(default)]
     top_risks: Vec<RiskRow>,
     #[serde(default)]
@@ -540,6 +554,13 @@ fn parse_markdown_fallback(text: &str) -> Option<RawSynthesis> {
     }
     Some(RawSynthesis {
         executive_summary: exec,
+        // #6004 fields are never recoverable from this free-text fallback —
+        // reconstructing them from prose would mean inventing content the
+        // model never structured; they stay empty and the guardrail leaves
+        // them absent from `Synthesis`, same honesty-marker path as an
+        // outright-rejected field.
+        code_quality_summary: String::new(),
+        security_summary: String::new(),
         top_risks: Vec::new(),
         findings: Vec::new(),
     })
@@ -618,6 +639,27 @@ fn apply_guardrail(
         }
     }
 
+    // #6004: Code Quality & Architecture and Security Posture narratives — same
+    // per-field guardrail path as the executive summary.
+    let code_quality = raw.code_quality_summary.trim();
+    if !code_quality.is_empty() {
+        match verify_prose(code_quality, allowed) {
+            Ok(()) => out.code_quality_summary = Some(code_quality.to_string()),
+            Err(tok) => out
+                .notes
+                .push(format!("{REJECTED_NOTE} in code quality summary: {tok}")),
+        }
+    }
+    let security = raw.security_summary.trim();
+    if !security.is_empty() {
+        match verify_prose(security, allowed) {
+            Ok(()) => out.security_summary = Some(security.to_string()),
+            Err(tok) => out
+                .notes
+                .push(format!("{REJECTED_NOTE} in security summary: {tok}")),
+        }
+    }
+
     // Top-risk rows.
     for (i, r) in raw.top_risks.into_iter().enumerate() {
         match verify_all(&[&r.description, &r.severity, &r.cost, &r.apps], allowed) {
@@ -656,7 +698,12 @@ fn apply_guardrail(
         }
     }
 
-    if out.executive_summary.is_none() && out.top_risks.is_empty() && out.findings.is_empty() {
+    if out.executive_summary.is_none()
+        && out.code_quality_summary.is_none()
+        && out.security_summary.is_none()
+        && out.top_risks.is_empty()
+        && out.findings.is_empty()
+    {
         return Err(SynthesisError::NoVerifiableContent);
     }
     Ok(out)

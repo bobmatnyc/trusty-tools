@@ -31,7 +31,8 @@ fn end_to_end_two_repo_report() {
             { "language": "TypeScript", "loc": 6000 },
             { "language": "CSS", "loc": 2200 }
           ]},
-          "counts": { "files": 120, "functions": 640 }
+          "counts": { "files": 120, "functions": 640 },
+          "complexity": { "buckets": [ { "label": "low (1-5)", "count": 640 } ] }
         }"#,
     )
     .expect("write web metrics");

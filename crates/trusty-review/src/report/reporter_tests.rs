@@ -20,11 +20,16 @@ use crate::report::template::TemplateLoader;
 /// Build a model from an in-memory manifest whose single repo has metrics.
 fn fixture_model(dir: &Path) -> ReportModel {
     // Write a metrics file the manifest will reference by relative path.
+    // #6004: `complexity` populates Key Facts + Code Quality — every field the
+    // bundled template asks for must be present so the full-purity assertions
+    // in `render_contains_expected`/`reporter_omits_empty_findings_sections_
+    // without_metrics` (zero honesty markers anywhere) still hold.
     let metrics = r#"{
       "loc": { "total": 5000, "by_language": [
         { "language": "Rust", "loc": 5000 }
       ]},
-      "counts": { "files": 20, "functions": 150 }
+      "counts": { "files": 20, "functions": 150 },
+      "complexity": { "buckets": [ { "label": "low (1-5)", "count": 150 } ] }
     }"#;
     std::fs::write(dir.join("acme.json"), metrics).expect("write metrics");
 
@@ -140,6 +145,75 @@ fn render_contains_expected() {
     assert!(!md.contains("{{"));
 }
 
+/// (a) #6004: a model WITH analyze data yields both the Code Quality &
+/// Architecture and Security Posture sections populated — never blank
+/// scaffolding.
+/// Test: this test itself.
+#[test]
+fn code_quality_and_security_sections_populate_from_analyze_data() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model_with_findings(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("## Code Quality & Architecture"));
+    assert!(md.contains("## Security Posture"));
+    assert!(md.contains("## Performance & Scalability"));
+    // Code Quality: the fixture's LoC/language/maintainability-finding data.
+    assert!(md.contains("Acme Web"));
+    assert!(md.contains("5000"));
+    // Security Posture: the fixture's RED "security"-category finding,
+    // re-projected as a violation-domain row — not the maintainability one.
+    assert!(md.contains("security"));
+    let security_section = md
+        .split("## Security Posture")
+        .nth(1)
+        .and_then(|s| s.split("## Performance").next())
+        .expect("Security Posture section present");
+    assert!(!security_section.contains("_No data available"));
+    // Performance stays the fixed gap text regardless of the data present.
+    assert!(md.contains(crate::report::reporter_performance::PERFORMANCE_NOTE));
+}
+
+/// (b) #6004: a model WITHOUT analyze data leaves both sections as honesty
+/// markers folded into Gaps & Caveats, never blank or fabricated — Code
+/// Quality's table collapses (no metrics anywhere) and Performance still
+/// states its fixed gap text (never a silent absence).
+/// Test: this test itself.
+#[test]
+fn code_quality_and_security_sections_gap_without_analyze_data() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let toml = r#"
+        [report]
+        title = "No Metrics DD"
+
+        [[repositories]]
+        name = "Acme Web"
+        remote = "acme/web"
+    "#;
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("build model");
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("## Code Quality & Architecture"));
+    assert!(md.contains("## Security Posture"));
+    assert!(
+        !md.contains(HONESTY_MARKER),
+        "omit-empty must fold every unmapped field into Gaps, never leave a marker: {md}"
+    );
+    assert!(md.contains("Data gaps:"));
+    // Performance & Scalability is FIXED — present and identical even with
+    // zero analyze data (never a silent gap, never LLM-touched).
+    assert!(md.contains(crate::report::reporter_performance::PERFORMANCE_NOTE));
+}
+
 /// Why: the CAST template's demonstration `<!-- instruct:executive_summary
 /// ... -->` override (#2357 layered instructions) must NEVER leak into a real
 /// rendered report — a comment-stripping regression here would be a live
@@ -229,6 +303,8 @@ fn reporter_injects_synthesis_prose() {
     let mut model = fixture_model(tmp.path());
     let slug = model.repositories[0].slug.clone();
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         executive_summary: Some("A grounded acquirer-relevant summary.".to_string()),
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -287,6 +363,8 @@ fn reporter_appends_guardrail_rejection_note() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         notes: vec![
             "synthesis: rejected (unverified figure) in executive summary: 9999".to_string(),
         ],
@@ -433,6 +511,8 @@ fn evidence_renders_as_fenced_block() {
     let mut model = fixture_model(tmp.path());
     let slug = model.repositories[0].slug.clone();
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -485,6 +565,8 @@ fn evidence_with_blank_line_fences_cleanly() {
     let quote =
         "function serializeSession(user) {\n\n  return Buffer.from(JSON.stringify(user));\n}";
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -540,6 +622,8 @@ fn evidence_containing_triple_backticks_uses_longer_fence() {
     let slug = model.repositories[0].slug.clone();
     let quote = "const doc = \"```js\\nconsole.log(1)\\n```\";";
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -614,6 +698,8 @@ fn evidence_with_adjacent_hash_comment_lines_renders_byte_identical() {
     let slug = model.repositories[0].slug.clone();
     let quote = "# ALLOWED_OAUTH_DOMAINS: comma-separated Google Workspace hosted-domains (`hd`\n# claim) allowed to enter the visualization area. The gate FAILS CLOSED if this\n# is empty.";
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -677,6 +763,8 @@ fn evidence_with_blank_line_full_render_has_no_fenced_splice() {
     let slug = model.repositories[0].slug.clone();
     let quote = "AI_GATEWAY_API_KEY=\n\n# Optional overrides for the gateway model IDs (format: \"provider/model\").\n# Defaults: AI_GATEWAY_MODEL=anthropic/claude-sonnet-4-5-20250929,";
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -851,6 +939,8 @@ fn reporter_merges_synthesis_prose_onto_deterministic_finding() {
     let mut model = fixture_model_with_findings(tmp.path());
     let slug = model.repositories[0].slug.clone();
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -1262,6 +1352,8 @@ fn reporter_tags_top_risks_as_inferred() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         executive_summary: Some("Summary.".to_string()),
         top_risks: vec![RiskRow {
             description: "Unpatched dependency chain".to_string(),
@@ -1307,6 +1399,8 @@ fn reporter_renders_all_top_risk_rows() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         executive_summary: Some("Summary.".to_string()),
         top_risks: (1..=5).map(risk).collect(),
         findings: vec![],
@@ -1357,6 +1451,8 @@ fn reporter_collapses_empty_top_risks() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         executive_summary: Some("Summary.".to_string()),
         top_risks: vec![],
         findings: vec![],
@@ -1396,6 +1492,8 @@ fn reporter_renders_defaulted_top_risk_severity_honestly() {
     let mut model = fixture_model(tmp.path());
     model.synthesis = Some(Synthesis {
         executive_summary: Some("Summary.".to_string()),
+        code_quality_summary: None,
+        security_summary: None,
         top_risks: vec![RiskRow {
             description: "Plaintext secrets at rest".to_string(),
             severity: String::new(),
@@ -1840,6 +1938,8 @@ fn reporter_prefers_synthesis_over_deterministic_summary() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model_with_findings(tmp.path());
     model.synthesis = Some(Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         executive_summary: Some("An acquirer-relevant judgement.".to_string()),
         top_risks: vec![RiskRow {
             description: "Credential exposure".to_string(),

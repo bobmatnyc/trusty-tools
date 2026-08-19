@@ -299,6 +299,10 @@ fn synthesis_schema_shape() {
     assert_eq!(schema.name, "report_synthesis");
     let props = &schema.schema["properties"];
     assert!(props["executive_summary"].is_object());
+    // #6004: the two additional narrative slots must be forced via the same
+    // schema value as executive_summary.
+    assert!(props["code_quality_summary"].is_object());
+    assert!(props["security_summary"].is_object());
     assert!(props["top_risks"].is_object());
     assert!(props["findings"].is_object());
     assert_eq!(props["top_risks"]["maxItems"], 5);
@@ -322,6 +326,10 @@ fn schema_contract_statement_lists_every_field_name() {
     let contract = schema_contract_statement(&schema.schema);
     for needle in [
         "executive_summary",
+        // #6004: the contract statement is derived from the same schema
+        // value, so these must be named alongside executive_summary.
+        "code_quality_summary",
+        "security_summary",
         "top_risks",
         "findings",
         "description",
@@ -354,6 +362,10 @@ fn schema_contract_statement_reaches_system_prompt() {
     let req = build_synthesis_prompt(&model, "stub/model", false);
     assert!(req.system.contains("Required JSON object shape"));
     assert!(req.system.contains("executive_summary"));
+    // #6004: the same derivation must carry the new narrative slots into the
+    // system prompt text, not just `response_format`.
+    assert!(req.system.contains("code_quality_summary"));
+    assert!(req.system.contains("security_summary"));
     assert!(req.system.contains("top_risks"));
     assert!(req.system.contains("findings"));
 }
@@ -511,6 +523,50 @@ async fn synthesize_happy_path_injects() {
     assert_eq!(result.findings.len(), 1);
     assert_eq!(result.findings[0].app_slug, "acme-core");
     assert!(result.notes.is_empty(), "clean response records no notes");
+}
+
+/// Why: regression for the rebase seam between #6009/#6014's whitelist
+/// normalizer and #6004's two new narrative slots — a normalizer whitelist
+/// keyed only off the pre-#6004 field set silently drops
+/// `code_quality_summary`/`security_summary` as "unrecognized" even though
+/// both the schema and `RawSynthesis` declare them.
+/// What: a full-shape response carrying both new fields, grounded in figures
+/// present in the fixture model; asserts both survive parse → normalize →
+/// guardrail into `Synthesis`, and that no drop note was recorded for either.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesize_happy_path_injects_new_narrative_fields() {
+    let model = fixture_model(vec![red("SQL injection risk")]);
+    let body = r#"{
+      "executive_summary": "The 8,200 LoC Rust codebase spans 120 files and 640 functions with one critical security gap.",
+      "code_quality_summary": "The 8,200 LoC codebase spans 120 files, a moderate footprint.",
+      "security_summary": "640 functions were assessed; one RED finding stands out.",
+      "top_risks": [],
+      "findings": []
+    }"#
+    .to_string();
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm {
+        body,
+        finish_reason: Some("stop".to_string()),
+    });
+    let result = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect("a clean response synthesizes");
+
+    assert_eq!(
+        result.code_quality_summary.as_deref(),
+        Some("The 8,200 LoC codebase spans 120 files, a moderate footprint.")
+    );
+    assert_eq!(
+        result.security_summary.as_deref(),
+        Some("640 functions were assessed; one RED finding stands out.")
+    );
+    assert!(
+        result.notes.is_empty(),
+        "neither new field is unrecognized or unverified: {:?}",
+        result.notes
+    );
 }
 
 /// Why: a malformed response must never be partial-trusted. #5454 regression —
@@ -693,6 +749,95 @@ async fn synthesize_rejects_unverified_figure() {
     );
 }
 
+/// (c) #6004: `code_quality_summary` is rejected exactly like
+/// `executive_summary` when it cites a figure absent from the model —
+/// constructed by calling the guardrail directly (`apply_guardrail`), not by
+/// routing a fabricated figure through a stub LLM whose trigger condition is
+/// the same as `synthesize_rejects_unverified_figure` already covers.
+/// What: one clean top-risk row (so the overall pass still succeeds) plus a
+/// `code_quality_summary` citing 9999; asserts the field is dropped, a
+/// rejection note names it, and the clean row survives untouched.
+/// Test: this test itself.
+#[test]
+fn code_quality_summary_guardrail_rejects_unverified_figure() {
+    let allowed: std::collections::HashSet<String> = ["moderate".to_string(), "Acme".to_string()]
+        .into_iter()
+        .collect();
+    let raw = super::RawSynthesis {
+        executive_summary: String::new(),
+        code_quality_summary: "Complexity sits at 9999 on average.".to_string(),
+        security_summary: String::new(),
+        top_risks: vec![super::RiskRow {
+            description: "moderate".to_string(),
+            severity: "AMBER".to_string(),
+            cost: "moderate".to_string(),
+            apps: "Acme".to_string(),
+        }],
+        findings: vec![],
+    };
+
+    let result = super::apply_guardrail(raw, &allowed, Vec::new())
+        .expect("the clean top-risk row keeps this Ok");
+
+    assert!(
+        result.code_quality_summary.is_none(),
+        "a code_quality_summary citing 9999 must be rejected"
+    );
+    assert_eq!(result.top_risks.len(), 1, "the clean row must survive");
+    assert!(
+        result
+            .notes
+            .iter()
+            .any(|n| n.contains("rejected (unverified figure)") && n.contains("code quality")),
+        "a guardrail rejection note must name the code quality summary: {:?}",
+        result.notes
+    );
+}
+
+/// (c) #6004: `security_summary` is rejected exactly like
+/// `code_quality_summary` when it cites a figure absent from the model — same
+/// construction as `code_quality_summary_guardrail_rejects_unverified_figure`,
+/// mirrored onto the sibling field.
+/// What: one clean top-risk row (so the overall pass still succeeds) plus a
+/// `security_summary` citing 9999; asserts the field is dropped, a rejection
+/// note names it, and the clean row survives untouched.
+/// Test: this test itself.
+#[test]
+fn security_summary_guardrail_rejects_unverified_figure() {
+    let allowed: std::collections::HashSet<String> = ["moderate".to_string(), "Acme".to_string()]
+        .into_iter()
+        .collect();
+    let raw = super::RawSynthesis {
+        executive_summary: String::new(),
+        code_quality_summary: String::new(),
+        security_summary: "9999 vulnerable dependencies were flagged.".to_string(),
+        top_risks: vec![super::RiskRow {
+            description: "moderate".to_string(),
+            severity: "AMBER".to_string(),
+            cost: "moderate".to_string(),
+            apps: "Acme".to_string(),
+        }],
+        findings: vec![],
+    };
+
+    let result = super::apply_guardrail(raw, &allowed, Vec::new())
+        .expect("the clean top-risk row keeps this Ok");
+
+    assert!(
+        result.security_summary.is_none(),
+        "a security_summary citing 9999 must be rejected"
+    );
+    assert_eq!(result.top_risks.len(), 1, "the clean row must survive");
+    assert!(
+        result
+            .notes
+            .iter()
+            .any(|n| n.contains("rejected (unverified figure)") && n.contains("security")),
+        "a guardrail rejection note must name the security summary: {:?}",
+        result.notes
+    );
+}
+
 /// Why: when nothing survives verification there is no narrative, which #5454
 /// makes a failed report rather than a deterministic-only one.
 /// What: every field cites 9999; asserts
@@ -769,6 +914,8 @@ async fn synthesize_with_many_findings_produces_exec_summary() {
 #[test]
 fn status_lines_render_banners() {
     let syn = Synthesis {
+        code_quality_summary: None,
+        security_summary: None,
         notes: vec!["synthesis: rejected (unverified figure) in top-risk row 1: 42".to_string()],
         ..Default::default()
     };
@@ -831,6 +978,18 @@ async fn synthesize_recovers_executive_summary_from_markdown_fallback() {
     assert!(
         result.findings.is_empty(),
         "prose is never reconstructed into findings"
+    );
+    // #6004: the markdown fallback recovers executive_summary ONLY — the two
+    // new narrative slots are absent from this response shape entirely, so
+    // they stay `None` (the reporter's honesty-marker path), same as
+    // top_risks/findings above.
+    assert!(
+        result.code_quality_summary.is_none(),
+        "the markdown fallback never recovers code_quality_summary"
+    );
+    assert!(
+        result.security_summary.is_none(),
+        "the markdown fallback never recovers security_summary"
     );
     assert!(
         result.notes.is_empty(),

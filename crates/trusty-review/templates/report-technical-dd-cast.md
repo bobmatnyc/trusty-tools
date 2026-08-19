@@ -50,6 +50,12 @@
   rendered output — they never appear in a generated report. This template
   demonstrates one override below (`executive_summary`, CAST health-factor
   voice).
+
+  DEFERRED (#6004): this CAST variant intentionally does not carry the
+  generic template's Code Quality & Architecture / Security Posture /
+  Performance & Scalability sections, Key Facts block, or Contents
+  jump-list — porting them to CAST's own health-factor voice and scales is
+  follow-up work tracked on #6004, not an oversight in this revision.
 -->
 
 <!-- instruct:executive_summary
