@@ -2213,3 +2213,133 @@ fn cast_reporter_states_a_zero_coverage_run_rather_than_omitting_it() {
 fn a_missing_ticketing_artifact_is_named_in_the_cast_template_too() {
     assert_template_names_a_missing_ticketing_artifact("report-technical-dd-cast");
 }
+
+/// #6029 regression: a sweep run WITHOUT `--analyze` carries no
+/// `AnalyzeMetrics`, but `RepoScan` is built on every model build — and the
+/// rendered Key Facts block must show that LoC figure. Before the fix
+/// `fill_key_facts` read `metrics` alone, so every row fell to the honesty
+/// marker, the omit-empty pass dropped all of them, and the polish pass
+/// collapsed the whole block to `_No data available — see Gaps & Caveats._`
+/// while the scan held 1.5M LoC. Assert the heading, the figure, and the
+/// absence of the collapse line together — the figure alone would pass on a
+/// report that had also dropped the heading.
+#[test]
+fn key_facts_renders_scan_loc_without_analyze_metrics() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    // Reproduce the no-`--analyze` shape: scan data present, metrics absent.
+    let repo = model.repositories.first_mut().expect("one repository");
+    repo.metrics = None;
+    repo.scan = Some(crate::report::scan::RepoScan {
+        total_loc: 1_500_000,
+        file_count: 8_432,
+        by_language: vec![crate::report::metrics::LanguageLoc {
+            language: "Rust".to_string(),
+            loc: 1_500_000,
+        }],
+        frameworks: vec![],
+    });
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("## Key Facts"), "{md}");
+    let section = md.split("## Key Facts").nth(1).expect("key facts body");
+    let block = section.split("## 2.").next().expect("block before §2");
+    assert!(
+        block.contains("1500000"),
+        "the scan's LoC figure must reach Key Facts:\n{block}"
+    );
+    assert!(
+        block.contains("8432"),
+        "the scan's file count must reach Key Facts:\n{block}"
+    );
+    assert!(
+        !block.contains("No data available"),
+        "Key Facts must never collapse while the sweep holds data:\n{block}"
+    );
+    // A genuinely absent input names itself in its own row rather than
+    // blanking the block around the data that IS present.
+    assert!(
+        block.contains("--analyze"),
+        "the complexity row must name its missing input:\n{block}"
+    );
+    assert!(
+        block.contains("authorship artifact"),
+        "the author rows must name their missing input:\n{block}"
+    );
+}
+
+/// #6029 regression: `fill_key_facts` writes named-gap text into
+/// `facts_author_count`/`facts_trajectory` unconditionally, so the measured
+/// figures reach the report only because `reporter::build_scope` runs
+/// `fill_authorship_facts` AFTER it (reporter.rs:236, 239). Nothing else in the
+/// suite exercises both together — `completes_key_facts_author_rows` calls
+/// `fill_authorship_facts` alone, and no other full-render test loads an
+/// authorship artifact — so swapping the two calls would clobber measured
+/// authorship data with "Not computed" and leave every test green. This renders
+/// the whole report with an artifact loaded and asserts the measured figures
+/// win in the Key Facts table.
+#[test]
+fn key_facts_authorship_rows_survive_the_fill_order() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let repo = model.repositories.first_mut().expect("one repository");
+    repo.authorship = Some(crate::report::authorship::AuthorshipSummary {
+        schema_version: "v0".to_string(),
+        repository: "Acme Web".to_string(),
+        distinct_authors: 7,
+        bus_factor: 2,
+        top_author_share_pct: 61.0,
+        single_author_subsystems: vec!["src".to_string()],
+        monthly_trajectory: vec![
+            crate::report::authorship::MonthlyActivity {
+                month: "2026-01".to_string(),
+                active_authors: 1,
+                commits: 5,
+            },
+            crate::report::authorship::MonthlyActivity {
+                month: "2026-02".to_string(),
+                active_authors: 2,
+                commits: 40,
+            },
+        ],
+        unresolved_authors: 0,
+        caveats: vec![],
+    });
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    let section = md.split("## Key Facts").nth(1).expect("key facts body");
+    let block = section.split("## 2.").next().expect("block before §2");
+
+    let authors = block
+        .lines()
+        .find(|l| l.starts_with("| Number of authors |"))
+        .expect("author-count row");
+    assert!(
+        authors.contains('7'),
+        "the measured author count must win over the named gap:\n{authors}"
+    );
+    assert!(
+        !authors.contains("Not computed"),
+        "the named gap clobbered the measured author count:\n{authors}"
+    );
+
+    let trajectory = block
+        .lines()
+        .find(|l| l.starts_with("| 12-month trajectory |"))
+        .expect("trajectory row");
+    assert!(
+        trajectory.contains("increasing"),
+        "the measured trajectory must win over the named gap:\n{trajectory}"
+    );
+    assert!(
+        !trajectory.contains("Not computed"),
+        "the named gap clobbered the measured trajectory:\n{trajectory}"
+    );
+}

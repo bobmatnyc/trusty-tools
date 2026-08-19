@@ -1407,3 +1407,112 @@ async fn synthesize_rejects_a_wholly_unrecognized_shape() {
         "expected NoVerifiableContent, got {err:?}"
     );
 }
+
+/// Why (#6030): the owner ruled that an executive summary "should describe
+/// what this codebase does (as well as analyze the major components)", and
+/// today's is risk-only. Like #5886's coverage-gaps note, this requirement is
+/// static rather than a section instruction, so a template `instruct:`
+/// override must not be able to drop it while restyling the section.
+/// What: overrides `executive_summary`, then asserts the purpose-and-
+/// components instruction still reaches the system prompt, and that the
+/// digest carries the assessed set the instruction names components from.
+#[test]
+fn system_prompt_asks_what_the_codebase_does() {
+    let mut model = fixture_model(vec![]);
+    model.section_instructions.insert(
+        "executive_summary".to_string(),
+        "OVERRIDE: lead with the TQI posture.".to_string(),
+    );
+    let req = build_synthesis_prompt(&model, "stub/model", false);
+    for needle in [
+        "What the codebase does",
+        "what the audited system IS and what it DOES",
+        "analyze the major components",
+        "Never invent a product, a market, a customer, or a component the data does not name",
+        "Risk remains the summary's core",
+    ] {
+        assert!(
+            req.system.contains(needle),
+            "the purpose/components instruction must survive a template override and contain \
+             {needle:?}: {}",
+            req.system
+        );
+    }
+    // The forced-output schema states the same requirement in the field's own
+    // description, so a model steering off `response_format` alone cannot
+    // revert to a risk-only summary.
+    let schema = req.response_schema.as_ref().expect("forced schema");
+    let description = schema.schema["properties"]["executive_summary"]["description"]
+        .as_str()
+        .expect("executive_summary description");
+    assert!(
+        description.contains("open by stating what the audited codebase IS and DOES"),
+        "the forced schema must state the requirement too: {description}"
+    );
+    assert!(
+        req.messages[0].content.contains("Applications assessed"),
+        "the digest must name the set whose components the instruction asks about: {}",
+        req.messages[0].content
+    );
+}
+
+/// Why (#6030/#6029): the instruction above can only be obeyed from data in
+/// the prompt. A sweep without `--analyze` carries no `AnalyzeMetrics`, and
+/// the digest previously wrote "No metrics available for this application"
+/// for exactly that run — starving the summary of density AND component
+/// evidence while `RepoScan` held both.
+/// What: metrics absent, scan present; asserts the scan's LoC, languages and
+/// file count all reach `messages[0]`.
+#[test]
+fn digest_carries_scan_profile_without_metrics() {
+    let mut model = fixture_model(vec![]);
+    let repo = model.repositories.first_mut().expect("one repository");
+    repo.metrics = None;
+    repo.scan = Some(crate::report::scan::RepoScan {
+        total_loc: 1_500_000,
+        file_count: 8_432,
+        by_language: vec![LanguageLoc {
+            language: "Rust".to_string(),
+            loc: 1_500_000,
+        }],
+        frameworks: vec![],
+    });
+
+    let digest = build_synthesis_prompt(&model, "stub/model", false).messages[0]
+        .content
+        .clone();
+    assert!(digest.contains("Total LoC: 1500000"), "{digest}");
+    assert!(digest.contains("Primary languages: Rust"), "{digest}");
+    assert!(digest.contains("Files: 8432"), "{digest}");
+    assert!(
+        !digest.contains("No metrics available"),
+        "a scanned application is not a metrics-free one: {digest}"
+    );
+}
+
+/// The component evidence itself: the build manifests, the project each
+/// declares, and its top dependencies are what the executive summary names
+/// components from, and they never reached the prompt before #6030.
+#[test]
+fn digest_names_build_manifests_as_component_evidence() {
+    let mut model = fixture_model(vec![]);
+    let repo = model.repositories.first_mut().expect("one repository");
+    repo.scan = Some(crate::report::scan::RepoScan {
+        total_loc: 8200,
+        file_count: 120,
+        by_language: vec![],
+        frameworks: vec![crate::report::scan::Framework {
+            manifest: "package.json".to_string(),
+            name: "acme-web".to_string(),
+            deps: vec!["react".to_string(), "vite".to_string()],
+        }],
+    });
+
+    let digest = build_synthesis_prompt(&model, "stub/model", false).messages[0]
+        .content
+        .clone();
+    assert!(digest.contains("Build manifests / frameworks:"), "{digest}");
+    assert!(digest.contains("package.json"), "{digest}");
+    assert!(digest.contains("acme-web"), "{digest}");
+    assert!(digest.contains("react"), "{digest}");
+}

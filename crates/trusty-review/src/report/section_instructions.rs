@@ -68,12 +68,21 @@ pub fn default_instruction(id: &str) -> Option<&'static str> {
         // "acquirer-side, skeptical, strengths and risks presented evenhandedly
         // but risk hunted adversarially, never promotional." Applied to every
         // default below; a template's `instruct:` override may still replace it.
+        // #6030: open with what the system does and its major components,
+        // then the risk analysis — see the "What the codebase does" block in
+        // `synthesize_prompt::synthesis_system_prompt`, which restates this
+        // statically so a template override cannot drop the requirement.
         EXECUTIVE_SUMMARY => Some(
-            "Write ONE deal-analytic paragraph synthesising the verified findings, \
-             severity-weighted (RED findings first), tied to what an acquirer must act \
-             on. Write from the acquirer's side: skeptical and adversarial about risk — \
-             hunt for what should worry a buyer — while still naming genuine strengths \
-             the data supports, evenhandedly, never as promotional filler. Reference a \
+            "Open by describing what the audited codebase is and does, then name its \
+             major components and each one's role, drawn from the applications, build \
+             manifests, and dependencies in the data. Then close with a \
+             deal-analytic paragraph synthesising the verified findings, \
+             severity-weighted (RED findings first), tied to what an acquirer \
+             must act on. Keep the whole thing short — a few tight paragraphs, not a \
+             tour of the report. Write from the acquirer's side: skeptical and \
+             adversarial about risk — hunt for what should worry a buyer — while still \
+             naming genuine strengths the data supports, evenhandedly, never as \
+             promotional filler. Reference a \
              coverage gap ONLY if one is genuinely named in the coverage data above (a \
              listed not-investigated dimension or a named failed batch) — and name it \
              specifically; never imply a gap that isn't documented there.",

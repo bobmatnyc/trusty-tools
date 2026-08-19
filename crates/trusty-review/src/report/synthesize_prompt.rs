@@ -85,9 +85,12 @@ pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
         serde_json::json!({
             "type": "object",
             "properties": {
+                // #6030: the summary opens with what the system is and does and
+                // names its major components, then covers risk — see the
+                // "What the codebase does" block in `synthesis_system_prompt`.
                 "executive_summary": {
                     "type": "string",
-                    "description": "ONE deal-relevant paragraph synthesised across all applications. Use ONLY figures present in the provided data; never invent numbers; preserve any \"(approx)\" marker verbatim."
+                    "description": "A short deal-relevant executive summary synthesised across all applications: open by stating what the audited codebase IS and DOES, name its major components and each one's role, then cover the risk picture. Use ONLY figures present in the provided data; never invent numbers; preserve any \"(approx)\" marker verbatim."
                 },
                 // #6004: two additional narrative slots, same schema/call/guardrail as
                 // executive_summary — see synthesize.rs::apply_guardrail.
@@ -221,8 +224,9 @@ pub(crate) fn schema_contract_statement(schema: &serde_json::Value) -> String {
 /// template or analyst may steer — see [`section_instructions`] for the
 /// generic → template → analyst layering (the same shape as the crate's
 /// existing stock → principles → voice reviewer layering, see `src/voice/`).
-/// What: the "Absolute rules", "Required JSON object shape", and "Coverage
-/// gaps in the assessed set" blocks are static invariants; the "Required JSON
+/// What: the "Absolute rules", "Required JSON object shape", "What the
+/// codebase does", and "Coverage gaps in the assessed set" blocks are static
+/// invariants; the "Required JSON
 /// object shape" block is `contract` — [`schema_contract_statement`] run over
 /// the SAME [`synthesis_schema`] value this request forces via
 /// `response_format`, so the two can never say different things (#6009 shape
@@ -238,9 +242,15 @@ pub(crate) fn schema_contract_statement(schema: &serde_json::Value) -> String {
 /// go.  It is scoped to targets ABSENT from the assessed set, which is a
 /// different question from the per-repo dimension coverage that
 /// [`super::investigate::render::coverage_prompt_summary`] already mandates.
+///
+/// #6030's "What the codebase does" block is static for the same reason: the
+/// owner requires every executive summary to describe the product and analyze
+/// its major components, so a template `instruct:` override must not be able
+/// to drop that requirement while restyling the section.
 /// Test: `synthesize_tests.rs::{system_prompt_embeds_resolved_instructions,
 /// system_prompt_concise_retry_directive,
 /// system_prompt_asks_for_unregistered_target_gaps,
+/// system_prompt_asks_what_the_codebase_does,
 /// schema_contract_statement_reaches_system_prompt}`.
 fn synthesis_system_prompt(
     resolved: &std::collections::BTreeMap<String, String>,
@@ -289,6 +299,12 @@ Write from the acquirer's side: balanced but adversarial. Hunt for risk skeptica
 
 ## Required JSON object shape
 Respond with ONLY a single JSON object — no markdown headings, no prose outside it, no fenced code block. {contract}
+
+## What the codebase does
+- OPEN the executive summary by stating what the audited system IS and what it DOES — its purpose in plain product terms — before any risk sentence. A risk-only summary is incomplete.
+- Then analyze the major components: name each one and what its role in the system is. Draw them from the applications listed above and from the build manifests, frameworks, and declared dependencies the data names for each.
+- Ground both from the provided data ONLY — application names, detected manifests and frameworks, language mix, LoC, authorship figures. Where the data does not support a claim about purpose, describe what the components do and stop. Never invent a product, a market, a customer, or a component the data does not name.
+- Risk remains the summary's core. The purpose and component narrative sets up the risk discussion; it does not replace it.
 
 ## Coverage gaps in the assessed set
 - The applications listed under "Applications assessed" are the ENTIRE assessed set. When the data references a repository, service, database schema, or project board that is not one of them, name it in a short coverage-gaps note closing the executive summary.
@@ -360,6 +376,66 @@ pub(super) fn build_synthesis_prompt(
     }
 }
 
+/// One application's profile bullets for the digest — density plus the
+/// component grounding the executive summary is required to analyze (#6030).
+///
+/// Why: the "What the codebase does" instruction can only be obeyed from data
+/// in the prompt, and the build manifests, declared project names, and top
+/// dependencies the repository scan already detects ARE the component
+/// evidence. They reached the rendered Profile table
+/// (`reporter_fill::fill_profile`) but never the synthesis prompt.
+/// What: LoC and languages from `AnalyzeMetrics` when a `--analyze` run
+/// supplied it, else from `RepoScan`; file/function counts from whichever
+/// source carries them; and the scan's framework line rendered through
+/// `reporter_fill::format_frameworks`, so the prompt and the report state the
+/// same manifests. Returns an empty string when neither source has anything —
+/// the caller then says so rather than emitting a headed but empty block.
+/// Test: `synthesize_tests.rs::{digest_carries_scan_profile_without_metrics,
+/// digest_names_build_manifests_as_component_evidence}`.
+fn repo_profile_lines(repo: &super::model::RepositoryReport) -> String {
+    let metrics = repo.metrics.as_ref();
+    let scan = repo.scan.as_ref();
+    let mut out = String::new();
+
+    let loc = metrics
+        .map(|m| m.loc.total)
+        .filter(|n| *n > 0)
+        .or_else(|| scan.map(|s| s.total_loc).filter(|n| *n > 0));
+    if let Some(n) = loc {
+        out.push_str(&format!("- Total LoC: {n}\n"));
+    }
+
+    let langs = metrics
+        .map(|m| m.primary_languages(4))
+        .filter(|l| !l.is_empty())
+        .or_else(|| {
+            scan.map(|s| s.primary_languages(4))
+                .filter(|l| !l.is_empty())
+        });
+    if let Some(l) = langs {
+        out.push_str(&format!("- Primary languages: {}\n", l.join(", ")));
+    }
+
+    if let Some(m) = metrics {
+        out.push_str(&format!(
+            "- Files: {}; Functions: {}\n",
+            m.counts.files, m.counts.functions
+        ));
+    } else if let Some(s) = scan.filter(|s| s.file_count > 0) {
+        out.push_str(&format!("- Files: {}\n", s.file_count));
+    }
+
+    // #6030: the component evidence — which manifests exist, what project each
+    // declares, and its top declared dependencies.
+    if let Some(fw) = scan
+        .map(super::reporter_fill::format_frameworks)
+        .filter(|f| !f.is_empty())
+    {
+        out.push_str(&format!("- Build manifests / frameworks: {fw}\n"));
+    }
+    out
+}
+
 /// Build the user-message data digest — per-application profile numbers plus
 /// the COMPACT findings digest (#2357 follow-up; never the full prose).
 ///
@@ -368,12 +444,13 @@ pub(super) fn build_synthesis_prompt(
 /// impact/remediation prose that already lives in the report body once
 /// verified — that separation is what keeps this call's input AND output
 /// bounded regardless of how many findings exist.
-/// What: writes a report header, then per application its profile numbers
-/// (LoC, languages, files/functions — unchanged from before); then ONE
-/// combined compact-findings context section and ONE elaboration-targets
-/// section (see [`super::synthesize_digest`]); then the wave-3 coverage
-/// summary (unchanged) and the analyst focus directives (unchanged, additive
-/// on top of whichever section instructions are active).
+/// What: writes a report header, then per application its profile bullets
+/// (LoC, languages, files/functions, and the detected build manifests — see
+/// [`repo_profile_lines`]); then ONE combined compact-findings context
+/// section and ONE elaboration-targets section (see
+/// [`super::synthesize_digest`]); then the wave-3 coverage summary
+/// (unchanged) and the analyst focus directives (unchanged, additive on top
+/// of whichever section instructions are active).
 /// Test: `synthesize_tests.rs::{prompt_excludes_greens, digest_stays_bounded_at_100_findings}`.
 fn build_digest(model: &ReportModel) -> String {
     let mut msg = String::with_capacity(4096);
@@ -390,20 +467,16 @@ fn build_digest(model: &ReportModel) -> String {
 
     for repo in &model.repositories {
         msg.push_str(&format!("## {} (slug: {})\n", repo.name, repo.slug));
-        if let Some(m) = &repo.metrics {
-            if m.loc.total > 0 {
-                msg.push_str(&format!("- Total LoC: {}\n", m.loc.total));
-            }
-            let langs = m.primary_languages(4);
-            if !langs.is_empty() {
-                msg.push_str(&format!("- Primary languages: {}\n", langs.join(", ")));
-            }
-            msg.push_str(&format!(
-                "- Files: {}; Functions: {}\n",
-                m.counts.files, m.counts.functions
-            ));
-        } else {
+        // #6029/#6030: `metrics` arrives only from a `--analyze` run, but
+        // `scan` is built on every model build. Reading metrics alone printed
+        // "No metrics available" for an ordinary sweep, leaving the executive
+        // summary nothing to ground a purpose or component claim on. Same
+        // metrics-then-scan precedence as `reporter_fill::fill_profile`.
+        let profile = repo_profile_lines(repo);
+        if profile.is_empty() {
             msg.push_str("- No metrics available for this application.\n");
+        } else {
+            msg.push_str(&profile);
         }
         // #5453/#6004: the authorship_summary slot has no other route to real
         // data — model.ticketing's precedent plumbs a figure to the TEMPLATE

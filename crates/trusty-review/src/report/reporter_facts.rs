@@ -10,38 +10,54 @@
 //! than duplicating it.
 //! What: [`fill_key_facts`] sets the `facts_*` scalars on the root [`Scope`]
 //! from data already loaded onto the model (LoC, file counts, languages,
-//! complexity distribution — all from `AnalyzeMetrics`, re-aggregated across
-//! every repository). Author count, work-volume estimate, and monthly
-//! trajectory are PR B's authorship-artifact fields (#5453) — left unset here
-//! so each renders as the honesty marker and surfaces its own line under
-//! Gaps & Caveats until that data exists, per the omit-empty row rule
-//! (`polish.rs::process_table`). tga has no effort-estimation metric today
-//! (verified: `story_points` fields are documented placeholders, always
-//! zero) — `facts_work_estimate` stays unset rather than inventing one.
+//! complexity distribution), re-aggregated across every repository. Density
+//! rows take the same source precedence `reporter_fill::fill_profile` uses —
+//! `AnalyzeMetrics` when a `--analyze` run supplied it, else the built-in
+//! `RepoScan` every model build produces (#6029). Complexity has no scan
+//! equivalent, and author count / work estimate / trajectory come from tga's
+//! authorship artifact (#5453, completed by
+//! `reporter_authorship::fill_authorship_facts`); when any of those inputs is
+//! genuinely absent, its row states the named reason rather than dropping out
+//! of the table. tga has no effort-estimation metric today (verified:
+//! `story_points` fields are documented placeholders, always zero) — the work
+//! estimate is a named gap in every run rather than an invented figure.
 //! Test: `reporter_facts_tests.rs`.
 
 use super::fill::Scope;
-use super::model::ReportModel;
+use super::metrics::LanguageLoc;
+use super::model::{ReportModel, RepositoryReport};
 use super::provenance::{Provenance, tag};
+
+// #6029: a genuinely absent input states WHY it is absent, in its own row.
+// Before this, every such row rendered the honesty marker, the omit-empty pass
+// dropped all of them, and an empty table collapsed the whole Key Facts block
+// to `_No data available — see Gaps & Caveats._` — even in a run whose scan
+// had measured 1.5M LoC that never reached the block at all.
+
+/// The complexity row's text when no `--analyze` metrics reached this run.
+const GAP_COMPLEXITY: &str =
+    "Not computed — this run carried no trusty-analyze metrics; re-run with `--analyze`";
+/// The author-count and trajectory rows' text when no authorship artifact loaded.
+const GAP_AUTHORSHIP: &str = "Not computed — this run carried no tga authorship artifact";
+/// The work-estimate row's text; no upstream effort metric exists yet.
+const GAP_WORK_ESTIMATE: &str = "Not computed — no upstream effort-estimation metric exists";
 
 /// Fill the Key Facts scalars from data already on `model`.
 ///
 /// Why: single entry point `reporter::build_scope` calls; keeps the
 /// aggregation logic out of `reporter.rs` (SLOC pressure — see its module
 /// doc) and testable in isolation.
-/// What: sums LoC/file counts across every repository with metrics, ranks
-/// languages by aggregate LoC, and re-projects the merged complexity
-/// distribution as a compact percentage summary. Each scalar is set only
-/// when the underlying data is non-empty, so an all-remote or metrics-free
-/// manifest leaves every row as a named gap rather than a stated zero.
-/// Test: `reporter_facts_tests::{fills_aggregate_facts, empty_model_is_all_gaps}`.
+/// What: sums LoC/file counts across every repository and ranks languages by
+/// aggregate LoC, reading each repository's `AnalyzeMetrics` when present and
+/// falling back to its `RepoScan` otherwise (#6029); then re-projects the
+/// merged complexity distribution as a compact percentage summary. A density
+/// scalar is set only when the underlying data is non-empty, so an all-remote
+/// manifest states no figure rather than a fabricated zero — but it then
+/// states the named reason instead, never a blank row.
+/// Test: `reporter_facts_tests::{fills_aggregate_facts,
+/// scan_only_model_fills_density_facts, empty_model_is_all_gaps}`.
 pub fn fill_key_facts(root: &mut Scope, model: &ReportModel) {
-    let total_loc: u64 = model
-        .repositories
-        .iter()
-        .filter_map(|r| r.metrics.as_ref())
-        .map(|m| m.loc.total)
-        .sum();
+    let total_loc: u64 = model.repositories.iter().map(repo_loc).sum();
     if total_loc > 0 {
         root.set(
             "facts_total_loc",
@@ -49,12 +65,7 @@ pub fn fill_key_facts(root: &mut Scope, model: &ReportModel) {
         );
     }
 
-    let total_files: u64 = model
-        .repositories
-        .iter()
-        .filter_map(|r| r.metrics.as_ref())
-        .map(|m| m.counts.files)
-        .sum();
+    let total_files: u64 = model.repositories.iter().map(repo_files).sum();
     if total_files > 0 {
         root.set(
             "facts_total_files",
@@ -70,27 +81,84 @@ pub fn fill_key_facts(root: &mut Scope, model: &ReportModel) {
         );
     }
 
-    if let Some(summary) = complexity_profile(model) {
-        root.set(
+    match complexity_profile(model) {
+        Some(summary) => root.set(
             "facts_complexity_summary",
             tag(summary, Provenance::Measured),
-        );
+        ),
+        // #6029: the complexity row names its missing input instead of
+        // vanishing — the scan has no complexity equivalent to fall back to.
+        None => root.set(
+            "facts_complexity_summary",
+            tag(GAP_COMPLEXITY, Provenance::NotStated),
+        ),
     }
 
-    // #5453: facts_author_count / facts_work_estimate / facts_trajectory are
-    // intentionally left unset in PR A — see module doc. PR B's authorship
-    // artifact completes them.
+    // #6029: authorship rows state their named gap here; when a repository's
+    // artifact did load, `reporter_authorship::fill_authorship_facts` runs
+    // next and overwrites both with the real figures.
+    root.set(
+        "facts_author_count",
+        tag(GAP_AUTHORSHIP, Provenance::NotStated),
+    );
+    root.set(
+        "facts_trajectory",
+        tag(GAP_AUTHORSHIP, Provenance::NotStated),
+    );
+    root.set(
+        "facts_work_estimate",
+        tag(GAP_WORK_ESTIMATE, Provenance::NotStated),
+    );
 }
 
-/// The top 5 languages by aggregate LoC across every repository with metrics.
+/// This repository's total LoC — declared metrics first, else the repo scan.
+///
+/// Why: `RepoScan` is produced on every model build while `AnalyzeMetrics`
+/// arrives only from a `--analyze` run, so reading metrics alone left the
+/// whole Key Facts block empty on an ordinary sweep (#6029). The precedence
+/// mirrors `reporter_fill::fill_profile`, which already made this choice for
+/// the per-application Profile table.
+/// What: `0` when neither source carries a positive figure.
+/// Test: `reporter_facts_tests::{scan_only_model_fills_density_facts,
+/// metrics_win_over_scan_in_key_facts}`.
+fn repo_loc(repo: &RepositoryReport) -> u64 {
+    repo.metrics
+        .as_ref()
+        .map(|m| m.loc.total)
+        .filter(|n| *n > 0)
+        .or_else(|| repo.scan.as_ref().map(|s| s.total_loc).filter(|n| *n > 0))
+        .unwrap_or(0)
+}
+
+/// This repository's tracked file count, with the same precedence as [`repo_loc`].
+fn repo_files(repo: &RepositoryReport) -> u64 {
+    repo.metrics
+        .as_ref()
+        .map(|m| m.counts.files)
+        .filter(|n| *n > 0)
+        .or_else(|| repo.scan.as_ref().map(|s| s.file_count).filter(|n| *n > 0))
+        .unwrap_or(0)
+}
+
+/// This repository's per-language LoC breakdown, with the same precedence.
+fn repo_languages(repo: &RepositoryReport) -> &[LanguageLoc] {
+    match repo
+        .metrics
+        .as_ref()
+        .filter(|m| !m.loc.by_language.is_empty())
+    {
+        Some(m) => &m.loc.by_language,
+        None => repo.scan.as_ref().map_or(&[], |s| &s.by_language),
+    }
+}
+
+/// The top 5 languages by aggregate LoC across every repository.
 fn aggregate_languages(model: &ReportModel) -> Vec<String> {
     let mut totals: Vec<(String, u64)> = Vec::new();
-    for m in model.repositories.iter().filter_map(|r| r.metrics.as_ref()) {
-        for lang in &m.loc.by_language {
-            match totals.iter_mut().find(|(name, _)| *name == lang.language) {
-                Some(entry) => entry.1 += lang.loc,
-                None => totals.push((lang.language.clone(), lang.loc)),
-            }
+    for lang in model.repositories.iter().flat_map(repo_languages) {
+        match totals.iter_mut().find(|(name, _)| *name == lang.language) {
+            Some(entry) => entry.1 += lang.loc,
+            None => totals.push((lang.language.clone(), lang.loc)),
         }
     }
     totals.sort_by_key(|(_, loc)| std::cmp::Reverse(*loc));
