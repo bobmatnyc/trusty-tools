@@ -64,7 +64,7 @@ pub fn set_contents_placeholder(root: &mut Scope) {
 /// included the placeholder) leaves the text unchanged. Zero other headings
 /// found removes the sentinel with no list. A fenced code block (``` … ```)
 /// is tracked with the same `in_fence` toggle guard as
-/// [`super::polish::collapse_recursive`] — every fenced line is skipped, so a
+/// `polish::collapse_recursive` — every fenced line is skipped, so a
 /// `## `-prefixed line inside a `raw_evidence` quote of source bytes is never
 /// misread as a heading and never linked as a dangling anchor.
 /// Test: `contents_links_tests::{links_every_top_level_heading,
