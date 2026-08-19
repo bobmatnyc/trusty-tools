@@ -85,12 +85,15 @@ pub struct GlobalConfig {
     ///
     /// Why: Routing qualifying queries (TM status, simple chat) to a local
     /// Ollama instance shaves the remote round-trip + token cost from the
-    /// hot path. Defaults to disabled so the feature is opt-in: a user must
-    /// explicitly toggle `enabled = true` (or run `/local on`) before any
-    /// remote-bound traffic gets diverted.
+    /// hot path. Enabled by default since #345 — `/local off` or
+    /// `enabled = false` turns it back off. (The pre-#345 opt-in wording this
+    /// comment carried was corrected by the 2026-08-19 audit, which found the
+    /// same claim contradicting `LocalInferenceConfig::default`.)
     /// What: Holds enable flag, model id (`ollama/<name>` form), fallback
     /// behavior, host URL, and a max-token cap to keep local responses snappy.
-    /// Test: `local_inference_defaults_apply` round-trips the section.
+    /// Test: `local_inference_defaults_apply` round-trips the section;
+    /// `local_inference_enabled_defaults_true_when_key_omitted` pins the
+    /// default that applies when the section omits `enabled`.
     #[serde(default)]
     pub local_inference: LocalInferenceConfig,
     /// `[tool_registry]` section (#453) — OpenRPC tool registry config.
@@ -246,9 +249,20 @@ impl GlobalConfig {
     /// mutate the in-memory config and need to immediately write it back to
     /// `~/.trusty-agents/config.toml` so subsequent processes (and the next
     /// prompt build) see the change.
-    /// What: Serializes `self` to pretty TOML and atomically writes to
-    /// `config_path()`. Creates the parent directory if absent.
-    /// Test: `tests::save_and_reload_roundtrip`.
+    /// What: Serializes `self` to pretty TOML, writes it to a scratch file
+    /// beside the target, then renames that file onto `config_path()` —
+    /// publishing the new config in one atomic directory operation. Creates
+    /// the parent directory if absent. A failed write or rename removes the
+    /// scratch file rather than leaving it behind.
+    ///
+    /// The scratch name comes from
+    /// [`trusty_agents_common::agents::manifest::temp_path`] so this writer
+    /// cannot drift from the per-process, per-attempt naming that #4409
+    /// established — a shared fixed `.tmp` name is its own corruption bug when
+    /// two writers interleave.
+    /// Test: `tests::save_and_reload_roundtrip`,
+    /// `tests::save_publishes_by_rename_leaving_the_old_file_intact`,
+    /// `tests::save_leaves_no_scratch_file_behind`.
     pub async fn save(&self) -> Result<()> {
         let path = Self::config_path()?;
         if let Some(parent) = path.parent() {
@@ -257,9 +271,19 @@ impl GlobalConfig {
                 .with_context(|| format!("failed to create config dir {}", parent.display()))?;
         }
         let content = toml::to_string_pretty(self).context("failed to serialize mcp config")?;
-        tokio::fs::write(&path, content)
-            .await
-            .with_context(|| format!("failed to write config {}", path.display()))?;
+        // audit 2026-08-19: was a plain `tokio::fs::write`, which truncates the
+        // live config in place — a crash mid-write left a torn file.
+        let tmp = trusty_agents_common::agents::manifest::temp_path(&path);
+        if let Err(e) = tokio::fs::write(&tmp, &content).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(anyhow::Error::new(e)
+                .context(format!("failed to write config scratch {}", tmp.display())));
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(anyhow::Error::new(e)
+                .context(format!("failed to publish config {}", path.display())));
+        }
         Ok(())
     }
 

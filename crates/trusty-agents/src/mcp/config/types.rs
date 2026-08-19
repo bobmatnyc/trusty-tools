@@ -36,11 +36,16 @@ pub(super) fn default_true() -> bool {
 /// model id. `fallback_on_error` controls whether a local failure retries
 /// remotely. `ollama_host` overrides the default localhost URL.
 /// `max_tokens` caps the local response (small for speed).
-/// Test: Defaults exercised via `LocalInferenceConfig::default`.
+/// Test: Defaults exercised via `LocalInferenceConfig::default`;
+/// `local_inference_enabled_defaults_true_when_key_omitted` and
+/// `local_inference_explicit_false_still_wins` pin the `enabled` serde default
+/// to the documented value.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LocalInferenceConfig {
     /// Enable local Ollama fast-path (default: true — enabled by default, #345).
-    #[serde(default)]
+    // audit 2026-08-19: was `#[serde(default)]`, which resolves to `false` and
+    // silently disabled the fast-path for any section omitting the key.
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Ollama model id, in `ollama/<name>` form (default: ollama/qwen3:30b).
     #[serde(default = "default_local_model")]

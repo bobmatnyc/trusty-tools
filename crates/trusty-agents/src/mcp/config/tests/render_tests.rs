@@ -222,6 +222,42 @@ max_tokens = 4096
 }
 
 #[test]
+fn local_inference_enabled_defaults_true_when_key_omitted() {
+    // audit 2026-08-19: `enabled` carried `#[serde(default)]`, so a
+    // `[local_inference]` section that omits the key parsed as `false` while
+    // both the doc comment and `LocalInferenceConfig::default()` said `true`.
+    // A hand-edited config that only changed `model` silently turned the
+    // fast-path off.
+    let cfg = GlobalConfig::from_toml_str(
+        r#"
+[local_inference]
+model = "ollama/qwen3:8b"
+"#,
+    )
+    .expect("section without `enabled` parses");
+    assert!(
+        cfg.local_inference.enabled,
+        "a [local_inference] section omitting `enabled` must inherit the \
+         documented default (true), not serde's bool default (false)"
+    );
+    assert_eq!(cfg.local_inference.model, "ollama/qwen3:8b");
+}
+
+#[test]
+fn local_inference_explicit_false_still_wins() {
+    // The default only fills an ABSENT key — an operator who wrote
+    // `enabled = false` keeps the fast-path off.
+    let cfg = GlobalConfig::from_toml_str(
+        r#"
+[local_inference]
+enabled = false
+"#,
+    )
+    .expect("explicit false parses");
+    assert!(!cfg.local_inference.enabled);
+}
+
+#[test]
 fn default_config_includes_local_inference_section() {
     // (#319, #345) The DEFAULT_CONFIG_TOML literal must include a usable
     // [local_inference] block so users have an obvious place to flip
