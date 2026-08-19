@@ -12,10 +12,17 @@
 //! return an RAII `InFlightGuard` that removes the key on drop, so the slot is
 //! always released even if the review task panics.
 //!
+//! `InFlightCountGuard` applies the same RAII rule to the plain `AtomicU64`
+//! counter `GET /status` reports (#5020): the decrement runs on drop, so it
+//! survives a client disconnect (which drops the handler future mid-`await`)
+//! and a panic unwind alike.
+//!
 //! Test: `pr_guard_blocks_second`, `pr_guard_released_on_drop`,
-//! `sha_guard_independent_of_pr`, `different_pr_not_blocked`.
+//! `sha_guard_independent_of_pr`, `different_pr_not_blocked`,
+//! `count_guard_decrements_on_drop`, `count_guard_decrements_on_unwind`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashSet;
 
@@ -110,6 +117,53 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// RAII guard around a plain in-flight *counter* (#5020).
+///
+/// Why: `POST /review` raised `AppState::in_flight` and lowered it after the
+/// `await`, with nothing between. A dropped handler future — which a client
+/// disconnect or a consumer timeout produces against a long review — skipped
+/// the decrement, so the counter only ever grew and `GET /status` reported a
+/// load figure that never came back down. A live daemon read `in_flight: 9`
+/// across a minute while reviews were both starting and finishing.
+/// What: raises the counter on construction and lowers it in `Drop`, so every
+/// exit path — return, cancellation, panic unwind — settles it. The decrement
+/// saturates at zero so a stray extra drop cannot wrap the counter to `u64::MAX`
+/// and turn an undercount into an absurd overcount.
+/// Test: `count_guard_decrements_on_drop`, `count_guard_decrements_on_unwind`,
+/// `count_guard_drop_saturates_at_zero`,
+/// `review_handler_decrements_in_flight_when_client_disconnects`.
+#[derive(Debug)]
+pub struct InFlightCountGuard {
+    counter: Arc<AtomicU64>,
+}
+
+impl InFlightCountGuard {
+    /// Raise `counter` and hand back the guard that lowers it again.
+    ///
+    /// Why: making entry and exit one object is what removes the "did every
+    /// path decrement?" question from the call site.
+    /// What: `fetch_add(1)` now; the matching `fetch_sub` happens in `Drop`.
+    /// Test: `count_guard_decrements_on_drop`.
+    pub fn enter(counter: &Arc<AtomicU64>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self {
+            counter: Arc::clone(counter),
+        }
+    }
+}
+
+impl Drop for InFlightCountGuard {
+    fn drop(&mut self) {
+        // Saturating: a counter that already read zero must stay zero rather
+        // than wrap to u64::MAX.
+        let _ = self
+            .counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_sub(1))
+            });
+    }
+}
+
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -147,6 +201,70 @@ mod tests {
         assert!(reg.try_acquire_pr("acme", "backend", 43).is_some());
         // A different repo is independent.
         assert!(reg.try_acquire_pr("acme", "frontend", 42).is_some());
+    }
+
+    /// The counter returns to its prior value when the guard is dropped.
+    ///
+    /// Why: this is the whole contract `POST /review` leaned on and did not
+    /// have (#5020).
+    /// What: enters twice, drops each guard, and reads the counter at each step.
+    /// Test: this test.
+    #[test]
+    fn count_guard_decrements_on_drop() {
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let first = InFlightCountGuard::enter(&counter);
+        let second = InFlightCountGuard::enter(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+
+        drop(second);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        drop(first);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    /// REGRESSION (#5020): the decrement must run on a panic unwind, not only
+    /// on a normal return.
+    ///
+    /// Why: the reported leak has two triggers — a dropped future and a panic
+    /// inside `run_review`. A fix that only handled the normal path would leave
+    /// the second one leaking, and this test is what catches that.
+    /// What: panics while holding a guard, catches the unwind, and asserts the
+    /// counter came back to zero.
+    /// Test: this test.
+    #[test]
+    fn count_guard_decrements_on_unwind() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let for_panic = Arc::clone(&counter);
+
+        let caught = std::panic::catch_unwind(move || {
+            let _guard = InFlightCountGuard::enter(&for_panic);
+            panic!("the review task panicked mid-flight");
+        });
+
+        assert!(caught.is_err(), "the panic must have been caught");
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "a panicking review must not leave the counter raised (#5020)"
+        );
+    }
+
+    /// A drop against a zero counter must not wrap it to `u64::MAX`.
+    ///
+    /// Why: an undercount is a small lie; `in_flight: 18446744073709551615` is
+    /// an operator-hostile one.
+    /// What: forces the counter to zero underneath a live guard, then drops it.
+    /// Test: this test.
+    #[test]
+    fn count_guard_drop_saturates_at_zero() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let guard = InFlightCountGuard::enter(&counter);
+        counter.store(0, Ordering::Relaxed);
+
+        drop(guard);
+
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 
     #[test]

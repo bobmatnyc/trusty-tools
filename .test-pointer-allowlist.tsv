@@ -724,7 +724,6 @@ crates/trusty-review/src/report/synthesize_guard.rs	verify_prose_rejects_fabrica
 crates/trusty-review/src/service/handlers.rs	health_inference_ok_when_llm_ok
 crates/trusty-review/src/service/handlers.rs	health_returns_ok_json
 crates/trusty-review/src/service/handlers.rs	new_for_test
-crates/trusty-review/src/service/handlers.rs	review_endpoint_with_fake_deps_returns_result
 crates/trusty-review/src/service/handlers.rs	status_returns_json_with_in_flight
 crates/trusty-review/src/service/inference_probe.rs	probe_default_starts_unknown
 crates/trusty-review/src/service/mod.rs	health_returns_ok_json

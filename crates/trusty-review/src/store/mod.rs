@@ -18,7 +18,7 @@ pub mod in_flight;
 
 pub use dedup::{ClaimOutcome, DedupError, DedupStore};
 pub use dedup_open::{DedupNeed, open_for as open_dedup_for};
-pub use in_flight::{InFlightGuard, InFlightRegistry};
+pub use in_flight::{InFlightCountGuard, InFlightGuard, InFlightRegistry};
 
 /// Classify a `redb::DatabaseError` as an incompatible / unreadable file format
 /// (issue #702).
