@@ -435,6 +435,48 @@ exit 1
         (dir, path)
     }
 
+    /// Like `write_mock_embedderd`, but every invocation answers its startup
+    /// probe, waits a second, then closes its stdout and idles forever
+    /// WITHOUT exiting — the wedged-sidecar shape that only the health signal
+    /// can detect.
+    ///
+    /// Why (issue #3026): proving the `unhealthy_signal` `select!` branch is
+    /// live again after a respawn needs a restart trigger that `child.wait()`
+    /// cannot supply. Closing stdout makes the client's reader task hit EOF,
+    /// which flips `unhealthy_tx` to `true` (see
+    /// `reader_eof_exit_also_signals_unhealthy` in `stdio_tests.rs`) while the
+    /// process itself stays alive, so a supervisor that stopped watching the
+    /// health channel would sit on a wedged sidecar forever.
+    /// What: identical wire protocol to `write_mock_embedderd` for the single
+    /// probe request, then `sleep 1`, `exec 1>&-` (close stdout), then an
+    /// endless idle loop. The one-second wait is load-bearing:
+    /// `watch::Sender::subscribe` marks the current value as SEEN, so an EOF
+    /// that beat `spawn_child`'s return would flip the flag before
+    /// `unhealthy_signal()` subscribed and the new receiver would never
+    /// report it.
+    /// Test: `supervisor_health_branch_is_live_again_after_respawn`.
+    fn write_mock_embedderd_wedges_after_probe() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("mock-embedderd-wedges.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+IFS= read -r line
+id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+[ -n "$id" ] || id=1
+printf '{"jsonrpc":"2.0","result":{"embeddings":[[0.1]]},"id":%s}\n' "$id"
+sleep 1
+exec 1>&-
+while :; do sleep 1; done
+"#,
+        )
+        .expect("write mock script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x");
+        (dir, path)
+    }
+
     /// Like `write_mock_embedderd_crash_once`, but only the FIRST invocation
     /// crashes — every later invocation (detected via a marker file dropped
     /// on the first run, same technique as
@@ -518,6 +560,7 @@ exit 1
     /// detaching, assert the OS process is gone.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn supervisor_shutdown_kills_child() {
         let (_dir, binary) = write_mock_embedderd();
         let cfg = SupervisorConfig {
@@ -551,6 +594,7 @@ exit 1
     /// child is gone and `child_pid_slot` was cleared to 0.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn supervisor_shutdown_handle_is_reachable_and_stops_child() {
         let (_dir, binary) = write_mock_embedderd();
         let cfg = SupervisorConfig {
@@ -592,6 +636,7 @@ exit 1
     /// published a fresh non-zero PID.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn supervisor_intentional_shutdown_does_not_respawn() {
         let (_dir, binary) = write_mock_embedderd();
         let cfg = SupervisorConfig {
@@ -648,6 +693,7 @@ exit 1
     /// after waiting past what the full backoff + respawn would have taken.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn supervisor_shutdown_during_respawn_backoff_returns_promptly() {
         let (_dir, binary) = write_mock_embedderd_crash_once();
         let cfg = SupervisorConfig {
@@ -745,6 +791,7 @@ exit 1
     /// (`shutdown_closed`) and did not wedge ongoing supervision.
     /// Test: this test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
     async fn supervisor_dropped_handle_does_not_busy_spin() {
         let (_dir, binary) = write_mock_embedderd();
         let cfg = SupervisorConfig {
@@ -829,6 +876,7 @@ exit 1
     /// (never a fixed sleep-and-hope) until it flips.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn supervisor_gives_up_after_max_restarts_flips_has_given_up() {
         let (_dir, binary) = write_mock_embedderd_crash_once();
         let cfg = SupervisorConfig {
@@ -953,6 +1001,7 @@ exit 1
     ///   5. Assert `has_given_up()` is still `false`.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn supervisor_transient_crash_then_sustained_health_resets_counter_no_premature_give_up()
     {
         let (_dir, binary) = write_mock_embedderd_crash_once_then_healthy();
@@ -1052,6 +1101,7 @@ exit 1
     /// `true` or a generous timeout.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn supervisor_terminated_signal_fires_after_exhausting_max_restarts() {
         let (_dir, binary) = write_mock_embedderd_crash_once();
         let cfg = SupervisorConfig {
@@ -1115,6 +1165,7 @@ exit 1
     /// `false` throughout and after.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn supervisor_terminated_signal_stays_false_on_intentional_shutdown() {
         let (_dir, binary) = write_mock_embedderd();
         let cfg = SupervisorConfig {
@@ -1136,5 +1187,168 @@ exit 1
             "an intentional cooperative shutdown must never set terminated_signal"
         );
         assert_eq!(pid_slot.load(Ordering::Acquire), 0);
+    }
+
+    /// Regression test for issue #3026: closing `unhealthy_signal`'s sender
+    /// while the sidecar is still alive must not busy-spin the supervision
+    /// loop, and must not be read as a health event.
+    ///
+    /// Why: `watch::Receiver::changed()` resolves `Ready(Err(_))` on every
+    /// poll once the last sender drops, and an immediately-ready future never
+    /// yields, so the old `Err` arm — which logged and `continue`d — re-armed
+    /// the same ready future and monopolised a tokio worker for the rest of
+    /// the child's life. That is the `shutdown_rx` hazard #3023 fixed, on the
+    /// branch beside it. Before the fix this test's iteration count runs into
+    /// the millions.
+    /// What: spawns the idling mock sidecar, then overwrites the supervisor's
+    /// `unhealthy_signal` field with a receiver whose sender is already
+    /// dropped — the field swap is what makes the closed-channel state
+    /// reachable at all, since the live client owns its own sender. Two
+    /// worker threads deliberately: a regression then shows up as a failed
+    /// assertion on the count rather than a hang. Asserts (a) the loop stays
+    /// bounded over a 300ms window, (b) the pid is unchanged, so a closed
+    /// channel was not misread as `RestartTrigger::Unhealthy` and did not
+    /// kill a healthy sidecar, and (c) supervision still works — an
+    /// out-of-band kill is noticed and respawned, and `shutdown()` still
+    /// stops the loop.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn supervisor_closed_unhealthy_signal_does_not_busy_spin() {
+        let (_dir, binary) = write_mock_embedderd();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            max_restarts: 5,
+            ..SupervisorConfig::default()
+        };
+        let (mut supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let initial_pid = pid_slot.load(Ordering::Acquire);
+        assert!(initial_pid > 0, "pid_slot must be populated after spawn");
+
+        // Hand the loop a health channel that is already closed, leaving the
+        // sidecar itself running — the state the loop must tolerate.
+        let (dead_tx, dead_rx) = watch::channel(false);
+        drop(dead_tx);
+        supervisor.unhealthy_signal = dead_rx;
+
+        super::SUPERVISION_LOOP_ITERATIONS.store(0, Ordering::Relaxed);
+        let handle = supervisor.start_supervisor_task();
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let iterations = super::SUPERVISION_LOOP_ITERATIONS.load(Ordering::Relaxed);
+        assert!(
+            iterations < 200,
+            "supervision_loop iterated {iterations} times in 300ms with a closed \
+             unhealthy_signal channel — expected a small, bounded count (the loop \
+             blocked on child.wait() as usual), not a busy-spin re-polling the \
+             immediately-ready Err future"
+        );
+        assert_eq!(
+            pid_slot.load(Ordering::Acquire),
+            initial_pid,
+            "a closed unhealthy_signal channel is not a health event — the live \
+             sidecar must not be killed and respawned because its sender dropped"
+        );
+
+        // Supervision must still function: kill the child out-of-band and
+        // confirm the loop notices the exit and respawns it.
+        std::process::Command::new("kill")
+            .args(["-9", &initial_pid.to_string()])
+            .status()
+            .expect("kill -9 mock child");
+
+        let respawned = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let pid = pid_slot.load(Ordering::Acquire);
+                if pid != 0 && pid != initial_pid {
+                    return pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            respawned.is_ok(),
+            "supervisor never respawned the killed child within 10s — a closed \
+             unhealthy_signal channel must not wedge ongoing supervision"
+        );
+
+        // And cooperative shutdown still reaches the loop afterwards.
+        handle.shutdown().await;
+        assert_eq!(pid_slot.load(Ordering::Acquire), 0);
+    }
+
+    /// Issue #3026, the half a naive fix gets wrong: after a respawn the
+    /// supervisor watches the NEW client's health signal again, even though
+    /// the previous receiver's channel was closed.
+    ///
+    /// Why: `shutdown_rx`'s sender lives for the whole supervision, so #3023
+    /// could latch `shutdown_closed` once and never revisit it. Copying that
+    /// shape onto `unhealthy_signal` would be wrong — the supervisor replaces
+    /// that receiver on every successful respawn, and a latched flag would
+    /// leave the branch disabled for the replacement sidecar. Nothing else in
+    /// the suite would catch it: a sidecar that wedges without exiting is
+    /// invisible to `child.wait()`, so the supervisor would simply sit on it.
+    /// What: starts with a closed health channel (same field swap as
+    /// `supervisor_closed_unhealthy_signal_does_not_busy_spin`), kills the
+    /// child to force a respawn, and then relies on
+    /// `write_mock_embedderd_wedges_after_probe` — every replacement answers
+    /// its probe and then closes stdout while staying alive, so the ONLY
+    /// signal that can drive another restart is the health channel. With
+    /// `max_restarts: 2` the loop reaches `should_give_up` after the initial
+    /// crash plus two wedge restarts, so `terminated_signal()` flipping is
+    /// proof the branch fired again. A latched-flag fix never reaches it and
+    /// this test times out.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn supervisor_health_branch_is_live_again_after_respawn() {
+        let (_dir, binary) = write_mock_embedderd_wedges_after_probe();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            backoff_max_secs: 0,
+            max_restarts: 2,
+            ..SupervisorConfig::default()
+        };
+        let (mut supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let initial_pid = pid_slot.load(Ordering::Acquire);
+        assert!(initial_pid > 0, "pid_slot must be populated after spawn");
+
+        let (dead_tx, dead_rx) = watch::channel(false);
+        drop(dead_tx);
+        supervisor.unhealthy_signal = dead_rx;
+
+        let terminated = supervisor.terminated_signal();
+        let handle = supervisor.start_supervisor_task();
+
+        // Force the first respawn, which is where the loop picks up the
+        // replacement client's (open) health receiver.
+        std::process::Command::new("kill")
+            .args(["-9", &initial_pid.to_string()])
+            .status()
+            .expect("kill -9 mock child");
+
+        let gave_up = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if terminated.load(Ordering::Acquire) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            gave_up.is_ok(),
+            "the supervisor never escalated past max_restarts — after the respawn \
+             it stopped watching the replacement sidecar's unhealthy_signal, so a \
+             wedged (stdout-closed but still running) sidecar was never restarted"
+        );
+
+        handle.shutdown().await;
     }
 }
