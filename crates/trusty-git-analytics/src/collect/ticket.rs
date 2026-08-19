@@ -4,18 +4,21 @@
 //! to an external work-tracking system. We currently recognize:
 //!
 //! - **JIRA / Linear style**: `PROJ-123`, `ENG-456`, `ABC-9` —
-//!   uppercase project key, hyphen, digits. The Linear identifier format
-//!   (`ENG-123`, `FE-456`) is a subset of this pattern.
+//!   uppercase project key, hyphen, digits, declared at the start of the
+//!   commit SUBJECT. The Linear identifier format (`ENG-123`, `FE-456`) is a
+//!   subset of this pattern.
 //! - **GitHub action-keyword refs**: `fixes #123`, `closes #45`,
 //!   `resolves #7` (case-insensitive, also matches `fix`/`close`/`resolve`).
 //! - **Azure DevOps work-item refs**: `AB#123`.
 //!
-//! **Note on JIRA-shaped tokens (issue #5199):** [`extract_ticket_id`] reads a
-//! JIRA/Linear key from the **subject line only**, and rejects documentation
-//! prefixes (`ADR`, `DOC`, `RFC`, `SPEC`). [`is_ticketed`] still scans the whole
-//! message with the unrestricted pattern — the two now disagree deliberately,
-//! because `ticketed` is an operator-facing quality metric last tuned by #445
-//! and narrowing it is a separate decision.
+//! **Note on JIRA-shaped tokens (issues #5199, #5735):** [`extract_ticket_id`]
+//! and [`is_ticketed`] read a JIRA/Linear key the same way — from the
+//! **subject line only**, rejecting documentation prefixes (`ADR`, `DOC`,
+//! `RFC`, `SPEC`) via [`subject_ticket_key`]. #5199 narrowed
+//! [`extract_ticket_id`] and left [`is_ticketed`] scanning the whole message
+//! with the unrestricted pattern; #5735 measured what that cost — 237 of this
+//! repository's 2633 commits counted ticketed on nothing but a `UTF-8`- or
+//! `ADR-0034`-shaped string in a body. The two now agree.
 //!
 //! **Note on bare `#N` refs (issue #445):** A bare `#N` preceded by
 //! whitespace (the `gh_bare` pattern) is explicitly *excluded* from
@@ -37,8 +40,11 @@ use regex::Regex;
 /// A bare `#N` reference no longer qualifies a commit as "ticketed" — only
 /// JIRA/Linear, GitHub action-keyword refs, and Azure DevOps refs do.
 /// The bare pattern still lives in [`ExtractPatterns`] for `ticket_id` population.
+///
+/// #5735: there is no `jira` field either. A JIRA/Linear key now reaches
+/// [`is_ticketed`] only through [`subject_ticket_key`], so the whole-message
+/// pattern that used to live here has no remaining caller.
 struct TicketPatterns {
-    jira: Regex,
     gh_action: Regex,
     azdo: Regex,
 }
@@ -51,10 +57,6 @@ fn patterns() -> &'static TicketPatterns {
         // [`patterns_compile`] below — any regression is caught at test
         // time, not at runtime.
         TicketPatterns {
-            // JIRA / Linear: uppercase letters (>=1), optional digits, '-', digits.
-            // Word boundaries prevent matching inside `FOO-BAR-1`-style identifiers'
-            // middle, while still catching the trailing `BAR-1` segment.
-            jira: Regex::new(r"\b[A-Z][A-Z0-9]*-\d+\b").expect("jira pattern compiles"),
             // GitHub action keyword: fix(es|ed)?|close(s|d)?|resolve(s|d)?  #123
             gh_action: Regex::new(r"(?i)\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+#\d+\b")
                 .expect("gh_action pattern compiles"),
@@ -174,19 +176,31 @@ fn subject_ticket_key(subject: &str) -> Option<String> {
 /// Return `true` if `message` contains any recognized ticket reference.
 ///
 /// Why: downstream metrics (ticketed-commit rate, quality score) must only
-/// count commits that are genuinely linked to a tracked work item. A bare
-/// `#N` reference (e.g. `#42` from a release note) is too noisy — it fires
-/// on nearly every multi-line commit body and inflates the ticketed rate to
-/// ~100% (issue #445). The `gh_bare` pattern is intentionally **excluded**
-/// from this OR-chain; it is still used by [`extract_ticket_id`] to populate
+/// count commits that are genuinely linked to a tracked work item. Two
+/// separate noise classes had to be excluded to make that true.
+///
+/// A bare `#N` reference (e.g. `#42` from a release note) fires on nearly
+/// every multi-line commit body and inflated the ticketed rate to ~100%
+/// (issue #445). The `gh_bare` pattern is intentionally **excluded** from
+/// this OR-chain; it is still used by [`extract_ticket_id`] to populate
 /// `commits.ticket_id` as a last-resort identifier.
-/// What: returns `true` for JIRA/Linear identifiers (`PROJ-N`), GitHub
-/// action-keyword refs (`closes #N`, `fixes #N`), and Azure DevOps refs
-/// (`AB#N`). A bare `#N` with no action keyword does NOT make a commit
-/// ticketed.
+///
+/// A JIRA-shaped token anywhere in the message is prose, not a declaration
+/// (issue #5735). `UTF-8`, `SHA-256`, `GCC-11`, `ADR-0034` and `DOC-39` are
+/// the same shape as `PROJ-123`, so no pattern can separate them and no
+/// deny-list can enumerate them — 237 of this repository's 2633 commits were
+/// counted ticketed on such a string alone. Position separates them:
+/// [`subject_ticket_key`] accepts a key only where the author declares one.
+///
+/// What: returns `true` for a JIRA/Linear key the SUBJECT declares
+/// (`PROJ-123: …`), a GitHub action-keyword ref anywhere in the message
+/// (`closes #N`, `fixes #N`), or an Azure DevOps ref anywhere (`AB#N`).
+/// A bare `#N`, and a JIRA-shaped token that is not the subject's leading
+/// token, both return `false`.
 /// Test: `tests::ticketed_*` below; the critical regression cases are
-/// `bare_hash_alone_is_NOT_ticketed`, `closes_hash_IS_ticketed`,
-/// `jira_IS_ticketed`, and `azdo_IS_ticketed`.
+/// `bare_hash_alone_is_not_ticketed`, `closes_hash_is_ticketed`,
+/// `jira_is_ticketed`, `azdo_is_ticketed`, and
+/// `jira_shaped_prose_is_not_ticketed`.
 ///
 /// # Examples
 ///
@@ -197,10 +211,18 @@ fn subject_ticket_key(subject: &str) -> Option<String> {
 /// assert!(is_ticketed("Fix login (closes #42)"));
 /// assert!(!is_ticketed("misc cleanup"));
 /// assert!(!is_ticketed("some note about #42"));
+///
+/// // #5735: a JIRA-shaped token in prose is not a ticket reference.
+/// assert!(!is_ticketed("fix: stem handling\n\nA multi-byte UTF-8 name breaks it.\n"));
+/// assert!(!is_ticketed("docs: amend ADR-0034"));
 /// ```
 pub fn is_ticketed(message: &str) -> bool {
     let p = patterns();
-    p.jira.is_match(message) || p.gh_action.is_match(message) || p.azdo.is_match(message)
+    p.gh_action.is_match(message)
+        || p.azdo.is_match(message)
+        // #5735: the same subject-anchored, doc-prefix-rejecting rule
+        // `extract_ticket_id` uses, so the two cannot disagree.
+        || subject_ticket_key(message.lines().next().unwrap_or("")).is_some()
 }
 
 /// Extract the ticket identifier a commit message declares.
@@ -569,7 +591,11 @@ mod tests {
     fn jira_style_is_ticketed() {
         assert!(is_ticketed("ENG-123: add feature"));
         assert!(is_ticketed("PROJ-1 initial commit"));
-        assert!(is_ticketed("Backport from upstream (ABC-4567)"));
+        // #5735: `Backport from upstream (ABC-4567)` used to pass here. It is
+        // now covered as a NEGATIVE in
+        // `jira_shaped_prose_is_not_ticketed` — a mid-subject parenthetical is
+        // the same position `UTF-8` and `ADR-0034` occupy.
+        assert!(is_ticketed("[ABC-4567] backport from upstream"));
     }
 
     #[test]
@@ -642,8 +668,11 @@ mod tests {
 
     #[test]
     fn multiline_body_with_ticket_is_ticketed() {
-        // JIRA ref anywhere in body → ticketed.
-        let msg = "Refactor module structure\n\nMoves things around.\nRelates to PROJ-789.\n";
+        // #5735: a JIRA ref in the BODY is no longer ticketed — that position
+        // is where `UTF-8` and `ADR-0034` live. The subject still declares.
+        let body_only = "Refactor module structure\n\nMoves things around.\nRelates to PROJ-789.\n";
+        assert!(!is_ticketed(body_only));
+        let msg = "PROJ-789: refactor module structure\n\nMoves things around.\n";
         assert!(is_ticketed(msg));
 
         // Bare #N in body is NOT ticketed (issue #445 fix); action keyword is.
@@ -668,9 +697,72 @@ mod tests {
         let p = patterns();
         assert!(!p.azdo.is_match("#1234 some work"));
         assert!(!p.azdo.is_match("fixes #99"));
-        // And the existing JIRA pattern must not accidentally fire on AB#N
-        // (different separator: `#` vs `-`).
-        assert!(!p.jira.is_match("AB#1234"));
+        // And the JIRA route must not fire on AB#N either (different
+        // separator: `#` vs `-`), so `AB#1234` is ticketed only as ADO.
+        assert_eq!(subject_ticket_key("AB#1234"), None);
+    }
+
+    /// Why: #5735 — `is_ticketed` ran an unrestricted `\b[A-Z][A-Z0-9]*-\d+\b`
+    /// over the whole message, so a `UTF-8` or `ADR-0034` in a body marked the
+    /// commit ticketed. 237 of this repository's 2633 commits were counted on
+    /// nothing else. `commits.ticketed` is the operator-facing quality metric
+    /// #445 tuned deliberately, so the inflation lands in a reported number.
+    /// What: every one of these is a JIRA-SHAPED string sitting where prose
+    /// sits — a body line, a mid-subject parenthetical, a tail segment — and
+    /// none of them makes a commit ticketed. The last two are the documentation
+    /// prefixes [`DOC_REF_PREFIXES`] rejects even in declaring position.
+    /// Test: this test itself.
+    #[test]
+    fn jira_shaped_prose_is_not_ticketed() {
+        for msg in [
+            // The two cases #5735 names.
+            "fix: stem handling\n\nA filename containing a multi-byte UTF-8 character breaks.\n",
+            "docs: amend ADR-0034 point 7",
+            // The rest of the measured long tail, in body position.
+            "chore: pin the digest\n\nVerifies the artifact against the published SHA-256.\n",
+            "chore: bump anydoc\n\nAvoids reintroducing RUSTSEC-2026-0187.\n",
+            "build: probe the toolchain\n\nMirrors the AL2023/GCC-11 desync.\n",
+            "docs: rate table\n\nGPT-5 and Gemini rates differ.\n",
+            "fix: parse timestamps\n\nISO-8601 offsets were dropped.\n",
+            "docs: manifest\n\nPer DOC-39 the manifest is an allowlist.\n",
+            "chore: triage\n\nResolves the HIGH-1 finding from the audit.\n",
+            // A mid-subject parenthetical is the same position as prose.
+            "Backport from upstream (ABC-4567)",
+            // A tail segment of a longer identifier stays unreachable.
+            "SPEC-INSTALLER-01 detect target",
+            // Declaring position, documentation prefix: still not a ticket.
+            "DOC-67 §2 rewrite",
+            "RFC-2119 keyword sweep",
+        ] {
+            assert!(!is_ticketed(msg), "message: {msg:?}");
+        }
+    }
+
+    /// Why: #5735 narrowed where a JIRA/Linear key counts, so the subject
+    /// shapes that DO declare one must be proven still to count — a fix that
+    /// zeroed the metric would be as wrong as the inflation it replaced.
+    /// What: `is_ticketed` agrees with `extract_ticket_id` on every subject
+    /// form, and the GitHub and Azure DevOps routes are untouched by position.
+    /// Test: this test itself.
+    #[test]
+    fn subject_declared_key_is_still_ticketed() {
+        for msg in [
+            "BB-2746: refactor auth service",
+            "DRE-405 fix demand calculation",
+            "fix(auth): PROJ-12 tighten token check",
+            "[ENG-77] add endpoint",
+            "feat!: API-9 breaking rename",
+            "SRE-3104",
+            "ENG-7 refactor\n\nBody mentions UTF-8 and ADR-0034.\n",
+        ] {
+            assert!(is_ticketed(msg), "message: {msg:?}");
+            assert!(extract_ticket_id(msg).is_some(), "message: {msg:?}");
+        }
+        // Position never mattered for these two routes and still does not.
+        assert!(is_ticketed("Rework the guard\n\nCloses #5735\n"));
+        assert!(is_ticketed(
+            "Refactor module\n\nbody mentions AB#7 explicitly"
+        ));
     }
 
     #[test]
