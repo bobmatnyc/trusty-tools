@@ -248,7 +248,7 @@ impl Synthesizer {
     /// Why: the CLI builds the provider from the reviewer role config; tests
     /// inject stubs.
     /// What: stores the provider + model with the default timeout and no raw
-    /// capture directory (opt-in via [`with_raw_capture_dir`]).
+    /// capture directory (opt-in via [`Self::with_raw_capture_dir`]).
     /// Test: exercised by every synthesize test.
     pub fn new(llm: Arc<dyn LlmProvider>, model: impl Into<String>) -> Self {
         Self {

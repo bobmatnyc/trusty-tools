@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.1.1] — 2026-08-19
+
+### Changed
+
+- Re-release of 3.1.0 from a gate-clean commit. No code change — every entry
+  under [3.1.0] below describes this release too. The `tga-v3.1.0` tag is pinned
+  by a protected ruleset to `43bfd64f1`, which contains the #6027
+  broken-intra-doc-link regression and therefore can never pass the pre-publish
+  gate. A tag cannot be moved, so the version moves forward instead.
+
+---
+
 ## [3.1.0] — 2026-08-19
 
 ### Breaking

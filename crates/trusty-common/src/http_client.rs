@@ -12,14 +12,27 @@
 //! next site forgets it.
 //!
 //! What:
-//! - [`loopback_client_builder`] — the primitive. A `ClientBuilder` with proxies
-//!   disabled and NO timeout policy, for callers that own their own bounds (an
-//!   SSE stream must not carry a whole-request timeout at all).
-//! - [`loopback_client`] — that builder plus the standard
-//!   [`LOOPBACK_CONNECT_TIMEOUT`] / [`LOOPBACK_REQUEST_TIMEOUT`] bounds, for
-//!   callers with no bespoke timing requirement.
-//! - [`blocking_loopback_client_builder`] — the `reqwest::blocking` counterpart,
-//!   behind the `blocking-http` feature.
+//! - [`loopback_client_builder`](crate::http_client::loopback_client_builder) —
+//!   the primitive. A `ClientBuilder` with proxies disabled and NO timeout
+//!   policy, for callers that own their own bounds (an SSE stream must not carry
+//!   a whole-request timeout at all).
+//! - [`loopback_client`](crate::http_client::loopback_client) — that builder plus
+//!   the standard
+//!   [`LOOPBACK_CONNECT_TIMEOUT`](crate::http_client::LOOPBACK_CONNECT_TIMEOUT) /
+//!   [`LOOPBACK_REQUEST_TIMEOUT`](crate::http_client::LOOPBACK_REQUEST_TIMEOUT)
+//!   bounds, for callers with no bespoke timing requirement.
+//! - `blocking_loopback_client_builder` — the `reqwest::blocking` counterpart,
+//!   behind the `blocking-http` feature. Deliberately NOT a link: the item does
+//!   not exist when that feature is off, and a link that resolves only under one
+//!   feature fails `#![deny(rustdoc::broken_intra_doc_links)]` for anyone who
+//!   documents this crate without it.
+//!
+//! Paths here are crate-absolute on purpose. This module carries docs in two
+//! places — these `//!` lines and the `///` block on `pub mod http_client;` in
+//! `lib.rs` — and rustdoc merges both into one doc string whose link-resolution
+//! scope comes from the FIRST fragment, which is the `lib.rs` one, so a bare
+//! `loopback_client` here resolves against the crate root and is not found
+//! (#6027).
 //!
 //! Scope: LOOPBACK callers only. A client that genuinely talks to the public
 //! internet — crates.io in `update`, an inference provider in `inference` /

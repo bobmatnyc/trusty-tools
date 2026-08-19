@@ -210,6 +210,28 @@ unmaintained = "none"
 # an always-red gate is an unread gate.
 unsound = "none"
 
+# TIME-BOXED EXCEPTION — one advisory, one review date, enforced by a human.
+#
+# RUSTSEC-2026-0258 was published 2026-08-17 and turned this check red on every
+# run since. h2 enters the graph twice and only one entry has a fix: 0.4.14 can
+# take the patched 0.4.16, but 0.3.27 is on a line the advisory never patched,
+# so no `cargo update` clears both. Clearing them needs a hyper 0.14 -> 1.x move
+# somewhere in the transitive graph, which is dependency work, not release work.
+#
+# Owner ruling 2026-08-19: "this is an expedited release. We will handle
+# dependabot in a subsequent release."
+#
+# CARGO-DENY CANNOT EXPIRE THIS ROW ITSELF. An `ignore` entry accepts `id` and
+# `reason` and nothing else — cargo-deny 0.20.2 rejects `expires` outright with
+# `error[unexpected-keys]`, so this row does NOT lapse on its own and will sit
+# here silently until someone deletes it. The review date lives in the `reason`
+# string, which cargo-deny prints, so it is at least visible in gate output. The
+# same id is ignored in `.cargo/audit.toml` for cargo-audit; remove both in one
+# change.
+ignore = [
+  { id = "RUSTSEC-2026-0258", reason = "REVIEW BY 2026-09-18. h2 unbounded empty DATA frames (low severity). Deferred past the 2026-08-19 expedited release by owner ruling; h2 0.3.27 has no patched version, so the real fix is a hyper 1.x migration. Nothing expires this row automatically — delete it when the upgrade lands or record a fresh decision." },
+]
+
 # ---------------------------------------------------------------------------
 # [sources] — provenance.
 #

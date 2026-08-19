@@ -10,7 +10,7 @@
 //! `github.repo` field needs. So this module has no `resolve(targets, …)`
 //! step of its own — [`GithubAccess::section`] is called once per selected
 //! repository, directly from the same name `crate::run::SelectedRepo::name`
-//! already carries (which [`crate::clone::record_selection`] sets from
+//! already carries (which `clone::record_selection` sets from
 //! [`crate::registry::Target::Repo::name_with_owner`], so it is already
 //! `owner/name`, never a display-only name).
 //!
