@@ -17,6 +17,7 @@ use crate::memory_core::palace::{Palace, PalaceId};
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::palace_store::{PalaceStore, PalaceStoreError};
+use crate::memory_core::timeouts::OpBudget;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use lru::LruCache;
@@ -450,6 +451,53 @@ impl PalaceRegistry {
     /// `writer_open_queue_wait_is_bounded_under_sustained_contention` proves the bound
     /// against real multi-writer contention.
     pub fn open_palace(&self, data_root: &Path, palace_id: &PalaceId) -> Result<Arc<PalaceHandle>> {
+        self.open_palace_bounded(data_root, palace_id, self.open_queue_timeout)
+    }
+
+    /// Open a palace, spending only what an in-flight operation's budget has
+    /// left on the open queue (issue #4002).
+    ///
+    /// Why: a `memory_remember` waits for the per-palace write mutex
+    /// ([`crate::memory_core::timeouts::write_lock_timeout`]) and only then
+    /// calls [`Self::open_palace`], which starts its own full
+    /// [`crate::memory_core::timeouts::open_queue_timeout`] window. Both legs
+    /// were bounded, but their sum was not, so a caller that exhausted each
+    /// waited 60 s + ~63 s before any error surfaced. Passing the operation's
+    /// residual budget makes this leg spend what the earlier leg left.
+    /// What: clamps the registry's configured `open_queue_timeout` with
+    /// [`crate::memory_core::timeouts::OpBudget::leg`], then runs the same open
+    /// pipeline as [`Self::open_palace`]. The budget is a ceiling only — it
+    /// never raises the configured bound, and an exhausted budget yields a
+    /// non-blocking queue attempt, so an UNCONTENDED open still succeeds.
+    /// Test: `open_palace_within_an_exhausted_budget_still_opens_an_uncontended_palace`,
+    /// `open_palace_within_does_not_extend_the_configured_queue_bound`.
+    pub fn open_palace_within(
+        &self,
+        data_root: &Path,
+        palace_id: &PalaceId,
+        budget: OpBudget,
+    ) -> Result<Arc<PalaceHandle>> {
+        self.open_palace_bounded(data_root, palace_id, budget.leg(self.open_queue_timeout))
+    }
+
+    /// Shared body of [`Self::open_palace`] and [`Self::open_palace_within`],
+    /// parameterised by how long the open queue may be waited on.
+    ///
+    /// Why: the two entry points differ only in that number; duplicating the
+    /// alias resolution, double-checked cache lookup, and open pipeline would
+    /// let them drift.
+    /// What: see [`Self::open_palace`]. `queue_wait` is the bound handed to
+    /// `try_lock_for`, and it is the duration the timeout error reports — so
+    /// an operator reading the message sees the wait that actually elapsed,
+    /// not the unclamped configured value.
+    /// Test: `open_palace_within_an_exhausted_budget_still_opens_an_uncontended_palace`,
+    /// `writer_open_queue_wait_is_bounded_under_sustained_contention`.
+    fn open_palace_bounded(
+        &self,
+        data_root: &Path,
+        palace_id: &PalaceId,
+        queue_wait: Duration,
+    ) -> Result<Arc<PalaceHandle>> {
         // Fast path: an already-open handle under the requested id.
         if let Some(h) = self.get(palace_id) {
             return Ok(h);
@@ -483,13 +531,18 @@ impl PalaceRegistry {
             .entry(effective_id.clone())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
-        let open_queue_timeout = self.open_queue_timeout;
-        let _open_guard = open_lock.try_lock_for(open_queue_timeout).ok_or_else(|| {
+        //
+        // Clamped further (issue #4002): when the caller arrives through
+        // `open_palace_within`, `queue_wait` is what the operation's joint
+        // budget has left after the write-lock leg, so the two waits no longer
+        // sum.
+        let _open_guard = open_lock.try_lock_for(queue_wait).ok_or_else(|| {
             anyhow::anyhow!(
-                "palace '{effective_id}' open queue timed out after {open_queue_timeout:?} \
+                "palace '{effective_id}' open queue timed out after {queue_wait:?} \
                  waiting behind other callers retrying a redb write-lock conflict (issue #3992); \
                  another process may be holding the lock persistently — stop it, or raise \
-                 TRUSTY_OPEN_QUEUE_TIMEOUT_SECS if this is expected under heavy contention"
+                 TRUSTY_OPEN_QUEUE_TIMEOUT_SECS (and TRUSTY_WRITE_OP_BUDGET_SECS, which caps \
+                 the whole operation — issue #4002) if this is expected under heavy contention"
             )
         })?;
         // Re-check under the open lock: another racer may have opened it while

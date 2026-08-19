@@ -18,7 +18,6 @@ use trusty_common::memory_core::retrieval::{
     list_drawers_in_wing, recall_across_palaces, recall_deep_scoped, recall_scoped, scope_admits,
     PalaceHandle, RecallScope, RememberOptions,
 };
-use trusty_common::memory_core::timeouts;
 use uuid::Uuid;
 
 use super::wing_ops::resolve_wing_arg;
@@ -28,9 +27,9 @@ use super::bm25::{
     serialize_recall,
 };
 use super::helpers::{
-    apply_tier_c, attach_mcp_attribution, blocklist_gate, content_gate, dedup_gate,
-    mcp_remember_opts, open_palace_handle, parse_tags, resolve_palace, resolve_tier_c, room_label,
-    skipped_envelope, write_drawer, WriteDrawerParams,
+    apply_tier_c, attach_mcp_attribution, begin_budgeted_write, blocklist_gate, content_gate,
+    dedup_gate, mcp_remember_opts, open_palace_handle, open_palace_handle_within, parse_tags,
+    resolve_palace, resolve_tier_c, room_label, skipped_envelope, write_drawer, WriteDrawerParams,
 };
 
 pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> {
@@ -125,18 +124,20 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     // visible to subsequent waiters.
     // Issue #906: bound the acquisition so a stuck embedder on a prior writer
     // does not cascade an indefinite queue of callers waiting for this lock.
+    // Issue #4002: that bound and the open-queue bound below used to be
+    // independent windows, so a caller that exhausted both waited their SUM.
+    // `begin_budgeted_write` stamps one budget here and every later leg spends
+    // its remainder.
     let write_lock = state.palace_write_lock(palace);
-    let _write_guard =
-        timeouts::lock_with_timeout(&write_lock, timeouts::write_lock_timeout(), palace)
-            .await
-            .map_err(|e| anyhow::anyhow!("memory_remember: {e:#}"))?;
+    let (_write_guard, budget) =
+        begin_budgeted_write(state, &write_lock, palace, "memory_remember").await?;
 
     // Issue #220: rolling dedup window — skip when a near-duplicate
     // landed in the same palace within the last 5 minutes. The
     // `force=true` operator override bypasses the gate so
     // intentional re-writes are not silently dropped.
     if !force {
-        let handle = open_palace_handle(state, palace)?;
+        let handle = open_palace_handle_within(state, palace, budget)?;
         if dedup_gate(&handle, &text) {
             tracing::debug!(
                 palace = %palace,
@@ -155,7 +156,7 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     // `engineer`/`Planning` and `pm`/`Planning` are two different rooms.
     // Without this the write path could never reach a non-default wing and
     // wing-scoped recall would be permanently empty outside the default.
-    let wing_handle = open_palace_handle(state, palace)?;
+    let wing_handle = open_palace_handle_within(state, palace, budget)?;
     let wing_id = resolve_wing_arg(&wing_handle, &args, "memory_remember")?;
     // #4886: ADR-0028 D3/D4. `fact_key` is what makes this a Tier C write; a
     // slot that fails admission degrades to an ordinary drawer, and the
@@ -176,6 +177,7 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
             importance: 0.5,
             opts,
             room_label_for_kg,
+            budget,
         },
     )
     .await?;
@@ -247,17 +249,16 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     // `remember_with_options` is visible to subsequent waiters before
     // they snapshot.
     // Issue #906: bound the acquisition to prevent cascading hangs.
+    // Issue #4002: one budget spans this leg and the open-queue leg below.
     let write_lock = state.palace_write_lock(palace);
-    let _write_guard =
-        timeouts::lock_with_timeout(&write_lock, timeouts::write_lock_timeout(), palace)
-            .await
-            .map_err(|e| anyhow::anyhow!("memory_note: {e:#}"))?;
+    let (_write_guard, budget) =
+        begin_budgeted_write(state, &write_lock, palace, "memory_note").await?;
     // Issue #220: rolling dedup window — same gate as
     // `memory_remember`. `memory_note` has no `force` arg, so the
     // gate is unconditional: curated short-fact writes that happen
     // to duplicate an existing recent note are still skipped.
     {
-        let handle = open_palace_handle(state, palace)?;
+        let handle = open_palace_handle_within(state, palace, budget)?;
         if dedup_gate(&handle, &content) {
             tracing::debug!(
                 palace = %palace,
@@ -305,6 +306,7 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
             importance: 1.0,
             opts,
             room_label_for_kg,
+            budget,
         },
     )
     .await

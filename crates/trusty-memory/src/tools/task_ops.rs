@@ -14,11 +14,11 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use trusty_common::memory_core::palace::{DrawerType, RoomType};
 use trusty_common::memory_core::retrieval::RememberOptions;
-use trusty_common::memory_core::timeouts;
 use uuid::Uuid;
 
 use super::helpers::{
-    open_palace_handle, parse_tags, resolve_palace, room_label, write_drawer, WriteDrawerParams,
+    begin_budgeted_write, open_palace_handle, parse_tags, resolve_palace, room_label, write_drawer,
+    WriteDrawerParams,
 };
 
 /// Create a Task drawer in a palace via the MCP surface.
@@ -58,11 +58,11 @@ pub(crate) async fn handle_task_add(state: &AppState, args: Value) -> Result<Val
     // Serialise the gate-check + write sequence per palace (same pattern as
     // `handle_memory_remember`) so two concurrent task_add calls on the same
     // palace can't race on the redb row insert.
+    // Issue #4002: one budget spans this leg and the open-queue leg inside
+    // `write_drawer`, so the two no longer sum.
     let write_lock = state.palace_write_lock(palace);
-    let _write_guard =
-        timeouts::lock_with_timeout(&write_lock, timeouts::write_lock_timeout(), palace)
-            .await
-            .map_err(|e| anyhow!("task_add: {e:#}"))?;
+    let (_write_guard, budget) =
+        begin_budgeted_write(state, &write_lock, palace, "task_add").await?;
 
     let drawer_id = write_drawer(
         state,
@@ -80,6 +80,7 @@ pub(crate) async fn handle_task_add(state: &AppState, args: Value) -> Result<Val
                 ..RememberOptions::default()
             },
             room_label_for_kg,
+            budget,
         },
     )
     .await?;
