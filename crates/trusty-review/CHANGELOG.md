@@ -6,6 +6,365 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.20.0] — 2026-08-19
+
+### Added
+
+- The technical due-diligence report renders a new section 8, "Ticketing &
+  Delivery Traceability", stating how many commits reference tracked board items
+  and which boards those items came from. Gaps & Caveats moves to section 9.
+- The manifest's `[report]` section accepts a `ticketing` key naming the JSON
+  artifact `tga audit` writes. A manifest that declares none renders the section
+  as unassessed and names it under Gaps & Caveats; a run that correlated nothing
+  states that in full rather than collapsing, so an empty board is never
+  indistinguishable from an absent artifact.
+- A ticketing artifact declaring a `schema_version` major this build does not
+  read fails the run by name instead of loading. tga and trusty-review are
+  installed independently, and every field of the artifact defaults, so a
+  renamed count in a future tga would otherwise have rendered as a stated zero.
+  A newer minor of a known major still loads.
+- The technical due-diligence report gains an "Authorship & Key-Person Risk"
+  section (#5453, #6004): bus factor, ownership concentration, single-author
+  subsystems, and a trailing-12-month trajectory per application, plus a new
+  `authorship_summary` LLM narrative slot (high-level, health-from-an-
+  authorship-perspective framing) on the existing synthesis call, inheriting
+  its numeric guardrail. Key-man risks render in this dedicated section, not
+  scattered across Top Risks. The manifest's per-repository entries accept a
+  new `authorship` key naming the JSON artifact `tga audit` writes; a
+  repository whose artifact fails to load states that as a named gap for that
+  repository only — never a silently absent section, never an aborted build.
+  The Key Facts block's author-count and trajectory rows, left as named gaps
+  by the earlier Code/Security/Performance change, now populate once
+  authorship data exists. The artifact's `unresolved_authors` count — commit
+  identities tga could not resolve to a canonical author — travels with the
+  figures, so a reader can tell how far the concentration numbers under-merge.
+- The report-synthesis system prompt now asks for a coverage-gaps note. When the
+  analysed data references a repository, service, database schema, or project
+  board that is not one of the assessed applications, the executive summary names
+  it and recommends the operator register it and re-run. Schema and migration
+  repositories are called out specifically — a finding citing a table or a
+  migration with no schema repository in the assessed set is the common tell. The
+  instruction is static, so a template overriding `executive_summary` cannot drop
+  it, and it permits naming only what the data actually references — never a
+  target the model infers probably exists.
+- The technical due-diligence report gains three new sections: "Code Quality &
+  Architecture" and "Security Posture" re-project complexity, LoC/tech-stack,
+  and RED/AMBER lint-tool findings already loaded for other sections —
+  Security Posture is the promoted, now actually-filled, successor to the old
+  §6.1 Security Violations table (previously unfilled template scaffolding).
+  "Performance & Scalability" states, in fixed text never touched by
+  synthesis, that no performance data source exists and what an assessment
+  would require.
+- A "Key Facts" block ahead of the executive summary frontloads codebase
+  density (LoC, file count, languages) and a merged complexity profile —
+  deterministic, never LLM-touched. Author count, work-volume estimate, and
+  monthly trajectory rows render as named gaps until the authorship artifact
+  lands.
+- The executive summary carries a deterministic jump-list linking to every
+  section actually present in the rendered document — never a link to a
+  section a custom template omitted.
+- Two new LLM narrative slots, `code_quality_summary` and `security_summary`,
+  join the existing synthesis call and inherit its numeric guardrail. A
+  template may override either section's voice via
+  `<!-- instruct:code_quality_summary ... -->` /
+  `<!-- instruct:security_summary ... -->`, same as the existing three.
+- The default narrative voice (executive summary, top risks, and the two new
+  slots) is now explicitly balanced/adversarial: acquirer-side, skeptical of
+  risk, evenhanded about genuine strengths, never promotional.
+- The `report-technical-dd-cast.md` template variant intentionally does not
+  get the new Code Quality & Architecture / Security Posture / Performance &
+  Scalability sections, the Key Facts block, or the Contents jump-list yet —
+  porting them to CAST's own methodology and health-factor voice is deferred
+  to follow-up work tracked on #6004.
+
+### Fixed
+
+- The CAST template (`report-technical-dd-cast`) renders the ticketing-coverage
+  section the generic template gained at 0.17.0. A CAST engagement whose
+  manifest declared a valid `[report].ticketing` artifact showed no coverage
+  figures and no gap line either: with no section in the template there was no
+  placeholder to collapse, so the omission escaped the polish pass that exists
+  to name absences. The section is now section 8 in both templates and Gaps &
+  Caveats is section 9 in both.
+- A multi-file diff no longer collapses into a single file. `parse_diff_files`
+  started a file record only on a `diff --git ` line but bound the path on
+  `+++ b/`, so a diff carrying `---`/`+++` pairs without those markers rebound
+  the open record's path on every file and returned ONE record — named after the
+  last file, holding every file's hunks. Stage A then reported `kept=1` and every
+  map-reduce unit inherited the misattribution (#4458). The parser now also
+  starts a record on a `---`/`+++` pair that arrives after the open record
+  already has a path or hunks, and reads hunk bodies against the line budget
+  their `@@` header declares so a diff-of-a-diff's body lines are not mistaken
+  for file headers.
+- Deleted files, binary files, mode-only changes, and pure renames now reach
+  Stage A. Each of those shapes lacks a `+++ b/` line, so the old parser
+  produced no record for it and the file vanished from the review with no error.
+  A record's path now resolves from the first available of `+++ b/`,
+  `rename to`, `--- a/`, and the `diff --git` header itself.
+- Content the parser cannot attribute to any file is reported instead of
+  dropped. `parse_diff_files_detailed` returns those runs as `UnparsedSection`
+  entries alongside the files, and `DiffAnalyzer::analyze` logs their count at
+  warn level and stamps `parsed` and `unparsed_sections` onto the Stage A line.
+- The per-finding verifier retries a transient failure instead of writing the
+  finding off on the first error. The transport errors that made this pass fail
+  on nearly every finding came from the round's own fan-out — 27 of 29 findings
+  in one measured review returned `Transport` while a single call to the same
+  model succeeded in ~845 ms — so fabrication detection was effectively off.
+  Each finding now gets up to `[verification] max_attempts` calls (default 3)
+  with exponential backoff and jitter, and the fan-out width is
+  `[verification] concurrency` (default 4, unchanged) instead of a hardcoded
+  constant. Both read `TRUSTY_REVIEW_VERIFY_MAX_ATTEMPTS` /
+  `TRUSTY_REVIEW_VERIFY_CONCURRENCY` over the config file. See #4459.
+- A finding the verifier still cannot reach after its last attempt is recorded
+  `unverifiable` — never confirmed, never refuted — rather than `error_refuted`,
+  which read as a judgment nothing made and clamped the finding's confidence to
+  0.10. `ReviewResult` carries a new `unverified_count` so a consumer can see how
+  much of a review went unchecked. A round that rendered no judgment on anything
+  can no longer relax the verdict the model itself reported. See #4459.
+- `GET /status` no longer reports an in-flight count that never comes down. `POST /review` now holds the counter through the new `InFlightCountGuard`, whose `Drop` runs the decrement, so a client disconnect that drops the handler future mid-review releases the slot — as does a panic. The decrement saturates at zero rather than wrapping, and warns when it does so, since the guard is the counter's only writer and an already-zero read means one raise was released twice. See #5020.
+- `trusty-review run` against a GitHub PR now opens the durable dedup claim store, so a re-run against the same `(owner, repo, pr, head_sha)` no longer posts a second comment. `build_deps_async` takes a `DedupNeed` and `dedup_need_for` derives it from the diff source and `allow_posting`; local diff sources still open nothing. `run_review` additionally aborts before any network call when posting is reachable and no store is present, so the combination fails closed wherever it is expressed. See #5113.
+- A dedup claim another process still holds no longer reports `APPROVE`. `DedupStore::claim` now returns `ClaimOutcome::InProgressElsewhere` for a fresh in-progress record and keeps `Skipped` for a completed one, so the runner tells a review that never ran apart from one that ran and finished; the blocked run reports UNKNOWN with the reason instead of a verdict. Previously a process that died between `claim` and `complete` made every re-run of that PR report approval for up to two hours. See #5126.
+- **The crate could not be built with `--no-default-features`.** Two files compiled unconditionally while depending on a gated feature: `pipeline/mapreduce/reduce.rs` imported `profile::synthesizer::jaccard_similarity`, and `tests/report_investigate.rs` imported `trusty_review::report`. Both are fixed, and `cargo check -p trusty-review --no-default-features --all-targets` is now clean ([#5466](https://github.com/bobmatnyc/trusty-tools/issues/5466))
+  - this was already shipped in 0.15.0 — `cargo add trusty-review --no-default-features --features http-server,mcp` fails against the published crate, which is what `cargo-semver-checks` hit when it tried to build the 0.15.0 baseline
+  - `report_investigate.rs` now carries `#![cfg(feature = "report")]`, matching its two siblings `report_e2e.rs` and `report_analyze_e2e.rs`. Under default features all three of its tests still run
+- Report synthesis no longer fails on OpenRouter backends that enforce OpenAI
+  strict schemas
+  ([#5675](https://github.com/bobmatnyc/trusty-tools/issues/5675)). The
+  `report_synthesis` schema was built by hand and never passed through
+  `enforce_strict_mode`, so `findings.items` carried no
+  `additionalProperties: false` and the provider rejected the call with
+  `In context=('properties','findings','items'), 'additionalProperties' is
+  required to be supplied and to be false`. The `repo_investigation` schema had
+  the same gap and is fixed with it.
+- Every response schema is now built through `ResponseSchema::new`, which
+  applies `enforce_strict_mode` on construction, so a schema added later is
+  strict-compliant without having to remember the call.
+- Fields that strict mode makes required now state that an empty string is
+  acceptable, so the model is not pushed to invent filler for a field it has
+  nothing grounded to say in: `evidence`, `component`, `business_impact` and
+  `cost_effort` in `report_synthesis`, and `business_impact` and `cost_effort`
+  in `repo_investigation`. The numeric guardrail only rejects invented FIGURES,
+  so a fabricated qualitative sentence would have reached the report unchecked.
+- `repo_investigation`'s `line` is nullable rather than a bare integer, so a
+  finding whose line cannot be placed says `null` instead of guessing.
+- **An unparsable `--provider` value no longer swallows the
+  `TRUSTY_REVIEW_PROVIDER` env layer**
+  ([#5679](https://github.com/bobmatnyc/trusty-tools/issues/5679)).
+  `resolve_role` parsed `cli_provider.or(env_provider)`, and `Option::or` falls
+  through on absence only — so a CLI value that failed to parse still won that
+  slot, the env var was never consulted, and resolution dropped straight to the
+  config file or the built-in default. Running `--provider garbage` with
+  `TRUSTY_REVIEW_PROVIDER=openrouter` exported reached Bedrock, not OpenRouter.
+- Each precedence layer now parses on its own through `parse_provider_layer`, so
+  a present-but-unparsable value logs a warning naming its source and yields to
+  the next layer, keeping the documented CLI → env → config file → default chain
+  intact.
+- `bedrock_region_resolution` no longer fails on a machine with `AWS_REGION`
+  exported ([#5706](https://github.com/bobmatnyc/trusty-tools/issues/5706)). The
+  test asserted that an empty explicit region reaches `us-east-1`, which skips
+  the `TRUSTY_AWS_REGION` and `AWS_REGION` tiers that `resolve_bedrock_region`
+  is documented to consult first. The precedence walk moved into a pure
+  `resolve_region_from(explicit, trusty_env, aws_env)` helper the test drives
+  directly, so every tier is covered without reading or mutating process-wide
+  env vars. `resolve_bedrock_region`'s behaviour is unchanged.
+- A declared metrics JSON whose `schema_version` names a major this build does
+  not read now fails the run by name instead of loading. Every field of the
+  metrics schema defaults, so a renamed key rendered as a stated zero — a
+  confident wrong LoC total, file count, or complexity distribution in a
+  client-facing due-diligence report — while only syntactically broken JSON
+  errored. A newer minor of a known major still loads, and a tag that resolves
+  to no major at all is refused rather than assumed to be v0.
+- A metrics JSON carrying no `schema_version` still loads, read as v0. Nothing
+  in this workspace writes that artifact — `tga audit` omits the manifest's
+  `metrics` key so the live `--analyze` fetch is not blocked — so the file is
+  hand-authored against a field this crate documented as informational, and v0
+  is the only schema it has ever had. This is where the metrics loader diverges
+  from the ticketing loader, which refuses an untagged artifact because every
+  producer of that one writes the tag.
+- A trusty-search index whose semantic or graph lane failed over a healthy
+  corpus no longer disappears from a degraded review's stamped reason.
+  trusty-search #5927 narrowed `warmboot_summary.indexes_corpus_failed` to real
+  corpus-open failures and moved the any-lane count to a new
+  `indexes_stage_failed` key. `degraded_reason` read only the old key, so after
+  that narrowing a lane failure built an empty clause list — which
+  `serving_state` classifies as the benign network-mount case and reports as
+  `Serving`. The wire mirror now carries `indexes_stage_failed` and reports the
+  cohort it names, minus the corpus cohort so no index is counted twice, with
+  its own consequence: those indexes answer with lexical results only.
+- Report synthesis no longer hard-fails a due-diligence run when a provider
+  ignores the forced JSON schema and returns markdown-headed free prose
+  instead ([#6009](https://github.com/bobmatnyc/trusty-tools/issues/6009)).
+  Live repro against `anthropic/claude-opus-4.8` via OpenRouter: `200 OK`,
+  `finish_reason: "stop"`, `response_format` silently ignored, response was
+  `## Executive Summary\n\n<prose>\n\n## Top Risks\n\n...`. The parser now
+  recovers `executive_summary` from that shape (never `top_risks`/`findings`
+  — prose is never reconstructed into structured rows); the numeric guardrail
+  still verifies whatever text is recovered, so a fabricated figure is
+  rejected exactly as before.
+- An unparseable synthesis response is now persisted (scrubbed) next to the
+  report output as `synthesis-unparseable-response.txt` so a future
+  occurrence is diagnosable without spending another live provider call.
+- Report synthesis no longer hard-fails a due-diligence run when a provider
+  returns valid top-level JSON but drifts `top_risks` field names — a live
+  capture used `risk` for `description` and `applications` for `apps`, and
+  omitted `severity`/`cost` entirely. Those field names are now accepted as
+  aliases, and an omitted `severity`/`cost` defaults to unset rather than
+  failing the whole response; the rendered report shows `not stated in
+  source data` for a defaulted severity/cost — never a fabricated band or
+  figure.
+- Fixed the CLASS of #6009, not just the two prior instances: three
+  consecutive live calls to `anthropic/claude-opus-4.8` via OpenRouter, all
+  with `response_format: json_schema`/`strict: true`, produced three
+  different response shapes (markdown prose, `risk`/`applications`, and
+  `risk`/`cost_effort_framing`/`affected_applications`) — `response_format`
+  is best-effort for Anthropic-family models, since Anthropic's own API has
+  no native strict-JSON mode. The synthesis system prompt now states the
+  exact required JSON field names in the prompt TEXT itself, generated
+  directly from the same schema definition the request forces via
+  `response_format` (so the two can never drift apart), and the per-shape
+  `#[serde(alias)]`s on `RiskRow` are replaced by a whitelist synonym table
+  (`synthesize_normalize`) applied before typed deserialization: a
+  recognised synonym (`risk`, `applications`, `affected_applications`,
+  `cost_effort_framing`) renames onto its canonical field, and any other key
+  is dropped with a recorded `synthesis: dropped unrecognized field` note —
+  never guessed. The numeric guardrail still runs after normalization, so a
+  fabricated figure is rejected exactly as before.
+- The report's Key Facts block no longer renders "No data available" while the
+  sweep holds the numbers (#6029). It read only a `--analyze` metrics file, so
+  an ordinary run — which always produces a repository scan — left every
+  density row empty and the polish pass collapsed the whole block; one real
+  engagement showed that line above a scan that had measured 1.5M LoC. LoC,
+  file count, and languages now take the same metrics-then-scan precedence the
+  per-application Profile table already used. A row whose input is genuinely
+  absent states which input is missing — complexity names `--analyze`, author
+  count and trajectory name the tga authorship artifact, and the work estimate
+  names the upstream effort metric that does not exist yet — instead of
+  dropping out of the table and blanking the rows around it.
+- **A synthesized narrative that rounds a measured figure is no longer dropped as
+  fabricated**
+  ([#6030](https://github.com/bobmatnyc/trusty-tools/issues/6030)).
+  The numeric guardrail compared canonical strings, so an authorship summary
+  writing a measured `top_author_share_pct` of 85.19 as "85%" produced
+  `rejected (unverified figure) in authorship summary: 85` and the whole LLM
+  narrative fell back to the deterministic composer. Live verification of #6037
+  failed on exactly that.
+- `allowed_numbers` now widens each measured figure with its conventional
+  roundings — the truncation and the round-half-up form at every coarser decimal
+  precision, carries included (85.19 admits 85.1, 85.2 and 85; 9.99 admits 10).
+  Integer figures are not widened, so a measured 8234 still never admits 8,000,
+  and a figure matching no measured value under any rounding is rejected exactly
+  as before, dropping the field with its raw-response capture.
+- `--analyze` no longer degrades to a scan-only report when the analyze daemon
+  closes a pooled connection (#6038). The adapter issues its GETs back to back
+  on one HTTP/1.1 keep-alive connection, and the daemon closing that connection
+  races the next request — the diagnostics fetch that followed a slow
+  `/complexity_distribution` failed with `error sending request`, and every
+  metrics-driven section fell back to the scan. A transport failure that is
+  neither a timeout nor a refused connect is now retried once on a fresh
+  connection; a refused connect and a timeout stay terminal, so a daemon that is
+  genuinely down still fails open at the same speed.
+- The default analyzer URL is `http://127.0.0.1:7879` rather than
+  `http://localhost:7879` (#6038). `trusty-analyze serve` binds the IPv4
+  loopback only, and macOS resolves `localhost` to `::1` first, so a stock run
+  could not reach a healthy daemon until the operator exported
+  `PR_INTELLIGENCE_ANALYZER_URL` by hand. The env-var override is unchanged.
+- Both analyze HTTP clients now build through
+  `trusty_common::http_client::loopback_client_builder`, so an exported
+  `HTTP_PROXY` no longer diverts a loopback fetch to a proxy (#4392).
+- `--analyze` gives each trusty-analyze endpoint its own request budget instead
+  of one flat 15 s. The diagnostics budget is derived from the daemon's own
+  deadline ladder (`TRUSTY_DIAGNOSTICS_DEADLINE_SECS`, default 180 s, plus its
+  90 s of handler/router/client headroom), so the daemon's answer — including
+  the structured report it sends when its own deadline is hit — always outlasts
+  the client. Measured live before the fix: diagnostics answered `200` at 142 s
+  with `tools_run: ["clippy"]` while the client gave up at 15 s. The cheap
+  endpoints keep the short budget. See #6041.
+- A trusty-analyze endpoint that fails no longer discards the data the other
+  endpoints returned. Complexity, diagnostics, and refactor suggestions are
+  fetched independently; whatever answered is rendered, and each endpoint that
+  did not is named under Gaps & Caveats along with why it dropped out (timed
+  out, unreachable, or an unusable answer). A fetch where no endpoint answered
+  still falls back to the repository scan rather than rendering empty metrics.
+  See #6041.
+- **The standalone authorship report now states why it has no data**
+  ([#6046](https://github.com/bobmatnyc/trusty-tools/issues/6046)).
+  A repository whose authorship artifact fails to load renders the section as
+  `_No data available — see Gaps & Caveats._`, and since the split that section
+  lives in the code-review report — so a reader holding only the authorship
+  document saw the collapse line and no reason for it. The authorship-load gap
+  lines now render as a `Data gaps in this assessment` block above the body.
+  Gaps from other legs stay out of it, and a run whose authorship leg succeeded
+  is byte-identical to before.
+
+### Changed
+
+- `SystemGhResolver` resolves `gh auth token` through
+  `trusty_common::gh::GhCommand`
+  ([#5475](https://github.com/bobmatnyc/trusty-tools/issues/5475)) instead of
+  its own `Command::new("gh")`. The resolution order (`GITHUB_TOKEN` →
+  `GH_TOKEN` → `gh auth token`) and the debug-log-and-return-`None` degrade are
+  unchanged; the log line now carries the entry point's classified reason.
+- **0.17.0, not 0.16.1 — the public API of the `report` module broke and the patch bump did not say so.** `ReportSection` and `ReportModel` each gained a required `ticketing` field, and `ReportError` gained `MetricsSchema`, `Ticketing` and `TicketingSchema`. Cargo's 0.x rule puts the breaking position at MINOR for a `0.y.z` crate, so this ships as 0.17.0. The `trusty-review-v0.16.1` tag was cut for that delta and is abandoned.
+- `ReportError`, `ReportSection` and `ReportModel` now carry `#[non_exhaustive]`. A downstream `match` on `ReportError` needs a `_` arm and the two structs are built through `ReportModel::build` or manifest deserialization rather than a struct literal, so the next variant or field is a minor bump instead of a major one. No in-workspace caller was affected — neither trusty-analyze nor trusty-mpm reaches the `report` module.
+- The three roles ask for a model tier instead of naming a pinned id: reviewer →
+  analysis tier, verifier and summarizer → haiku tier. On OpenRouter the
+  reviewer now resolves Opus 4.8, so the model that does the judging is an opus
+  model rather than the Bedrock Sonnet 4.6 id it fell back to before.
+- The haiku roles resolve the same model as before —
+  `us.anthropic.claude-haiku-4-5-20251001-v1:0` on Bedrock. What changed is that
+  a date-stamped constant became a tier lookup, so a future haiku move is one
+  edit in `trusty-common` rather than three here.
+- Bedrock's opus tiers are unmapped, so a standalone Bedrock run keeps its
+  Sonnet 4.6 reviewer default. The trusty-audit path configures OpenRouter and
+  gets Opus 4.8.
+- `--reviewer-model`, `TRUSTY_REVIEW_*_MODEL`, and the config file's
+  `[models.*].model` are unaffected. The tier is the built-in layer, below all
+  three, so an explicitly-named id still wins. The provider now resolves before
+  the model so the tier has a provider to key on.
+- The verifier and summarizer roles request `ModelTier::Classification`, renamed from `ModelTier::Haiku` in trusty-common. Both roles resolve the same model as before; a doc comment at the role mapping records that they select that tier for cost, not because verifying or summarising is classification. See #5987.
+- The synthesized executive summary now describes what the audited codebase is
+  and does, and analyzes its major components, before covering risk (#6030) —
+  it was risk-only. The instruction is static in the synthesis system prompt,
+  like #5886's coverage-gaps note, so a template that overrides the
+  `executive_summary` section instruction cannot drop it; the forced-output
+  schema states the same requirement. The synthesis digest now also carries
+  each application's repository-scan profile — LoC, languages, file count, and
+  the detected build manifests with their declared project names and top
+  dependencies — so the component analysis is grounded in real data rather
+  than invented. Before this, a run without `--analyze` sent the model "No
+  metrics available for this application" while the scan held all of it.
+- `report` now renders two documents per run instead of one (#6046): the
+  code-review report keeps every section it had except Authorship & Key-Person
+  Risk, which becomes its own `<stem>-authorship.md` beside it, with its own
+  title, provenance legend, and generation date. Both come from one fill pass,
+  so the two cannot drift in wording or provenance tagging. The code-review
+  report's Contents jump list no longer links the authorship section, since it
+  no longer carries it. A run with no authorship data still writes the second
+  document, carrying the same no-data line the section used to show inline.
+  Both paths are printed to stdout as before, so `tga audit` picks them up and
+  `trusty-audit` packages both without change.
+
+### Removed
+
+- **Contributor profiling is gone from trusty-review — it lives in `tga profile` (tga 2.19.0) now.** This removes `src/profile/` (20 files), the `profile` CLI subcommand and its `cli_profile.rs`, the default-on `profile` Cargo feature, and the `tga` + `rusqlite` dependencies that feature carried. Breaking, hence the MINOR bump to 0.16.0 (closes [#5466](https://github.com/bobmatnyc/trusty-tools/issues/5466), part of [#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468))
+  - the Cargo edge ran backwards: trusty-review declared `tga`, while at runtime `tga audit` shells out to `trusty-review`. Only one direction survives now, and it is not a manifest edge — `tga` resolves `trusty-review` from PATH ([#5236](https://github.com/bobmatnyc/trusty-tools/issues/5236), DOC-67 §6)
+  - `trusty_review::profile::synthesizer::jaccard_similarity` was public and is removed. Its one in-crate caller, the map-reduce `dedup_findings`, keeps it as a private helper in `pipeline/mapreduce/reduce.rs` with both its tests; behaviour is byte-identical
+  - dropping `profile` from the default feature set also drops a vendored libgit2 and a bundled SQLite from every default build of this crate and of anything depending on it
+
+### Documentation
+
+- Repaired every broken rustdoc intra-doc link in this crate and added
+  `#![deny(rustdoc::broken_intra_doc_links)]` to its crate root(s), so a new
+  one fails the build instead of shipping as dead text on docs.rs (#5744).
+- **Module docs render once instead of twice.** `config::resolve_index_tests` carried both an outer `///` on its `mod` declaration and its own inner `//!`; rustdoc concatenates the two, so the module page showed the split rationale twice. The outer is gone and the inner `//!` is now the single module doc, per the `//!` convention in `documentation-style` and DOC-38 §3.1 ([#5754](https://github.com/bobmatnyc/trusty-tools/pull/5754))
+- Two doc links no longer fail `cargo doc` under
+  `-D rustdoc::broken_intra_doc_links`. `contents_links` linked
+  `super::polish::collapse_recursive`, a private `fn` that rustdoc cannot resolve
+  from a public doc — now plain backticks. `Synthesizer::new` linked a bare
+  `with_raw_capture_dir`, which does not resolve because a method is not in scope
+  by its own name — now `Self::with_raw_capture_dir`, matching how the same
+  method is already referenced elsewhere in the file.
+
 ## [0.15.0] — 2026-08-12
 
 ### Breaking
