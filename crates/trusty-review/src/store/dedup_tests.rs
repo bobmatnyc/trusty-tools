@@ -68,10 +68,19 @@ fn first_claim_succeeds() {
     assert_eq!(outcome, ClaimOutcome::Claimed);
 }
 
+/// REGRESSION (#5126): a fresh in-progress claim must not report as a
+/// completed review.
+///
+/// Why: `Skipped` is what the runner turns into `Verdict::Approve`. When a
+/// held (or stranded) in-progress claim also returned `Skipped`, a review that
+/// never ran reported approval — for the whole `DEDUP_STALE_SECS` window after
+/// a holder crashed between `claim` and `complete`.
+/// What: claims a SHA, then re-claims it while the first claim is still
+/// in-progress and not stale.
+/// Test: this test. Fails pre-fix at the `assert_ne!`, which observes the
+/// `Skipped` the old two-way outcome produced.
 #[test]
-fn concurrent_in_progress_skips() {
-    // A second claim for the same SHA while the first is still in-progress
-    // (and not stale) is skipped — another worker owns it.
+fn fresh_in_progress_claim_is_not_a_completed_review() {
     let (store, _d) = temp_store();
     assert_eq!(
         store
@@ -79,11 +88,21 @@ fn concurrent_in_progress_skips() {
             .unwrap(),
         ClaimOutcome::Claimed
     );
+
+    let second = store
+        .claim_blocking("acme", "backend", 42, "sha-abc")
+        .unwrap();
+
+    assert_ne!(
+        second,
+        ClaimOutcome::Skipped,
+        "a held in-progress claim means nothing was reviewed — reporting it as a \
+         completed review is what made the runner approve an unrun review (#5126)"
+    );
     assert_eq!(
-        store
-            .claim_blocking("acme", "backend", 42, "sha-abc")
-            .unwrap(),
-        ClaimOutcome::Skipped
+        second,
+        ClaimOutcome::InProgressElsewhere,
+        "the second caller must be told another holder owns the slot"
     );
 }
 
@@ -267,16 +286,19 @@ fn concurrent_threads_claim_exactly_once() {
         .collect();
 
     let mut claimed = 0usize;
-    let mut skipped = 0usize;
+    let mut blocked = 0usize;
     for h in handles {
         match h.join().expect("thread must not panic") {
             Ok(ClaimOutcome::Claimed) => claimed += 1,
-            Ok(ClaimOutcome::Skipped) => skipped += 1,
+            // #5126: the losers see the winner's in-progress claim, which is
+            // not a completed review.
+            Ok(ClaimOutcome::InProgressElsewhere) => blocked += 1,
+            Ok(other) => panic!("no thread may see a completed review here: {other:?}"),
             Err(e) => panic!("concurrent claim must not error under contention: {e}"),
         }
     }
     assert_eq!(claimed, 1, "exactly one caller may own the claim");
-    assert_eq!(skipped, THREADS - 1, "every other caller must be skipped");
+    assert_eq!(blocked, THREADS - 1, "every other caller must be blocked");
 }
 
 /// Why: contention is waited out, but not forever — and when the budget expires

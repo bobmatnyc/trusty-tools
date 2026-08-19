@@ -1925,6 +1925,7 @@ fn classify_claim_contended_aborts() {
             panic!("a contended claim must NOT proceed — that posts an ungated comment (#5064)")
         }
         ClaimGate::DuplicateSkip => panic!("a contended claim is not a duplicate"),
+        ClaimGate::InProgressElsewhere => panic!("a contended claim is not a live claim"),
     }
 }
 
@@ -1966,6 +1967,78 @@ fn classify_claim_skipped_is_duplicate() {
         classify_claim(Ok(ClaimOutcome::Skipped)),
         ClaimGate::DuplicateSkip
     ));
+}
+
+/// REGRESSION (#5126): a claim another holder owns must not classify as a
+/// completed duplicate.
+///
+/// Why: `DuplicateSkip` is the arm that sets `Verdict::Approve` and returns. A
+/// stranded `InProgress` record — what a process that died between `claim` and
+/// `complete` leaves behind — reached that arm too, so for the whole
+/// `DEDUP_STALE_SECS` window every re-run of that PR reported approval for a
+/// review that never ran. This drives the outcome through a real store rather
+/// than a hand-built enum value, so it exercises the store and the classifier
+/// together and compiles against the pre-fix source as well.
+/// What: one store writes an in-progress claim; a second store on the same file
+/// claims the same key; the resulting gate must not be `DuplicateSkip`.
+/// Test: this test. Fails pre-fix at the first assertion — the second claim
+/// returned `Skipped`, which classified as `DuplicateSkip`.
+#[tokio::test]
+async fn stranded_in_progress_claim_is_not_a_duplicate_skip() {
+    use crate::store::DedupStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dedup.redb");
+
+    // A holder claims the slot and then dies without completing or releasing.
+    let stranded = DedupStore::open(&path).expect("open");
+    stranded
+        .claim_blocking("acme", "backend", 42, "sha-stranded")
+        .expect("claim");
+    drop(stranded);
+
+    let store = Arc::new(DedupStore::open(&path).expect("open"));
+    let gate = classify_claim(store.claim("acme", "backend", 42, "sha-stranded").await);
+
+    assert!(
+        !matches!(gate, ClaimGate::DuplicateSkip),
+        "a stranded in-progress claim is not a completed review — classifying it as one \
+         is what made the runner report Verdict::Approve for an unrun review (#5126)"
+    );
+    assert!(
+        matches!(gate, ClaimGate::InProgressElsewhere),
+        "the runner must be told the slot is held, so it can report 'not reviewed'"
+    );
+}
+
+/// Why: fixing the stranded-claim arm must not disarm the case dedup exists
+/// for — a genuinely completed review must still short-circuit.
+/// What: a store completes a claim; a second store's claim for the same key
+/// still classifies as `DuplicateSkip`.
+/// Test: this test.
+#[tokio::test]
+async fn completed_claim_still_classifies_as_duplicate_skip() {
+    use crate::store::DedupStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dedup.redb");
+
+    let owner = DedupStore::open(&path).expect("open");
+    owner
+        .claim_blocking("acme", "backend", 42, "sha-done")
+        .expect("claim");
+    owner
+        .complete_blocking("acme", "backend", 42, "sha-done")
+        .expect("complete");
+    drop(owner);
+
+    let store = Arc::new(DedupStore::open(&path).expect("open"));
+    let gate = classify_claim(store.claim("acme", "backend", 42, "sha-done").await);
+
+    assert!(
+        matches!(gate, ClaimGate::DuplicateSkip),
+        "a completed review must still suppress the re-run"
+    );
 }
 
 /// Why: the round-1 fix routed the failed-claim path into `abort_dry`, which
