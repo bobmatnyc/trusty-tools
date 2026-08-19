@@ -6,15 +6,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [3.1.1] — 2026-08-19
+## [3.2.0] — 2026-08-19
+
+### Fixed
+
+- `persist.rs` and `aggregator/mod.rs` cited a
+  `report::tests::persist_weekly_engineer_upserts_rows` that did not exist, so
+  the `agentic_pct` formula DOC-67 §8 reports had no test naming it. That test
+  now exists and runs eight real commit shapes — a multi-trailer house footer, a
+  bare Claude Code footer, a Copilot trailer, a forge squash-merge whose body was
+  replaced, a machine merge summary, a hand-written commit, a revert and a
+  bot-authored commit identified only by its email — through `ai_markers::detect`
+  and the aggregator, then reads the persisted row back. The stale
+  `persist_weekly_quality_upserts_rows` pointer is corrected too, and all four
+  rows leave the test-pointer ratchet allowlist.
+- The Bitbucket auth check and the LLM API-key check now take their environment
+  values as arguments instead of reading `BITBUCKET_TOKEN`,
+  `BITBUCKET_APP_PASSWORD`, `OPENROUTER_API_KEY` and `OPENAI_API_KEY` inline.
+  Their tests previously removed those variables process-wide, which is `unsafe`
+  under the 2024 edition and raced the rest of the suite: the restore put
+  `OPENROUTER_API_KEY` back while a concurrent test was resolving a credential,
+  failing it 40 runs out of 40. No test in `validator_tests.rs` mutates the
+  process environment any more, and the present-key branches are covered for the
+  first time.
+- `is_ticketed` no longer counts a JIRA-shaped string found anywhere in a commit
+  message. `UTF-8`, `SHA-256`, `GCC-11`, `ADR-0034` and `DOC-39` are the same
+  shape as `PROJ-123`, and 237 of this repository's 2633 commits were reported
+  ticketed on one of them alone. A JIRA/Linear key now counts only where the
+  subject declares it, which is the rule #5199 already applied to
+  `extract_ticket_id` — the two functions no longer disagree. GitHub
+  action-keyword refs (`closes #N`) and Azure DevOps refs (`AB#N`) are unchanged
+  and still count from anywhere in the message. Expect `commits.ticketed` to
+  fall on repositories that cite documents or technical identifiers in commit
+  bodies.
 
 ### Changed
 
-- Re-release of 3.1.0 from a gate-clean commit. No code change — every entry
-  under [3.1.0] below describes this release too. The `tga-v3.1.0` tag is pinned
-  by a protected ruleset to `43bfd64f1`, which contains the #6027
-  broken-intra-doc-link regression and therefore can never pass the pre-publish
-  gate. A tag cannot be moved, so the version moves forward instead.
+- First release of the 3.1.x line to reach crates.io — 3.1.0 and 3.1.1 were both
+  tagged and neither published, so every entry under [3.1.0] below describes this
+  release too. The `tga-v3.1.0` tag is pinned by a protected ruleset to
+  `43bfd64f1`, which contains the #6027 broken-intra-doc-link regression and
+  therefore can never pass the pre-publish gate; a tag cannot be moved, so 3.1.1
+  was cut instead, and 3.1.1 in turn is superseded here. Both tags stay orphaned.
+- The published baseline is 3.0.0, and `cargo-semver-checks` reports the delta to
+  it as breaking: `constructible_struct_adds_field` on
+  `DdRepositoryEntry.authorship`, and `struct_marked_non_exhaustive` on
+  `GithubConfig`, `JiraConfig` and `PmTicket`. This ships as a MINOR bump by owner
+  ruling (2026-08-19) rather than 4.0.0. tga's library API has no external linking
+  consumers — it is installed as the `tga` binary, trusty-audit drives `tga audit`
+  as a child process resolved by version at runtime, and crates.io reports zero
+  reverse dependencies — so the SemVer gate has nobody to protect here. The
+  exception is a `tga` row in `scripts/semver-checks-crate-exclusions.tsv`, which
+  the gate re-checks against `cargo metadata` on every run and refuses the moment
+  a workspace package takes a Cargo edge on tga.
 
 ---
 
