@@ -14,6 +14,7 @@
 use super::*;
 use crate::core::session::{ControlModel, Session, SessionStatus};
 use crate::daemon::idle_nudge::has_live_children;
+use crate::daemon::state::pending_stops::PENDING_STOP_TTL_SECS;
 use crate::daemon::state::sessions::{
     DECLARED_STALE_AFTER_SECS, DELEGATION_RETENTION_SECS, RUNNING_STALE_AFTER_SECS,
     STALE_RETENTION_SECS,
@@ -1533,4 +1534,264 @@ fn an_unknown_agent_id_registers_nothing() {
         &subagent_call("ghost", "/tmp/p/.claude/worktrees/ghost"),
     );
     assert!(state.delegations_for(sid).is_empty());
+}
+
+// ---- #4142: out-of-order `SubagentStop` recovery -------------------------
+
+/// Find one session's delegation by its `tool_use_id`.
+fn by_tool_use(state: &DaemonState, session: SessionId, tool_use_id: &str) -> Delegation {
+    state
+        .delegations_for(session)
+        .into_iter()
+        .find(|d| d.tool_use_id.as_deref() == Some(tool_use_id))
+        .unwrap_or_else(|| panic!("no delegation carries tool_use_id {tool_use_id}"))
+}
+
+/// THE acceptance criterion for #4142.
+///
+/// A stop that lands before the `PostToolUse` teaching its `agent_id` must
+/// resolve the delegation it names once that id arrives — and must leave every
+/// other live delegation alone. The second, unrelated `Running` delegation is
+/// the control: a "most recent Running" guess at stop time would have closed
+/// THAT one, which is the false all-clear #4142 forbids.
+#[test]
+fn out_of_order_subagent_stop_resolves_when_its_post_tool_use_lands() {
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "first", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "qa", "second", "toolu_2"),
+    );
+    // The control's own PostToolUse lands normally.
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_2", "aid2"),
+    );
+
+    // The race: toolu_1's stop overtakes its async PostToolUse.
+    observe(&state, sid, HookEvent::SubagentStop, &stop("aid1"));
+    assert_eq!(
+        by_tool_use(&state, sid, "toolu_1").status,
+        DelegationStatus::Running,
+        "nothing may be terminalized before the id is known"
+    );
+    assert_eq!(
+        by_tool_use(&state, sid, "toolu_2").status,
+        DelegationStatus::Running,
+        "an unmatched stop must never close another delegation"
+    );
+
+    // The late PostToolUse finally teaches `aid1`.
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "aid1"),
+    );
+
+    let resolved = by_tool_use(&state, sid, "toolu_1");
+    assert_eq!(
+        resolved.status,
+        DelegationStatus::Completed,
+        "the out-of-order stop must resolve without waiting on the staleness sweep"
+    );
+    assert!(resolved.ended_at.is_some(), "ended_at must be stamped");
+    assert_eq!(
+        by_tool_use(&state, sid, "toolu_2").status,
+        DelegationStatus::Running,
+        "the control delegation must still be live"
+    );
+    assert!(has_live_children(&state.delegations_for(sid)));
+}
+
+/// A `SubagentStopFailure` that overtakes its `PostToolUse` still lands as
+/// `Failed` — the deferred path applies the status the stop determined, not a
+/// re-derivation from the launch response.
+#[test]
+fn an_out_of_order_stop_failure_lands_as_failed() {
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    observe(&state, sid, HookEvent::SubagentStopFailure, &stop("aid1"));
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "aid1"),
+    );
+    assert_eq!(only(&state, sid).status, DelegationStatus::Failed);
+}
+
+/// A deferred stop resolves the delegation naming it and no other, even when a
+/// later dispatch's `PostToolUse` lands first.
+#[test]
+fn a_pending_stop_never_terminalizes_a_delegation_it_does_not_name() {
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "one", "toolu_1"),
+    );
+    // A stop for an agent this session never dispatched.
+    observe(&state, sid, HookEvent::SubagentStop, &stop("stranger"));
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "aid1"),
+    );
+    assert_eq!(
+        only(&state, sid).status,
+        DelegationStatus::Running,
+        "a stop naming another agent must never close this one"
+    );
+}
+
+/// A stop redelivered after its delegation is already terminal must not enter
+/// the ledger — that is a repeat, not an ordering failure, and an entry there
+/// would outlive the record it refers to.
+#[test]
+fn a_redelivered_stop_for_a_finished_delegation_records_no_pending_stop() {
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "e", "t", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "aid1"),
+    );
+    observe(&state, sid, HookEvent::SubagentStop, &stop("aid1"));
+    assert_eq!(state.pending_stops().len(), 0);
+    observe(&state, sid, HookEvent::SubagentStop, &stop("aid1"));
+    assert_eq!(
+        state.pending_stops().len(),
+        0,
+        "a redelivered stop for a terminal delegation must record nothing"
+    );
+}
+
+/// The ledger entry is spent only by a terminalization that actually landed. A
+/// `PostToolUse` naming a `tool_use_id` no delegation carries resolves nothing,
+/// so the stop must survive for the record that does carry it.
+#[test]
+fn an_unmatched_post_tool_use_does_not_consume_the_pending_stop() {
+    let (state, sid) = state_with_session();
+    observe(&state, sid, HookEvent::SubagentStop, &stop("aid1"));
+    assert_eq!(state.pending_stops().len(), 1);
+
+    // Same agentId, but a tool_use_id nothing tracks: `on_launched` returns early.
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_ghost", "aid1"),
+    );
+    assert_eq!(
+        state.pending_stops().len(),
+        1,
+        "an unresolved launch must not spend the deferred stop"
+    );
+
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "e", "t", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "aid1"),
+    );
+    assert_eq!(only(&state, sid).status, DelegationStatus::Completed);
+    assert_eq!(state.pending_stops().len(), 0, "and is spent exactly once");
+}
+
+/// A stop is scoped to its own session, exactly as in-order resolution is.
+#[test]
+fn a_pending_stop_does_not_cross_sessions() {
+    let (state, sid) = state_with_session();
+    let other = SessionId::new();
+    let mut s = Session::new(other, "/tmp/q", ControlModel::Tmux, None);
+    s.status = SessionStatus::Active;
+    state.register_session(s);
+
+    observe(&state, other, HookEvent::SubagentStop, &stop("aid1"));
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "e", "t", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "aid1"),
+    );
+    assert_eq!(
+        only(&state, sid).status,
+        DelegationStatus::Running,
+        "another session's stop must not resolve this one"
+    );
+}
+
+/// An expired deferred stop degrades to the pre-#4142 behavior — the delegation
+/// stays live for the staleness sweep — and never to a wrong terminalization.
+#[test]
+fn an_expired_pending_stop_never_resolves_a_later_launch() {
+    let (state, sid) = state_with_session();
+    observe(&state, sid, HookEvent::SubagentStop, &stop("aid1"));
+
+    let past_ttl = chrono::Utc::now() + chrono::Duration::seconds(PENDING_STOP_TTL_SECS + 1);
+    state.sweep_delegations_at(past_ttl);
+    assert_eq!(state.pending_stops().len(), 0, "the sweep ages the ledger");
+
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "e", "t", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "aid1"),
+    );
+    assert_eq!(only(&state, sid).status, DelegationStatus::Running);
+}
+
+/// The 60 s sweep is what bounds the ledger's age; this pins the wiring.
+#[test]
+fn the_delegation_sweep_ages_the_deferred_stop_ledger() {
+    let (state, sid) = state_with_session();
+    observe(&state, sid, HookEvent::SubagentStop, &stop("aid1"));
+    assert_eq!(state.pending_stops().len(), 1);
+    state.sweep_delegations_at(chrono::Utc::now());
+    assert_eq!(state.pending_stops().len(), 1, "a fresh entry survives");
+    state.sweep_delegations_at(
+        chrono::Utc::now() + chrono::Duration::seconds(PENDING_STOP_TTL_SECS + 1),
+    );
+    assert_eq!(state.pending_stops().len(), 0);
 }

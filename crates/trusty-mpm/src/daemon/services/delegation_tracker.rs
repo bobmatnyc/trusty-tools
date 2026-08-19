@@ -52,6 +52,23 @@
 //! manufacture a false idle, which is the specific failure this design exists to
 //! prevent.
 //!
+//! # Arrival order is a race, not a contract (#4142)
+//!
+//! `PostToolUse` is installed `async: true` and `SubagentStop` synchronously
+//! (`core::standalone::hooks`), so each is its own `tm hook` process posting
+//! independently. The async one can be descheduled while the synchronous stop
+//! for the same subagent completes and posts first — at which point the stop
+//! quotes an `agent_id` no record has learned yet, and the only reason it
+//! resolves nothing is that it is early.
+//!
+//! [`on_subagent_stop`] therefore *holds* an unresolvable stop in
+//! [`crate::daemon::state::pending_stops`] rather than discarding it, and
+//! [`on_launched`] applies it the instant the `agent_id` is taught. The key is
+//! the exact id the stop quoted, so the deferred path terminalizes precisely the
+//! record the in-order path would have — the two orders converge instead of one
+//! of them winning. This buffers evidence; it never invents any, and the "most
+//! recent" guess stays forbidden in both directions.
+//!
 //! # Fail direction
 //!
 //! Every branch here fails **closed**: uncertainty leaves a delegation `Running`
@@ -65,7 +82,8 @@
 //! The cost of failing closed is that a delegation can enter `Running` with no
 //! route out: `SubagentStop` is not guaranteed to arrive (`tm hook` POSTs fail
 //! open on a 2 s budget, an interrupted subagent emits no stop, a dispatch that
-//! never learned an `agent_id` can never be resolved by one). That is bounded
+//! never learned an `agent_id` can never be resolved by one — a stop that merely
+//! arrived early is the one case now recovered, see #4142 above). That is bounded
 //! outside the hot path by
 //! [`DaemonState::sweep_delegations`](crate::daemon::state::DaemonState::sweep_delegations),
 //! which the 60 s reap loop drives: a long-overdue live delegation becomes
@@ -684,7 +702,15 @@ fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: 
             .unwrap_or(false);
     let outcome = classify_dispatch(response);
 
-    state.mutate_delegation(id, |d| {
+    // #4142: the stop for this agent may already have arrived and found nothing
+    // to resolve. `peek` rather than take — the entry is cleared below only once
+    // the terminalization it authorises has actually landed, so a mutate that
+    // finds no record leaves the stop recoverable instead of discarding it.
+    let pending = agent_id
+        .as_deref()
+        .and_then(|a| state.pending_stops().peek(session, a));
+
+    let mutated = state.mutate_delegation(id, |d| {
         if agent_id.is_some() {
             d.agent_id = agent_id.clone();
         }
@@ -696,7 +722,12 @@ fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: 
         // `SubagentStop` will close it. `Unknown` terminalizes only on an
         // explicit dispatch failure, which is itself positive evidence that
         // nothing was left running.
-        let terminal = match outcome {
+        //
+        // #4142: a stop already observed for this exact `agent_id` outranks all
+        // three. It is the authoritative terminal signal, and applying the
+        // status it determined is what makes the two arrival orders converge on
+        // one record rather than one of them deciding.
+        let terminal = pending.or(match outcome {
             DispatchOutcome::Launched => None,
             DispatchOutcome::Returned => Some(if errored {
                 DelegationStatus::Failed
@@ -705,12 +736,22 @@ fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: 
             }),
             DispatchOutcome::Unknown if errored => Some(DelegationStatus::Failed),
             DispatchOutcome::Unknown => None,
-        };
+        });
         if let Some(status) = terminal {
             d.status = status;
             d.ended_at = Some(Utc::now());
         }
     });
+
+    // Only now is the deferred stop spent. A `false` here means the record
+    // vanished between the lookup and the write, so the stop stays pending for
+    // whatever record carries this id next.
+    if mutated
+        && pending.is_some()
+        && let Some(a) = agent_id.as_deref()
+    {
+        state.pending_stops().clear(session, a);
+    }
 }
 
 /// What a dispatch `PostToolUse` response says about whether a subagent is
@@ -773,21 +814,21 @@ enum DispatchOutcome {
 ///
 /// [`on_subagent_stop`] resolves a delegation *only* by `agent_id`, and
 /// `agent_id` is taught *only* by this function. A response with no *usable*
-/// `agentId` — absent, `null`, `""`, or any non-string ([`usable_agent_id`])
-/// therefore has **no** route to termination other than this branch — nothing
-/// can ever quote it back to us. Compounding that, `PostToolUse` is installed
-/// `async: true` while `SubagentStop` is synchronous
-/// (`core::standalone::hooks`), so the two are independent `tm hook` processes
-/// whose arrival order at the daemon is not guaranteed; an out-of-order stop
-/// matches nothing and nothing re-checks. Making this branch affirmative without
-/// first giving `on_subagent_stop` a recovery path would convert a rare
-/// fail-open into a guaranteed six-hour phantom "agent in flight" for every such
-/// dispatch.
+/// `agentId` — absent, `null`, `""`, or any non-string ([`usable_agent_id`]) —
+/// therefore has **no** route to termination other than this branch, because
+/// nothing can ever quote it back to us. Making this branch affirmative would
+/// convert a rare fail-open into a guaranteed six-hour phantom "agent in flight"
+/// for every such dispatch.
+///
+/// The #4142 deferred-stop ledger does NOT close this. That ledger recovers a
+/// stop that merely arrived *early*, by holding it until the `agent_id` is
+/// taught. When no usable `agentId` is ever taught, there is no key for it to be
+/// held against and the delegation is unreachable by any stop, in any order.
 ///
 /// The band is unobserved: Claude Code 2.1.220 returns
 /// `{isAsync, status, agentId, resolvedModel}` for a dispatch, which takes the
-/// `Launched` branch. Tightening is blocked on the stop-side recovery work and
-/// is tracked with it, not attempted here.
+/// `Launched` branch. Tightening it needs a correlation key this response does
+/// not carry, so it is not attempted here.
 /// Test: `post_tool_use_without_tool_response_stays_running`,
 /// `post_tool_use_with_unrecognized_response_stays_running`,
 /// `post_tool_use_with_only_an_agent_id_stays_running`,
@@ -829,18 +870,38 @@ fn recognized_response(response: &Value) -> bool {
         .is_some_and(|o| TOOL_RESPONSE_KEYS.iter().any(|k| o.contains_key(*k)))
 }
 
-/// `SubagentStop`: terminalize exactly the delegation that ended.
+/// `SubagentStop`: terminalize exactly the delegation that ended, or remember
+/// the stop until the delegation can be found (#4142).
 ///
 /// Why: this is the authoritative completion signal, and the only one that
-/// arrives when the subagent actually finishes.
-/// What: resolves `payload.agent_id` against the stored `agent_id` and
-/// terminalizes that record alone (`Failed` for `SubagentStopFailure`, else
-/// `Completed`). When `agent_id` is absent, or matches nothing, **nothing is
-/// terminalized** — see the module note on why a "most recent" fallback is
-/// forbidden.
+/// arrives when the subagent actually finishes. It resolves only by `agent_id`,
+/// which only [`on_launched`] teaches — and `PostToolUse` is installed
+/// `async: true` while this event is synchronous, so a stop can reach the daemon
+/// before the id it quotes has been recorded. Discarding it there left the
+/// delegation `Running` for the full six-hour staleness window as a phantom
+/// in-flight agent.
+/// What: `Failed` for `SubagentStopFailure`, else `Completed`. Three
+/// dispositions, and the third is the #4142 fix:
+///
+/// 1. A **live** delegation carries this `agent_id` — terminalize it. `Stale` is
+///    deliberately not terminal, so a stop arriving after the staleness sweep
+///    gave up still replaces "we lost track" with the truth.
+/// 2. A **terminal** delegation carries it — this stop was redelivered and its
+///    fact is already recorded. Nothing to do, and nothing to remember.
+/// 3. **No delegation carries it at all** — either the id is not ours, or its
+///    `PostToolUse` has not landed yet, and the two are indistinguishable here.
+///    So the stop goes to [`crate::daemon::state::pending_stops`] and
+///    [`on_launched`] applies it the moment the id becomes known. A stop that
+///    was never ours simply expires there.
+///
+/// A missing `agent_id` still terminalizes nothing and records nothing — with no
+/// correlation key there is nothing to defer, and the module note explains why a
+/// "most recent" guess is forbidden.
 /// Test: `subagent_stop_completes_matching_delegation`,
 /// `subagent_stop_without_agent_id_terminalizes_nothing`,
-/// `concurrent_delegations_terminalize_independently`.
+/// `concurrent_delegations_terminalize_independently`,
+/// `out_of_order_subagent_stop_resolves_when_its_post_tool_use_lands`,
+/// `a_redelivered_stop_for_a_finished_delegation_records_no_pending_stop`.
 fn on_subagent_stop(state: &DaemonState, session: SessionId, payload: &Value, event: HookEvent) {
     let Some(agent_id) = field(payload, "agent_id") else {
         tracing::trace!(
@@ -849,19 +910,27 @@ fn on_subagent_stop(state: &DaemonState, session: SessionId, payload: &Value, ev
         );
         return;
     };
-    // `Stale` is deliberately not terminal, so a stop that arrives after the
-    // staleness sweep gave up still replaces "we lost track" with the truth.
-    let Some(id) = state.find_delegation(session, |d| {
-        d.agent_id.as_deref() == Some(agent_id) && !d.status.is_terminal()
-    }) else {
-        return;
-    };
     let status = if event == HookEvent::SubagentStopFailure {
         DelegationStatus::Failed
     } else {
         DelegationStatus::Completed
     };
-    state.terminate_delegation(id, status);
+    if let Some(id) = state.find_delegation(session, |d| {
+        d.agent_id.as_deref() == Some(agent_id) && !d.status.is_terminal()
+    }) {
+        state.terminate_delegation(id, status);
+        return;
+    }
+    if state
+        .find_delegation(session, |d| d.agent_id.as_deref() == Some(agent_id))
+        .is_some()
+    {
+        return;
+    }
+    // #4142: the id is unknown to this session — hold the stop rather than drop it.
+    state
+        .pending_stops()
+        .record(session, agent_id, status, Utc::now());
 }
 
 #[cfg(test)]
