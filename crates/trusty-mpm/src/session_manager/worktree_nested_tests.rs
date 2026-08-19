@@ -242,6 +242,223 @@ fn object_store_dies_with_is_true_for_a_self_contained_clone() {
     );
 }
 
+/// Seed a BARE repository at `<parent>/<rel>` holding a commit that exists
+/// nowhere else on disk (#4166).
+///
+/// Why: the producing checkout is built OUTSIDE the candidate and deleted once
+/// the commit is pushed, so the bare repo genuinely holds the only copy. A
+/// `clone --bare` of the fixture would leave the same commit in the fixture's
+/// own remote, and the test would then prove nothing about loss.
+/// What: `git init --bare`, push one commit in from a scratch checkout under
+/// `repos_root`, remove the scratch checkout. Returns the bare repo path.
+fn seed_bare_repo_with_only_copy(fx: &GitWorktreeFixture, parent: &Path, rel: &str) -> PathBuf {
+    let bare = parent.join(rel);
+    std::fs::create_dir_all(&bare).unwrap();
+    git_ok(&bare, &["init", "--bare", "--initial-branch=main"]);
+
+    let src = fx.repos_root.join("bare-source");
+    std::fs::create_dir_all(&src).unwrap();
+    git_ok(&src, &["init", "--initial-branch=main"]);
+    git_ok(&src, &["config", "user.email", "ci@test.invalid"]);
+    git_ok(&src, &["config", "user.name", "CI"]);
+    git_ok(&src, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(src.join("salvage.txt"), "the only copy\n").unwrap();
+    git_ok(&src, &["add", "salvage.txt"]);
+    git_ok(&src, &["commit", "-m", "salvaged work"]);
+    git_ok(&src, &["push", bare.to_str().unwrap(), "main"]);
+    std::fs::remove_dir_all(&src).unwrap();
+    bare
+}
+
+/// THE #4166 HIGH: a nested BARE repository holding the only copy of a commit
+/// must make the parent DIRTY.
+///
+/// Why: `scan_for_repos` decided "is this a repository root" by matching an
+/// entry named literally `.git`. A bare repository has none — it has `HEAD`,
+/// `objects/` and `refs/` at its own root — so the walk descended past it,
+/// found nothing, and the candidate read CLEAN with `dirty_files = 0`. Every
+/// other question answers clean too, by construction: `git status` on the
+/// candidate is empty because the path is gitignored, and `git worktree list`
+/// does not mention a different repository.
+#[test]
+fn inspect_dirt_reports_nested_bare_repo_holding_the_only_copy() {
+    let fx = GitWorktreeFixture::new();
+    let parent = seed_parent(&fx, "bare-only-copy");
+    let bare = seed_bare_repo_with_only_copy(&fx, &parent, "scratch/salvage.git");
+
+    // Premise 1: the shape really has no `.git` entry for the old predicate.
+    assert!(
+        !bare.join(".git").exists(),
+        "premise broken: a bare repo must not have a .git entry"
+    );
+    // Premise 2: the candidate's own porcelain is blind to it.
+    let plain = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&parent)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&plain.stdout).trim().is_empty(),
+        "premise broken: the bare repo sits under a gitignored path"
+    );
+
+    let dirt = inspect_dirt(&parent)
+        .expect("a nested bare repo holding the only copy of a commit must be seen");
+    assert!(
+        dirt.reason.contains("bare repository"),
+        "the reason must name the loss model that applied; got: {}",
+        dirt.reason
+    );
+    assert!(
+        dirt.unpushed_commits >= 1,
+        "the unreachable commit must be counted; got: {}",
+        dirt.reason
+    );
+}
+
+/// THE COUNTERWEIGHT: a bare repository with nothing in it must NOT pin the
+/// parent.
+///
+/// Why: a bare repo has no working tree, so `git status` inside one exits 128.
+/// Routing it through the ordinary working-tree check would turn that into a
+/// permanent DIRTY through the error arm — safe, but a leak, and it would make
+/// the test above pass for the wrong reason.
+#[test]
+fn inspect_dirt_allows_an_empty_nested_bare_repo() {
+    let fx = GitWorktreeFixture::new();
+    let parent = seed_parent(&fx, "bare-empty");
+    let bare = parent.join("scratch").join("empty.git");
+    std::fs::create_dir_all(&bare).unwrap();
+    git_ok(&bare, &["init", "--bare", "--initial-branch=main"]);
+
+    assert!(
+        inspect_dirt(&parent).is_none(),
+        "an empty bare repo holds nothing and must not pin the parent; got {:?}",
+        inspect_dirt(&parent)
+    );
+}
+
+/// The second-order half of the #4166 HIGH: the walk must STOP at a bare
+/// repository root rather than descending into its object store.
+///
+/// Why: the old predicate never matched a bare repo, so the walk descended into
+/// `objects/` and `refs/` and spent scan budget there. A large loose-object bare
+/// repo could therefore exhaust the 50k budget and fail-safe to DIRTY by
+/// accident, while a packed one — the normal state right after `clone --bare` —
+/// stayed cheap and read CLEAN. Non-descent is proved observably: a file whose
+/// name the #4166 list would otherwise flag is planted inside `objects/`, and a
+/// walk that stopped at the root cannot have seen it.
+#[test]
+fn scan_does_not_descend_into_a_bare_repos_object_store() {
+    let fx = GitWorktreeFixture::new();
+    let parent = seed_parent(&fx, "bare-no-descend");
+    let bare = parent.join("scratch").join("packed.git");
+    std::fs::create_dir_all(&bare).unwrap();
+    git_ok(&bare, &["init", "--bare", "--initial-branch=main"]);
+    std::fs::write(bare.join("objects").join("tripwire.bak"), "unreachable\n").unwrap();
+
+    assert!(
+        inspect_dirt(&parent).is_none(),
+        "the walk must stop at the bare repo root, so nothing inside objects/ is \
+         reachable; got {:?}",
+        inspect_dirt(&parent)
+    );
+}
+
+/// THE #4166 MEDIUM: a gitignored `.env.local` must make the candidate DIRTY.
+///
+/// Why: the residual-risk note excused every gitignored loose file, and the
+/// measurement behind that was sound — counting them all flagged `.claude/` in
+/// 30 of 31 session worktrees. "Count none of them" overshoots the other way: a
+/// `.env.local` holds credentials that exist nowhere else and is cheap to name.
+#[test]
+fn inspect_dirt_reports_high_value_gitignored_env_file() {
+    let fx = GitWorktreeFixture::new();
+    let parent = fx.add_worktree("env-local");
+    std::fs::write(parent.join(".gitignore"), ".env*\n").unwrap();
+    GitWorktreeFixture::commit_all_and_push(&parent, "ignore env files");
+    std::fs::write(parent.join(".env.local"), "API_KEY=not-in-git\n").unwrap();
+
+    // Premise: no git question asked of the candidate can see it.
+    let plain = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&parent)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&plain.stdout).trim().is_empty(),
+        "premise broken: .env.local should be invisible to plain porcelain"
+    );
+
+    let dirt = inspect_dirt(&parent).expect("a gitignored .env.local must read as dirty");
+    assert!(
+        dirt.reason.contains(".env.local"),
+        "the reason must name the file at risk; got: {}",
+        dirt.reason
+    );
+    assert_eq!(dirt.dirty_files, 1, "reason: {}", dirt.reason);
+}
+
+/// The same rule one level down, which is a different code path: a top-level
+/// `!!` entry is a collapsed DIRECTORY, so the file is only reachable by the
+/// walk that descends into it.
+#[test]
+fn inspect_dirt_reports_high_value_gitignored_bak_in_a_subdirectory() {
+    let fx = GitWorktreeFixture::new();
+    let parent = fx.add_worktree("bak-nested");
+    std::fs::write(parent.join(".gitignore"), "scratch/\n").unwrap();
+    GitWorktreeFixture::commit_all_and_push(&parent, "ignore scratch");
+    std::fs::create_dir_all(parent.join("scratch").join("deep")).unwrap();
+    std::fs::write(
+        parent
+            .join("scratch")
+            .join("deep")
+            .join("settings.json.bak"),
+        "the pre-edit copy\n",
+    )
+    .unwrap();
+
+    let dirt = inspect_dirt(&parent).expect("a gitignored *.bak must read as dirty");
+    assert!(
+        dirt.reason.contains("settings.json.bak"),
+        "the reason must name the file at risk; got: {}",
+        dirt.reason
+    );
+}
+
+/// THE COUNTERWEIGHT that keeps reclamation alive: the same high-value names
+/// inside a disposable build directory stay excused, so a candidate whose only
+/// ignored content is build output is still removed.
+///
+/// Why: this is the whole reason the #4166 list is a short list of names rather
+/// than "every ignored entry". Widening it until `target/` counts is the
+/// failure mode of a guard nobody can run.
+#[test]
+fn inspect_dirt_ignores_high_value_names_inside_disposable_build_dirs() {
+    let fx = GitWorktreeFixture::new();
+    let parent = fx.add_worktree("disposable-env");
+    std::fs::write(parent.join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+    GitWorktreeFixture::commit_all_and_push(&parent, "ignore build output");
+    std::fs::create_dir_all(parent.join("target").join("debug")).unwrap();
+    std::fs::write(parent.join("target").join(".env"), "BUILD=1\n").unwrap();
+    std::fs::write(
+        parent.join("target").join("debug").join("incremental.bak"),
+        "regenerable\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(parent.join("node_modules")).unwrap();
+    std::fs::write(parent.join("node_modules").join("x.orig"), "vendored\n").unwrap();
+
+    assert!(
+        inspect_dirt(&parent).is_none(),
+        "a candidate whose only ignored content is build output must stay \
+         reclaimable; got {:?}",
+        inspect_dirt(&parent)
+    );
+}
+
 /// FAIL-SAFE: when the discriminator cannot answer, the nested root is DIRTY.
 /// Not knowing which loss model applies means not knowing what removal costs.
 #[test]

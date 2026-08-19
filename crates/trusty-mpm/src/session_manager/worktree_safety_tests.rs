@@ -265,6 +265,42 @@ fn inspect_dirt_counts_tracked_trusty_mpm_edit() {
     );
 }
 
+/// #4166: a tracked file DELETED from `.trusty-mpm/` must be counted by
+/// exactly one of the two passes, and before this it was counted by neither.
+///
+/// Why: pass 1 skips every `.trusty-mpm/`-scoped status line on the promise
+/// that pass 2 owns them, and pass 2 returned `Ok(0)` without running git
+/// whenever the directory was absent. Deleting the last file under
+/// `.trusty-mpm/` removes the directory too, so the deletion fell through the
+/// handover and `dirty_files` read 0 — the broken invariant, not a large loss:
+/// for a registered worktree both the index and the object store live outside
+/// the candidate, so nothing unique dies.
+#[test]
+fn inspect_dirt_counts_a_deleted_tracked_file_under_trusty_mpm() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("deleted-tm");
+    std::fs::create_dir_all(wt.join(".trusty-mpm")).unwrap();
+    std::fs::write(wt.join(".trusty-mpm").join("notes.md"), "v1\n").unwrap();
+    // Pushed, so the commit itself is not the dirt under test.
+    GitWorktreeFixture::commit_all_and_push(&wt, "track notes under .trusty-mpm");
+    std::fs::remove_dir_all(wt.join(".trusty-mpm")).unwrap();
+
+    // Premise: the directory really is gone, which is what used to short-circuit
+    // pass 2 before it ever asked git.
+    assert!(
+        !wt.join(".trusty-mpm").exists(),
+        "premise broken: the whole directory should be gone"
+    );
+
+    let dirt =
+        inspect_dirt(&wt).expect("a deleted tracked file under .trusty-mpm/ must read as dirty");
+    assert_eq!(
+        dirt.dirty_files, 1,
+        "the deletion must be counted by pass 2; reason: {}",
+        dirt.reason
+    );
+}
+
 /// Definition 2 of dirty: a COMMITTED but UNPUSHED commit. This looks safe —
 /// the work is committed — but `remove_session_worktree` deletes the
 /// `session/<leaf>` branch after removal, so the commit loses its last

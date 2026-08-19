@@ -37,32 +37,44 @@
 //! `.base/.worktrees/2eb72dca-…` gitignores neither, so the same content
 //! arrives as `??` lines there and is invisible here. A guard that closed only
 //! one of those would be sound on one branch and useless on the other, so this
-//! module never reasons from "is it gitignored". It asks four questions:
+//! module never reasons from "is it gitignored". It asks five questions:
 //!
 //! 1. **Does git report anything?** — [`STATUS_ARGS`], with every
 //!    config knob that could silence it pinned on the command line.
 //! 2. **Is anything committed but not on a remote?** — on `HEAD` *and* on the
 //!    `session/<leaf>` branch that `decommission` force-deletes.
-//! 3. **Is there a nested repository holding unsaved work?** — enumerated
-//!    exactly, never inferred: registered worktrees from
-//!    `git worktree list --porcelain`, plus a bounded walk of gitignored
-//!    subtrees for unregistered clones. Each nested root is then put through
-//!    questions 1, 2 and 4 in its own right.
+//! 3. **Is there a nested repository holding unsaved work?** — registered
+//!    worktrees from `git worktree list --porcelain` (exact), plus a bounded
+//!    walk of gitignored subtrees for repositories git has never heard of,
+//!    bare and non-bare alike. Each nested root is then put through questions
+//!    1, 2 and 4 in its own right.
 //! 4. **Is there anything under `.trusty-mpm/` that is not one of two
 //!    disposable artefacts?** — accounted per-file by pathspec, covering the
 //!    gitignored and untracked spellings alike.
+//! 5. **Is there a high-value gitignored file?** (#4166) — a short list of
+//!    names that are unrecoverable if deleted (`.env*`, `*.bak`, `*.orig`),
+//!    found by the same walk as question 3. See
+//!    `super::worktree_nested::is_high_value_ignored`.
 //!
 //! # What this rule still CANNOT see (residual risk)
 //!
-//! - **Gitignored loose files outside `.trusty-mpm/`** that are not part of a
-//!   nested repository — a `.env.local`, a `.mcp.json.bak`, a scratch note in
-//!   an ignored directory. Deliberately not counted: on this repo's own 31
-//!   session worktrees, treating every non-disposable ignored entry as dirt
-//!   would flag `.claude/` in 30 of 31 and disable reclamation outright, which
-//!   is the failure mode of a guard nobody can run.
+//! - **Gitignored loose files outside `.trusty-mpm/` whose names are not on the
+//!   #4166 list** — a scratch note in an ignored directory, a `.mcp.json.local`.
+//!   Deliberately not counted: on this repo's own 31 session worktrees,
+//!   treating every non-disposable ignored entry as dirt would flag `.claude/`
+//!   in 30 of 31 and disable reclamation outright, which is the failure mode of
+//!   a guard nobody can run. The named list buys back the unrecoverable cases
+//!   without that flag rate; widening it is a measurement, not a judgement
+//!   call.
 //! - **Anything under a disposable build directory** (`target/`,
 //!   `node_modules/`, …), including a nested repository inside one — see
 //!   `super::worktree_nested::DISPOSABLE_DIR_NAMES`.
+//! - **A repository whose root this walk cannot recognise.** Question 3 knows
+//!   two shapes: a `.git` entry, and the `HEAD` + `objects/` + `refs/` triple a
+//!   bare repository has instead (#4166 — before that, a bare repo was invisible
+//!   and a candidate holding one read CLEAN). A repository laid out as neither —
+//!   a `.git` FILE pointing somewhere unusual, a bare repo missing a marker — is
+//!   still not seen.
 //! - **`.git/info/exclude`**, which is per-repo and on-disk and cannot be
 //!   overridden from the command line the way `core.excludesFile` can.
 //! - **The stash — but only for the CANDIDATE ITSELF, and this distinction
@@ -77,7 +89,7 @@
 //! - **Symlinked subtrees** — not followed, because `remove_dir_all` deletes
 //!   the link and not its target, so no work is at risk there.
 //! - **A repository nested inside a gitignored subtree OF a nested repository**
-//!   — the scan stops descending at the first `.git` it finds.
+//!   — the scan stops descending at the first repository root it finds.
 //! - **The bare-branch population, partially.** `count_session_branch_unpushed`
 //!   covers both `session/<leaf>` and the bare `<leaf>` spelling, but see its
 //!   own doc for which of the two `decommission` actually force-deletes today.
@@ -283,8 +295,8 @@ impl DirtyWorktree {
 /// 2. [`count_unpushed`] finds a commit that is on no remote, on `HEAD` or on
 ///    the `session/<leaf>` branch `remove_session_worktree` force-deletes;
 /// 3. [`super::worktree_nested::nested_dirt`] finds a nested repository
-///    holding unsaved work,
-///    regardless of gitignore;
+///    holding unsaved work, or a high-value gitignored file (#4166), either
+///    way regardless of gitignore;
 /// 4. the directory is not a git worktree ROOT at all and is not empty — see
 ///    [`non_git_dirt`];
 /// 5. any check errored — see the module-level FAIL-SAFE note.
@@ -417,12 +429,12 @@ fn is_trusty_mpm_scoped(path: &str) -> bool {
 /// live `wip-backup-20260727-jira/` hole, and it must work whether the subtree
 /// is gitignored (invisible to plain status) or untracked (collapsed by plain
 /// status) — hence [`TRUSTY_MPM_STATUS_ARGS`].
-/// What: 0 when the directory does not exist; otherwise one count per reported
-/// entry that is not on the allowlist. A quoted path is an ERROR, not a
-/// silently-unmatched one: if the guard cannot spell the path it cannot decide
-/// the path is disposable.
+/// What: one count per reported entry that is not on the allowlist. A quoted
+/// path is an ERROR, not a silently-unmatched one: if the guard cannot spell
+/// the path it cannot decide the path is disposable.
 /// Test: `inspect_dirt_counts_wip_backup_under_trusty_mpm`,
-/// `inspect_dirt_counts_pause_snapshots_under_trusty_mpm`.
+/// `inspect_dirt_counts_pause_snapshots_under_trusty_mpm`,
+/// `inspect_dirt_counts_a_deleted_tracked_file_under_trusty_mpm`.
 fn trusty_mpm_dirt(root: &Path) -> Result<usize, String> {
     // NOT `Path::exists()`: that collapses every I/O error to `false`, and
     // pass 1 has already skipped every `.trusty-mpm/`-scoped entry on the
@@ -431,7 +443,13 @@ fn trusty_mpm_dirt(root: &Path) -> Result<usize, String> {
     let dir = root.join(TRUSTY_MPM_DIR);
     match std::fs::symlink_metadata(&dir) {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        // #4166: absence must NOT short-circuit. A tracked file DELETED from
+        // `.trusty-mpm/` leaves no directory behind, and returning 0 here
+        // meant pass 1 skipped that status line and pass 2 never ran — so the
+        // deletion was counted by neither. The pathspec below is correct on
+        // its own: verified to exit 0 with empty output in a repo where
+        // `.trusty-mpm` never existed, so nothing is gained by asking first.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("`{}` is unreadable: {e}", dir.display())),
     }
     let out = git_stdout(root, TRUSTY_MPM_STATUS_ARGS)?;
