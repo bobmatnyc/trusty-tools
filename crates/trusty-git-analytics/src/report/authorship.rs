@@ -20,16 +20,24 @@
 //!   name/email pattern match before any aggregation runs.
 //! - **Merge commits** — HANDLED. The query filters `is_merge = 0`; an
 //!   inflated merger count never reaches the aggregation.
-//! - **Squash-merge attribution, no `.mailmap` identity merging, vendored-path
-//!   exclusion** — NOT handled (each needs, respectively: nothing extra for
-//!   GitHub squash since `commits.author_name`/`author_email` already read
-//!   the PR author verbatim, per issue #5453's own finding — the residual
-//!   risk is a LOCAL `git merge --squash` by a human, which this derivation
-//!   cannot distinguish from a real commit; a per-engagement `.mailmap`/alias
-//!   table, which does not exist in this schema; and a vendored-path filter,
-//!   which needs a configurable ignore-list this module does not have). Named
-//!   explicitly in [`CAVEATS`], which the report section
-//!   renders verbatim rather than silently omitting the limitation.
+//! - **Identity aliases** — HANDLED, partially. Authors are grouped by the
+//!   collection pass's own identity resolver
+//!   (`collect::identity::IdentityResolver`, which populates
+//!   `commits.author_id → authors.canonical_email`), so one person committing
+//!   under several names or emails collapses to one author. A commit the
+//!   resolver never linked (`author_id IS NULL`) falls back to its raw commit
+//!   email, so its aliases stay split — [`AuthorshipSummary::unresolved_authors`]
+//!   counts exactly those identities, which is the honesty gate issue #5453
+//!   asked for.
+//! - **Squash-merge attribution, vendored-path exclusion** — NOT handled (each
+//!   needs, respectively: nothing extra for GitHub squash since
+//!   `commits.author_name`/`author_email` already read the PR author verbatim,
+//!   per issue #5453's own finding — the residual risk is a LOCAL `git merge
+//!   --squash` by a human, which this derivation cannot distinguish from a
+//!   real commit; and a vendored-path filter, which needs a configurable
+//!   ignore-list this module does not have). Named explicitly in [`CAVEATS`],
+//!   which the report section renders verbatim rather than silently omitting
+//!   the limitation.
 //!
 //! What: [`AuthorshipSummary`], [`build_authorship_summary`] which reads it
 //! from an open database for one repository, and
@@ -78,6 +86,16 @@ pub struct AuthorshipSummary {
     pub single_author_subsystems: Vec<String>,
     /// One entry per active month in the trailing 12 months, oldest first.
     pub monthly_trajectory: Vec<MonthlyActivity>,
+    /// Distinct raw commit identities the identity resolver never linked to an
+    /// `authors` row (`commits.author_id IS NULL`) — issue #5453's honesty gate.
+    ///
+    /// Why: every such identity is grouped by its raw commit email instead of a
+    /// canonical one, so its aliases stay split and concentration/bus factor
+    /// read LOWER than reality. A nonzero count is the caveat a reader needs to
+    /// discount the figures by; zero means every counted commit went through
+    /// the resolver.
+    /// Test: `super::authorship_tests::unresolved_authors_are_counted_and_caveated`.
+    pub unresolved_authors: u64,
     /// Data-trap limitations this run did NOT correct for (issue #5453) —
     /// rendered verbatim by the report section's caption.
     pub caveats: Vec<String>,
@@ -98,11 +116,26 @@ pub struct MonthlyActivity {
 const CAVEATS: &[&str] = &[
     "Squash-merge attribution: a GitHub squash-merge preserves the PR author, but a local \
      `git merge --squash` by a human does not — this run cannot distinguish the two.",
-    "No .mailmap / identity-alias merging: one person committing under multiple names or \
-     emails is counted as multiple authors, which UNDERSTATES concentration and bus factor.",
+    "Identity aliases are merged only as far as the collection pass resolved them: authors \
+     are grouped by `authors.canonical_email` where the resolver linked the commit, and by the \
+     raw commit email where it did not.",
     "No vendored-path exclusion: a checked-in vendor/dependency directory can make its \
      committer look like the sole owner of thousands of paths.",
 ];
+
+/// The caveat naming an unresolved-identity count, for a run that has one.
+///
+/// Why: a standing caveat a reader sees on every report teaches them to skip
+/// it; this one appears only when the figure is nonzero, and carries the
+/// figure. Splitting an author across aliases lowers every concentration
+/// number, so the direction of the error is stated too.
+fn unresolved_caveat(count: u64) -> String {
+    format!(
+        "{count} commit identity/identities in this repository were never linked to a resolved \
+         author, so their aliases stay split — concentration and bus factor read LOWER than \
+         reality by that much."
+    )
+}
 
 /// Name/email substrings identifying a machine-authored commit (issue #5453).
 ///
@@ -146,24 +179,35 @@ fn month_of(timestamp: &str) -> Option<String> {
 /// bus factor / concentration), per-subsystem author sets (for single-author
 /// subsystems), and per-month distinct-author/commit counts limited to the
 /// most recent 12 active months (for the trajectory).
+///
+/// Authors are keyed on `authors.canonical_email` via a LEFT JOIN on
+/// `commits.author_id` — the identity resolver's own output (#5453 requires
+/// reusing it rather than re-grouping raw commit emails). A commit the resolver
+/// never linked keeps its raw email as the key and is counted into
+/// [`AuthorshipSummary::unresolved_authors`].
 /// Test: `super::authorship_tests::{builds_from_seeded_commits,
-/// bots_and_merges_are_excluded, single_author_subsystem_detected}`.
+/// bots_and_merges_are_excluded, single_author_subsystem_detected,
+/// aliases_collapse_through_the_identity_resolver,
+/// unresolved_authors_are_counted_and_caveated}`.
 ///
 /// # Errors
 ///
 /// Propagates [`crate::core::errors::TgaError::DbError`] from either query.
 pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<AuthorshipSummary> {
     let mut stmt = conn.prepare(
-        "SELECT c.author_name, c.author_email, c.timestamp, f.path \
-         FROM commits c JOIN files f ON f.commit_id = c.id \
+        "SELECT c.author_name, c.author_email, a.canonical_email, c.timestamp, f.path \
+         FROM commits c \
+         JOIN files f ON f.commit_id = c.id \
+         LEFT JOIN authors a ON a.id = c.author_id \
          WHERE c.repository = ?1 AND c.is_merge = 0",
     )?;
     let rows = stmt.query_map(params![repository], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(2)?,
             row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
         ))
     })?;
 
@@ -172,16 +216,26 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
         BTreeMap::new();
     let mut months: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
     let mut month_commits: BTreeMap<String, u64> = BTreeMap::new();
+    let mut unresolved: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for row in rows {
-        let (name, email, timestamp, path) = row?;
+        let (name, email, canonical_email, timestamp, path) = row?;
         if is_bot(&name, &email) {
             continue;
         }
-        let author_key = if email.is_empty() {
+        let raw_key = if email.is_empty() {
             name.clone()
         } else {
             email.clone()
+        };
+        // The resolver's canonical email wins; an unlinked commit falls back to
+        // its raw identity and is counted as an honesty caveat (#5453).
+        let author_key = match canonical_email.filter(|e| !e.is_empty()) {
+            Some(canonical) => canonical,
+            None => {
+                unresolved.insert(raw_key.clone());
+                raw_key
+            }
         };
         *touches_by_author.entry(author_key.clone()).or_insert(0) += 1;
         authors_by_subsystem
@@ -226,6 +280,12 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
         })
         .collect();
 
+    let unresolved_authors = unresolved.len() as u64;
+    let mut caveats: Vec<String> = CAVEATS.iter().map(|s| s.to_string()).collect();
+    if unresolved_authors > 0 {
+        caveats.push(unresolved_caveat(unresolved_authors));
+    }
+
     Ok(AuthorshipSummary {
         schema_version: AUTHORSHIP_SCHEMA_VERSION.to_string(),
         repository: repository.to_string(),
@@ -234,8 +294,49 @@ pub fn build_authorship_summary(conn: &Connection, repository: &str) -> Result<A
         top_author_share_pct,
         single_author_subsystems,
         monthly_trajectory,
-        caveats: CAVEATS.iter().map(|s| s.to_string()).collect(),
+        unresolved_authors,
+        caveats,
     })
+}
+
+/// True when at least one commit row carries `repository` as its name.
+///
+/// Why (#5453 review): `build_authorship_summary` cannot tell "this repository
+/// genuinely has no commits" from "the name the manifest used never matched a
+/// `commits.repository` value" — both aggregate zero rows and both would render
+/// as a confident "0 authors, bus factor 0". The caller needs the difference to
+/// choose between an artifact and a named gap, so the probe is its own query.
+/// What: a bare `SELECT 1 … LIMIT 1` existence check, merges included, because
+/// the question is whether the NAME matched anything at all.
+/// Test: `super::authorship_tests::a_name_that_matches_nothing_is_detectable`.
+///
+/// # Errors
+///
+/// Propagates [`crate::core::errors::TgaError::DbError`].
+pub fn repository_has_commits(conn: &Connection, repository: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT 1 FROM commits WHERE repository = ?1 LIMIT 1")?;
+    Ok(stmt.exists(params![repository])?)
+}
+
+/// Every distinct `commits.repository` value in the database, sorted.
+///
+/// Why: when a manifest name matched nothing, the gap line is only actionable
+/// if it names what IS present — "no commits under 'acme-web' (the database
+/// holds: acme_web)" points straight at the drift, where a bare "no commits"
+/// does not.
+/// Test: `super::authorship_tests::a_name_that_matches_nothing_is_detectable`.
+///
+/// # Errors
+///
+/// Propagates [`crate::core::errors::TgaError::DbError`].
+pub fn recorded_repository_names(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT repository FROM commits ORDER BY repository")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut names = Vec::new();
+    for row in rows {
+        names.push(row?);
+    }
+    Ok(names)
 }
 
 /// The smallest number of top-ranked authors whose combined share reaches 50%.

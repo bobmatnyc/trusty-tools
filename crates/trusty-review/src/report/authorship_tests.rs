@@ -11,7 +11,8 @@ const ARTIFACT: &str = r#"{
     {"month": "2026-01", "active_authors": 2, "commits": 10},
     {"month": "2026-02", "active_authors": 3, "commits": 15}
   ],
-  "caveats": ["no mailmap"]
+  "unresolved_authors": 2,
+  "caveats": ["2 commit identity/identities in this repository were never linked"]
 }"#;
 
 #[test]
@@ -28,7 +29,26 @@ fn parses_the_artifact_tga_writes() {
     assert!((summary.top_author_share_pct - 82.5).abs() < f64::EPSILON);
     assert_eq!(summary.single_author_subsystems, vec!["src", "scripts"]);
     assert_eq!(summary.monthly_trajectory.len(), 2);
-    assert_eq!(summary.caveats, vec!["no mailmap".to_string()]);
+    // #5453: the unresolved-identity count crosses the process boundary as a
+    // figure, not only as caveat prose — a reader (and the JSON output) needs
+    // to know how far the concentration numbers under-merge.
+    assert_eq!(summary.unresolved_authors, 2);
+    assert_eq!(summary.caveats.len(), 1);
+}
+
+/// An older tga wrote no `unresolved_authors` key. Reading it as `0` is the
+/// only safe default the `#[serde(default)]` on every field already implies —
+/// and it must not turn the load into an error, since the schema major is
+/// unchanged.
+#[test]
+fn an_artifact_without_the_unresolved_count_still_loads() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("authorship.json");
+    std::fs::write(&path, r#"{"schema_version": "v0", "distinct_authors": 3}"#).expect("write");
+
+    let summary = load_authorship(&path).expect("parses");
+    assert_eq!(summary.distinct_authors, 3);
+    assert_eq!(summary.unresolved_authors, 0);
 }
 
 #[test]

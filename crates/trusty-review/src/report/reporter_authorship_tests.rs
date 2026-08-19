@@ -60,7 +60,8 @@ fn summary() -> AuthorshipSummary {
                 commits: 10,
             },
         ],
-        caveats: vec!["no mailmap".to_string()],
+        unresolved_authors: 0,
+        caveats: vec!["no vendored-path exclusion".to_string()],
     }
 }
 
@@ -77,7 +78,7 @@ fn populates_rows_from_loaded_artifacts() {
     assert!(rendered.contains("|1 "), "rendered: {rendered}");
     assert!(rendered.contains("80%"));
     assert!(rendered.contains("src"));
-    assert!(rendered.contains("no mailmap"));
+    assert!(rendered.contains("no vendored-path exclusion"));
 }
 
 /// A repository with no loaded artifact contributes no row — fail-open, the

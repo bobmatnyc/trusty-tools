@@ -2,8 +2,36 @@
 
 use rusqlite::params;
 
-use super::{build_authorship_summary, AUTHORSHIP_SCHEMA_VERSION};
+use super::{
+    build_authorship_summary, recorded_repository_names, repository_has_commits,
+    AUTHORSHIP_SCHEMA_VERSION,
+};
 use crate::core::db::Database;
+
+/// Insert one `authors` row — the identity resolver's output — and hand back
+/// its id, so a test can link commits to it exactly as `upsert_observed_authors`
+/// does at collection time.
+fn insert_author(db: &Database, canonical_name: &str, canonical_email: &str) -> i64 {
+    db.connection()
+        .execute(
+            "INSERT INTO authors (canonical_name, canonical_email) VALUES (?1, ?2)",
+            params![canonical_name, canonical_email],
+        )
+        .expect("insert author");
+    db.connection().last_insert_rowid()
+}
+
+/// Link an already-inserted commit to a resolved author.
+fn link_commit(db: &Database, sha: &str, author_id: i64) {
+    let updated = db
+        .connection()
+        .execute(
+            "UPDATE commits SET author_id = ?1 WHERE sha = ?2",
+            params![author_id, sha],
+        )
+        .expect("link commit");
+    assert_eq!(updated, 1, "the commit to link must exist: {sha}");
+}
 
 /// Insert one commit (with its file touches) into the seeded database.
 #[allow(clippy::too_many_arguments)]
@@ -189,4 +217,139 @@ fn trajectory_caps_at_twelve_months() {
     // Oldest-first, and only the most recent 12 survive — 2024-11/12 dropped.
     assert_eq!(summary.monthly_trajectory.first().unwrap().month, "2025-01");
     assert_eq!(summary.monthly_trajectory.last().unwrap().month, "2025-12");
+}
+
+/// (#5453) One person committing under two emails is ONE author, because the
+/// aggregation joins `commits.author_id → authors.canonical_email` rather than
+/// grouping raw commit emails. Against the raw-email grouping this replaced,
+/// `distinct_authors` reads 2 and `bus_factor` reads 1 out of a two-author
+/// field — the exact understatement of concentration issue #5453 named.
+#[test]
+fn aliases_collapse_through_the_identity_resolver() {
+    let db = Database::open_in_memory().expect("open");
+    let alice = insert_author(&db, "Alice", "alice@x.com");
+    for (sha, email, path) in [
+        ("a1", "alice@x.com", "src/lib.rs"),
+        ("a2", "alice@corp.example", "docs/readme.md"),
+    ] {
+        insert_commit(
+            &db,
+            sha,
+            "Alice",
+            email,
+            "2026-01-15T00:00:00Z",
+            "repo",
+            false,
+            &[path],
+        );
+        link_commit(&db, sha, alice);
+    }
+
+    let summary = build_authorship_summary(db.connection(), "repo").expect("summary");
+    assert_eq!(
+        summary.distinct_authors, 1,
+        "both aliases resolve to one canonical author"
+    );
+    assert!(
+        (summary.top_author_share_pct - 100.0).abs() < f64::EPSILON,
+        "one author holds every touch: {}",
+        summary.top_author_share_pct
+    );
+    assert_eq!(
+        summary.unresolved_authors, 0,
+        "every commit was linked, so nothing is unresolved"
+    );
+    assert!(
+        !summary.caveats.iter().any(|c| c.contains("never linked")),
+        "a fully-resolved run must not carry the unresolved caveat: {:?}",
+        summary.caveats
+    );
+}
+
+/// (#5453) A commit the resolver never linked keeps its raw identity AND is
+/// counted into `unresolved_authors`, which then earns its own caveat. This is
+/// the honesty gate: the figures are still published, but a reader is told how
+/// many identities they under-merge.
+#[test]
+fn unresolved_authors_are_counted_and_caveated() {
+    let db = Database::open_in_memory().expect("open");
+    let alice = insert_author(&db, "Alice", "alice@x.com");
+    insert_commit(
+        &db,
+        "a1",
+        "Alice",
+        "alice@x.com",
+        "2026-01-15T00:00:00Z",
+        "repo",
+        false,
+        &["src/lib.rs"],
+    );
+    link_commit(&db, "a1", alice);
+    // Never resolved: no `authors` row, so `author_id` stays NULL.
+    insert_commit(
+        &db,
+        "c1",
+        "Carol",
+        "carol@x.com",
+        "2026-01-16T00:00:00Z",
+        "repo",
+        false,
+        &["src/other.rs"],
+    );
+
+    let summary = build_authorship_summary(db.connection(), "repo").expect("summary");
+    assert_eq!(summary.distinct_authors, 2);
+    assert_eq!(
+        summary.unresolved_authors, 1,
+        "exactly Carol's identity is unresolved"
+    );
+    let caveat = summary
+        .caveats
+        .iter()
+        .find(|c| c.contains("never linked"))
+        .expect("an unresolved run must name the count in a caveat");
+    assert!(
+        caveat.contains('1'),
+        "the caveat must carry the figure: {caveat}"
+    );
+}
+
+/// (#5453 review) The probe that separates "this name matched nothing" from
+/// "this repository is empty" — the distinction `build_authorship_summary`
+/// cannot make, since both aggregate zero rows into a confident zero.
+#[test]
+fn a_name_that_matches_nothing_is_detectable() {
+    let db = Database::open_in_memory().expect("open");
+    assert!(
+        !repository_has_commits(db.connection(), "acme-web").expect("probe"),
+        "an empty database matches no name"
+    );
+    assert!(
+        recorded_repository_names(db.connection())
+            .expect("names")
+            .is_empty(),
+        "an empty database records no names"
+    );
+
+    insert_commit(
+        &db,
+        "a1",
+        "Alice",
+        "alice@x.com",
+        "2026-01-15T00:00:00Z",
+        "acme_web",
+        false,
+        &["src/lib.rs"],
+    );
+
+    assert!(repository_has_commits(db.connection(), "acme_web").expect("probe"));
+    assert!(
+        !repository_has_commits(db.connection(), "acme-web").expect("probe"),
+        "a name one character off must not match — that is the drift this catches"
+    );
+    assert_eq!(
+        recorded_repository_names(db.connection()).expect("names"),
+        vec!["acme_web".to_string()],
+        "the recorded name is what the gap line points the operator at"
+    );
 }

@@ -12,4 +12,6 @@ Added
   repository only — never a silently absent section, never an aborted build.
   The Key Facts block's author-count and trajectory rows, left as named gaps
   by the earlier Code/Security/Performance change, now populate once
-  authorship data exists.
+  authorship data exists. The artifact's `unresolved_authors` count — commit
+  identities tga could not resolve to a canonical author — travels with the
+  figures, so a reader can tell how far the concentration numbers under-merge.

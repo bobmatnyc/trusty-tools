@@ -361,3 +361,7 @@ fn resolve(manifest_dir: &Path, path: &Path) -> std::path::PathBuf {
         manifest_dir.join(path)
     }
 }
+
+#[cfg(test)]
+#[path = "model_tests.rs"]
+mod model_tests;

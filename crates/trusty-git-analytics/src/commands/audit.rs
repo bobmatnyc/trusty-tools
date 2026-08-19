@@ -33,8 +33,10 @@ use tga::report::dd_manifest::{
 };
 // #5405: the board-correlation figures the DD report renders.
 use tga::report::build_ticketing_summary;
-// #5453/#6004: per-repository ownership/bus-factor/trajectory figures.
-use tga::report::build_authorship_summary;
+// #5453/#6004: per-repository ownership/bus-factor/trajectory figures, plus the
+// name-match probe that keeps an unmatched repository name from rendering as a
+// derived zero.
+use tga::report::{build_authorship_summary, recorded_repository_names, repository_has_commits};
 use trusty_common::credentials::scrub_secrets;
 
 /// Arguments for `tga audit`.
@@ -269,7 +271,13 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     {
         let repository = repo_name(repo_cfg.name.as_deref(), &repo_cfg.path);
         match authorship_artifact(db, &output, &repository, i) {
-            Ok(path) => entry.authorship = Some(path),
+            Ok(AuthorshipArtifact::Written(path)) => entry.authorship = Some(path),
+            Ok(AuthorshipArtifact::NameMatchedNothing(recorded)) => {
+                authorship_gaps.push(scrub_secrets(
+                    &authorship_no_match_gap(&entry.name, &repository, &recorded),
+                    &configured_secrets(&config),
+                ));
+            }
             Err(e) => authorship_gaps.push(scrub_secrets(
                 &format!(
                     "Authorship ({}): could not write the authorship artifact ({e:#}). The \
@@ -384,8 +392,15 @@ fn ticketing_artifact(
 /// What: `index` names the file uniquely (`authorship-{index}.json`) since two
 /// repositories can share a display name. The path returned is
 /// manifest-relative, matching every other artifact this command writes.
+///
+/// A name matching NO commit row returns [`AuthorshipArtifact::NameMatchedNothing`]
+/// rather than an artifact (#5453 review): the aggregation cannot tell that case
+/// from a genuinely empty repository, and both would render as a confident
+/// "0 authors, bus factor 0" — so the probe runs first and the caller states a
+/// gap instead.
 /// Test: `tests::{authorship_artifact_is_written_per_repository,
-/// a_failed_authorship_write_is_a_named_gap}`.
+/// a_failed_authorship_write_is_a_named_gap,
+/// a_repository_name_matching_no_commits_is_a_named_gap_not_zero_authors}`.
 ///
 /// # Errors
 ///
@@ -396,11 +411,56 @@ fn authorship_artifact(
     output: &Path,
     repository: &str,
     index: usize,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<AuthorshipArtifact> {
+    if !repository_has_commits(db.connection(), repository)? {
+        return Ok(AuthorshipArtifact::NameMatchedNothing(
+            recorded_repository_names(db.connection())?,
+        ));
+    }
     let summary = build_authorship_summary(db.connection(), repository)?;
     let filename = format!("authorship-{index}.json");
     std::fs::write(output.join(&filename), summary.to_json()?)?;
-    Ok(PathBuf::from(filename))
+    Ok(AuthorshipArtifact::Written(PathBuf::from(filename)))
+}
+
+/// The gap line for a repository whose name matched no collected commit.
+///
+/// Why: the two causes read identically from the aggregation but need different
+/// action from the operator — an empty database means collection produced
+/// nothing (its own stage gap already says so), while a populated one under
+/// other names means the config name and `commits.repository` drifted, and the
+/// remedy is naming the recorded value. So the line states which case it is.
+/// Test: `tests::a_repository_name_matching_no_commits_is_a_named_gap_not_zero_authors`.
+fn authorship_no_match_gap(display_name: &str, repository: &str, recorded: &[String]) -> String {
+    if recorded.is_empty() {
+        format!(
+            "Authorship ({display_name}): the sweep recorded no commits at all, so there is no \
+             authorship/key-person signal for this application."
+        )
+    } else {
+        format!(
+            "Authorship ({display_name}): no collected commit is recorded under the repository \
+             name `{repository}` (the database holds commits under: {}). The report states no \
+             authorship/key-person signal for this application rather than deriving zeroes from \
+             an unmatched name.",
+            recorded.join(", ")
+        )
+    }
+}
+
+/// What [`authorship_artifact`] produced for one repository.
+///
+/// Why: the two non-error outcomes are not interchangeable. Figures written
+/// from real rows go on the manifest; a name that matched nothing must never
+/// become an artifact of zeroes, because a reader cannot tell derived-zero from
+/// no-data once it is rendered.
+#[derive(Debug)]
+enum AuthorshipArtifact {
+    /// Figures were written; the manifest-relative path to them.
+    Written(PathBuf),
+    /// No `commits.repository` value equals this repository's name. Carries
+    /// every name that IS recorded, so the gap line can point at the drift.
+    NameMatchedNothing(Vec<String>),
 }
 
 /// Invoke `trusty-review report` and report what it produced.
@@ -733,6 +793,125 @@ mod tests {
         assert!(
             written.contains("\"commits\"") && written.contains("\"work_items\""),
             "the artifact must carry the board counts: {written}"
+        );
+    }
+
+    /// Seed one non-merge commit under `repository`, with one file touch.
+    fn seed_commit(db: &Database, sha: &str, repository: &str) {
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, is_merge) \
+                 VALUES (?1, 'Alice', 'alice@x.com', '2026-01-15T00:00:00Z', 'msg', ?2, 0)",
+                rusqlite::params![sha, repository],
+            )
+            .expect("insert commit");
+        let commit_id = db.connection().last_insert_rowid();
+        db.connection()
+            .execute(
+                "INSERT INTO files (commit_id, path, change_type) VALUES (?1, 'src/lib.rs', 'modified')",
+                rusqlite::params![commit_id],
+            )
+            .expect("insert file");
+    }
+
+    /// #5453/#6004: the write-success half of the fail-open contract
+    /// `authorship_artifact`'s doc comment states — figures for a repository
+    /// that has commits become a file named by INDEX (two repositories may
+    /// share a display name), and the returned path is MANIFEST-RELATIVE
+    /// because trusty-review resolves it against the manifest's directory.
+    #[test]
+    fn authorship_artifact_is_written_per_repository() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("tga.db")).expect("open db");
+        seed_commit(&db, "a1", "acme-web");
+        seed_commit(&db, "b1", "acme-api");
+
+        let first = super::authorship_artifact(&db, dir.path(), "acme-web", 0).expect("write");
+        let second = super::authorship_artifact(&db, dir.path(), "acme-api", 1).expect("write");
+
+        let (super::AuthorshipArtifact::Written(first), super::AuthorshipArtifact::Written(second)) =
+            (first, second)
+        else {
+            panic!("both repositories have commits, so both must produce figures");
+        };
+        assert_eq!(first, std::path::PathBuf::from("authorship-0.json"));
+        assert_eq!(second, std::path::PathBuf::from("authorship-1.json"));
+
+        let written = std::fs::read_to_string(dir.path().join("authorship-0.json"))
+            .expect("artifact written");
+        assert!(
+            written.contains("\"repository\": \"acme-web\"") && written.contains("\"bus_factor\""),
+            "the artifact must carry THIS repository's figures: {written}"
+        );
+        assert!(
+            !written.contains("acme-api"),
+            "the per-repository filter must not leak the sibling's commits: {written}"
+        );
+    }
+
+    /// #5453/#6004: the error half — a write that cannot land is surfaced as an
+    /// `Err` for the caller to turn into a named gap, never swallowed into a
+    /// silent success that leaves the manifest pointing at a file which does not
+    /// exist. Constructed by aiming the write at a path that is not a directory.
+    #[test]
+    fn a_failed_authorship_write_is_a_named_gap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("tga.db")).expect("open db");
+        seed_commit(&db, "a1", "acme-web");
+
+        // A regular file where the output directory should be: every write
+        // beneath it fails at the OS layer.
+        let blocked = dir.path().join("not-a-directory");
+        std::fs::write(&blocked, "").expect("create blocking file");
+
+        let err = super::authorship_artifact(&db, &blocked, "acme-web", 0)
+            .expect_err("an unwritable output must surface, not be swallowed");
+        let rendered = format!("{err:#}");
+        assert!(
+            !rendered.is_empty(),
+            "the error must carry a reason for the gap line to quote"
+        );
+        assert!(
+            !blocked.join("authorship-0.json").exists(),
+            "nothing may be left behind by a failed write"
+        );
+    }
+
+    /// #5453 review: a repository name that matches no `commits.repository`
+    /// value is a NAMED GAP, not an artifact of zeroes. Without the probe the
+    /// aggregation returns "0 authors, bus factor 0" for a name that never
+    /// joined a single row — indistinguishable, to a reader, from a measured
+    /// finding that the codebase has no authors.
+    #[test]
+    fn a_repository_name_matching_no_commits_is_a_named_gap_not_zero_authors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("tga.db")).expect("open db");
+        // Collection recorded `acme_web`; the manifest asks for `acme-web`.
+        seed_commit(&db, "a1", "acme_web");
+
+        let outcome = super::authorship_artifact(&db, dir.path(), "acme-web", 0).expect("no error");
+        let super::AuthorshipArtifact::NameMatchedNothing(recorded) = outcome else {
+            panic!("an unmatched name must never produce an artifact of zeroes");
+        };
+        assert_eq!(recorded, vec!["acme_web".to_string()]);
+        assert!(
+            !dir.path().join("authorship-0.json").exists(),
+            "no artifact may be written for a name that matched nothing"
+        );
+
+        let gap = super::authorship_no_match_gap("Acme Web", "acme-web", &recorded);
+        assert!(
+            gap.contains("acme-web") && gap.contains("acme_web"),
+            "the gap must name BOTH the name asked for and the name recorded: {gap}"
+        );
+
+        // The empty-database case reads differently — collection produced
+        // nothing at all, which is not a naming drift.
+        let empty = super::authorship_no_match_gap("Acme Web", "acme-web", &[]);
+        assert!(
+            empty.contains("no commits at all"),
+            "an empty sweep must not be reported as a name mismatch: {empty}"
         );
     }
 }

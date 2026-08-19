@@ -294,17 +294,31 @@ fn anchor(base: &Path, path: &Path) -> PathBuf {
 
 /// The display name for a repository: its configured name, else the directory
 /// basename (`config/mod.rs`'s own documented fallback).
-/// `pub` (#5453/#6004): `commands::audit` needs the same name-fallback logic
-/// to match `commits.repository` when writing the per-repo authorship
-/// artifact — reusing this avoids a second, independently-driftable
-/// derivation of the same fallback.
+///
+/// Why: this is the ONE derivation of a repository's name in tga, and it has to
+/// be, because two independent copies is a silent-zero join. `commits.
+/// repository` is written by [`crate::collect::git::GitCollector`] at collection
+/// time and read back by an equality filter at report time (#5453's per-repo
+/// authorship artifact) — a name the two sides spell differently matches no rows
+/// and renders a confident "0 authors, bus factor 0" instead of an error. The
+/// collector calls this too since #5453's review; before that it had its own
+/// copy, which disagreed on a configured name that was empty or whitespace.
+/// What: the configured name when it is non-empty after trimming, else the
+/// basename of the tilde-expanded path, else the path itself. Expansion happens
+/// HERE so a caller holding the raw config path and a caller holding an
+/// already-expanded one still agree.
+/// Test: `super::dd_manifest_tests::{names_fall_back_to_the_directory_basename,
+/// a_blank_configured_name_falls_back_the_same_way_for_every_caller}`.
 pub fn repo_name(configured: Option<&str>, path: &Path) -> String {
     match configured.map(str::trim).filter(|n| !n.is_empty()) {
         Some(name) => name.to_string(),
-        None => path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string()),
+        None => {
+            let expanded = crate::core::config::expand_path(path);
+            expanded
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| expanded.display().to_string())
+        }
     }
 }
 

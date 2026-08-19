@@ -490,6 +490,70 @@ fn system_prompt_asks_for_unregistered_target_gaps() {
     );
 }
 
+/// Why (#5453/#6004): the `authorship_summary` slot asks the model for a
+/// key-person narrative, and the ONLY route real ownership figures take into
+/// the prompt is the per-repository digest block. Every other fixture leaves
+/// `authorship: None`, so nothing proved the wiring — a regression that dropped
+/// it would leave the model writing that section from no data at all, which is
+/// exactly the ungrounded prose the guardrail exists to reject.
+/// What: attaches a loaded artifact to the fixture repository and asserts the
+/// digest carries the ownership figures and the trajectory line; then asserts a
+/// repository WITHOUT an artifact contributes neither, so the absence is a real
+/// absence rather than a zeroed row.
+/// Test: this test itself.
+#[test]
+fn authorship_figures_reach_the_synthesis_prompt() {
+    use crate::report::authorship::{AuthorshipSummary, MonthlyActivity};
+
+    let mut model = fixture_model(vec![]);
+    model.repositories[0].authorship = Some(AuthorshipSummary {
+        schema_version: "v0".to_string(),
+        repository: "acme-core".to_string(),
+        distinct_authors: 4,
+        bus_factor: 1,
+        top_author_share_pct: 71.0,
+        single_author_subsystems: vec!["migrations".to_string()],
+        monthly_trajectory: vec![
+            MonthlyActivity {
+                month: "2026-01".to_string(),
+                active_authors: 2,
+                commits: 4,
+            },
+            MonthlyActivity {
+                month: "2026-02".to_string(),
+                active_authors: 3,
+                commits: 20,
+            },
+        ],
+        unresolved_authors: 0,
+        caveats: vec![],
+    });
+
+    let req = build_synthesis_prompt(&model, "stub/model", false);
+    let digest = &req.messages[0].content;
+    assert!(
+        digest.contains("Authorship:"),
+        "the ownership figures must reach the prompt: {digest}"
+    );
+    for needle in ["4 distinct author(s)", "bus factor 1", "migrations"] {
+        assert!(
+            digest.contains(needle),
+            "the digest must carry {needle:?}: {digest}"
+        );
+    }
+    assert!(
+        digest.contains("Authorship trajectory: increasing"),
+        "the trailing-window trend must reach the prompt too: {digest}"
+    );
+
+    let without = build_synthesis_prompt(&fixture_model(vec![]), "stub/model", false);
+    assert!(
+        !without.messages[0].content.contains("Authorship:"),
+        "a repository with no artifact must contribute no authorship line at all: {}",
+        without.messages[0].content
+    );
+}
+
 // ── Synthesize: happy path + fail-closed paths ──────────────────────────────
 
 fn good_response() -> String {
@@ -826,6 +890,7 @@ fn security_summary_guardrail_rejects_unverified_figure() {
         executive_summary: String::new(),
         code_quality_summary: String::new(),
         security_summary: "9999 vulnerable dependencies were flagged.".to_string(),
+        authorship_summary: String::new(),
         top_risks: vec![super::RiskRow {
             description: "moderate".to_string(),
             severity: "AMBER".to_string(),

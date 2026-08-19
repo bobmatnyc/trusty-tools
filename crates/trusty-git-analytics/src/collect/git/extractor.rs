@@ -96,15 +96,11 @@ impl GitCollector {
         // Verify it's actually a repository up-front.
         let _ = Repository::open(&path)?;
 
-        let name = config
-            .name
-            .clone()
-            .or_else(|| {
-                path.file_name()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| path.display().to_string());
+        // #5453: the name written into `commits.repository` and the name the DD
+        // manifest reads it back by must come from ONE function — a second copy
+        // here disagreed whenever a configured name was blank, and a mismatched
+        // name joins zero rows rather than erroring.
+        let name = crate::report::repo_name(config.name.as_deref(), &path);
 
         let since = parse_iso_date(config.since_date.as_deref())?;
         let until = parse_iso_date(config.until_date.as_deref())?;

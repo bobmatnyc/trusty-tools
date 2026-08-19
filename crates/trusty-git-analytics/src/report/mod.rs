@@ -26,9 +26,12 @@ pub mod ticketed_stats;
 // #5405: the board-correlation figures the DD report renders.
 pub mod ticketing;
 
-pub use authorship::{build_authorship_summary, AuthorshipSummary, AUTHORSHIP_SCHEMA_VERSION};
+pub use authorship::{
+    build_authorship_summary, recorded_repository_names, repository_has_commits, AuthorshipSummary,
+    AUTHORSHIP_SCHEMA_VERSION,
+};
 pub use dd_manifest::{
-    build_dd_manifest, DdManifest, DdManifestError, DdManifestOptions, DdReportSection,
+    build_dd_manifest, repo_name, DdManifest, DdManifestError, DdManifestOptions, DdReportSection,
     DdRepositoryEntry,
 };
 pub use errors::{ReportError, Result};

@@ -53,6 +53,16 @@ pub struct AuthorshipSummary {
     /// One entry per active month in the trailing 12 months, oldest first.
     #[serde(default)]
     pub monthly_trajectory: Vec<MonthlyActivity>,
+    /// Commit identities tga's derivation could not link to a resolved author
+    /// (issue #5453's honesty gate).
+    ///
+    /// Why: a nonzero count means the figures beside it UNDERSTATE
+    /// concentration — those identities were grouped by raw commit email, so
+    /// one person's aliases were counted as several authors. tga also states
+    /// this in [`Self::caveats`]; the number is carried separately so the
+    /// section can render it as a measured figure rather than only as prose.
+    #[serde(default)]
+    pub unresolved_authors: u64,
     /// Data-trap limitations the derivation did NOT correct for (issue
     /// #5453) — rendered verbatim in the section's caption.
     #[serde(default)]
