@@ -645,6 +645,8 @@ assert_eq "the gate's self-test"      "true"  "$(gate_inputs_of 'scripts/check_s
 assert_eq "the type differ"           "true"  "$(gate_inputs_of 'scripts/check_semver_types.sh')"
 assert_eq "the type differ's tests"   "true"  "$(gate_inputs_of 'scripts/check_semver_types_selftest.sh')"
 assert_eq "the rustdoc walk it imports" "true" "$(gate_inputs_of 'scripts/lib/rustdoc_walk.py')"
+assert_eq "the build-accel resolver"  "true"  "$(gate_inputs_of 'scripts/lib/build_accel.sh')"
+assert_eq "the build-accel self-test" "true"  "$(gate_inputs_of 'scripts/build_accel_selftest.sh')"
 assert_eq "crate selection"           "true"  "$(gate_inputs_of 'scripts/detect-version-bumps.sh')"
 assert_eq "this classifier"           "true"  "$(gate_inputs_of 'scripts/detect-semver-gate-inputs.sh')"
 assert_eq "the crate exclusions"      "true"  "$(gate_inputs_of 'scripts/semver-checks-crate-exclusions.tsv')"
@@ -850,12 +852,13 @@ assert_eq "no gate in semver-checks branches on the activity type" "0" \
 # here to catch.
 assert_eq "semver-checks gates its costly steps on there being work" "4" \
   "$(grep -cE "if: steps\.crate\.outputs\.have_work == 'true'$" .github/workflows/semver-checks.yml || true)"
-# #5501: the three CHEAP steps run on either trigger — a declared bump, or a
-# change to the gate's own machinery. Gating them on the bump alone skipped the
-# self-tests on every PR that changed the gate, which is every gate-fix PR (PR
-# #5496 is the observed case). The three: Install stable toolchain (both
-# self-tests need a `cargo` on PATH), SemVer gate selftest, Type-differ selftest.
-assert_eq "semver-checks runs its self-tests when the gate itself changed" "3" \
+# #5501: the CHEAP steps run on either trigger — a declared bump, or a change to
+# the gate's own machinery. Gating them on the bump alone skipped the self-tests
+# on every PR that changed the gate, which is every gate-fix PR (PR #5496 is the
+# observed case). The four: Install stable toolchain (two of the self-tests need
+# a `cargo` on PATH), SemVer gate selftest, Type-differ selftest, and the
+# build-acceleration selftest.
+assert_eq "semver-checks runs its self-tests when the gate itself changed" "4" \
   "$(grep -c "have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'" .github/workflows/semver-checks.yml || true)"
 assert_eq "semver-checks classifies its own machinery from the diff" "1" \
   "$(grep -c 'bash scripts/detect-semver-gate-inputs.sh' .github/workflows/semver-checks.yml || true)"

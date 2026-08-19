@@ -36,6 +36,10 @@
 #                                               subject of check_semver_selftest
 #     scripts/check_semver_types.sh             the subject of the type-differ
 #                                               self-test
+#     scripts/lib/build_accel.sh                the build-acceleration resolver
+#                                               check_semver.sh sources
+#     scripts/build_accel_selftest.sh           its self-test, run by the
+#                                               "Build-acceleration selftest" step
 #     scripts/lib/rustdoc_walk.py               the walk check_semver_types.sh
 #                                               imports (ADR-0047)
 #     scripts/semver-checks-*-exclusions.tsv    the crate and feature exclusion
@@ -82,6 +86,8 @@ is_gate_input() {
     scripts/detect-version-bumps.sh) return 0 ;;
     scripts/detect-semver-gate-inputs.sh) return 0 ;;
     scripts/lib/rustdoc_walk.py) return 0 ;;
+    scripts/lib/build_accel.sh) return 0 ;;
+    scripts/build_accel_selftest.sh) return 0 ;;
     scripts/semver-checks-crate-exclusions.tsv) return 0 ;;
     scripts/semver-checks-feature-exclusions.tsv) return 0 ;;
     scripts/test-data/semver-gate/*) return 0 ;;

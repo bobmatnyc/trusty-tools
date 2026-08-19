@@ -305,6 +305,28 @@ if [[ "${1:-}" == "semver-checks" ]]; then
   case " $* " in
     *" --version "*) echo "cargo-semver-checks 0.50.0"; exit 0 ;;
   esac
+
+  # Build-acceleration probe (cases 25-27). Records what actually reached THIS
+  # subprocess's environment, which is the only place the question "did the
+  # wrapper get applied?" has an answer — the gate builds the assignments as an
+  # `env` prefix, so nothing upstream of here can be inspected for it.
+  if [[ -n "${SEMVER_SELFTEST_ENV_OUT:-}" ]]; then
+    {
+      echo "RUSTC_WRAPPER=${RUSTC_WRAPPER:-}"
+      # PRESENCE, not value. `env -u CARGO_TARGET_DIR` and `CARGO_TARGET_DIR=`
+      # both yield an empty ${CARGO_TARGET_DIR:-}, and only the first is
+      # correct — cargo rejects an empty value outright. This stub replaces the
+      # real cargo, so it is the only place that difference is observable at
+      # all; recording `${VAR+x}` is what lets cases 25 and 28 tell them apart.
+      if [[ -n "${CARGO_TARGET_DIR+x}" ]]; then
+        echo "CARGO_TARGET_DIR_PRESENT=yes(${CARGO_TARGET_DIR})"
+      else
+        echo "CARGO_TARGET_DIR_PRESENT=no"
+      fi
+      echo "SKIP_UI_BUILD=${SKIP_UI_BUILD:-}"
+    } > "$SEMVER_SELFTEST_ENV_OUT"
+  fi
+
   fixture="${SEMVER_SELFTEST_FIXTURE:-}"
   rc="${SEMVER_SELFTEST_RC:-0}"
 
@@ -748,6 +770,161 @@ elif [[ "$out" == *"SKIP trusty-agents-common"* ]]; then
   fail_case "exclusion/premise-died: granted the skip anyway" "$out"
 else
   pass_case "an exclusion contradicted by a workspace dependency refuses the skip (exit 3)"
+fi
+
+# ===========================================================================
+# 25-27. Build acceleration reaches the subprocess, and cannot change a verdict.
+#
+# scripts/build_accel_selftest.sh already proves the RESOLVER answers correctly
+# in every environment. What it cannot prove is that those answers are wired to
+# anything: a resolver whose output the gate never applies passes every one of
+# its cases. These three ask the wiring question instead, against the real gate
+# and its real code path.
+#
+# The stub cargo writes its own environment to a file, so the assertion is on
+# what the `cargo semver-checks` process actually received — not on a log line
+# the gate printed about what it intended to send.
+# ===========================================================================
+ACCEL_SCCACHE_DIR="${STUB_DIR}/accel-bin"
+mkdir -p "$ACCEL_SCCACHE_DIR"
+printf '#!/bin/sh\nexec "$@"\n' > "${ACCEL_SCCACHE_DIR}/sccache"
+chmod +x "${ACCEL_SCCACHE_DIR}/sccache"
+
+ENV_OUT="${STUB_DIR}/accel-env.txt"
+
+# accel_gate <extra-env-assignments...> — one gate run with the acceleration
+# probe armed. The stub sccache goes on PATH AHEAD of the stub cargo's directory
+# so neither the presence nor the absence of a real sccache install can decide
+# the outcome on whoever's machine is running this.
+accel_gate() {
+  (cd "$REPO_ROOT" &&
+    env "$@" \
+      PATH="${ACCEL_SCCACHE_DIR}:${STUB_DIR}:${PATH}" \
+      SEMVER_GATE_TOOLCHAIN_BIN='' \
+      SEMVER_SELFTEST_REAL_CARGO="$REAL_CARGO" \
+      SEMVER_SELFTEST_ENV_OUT="$ENV_OUT" \
+      SEMVER_GATE_INDEX_BASE="http://127.0.0.1:${PORT}/v/${STUB_PREV}" \
+      bash "$GATE" --crate "$STUB_CRATE" 2>&1)
+}
+
+# --- 25. The wrapper reaches the subprocess, and CARGO_TARGET_DIR does not.
+#
+#         The second half is the regression test, not a stylistic assertion. A
+#         persistent CARGO_TARGET_DIR was built and then rejected on evidence:
+#         cargo-semver-checks honours it in its INNER `cargo doc` too, which
+#         moves the current crate's rustdoc JSON out of
+#         semver-checks/local-<pkg>-<ver>-<triple>-<hash>/target/doc/ and into a
+#         flat <target>/doc/<pkg>.json keyed by crate name alone. That blinds
+#         check_semver_types.sh, and because the whole point of a persistent
+#         directory is that worktrees share it, two parallel gate runs on the
+#         same crate would overwrite each other's document — a stale cache
+#         changing an answer. See scripts/lib/build_accel.sh for the full note.
+rm -f "$ENV_OUT"
+rc=0
+out="$(accel_gate \
+  "SEMVER_SELFTEST_FIXTURE=${FIXTURES}/clean.out" \
+  "SEMVER_SELFTEST_RC=0")" || rc=$?
+if [[ ! -f "$ENV_OUT" ]]; then
+  fail_case "accel/applied: the gate never reached cargo semver-checks, so this case proves nothing" "$out"
+elif [[ "$rc" -ne 0 ]]; then
+  fail_case "accel/applied: a clean run under the wrapper exited ${rc}" "$out"
+elif ! grep -qx "RUSTC_WRAPPER=${ACCEL_SCCACHE_DIR}/sccache" "$ENV_OUT"; then
+  fail_case "accel/applied: RUSTC_WRAPPER never reached the subprocess" "$(cat "$ENV_OUT")" "$out"
+elif ! grep -qx "CARGO_TARGET_DIR_PRESENT=no" "$ENV_OUT"; then
+  fail_case "accel/applied: CARGO_TARGET_DIR reached cargo-semver-checks — it relocates the current rustdoc JSON and blinds the type differ" "$(cat "$ENV_OUT")"
+elif ! grep -qx "SKIP_UI_BUILD=1" "$ENV_OUT"; then
+  # The env prefix REPLACED an existing `SKIP_UI_BUILD=1 cargo ...` assignment.
+  # Dropping it would trade a build-time saving for a UI build on every run.
+  fail_case "accel/applied: the env prefix lost the pre-existing SKIP_UI_BUILD=1" "$(cat "$ENV_OUT")" "$out"
+elif [[ "$out" != *"build-accel: sccache"* ]]; then
+  fail_case "accel/applied: the run did not print its mode line" "$out"
+else
+  pass_case "sccache reaches the cargo subprocess, and CARGO_TARGET_DIR does not"
+fi
+
+# --- 26. The opt-out reaches it too. A knob proven only in the resolver is a
+#         knob an operator cannot rely on mid-release.
+rm -f "$ENV_OUT"
+rc=0
+out="$(accel_gate \
+  "PREFLIGHT_NO_SCCACHE=1" \
+  "SEMVER_SELFTEST_FIXTURE=${FIXTURES}/clean.out" \
+  "SEMVER_SELFTEST_RC=0")" || rc=$?
+if [[ ! -f "$ENV_OUT" ]]; then
+  fail_case "accel/opt-out: the gate never reached cargo semver-checks" "$out"
+elif ! grep -qx "RUSTC_WRAPPER=" "$ENV_OUT"; then
+  fail_case "accel/opt-out: PREFLIGHT_NO_SCCACHE=1 did not stop the wrapper reaching cargo" "$(cat "$ENV_OUT")"
+elif [[ "$rc" -ne 0 ]]; then
+  fail_case "accel/opt-out: the opted-out run exited ${rc} where the accelerated one exited 0" "$out"
+elif [[ "$out" != *"disabled by PREFLIGHT_NO_SCCACHE"* ]]; then
+  fail_case "accel/opt-out: the mode line did not report the opt-out" "$out"
+else
+  pass_case "PREFLIGHT_NO_SCCACHE=1 reaches the subprocess and is reported"
+fi
+
+# --- 27. A FAILING BUILD UNDER THE WRAPPER STILL FAILS THE GATE.
+#         This is the case the whole change is answerable for. A cache that can
+#         turn a broken build into a skip, or into a pass, would be worse than
+#         the rebuild it replaced — so the rustdoc-failure fixture is replayed
+#         with the wrapper on, and the gate must reach exactly the exit 3 it
+#         reaches without it.
+rm -f "$ENV_OUT"
+rc=0
+out="$(accel_gate \
+  "SEMVER_SELFTEST_FIXTURE=${FIXTURES}/build-error.out" \
+  "SEMVER_SELFTEST_RC=101")" || rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  fail_case "accel/build-failure: the gate PASSED a build failure that ran under the wrapper" "$out"
+elif [[ "$rc" -ne 3 ]]; then
+  fail_case "accel/build-failure: expected exit 3 (no verdict), got ${rc}" "$out"
+elif [[ "$out" != *"NO SEMVER VERDICT WAS COMPUTED"* ]]; then
+  fail_case "accel/build-failure: exited 3 without saying no verdict was computed" "$out"
+elif [[ "$out" == *"requires a matching version bump"* ]]; then
+  fail_case "accel/build-failure: rendered a build failure as a SemVer verdict" "$out"
+elif ! grep -qx "RUSTC_WRAPPER=${ACCEL_SCCACHE_DIR}/sccache" "$ENV_OUT" 2> /dev/null; then
+  fail_case "accel/build-failure: the run was not wrapped, so it did not test the wrapper" "$(cat "$ENV_OUT" 2> /dev/null)"
+else
+  pass_case "a build failure under the wrapper still exits 3 (no verdict)"
+fi
+
+# --- 28. AN AMBIENT CARGO_TARGET_DIR DOES NOT REACH THE SUBPROCESS.
+#
+#         Case 25 proves this gate does not ADD one. That is a weaker claim than
+#         it looks, because the damage does not care who set the variable: an
+#         inherited value relocates the current crate's rustdoc JSON to the same
+#         flat, name-keyed path and blinds check_semver_types.sh exactly as a
+#         locally-added one would.
+#
+#         And it is inheritable here in practice, not in theory. DOC-66 §6.2/§6.4
+#         lists a shared CARGO_TARGET_DIR as a sanctioned opt-in disk-saving
+#         strategy for this repo's worktrees, and vmtest-harness/lib/provision.sh
+#         exports one specifically so it survives into cargo's child processes.
+#         A developer who adopts either would silently lose CHECK 5b.
+#
+#         semver_checks_run uses `env -u`, not `CARGO_TARGET_DIR=`: cargo treats
+#         an empty value as a hard error ("the target directory is set to an
+#         empty string in the `CARGO_TARGET_DIR` environment variable", exit
+#         101), so setting it empty would convert an ambient variable into a
+#         failed gate rather than a clean one.
+rm -f "$ENV_OUT"
+rc=0
+out="$(accel_gate \
+  "CARGO_TARGET_DIR=${STUB_DIR}/ambient-target-dir" \
+  "SEMVER_SELFTEST_FIXTURE=${FIXTURES}/clean.out" \
+  "SEMVER_SELFTEST_RC=0")" || rc=$?
+if [[ ! -f "$ENV_OUT" ]]; then
+  fail_case "accel/ambient-target-dir: the gate never reached cargo semver-checks, so this case proves nothing" "$out"
+elif grep -q "CARGO_TARGET_DIR_PRESENT=yes" "$ENV_OUT"; then
+  # Catches BOTH wrong spellings, which is why the stub records presence rather
+  # than value. No neutralisation at all leaves the ambient path visible;
+  # `CARGO_TARGET_DIR=` leaves the variable present-but-empty, which cargo
+  # rejects outright — and the stub replaces cargo, so an empty value would
+  # otherwise sail through this file and fail only at a real release.
+  fail_case "accel/ambient-target-dir: CARGO_TARGET_DIR still reached cargo-semver-checks — it must be UNSET (env -u), not set to empty" "$(cat "$ENV_OUT")"
+elif [[ "$rc" -ne 0 ]]; then
+  fail_case "accel/ambient-target-dir: neutralising the ambient value broke the run (exit ${rc})" "$out"
+else
+  pass_case "an ambient CARGO_TARGET_DIR is unset for the subprocess without failing the run"
 fi
 
 rm -rf "$STUB_DIR"
