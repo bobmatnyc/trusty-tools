@@ -1,6 +1,10 @@
 //! Unit tests for the code-review / authorship output split (#6046).
 
 use super::*;
+use crate::report::Reporter;
+use crate::report::manifest::parse_manifest;
+use crate::report::model::ReportModel;
+use crate::report::template::TemplateLoader;
 
 /// A three-section document with the authorship section in the middle.
 fn document() -> String {
@@ -74,7 +78,7 @@ fn a_trailing_authorship_section_splits_to_the_end() {
 #[test]
 fn authorship_document_carries_title_and_legend() {
     let (_, section) = split_authorship(&document());
-    let doc = authorship_document("Acme DD", "2026-08-19", &section.expect("section"));
+    let doc = authorship_document("Acme DD", "2026-08-19", &section.expect("section"), &[]);
 
     assert!(
         doc.starts_with("# Authorship & Key-Person Risk: Acme DD\n"),
@@ -91,7 +95,7 @@ fn authorship_document_carries_title_and_legend() {
 #[test]
 fn authorship_document_keeps_the_section_body() {
     let (_, section) = split_authorship(&document());
-    let doc = authorship_document("Acme DD", "2026-08-19", &section.expect("section"));
+    let doc = authorship_document("Acme DD", "2026-08-19", &section.expect("section"), &[]);
 
     assert!(doc.contains("Bus factor 2."), "{doc}");
     assert!(doc.contains("| acme | 7 |"), "{doc}");
@@ -100,4 +104,144 @@ fn authorship_document_keeps_the_section_body() {
         "the heading is promoted to the title, not repeated:\n{doc}"
     );
     assert!(doc.ends_with('\n'), "must end with a newline");
+}
+
+/// Why: `polish` collapses a data-less section to `_No data available — see Gaps
+/// & Caveats._`, and since the split that referenced section renders in the
+/// code-review document. A reader holding only the authorship document must
+/// still learn why it is empty.
+/// What: an authorship-load gap reaches the document as a bullet above the body.
+#[test]
+fn authorship_document_states_its_own_data_gaps() {
+    let (_, section) = split_authorship(&document());
+    let gaps = vec![
+        "Authorship (Acme Web): could not load the authorship artifact (bad json). The report \
+         states no authorship/key-person signal for this application."
+            .to_string(),
+        "Scan (Acme Web): the working tree was not readable.".to_string(),
+    ];
+    let doc = authorship_document("Acme DD", "2026-08-19", &section.expect("section"), &gaps);
+
+    assert!(doc.contains("**Data gaps in this assessment:**"), "{doc}");
+    assert!(
+        doc.contains("could not load the authorship artifact"),
+        "{doc}"
+    );
+    assert!(
+        !doc.contains("the working tree was not readable"),
+        "a non-authorship gap must not be misattributed to this document:\n{doc}"
+    );
+    assert!(
+        doc.find("Data gaps").expect("gap block") < doc.find("Bus factor 2.").expect("body"),
+        "the gaps must precede the body they explain:\n{doc}"
+    );
+}
+
+/// Why: the gap block is failure-only — a successful run must render exactly as
+/// it did before this addition.
+/// What: a gap list carrying no authorship line produces no block at all.
+#[test]
+fn authorship_document_omits_the_gap_block_when_the_leg_succeeded() {
+    let (_, section) = split_authorship(&document());
+    let section = section.expect("section");
+    let gaps = vec!["Scan (Acme Web): the working tree was not readable.".to_string()];
+
+    let with_unrelated = authorship_document("Acme DD", "2026-08-19", &section, &gaps);
+    let with_none = authorship_document("Acme DD", "2026-08-19", &section, &[]);
+
+    assert_eq!(with_unrelated, with_none);
+    assert!(!with_none.contains("Data gaps"), "{with_none}");
+}
+
+/// A one-repository manifest declaring `authorship = <name>`, built through the
+/// real loader so the fail-open arm in `model.rs` is the thing under test.
+fn model_declaring_authorship(dir: &std::path::Path, declared: &str) -> ReportModel {
+    let toml = format!(
+        r#"
+        [report]
+        title = "Acme Due Diligence"
+        analyst = "bobmatnyc"
+
+        [[repositories]]
+        name = "Acme Web"
+        path = "/nonexistent/acme-web"
+        authorship = "{declared}"
+    "#
+    );
+    let manifest_path = dir.join("manifest.toml");
+    let manifest = parse_manifest(&toml, &manifest_path).expect("manifest parse");
+    ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("a declared authorship path must never fail the build")
+}
+
+/// Why: the owner requirement behind #6046 — "I don't want the code review to be
+/// held up by authorship." A broken authorship artifact is the cheapest real
+/// failure to inject, and it must cost the code-review document nothing.
+/// What: writes a malformed artifact, builds the model through
+/// `ReportModel::build`, renders both documents, and asserts every code-review
+/// section still arrives, with the failure named in both documents.
+#[test]
+fn an_authorship_load_failure_leaves_the_code_review_document_complete() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("authorship-0.json"), "{not json").expect("write artifact");
+    let model = model_declaring_authorship(dir.path(), "authorship-0.json");
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+
+    let documents = Reporter::new(dir.path()).render_documents(&model, &template);
+
+    let code = &documents.code_review;
+    for heading in [
+        "## 1. Report Metadata",
+        "## 2. Executive Summary",
+        "## 3. Scoring Model Normalization",
+        "## 4. Per-Application Scorecard",
+        "## 5. Findings by Severity",
+        "## 6. Risk Registers",
+        "## 7. Graph-Ready Data Appendix",
+        "## 9. Gaps & Caveats",
+    ] {
+        assert!(code.contains(heading), "missing {heading}:\n{code}");
+    }
+    assert!(
+        !code.contains("## Authorship & Key-Person Risk"),
+        "the section still belongs to the other document:\n{code}"
+    );
+    assert!(
+        code.contains("could not load the authorship artifact"),
+        "the code-review report states the gap it hit:\n{code}"
+    );
+
+    let authorship = documents
+        .authorship
+        .expect("a failed leg still produces the document");
+    assert!(
+        authorship.contains("could not load the authorship artifact"),
+        "the failure must be legible without the companion report:\n{authorship}"
+    );
+}
+
+/// Why: the same guarantee for the OTHER authorship-leg failure shape — a
+/// declared path that is not there at all.
+/// What: the code-review document renders its executive summary and gap line,
+/// and the render does not fail.
+#[test]
+fn a_missing_authorship_artifact_leaves_the_code_review_document_complete() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let model = model_declaring_authorship(dir.path(), "not-written.json");
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+
+    let documents = Reporter::new(dir.path()).render_documents(&model, &template);
+
+    assert!(documents.code_review.contains("## 2. Executive Summary"));
+    assert!(
+        documents
+            .code_review
+            .contains("could not load the authorship artifact"),
+        "{}",
+        documents.code_review
+    );
 }
