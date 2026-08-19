@@ -107,6 +107,11 @@ pub async fn run_pm_task_with_history(
             llm::credentials::LlmCredentials::ClaudeCode => "claude-code (ClaudeCodeAgentRunner)",
             llm::credentials::LlmCredentials::AnthropicDirect => "anthropic-direct",
             llm::credentials::LlmCredentials::OpenRouter => "openrouter",
+            // audit 2026-08-19: these two used to report "openrouter" because
+            // they shared its variant, so the deployment footer named the wrong
+            // transport back to the user.
+            llm::credentials::LlmCredentials::Bedrock => "bedrock",
+            llm::credentials::LlmCredentials::Ollama => "ollama",
         };
         let skills_count = pm_cfg
             .system_prompt

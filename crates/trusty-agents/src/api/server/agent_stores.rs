@@ -61,6 +61,35 @@ pub(super) async fn agent_stores_route(
     .await
 }
 
+/// Maximum accepted agent-name length. Matches `agent_create::is_valid_slug`'s
+/// cap, so a name this route accepts is one the create path could have written.
+const MAX_AGENT_NAME_LEN: usize = 64;
+
+/// Is `name` a safe single path segment to join onto an agents directory?
+///
+/// Why: this used to be a DENYLIST — `/`, `\`, `.`, `..` (audit 2026-08-19,
+/// finding 12). A denylist has to anticipate every hostile spelling, and the
+/// name is joined straight onto a filesystem path by `resolve_agent_paths`.
+/// It admitted NUL bytes, control characters, whitespace-only names,
+/// unbounded lengths, and Unicode look-alikes for the separators it did
+/// reject (`＼` U+FF3C, `∕` U+2215, `․` U+2024) — every one of which reaches
+/// the join. An allowlist inverts the burden: only characters that can never
+/// change a path's meaning get through, so an unanticipated spelling fails
+/// closed.
+/// What: non-empty, at most [`MAX_AGENT_NAME_LEN`] bytes, and every character
+/// is ASCII alphanumeric, `_`, or `-`. That admits every bundled agent name
+/// (see `agent_name_allowlist_accepts_every_bundled_agent`) and every name
+/// `POST /api/agents` can create.
+/// Test: `agent_name_allowlist_rejects_traversal_and_unicode_tricks`,
+/// `agent_name_allowlist_accepts_every_bundled_agent`.
+pub(super) fn is_valid_agent_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_AGENT_NAME_LEN
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Core store-resolution logic against explicit agents dirs + daemon URLs.
 ///
 /// Why: Same testability rationale as `agent_patch::patch_agent_at`.
@@ -79,7 +108,7 @@ pub(super) async fn stores_at(
     search_base: Option<&str>,
     memory_base: Option<&str>,
 ) -> Response {
-    if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
+    if !is_valid_agent_name(name) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "invalid agent name" })),
@@ -315,6 +344,102 @@ search_indexes = ["real-index", "store-label"]
             attached_indexes_deduped(&stores, &tools),
             vec!["store-label".to_string()],
             "dedupe keys on resolved_index, not the store's display name"
+        );
+    }
+
+    /// audit 2026-08-19 (finding 12): the name reaches `dir.join(name)`, so
+    /// anything that can alter a path's meaning must fail closed.
+    ///
+    /// Why: the previous denylist named four spellings and let everything else
+    /// through. These cases are the ones it missed — Unicode separator
+    /// look-alikes, percent-encoded traversal, NUL and control bytes,
+    /// whitespace-only names, and an unbounded length — alongside the four it
+    /// did catch, so neither class can regress.
+    /// Test: itself.
+    #[test]
+    fn agent_name_allowlist_rejects_traversal_and_unicode_tricks() {
+        let rejected = [
+            // What the old denylist already caught.
+            "",
+            ".",
+            "..",
+            "../etc/passwd",
+            "a/b",
+            "a\\b",
+            // What it did not.
+            "\u{FF3C}etc",      // fullwidth reverse solidus
+            "a\u{2215}b",       // division slash
+            "a\u{2044}b",       // fraction slash
+            "a\u{2024}b",       // one-dot leader
+            "..%2fetc",         // percent-encoded traversal
+            "%2e%2e%2fetc",     // fully encoded `../`
+            "izzie\0",          // NUL byte
+            "izzie\n",          // control character
+            "izzie ",           // trailing space
+            "   ",              // whitespace only
+            "izzie.toml",       // extension smuggling
+            "cto\u{2011}agent", // non-breaking hyphen
+            "\u{0430}ssistant", // Cyrillic а homoglyph
+        ];
+        for name in rejected {
+            assert!(
+                !is_valid_agent_name(name),
+                "must reject {name:?} — it is joined onto a filesystem path"
+            );
+        }
+        assert!(
+            !is_valid_agent_name(&"a".repeat(MAX_AGENT_NAME_LEN + 1)),
+            "length must be bounded"
+        );
+        assert!(is_valid_agent_name(&"a".repeat(MAX_AGENT_NAME_LEN)));
+    }
+
+    /// audit 2026-08-19 (finding 12): tightening to an allowlist must not lock
+    /// any shipped agent out of its own stores panel.
+    ///
+    /// Why: a validator that rejects real names is a worse outage than the
+    /// traversal it prevents. Reading the roster off disk (rather than pasting
+    /// a list here) means a newly bundled agent whose name the allowlist would
+    /// reject fails this test the day it is added.
+    /// What: walks the bundled `.trusty-agents/agents/` directory, deriving the
+    /// name the router sees for both layouts `resolve_agent_paths` supports —
+    /// a directory package (`<name>/agent.toml`) and a flat `<name>.toml`.
+    /// Test: itself.
+    #[test]
+    fn agent_name_allowlist_accepts_every_bundled_agent() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".trusty-agents")
+            .join("agents");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("bundled agents dir") {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            let name = if path.is_dir() {
+                if !path.join("agent.toml").is_file() {
+                    continue;
+                }
+                path.file_name()
+                    .expect("dir name")
+                    .to_string_lossy()
+                    .into_owned()
+            } else if path.extension().is_some_and(|e| e == "toml") {
+                path.file_stem()
+                    .expect("file stem")
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                continue;
+            };
+            assert!(
+                is_valid_agent_name(&name),
+                "bundled agent {name:?} must remain reachable"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 20,
+            "expected the full bundled roster, only saw {checked} names in {}",
+            dir.display()
         );
     }
 

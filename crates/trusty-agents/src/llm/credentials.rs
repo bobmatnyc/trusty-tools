@@ -33,12 +33,13 @@
 
 /// Resolved LLM backend for the ctrl/PM in-process LLM calls.
 ///
-/// Why: Three discrete routing paths require three different downstream
-/// behaviors: the OpenRouter HTTP client, the direct Anthropic API, or the
-/// `claude` CLI subprocess. Encoding the choice as an enum keeps the wiring
-/// honest across `ctrl::run_pm_task_with_history`.
+/// Why: Each routing path requires a different downstream behavior: the
+/// OpenRouter HTTP client, the direct Anthropic API, the `claude` CLI
+/// subprocess, AWS Bedrock, or a local Ollama server. Encoding the choice as
+/// an enum keeps the wiring honest across `ctrl::run_pm_task_with_history`.
 /// What: One variant per supported credential source.
-/// Test: See module-level tests.
+/// Test: See module-level tests, notably
+/// `every_variant_has_a_distinct_label`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmCredentials {
     /// `CLAUDE_CODE_OAUTH_TOKEN` is set — route via the local `claude` CLI
@@ -49,6 +50,22 @@ pub enum LlmCredentials {
     AnthropicDirect,
     /// `OPENROUTER_API_KEY` is set — the original OpenRouter routing path.
     OpenRouter,
+    /// `/provider bedrock` — dispatch to AWS Bedrock, driven by the
+    /// `bedrock/` model prefix `resolve_overridden_credentials` guarantees.
+    ///
+    /// audit 2026-08-19 (finding 18): this path used to reuse
+    /// [`LlmCredentials::OpenRouter`] as a placeholder, so the credential type
+    /// named a transport the call was not using. No auth header or signing
+    /// decision reads this enum — the model prefix does — so the variant is
+    /// about the type telling the truth, not about changing routing.
+    Bedrock,
+    /// `/provider local` — dispatch to a local Ollama server, driven by the
+    /// `ollama/` model prefix. Needs no auth header: `OllamaAdapter::api_endpoint`
+    /// leaves `auth_header_value` empty and the HTTP layer skips it.
+    ///
+    /// audit 2026-08-19 (finding 18): same placeholder history as
+    /// [`LlmCredentials::Bedrock`].
+    Ollama,
 }
 
 impl LlmCredentials {
@@ -58,6 +75,8 @@ impl LlmCredentials {
             LlmCredentials::ClaudeCode => "claude-code",
             LlmCredentials::AnthropicDirect => "anthropic-direct",
             LlmCredentials::OpenRouter => "openrouter",
+            LlmCredentials::Bedrock => "bedrock",
+            LlmCredentials::Ollama => "ollama",
         }
     }
 }
@@ -433,6 +452,76 @@ mod tests {
         assert_eq!(LlmCredentials::ClaudeCode.label(), "claude-code");
         assert_eq!(LlmCredentials::AnthropicDirect.label(), "anthropic-direct");
         assert_eq!(LlmCredentials::OpenRouter.label(), "openrouter");
+        assert_eq!(LlmCredentials::Bedrock.label(), "bedrock");
+        assert_eq!(LlmCredentials::Ollama.label(), "ollama");
+    }
+
+    /// audit 2026-08-19 (finding 18): every variant must serialize to a label
+    /// of its own, and adding a variant must not be possible without deciding
+    /// what it is called.
+    ///
+    /// Why: the label is what reaches the user — the startup banner, the
+    /// `## Deployment Configuration` footer, and the self-identification line
+    /// the agent answers "what am I running on?" with. Two variants sharing a
+    /// label reintroduces exactly the drift the dedicated variants removed.
+    /// What: `expected` re-states the mapping in an EXHAUSTIVE match, so a new
+    /// variant fails this test at compile time; `ALL` then forces every variant
+    /// through it and asserts the labels are pairwise distinct.
+    /// Test: itself.
+    #[test]
+    fn every_variant_has_a_distinct_label() {
+        const ALL: &[LlmCredentials] = &[
+            LlmCredentials::ClaudeCode,
+            LlmCredentials::AnthropicDirect,
+            LlmCredentials::OpenRouter,
+            LlmCredentials::Bedrock,
+            LlmCredentials::Ollama,
+        ];
+        fn expected(c: &LlmCredentials) -> &'static str {
+            match c {
+                LlmCredentials::ClaudeCode => "claude-code",
+                LlmCredentials::AnthropicDirect => "anthropic-direct",
+                LlmCredentials::OpenRouter => "openrouter",
+                LlmCredentials::Bedrock => "bedrock",
+                LlmCredentials::Ollama => "ollama",
+            }
+        }
+        let mut seen: Vec<&'static str> = Vec::new();
+        for c in ALL {
+            assert_eq!(c.label(), expected(c), "label drifted for {c:?}");
+            assert!(
+                !seen.contains(&c.label()),
+                "{:?} reuses the label {:?}",
+                c,
+                c.label()
+            );
+            seen.push(c.label());
+        }
+        assert_eq!(seen.len(), ALL.len());
+    }
+
+    /// audit 2026-08-19 (finding 18): the dedicated variants must not change
+    /// what goes on the wire.
+    ///
+    /// Why: `Bedrock` / `Ollama` replaced an `OpenRouter` placeholder. Under
+    /// that placeholder `qualify_openrouter_model` ran but was a no-op — a
+    /// `bedrock/` id is excluded explicitly and an `ollama/` id already
+    /// contains a `/`. This pins that equivalence so the rename stayed a
+    /// rename.
+    /// Test: itself.
+    #[test]
+    fn new_variants_leave_their_prefixed_model_ids_alone() {
+        for (creds, model) in [
+            (LlmCredentials::Bedrock, "bedrock/claude-sonnet-4-6"),
+            (LlmCredentials::Ollama, "ollama/qwen3:8b"),
+        ] {
+            assert_eq!(qualify_openrouter_model(&creds, model), model);
+            // …and identical to what the old placeholder produced.
+            assert_eq!(
+                qualify_openrouter_model(&LlmCredentials::OpenRouter, model),
+                model
+            );
+        }
     }
 
     #[test]

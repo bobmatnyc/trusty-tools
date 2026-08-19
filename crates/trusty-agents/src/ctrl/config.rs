@@ -74,19 +74,23 @@ pub struct SessionOverrides {
 /// path instead. Centralising the override-vs-env decision here keeps both
 /// dispatch entrypoints (`run_pm_task_with_history`, `run_pm_task_with_persona`)
 /// in lock-step.
-/// What: Three valid override values:
+/// What: Four valid override values:
 ///   - `"claude-code"` → `LlmCredentials::ClaudeCode` (claude CLI subprocess)
 ///   - `"openrouter"` → `LlmCredentials::OpenRouter` (REST client)
 ///   - `"bedrock"`    → ensures the model id carries the `bedrock/` prefix
-///     (auto-prepending when absent) and returns `LlmCredentials::OpenRouter`
-///     as a placeholder. Bedrock dispatch is driven by the `bedrock/` model
-///     prefix in `chat_with_tools_gated`, not by a credential variant — see
-///     `src/llm/mod.rs` Bedrock branch.
+///     (auto-prepending when absent) and returns `LlmCredentials::Bedrock`.
+///   - `"local"`      → ensures the `ollama/` prefix and returns
+///     `LlmCredentials::Ollama`.
+/// Dispatch for the last two is driven by the MODEL PREFIX in
+/// `chat_with_tools_gated` (see `src/llm/mod.rs`), not by the credential
+/// variant; the variant exists so the type names the real transport (audit
+/// 2026-08-19, finding 18).
 /// Any other override value returns an error so the user's typo doesn't
 /// silently fall through to env defaults. When `provider_override` is `None`
 /// we delegate to `pick_credentials()` exactly as before.
-/// Test: `cargo check`; `apply_credential_routing` tests still pass since
-/// this helper is composed before that point.
+/// Test: `provider_override_bedrock_and_local_get_their_own_variants`;
+/// `apply_credential_routing` tests still pass since this helper is composed
+/// before that point.
 pub(crate) fn resolve_overridden_credentials(
     cfg: &mut AgentConfig,
     provider_override: Option<&str>,
@@ -120,25 +124,24 @@ pub(crate) fn resolve_overridden_credentials(
             if !cfg.agent.model.starts_with("bedrock/") {
                 cfg.agent.model = format!("bedrock/{}", cfg.agent.model);
             }
-            // Placeholder credential — adapter inspects the model prefix and
-            // routes to AWS Bedrock; the OpenRouter variant just lets
-            // `apply_credential_routing` skip the use_anthropic_direct flag
-            // and the claude-cli short-circuit. The OpenRouter path's bare-
-            // model qualification is a no-op since the model already starts
-            // with `bedrock/` (see `qualify_openrouter_model`).
-            Ok(LlmCredentials::OpenRouter)
+            // audit 2026-08-19: was `OpenRouter` as a placeholder. The adapter
+            // still routes on the `bedrock/` model prefix; only the credential
+            // type changed, and `qualify_openrouter_model` was already a no-op
+            // for a `bedrock/`-prefixed id, so routing is byte-identical.
+            Ok(LlmCredentials::Bedrock)
         }
         Some("local") => {
             // Ollama dispatch is also model-prefix driven (`ollama/<name>`).
             // The adapter detects the prefix and overrides the OpenAI-compatible
-            // base URL to point at the local ollama server. We piggyback on the
-            // OpenRouter credential variant since ollama needs no auth header;
-            // the LLM HTTP layer will skip auth when the endpoint's
-            // `auth_header_value` is empty (see `OllamaAdapter::api_endpoint`).
+            // base URL to point at the local ollama server. Ollama needs no auth
+            // header; the LLM HTTP layer skips auth when the endpoint's
+            // `auth_header_value` is empty (see `OllamaAdapter::api_endpoint`),
+            // which is keyed on the endpoint, not on this variant.
             if !cfg.agent.model.starts_with("ollama/") {
                 cfg.agent.model = format!("ollama/{}", cfg.agent.model);
             }
-            Ok(LlmCredentials::OpenRouter)
+            // audit 2026-08-19: was `OpenRouter` as a placeholder.
+            Ok(LlmCredentials::Ollama)
         }
         // Bookmarked for future wiring: "anthropic-api", "openai-api".
         Some(other) => anyhow::bail!(
@@ -318,9 +321,18 @@ pub(crate) fn build_user_context_prefix(
 /// JSON payload when no `content` field is present). Any error — store
 /// missing, embedder init failure, search error — collapses to an empty Vec
 /// so prompt building never blocks on memory recall.
-/// Test: Both call sites (PM `run_pm_task_with_history` and ctrl
-/// `run_ctrl`) exercise the empty-Vec path on any cold project; populated
-/// recall is covered by `memory_recall` integration tests in `tools/memory.rs`.
+///
+/// Log level is NOT uniform across those error arms (audit 2026-08-19,
+/// finding 19). A broken store and a cold project both return an empty Vec,
+/// so the log record is the only thing that tells them apart: store-open and
+/// embedder-init failures — the two an operator can actually fix — emit
+/// `warn!` carrying the anyhow error chain. Embed and search failures stay at
+/// `debug!`; they are per-query and do not indicate misconfiguration.
+/// Test: `recall_project_memories_warns_when_store_open_fails` asserts the
+/// WARN event fires AND that the empty-Vec fallback is unchanged. Both call
+/// sites (PM `run_pm_task_with_history` and ctrl `run_ctrl`) exercise the
+/// empty-Vec path on any cold project; populated recall is covered by
+/// `memory_recall` integration tests in `tools/memory.rs`.
 pub(crate) async fn recall_project_memories(
     project_dir: &Path,
     query: &str,
@@ -336,14 +348,24 @@ pub(crate) async fn recall_project_memories(
     let store = match crate::memory::open_memory_store(&session_dir) {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!(error = %e, "recall_project_memories: store open failed");
+            // audit 2026-08-19: `debug!` hid a broken store behind the same
+            // empty Vec a cold project returns. `?e` prints anyhow's cause chain.
+            tracing::warn!(
+                error = ?e,
+                session_dir = %session_dir.display(),
+                "recall_project_memories: store open failed; continuing without project memory"
+            );
             return Vec::new();
         }
     };
     let embedder = match crate::memory::FastEmbedder::new() {
         Ok(e) => e,
         Err(e) => {
-            tracing::debug!(error = %e, "recall_project_memories: embedder unavailable");
+            // audit 2026-08-19: same reasoning as the store-open arm above.
+            tracing::warn!(
+                error = ?e,
+                "recall_project_memories: embedder unavailable; continuing without project memory"
+            );
             return Vec::new();
         }
     };
@@ -528,6 +550,11 @@ pub(crate) fn apply_credential_routing(
             }
             false
         }
+        // audit 2026-08-19: both arms are deliberately no-ops. Each model id
+        // already carries its routing prefix (`bedrock/`, `ollama/`), which is
+        // what the adapter dispatches on; model qualification was already a
+        // no-op for both when they rode the `OpenRouter` variant.
+        LlmCredentials::Bedrock | LlmCredentials::Ollama => false,
     }
 }
 

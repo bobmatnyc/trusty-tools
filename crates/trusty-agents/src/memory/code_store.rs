@@ -11,7 +11,8 @@
 //! What: Opens a `RedbUsearchStore` at `<dir>/` and uses `<dir>/.write.lock`
 //! as an advisory `fs4` lock. Implements `MemoryStore` for `Segment::CodeIndex`
 //! only; using it with `Segment::AgentMemory` returns an error so mis-wired
-//! callers fail loudly.
+//! callers fail loudly. Acquiring that lock is a blocking syscall and runs on
+//! `spawn_blocking`, never on a runtime worker — see [`CodeStore::acquire_lock`].
 //! Test: See `tests` module — round-trip insert+search and "second open of
 //! same dir still works" (advisory lock doesn't prevent reopen).
 
@@ -70,30 +71,61 @@ impl CodeStore {
         Ok(Self { inner, lock_file })
     }
 
+    /// Open the lock file and take an advisory lock on it, off the async
+    /// runtime.
+    ///
+    /// Why: `fs4`'s `lock` / `lock_shared` are blocking syscalls (`flock` /
+    /// `LockFileEx`) that PARK the calling thread for as long as another
+    /// process holds the lock. Calling them straight from an async fn stalls a
+    /// tokio worker thread for that whole time (audit 2026-08-19, finding 21):
+    /// with several trusty-agents processes contending on one code index, that
+    /// starves every other task on the runtime. `File::open` is blocking I/O
+    /// too, so it moves across with them.
+    /// What: runs open + lock inside `spawn_blocking` and hands the locked
+    /// `File` back. `exclusive` selects `FileExt::lock` over
+    /// `FileExt::lock_shared`. A panic in the blocking task surfaces as an
+    /// error rather than being swallowed.
+    /// Test: `code_store_insert_search_round_trip` exercises both lock kinds
+    /// end to end; `concurrent_write_lock_prevents_corruption` drives the
+    /// contended path, where the parked thread is now a blocking-pool thread
+    /// rather than a runtime worker.
+    async fn acquire_lock(&self, exclusive: bool) -> Result<File> {
+        let path = self.lock_file.clone();
+        tokio::task::spawn_blocking(move || -> Result<File> {
+            let f = File::open(&path)
+                .with_context(|| format!("opening lock file {}", path.display()))?;
+            if exclusive {
+                // fs4 1.0 renamed `lock_exclusive` -> `lock`.
+                FileExt::lock(&f).map_err(|e| anyhow!("acquiring exclusive lock: {e}"))?;
+            } else {
+                FileExt::lock_shared(&f).map_err(|e| anyhow!("acquiring shared lock: {e}"))?;
+            }
+            Ok(f)
+        })
+        .await
+        .map_err(|e| anyhow!("lock acquisition task failed: {e}"))?
+    }
+
     /// Guard `op` with an exclusive advisory lock on the lock file.
     ///
-    /// Why: `fs4` exposes blocking syscalls (`flock` / `LockFileEx`); calling
-    /// them from an async context would risk blocking the tokio runtime. We
-    /// wrap the lock acquire/release around the actual inner operation on the
-    /// current (already-async) task because the acquire is expected to be
-    /// short-lived for a typical developer workflow. Callers who need to batch
-    /// many writes should take the lock themselves around the batch — which
-    /// isn't exposed by this API yet because we haven't needed it.
-    /// What: Opens the lock file, acquires exclusive lock, runs `op`,
-    /// unconditionally unlocks, returns `op`'s result.
+    /// Why: serializes cross-process writes to the shared code index. The
+    /// acquire itself runs on a blocking thread — see [`Self::acquire_lock`].
+    /// Callers who need to batch many writes should take the lock themselves
+    /// around the batch, which isn't exposed by this API yet because we
+    /// haven't needed it.
+    /// What: acquires the exclusive lock, runs `op`, unconditionally unlocks,
+    /// returns `op`'s result.
     async fn with_write_lock<T, F, Fut>(&self, op: F) -> Result<T>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        let f = File::open(&self.lock_file)
-            .with_context(|| format!("opening lock file {}", self.lock_file.display()))?;
-        // fs4 1.0 renamed `lock_exclusive` -> `lock`.
-        FileExt::lock(&f).map_err(|e| anyhow!("acquiring exclusive lock: {e}"))?;
+        let f = self.acquire_lock(true).await?;
         let result = op().await;
         // Always unlock; an explicit unlock is preferable to relying on drop
         // so errors surface. If unlock fails the file descriptor drop will
-        // still release eventually.
+        // still release eventually. Unlocking never blocks on another holder,
+        // so it stays on the async task.
         let _ = FileExt::unlock(&f);
         result
     }
@@ -104,9 +136,7 @@ impl CodeStore {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        let f = File::open(&self.lock_file)
-            .with_context(|| format!("opening lock file {}", self.lock_file.display()))?;
-        FileExt::lock_shared(&f).map_err(|e| anyhow!("acquiring shared lock: {e}"))?;
+        let f = self.acquire_lock(false).await?;
         let result = op().await;
         let _ = FileExt::unlock(&f);
         result
