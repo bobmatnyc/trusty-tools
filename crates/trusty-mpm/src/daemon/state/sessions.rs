@@ -523,6 +523,19 @@ impl DaemonState {
         self.dispatch_record.lock()
     }
 
+    /// Stops still waiting for the `agent_id` that names them (#4142).
+    ///
+    /// Why: `crate::daemon::services::delegation_tracker` is the ledger's only
+    /// caller — it records on an unresolvable `SubagentStop` and consults it on
+    /// the `PostToolUse` that finally teaches the id. Exposed as a borrow rather
+    /// than wrapped in per-operation methods so the ledger's own invariants
+    /// (bound, TTL, peek-before-clear) stay in one file.
+    /// What: `pub(crate)` — internal correlation state, never a consumer API.
+    /// Test: `out_of_order_subagent_stop_resolves_when_its_post_tool_use_lands`.
+    pub(crate) fn pending_stops(&self) -> &super::pending_stops::PendingStops {
+        &self.pending_stops
+    }
+
     /// All delegations belonging to one session.
     pub fn delegations_for(&self, session: SessionId) -> Vec<Delegation> {
         self.delegations
@@ -746,12 +759,15 @@ impl DaemonState {
     /// nothing. Past 24 h a `Stale` record IS dropped and a later stop finds
     /// nothing: the recovery window is long, not infinite, because the map must
     /// stay bounded. That bound is asserted, not incidental.
+    /// It also ages the #4142 deferred-stop ledger on the same pass, for the
+    /// same reason: both are bounded off the hook path, never on it.
     /// Test: `stale_running_delegation_stops_suppressing_the_nudge`,
     /// `declared_but_never_dispatched_goes_stale_quickly`,
     /// `terminal_delegations_are_evicted_after_retention`,
     /// `live_delegations_are_never_evicted`,
     /// `stale_delegation_stays_resolvable_far_past_the_terminal_window`,
-    /// `a_stale_delegation_is_eventually_evicted`.
+    /// `a_stale_delegation_is_eventually_evicted`,
+    /// `the_delegation_sweep_ages_the_deferred_stop_ledger`.
     pub fn sweep_delegations(&self) -> DelegationSweep {
         self.sweep_delegations_at(chrono::Utc::now())
     }
@@ -766,6 +782,13 @@ impl DaemonState {
         now: chrono::DateTime<chrono::Utc>,
     ) -> DelegationSweep {
         let mut sweep = DelegationSweep::default();
+        // #4142: the deferred-stop ledger ages on the same loop, and off the
+        // hook path for the same reason. An expired entry costs only the
+        // recovery — the delegation it would have closed is staled below.
+        let expired = self.pending_stops.prune_at(now);
+        if expired > 0 {
+            tracing::debug!(expired, "delegation: pruned expired deferred stops (#4142)");
+        }
         self.delegations.retain(|_, d| {
             let age_from = d.started_at.unwrap_or(d.created_at);
             if d.status.is_live() {

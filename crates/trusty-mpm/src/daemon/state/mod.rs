@@ -14,6 +14,7 @@
 
 mod core;
 mod overseer;
+pub(crate) mod pending_stops;
 mod resources;
 pub(crate) mod sessions;
 mod sm;

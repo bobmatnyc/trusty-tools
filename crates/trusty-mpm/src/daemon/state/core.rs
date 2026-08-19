@@ -412,6 +412,13 @@ pub struct DaemonState {
     /// so the two can never deadlock. In-memory work only: no I/O, no await.
     /// Test: `a_grant_and_the_tracker_converge_in_either_order`.
     pub(super) dispatch_record: parking_lot::Mutex<()>,
+    /// `SubagentStop`s that arrived before the `agent_id` naming them (#4142).
+    ///
+    /// Why: `PostToolUse` is async and `SubagentStop` synchronous, so the stop
+    /// can win the race and match nothing. See
+    /// [`crate::daemon::state::pending_stops`] for the whole rationale.
+    /// Test: `out_of_order_subagent_stop_resolves_when_its_post_tool_use_lands`.
+    pub(super) pending_stops: super::pending_stops::PendingStops,
 }
 
 impl Default for DaemonState {
@@ -510,6 +517,7 @@ impl DaemonState {
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
+            pending_stops: super::pending_stops::PendingStops::default(),
         }
     }
 
@@ -585,6 +593,7 @@ impl DaemonState {
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
+            pending_stops: super::pending_stops::PendingStops::default(),
         }
     }
 
