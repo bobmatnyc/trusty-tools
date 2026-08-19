@@ -142,6 +142,39 @@ pub enum AuditError {
         source: std::io::Error,
     },
 
+    /// The working-directory root cannot be created where it was resolved.
+    ///
+    /// Why: #5941. `WorkDir::create` went straight to `create_dir_all`, so an
+    /// operator standing at `/` with no resolvable home met
+    /// `working directory /trusty-audit-work/tools: Read-only file system
+    /// (os error 30)` as their first sight of the tool — a message naming a
+    /// directory that was never created, which sends the reader hunting for a
+    /// path instead of at the cause. `workdir::default_root`'s own comment
+    /// assumed "the cwd is at least writable" for exactly that branch, and
+    /// nothing checked it.
+    /// What: names the root it needs, the directory it actually tried to write
+    /// in, why that failed, and the two ways out — run somewhere writable, or
+    /// set the environment variable. Raised before anything under the root is
+    /// created, so a refusal leaves the filesystem as it found it.
+    /// Test: `crate::workdir::layout_tests::an_unwritable_cwd_is_named_before_anything_is_created`,
+    /// `crate::workdir::layout_tests::an_unwritable_root_leaves_nothing_behind`.
+    #[error(
+        "the working directory {root} cannot be created: {tried} is not writable ({source}). \
+         Run this from a directory you can write to, or set {env} to a writable path; \
+         nothing was written"
+    )]
+    WorkDirNotWritable {
+        /// The root that was resolved and could not be made.
+        root: PathBuf,
+        /// The nearest existing ancestor — where creation would have begun.
+        tried: PathBuf,
+        /// The environment variable that names another root.
+        env: &'static str,
+        /// Why that directory refused the write.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// A companion file (engagement config, audit manifest) could not be read.
     #[error("cannot read {path}: {source}")]
     Read {
