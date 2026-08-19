@@ -18,7 +18,8 @@
 //! `resolve_propagates_malformed_per_profile_file`,
 //! `persist_and_resolve_roundtrip`, `persist_rejects_malformed_source`,
 //! `persist_restricts_permissions_on_unix` (cfg(unix)),
-//! `profile_client_source_reports_global_and_per_profile`.
+//! `profile_client_source_reports_global_and_per_profile`,
+//! `clients_dir_from_errors_when_home_is_none`.
 
 use std::path::{Path, PathBuf};
 
@@ -32,20 +33,38 @@ use crate::api::auth::perms::restrict_to_owner;
 /// Why: A `clients/` subdirectory (not flat files at the `.gworkspace-mcp/`
 /// root) so a profile named e.g. `tokens` or `oauth_client` can never
 /// collide with the existing fixed filenames there.
-/// What: `~/.gworkspace-mcp/clients/`.
-fn clients_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".gworkspace-mcp")
-        .join("clients")
+/// What: `~/.gworkspace-mcp/clients/`. Delegates to [`clients_dir_from`] for
+/// the actual home-directory handling.
+fn clients_dir() -> Result<PathBuf> {
+    clients_dir_from(dirs::home_dir())
+}
+
+/// Why: audit 2026-08-19 — `home` previously defaulted to `PathBuf::from(".")`
+/// when unresolvable, so OAuth client credentials would silently read from
+/// and write into the process's current working directory instead of a
+/// clearly-broken environment failing loudly. Splitting the home-directory
+/// lookup out from [`clients_dir`] also gives the `None` path a seam that a
+/// test can exercise directly, without depending on whether
+/// `dirs::home_dir()` ever actually returns `None` on the machine running
+/// the tests.
+/// What: Errors when `home` is `None`; otherwise joins `.gworkspace-mcp/clients`.
+/// Test: `clients_dir_from_errors_when_home_is_none`.
+fn clients_dir_from(home: Option<PathBuf>) -> Result<PathBuf> {
+    let home = home.context(
+        "cannot determine home directory (HOME/USERPROFILE unset) — refusing to store OAuth \
+         client credentials in the current working directory",
+    )?;
+    Ok(home.join(".gworkspace-mcp").join("clients"))
 }
 
 /// The on-disk path for `profile`'s per-profile OAuth client file, if any.
 ///
 /// What: `~/.gworkspace-mcp/clients/<profile>.json`. Existence is the only
 /// signal of whether a per-profile client is configured — no separate index.
-pub fn profile_client_path(profile: &str) -> PathBuf {
-    clients_dir().join(format!("{profile}.json"))
+/// Errors when the home directory cannot be determined (see
+/// [`clients_dir_from`]) rather than resolving to a CWD-relative path.
+pub fn profile_client_path(profile: &str) -> Result<PathBuf> {
+    Ok(clients_dir()?.join(format!("{profile}.json")))
 }
 
 /// Which OAuth client a profile actually uses — for diagnostics
@@ -77,13 +96,13 @@ impl ClientSource {
 /// What: `PerProfile` iff the file exists; does not validate its contents
 /// (a malformed per-profile file still shows as `PerProfile` here — the
 /// content problem surfaces via [`resolve_client_creds_for_profile`] instead).
-pub fn profile_client_source(profile: &str) -> ClientSource {
-    let path = profile_client_path(profile);
-    if path.exists() {
+pub fn profile_client_source(profile: &str) -> Result<ClientSource> {
+    let path = profile_client_path(profile)?;
+    Ok(if path.exists() {
         ClientSource::PerProfile(path)
     } else {
         ClientSource::Global
-    }
+    })
 }
 
 /// Resolve the OAuth client credentials to use for `profile`.
@@ -104,7 +123,7 @@ pub fn profile_client_source(profile: &str) -> ClientSource {
 /// `resolve_falls_back_to_global_when_absent`,
 /// `resolve_propagates_malformed_per_profile_file`.
 pub fn resolve_client_creds_for_profile(profile: &str) -> Result<ClientCreds> {
-    let path = profile_client_path(profile);
+    let path = profile_client_path(profile)?;
     if path.exists() {
         let data = std::fs::read_to_string(&path)
             .with_context(|| format!("read per-profile OAuth client {}", path.display()))?;
@@ -133,7 +152,7 @@ pub fn persist_profile_client(profile: &str, source: &Path) -> Result<PathBuf> {
     parse_client_creds_json(&data)
         .with_context(|| format!("invalid OAuth client JSON in {}", source.display()))?;
 
-    let target = profile_client_path(profile);
+    let target = profile_client_path(profile)?;
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
@@ -189,7 +208,11 @@ mod tests {
             "global-id",
             "global-secret",
         );
-        write_client_json(&profile_client_path("work"), "profile-id", "profile-secret");
+        write_client_json(
+            &profile_client_path("work").unwrap(),
+            "profile-id",
+            "profile-secret",
+        );
 
         let creds = resolve_client_creds_for_profile("work").expect("resolve");
         assert_eq!(creds.client_id, "profile-id");
@@ -237,7 +260,7 @@ mod tests {
             "global-id",
             "global-secret",
         );
-        let broken = profile_client_path("broken");
+        let broken = profile_client_path("broken").unwrap();
         std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
         std::fs::write(&broken, "not json").unwrap();
 
@@ -259,13 +282,13 @@ mod tests {
         write_client_json(&source, "new-id", "new-secret");
 
         let target = persist_profile_client("work", &source).expect("persist");
-        assert_eq!(target, profile_client_path("work"));
+        assert_eq!(target, profile_client_path("work").unwrap());
 
         let creds = resolve_client_creds_for_profile("work").expect("resolve after persist");
         assert_eq!(creds.client_id, "new-id");
         assert_eq!(creds.client_secret, "new-secret");
         assert_eq!(
-            profile_client_source("work"),
+            profile_client_source("work").expect("source"),
             ClientSource::PerProfile(target)
         );
     }
@@ -283,7 +306,7 @@ mod tests {
         let err = persist_profile_client("work", &source).unwrap_err();
         assert!(err.to_string().contains("invalid OAuth client"), "{err}");
         assert!(
-            !profile_client_path("work").exists(),
+            !profile_client_path("work").unwrap().exists(),
             "a malformed source must never be written to the profile client path"
         );
     }
@@ -312,18 +335,31 @@ mod tests {
         let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
         isolated_home("source-labels");
 
-        assert_eq!(profile_client_source("no-file"), ClientSource::Global);
-        assert_eq!(profile_client_source("no-file").label(), "global");
+        assert_eq!(
+            profile_client_source("no-file").unwrap(),
+            ClientSource::Global
+        );
+        assert_eq!(profile_client_source("no-file").unwrap().label(), "global");
 
-        write_client_json(&profile_client_path("work"), "id", "secret");
-        match profile_client_source("work") {
-            ClientSource::PerProfile(p) => assert_eq!(p, profile_client_path("work")),
+        write_client_json(&profile_client_path("work").unwrap(), "id", "secret");
+        match profile_client_source("work").unwrap() {
+            ClientSource::PerProfile(p) => assert_eq!(p, profile_client_path("work").unwrap()),
             ClientSource::Global => panic!("expected PerProfile"),
         }
         assert!(
             profile_client_source("work")
+                .unwrap()
                 .label()
                 .starts_with("per-profile (")
+        );
+    }
+
+    #[test]
+    fn clients_dir_from_errors_when_home_is_none() {
+        let err = clients_dir_from(None).unwrap_err();
+        assert!(
+            err.to_string().contains("home directory"),
+            "expected a home-directory error, got: {err}"
         );
     }
 }
