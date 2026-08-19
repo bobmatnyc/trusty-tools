@@ -30,11 +30,12 @@ use axum::{
     Json,
     extract::{Path as AxumPath, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::core::gh_account::{GH_DOCTOR_TIMEOUT, GhAuthProbe, probe_gh_auth};
 use crate::core::trusty_tools_config::GithubConfig;
 use crate::daemon::state::DaemonState;
 use crate::project::{Project, ProjectStoreError};
@@ -347,9 +348,10 @@ where
 /// (`daemon/api/deliverable_routes.rs`) documents for its single-`Option`
 /// fields. `tags` deliberately does NOT accept a full-replacement array — §6
 /// requires "`--add`/`--remove`, no free-text replace-whole-list footgun" — so
-/// mutation goes through `tags_add`/`tags_remove` instead; `gh_user`'s `gh auth
-/// status` validation is out of scope here (#2081/#2121, accepted as-is);
-/// `jira_config` is NOT a field on this body (#2082/#2122 territory).
+/// mutation goes through `tags_add`/`tags_remove` instead; setting `gh_user` is
+/// additionally checked against `gh auth status` by
+/// [`validate_gh_user_login`] (#2081/#2121); `jira_config` is NOT a field on
+/// this body (#2082/#2122 territory).
 /// Test: `patch_body_distinguishes_absent_null_and_value`, and the HTTP tests
 /// in `tests/project_registry_routes.rs`.
 #[derive(Debug, Default, Deserialize)]
@@ -370,8 +372,9 @@ pub struct PatchProjectBody {
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub stack_hint: Option<Option<String>>,
     /// New preferred `gh` login (#2081); absent=unchanged, `null`=clear,
-    /// string=set. Deep validation against `gh auth status` is deferred to
-    /// #2121 — this endpoint accepts and stores the string as-is.
+    /// string=set. A `set` is validated against `gh auth status` before it is
+    /// stored and rejected if `gh` does not report the login as logged in
+    /// (#2121) — see [`validate_gh_user_login`].
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub gh_user: Option<Option<String>>,
     /// New pinned spawn-time `gh` account (#3025); absent=unchanged,
@@ -426,7 +429,11 @@ pub struct PatchProjectBody {
 /// `tests/project_registry_routes.rs`: `patch_round_trip_updates_fields`,
 /// `patch_absent_fields_untouched`, `patch_unknown_project_is_404`,
 /// `patch_rejects_name_change`, `patch_is_idempotent`,
-/// `patch_rejects_blank_tags_add`, `patch_rejects_blank_tags_remove`; and in
+/// `patch_rejects_blank_tags_add`, `patch_rejects_blank_tags_remove`; the
+/// `gh_user` accept/reject arms are proved through
+/// [`patch_project_registry_with_probe`] by
+/// `patch_persists_a_gh_user_gh_reports_as_logged_in` and
+/// `patch_rejects_an_unknown_gh_user_and_leaves_the_store_untouched`; and in
 /// `crate::project::registry::tests`:
 /// `update_with_serializes_concurrent_field_edits`,
 /// `get_then_register_pattern_reproduces_lost_update_pre_fix`.
@@ -435,6 +442,42 @@ pub async fn patch_project_registry_route(
     AxumPath(name): AxumPath<String>,
     Json(body): Json<PatchProjectBody>,
 ) -> impl IntoResponse {
+    // #2121: only a request that actually SETS `gh_user` pays for the `gh auth
+    // status` subprocess — absent and `null` (clear) never run it. The probe
+    // blocks its thread for up to GH_DOCTOR_TIMEOUT, so it runs off the async
+    // executor.
+    let probe = match body.gh_user.as_ref().and_then(|v| v.as_deref()) {
+        Some(login) if !login.trim().is_empty() => Some(
+            tokio::task::spawn_blocking(|| probe_gh_auth(GH_DOCTOR_TIMEOUT))
+                .await
+                .unwrap_or_else(|e| {
+                    GhAuthProbe::Inconclusive(format!("the `gh auth status` probe failed: {e}"))
+                }),
+        ),
+        _ => None,
+    };
+    patch_project_registry_with_probe(state, name, body, probe).await
+}
+
+/// [`patch_project_registry_route`]'s body, with the `gh auth status` answer
+/// passed in rather than taken (#2121).
+///
+/// Why: the route's own validation must be testable without a live `gh` on the
+/// machine running the suite, and the accept/reject arms are exactly the ones
+/// worth proving end-to-end (does a rejected login really leave the store
+/// untouched?). Taking [`GhAuthProbe`] as a parameter is the seam that makes
+/// both arms hermetic, mirroring [`crate::core::gh_account::probe_gh_auth_with`].
+/// What: `probe` is `None` when the request does not set `gh_user` (nothing to
+/// verify); `Some(..)` carries whatever `gh` reported. Everything else is the
+/// validate-then-touch-the-store sequence described on the route.
+/// Test: `patch_persists_a_gh_user_gh_reports_as_logged_in`,
+/// `patch_rejects_an_unknown_gh_user_and_leaves_the_store_untouched`.
+pub(crate) async fn patch_project_registry_with_probe(
+    state: Arc<DaemonState>,
+    name: String,
+    body: PatchProjectBody,
+    probe: Option<GhAuthProbe>,
+) -> Response {
     if let Some(new_name) = &body.name
         && new_name.trim() != name
     {
@@ -471,11 +514,20 @@ pub async fn patch_project_registry_route(
         Some(Err(msg)) => return (StatusCode::BAD_REQUEST, msg).into_response(),
         None => None,
     };
+    // #2121: verify a `gh_user` SET before anything touches the store; absent
+    // and `null` (clear) pass straight through.
+    let gh_user = match body.gh_user {
+        Some(Some(login)) => match validate_gh_user_login(&login, probe.as_ref()) {
+            Ok(canonical) => Some(Some(canonical)),
+            Err((status, message)) => return (status, message).into_response(),
+        },
+        other => other,
+    };
+
     let repo_url = body.repo_url;
     let default_branch = body.default_branch;
     let description = body.description;
     let stack_hint = body.stack_hint;
-    let gh_user = body.gh_user;
     let gh_account = body.gh_account;
     let worktree = body.worktree;
 
@@ -533,6 +585,74 @@ pub async fn patch_project_registry_route(
     }
 }
 
+/// Accept a `gh_user` only when `gh auth status` reports it as logged in
+/// (#2121), returning `gh`'s own spelling of the login.
+///
+/// Why: #2081 gave `Project::gh_user` a fail-loud contract at `gh`-call time,
+/// but this endpoint stored whatever string it was handed. A typo'd or
+/// not-yet-authenticated login therefore persisted with a 200 and surfaced
+/// much later as a delegated-agent failure, far from the edit that caused it.
+/// Checking at config-WRITE time moves that failure to the request that
+/// introduces it. The `gh auth status` account list is the right authority
+/// because it is the only source that sees every auth mode — keyring,
+/// `hosts.yml`, and an env token, which writes no config file at all (#5032).
+/// What: rejects a blank login with 400 (`null` is the documented way to clear
+/// the field, so blank is a mistake rather than an intent). With a definitive
+/// answer from `gh`, returns the canonical spelling of a logged-in login, or
+/// 400 naming the field, the rejected login, and the logins that would be
+/// accepted. An INCONCLUSIVE probe is 503, never 400 and never a silent
+/// accept: "`gh` says no" and "I could not ask `gh`" are different facts
+/// (#5032), and only the first is the caller's mistake — but neither is
+/// grounds to store an unverified login.
+/// Test: `validate_gh_user_accepts_a_logged_in_login`,
+/// `validate_gh_user_rejects_an_unknown_login`,
+/// `validate_gh_user_rejects_a_blank_login`,
+/// `validate_gh_user_rejects_a_host_with_no_accounts`,
+/// `validate_gh_user_is_503_when_gh_could_not_answer`.
+fn validate_gh_user_login(
+    login: &str,
+    probe: Option<&GhAuthProbe>,
+) -> Result<String, (StatusCode, String)> {
+    let login = login.trim();
+    if login.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "gh_user must not be blank — send null to clear it".to_string(),
+        ));
+    }
+    match probe {
+        Some(GhAuthProbe::Answered(status)) => match status.canonical_logged_in_login(login) {
+            Some(canonical) => Ok(canonical),
+            None if status.logged_in.is_empty() => Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "gh_user must name an account `gh auth status` reports as logged in, but it \
+                     reports none — run `gh auth login` before setting gh_user to '{login}'"
+                ),
+            )),
+            None => Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "gh_user must name an account `gh auth status` reports as logged in; \
+                     '{login}' is not one of: {}",
+                    status.logged_in.join(", ")
+                ),
+            )),
+        },
+        Some(GhAuthProbe::Inconclusive(why)) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("gh_user '{login}' could not be verified against `gh auth status`: {why}"),
+        )),
+        None => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "gh_user '{login}' could not be verified: no `gh auth status` answer was \
+                 available for this request"
+            ),
+        )),
+    }
+}
+
 /// Trim every tag in a `tags_add`/`tags_remove` list and reject the whole
 /// request (400) if any entry is blank/whitespace-only after trimming.
 ///
@@ -567,6 +687,205 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::core::gh_account::GhAccountStatus;
+
+    /// The two-account answer a real `gh auth status` gives on this machine.
+    fn two_accounts() -> GhAuthProbe {
+        GhAuthProbe::Answered(GhAccountStatus {
+            active: Some("bob-duetto".to_string()),
+            logged_in: vec!["bob-duetto".to_string(), "bobmatnyc".to_string()],
+        })
+    }
+
+    /// Why (#2121): the accepted arm — a login `gh` reports as logged in is
+    /// stored, in `gh`'s spelling rather than the caller's casing.
+    /// Test: itself.
+    #[test]
+    fn validate_gh_user_accepts_a_logged_in_login() {
+        assert_eq!(
+            validate_gh_user_login("BobMatNyc", Some(&two_accounts())).unwrap(),
+            "bobmatnyc"
+        );
+        // A logged-in but non-active account is a legitimate choice.
+        assert_eq!(
+            validate_gh_user_login(" bob-duetto ", Some(&two_accounts())).unwrap(),
+            "bob-duetto"
+        );
+    }
+
+    /// Why (#2121): the rejected arm — the 400 must name the field, the
+    /// rejected login, and what would have been accepted, so the operator can
+    /// fix the typo without reading the daemon's source.
+    /// Test: itself.
+    #[test]
+    fn validate_gh_user_rejects_an_unknown_login() {
+        let (status, message) =
+            validate_gh_user_login("typo-bot", Some(&two_accounts())).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(message.contains("gh_user"), "{message}");
+        assert!(message.contains("typo-bot"), "{message}");
+        assert!(message.contains("bobmatnyc"), "{message}");
+    }
+
+    /// Why (#2121): `null` is the documented way to clear `gh_user`, so an
+    /// empty or whitespace-only string is a client mistake, not an unset.
+    /// Test: itself.
+    #[test]
+    fn validate_gh_user_rejects_a_blank_login() {
+        for blank in ["", "   "] {
+            let (status, message) =
+                validate_gh_user_login(blank, Some(&two_accounts())).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(message.contains("null"), "{message}");
+        }
+    }
+
+    /// Why (#2121): on a host where `gh` is installed but nobody is logged in,
+    /// "not one of: " with an empty list would be a useless message.
+    /// Test: itself.
+    #[test]
+    fn validate_gh_user_rejects_a_host_with_no_accounts() {
+        let probe = GhAuthProbe::Answered(GhAccountStatus::default());
+        let (status, message) = validate_gh_user_login("bobmatnyc", Some(&probe)).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(message.contains("gh auth login"), "{message}");
+    }
+
+    /// Why (#5032/#2121): "`gh` says no" and "I could not ask `gh`" are
+    /// different facts. An unanswerable probe must not be reported as a bad
+    /// login (400) and must not be stored either.
+    /// Test: itself.
+    #[test]
+    fn validate_gh_user_is_503_when_gh_could_not_answer() {
+        let probe = GhAuthProbe::Inconclusive("`gh` could not be run".to_string());
+        let (status, message) = validate_gh_user_login("bobmatnyc", Some(&probe)).unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(message.contains("could not be verified"), "{message}");
+
+        let (status, _) = validate_gh_user_login("bobmatnyc", None).unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Seed an isolated daemon holding one registered project.
+    async fn state_with_widget() -> (Arc<DaemonState>, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let state = Arc::new(DaemonState::with_root_isolated_managed(tmp.path().to_owned()).await);
+        state
+            .project_registry()
+            .await
+            .register(Project {
+                name: "widget".into(),
+                repo_url: "https://github.com/acme/widget".into(),
+                default_branch: "main".into(),
+                stack_hint: None,
+                tags: vec![],
+                description: None,
+                gh_user: Some("bob-duetto".into()),
+                gh_account: None,
+                github: None,
+                commit_name: None,
+                commit_email: None,
+                worktree: None,
+            })
+            .await
+            .expect("seed register");
+        (state, tmp)
+    }
+
+    /// Why (#2121): the accepted arm end-to-end — a verified login reaches the
+    /// store, in `gh`'s spelling.
+    /// Test: itself.
+    #[tokio::test]
+    async fn patch_persists_a_gh_user_gh_reports_as_logged_in() {
+        let (state, _tmp) = state_with_widget().await;
+        let resp = patch_project_registry_with_probe(
+            Arc::clone(&state),
+            "widget".into(),
+            PatchProjectBody {
+                gh_user: Some(Some("BobMatNyc".into())),
+                ..Default::default()
+            },
+            Some(two_accounts()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let stored = state
+            .project_registry()
+            .await
+            .get("widget")
+            .await
+            .expect("stored");
+        assert_eq!(stored.gh_user.as_deref(), Some("bobmatnyc"));
+    }
+
+    /// Why (#2121): the rejected arm end-to-end — the defect this fixes was
+    /// store-and-continue, so the assertion that matters is that the persisted
+    /// record is byte-identical to what it was before the request.
+    /// Test: itself.
+    #[tokio::test]
+    async fn patch_rejects_an_unknown_gh_user_and_leaves_the_store_untouched() {
+        let (state, _tmp) = state_with_widget().await;
+        let before = state
+            .project_registry()
+            .await
+            .get("widget")
+            .await
+            .expect("seeded");
+
+        let resp = patch_project_registry_with_probe(
+            Arc::clone(&state),
+            "widget".into(),
+            PatchProjectBody {
+                // A description edit rides along to prove the WHOLE request is
+                // rejected, not just the offending field.
+                description: Some(Some("should not persist".into())),
+                gh_user: Some(Some("typo-bot".into())),
+                ..Default::default()
+            },
+            Some(two_accounts()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let after = state
+            .project_registry()
+            .await
+            .get("widget")
+            .await
+            .expect("still there");
+        assert_eq!(after, before);
+    }
+
+    /// Why (#2121): clearing with `null`, and every request that does not
+    /// mention `gh_user`, must stay free of any `gh auth status` requirement —
+    /// so no probe is taken and none is needed.
+    /// Test: itself.
+    #[tokio::test]
+    async fn patch_clears_gh_user_without_a_probe() {
+        let (state, _tmp) = state_with_widget().await;
+        let resp = patch_project_registry_with_probe(
+            Arc::clone(&state),
+            "widget".into(),
+            PatchProjectBody {
+                gh_user: Some(None),
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .project_registry()
+                .await
+                .get("widget")
+                .await
+                .expect("stored")
+                .gh_user,
+            None
+        );
+    }
 
     /// A full register body deserializes with every field populated.
     #[test]
