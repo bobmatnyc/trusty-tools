@@ -643,6 +643,50 @@ fn has_file_write_redirection_ignores_quoted_gt() {
 }
 
 #[test]
+fn has_file_write_redirection_ignores_heredoc_body() {
+    // #5356: a `>` in here-document body text is script content, not a
+    // redirect. Both spellings of the issue's reproduction.
+    assert!(!has_file_write_redirection(
+        "python3 <<'PY'\nprint([k for k in d if len(k) > 3])\nPY"
+    ));
+    assert!(!has_file_write_redirection("cat <<EOF\nspec -> code\nEOF"));
+}
+
+#[test]
+fn has_file_write_redirection_detects_redirect_on_a_heredoc_operator_line() {
+    // #5356 must not fail open: only the BODY is data. A redirect on the
+    // operator line, or after the terminator, is still a file write.
+    assert!(has_file_write_redirection(
+        "python3 <<'PY' > out.rs\nprint(1)\nPY"
+    ));
+    assert!(has_file_write_redirection(
+        "python3 <<'PY'\nprint(1)\nPY\necho done > f.rs"
+    ));
+}
+
+#[test]
+fn evaluate_bash_command_allows_readonly_heredoc_script() {
+    // #5356 end-to-end through the classifier: the read-only heredoc that was
+    // classified as a shell file edit (and so consumed the PM's per-turn
+    // file-change budget) now allows.
+    assert_eq!(
+        evaluate_bash_command(
+            "python3 <<'PY'\nimport json\nd = json.load(open('/tmp/x.json'))\nprint([k for k in d if len(k) > 3])\nPY"
+        ),
+        None
+    );
+}
+
+#[test]
+fn evaluate_bash_command_denies_heredoc_with_real_redirect() {
+    // The still-denies arm of #5356.
+    assert_eq!(
+        evaluate_bash_command("python3 <<'PY' > src/lib.rs\nprint(1)\nPY"),
+        Some(SHELL_EDIT_REASON)
+    );
+}
+
+#[test]
 fn evaluate_bash_command_allows_quoted_substitution_prose() {
     // `$(`/backtick inside SINGLE quotes is literal; inside DOUBLE quotes it is
     // still live and a forbidden body still denies.

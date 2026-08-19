@@ -295,6 +295,40 @@ fn pm_guard_denies_forbidden_bash_verb_after_budget_exhausted() {
 }
 
 #[test]
+fn pm_guard_readonly_heredoc_turn_never_touches_the_file_change_budget() {
+    // #5356: a read-only `python3 <<'PY'` script whose body compares with `>`
+    // was classified as a shell file edit, so three such reads were allowed
+    // silently while consuming the budget and the fourth was denied as
+    // "PM file-change budget 3/3 used this turn" with zero files changed.
+    // Pre-fix this test fails twice over: the fourth call denies, and the
+    // counter file exists.
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"issue-5356","tool_name":"Bash","tool_input":{"command":"python3 <<'PY'\nimport json\nd = json.load(open('/tmp/x.json'))\nprint([k for k in d if len(k) > 3])\nPY"}}"#;
+    for n in 1..=4 {
+        assert_eq!(
+            run_pm_guard(payload, &[("HOME", &home_s)]).trim(),
+            "",
+            "call {n} reads a file and writes none — it must be allowed"
+        );
+    }
+    let counter = home.path().join(".trusty-mpm/state/pm_guard_turn_budget");
+    assert!(
+        !counter.exists(),
+        "a read-only turn must not record a file change at {}",
+        counter.display()
+    );
+
+    // The still-denies arm: the same heredoc with a real redirect on its
+    // operator line is a file write, and exhausts the budget as before.
+    let writing = r#"{"hook_event_name":"PreToolUse","session_id":"issue-5356","tool_name":"Bash","tool_input":{"command":"python3 <<'PY' > src/lib.rs\nprint(1)\nPY"}}"#;
+    for _ in 1..=3 {
+        assert_eq!(run_pm_guard(writing, &[("HOME", &home_s)]).trim(), "");
+    }
+    assert_denied(&run_pm_guard(writing, &[("HOME", &home_s)]));
+}
+
+#[test]
 fn pm_guard_allows_read_tool() {
     let stdout = run_pm_guard(
         r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/x/a.rs"}}"#,
