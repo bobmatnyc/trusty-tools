@@ -213,6 +213,11 @@ pub use stderr_piped::{StderrPipedSpawn, disclaimed_stderr_piped_spawn};
 mod stdout_piped;
 pub use stdout_piped::{StdoutPipedSpawn, disclaimed_stdout_piped_spawn};
 
+// #5969: every other spawn shape here waits unbounded, which hung `tm` on a
+// wedged `claude --version`; this one carries a deadline.
+mod timeout;
+pub use timeout::disclaimed_stdout_with_timeout;
+
 /// Trait-object alias for a spawned child's writable stdin, uniform across
 /// the native (`tokio::process::ChildStdin`) and macOS-disclaimed
 /// (`tokio::net::unix::pipe::Sender`) spawn paths so callers ([`PipedSpawn`])

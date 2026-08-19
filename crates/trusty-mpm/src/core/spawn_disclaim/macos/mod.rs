@@ -115,6 +115,34 @@ pub(super) fn wait_for(pid: libc::pid_t) -> io::Result<ExitStatus> {
     }
 }
 
+/// Poll `pid` without blocking: `Some(status)` once it has exited.
+///
+/// Why: [`wait_for`] blocks with no bound, so a wedged child hangs its caller
+/// forever — a `claude --version` probe stalled a live `tm` session launch
+/// (#5969). A `WNOHANG` variant lets the `timeout` module bound the wait and
+/// kill the child when the deadline passes.
+/// What: `waitpid(pid, WNOHANG)` through `EINTR`; `rc == 0` means the child is
+/// still running, so `Ok(None)`.
+/// Test: `spawn_disclaim::timeout`'s `disclaimed_stdout_with_timeout_*` tests.
+pub(super) fn try_wait_for(pid: libc::pid_t) -> io::Result<Option<ExitStatus>> {
+    loop {
+        let mut status: libc::c_int = 0;
+        // SAFETY: `waitpid` writes only into `status`; `pid` is our child.
+        let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if rc == -1 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(e);
+        }
+        if rc == 0 {
+            return Ok(None);
+        }
+        return Ok(Some(ExitStatus::from_raw(status)));
+    }
+}
+
 /// Create a pipe whose BOTH ends are `FD_CLOEXEC`.
 ///
 /// Why: the read (or write) end kept by the parent must not leak into
