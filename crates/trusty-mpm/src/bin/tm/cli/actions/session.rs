@@ -180,7 +180,8 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         deliverable: Option<String>,
     },
-    /// List managed sessions (session-manager MVP).
+    /// List managed sessions (session-manager MVP). Auto-prunes dead records;
+    /// pass `--no-prune` for a read that changes nothing.
     ///
     /// Why: operators need to see every managed session and its pending decision.
     /// What: GETs `/api/v1/sessions/managed` (with optional source_id filter) and
@@ -234,6 +235,18 @@ pub(crate) enum SessionAction {
         /// Has no effect on `--json` output (raw daemon response is always complete).
         #[arg(long)]
         all: bool,
+        /// Do NOT auto-prune dead records on this listing (#5950).
+        ///
+        /// Every listing decommissions confirmed-dead records by default
+        /// (#4702) — records whose workspace is gone, never a live session —
+        /// so `tm ls` stays usable instead of filling with tombstones. That
+        /// makes a read verb mutate, which is surprising during a census, so
+        /// this flag turns it off for one invocation: no decommission call, no
+        /// confirmation-marker write, no prune notice. The listing then shows
+        /// dead rows it would otherwise have hidden, because nothing swept
+        /// them.
+        #[arg(long)]
+        no_prune: bool,
     },
     /// Show recent activity for a managed session.
     ///

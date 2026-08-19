@@ -357,6 +357,7 @@ pub(crate) async fn session(
             source_id,
             current,
             all,
+            no_prune,
         } => {
             let sid: Option<String> = if current {
                 derive_source_id_from_cwd()
@@ -377,6 +378,8 @@ pub(crate) async fn session(
                 false,
                 sort,
                 filter,
+                // #5950: explicit opt-out from the default listing auto-prune.
+                no_prune,
             )
             .await?
         }

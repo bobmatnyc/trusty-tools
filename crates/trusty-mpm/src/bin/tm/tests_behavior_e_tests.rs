@@ -631,3 +631,79 @@ fn scope_for_display_hides_tombstone_by_default_and_all_shows_it() {
         "--all must list the tombstone at its original slot, in slot order"
     );
 }
+
+// ── `--no-prune` on both listing surfaces (#5950) ────────────────────────────
+
+/// Both `ls` surfaces accept `--no-prune`, and neither prunes-by-default flips.
+///
+/// Why (#5950): auto-pruning every listing is deliberate (#4702), but it makes
+/// a read verb mutate — three records were decommissioned during a fleet census
+/// that only asked for `--all --json`. The opt-out has to exist on the surface
+/// the operator actually types, which is `tm ls` as often as `tm sessions ls`.
+#[test]
+fn cli_parses_no_prune_on_both_listing_surfaces() {
+    let top = Cli::try_parse_from(["trusty-mpm", "ls", "--json", "--no-prune"]).unwrap();
+    match top.command.unwrap() {
+        Command::Ls { no_prune, json, .. } => {
+            assert!(no_prune, "top-level `tm ls --no-prune` must parse to true");
+            assert!(json);
+        }
+        other => panic!("expected top-level ls, got {other:?}"),
+    }
+
+    let sessions =
+        Cli::try_parse_from(["trusty-mpm", "sessions", "ls", "--all", "--no-prune"]).unwrap();
+    match sessions.command.unwrap() {
+        Command::Sessions {
+            action: SessionAction::Ls { no_prune, all, .. },
+        } => {
+            assert!(no_prune, "`tm sessions ls --no-prune` must parse to true");
+            assert!(all);
+        }
+        other => panic!("expected sessions ls, got {other:?}"),
+    }
+
+    // Absent the flag, the #4702 default is unchanged on both surfaces.
+    match Cli::try_parse_from(["trusty-mpm", "ls"])
+        .unwrap()
+        .command
+        .unwrap()
+    {
+        Command::Ls { no_prune, .. } => assert!(!no_prune),
+        other => panic!("expected top-level ls, got {other:?}"),
+    }
+    match Cli::try_parse_from(["trusty-mpm", "sessions", "ls"])
+        .unwrap()
+        .command
+        .unwrap()
+    {
+        Command::Sessions {
+            action: SessionAction::Ls { no_prune, .. },
+        } => assert!(!no_prune),
+        other => panic!("expected sessions ls, got {other:?}"),
+    }
+}
+
+/// The `ls` help states that a plain listing prunes (#5950 closure condition).
+///
+/// Why: the reporter's objection was not that pruning happens but that nothing
+/// at the call site said it would. A doc comment in `managed.rs` is not the
+/// call site an operator sees; `--help` is.
+#[test]
+fn ls_help_states_that_a_plain_listing_prunes() {
+    let render = |argv: &[&str]| {
+        Cli::try_parse_from(argv)
+            .expect_err("--help exits through clap's error channel")
+            .to_string()
+    };
+    for argv in [
+        ["trusty-mpm", "ls", "--help"].as_slice(),
+        ["trusty-mpm", "sessions", "ls", "--help"].as_slice(),
+    ] {
+        let help = render(argv);
+        assert!(
+            help.contains("prune"),
+            "`{argv:?}` help must tell the operator this listing prunes: {help}"
+        );
+    }
+}

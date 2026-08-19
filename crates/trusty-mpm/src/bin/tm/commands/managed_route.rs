@@ -452,6 +452,7 @@ mod tests {
                 source_id: None,
                 current: false,
                 all: false,
+                no_prune: false,
             }),
             Some(TrustyCommand::ManagedList)
         ));

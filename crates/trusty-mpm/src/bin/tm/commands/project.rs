@@ -11,10 +11,7 @@
 //! `project_init_keeps_existing_config` in `tests_behavior_a.rs`,
 //! `project_trust_grants_and_revokes` in `tests_project_trust_tests.rs`.
 
-use serde::Deserialize;
-
 use crate::cli::ProjectAction;
-use crate::types::ProjectRow;
 
 /// Resolve a `--dir` option to an absolute path, defaulting to the cwd.
 ///
@@ -36,10 +33,11 @@ pub(crate) fn resolve_dir(dir: Option<String>) -> anyhow::Result<std::path::Path
 /// hand-crafting HTTP requests. `Trust` additionally lets them consent to
 /// project-scope custom MCP bridging (issue #3033).
 /// What: `Init` registers the directory (`POST /projects`) and scaffolds a
-/// local `.trusty-mpm/`; `List` prints `GET /projects` with an
-/// `[mcp-trusted]` marker per project; `Info` prints the current directory's
-/// project via `GET /projects/current` plus its trust status; `Trust` is
-/// handled entirely locally by [`trust_cmd`] (no daemon round-trip — see its
+/// local `.trusty-mpm/`; `List` prints the persistent registry
+/// (`GET /api/v1/projects`, see [`list_rows`] for why not `GET /projects`)
+/// with an `[mcp-trusted]` marker per project; `Info` prints the current
+/// directory's project via `GET /projects/current` plus its trust status;
+/// `Trust` is handled entirely locally by [`trust_cmd`] (no daemon round-trip — see its
 /// own doc). Trust status in `List`/`Info` is read from the SAME local
 /// `core::project_trust` store `Trust` writes, never from the daemon.
 /// Test: `cli_parses_project_init`, `cli_parses_project_list`,
@@ -71,27 +69,10 @@ pub(crate) async fn project(
             println!("registered project '{name}' at {}", path.display());
         }
         ProjectAction::List => {
-            #[derive(Deserialize)]
-            struct Body {
-                projects: Vec<ProjectRow>,
-            }
-            let body: Body = client
-                .get(format!("{url}/projects"))
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            if body.projects.is_empty() {
-                println!("no projects registered");
-            }
-            for p in &body.projects {
-                let trust_marker = if trusty_mpm::core::project_trust::is_project_trusted(&p.path) {
-                    " [mcp-trusted]"
-                } else {
-                    ""
-                };
-                println!("{} {}{trust_marker}", p.name, p.path.display());
+            // #5994: rows come from the persistent registry, not the daemon's
+            // in-memory session-derived project map.
+            for row in list_rows(client, url).await? {
+                println!("{row}");
             }
         }
         ProjectAction::Info { dir } => {
@@ -116,6 +97,67 @@ pub(crate) async fn project(
         ProjectAction::Trust { dir, revoke } => trust_cmd(dir, revoke)?,
     }
     Ok(())
+}
+
+/// The lines `tm project list` prints, read from the PERSISTENT registry.
+///
+/// Why (#5994): this verb used to `GET /projects`, which is
+/// `DaemonState::projects` — an in-memory `HashMap` rebuilt on every daemon
+/// start and populated only from `config.yaml` and session history. On a host
+/// whose `~/.trusty-mpm/project-registry/projects.json`, `project_list` MCP
+/// tool, and `GET /api/v1/projects` route all listed five projects, that map
+/// was empty and the command printed "no projects registered". `/api/v1/projects`
+/// is the authoritative surface — it is served straight from the on-disk
+/// registry, and it is the same store the MCP tool reads — so this reads there.
+/// What: `GET /api/v1/projects` via [`trusty_mpm::client::DaemonClient::registry_list_projects`],
+/// rendered by the SAME [`crate::commands::projects::registry::render_project_line`]
+/// `tm projects list` uses, plus the `[mcp-trusted]` marker this verb has always
+/// carried. Trust is keyed on a local PATH and the registry record holds none,
+/// so the local alias store (`~/.trusty-mpm/project-paths.json`) supplies it;
+/// a project with no local alias simply gets no marker. Returns the rows
+/// instead of printing them so a test can assert both the endpoint and the text.
+/// Test: `project_list_reads_the_persistent_registry`,
+/// `project_list_row_marks_a_trusted_local_path`.
+pub(crate) async fn list_rows(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<String>> {
+    let projects = trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string())
+        .registry_list_projects(None)
+        .await?;
+    if projects.is_empty() {
+        return Ok(vec!["no projects registered".to_string()]);
+    }
+    let aliases = local_project_paths();
+    Ok(projects
+        .iter()
+        .map(|p| {
+            let trusted = aliases
+                .get(&p.name)
+                .is_some_and(|path| trusty_mpm::core::project_trust::is_project_trusted(path));
+            project_list_row(p, trusted)
+        })
+        .collect())
+}
+
+/// One `tm project list` row: the shared registry line plus the trust marker.
+pub(crate) fn project_list_row(p: &trusty_mpm::project::Project, trusted: bool) -> String {
+    let marker = if trusted { " [mcp-trusted]" } else { "" };
+    format!(
+        "{}{marker}",
+        crate::commands::projects::registry::render_project_line(p)
+    )
+}
+
+/// `alias → local path` from `~/.trusty-mpm/project-paths.json`, best-effort.
+///
+/// Why: an unreadable or absent alias store must degrade to "no marker", never
+/// fail the listing — the registry rows are the answer the operator asked for.
+fn local_project_paths() -> std::collections::HashMap<String, std::path::PathBuf> {
+    let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
+    trusty_mpm::core::project_aliases::ProjectAliasStore::load(&root)
+        .unwrap_or_default()
+        .list()
+        .iter()
+        .map(|e| (e.alias.clone(), e.path.clone()))
+        .collect()
 }
 
 /// `project trust` / `project trust --revoke` handler (issue #3033).
