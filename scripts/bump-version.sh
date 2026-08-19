@@ -22,18 +22,36 @@
 # easy-to-extend place that derives it). Finally it prints — but does NOT
 # execute — the `git tag` and `git push` commands.
 #
-# Test: `bash -n scripts/bump-version.sh` for syntax and `shellcheck
-# scripts/bump-version.sh` for lint. Functionally, the pure version-bump logic
-# lives in bump_semver()/read_package_version()/write_package_version(), which
-# can be exercised against a throwaway copy of a Cargo.toml without mutating any
-# real crate manifest (see the PR's verification notes).
+# FRAGMENT CONSUMPTION IS THE RELEASE CUT'S JOB, AND ONLY ITS JOB (#5674).
+# Assembly used to run unconditionally, right after `cargo update`, with no way
+# to ask for a bump without it. That is correct at a release cut and wrong every
+# other time: a bump landing in the same PR as its source change — a
+# cargo-semver-checks BREAK forcing one mid-PR, say — ate four in-flight
+# fragments on PR #5673, and `scripts/check_changelog_fragment.sh` then failed
+# that PR for lacking a fragment this script had just deleted. The repair was
+# manual (commit 879b5fe2 restored the fragments and reverted the CHANGELOG
+# section).
+#
+# `--no-changelog` is the opt-OUT, deliberately not an opt-in. A forgotten
+# opt-out costs a red gate on the PR — loud, and the fragments are recoverable
+# from git. A forgotten opt-in would publish a release whose CHANGELOG has no
+# section for it, which nothing checks and nobody sees until a reader looks for
+# an entry that is not there. The default therefore stays exactly what the
+# release path already relies on.
+#
+# Test: scripts/bump_version_selftest.sh drives the real script against a
+# throwaway workspace (WORKSPACE_ROOT derives from the script's own location)
+# with a stub `cargo` on PATH, and asserts both directions: the default consumes
+# fragments and writes the section, --no-changelog bumps the manifest and leaves
+# changelog.d/ untouched. `bash -n` and `shellcheck` cover syntax and lint.
 #
 # Usage:
-#   scripts/bump-version.sh <crate-dir> <major|minor|patch>
+#   scripts/bump-version.sh <crate-dir> <major|minor|patch> [--no-changelog]
 #
 # Example:
 #   scripts/bump-version.sh trusty-search patch
 #   scripts/bump-version.sh trusty-git-analytics minor
+#   scripts/bump-version.sh trusty-review minor --no-changelog
 
 set -euo pipefail
 
@@ -52,15 +70,21 @@ tag_prefix_for() {
 }
 
 usage() {
-  echo "Usage: scripts/bump-version.sh <crate-dir> <major|minor|patch>" >&2
+  echo "Usage: scripts/bump-version.sh <crate-dir> <major|minor|patch> [--no-changelog]" >&2
   echo "" >&2
   echo "  <crate-dir>            directory under crates/ (e.g. trusty-search)" >&2
   echo "  <major|minor|patch>    semver component to increment" >&2
+  echo "  --no-changelog         bump the manifest only; leave changelog.d/ alone" >&2
   echo "" >&2
   echo "Reads the package version from crates/<crate-dir>/Cargo.toml, bumps it," >&2
   echo "syncs Cargo.lock (cargo update -p <package> --precise <next>), assembles" >&2
   echo "the crate's changelog.d/ fragments into a [<next>] CHANGELOG section, and" >&2
   echo "PRINTS the tag/push commands for you to run (it never tags or pushes)." >&2
+  echo "" >&2
+  echo "Pass --no-changelog when the bump lands in the same PR as the source" >&2
+  echo "change it accompanies: the fragments belong to work still in flight, and" >&2
+  echo "consuming them fails that PR's changelog-fragment gate (issue #5674)." >&2
+  echo "A release cut takes no flag — assembly is what it is for." >&2
   exit 2
 }
 
@@ -158,6 +182,25 @@ write_package_version() {
 }
 
 main() {
+  # #5674: `--no-changelog` is the only flag, and it may sit anywhere in the
+  # argument list. Everything else is positional, exactly as before.
+  local assemble_changelog=1
+  local arg
+  local -a positional=()
+  for arg in "$@"; do
+    case "${arg}" in
+      --no-changelog) assemble_changelog=0 ;;
+      -*)
+        echo "ERROR: unknown option '${arg}'" >&2
+        usage
+        ;;
+      *) positional+=("${arg}") ;;
+    esac
+  done
+  # `${a[@]+"${a[@]}"}` — bash 3.2 treats an empty array as unbound under
+  # `set -u`, and the no-argument case must reach usage(), not a crash.
+  set -- ${positional[@]+"${positional[@]}"}
+
   [[ $# -ne 2 ]] && usage
 
   local crate_dir="$1" level="$2"
@@ -185,8 +228,9 @@ main() {
   # Pre-flight (BEFORE mutating any Cargo.toml): the changelog assembler must
   # exist and be executable. Failing here keeps the repo unmodified rather than
   # leaving it half-bumped (version edited but CHANGELOG never staged).
+  # Skipped under --no-changelog, which never calls the assembler at all.
   local changelog_script="${WORKSPACE_ROOT}/scripts/assemble-changelog.sh"
-  if [[ ! -x "${changelog_script}" ]]; then
+  if [[ "${assemble_changelog}" -eq 1 && ! -x "${changelog_script}" ]]; then
     echo "ERROR: ${changelog_script} is missing or not executable — refusing to" >&2
     echo "       bump ${manifest} to avoid leaving the repo half-bumped." >&2
     exit 1
@@ -210,10 +254,12 @@ main() {
   # re-run this script" warning. Validating first — fragments exist, categories
   # are known, no leftover `## [Unreleased]` section, `[next]` not already cut —
   # means a changelog problem costs nothing to recover from.
-  if ! "${changelog_script}" "${crate_dir}" "${next}" --check; then
-    echo "ERROR: changelog pre-flight failed for crates/${crate_dir}." >&2
-    echo "       Nothing has been modified — fix the fragments and re-run." >&2
-    exit 1
+  if [[ "${assemble_changelog}" -eq 1 ]]; then
+    if ! "${changelog_script}" "${crate_dir}" "${next}" --check; then
+      echo "ERROR: changelog pre-flight failed for crates/${crate_dir}." >&2
+      echo "       Nothing has been modified — fix the fragments and re-run." >&2
+      exit 1
+    fi
   fi
 
   write_package_version "${manifest}" "${current}" "${next}"
@@ -270,8 +316,13 @@ main() {
   # validated this exact operation, so a failure here is unexpected rather than
   # routine — but it is still fatal, and the fragments are left untouched on
   # any failure path inside the assembler.
-  echo "Assembling CHANGELOG section from changelog.d/ fragments ..." >&2
-  "${changelog_script}" "${crate_dir}" "${next}"
+  if [[ "${assemble_changelog}" -eq 1 ]]; then
+    echo "Assembling CHANGELOG section from changelog.d/ fragments ..." >&2
+    "${changelog_script}" "${crate_dir}" "${next}"
+  else
+    echo "Skipping changelog assembly (--no-changelog): crates/${crate_dir}/changelog.d/" >&2
+    echo "fragments are left in place for the release cut to consume." >&2
+  fi
 
   # No duplicate-`## [Unreleased]`-heading stopgap is needed any more. The old
   # one (issue #2793) existed because generate-changelog.sh ran
@@ -282,14 +333,26 @@ main() {
   # while a leftover one survives. The failure mode is not reachable.
 
   # Print — but DO NOT RUN — the manual tag/push commands (human stays in loop).
+  # Under --no-changelog there is no CHANGELOG.md edit to stage and no release
+  # to tag: the bump rides along in the PR that carries the source change, so
+  # naming a tag here would invite one to be cut off an unmerged branch.
   local tag="${prefix}-v${next}"
   echo "" >&2
   echo "Next steps (review, then run these yourself):" >&2
   echo "" >&2
-  echo "  git add crates/${crate_dir}/Cargo.toml crates/${crate_dir}/CHANGELOG.md Cargo.lock" >&2
-  echo "  git commit -m \"chore(release): ${crate_dir} ${next}\"" >&2
-  echo "  git tag ${tag}" >&2
-  echo "  git push origin ${tag}" >&2
+  if [[ "${assemble_changelog}" -eq 1 ]]; then
+    echo "  git add crates/${crate_dir}/Cargo.toml crates/${crate_dir}/CHANGELOG.md Cargo.lock" >&2
+    echo "  git commit -m \"chore(release): ${crate_dir} ${next}\"" >&2
+    echo "  git tag ${tag}" >&2
+    echo "  git push origin ${tag}" >&2
+  else
+    echo "  git add crates/${crate_dir}/Cargo.toml Cargo.lock" >&2
+    echo "  git commit -m \"chore: bump ${crate_dir} to ${next}\"" >&2
+    echo "" >&2
+    echo "No tag: --no-changelog bumps the manifest only. The release cut runs" >&2
+    echo "this script WITHOUT that flag, which assembles the fragments — the" >&2
+    echo "ones this run left in place — and prints the tag commands." >&2
+  fi
 }
 
 main "$@"

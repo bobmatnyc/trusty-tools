@@ -114,6 +114,32 @@ assert_eq "notify classifies the doctest result directly (#5998)" "1" \
 assert_eq "a cancelled shard is not laundered into red (#5998)" "1" \
   "$(grep -cF "needs['test-shard'].result == 'cancelled'" <<<"${notify_job}" || true)"
 
+# #5657: `notify-main-failure`'s `needs:` cannot name a job in another workflow
+# file, so `test-pointers.yml` was invisible to it — the doc-pointer lint sat red
+# on main for over 24 hours (runs 31587713536 to 31688534235) and no
+# `ci-red-main` issue was ever filed. That workflow now carries its own notifier,
+# on the same label and through the same classifier. Asserted by grep for the
+# same reason the ci.yml wiring above is: the script being correct proves
+# nothing while no workflow calls it.
+pointers_notify="$(sed -n '/^  notify-main-failure:/,$p' .github/workflows/test-pointers.yml)"
+assert_eq "test-pointers.yml has its own notifier (#5657)" "1" \
+  "$(grep -c '^  notify-main-failure:$' .github/workflows/test-pointers.yml || true)"
+assert_eq "it waits on the lint job itself" "1" \
+  "$(grep -cF "needs: [test-pointers]" <<<"${pointers_notify}" || true)"
+assert_eq "it classifies through classify-ci-results.sh" "1" \
+  "$(grep -c 'bash scripts/classify-ci-results\.sh' <<<"${pointers_notify}" || true)"
+assert_eq "it feeds the lint's own conclusion, unlaundered" "1" \
+  "$(grep -cF "test-pointers=\${{ needs['test-pointers'].result }}" <<<"${pointers_notify}" || true)"
+assert_eq "it files on the same ci-red-main label" "1" \
+  "$(grep -cF "const label = 'ci-red-main';" <<<"${pointers_notify}" || true)"
+# `always()` or the notifier itself is skipped by the very failure it reports.
+assert_eq "it runs even when the lint did not succeed" "1" \
+  "$(grep -c "if: always() && github.event_name == 'push'" <<<"${pointers_notify}" || true)"
+# And the run's own conclusion must follow the verdict, the same rule ci.yml's
+# notifier enforces — otherwise a cancelled lint still ends the run green.
+assert_eq "it fails the run on a non-green verdict" "1" \
+  "$(grep -c 'Fail this job on any non-green verdict' <<<"${pointers_notify}" || true)"
+
 # ---------------------------------------------------------------------------
 # detect-docs-only.sh
 # ---------------------------------------------------------------------------
@@ -256,8 +282,13 @@ EOF
 # run_gate <dir> <stub> [base-ref]  — base defaults to the `base-ref` branch.
 run_gate() {
   local dir="$1" stub="$2" base="${3:-base-ref}"
-  mkdir -p "${dir}/scripts"
+  # #5765: the gate sources scripts/lib/source_class.sh from its OWN directory,
+  # so the library travels with it into the throwaway repo. Copying the gate
+  # alone leaves it unable to start, and every case that expects exit 0 fails
+  # for a reason that has nothing to do with what it is testing.
+  mkdir -p "${dir}/scripts/lib"
   cp scripts/check-pr-version-bump.sh "${dir}/scripts/check-pr-version-bump.sh"
+  cp scripts/lib/source_class.sh "${dir}/scripts/lib/source_class.sh"
   (
     cd "${dir}" &&
       PR_VERSION_BUMP_BASE="${base}" \
@@ -757,16 +788,40 @@ pr_trigger_block() {
   ' "$1"
 }
 
-for wf in .github/workflows/test-pointers.yml .github/workflows/semver-checks.yml; do
-  assert_eq "${wf##*/}: pull_request trigger has no paths filter" "0" \
+# One job's block: from `  <name>:` to the next job at the same indent. Scoping
+# matters since #5657 gave test-pointers.yml a SECOND job — a notifier whose
+# job-level `if:` is required (it must run on push-to-main only, and never on a
+# PR). Counting `    if:` across the whole file would read that as the banned
+# thing. The ban is about the GATE job, which is a required context and must
+# never conclude `skipped`.
+job_block() {
+  awk -v job="  $2:" '
+    $0 == job { inblk = 1; next }
+    inblk && /^  [^[:space:]]/ { exit }
+    inblk { print }
+  ' "$1"
+}
+
+for entry in "test-pointers.yml test-pointers" "semver-checks.yml semver-checks"; do
+  # shellcheck disable=SC2086  # two fields, both known-safe literals
+  set -- ${entry}
+  wf=".github/workflows/$1"
+  gate="$(job_block "${wf}" "$2")"
+  assert_eq "$1: pull_request trigger has no paths filter" "0" \
     "$(grep -cE '^    paths(-ignore)?:' <<<"$(pr_trigger_block "${wf}")" || true)"
   # `    if:` at four-space indent is a JOB-level condition; step-level ones are
   # indented six and are the prescribed mechanism, so they must not be counted.
-  assert_eq "${wf##*/}: no job-level if: can skip the gate" "0" \
-    "$(grep -cE '^    if:' "${wf}" || true)"
-  assert_eq "${wf##*/}: has a no-op step that reports success" "1" \
-    "$(grep -cE "^      - name: No .* — nothing to (lint|compare)$" "${wf}" || true)"
+  assert_eq "$1: no job-level if: can skip the gate" "0" \
+    "$(grep -cE '^    if:' <<<"${gate}" || true)"
+  assert_eq "$1: has a no-op step that reports success" "1" \
+    "$(grep -cE "^      - name: No .* — nothing to (lint|compare)$" <<<"${gate}" || true)"
 done
+
+# The other half of that scoping: every job-level `if:` left in
+# test-pointers.yml belongs to the notifier, so the ban above cannot be evaded
+# by moving a condition onto a new job.
+assert_eq "test-pointers.yml: only the notifier carries a job-level if:" "1" \
+  "$(grep -cE '^    if:' .github/workflows/test-pointers.yml || true)"
 
 assert_eq "semver-checks runs on pull requests at all" "1" \
   "$(grep -c '^  pull_request:' .github/workflows/semver-checks.yml || true)"

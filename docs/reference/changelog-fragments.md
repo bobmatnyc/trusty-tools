@@ -61,6 +61,12 @@ heading between releases. At release time `scripts/bump-version.sh` calls
 fragments by category, writes one `## [<version>] — <date>` section, and deletes
 the consumed fragments in the same operation.
 
+A bump that is not a release cut must not do that. Pass
+`scripts/bump-version.sh <crate-dir> <level> --no-changelog` when the bump rides
+along in the PR carrying its source change: the fragments there belong to work
+still in flight, and consuming them makes this gate fail the PR for lacking a
+fragment the bump deleted (issue #5674).
+
 ## Recovering a Stale Section (`--merge`)
 
 Assembling is not coupled to publishing, so a `## [<version>]` section can exist

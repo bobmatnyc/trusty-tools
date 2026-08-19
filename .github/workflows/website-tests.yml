@@ -1,4 +1,7 @@
 # #5200: nothing in CI ran `website/`'s Vitest suite — this workflow does.
+# #5918: nothing ran `pnpm lint` over it either — the `Prettier + ESLint` job
+# at the bottom does, as a second, independent job. Both are ADVISORY: neither
+# is a required branch-protection context.
 #
 # The gap this closes: `scripts/detect-docs-only.sh` buckets `website/**` as
 # inert (same as `docs/**`) on the strength of a comment claiming the site
@@ -47,10 +50,12 @@
 # field keeps one source of truth, and the assertion makes a mis-resolution
 # fail loudly instead of running the suite under some other pnpm.
 #
-# NODE 20 — `website/` declares no `engines` field and has no `.nvmrc`. 20 is
-# the version every sibling workflow uses AND the lowest one all three
-# floors accept: vitest 4 wants `^20 || ^22 || >=24`, vite 6 wants
-# `^18 || ^20 || >=22`, SvelteKit 2 wants `>=18.13`.
+# NODE 22 — `website/` declares no `engines` field and has no `.nvmrc`. Both
+# jobs pin 22, which every floor accepts: vitest 4 wants `^20 || ^22 || >=24`,
+# vite 6 wants `^18 || ^20 || >=22`, SvelteKit 2 wants `>=18.13`. A local Node
+# on a different line can report `localStorage` failures in
+# `tests/theme.test.ts` that this runner does not — match the pin before
+# treating one as real.
 #
 # CHROMIUM — `tests/mobile-overflow.test.ts` launches a real browser to
 # measure `scrollWidth`; jsdom has no layout engine and cannot. That file's
@@ -157,3 +162,78 @@ jobs:
       - name: Run the website test suite
         working-directory: website
         run: pnpm run test
+
+  # #5918: nothing in CI ran `pnpm lint` over `website/`, and `main` carried a
+  # Prettier violation because of it. The gap is the same shape as the one this
+  # workflow was created for (#5200): `ci.yml`'s `ui-checks` matrix is the only
+  # other pnpm surface, every step in it is gated on `docs_only != 'true'`, and
+  # `scripts/detect-docs-only.sh:114` buckets `website/**` as docs-only — so a
+  # lint leg bolted onto that matrix would skip on exactly the PRs it exists to
+  # check. It goes here, beside the suite that already solved that.
+  #
+  # A SEPARATE JOB, not a step in `website-tests`. Two reasons. A Prettier nit
+  # and a broken assertion are different problems and deserve different red
+  # squares — as one job, whichever ran first would mask the other. And this job
+  # needs neither Chromium nor a `vite build`, so it settles in well under a
+  # minute while the suite takes up to twenty.
+  #
+  # ADVISORY, stated explicitly (#5918's third closure condition). Neither job
+  # in this workflow is a required branch-protection context — read the live
+  # list with `gh api repos/bobmatnyc/trusty-tools/branches/main/protection
+  # --jq '.required_status_checks.contexts'`, never a copy of it. A red lint
+  # here does not block a merge; it is a signal a reviewer is expected to read.
+  website-lint:
+    name: Prettier + ESLint
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      # Same pin-then-verify sequence as the job above, and for the same reason:
+      # `website/` pins an exact pnpm in `packageManager` and a shell at the repo
+      # root has no pin at all, so the version is READ rather than hardcoded.
+      - name: Read the pinned pnpm version from website/package.json
+        id: pin
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([0-9][0-9.]*\).*/\1/p' website/package.json)"
+          if [ -z "$version" ]; then
+            echo "::error::no pnpm@<version> found in website/package.json packageManager" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.pin.outputs.version }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: website/pnpm-lock.yaml
+
+      - name: Verify the resolved pnpm is the pinned one
+        run: |
+          set -euo pipefail
+          resolved="$(pnpm --version)"
+          expected="${{ steps.pin.outputs.version }}"
+          if [ "$resolved" != "$expected" ]; then
+            echo "::error::pnpm $resolved resolved, but website/package.json pins $expected" >&2
+            exit 1
+          fi
+          echo "pnpm $resolved matches the pin"
+
+      - name: Install dependencies
+        working-directory: website
+        run: pnpm install --frozen-lockfile
+
+      # `prettier --check . && eslint .` — the script `website/package.json`
+      # already defines, so a developer running `pnpm lint` locally runs exactly
+      # what this job runs. `pnpm format` writes the fixes.
+      - name: Lint the website
+        working-directory: website
+        run: pnpm run lint

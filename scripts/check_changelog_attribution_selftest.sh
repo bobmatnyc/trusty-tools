@@ -112,9 +112,12 @@ g() { git -C "$REPO" "$@"; }
 #   - every non-source shape the gate must keep ignoring
 # plus a second crate (`doomed`) that a later case dissolves.
 # ---------------------------------------------------------------------------
-mkdir -p "$REPO/scripts"
+mkdir -p "$REPO/scripts/lib"
 cp "$GATE_SOURCE" "$REPO/scripts/check_changelog_fragment.sh"
 cp "$SCRIPT_DIR/assemble-changelog.sh" "$REPO/scripts/"
+# #5765: the gate sources its path classification from `scripts/lib/` beside
+# itself, so the library travels with it into the synthetic repo.
+cp "$SCRIPT_DIR/lib/source_class.sh" "$REPO/scripts/lib/"
 
 new_crate() {
   local name="$1" dir="$REPO/crates/$1"

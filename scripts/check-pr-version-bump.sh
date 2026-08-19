@@ -30,6 +30,13 @@
 #        still goes red, which is the cost #4421 is about. (The louder half
 #        landed anyway — see ci.yml's notify job, #4179.)
 #
+# SOURCE CLASSIFICATION (#5765): what counts as `crates/<X>/src/**` is
+#   `scripts/lib/source_class.sh`, shared with
+#   `scripts/check_changelog_fragment.sh`. Read that file's THE RULING section
+#   before changing this gate's reach — it records why this gate counts a test
+#   file as source and the changelog gate does not, which is the disagreement
+#   the shared definition exists to keep deliberate.
+#
 # What: for every crate whose `crates/<X>/src/**` changed between the merge
 #   base and HEAD:
 #     - crate absent at HEAD (deleted by the PR)  -> SKIP
@@ -79,11 +86,15 @@
 # Test: scripts/check-ci-helpers-selftest.sh (`check-pr-version-bump:` cases)
 #   exercises the crate-extraction and version-decision logic against synthetic
 #   diffs with the registry lookup stubbed; the live crates.io path is covered
-#   by running this script against a real branch (see the #4421 PR body).
+#   by running this script against a real branch (see the #4421 PR body). The
+#   shared path classification has its own fixtures in
+#   scripts/check_source_class_selftest.sh.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/source_class.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/source_class.sh"
 cd "${REPO_ROOT}"
 
 BASE="${PR_VERSION_BUMP_BASE:-origin/main}"
@@ -173,10 +184,18 @@ main() {
     return 1
   fi
 
+  # #5765: the definition of "crate source" is `scripts/lib/source_class.sh`,
+  # shared with scripts/check_changelog_fragment.sh. This gate applies
+  # `is_crate_src_path` ALONE and does NOT exempt test files: a crates.io
+  # tarball ships them, so editing one under an already-published version is
+  # the drift this gate exists to catch. That ruling, and why the changelog
+  # gate applies the opposite one to the same path, are recorded in that file.
   touched="$(
-    grep -E '^crates/[^/]+/src/' <<<"${changed}" |
-      cut -d/ -f2 |
-      sort -u
+    while IFS= read -r path; do
+      [ -n "${path}" ] || continue
+      is_crate_src_path "${path}" || continue
+      crate_of_src_path "${path}"
+    done <<<"${changed}" | sort -u
   )" || true
 
   if [ -z "${touched}" ]; then

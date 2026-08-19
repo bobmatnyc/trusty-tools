@@ -84,6 +84,26 @@ jobs:
       - name: Crate-attribution selftest (must not drop nested crate source)
         run: bash scripts/check_changelog_attribution_selftest.sh
 
+      # Shared-classification selftest (#5765): this gate's test-file exemption
+      # and `check-pr-version-bump.sh`'s lack of one used to be two independent
+      # path matches, so the same file — `crates/trusty-review/src/report/
+      # reporter_tests.rs` on PR #5764 — was source to one gate and not the
+      # other by accident. Both now read scripts/lib/source_class.sh. This
+      # re-proves the classification AND that neither gate has grown a private
+      # copy again, which is the only way the definitions can drift apart.
+      - name: Source-classification selftest (both gates share one definition)
+        run: bash scripts/check_source_class_selftest.sh
+
+      # Bump-mode selftest (#5674): `bump-version.sh` used to consume this
+      # crate's changelog.d/ fragments unconditionally, so a bump landing in the
+      # same PR as its source change deleted the fragments THIS gate then failed
+      # the PR for lacking (PR #5673). It runs here because the two scripts are
+      # two halves of one contract — the gate demands a fragment the bump must
+      # not eat — and proves both directions: --no-changelog leaves fragments in
+      # place, and a release cut still assembles them.
+      - name: Bump-mode selftest (a mid-PR bump must not eat fragments)
+        run: bash scripts/bump_version_selftest.sh
+
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
       # `base.sha` snapshot. checkout leaves refs/remotes/origin/<base> at
       # whatever it fetched; re-fetching pins it to the live tip so the merge

@@ -321,6 +321,15 @@ export function parseChangelog(
  * own path, and fails the build on anything it cannot resolve. Mutates the
  * tree in place, before any of it is serialised.
  *
+ * A link resolves against the changelog's own directory first. A BARE path
+ * (`docs/adr/0043-cargo-bin-policy.md` — no leading `./` or `../`) that
+ * resolves to nothing there is tried a second time against the repository
+ * root, which is what a fragment author writing that path meant (#5640). The
+ * order matters: the fallback fires only where the first reading found
+ * nothing, so a link that already resolved cannot change meaning. An href that
+ * states its base explicitly gets one reading, and an escaping link is refused
+ * before any fallback — `rootRelativeCandidate` below holds both rules.
+ *
  * Case 2 RECOVERS rather than failing, unlike the identical hazard in the doc
  * reader. The difference is who can fix it: a published page's author can add
  * the backticks, but a changelog is append-only history that this site must
@@ -399,35 +408,48 @@ function harden(
 			return;
 		}
 
-		const target = path.posix.normalize(path.posix.join(dir, rawTarget));
+		const relativeTarget = path.posix.normalize(path.posix.join(dir, rawTarget));
 
 		// A target outside the repository is a dead stop, never a guess. An
 		// earlier revision stripped the leading `../` and accepted whatever it
 		// landed on if that path existed — which turned
 		// `[the README](../../../README.md)` in a trusty-search changelog into a
 		// confident link to the repo-root README, with zero failures reported.
-		// A green build has to mean every link resolved as written.
-		if (target.startsWith('..')) {
+		// A green build has to mean every link resolved as written. The #5640
+		// fallback below is deliberately not reachable from here: an escaping
+		// link is refused before any second reading is attempted.
+		if (relativeTarget.startsWith('..')) {
 			failures.push({
 				code: CHANGELOG_CODES.BAD_LINK,
 				file,
 				line,
-				problem: `\`${href}\` resolves to \`${target}\`, outside the repository`,
+				problem: `\`${href}\` resolves to \`${relativeTarget}\`, outside the repository`,
 				remedy: `count the \`../\` from \`${dir}/\`, or write it as an absolute https:// URL`
 			});
 			return;
 		}
 
-		if (!probe(target)) {
-			failures.push({
-				code: CHANGELOG_CODES.BAD_LINK,
-				file,
-				line,
-				problem: `\`${href}\` resolves to \`${target}\`, which is not in the repository`,
-				remedy:
-					'point it at the file’s current path, write an absolute https:// URL, or drop the link and keep its text'
-			});
-			return;
+		// `undefined` once the two readings coincide (a changelog at the repo
+		// root), so the diagnostic never names one path as two candidates.
+		const candidate = rootRelativeCandidate(rawTarget);
+		const rootTarget = candidate === relativeTarget ? undefined : candidate;
+		let target = relativeTarget;
+		if (!probe(relativeTarget)) {
+			if (rootTarget === undefined || !probe(rootTarget)) {
+				failures.push({
+					code: CHANGELOG_CODES.BAD_LINK,
+					file,
+					line,
+					problem:
+						rootTarget === undefined
+							? `\`${href}\` resolves to \`${relativeTarget}\`, which is not in the repository`
+							: `\`${href}\` resolves to \`${relativeTarget}\` against \`${dir}/\` and to \`${rootTarget}\` against the repository root, and neither is in the repository`,
+					remedy:
+						'point it at the file’s current path, write an absolute https:// URL, or drop the link and keep its text'
+				});
+				return;
+			}
+			target = rootTarget;
 		}
 
 		// `blob/main`, not a pinned SHA: see `changelogUrl` in `site.ts`.
@@ -437,6 +459,38 @@ function harden(
 			rel: ['noreferrer', 'noopener']
 		};
 	});
+}
+
+/**
+ * Why: a fragment author writing `docs/adr/0043-cargo-bin-policy.md` means the
+ * path from the repository ROOT, and that reading is the one this checker had
+ * no way to try. Resolved only against `crates/<crate>/`, the link pointed at
+ * `crates/trusty-mpm/docs/adr/…`, the build gate failed the whole site, and
+ * every Vercel deploy from `d1774c81` on was red — six unrelated PRs inherited
+ * a check they had not caused and could only diagnose from raw Vercel logs
+ * (#5640).
+ *
+ * What: returns the repo-root reading of an href worth trying as a SECOND
+ * candidate, or `undefined` when there is no second reading to try. An href
+ * that opens with `./` or `../` states its base explicitly, so it gets one
+ * reading and one only; a bare path is the ambiguous shape, and its root
+ * reading is returned normalized. A root reading that escapes the repository
+ * is discarded here rather than offered, so the caller can never resolve a
+ * link to somewhere outside the tree.
+ *
+ * The caller tries the changelog-relative reading FIRST and falls back only
+ * when it resolves to nothing, so no link that already resolved can change
+ * meaning — which keeps this a strictly widening change to a release-adjacent
+ * gate.
+ *
+ * Test: `parse.test.ts` (`resolves a repo-root-relative link …` and the
+ * precedence and escape cases beside it).
+ */
+function rootRelativeCandidate(rawTarget: string): string | undefined {
+	if (rawTarget.startsWith('./') || rawTarget.startsWith('../')) return undefined;
+	const normalized = path.posix.normalize(rawTarget);
+	if (normalized.startsWith('..')) return undefined;
+	return normalized;
 }
 
 /** Turns one `h2` into a release, or records why it is not one. */

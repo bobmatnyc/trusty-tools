@@ -74,6 +74,8 @@ on:
       - "Cargo.lock"
       - "scripts/check-version-parity.sh"
       - "scripts/check-pr-version-bump.sh"
+      - "scripts/lib/source_class.sh"
+      - "scripts/check_source_class_selftest.sh"
       - "scripts/check_scan_floor_selftest.sh"
       - ".github/workflows/version-parity.yml"
   # Every three hours. Fine-grained enough that a publish is caught in one
@@ -180,6 +182,18 @@ jobs:
       - name: Publish-order selftest (optional + dev dep edges must order first)
         if: steps.gate.outputs.run_check == 'true'
         run: bash scripts/publish-dry-run-order_selftest.sh
+
+      # Shared-classification selftest (#5765). This gate decides which crates
+      # it examines from `scripts/lib/source_class.sh`, shared with
+      # `scripts/check_changelog_fragment.sh` — the two used to carry
+      # independent path matches that disagreed about a test file under src/.
+      # Run here as well as in changelog-fragment.yml because both consumers
+      # should refuse to run against a broken definition, and this is the
+      # required context of the two. Pure shell, no network, well under a
+      # second.
+      - name: Source-classification selftest (both gates share one definition)
+        if: steps.gate.outputs.run_check == 'true'
+        run: bash scripts/check_source_class_selftest.sh
 
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
       # `base.sha` snapshot. checkout leaves refs/remotes/origin/<base> at

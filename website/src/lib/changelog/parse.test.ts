@@ -281,6 +281,57 @@ describe('links and metavariables inside an item', () => {
 		}
 	});
 
+	/**
+	 * The exact entry `d1774c81` added, replayed verbatim. Every Vercel deploy
+	 * from that commit on failed on it: `docs/adr/0043-cargo-bin-policy.md` is
+	 * the path from the repository root, and the checker only ever tried
+	 * `crates/trusty-mpm/docs/adr/…` (#5640).
+	 */
+	it('resolves a repo-root-relative link that does not exist beside the changelog', () => {
+		const { releases, failures } = withProbe(
+			item('see [ADR-0043](docs/adr/0043-cargo-bin-policy.md)'),
+			['docs/adr/0043-cargo-bin-policy.md']
+		);
+		expect(failures).toEqual([]);
+		expect(releases[0].categories[0].items[0].html).toContain(
+			'href="https://github.com/bobmatnyc/trusty-tools/blob/main/docs/adr/0043-cargo-bin-policy.md"'
+		);
+	});
+
+	// Precedence, not preference: the fallback fires only where the first
+	// reading found nothing, so a link that already resolved beside the
+	// changelog keeps resolving there even when the same path exists at the
+	// root. Without this the #5640 widening would silently re-point links.
+	it('prefers the changelog-relative reading when both readings exist', () => {
+		const { releases, failures } = withProbe(item('see [readme](README.md)'), [
+			'crates/trusty-mpm/README.md',
+			'README.md'
+		]);
+		expect(failures).toEqual([]);
+		expect(releases[0].categories[0].items[0].html).toContain(
+			'blob/main/crates/trusty-mpm/README.md'
+		);
+	});
+
+	// An href that states its base explicitly gets one reading. `./` and `../`
+	// mean "from here", so a root file with the same name must not rescue them.
+	it('does not fall back to the repository root for an explicitly relative link', () => {
+		for (const href of ['./docs/x.md', '../docs/x.md']) {
+			const { failures } = withProbe(item(`[x](${href})`), ['docs/x.md']);
+			expect(
+				failures.map((f) => f.code),
+				href
+			).toEqual(['CHANGELOG-BAD-LINK']);
+		}
+	});
+
+	it('names both readings it tried when neither resolves', () => {
+		const { failures } = withProbe(item('[x](docs/specs/gone.md)'), []);
+		expect(failures).toHaveLength(1);
+		expect(failures[0].problem).toContain('crates/trusty-mpm/docs/specs/gone.md');
+		expect(failures[0].problem).toContain('`docs/specs/gone.md` against the repository root');
+	});
+
 	it('fails the build on a relative link whose target is not in the repository', () => {
 		const { failures } = withProbe(item('[gone](../../docs/specs/gone.md)'), []);
 		expect(failures).toHaveLength(1);
