@@ -73,7 +73,6 @@ pub fn build_router_with_self_origins(
     let router = Router::new()
         .route("/", get(|| async { Redirect::permanent("/ui/") }))
         .route("/health", get(health))
-        .route("/sse", get(sse_handler))
         .route("/indexes", get(list_indexes))
         .route(
             "/indexes/{id}/complexity_hotspots",
@@ -132,6 +131,22 @@ pub fn build_router_with_self_origins(
         .route("/ui", get(|| async { Redirect::permanent("/ui/") }))
         .route("/ui/", get(ui::ui_index_handler))
         .route("/ui/{*path}", get(ui::ui_asset_handler))
+        // #6018: blanket request deadline — the net under a handler that
+        // forgets to bound its own work, never the mechanism. Anything that
+        // reaches this layer is a handler bug, so it must lose every race
+        // against a working handler: its 504 body is empty, while the
+        // diagnostics handler's names the files and tools that were cut off.
+        // The timeout is DERIVED from the configured diagnostics deadline
+        // rather than hardcoded — a fixed 300 s held the ordering only at the
+        // default, and raising TRUSTY_DIAGNOSTICS_DEADLINE_SECS past 270 s
+        // inverted it on the exact remediation path the handler recommends.
+        // Applied BEFORE `/sse` is merged in, because `/sse` is a long-lived
+        // Server-Sent Events stream a request timeout would cut off.
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            crate::core::router_request_timeout(),
+        ))
+        .merge(Router::new().route("/sse", get(sse_handler)))
         .with_state(Arc::new(state));
     // #3304: router-wide same-origin write guard, applied AFTER all route
     // registration so every destructive route is covered.

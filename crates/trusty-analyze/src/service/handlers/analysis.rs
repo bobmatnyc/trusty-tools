@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     extract::{Path, Query, State},
@@ -316,17 +317,25 @@ pub struct DiagnosticsParams {
 ///
 /// Why: tree-sitter heuristics are uniform but shallow; real linters catch
 /// far more, but only when their binary is installed. This endpoint discovers
-/// what is available and runs it, file by file. Project-scoped tools (Roslyn)
-/// receive real on-disk paths via `root_path`; file-scoped tools write to a
-/// scratch dir as before.
+/// what is available and runs it, file by file. Project-scoped tools (clippy,
+/// Roslyn) receive real on-disk paths via `root_path` and build once per
+/// request; file-scoped tools write to a scratch dir as before.
 /// What: fetches the corpus, reconstructs whole-file content from chunks,
 /// fetches the index root_path via `GET /indexes/:id/status` (O(1) single-index
 /// lookup — issue #1013), then delegates all dispatch to
-/// `diagnostics_dispatch::run_diagnostics_blocking`. Results are sliced by
-/// `offset`+`limit` and returned with a pagination envelope.
+/// `diagnostics_dispatch::run_diagnostics_blocking` under a per-request
+/// deadline. Results are sliced by `offset`+`limit` and returned with a
+/// pagination envelope carrying `timed_out` / `cutoff`.
+///
+/// #6018: the request always answers with bytes. Three outcomes, all
+/// well-formed JSON — a complete report (`timed_out: false`), a partial report
+/// naming what the deadline cut off (`timed_out: true` plus `cutoff`), or, when
+/// even the grace window expires, HTTP 504 with an `error` body. What it never
+/// does again is run unbounded and let the client abandon the connection.
 /// Test: `diagnostics_endpoint_returns_empty_when_no_tools` boots the router
-/// with a stub client and confirms a well-formed empty response; pagination
-/// behaviour is unit-tested in `diagnostics_pagination_*` below.
+/// with a stub client and confirms a well-formed empty response; the deadline
+/// branch is proven in `dispatch_stops_at_deadline_and_reports_cutoff`;
+/// pagination behaviour is unit-tested in `diagnostics_pagination_*` below.
 pub async fn diagnostics_for_index(
     State(state): State<Arc<AnalyzerAppState>>,
     Path(id): Path<String>,
@@ -363,18 +372,49 @@ pub async fn diagnostics_for_index(
         .ok()
         .flatten();
 
-    // Heavy work (process spawns, blocking I/O) runs off the async runtime.
+    // Heavy work (process spawns, blocking I/O) runs off the async runtime,
+    // under a cooperative deadline the dispatch honours between spawns (#6018).
     let language_filter = params.language.clone();
-    let report: crate::core::DiagnosticsReport = tokio::task::spawn_blocking(move || {
+    // #6018: every rung of the request-timeout ladder — this deadline, the
+    // router's blanket layer, and the MCP client's own timeout — derives from
+    // `core::deadlines` so raising the deadline cannot invert the ordering.
+    let budget = crate::core::diagnostics_deadline();
+    let hard_budget = crate::core::diagnostics_handler_budget();
+    let file_count = by_file.len();
+    let deadline = Instant::now() + budget;
+    let task = tokio::task::spawn_blocking(move || {
         crate::service::diagnostics_dispatch::run_diagnostics_blocking(
             by_file,
             language_filter,
             tool_filter,
             root_path,
+            Some(deadline),
         )
-    })
-    .await
-    .map_err(|e| ApiError::internal(format!("diagnostics task panicked: {e}")))?;
+    });
+
+    // Outer net: one tool already running when the deadline passed can overrun
+    // it. Past `budget + grace` the handler stops waiting and answers 504 rather
+    // than holding the connection open indefinitely.
+    let report: crate::core::DiagnosticsReport = match tokio::time::timeout(hard_budget, task).await
+    {
+        Ok(joined) => {
+            joined.map_err(|e| ApiError::internal(format!("diagnostics task panicked: {e}")))?
+        }
+        Err(_) => {
+            tracing::warn!(
+                index_id = %id,
+                file_count,
+                budget_secs = budget.as_secs(),
+                "diagnostics dispatch overran its deadline plus grace; answering 504"
+            );
+            return Err(ApiError::gateway_timeout(format!(
+                "diagnostics for index '{id}' exceeded {}s over {file_count} files and was \
+                     abandoned with no partial result; narrow the request with ?language= or \
+                     ?tools=, or raise TRUSTY_DIAGNOSTICS_DEADLINE_SECS",
+                hard_budget.as_secs()
+            )));
+        }
+    };
 
     let total = report.diagnostics.len();
     let page: Vec<&crate::core::ToolDiagnostic> = report
@@ -395,6 +435,11 @@ pub async fn diagnostics_for_index(
         "truncated": truncated,
         "tools_run": report.tools_run,
         "tools_unavailable": report.tools_unavailable,
+        // #6018: `timed_out` is the flag a client checks; `cutoff` (absent on a
+        // complete run) names the files and tools the deadline skipped, so a
+        // truncated list can never be mistaken for a clean corpus.
+        "timed_out": report.cutoff.is_some(),
+        "cutoff": report.cutoff,
         "diagnostics": page,
     })))
 }

@@ -135,17 +135,6 @@ impl Response {
 
 /// Per-request timeout for the MCP→daemon HTTP client (in seconds).
 ///
-/// Why: the `deep_analysis` tool calls `POST /analyze/deep`, which in turn
-/// calls OpenRouter with up to 120 s allowed (matching `OPENROUTER_REQUEST_TIMEOUT_SECS`
-/// in `trusty-common/src/chat.rs`). Adding 30 s of headroom for report synthesis
-/// and network round-trips gives 150 s total — safely above the 120 s
-/// OpenRouter ceiling so slow or large-context models are not systematically
-/// killed at the MCP transport layer before the daemon's own timeout fires.
-/// What: sets the per-request timeout passed to `reqwest::ClientBuilder`.
-/// Test: `mcp_client_timeout_exceeds_openrouter_ceiling` asserts this value
-/// is strictly greater than 120 (the OpenRouter maximum).
-const DEEP_ANALYSIS_MCP_TIMEOUT_SECS: u64 = 150;
-
 /// MCP dispatcher backed by an HTTP client targeting the analyzer daemon.
 #[derive(Clone)]
 pub struct AnalyzerMcpServer {
@@ -156,21 +145,24 @@ pub struct AnalyzerMcpServer {
 impl AnalyzerMcpServer {
     /// Why: without timeouts MCP tool calls hang forever if the analyze daemon
     /// is slow or unresponsive, blocking the entire stdio dispatch loop. The
-    /// per-request timeout is set to [`DEEP_ANALYSIS_MCP_TIMEOUT_SECS`] (150 s)
-    /// so LLM-backed tools like `deep_analysis` — which can take up to the
-    /// OpenRouter 120 s ceiling plus synthesis headroom — complete without
-    /// being aborted at the transport layer.
-    /// What: builds a `reqwest::Client` with a 150 s per-request timeout and a
-    /// 5 s TCP connect timeout. The connect timeout is kept short because the
-    /// daemon is always local; the long request timeout is required only for
-    /// the LLM call path.
-    /// Test: `cargo test -p trusty-analyze -- mcp` exercises dispatch paths;
-    /// `mcp_client_timeout_exceeds_openrouter_ceiling` asserts the const value.
+    /// value must clear two independent floors: the OpenRouter 120 s ceiling
+    /// `deep_analysis` can spend, and the diagnostics handler's own budget. It
+    /// used to be a flat 150 s, which cleared the first and missed the second —
+    /// below the 180 s diagnostics deadline, so `run_diagnostics` handed an MCP
+    /// caller a body-less transport timeout for any run between 150 s and the
+    /// daemon's answer. That is the exact #6018 symptom the deadline was added
+    /// to remove, reintroduced one layer out.
+    /// What: builds a `reqwest::Client` whose per-request timeout comes from
+    /// `core::deadlines::mcp_client_timeout()` — the outermost rung of the
+    /// shared ladder, so it tracks the configured deadline instead of drifting
+    /// from it. The 5 s TCP connect timeout stays short because the daemon is
+    /// always local.
+    /// Test: `mcp_client_timeout_outlives_the_daemon_and_openrouter`;
+    /// `ladder_is_strictly_increasing_across_the_configurable_range` pins the
+    /// ordering across the whole configurable range.
     pub fn new(base_url: impl Into<String>) -> Self {
         let http = reqwest::ClientBuilder::new()
-            .timeout(std::time::Duration::from_secs(
-                DEEP_ANALYSIS_MCP_TIMEOUT_SECS,
-            ))
+            .timeout(crate::core::mcp_client_timeout())
             .connect_timeout(std::time::Duration::from_secs(5))
             .build()
             .expect("reqwest ClientBuilder is infallible with valid config");

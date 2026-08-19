@@ -21,6 +21,7 @@ pub mod client;
 pub mod complexity;
 pub mod complexity_ts;
 pub mod concept_cluster;
+pub mod deadlines;
 pub mod explain;
 pub mod facts;
 pub mod github;
@@ -40,6 +41,10 @@ pub mod tools;
 pub use client::{IndexSummary, TrustySearchClient};
 pub use complexity::compute_complexity_for;
 pub use concept_cluster::{bow_embedding, cluster, ClusterResult, ConceptCluster};
+pub use deadlines::{
+    diagnostics_deadline, diagnostics_handler_budget, mcp_client_timeout, router_request_timeout,
+    DIAGNOSTICS_HARD_GRACE,
+};
 pub use explain::{
     build_explain_prompt, deep_analysis, explain_report, render_text as render_deep_analysis_text,
     DeepAnalysisError, DeepAnalysisReport,
@@ -59,7 +64,9 @@ pub use review::{
 pub use scip::{extract_kg_from_scip, index_to_graph as scip_index_to_graph, ScipIngestSummary};
 pub use scip_overlay::{overlay_path_beside_facts, ScipOverlayRecord, ScipOverlayStore};
 pub use tool_registry::{global_registry, ToolRegistry};
-pub use tools::{DiagnosticsReport, Severity as DiagnosticSeverity, StaticTool, ToolDiagnostic};
+pub use tools::{
+    DeadlineCutoff, DiagnosticsReport, Severity as DiagnosticSeverity, StaticTool, ToolDiagnostic,
+};
 
 #[cfg(test)]
 mod integration_tests;

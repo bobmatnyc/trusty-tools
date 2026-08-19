@@ -286,6 +286,25 @@ impl ApiError {
             message: msg.into(),
         }
     }
+
+    /// 504 — the handler's own work exceeded its per-request deadline (#6018).
+    ///
+    /// Why: `GET /indexes/{id}/diagnostics` used to run unbounded, so a client
+    /// hit its read timeout and saw a transport-level abandon — zero bytes, no
+    /// status line, nothing to distinguish "still working" from "daemon dead".
+    /// A 504 with a JSON body says which request was abandoned and how to make
+    /// it fit.
+    /// What: builds an `ApiError` at `GATEWAY_TIMEOUT`; `IntoResponse` renders
+    /// it as `{"error": "<msg>"}` like every other variant.
+    /// Test: the timeout branch is exercised through
+    /// `dispatch_stops_at_deadline_and_reports_cutoff`; the response shape is
+    /// shared with the other constructors.
+    pub fn gateway_timeout(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            message: msg.into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
