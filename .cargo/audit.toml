@@ -1,0 +1,25 @@
+# cargo-audit configuration — read automatically from `.cargo/audit.toml` at the
+# workspace root by the `cargo audit` leg of `.github/workflows/pre-publish.yml`
+# (Gate 2) and by `.github/workflows/cargo-audit.yml` (the weekly cron).
+#
+# SCOPE: this file exists ONLY to hold time-boxed advisory deferrals. It is not a
+# place to turn the gate down. Every entry names one advisory id, and the comment
+# above it says who deferred it, when, and what clears it.
+#
+# NO EXPIRY FIELD EXISTS HERE. cargo-audit's ignore list is a bare array of ids
+# with no expiry support, unlike cargo-deny's `{ id, expires, reason }` form. The
+# EXPIRY FOR THIS DEFERRAL IS RECORDED IN `deny.toml` (`[advisories].ignore`,
+# `expires = "2026-09-18"`), and cargo-deny fails the build once that date
+# passes. Both tools read the same RustSec database and both legs must be green,
+# so the cargo-deny expiry is what re-opens this file's entry too — remove the id
+# here in the same change that removes it there.
+
+[advisories]
+# RUSTSEC-2026-0258 — h2 unbounded empty DATA frames, published 2026-08-17, low
+# severity. h2 appears twice in the graph: 0.4.14 (patched in 0.4.16) and 0.3.27
+# (a line the advisory never patched), so no `cargo update` clears both — the
+# real fix is a hyper 0.14 -> 1.x move in the transitive graph.
+#
+# Owner ruling 2026-08-19: "this is an expedited release. We will handle
+# dependabot in a subsequent release."
+ignore = ["RUSTSEC-2026-0258"]

@@ -909,7 +909,9 @@ pub mod health_probe;
 /// ONE entry point rather than across ~133 `Client::builder()` sites.
 /// What: Exposes [`http_client::loopback_client_builder`] (the primitive, no
 /// timeout policy), [`http_client::loopback_client`] (standard bounds), and
-/// [`http_client::blocking_loopback_client_builder`] behind `blocking-http`.
+/// `http_client::blocking_loopback_client_builder` behind `blocking-http` — the
+/// last is left unlinked because it does not exist when that feature is off
+/// (#6027).
 /// Public-internet callers (crates.io, inference providers, the GitHub API)
 /// deliberately do NOT route through here — they must keep honouring the
 /// operator's proxy.
