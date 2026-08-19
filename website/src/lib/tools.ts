@@ -221,7 +221,7 @@ export const TOOLS: Tool[] = [
 				'curl -fsSL https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/crates/trusty-audit/install.sh | sh',
 			note: 'One command, macOS on Apple Silicon only. It verifies the release tarball against its published SHA-256 before anything reaches your PATH, installs into ${CARGO_HOME:-$HOME/.cargo}/bin with an atomic rename, and then launches the binary.'
 		},
-		released: false,
+		released: true,
 		docsPath: null
 	}
 ];

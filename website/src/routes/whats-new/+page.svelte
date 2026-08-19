@@ -4,7 +4,7 @@
 	 * shipped; this page only organises them. Everything below is already HTML
 	 * by the time it arrives — parsed and serialised at build time by
 	 * `$lib/changelog` — so `{@html}` is placing markup this build produced from
-	 * six files in this repository, not rendering anything from a request.
+	 * files in this repository, not rendering anything from a request.
 	 *
 	 * What: one section per flagship in `RELEASED_FLAGSHIPS` order, each with
 	 * `id="<crate-name>"` so the landing page's "All changes →" lands on it.
@@ -19,7 +19,7 @@
 	let { data } = $props();
 
 	const description =
-		'What shipped in the six flagship trusty-tools crates, generated from the crates’ own CHANGELOG.md files.';
+		'What shipped in the flagship trusty-tools crates, generated from the crates’ own CHANGELOG.md files.';
 </script>
 
 <svelte:head>
@@ -171,7 +171,7 @@
 	<div class="card">
 		<h2 class="font-display text-xl font-semibold">The rest of the workspace</h2>
 		<p class="mt-2 text-sm text-foundry-secondary">
-			Only the six flagship crates are published here. Every other crate keeps its changelog
+			Only the flagship crates are published here. Every other crate keeps its changelog
 			alongside its source — see
 			<a
 				href={data.cratesDirUrl}

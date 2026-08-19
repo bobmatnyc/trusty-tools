@@ -49,8 +49,10 @@ export const FLAGSHIPS: Flagship[] = TOOLS;
  * Why a subset rather than `FLAGSHIPS`: `$lib/changelog/site` fails the build
  * for a crate whose `CHANGELOG.md` parses to zero release sections, because an
  * empty section is indistinguishable from "nothing shipped". trusty-audit is
- * `publish = false` and has no release tag, so it is carded and paged like the
- * rest and carries no strip until its first release (`Tool.released`).
+ * `publish = false` (it ships a signed binary via install script, not
+ * crates.io) but does cut its own tagged releases, so once its CHANGELOG.md
+ * carried a real `## [0.6.0]` heading it joined this set (`Tool.released`)
+ * like the rest.
  */
 export const RELEASED_FLAGSHIPS: Flagship[] = FLAGSHIPS.filter((f) => f.released);
 
@@ -60,13 +62,13 @@ export interface CrateGroup {
 }
 
 /**
- * Why: what a visitor wants below the six flagship cards is "what else can I
+ * Why: what a visitor wants below the flagship cards is "what else can I
  * install, and what is coming" — not an inventory of every workspace member.
  * Internal plumbing is deliberately absent: shared libraries (`trusty-common`,
  * `trusty-progress`), private launchers, release tooling, and sidecars that
  * are installed BY another crate rather than on their own (`trusty-embedderd`,
  * whose own README says it is not installed standalone) have nothing to offer
- * a reader here. The six flagships are carded above and are not repeated.
+ * a reader here. The flagships are carded above and are not repeated.
  *
  * What: two groups, split on release state rather than on subject matter.
  * Placement was checked per crate against crates.io and this repository's
@@ -76,7 +78,7 @@ export interface CrateGroup {
  *
  * Deliberately omitted here, like the crate COUNT above: any per-crate version
  * number. A number TYPED INTO THIS FILE is stale the next time that crate
- * ships. The six flagship cards do now show one, and that is not a reversal of
+ * ships. The flagship cards do now show one, and that is not a reversal of
  * the same rule — `$lib/changelog` derives it from the crate's own
  * `CHANGELOG.md` at build time, so it cannot disagree with the repository. The
  * rule is "never hand-write a version", not "never show one".

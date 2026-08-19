@@ -1,5 +1,5 @@
 /**
- * Why: the whole page is one build-time computation over six files that live
+ * Why: the whole page is one build-time computation over files that live
  * ABOVE `website/`, exactly like the doc reader (`src/routes/docs/[...slug]`).
  * Prerendering bakes the result into static HTML, so the published page reads
  * no changelog at request time and opens no connection to GitHub.
