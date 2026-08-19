@@ -273,8 +273,6 @@ crates/trusty-installer/src/commands/up/report.rs	verdict_matches_exit_code
 crates/trusty-installer/src/commands/up/stages.rs	sequence_console_starts_on_partial_core
 crates/trusty-installer/src/commands/up/stages.rs	sequence_core_down_skips_orchestrator
 crates/trusty-installer/src/commands/up/stages.rs	sequence_optin_off_skips_orchestrator
-crates/trusty-installer/src/download/fetch.rs	verify_sha256_match
-crates/trusty-installer/src/download/fetch.rs	verify_sha256_tampered
 crates/trusty-memory/src/bootstrap/mod.rs	bootstrap_palace_scans_cargo_toml
 crates/trusty-memory/src/bootstrap/mod.rs	bootstrap_palace_seeds_temporal_metadata_when_no_files
 crates/trusty-memory/src/bootstrap/scan.rs	read_origin_url_returns_none_for_non_git_dir

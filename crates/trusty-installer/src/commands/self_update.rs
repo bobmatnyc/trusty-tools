@@ -110,8 +110,13 @@ pub fn probe_install_dir(dir: &Path) -> WriteProbe {
 /// then calls `try_install_prebuilt("trusty-installer", &dir)` and either prints
 /// the restart hint or falls back to cargo with a truthful location message.
 ///
+/// #5518: a `ChecksumMismatch` outcome is the one case that does NOT fall back.
+/// It prints the mismatch as an error and exits 1, because a source build here
+/// would turn a tamper signal into a slower-but-successful self-update.
+///
 /// Test: `tests::outcome_installed_message`, `tests::probe_nonwritable_dir`,
-///       `tests::cargo_updated_different_dir`.
+///       `tests::cargo_updated_different_dir`,
+///       `tests::a_checksum_mismatch_aborts_self_update_without_a_cargo_fallback`.
 pub fn run(json: bool) -> i32 {
     let narr = narrator(json);
     let install_dir = resolve_install_dir();
@@ -147,17 +152,59 @@ pub fn run(json: bool) -> i32 {
         &install_dir,
     ));
 
-    match outcome {
-        Outcome::Installed { version, .. } => {
-            let msg = installed_message(&version);
+    match next_step(outcome) {
+        Next::Done(msg) => {
             let _ = narr.info(&msg);
             0
         }
-        Outcome::Fallback { reason } => {
-            tracing::info!(%reason, "prebuilt self-update unavailable");
-            let _ = narr.info(&format!("prebuilt unavailable: {reason}"));
+        Next::CargoFallback(msg) => {
+            let _ = narr.info(&msg);
             run_cargo_fallback(json, &install_dir)
         }
+        Next::Abort(msg) => {
+            let _ = narr.error(&msg);
+            1
+        }
+    }
+}
+
+/// What `run` does after the prebuilt attempt finishes.
+///
+/// Why: The abort-vs-fall-back choice is the whole of #5518 at this call site,
+/// and `run` itself cannot be unit-tested — it writes to the real install
+/// directory and shells out to cargo. Separating the DECISION from the effect
+/// makes "a checksum mismatch never reaches `cargo install`" a claim a test can
+/// check rather than one a reader has to take on trust.
+///
+/// What: Success narrates and stops; a routine failure narrates and falls back;
+/// a checksum mismatch narrates AS AN ERROR and stops.
+enum Next {
+    /// Installed. Narrate at info level, exit 0.
+    Done(String),
+    /// Prebuilt genuinely unavailable. Narrate at info level, then run cargo.
+    CargoFallback(String),
+    /// Terminal. Narrate at ERROR level, exit 1, never run cargo.
+    Abort(String),
+}
+
+/// Decide what follows a finished prebuilt self-update attempt.
+///
+/// # Postconditions
+/// A [`Outcome::ChecksumMismatch`] always yields [`Next::Abort`] — never
+/// [`Next::CargoFallback`]. A source build would leave the operator with a
+/// working `tctl` and no reason to look at why the prebuilt failed.
+///
+/// Test: `tests::a_checksum_mismatch_aborts_self_update_without_a_cargo_fallback`,
+/// `tests::an_absent_prebuilt_still_falls_back_to_cargo`.
+fn next_step(outcome: Outcome) -> Next {
+    match outcome {
+        Outcome::Installed { version, .. } => Next::Done(installed_message(&version)),
+        Outcome::Fallback { reason } => {
+            tracing::info!(%reason, "prebuilt self-update unavailable");
+            Next::CargoFallback(format!("prebuilt unavailable: {reason}"))
+        }
+        // #5518: a failed checksum is terminal — no cargo fallback, nonzero exit.
+        Outcome::ChecksumMismatch(mismatch) => Next::Abort(mismatch.to_string()),
     }
 }
 
@@ -368,6 +415,48 @@ mod tests {
             msg.contains("Restart to apply"),
             "should contain restart hint"
         );
+    }
+
+    /// Why: #5518 — `tctl self-update` used to print a checksum mismatch as
+    /// `prebuilt unavailable: …` at INFO level and then quietly build from
+    /// source, exiting 0. The operator saw a slow update, not a warning.
+    /// What: Feeds a mismatch to `next_step`; asserts it aborts (never the
+    /// cargo branch) and that the text it hands the narrator names the
+    /// condition and both digests.
+    /// Test: This is the test.
+    #[test]
+    fn a_checksum_mismatch_aborts_self_update_without_a_cargo_fallback() {
+        let outcome = Outcome::ChecksumMismatch(crate::download::ChecksumMismatch {
+            crate_name: "trusty-installer".to_owned(),
+            version: "0.8.0".to_owned(),
+            archive: "trusty-installer-0.8.0.tar.gz".to_owned(),
+            url: "https://example.invalid/asset.tar.gz".to_owned(),
+            expected: "a".repeat(64),
+            actual: "b".repeat(64),
+        });
+
+        let Next::Abort(msg) = next_step(outcome) else {
+            panic!("a failed checksum must never route into `cargo install`")
+        };
+        assert!(msg.contains("checksum mismatch"), "{msg}");
+        assert!(msg.contains(&"a".repeat(64)), "{msg}");
+        assert!(msg.contains(&"b".repeat(64)), "{msg}");
+        assert!(
+            !msg.contains("prebuilt unavailable"),
+            "must not read as a routine absence: {msg}"
+        );
+    }
+
+    /// Why: The abort must be specific to a failed checksum — a 404 on an
+    /// unbuilt platform is still a routine fallback.
+    /// What: Feeds a `Fallback` to `next_step`; asserts the cargo branch.
+    /// Test: This is the test.
+    #[test]
+    fn an_absent_prebuilt_still_falls_back_to_cargo() {
+        let outcome = Outcome::Fallback {
+            reason: "prebuilt binaries are not available for x86_64-freebsd".to_owned(),
+        };
+        assert!(matches!(next_step(outcome), Next::CargoFallback(_)));
     }
 
     /// Why: When cargo is absent, the fallback must give an actionable manual hint.
