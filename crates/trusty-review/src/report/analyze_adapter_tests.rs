@@ -9,6 +9,10 @@
 use super::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+/// A budget short enough to keep the transport tests fast and long enough that
+/// a loopback stub always beats it. Only the timeout tests want it hit.
+const CHEAP_TEST_BUDGET: Duration = Duration::from_secs(5);
+
 // ─── Severity map ────────────────────────────────────────────────────────────
 
 #[test]
@@ -330,13 +334,13 @@ async fn transport_failure_on_a_reused_connection_retries_once() {
     let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
 
     let first: serde_json::Value = src
-        .get_json("/indexes")
+        .get_json("/indexes", CHEAP_TEST_BUDGET)
         .await
         .expect("the first GET opens a connection and is answered");
     assert_eq!(first, serde_json::json!([]));
 
     let second: serde_json::Value = src
-        .get_json("/indexes/demo/diagnostics")
+        .get_json("/indexes/demo/diagnostics", CHEAP_TEST_BUDGET)
         .await
         .expect("a closed pooled connection must be retried on a fresh one");
     assert_eq!(second, serde_json::json!([]));
@@ -359,7 +363,7 @@ async fn a_connection_that_keeps_dying_is_retried_exactly_once() {
     let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
 
     let err = src
-        .get_json::<serde_json::Value>("/indexes")
+        .get_json::<serde_json::Value>("/indexes", CHEAP_TEST_BUDGET)
         .await
         .expect_err("a peer that answers nothing cannot succeed");
     assert!(
@@ -371,6 +375,222 @@ async fn a_connection_that_keeps_dying_is_retried_exactly_once() {
         2,
         "one original attempt plus one retry, and no more"
     );
+}
+
+// ─── Per-endpoint budgets and independence (#6041) ───────────────────────────
+
+/// Why (#6041): the adapter used one 15 s budget for every endpoint while
+/// trusty-analyze runs project-scoped clippy under a 180 s deadline, so the
+/// client gave up on a request the daemon answered 200 at 142 s. A client that
+/// gives up before the server's outermost rung turns every structured answer —
+/// including the daemon's own cutoff report — into a bare transport error.
+/// What: walks the configurable deadline range and asserts the client budget
+/// outlives the daemon's router rung (deadline + 30 s handler grace + 30 s
+/// router margin, from `trusty-analyze/src/core/deadlines.rs`) at every value.
+/// Test: This is the test. Fails against the old flat 15 s constant at every
+/// deadline.
+#[test]
+fn diagnostics_budget_outlives_the_daemon_deadline_ladder() {
+    for secs in [1u64, 60, 180, 270, 600, 3600] {
+        let deadline = Duration::from_secs(secs);
+        let router_rung = deadline + Duration::from_secs(60);
+        let budget = diagnostics_budget_for(deadline);
+        assert!(
+            budget > router_rung,
+            "deadline={secs}s: client budget {budget:?} must outlive the daemon's \
+             outermost responding rung {router_rung:?}, or the daemon's answer \
+             never reaches the report"
+        );
+    }
+    assert!(
+        AnalyzeEndpoint::Diagnostics.budget() > AnalyzeEndpoint::ComplexityDistribution.budget(),
+        "the endpoint that runs external tooling must not share a budget with a \
+         memory read"
+    );
+}
+
+/// Build a raw HTTP/1.1 response with a correct `Content-Length`.
+fn http_response(status: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// A loopback stub that answers each request from a path → response table.
+///
+/// Why (#6041): the defect is about what happens when endpoints disagree — one
+/// answers in milliseconds and another does not answer at all — so the stub has
+/// to route per path rather than reply uniformly.
+/// What: binds `127.0.0.1:0` and replies with the first route whose path is a
+/// substring of the request (so order the table most-specific first). An empty
+/// response body is the "never answer" route: the client must hit its own
+/// budget. An unmatched path gets a 404.
+/// Test: `a_failing_endpoint_keeps_what_the_others_returned`,
+/// `a_fetch_where_no_endpoint_answered_falls_back_to_scan`,
+/// `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`.
+async fn routing_stub(routes: Vec<(&'static str, String)>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback stub");
+    let addr = listener.local_addr().expect("stub addr").to_string();
+    let routes = std::sync::Arc::new(routes);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let routes = std::sync::Arc::clone(&routes);
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => n,
+                    };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let reply = routes
+                        .iter()
+                        .find(|(path, _)| req.contains(path))
+                        .map(|(_, body)| body.clone());
+                    match reply {
+                        Some(r) if r.is_empty() => std::future::pending::<()>().await,
+                        Some(r) => {
+                            let _ = stream.write_all(r.as_bytes()).await;
+                        }
+                        None => {
+                            let _ = stream
+                                .write_all(http_response("404 Not Found", "{}").as_bytes())
+                                .await;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// A five-band histogram, the shape the §7 table renders from.
+const DISTRIBUTION_BODY: &str = r#"{"index_id":"demo","total":100,"buckets":[
+    {"grade":"A","label":"A: simple (0-5)","count":60},
+    {"grade":"B","label":"B: moderate (6-10)","count":20},
+    {"grade":"C","label":"C: elevated (11-15)","count":10},
+    {"grade":"D","label":"D: high (16-20)","count":7},
+    {"grade":"F","label":"F: very high (>20)","count":3}]}"#;
+
+/// Why (#6041): the per-repo fetch was all-or-nothing. Diagnostics is the slow
+/// endpoint, so its timeout discarded a complexity histogram that had already
+/// arrived in milliseconds and dropped the whole repository back to scan — the
+/// report lost data it was holding.
+/// What: a stub that answers the index probe, the histogram, and the refactor
+/// list normally while returning the daemon's own deadline 504 for diagnostics.
+/// Asserts the histogram survives, that exactly one caveat is raised, and that
+/// the caveat names diagnostics and says it ran out of time.
+/// Test: This is the test. Pre-fix the 504 propagated through `?` and
+/// `fetch_named` returned `Missing(Unreachable)` with no metrics at all.
+#[tokio::test]
+async fn a_failing_endpoint_keeps_what_the_others_returned() {
+    let addr = routing_stub(vec![
+        (
+            "/indexes/demo/complexity_distribution",
+            http_response("200 OK", DISTRIBUTION_BODY),
+        ),
+        (
+            "/indexes/demo/diagnostics",
+            // What trusty-analyze answers when its own deadline is hit.
+            http_response("504 Gateway Timeout", r#"{"error":"deadline exceeded"}"#),
+        ),
+        (
+            "/indexes/demo/refactor-suggestions",
+            http_response("200 OK", r#"{"suggestions":[]}"#),
+        ),
+        (
+            "/indexes",
+            http_response("200 OK", r#"[{"id":"demo","root_path":"/tmp/demo"}]"#),
+        ),
+    ])
+    .await;
+    let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
+
+    match src.fetch_named("demo").await {
+        AnalyzeFetch::Fetched { metrics, caveats } => {
+            assert_eq!(
+                metrics.complexity.buckets.len(),
+                5,
+                "the histogram that answered in milliseconds must survive a slow \
+                 sibling endpoint"
+            );
+            let line = caveats
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert_eq!(caveats.len(), 1, "only diagnostics dropped out: {line}");
+            assert!(line.contains("diagnostics"), "the gap must name it: {line}");
+            assert!(
+                line.contains("did not answer within the time allowed"),
+                "the gap must say why: {line}"
+            );
+            assert!(
+                line.contains("unassessed, not clean"),
+                "an emptied defect band must not read as a clean pass: {line}"
+            );
+        }
+        AnalyzeFetch::Missing(gap) => {
+            panic!("one slow endpoint must not discard the whole fetch: {gap:?}")
+        }
+    }
+}
+
+/// Why (#6041): per-endpoint independence must not become fail-SILENT. If every
+/// dataset drops out there is nothing partial to render, and reporting empty
+/// metrics would put an empty §7 and an empty findings table on the page — which
+/// reads as a clean pass.
+/// What: a stub whose index probe succeeds and whose every dataset endpoint
+/// answers 503; the fetch must fall back to scan, not to empty metrics.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_fetch_where_no_endpoint_answered_falls_back_to_scan() {
+    let addr = routing_stub(vec![
+        (
+            "/indexes/demo/",
+            http_response("503 Service Unavailable", "{}"),
+        ),
+        ("/indexes", http_response("200 OK", r#"[{"id":"demo"}]"#)),
+    ])
+    .await;
+    let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
+
+    match src.fetch_named("demo").await {
+        AnalyzeFetch::Missing(gap) => assert_eq!(gap, AnalyzeGap::Unreachable),
+        AnalyzeFetch::Fetched { .. } => {
+            panic!("a fetch that assessed nothing must not render as assessed")
+        }
+    }
+}
+
+/// Why (#6041): the gap line distinguishes "ran out of time" from "nothing was
+/// listening" because the remedies differ, and that distinction has to come from
+/// the error class rather than from matching a message that can quote a URL.
+/// What: points `get_json` at a stub that never replies, with a budget short
+/// enough to be hit, and asserts the failure is a `Timeout` classified as
+/// `TimedOut` — not the `Transport` variant a dead peer produces.
+/// Test: This is the test. Pre-fix `get_json` took no budget at all.
+#[tokio::test]
+async fn a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error() {
+    let addr = routing_stub(vec![("/indexes", String::new())]).await;
+    let src = HttpAnalyzeMetricsSource::new(format!("http://{addr}")).expect("client builds");
+
+    let err = src
+        .get_json::<serde_json::Value>("/indexes", Duration::from_millis(150))
+        .await
+        .expect_err("a stub that never replies cannot answer inside 150ms");
+
+    assert!(
+        matches!(err, AnalyzeAdapterError::Timeout(_)),
+        "expected a timeout, got {err:?}"
+    );
+    assert_eq!(classify_failure(&err), EndpointFailure::TimedOut);
 }
 
 #[test]
@@ -473,10 +693,28 @@ fn gap_labels_are_stable() {
 /// Test: itself.
 #[test]
 fn caveat_labels_are_stable() {
-    let dist = AnalyzeCaveat::ComplexityDistributionUnavailable.as_str();
+    let dist = AnalyzeCaveat::EndpointUnavailable(
+        AnalyzeEndpoint::ComplexityDistribution,
+        EndpointFailure::Rejected,
+    )
+    .to_string();
+    assert!(dist.contains("complexity distribution"), "{dist}");
     assert!(dist.contains("not a distribution"), "{dist}");
     assert!(dist.contains("omitted"), "{dist}");
-    let tools = AnalyzeCaveat::NoStaticAnalysisTools.as_str();
+
+    // #6041: the line must name the endpoint AND why it dropped out, because
+    // "raise the deadline" and "start the daemon" are different remedies.
+    let diag =
+        AnalyzeCaveat::EndpointUnavailable(AnalyzeEndpoint::Diagnostics, EndpointFailure::TimedOut)
+            .to_string();
+    assert!(diag.contains("diagnostics"), "{diag}");
+    assert!(
+        diag.contains("did not answer within the time allowed"),
+        "{diag}"
+    );
+    assert!(diag.contains("unassessed, not clean"), "{diag}");
+
+    let tools = AnalyzeCaveat::NoStaticAnalysisTools.to_string();
     assert!(tools.contains("unassessed, not clean"), "{tools}");
 }
 
@@ -491,7 +729,10 @@ async fn enrich_reports_caveats_for_partially_answered_repositories() {
     let source = StubSource(|| AnalyzeFetch::Fetched {
         metrics: Box::new(map_metrics(None, &[], &[])),
         caveats: vec![
-            AnalyzeCaveat::ComplexityDistributionUnavailable,
+            AnalyzeCaveat::EndpointUnavailable(
+                AnalyzeEndpoint::ComplexityDistribution,
+                EndpointFailure::Rejected,
+            ),
             AnalyzeCaveat::NoStaticAnalysisTools,
         ],
     });

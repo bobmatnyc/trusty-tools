@@ -14,6 +14,8 @@
 //! lives in `crates/trusty-review/tests/report_e2e.rs`.
 
 pub mod analyze_adapter;
+// #6041: per-endpoint paths, request budgets, and partial-fetch vocabulary.
+pub mod analyze_endpoints;
 // #5453/#6004: the tga-authored authorship artifact, receiving half.
 pub mod authorship;
 pub mod benchmark;
