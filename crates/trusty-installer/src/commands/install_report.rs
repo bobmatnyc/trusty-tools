@@ -443,15 +443,11 @@ pub(super) struct SummaryLines {
 ///
 /// # Postconditions
 /// - Over a non-empty selection, `errors` is empty iff every gating member
-///   installed and bootstrapped AND every member passed verification — the same
-///   verdict [`InstallReport::all_ok`] reaches before the verify tail folds in.
-///   `build(vec![])` is the one deliberate exception: no member can fail, so
-///   `errors` is empty while `all_ok` is `false` ("installed nothing" is not a
-///   success).
-/// - PATH shadowing is the one `all_ok` input this footer does not restate. A
-///   shadow is reported at ERROR level the moment it is detected
-///   (`install_one`, #3554), so it reaches the operator on the human path
-///   without the footer repeating it.
+///   installed, bootstrapped and is unshadowed AND every member passed
+///   verification — the same verdict [`InstallReport::all_ok`] reaches before
+///   the verify tail folds in. `build(vec![])` is the one deliberate exception:
+///   no member can fail, so `errors` is empty while `all_ok` is `false`
+///   ("installed nothing" is not a success).
 /// - A member never appears in both `errors` and `skipped`.
 ///
 /// Test: `tests::summary_lines_match_the_gating_set`,
@@ -485,6 +481,18 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
             .iter()
             .filter(|m| m.ok && !m.service_ok)
             .map(|m| format!("{}: {}", m.member, m.service_detail)),
+    );
+    // #5812: the last `all_ok` input the footer left out. A gating member with
+    // `ok && service_ok && !shadow_ok` gave `all_ok: false` and exit 2 under a
+    // footer reading `installed 1/1 required component(s)` with no error line.
+    // `install_one` already logs the shadow when it detects it, but a footer
+    // that omits what the exit code gates on is the same two-channel
+    // disagreement #5806 closed for every other input.
+    errors.extend(
+        gating
+            .iter()
+            .filter(|m| m.ok && !m.shadow_ok)
+            .map(|m| format!("{}: {}", m.member, m.shadow_detail)),
     );
     // #5518: an integrity failure is never a graceful degrade. A non-gating
     // member whose artifact failed verification is reported as an error, in the

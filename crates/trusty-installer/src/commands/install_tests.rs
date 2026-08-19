@@ -377,6 +377,19 @@ fn summary_errors_agree_with_all_ok_across_selection_shapes() {
         o
     };
 
+    // #5812: a member that installed and bootstrapped cleanly but is shadowed
+    // on $PATH by an earlier, different copy of the same name.
+    let shadowed = |member: &str, required: bool| {
+        let mut o = if required {
+            outcome(member, true, "installed")
+        } else {
+            optional_outcome(member, true, "installed")
+        };
+        o.shadow_ok = false;
+        o.shadow_detail = format!("`{member}` on PATH resolves to a different copy");
+        o
+    };
+
     let cases: Vec<(&str, Vec<InstallOutcome>)> = vec![
         (
             "all required, healthy",
@@ -389,6 +402,20 @@ fn summary_errors_agree_with_all_ok_across_selection_shapes() {
         (
             "all required, one service failure",
             vec![outcome("a", true, "installed"), service_failed("b", true)],
+        ),
+        // #5812: `ok && service_ok && !shadow_ok` — the one `all_ok` input the
+        // footer used to leave out, so it printed `installed 1/1 required
+        // component(s)` with no error line while `build` exited 2.
+        (
+            "all required, one shadowed member",
+            vec![outcome("a", true, "installed"), shadowed("b", true)],
+        ),
+        (
+            "mixed, required member shadowed",
+            vec![
+                shadowed("a", true),
+                optional_outcome("b", true, "installed"),
+            ],
         ),
         (
             "all optional, healthy",
