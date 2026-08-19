@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use axum::{
     extract::{Path, Query, State},
@@ -312,46 +312,6 @@ pub struct DiagnosticsParams {
     pub offset: usize,
 }
 
-/// Default wall-clock budget for one `GET /indexes/{id}/diagnostics` request.
-///
-/// Why: 180 s is long enough for one project-scoped build (cargo clippy over a
-/// warm workspace, a small `dotnet build`) and short enough that an HTTP client
-/// with a default read timeout still receives a response body. Before #6018
-/// there was no budget at all: a 4097-file Rust index spawned one `cargo
-/// clippy` per file at ~0.155 s each and ran past 10 minutes, so every client
-/// gave up at the transport layer and got zero bytes. The value is a starting
-/// point, not a measured optimum — operators tune it with
-/// `TRUSTY_DIAGNOSTICS_DEADLINE_SECS`.
-const DEFAULT_DIAGNOSTICS_DEADLINE_SECS: u64 = 180;
-
-/// Extra time the handler waits past the cooperative deadline before giving up
-/// on the blocking task entirely.
-///
-/// Why: the dispatch checks its deadline BETWEEN subprocess spawns, so one
-/// already-running tool can overrun it by up to that tool's own cap. This grace
-/// window lets the dispatch finish that last subprocess and return a partial
-/// report — the informative answer — instead of the handler racing it to a bare
-/// 504. Past the grace the handler answers anyway; `spawn_blocking` cannot be
-/// cancelled, so the orphaned task drains on its own.
-const DIAGNOSTICS_HARD_GRACE: Duration = Duration::from_secs(30);
-
-/// Wall-clock budget for one diagnostics request.
-///
-/// Why: mirrors `core::tool_impls::build_tool_timeout` — a named default that an
-/// operator can raise on slow hardware without a rebuild.
-/// What: reads `TRUSTY_DIAGNOSTICS_DEADLINE_SECS`, falling back to
-/// `DEFAULT_DIAGNOSTICS_DEADLINE_SECS` on a missing, unparseable, or zero value
-/// (zero would make every request time out instantly).
-/// Test: `diagnostics_deadline_default_is_180s`.
-pub fn diagnostics_deadline() -> Duration {
-    let secs = std::env::var("TRUSTY_DIAGNOSTICS_DEADLINE_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&s| s > 0)
-        .unwrap_or(DEFAULT_DIAGNOSTICS_DEADLINE_SECS);
-    Duration::from_secs(secs)
-}
-
 /// `GET /indexes/{id}/diagnostics` — run available external static-analysis
 /// tools (clippy, ruff, biome, ...) across the index corpus on demand.
 ///
@@ -415,7 +375,11 @@ pub async fn diagnostics_for_index(
     // Heavy work (process spawns, blocking I/O) runs off the async runtime,
     // under a cooperative deadline the dispatch honours between spawns (#6018).
     let language_filter = params.language.clone();
-    let budget = diagnostics_deadline();
+    // #6018: every rung of the request-timeout ladder — this deadline, the
+    // router's blanket layer, and the MCP client's own timeout — derives from
+    // `core::deadlines` so raising the deadline cannot invert the ordering.
+    let budget = crate::core::diagnostics_deadline();
+    let hard_budget = crate::core::diagnostics_handler_budget();
     let file_count = by_file.len();
     let deadline = Instant::now() + budget;
     let task = tokio::task::spawn_blocking(move || {
@@ -431,26 +395,26 @@ pub async fn diagnostics_for_index(
     // Outer net: one tool already running when the deadline passed can overrun
     // it. Past `budget + grace` the handler stops waiting and answers 504 rather
     // than holding the connection open indefinitely.
-    let report: crate::core::DiagnosticsReport =
-        match tokio::time::timeout(budget + DIAGNOSTICS_HARD_GRACE, task).await {
-            Ok(joined) => {
-                joined.map_err(|e| ApiError::internal(format!("diagnostics task panicked: {e}")))?
-            }
-            Err(_) => {
-                tracing::warn!(
-                    index_id = %id,
-                    file_count,
-                    budget_secs = budget.as_secs(),
-                    "diagnostics dispatch overran its deadline plus grace; answering 504"
-                );
-                return Err(ApiError::gateway_timeout(format!(
-                    "diagnostics for index '{id}' exceeded {}s over {file_count} files and was \
+    let report: crate::core::DiagnosticsReport = match tokio::time::timeout(hard_budget, task).await
+    {
+        Ok(joined) => {
+            joined.map_err(|e| ApiError::internal(format!("diagnostics task panicked: {e}")))?
+        }
+        Err(_) => {
+            tracing::warn!(
+                index_id = %id,
+                file_count,
+                budget_secs = budget.as_secs(),
+                "diagnostics dispatch overran its deadline plus grace; answering 504"
+            );
+            return Err(ApiError::gateway_timeout(format!(
+                "diagnostics for index '{id}' exceeded {}s over {file_count} files and was \
                      abandoned with no partial result; narrow the request with ?language= or \
                      ?tools=, or raise TRUSTY_DIAGNOSTICS_DEADLINE_SECS",
-                    (budget + DIAGNOSTICS_HARD_GRACE).as_secs()
-                )));
-            }
-        };
+                hard_budget.as_secs()
+            )));
+        }
+    };
 
     let total = report.diagnostics.len();
     let page: Vec<&crate::core::ToolDiagnostic> = report

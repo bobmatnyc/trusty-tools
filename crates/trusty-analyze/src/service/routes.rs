@@ -15,7 +15,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::core::IndexSummary;
 use crate::service::events::{AnalyzerAppState, ApiError};
@@ -33,21 +32,6 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use super::handlers;
 use super::ui;
-
-/// Last-resort cap on how long any non-streaming route may hold a connection.
-///
-/// Why: every handler is meant to bound its own work, but #6018 showed what
-/// happens when one forgets — `GET /indexes/{id}/diagnostics` ran past ten
-/// minutes and clients saw a transport-level abandon rather than a response.
-/// This layer is the net under that, not the mechanism: it is deliberately
-/// wider than the diagnostics handler's own budget plus grace so the handler's
-/// informative 504 (which names the files and tools that were cut off) always
-/// wins the race. Anything that reaches this layer is a handler bug.
-/// What: 300 s, answered as `504 Gateway Timeout` to match the status the
-/// diagnostics handler returns for the same condition. The layer's body is
-/// empty — fewer bytes than the handler's own JSON, but a real HTTP response
-/// either way, which is what the client never got before #6018.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Build the axum router around `state`.
 ///
@@ -147,12 +131,20 @@ pub fn build_router_with_self_origins(
         .route("/ui", get(|| async { Redirect::permanent("/ui/") }))
         .route("/ui/", get(ui::ui_index_handler))
         .route("/ui/{*path}", get(ui::ui_asset_handler))
-        // #6018: blanket request deadline. Applied here, BEFORE `/sse` is
-        // merged in, because `/sse` is a long-lived Server-Sent Events stream
-        // that a request timeout would cut off every 300 s.
+        // #6018: blanket request deadline — the net under a handler that
+        // forgets to bound its own work, never the mechanism. Anything that
+        // reaches this layer is a handler bug, so it must lose every race
+        // against a working handler: its 504 body is empty, while the
+        // diagnostics handler's names the files and tools that were cut off.
+        // The timeout is DERIVED from the configured diagnostics deadline
+        // rather than hardcoded — a fixed 300 s held the ordering only at the
+        // default, and raising TRUSTY_DIAGNOSTICS_DEADLINE_SECS past 270 s
+        // inverted it on the exact remediation path the handler recommends.
+        // Applied BEFORE `/sse` is merged in, because `/sse` is a long-lived
+        // Server-Sent Events stream a request timeout would cut off.
         .layer(tower_http::timeout::TimeoutLayer::with_status_code(
             StatusCode::GATEWAY_TIMEOUT,
-            REQUEST_TIMEOUT,
+            crate::core::router_request_timeout(),
         ))
         .merge(Router::new().route("/sse", get(sse_handler)))
         .with_state(Arc::new(state));

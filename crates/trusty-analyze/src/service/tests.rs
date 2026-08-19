@@ -320,7 +320,11 @@ fn run_diagnostics_blocking_project_scoped_skips_when_no_root() {
         fn run(&self, _file: &Path, _content: &str) -> anyhow::Result<Vec<ToolDiagnostic>> {
             Ok(Vec::new())
         }
-        fn run_project(&self, _files: &[PathBuf]) -> anyhow::Result<Vec<ToolDiagnostic>> {
+        fn run_project(
+            &self,
+            _files: &[PathBuf],
+            _deadline: Option<std::time::Instant>,
+        ) -> anyhow::Result<Vec<ToolDiagnostic>> {
             *self.call_count.lock().unwrap() += 1;
             Ok(Vec::new())
         }

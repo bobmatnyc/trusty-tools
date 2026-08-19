@@ -39,7 +39,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Hard wall-clock cap on any single file-scoped tool invocation.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -76,6 +76,37 @@ pub fn build_tool_timeout() -> Duration {
         .filter(|&s| s > 0)
         .unwrap_or(DEFAULT_BUILD_TIMEOUT_SECS);
     Duration::from_secs(secs)
+}
+
+/// Wall-clock cap for the next build-class subprocess, or `None` when the
+/// request deadline has already passed and nothing further may be started.
+///
+/// Why: `build_tool_timeout()` alone bounds one subprocess, not a request. A
+/// project-scoped tool spawns one build per project root, so N roots at 300 s
+/// each outlive the request by multiples of the deadline — and because
+/// `spawn_blocking` cannot be cancelled, those builds keep burning CPU after
+/// the client already received its 504, with a client retry stacking another
+/// build behind them on the same toolchain lock (#6018). Capping each spawn at
+/// the remaining budget makes the existing kill-on-timeout path terminate the
+/// child when the request is over, instead of 300 s later.
+/// What: returns `min(remaining_budget, build_tool_timeout())`. `deadline:
+/// None` means no budget, so the plain build-class cap applies. A deadline
+/// already in the past returns `None` — the caller must not spawn.
+/// Test: `remaining_build_budget_caps_to_deadline`,
+/// `remaining_build_budget_is_none_once_expired`, and
+/// `remaining_build_budget_without_deadline_is_the_build_cap`.
+pub fn remaining_build_budget(deadline: Option<Instant>) -> Option<Duration> {
+    let cap = build_tool_timeout();
+    let Some(d) = deadline else {
+        return Some(cap);
+    };
+    // `checked_duration_since` yields None when the deadline is already past.
+    let remaining = d.checked_duration_since(Instant::now())?;
+    if remaining.is_zero() {
+        None
+    } else {
+        Some(remaining.min(cap))
+    }
 }
 
 /// Run `program` with `args` in `cwd`, capturing stdout/stderr with a
@@ -295,6 +326,39 @@ mod tests {
         let dir = std::env::temp_dir();
         let res = run_command("trusty-no-such-binary-xyz", &[], &dir);
         assert!(res.is_err());
+    }
+
+    /// Why: #6018 — a build-class spawn must never outlive the request that
+    /// asked for it. With 5 s left and a 300 s build cap, the cap must be 5 s.
+    /// Test: this test.
+    #[test]
+    fn remaining_build_budget_caps_to_deadline() {
+        let budget = remaining_build_budget(Some(Instant::now() + Duration::from_secs(5)))
+            .expect("5 s remaining is a live budget");
+        assert!(
+            budget <= Duration::from_secs(5),
+            "budget {budget:?} must not exceed the 5 s remaining"
+        );
+        assert!(
+            budget < build_tool_timeout(),
+            "budget {budget:?} must be capped below the build-class timeout {:?}",
+            build_tool_timeout()
+        );
+    }
+
+    #[test]
+    fn remaining_build_budget_is_none_once_expired() {
+        let past = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            remaining_build_budget(Some(past)),
+            None,
+            "an expired deadline must forbid starting another subprocess"
+        );
+    }
+
+    #[test]
+    fn remaining_build_budget_without_deadline_is_the_build_cap() {
+        assert_eq!(remaining_build_budget(None), Some(build_tool_timeout()));
     }
 
     #[test]

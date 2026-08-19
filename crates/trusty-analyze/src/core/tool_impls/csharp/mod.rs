@@ -14,10 +14,11 @@ pub mod sarif;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::Result;
 
-use super::{build_tool_timeout, run_command_with_timeout};
+use super::{remaining_build_budget, run_command_with_timeout};
 use crate::core::tools::{StaticTool, ToolDiagnostic};
 use sarif::{parse_roslyn_sarif, roslyn_file_matches};
 
@@ -68,7 +69,7 @@ impl StaticTool for RoslynTool {
             None => return Ok(Vec::new()),
         };
 
-        let all_diags = build_project_diags(&csproj);
+        let all_diags = build_project_diags(&csproj, None);
 
         let target = file.to_string_lossy().into_owned();
         let filtered = all_diags
@@ -104,9 +105,18 @@ impl StaticTool for RoslynTool {
     /// only diagnostics whose `.file` matches at least one of the input files
     /// for that project. Files with no resolvable `.csproj` are silently
     /// skipped.
+    ///
+    /// #6018: `deadline` bounds the whole run. Each `dotnet` spawn is capped at
+    /// the remaining request budget and the budget is rechecked between
+    /// projects, so N projects cannot cost N full build timeouts after the
+    /// client has already been answered.
     /// Test: `run_project_filters_diagnostics_to_requested_files` exercises
     /// the filtering logic without invoking dotnet.
-    fn run_project(&self, files: &[PathBuf]) -> Result<Vec<ToolDiagnostic>> {
+    fn run_project(
+        &self,
+        files: &[PathBuf],
+        deadline: Option<Instant>,
+    ) -> Result<Vec<ToolDiagnostic>> {
         let mut by_csproj: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         for f in files {
             let dir = f.parent().unwrap_or_else(|| Path::new("."));
@@ -120,9 +130,18 @@ impl StaticTool for RoslynTool {
             }
         }
 
+        let total = by_csproj.len();
         let mut out = Vec::new();
-        for (csproj, proj_files) in &by_csproj {
-            let all_diags = build_project_diags(csproj);
+        for (done, (csproj, proj_files)) in by_csproj.iter().enumerate() {
+            // #6018: never start another build past the request deadline.
+            if remaining_build_budget(deadline).is_none() {
+                tracing::warn!(
+                    "roslyn: request budget spent after {done} of {total} project(s); \
+                     skipping the rest"
+                );
+                break;
+            }
+            let all_diags = build_project_diags(csproj, deadline);
             for diag in all_diags {
                 let matches_any = proj_files
                     .iter()
@@ -144,11 +163,15 @@ impl StaticTool for RoslynTool {
 /// caller apply its own filter on top.
 /// What: creates a temp SARIF file, runs a best-effort restore followed by
 /// `dotnet build --no-restore --no-incremental` with the analyzer flags,
-/// reads the SARIF, and returns the unfiltered `Vec<ToolDiagnostic>`. Uses
-/// `build_tool_timeout()` (default 300 s) instead of the 30 s file-tool cap.
+/// reads the SARIF, and returns the unfiltered `Vec<ToolDiagnostic>`. Each of
+/// the two spawns is capped at `remaining_build_budget(deadline)` — the
+/// build-class timeout (default 300 s) when unbounded, less when the request
+/// deadline is nearer (#6018). An expired budget skips the spawn entirely.
 /// Test: not directly tested (spawns dotnet); the SARIF parsing it delegates
-/// to is covered by `parse_roslyn_sarif_extracts_result` in `sarif.rs`.
-fn build_project_diags(csproj: &Path) -> Vec<ToolDiagnostic> {
+/// to is covered by `parse_roslyn_sarif_extracts_result` in `sarif.rs`;
+/// budget arithmetic is covered by `remaining_build_budget_*` in
+/// `tool_impls/mod.rs`.
+fn build_project_diags(csproj: &Path, deadline: Option<Instant>) -> Vec<ToolDiagnostic> {
     let dir = csproj.parent().unwrap_or_else(|| Path::new("."));
 
     let tmp = match tempfile::Builder::new().suffix(".sarif").tempfile() {
@@ -172,12 +195,10 @@ fn build_project_diags(csproj: &Path) -> Vec<ToolDiagnostic> {
     // Timing out silently here causes the subsequent --no-restore build
     // to fail with missing packages and zero diagnostics, which is a
     // silent false-negative that makes Roslyn appear broken.
-    let _ = run_command_with_timeout(
-        "dotnet",
-        &["restore", &csproj_path],
-        dir,
-        build_tool_timeout(),
-    );
+    // #6018: capped at whatever is left of the request, not a flat 300 s.
+    if let Some(budget) = remaining_build_budget(deadline) {
+        let _ = run_command_with_timeout("dotnet", &["restore", &csproj_path], dir, budget);
+    }
 
     // The %2C escapes the comma so MSBuild parses the -p: value correctly.
     let errorlog_arg = format!("-p:ErrorLog={}%2Cversion=2.1", tmp_path);
@@ -198,7 +219,14 @@ fn build_project_diags(csproj: &Path) -> Vec<ToolDiagnostic> {
             "-p:EnforceCodeStyleInBuild=true",
         ],
         dir,
-        build_tool_timeout(),
+        // #6018: the restore above may have consumed the budget; recompute.
+        match remaining_build_budget(deadline) {
+            Some(b) => b,
+            None => {
+                tracing::warn!("roslyn: budget spent during restore; skipping the build");
+                return Vec::new();
+            }
+        },
     );
 
     if let Err(e) = build_res {

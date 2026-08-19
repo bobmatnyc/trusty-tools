@@ -6,7 +6,7 @@
 //! What: Pure-logic tests; no I/O, no tokio runtime needed.
 //! Test: `cargo test -p trusty-analyze`.
 
-use super::{build_query, index_id_or_default, DEEP_ANALYSIS_MCP_TIMEOUT_SECS};
+use super::{build_query, index_id_or_default};
 
 #[test]
 fn index_id_or_default_prefers_index_then_alias_then_default() {
@@ -67,22 +67,34 @@ fn build_query_integer_limit_parses_correctly() {
     );
 }
 
-/// Verify at compile time that the MCP client timeout is strictly greater
-/// than OpenRouter's 120 s maximum so deep_analysis calls are never aborted
-/// at the MCP transport layer before the daemon's own timeout fires.
-///
-/// Why: issue #528 — a 30 s MCP timeout silently killed any LLM response
-/// taking more than 30 s, even when the daemon and API key were correct.
-/// What: compile-time assertion that `DEEP_ANALYSIS_MCP_TIMEOUT_SECS > 120`.
-/// Test: this is the test — it fails to compile if the const regresses.
+/// Why: the MCP client timeout has two floors and used to clear only one.
+/// Issue #528 fixed a 30 s timeout that silently killed slow LLM responses,
+/// settling on a flat 150 s. #6018 then gave the diagnostics endpoint a 180 s
+/// deadline and left that 150 s alone, so `run_diagnostics` over a large index
+/// wrote its structured 504 into a socket the client had already abandoned —
+/// the body-less transport failure the whole fix exists to remove.
+/// What: asserts the live client timeout exceeds BOTH the OpenRouter 120 s
+/// ceiling and the diagnostics handler budget (deadline + grace).
+/// Test: this test. Fails against the pre-fix flat 150 s, which sits below the
+/// 210 s default handler budget.
 #[test]
-fn mcp_client_timeout_exceeds_openrouter_ceiling() {
+fn mcp_client_timeout_outlives_the_daemon_and_openrouter() {
     // The OpenRouter request timeout in trusty-common/src/chat.rs is 120 s.
-    // Our MCP client must allow more than that. Use const assertion so
-    // clippy does not flag `assertions_on_constants`.
-    const OPENROUTER_CEILING_SECS: u64 = 120;
-    const _: () = assert!(
-        DEEP_ANALYSIS_MCP_TIMEOUT_SECS > OPENROUTER_CEILING_SECS,
-        "DEEP_ANALYSIS_MCP_TIMEOUT_SECS must be > OpenRouter ceiling (120 s)"
+    const OPENROUTER_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
+
+    let client = crate::core::mcp_client_timeout();
+    assert!(
+        client > OPENROUTER_CEILING,
+        "MCP client timeout {client:?} must exceed the OpenRouter ceiling \
+         {OPENROUTER_CEILING:?} so a slow deep_analysis is not killed at the \
+         transport layer (#528)"
+    );
+
+    let handler = crate::core::diagnostics_handler_budget();
+    assert!(
+        client > handler,
+        "MCP client timeout {client:?} must exceed the diagnostics handler \
+         budget {handler:?}, or run_diagnostics answers into an abandoned \
+         socket (#6018)"
     );
 }

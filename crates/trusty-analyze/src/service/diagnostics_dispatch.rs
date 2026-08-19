@@ -377,7 +377,10 @@ pub fn run_diagnostics_blocking_with_registry(
                 continue;
             }
             tools_run_set.insert(tool.name().to_string());
-            match tool.run_project(&real_paths) {
+            // #6018: the tool caps each subprocess at the remaining budget and
+            // rechecks between project roots, so a build cannot outlive the
+            // request the way a flat build_tool_timeout() allowed.
+            match tool.run_project(&real_paths, budget.deadline) {
                 Ok(diags) => {
                     for mut diag in diags {
                         match abs_to_rel(&diag.file, &rel_real_pairs) {

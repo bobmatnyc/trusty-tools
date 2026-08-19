@@ -13,6 +13,7 @@
 //! impl tests in `tool_impls` exercise `run` against captured fixtures.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -186,18 +187,42 @@ pub trait StaticTool: Send + Sync {
     /// paths and call `run_project` (not per-file `run()`). The default
     /// implementation falls back to calling `run` per file so the other ten
     /// tools are unaffected.
-    /// What: default iterates `files`, calls `self.run(f, "")` for each, and
-    /// merges the results. Per-file errors are logged at warn level and
-    /// skipped (log-and-continue) so one failing file does not abort the
-    /// remaining files — this matches the dispatcher's own log-and-continue
-    /// behavior for file-scoped tools. Override in project-scoped tools to
-    /// build once and filter.
-    /// Test: default fallback is exercised by non-project tools in the
-    /// diagnostics pipeline. `RoslynTool`'s override is tested in
-    /// `tool_impls/csharp.rs`.
-    fn run_project(&self, files: &[PathBuf]) -> anyhow::Result<Vec<ToolDiagnostic>> {
+    ///
+    /// `deadline` is the wall-clock instant the whole request must be done by.
+    /// An implementation MUST cap each subprocess it spawns at the remaining
+    /// budget and MUST stop starting new ones once the instant has passed
+    /// (#6018). Without it a build-class tool ignores the request deadline
+    /// entirely: `spawn_blocking` cannot be cancelled, so a `cargo clippy` or
+    /// `dotnet build` capped only by `build_tool_timeout` (300 s each, one per
+    /// project root) keeps running long after the client received its 504, and
+    /// a client retry stacks a second build behind the first on the same
+    /// toolchain lock. `None` means no budget.
+    ///
+    /// What: default iterates `files`, checks `deadline` before each, calls
+    /// `self.run(f, "")`, and merges the results. Per-file errors are logged at
+    /// warn level and skipped (log-and-continue) so one failing file does not
+    /// abort the rest — matching the dispatcher's own behavior for file-scoped
+    /// tools. Each `run` is already capped at `TOOL_TIMEOUT` (30 s), so the
+    /// default only needs the between-files check, not a per-spawn cap.
+    /// Test: `ClippyTool`'s override is proven by
+    /// `run_project_stops_between_roots_when_budget_expires` and
+    /// `run_project_caps_each_invocation_to_the_remaining_budget`;
+    /// `RoslynTool`'s is in `tool_impls/csharp/mod.rs`.
+    fn run_project(
+        &self,
+        files: &[PathBuf],
+        deadline: Option<Instant>,
+    ) -> anyhow::Result<Vec<ToolDiagnostic>> {
         let mut out = Vec::new();
         for f in files {
+            // #6018: never start another subprocess past the request deadline.
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                tracing::debug!(
+                    tool = self.name(),
+                    "run_project default: deadline passed, skipping remaining files"
+                );
+                break;
+            }
             match self.run(f, "") {
                 Ok(diags) => out.extend(diags),
                 Err(e) => {

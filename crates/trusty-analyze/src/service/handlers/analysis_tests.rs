@@ -54,23 +54,6 @@ fn run_diagnostics_blocking_two_files_same_basename() {
     // Reaching here without panic means the subdir isolation works.
 }
 
-/// Why: the diagnostics deadline is what keeps `GET /indexes/{id}/diagnostics`
-/// answering at all (#6018), so a zero or absurd default would silently
-/// reintroduce the hang (0 s) or leave it unbounded in practice.
-/// What: asserts the default budget is 180 s. Reads the env-var override only
-/// if the operator set one, in which case it just asserts non-zero — the test
-/// must not mutate process-wide env state while other tests run in parallel.
-/// Test: this test.
-#[test]
-fn diagnostics_deadline_default_is_180s() {
-    let d = crate::service::handlers::analysis::diagnostics_deadline();
-    if std::env::var("TRUSTY_DIAGNOSTICS_DEADLINE_SECS").is_ok() {
-        assert!(d.as_secs() > 0, "an overridden deadline must be non-zero");
-    } else {
-        assert_eq!(d.as_secs(), 180, "default diagnostics deadline changed");
-    }
-}
-
 // ── SmellItem serialization tests ────────────────────────────────────────
 
 /// Why: default `omit_content=true` must strip the raw source field to bound

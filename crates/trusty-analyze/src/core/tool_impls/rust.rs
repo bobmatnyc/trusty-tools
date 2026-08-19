@@ -19,11 +19,12 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::Value;
 
-use super::{build_tool_timeout, run_command_with_timeout};
+use super::{remaining_build_budget, run_command_with_timeout};
 use crate::core::tools::{Severity, StaticTool, ToolDiagnostic};
 
 /// Highest number of parent directories walked while looking for a cargo root.
@@ -59,7 +60,7 @@ impl StaticTool for ClippyTool {
     /// Test: covered by `run_project_filters_to_requested_files`, which
     /// exercises the same path with the invocation injected.
     fn run(&self, file: &Path, _content: &str) -> Result<Vec<ToolDiagnostic>> {
-        self.run_project(&[file.to_path_buf()])
+        self.run_project(&[file.to_path_buf()], None)
     }
 
     /// Returns true: clippy compiles a cargo project, not a loose file.
@@ -80,33 +81,44 @@ impl StaticTool for ClippyTool {
     /// Why: one build covers every file under a root, so N files cost one
     /// invocation rather than N. This is the whole point of #6018.
     /// What: delegates to `run_project_with`, supplying the real
-    /// `cargo clippy --workspace --message-format=json --quiet` invocation
-    /// under the build-class timeout (`build_tool_timeout`, 300 s default) —
-    /// the per-file 30 s cap is far too short for a cold compile.
-    /// Test: `run_project_invokes_cargo_once_per_root_not_per_file` and
-    /// `run_project_filters_to_requested_files` inject the invocation instead
-    /// of spawning cargo.
-    fn run_project(&self, files: &[PathBuf]) -> Result<Vec<ToolDiagnostic>> {
-        run_project_with(files, clippy_stdout)
+    /// `cargo clippy --workspace --message-format=json --quiet` invocation.
+    /// Each spawn is capped at `min(remaining request budget,
+    /// build_tool_timeout())` and the budget is rechecked between roots, so a
+    /// cold or multi-root build cannot outlive the request that asked for it.
+    /// Test: `run_project_invokes_cargo_once_per_root_not_per_file`,
+    /// `run_project_caps_each_invocation_to_the_remaining_budget`, and
+    /// `run_project_stops_between_roots_when_budget_expires` inject the
+    /// invocation instead of spawning cargo.
+    fn run_project(
+        &self,
+        files: &[PathBuf],
+        deadline: Option<Instant>,
+    ) -> Result<Vec<ToolDiagnostic>> {
+        run_project_with(files, deadline, clippy_stdout)
     }
 }
 
-/// Invoke `cargo clippy` at `root` and return its stdout, or `None` on failure.
+/// Invoke `cargo clippy` at `root` within `timeout` and return its stdout, or
+/// `None` on failure.
 ///
 /// Why: separating the spawn from the grouping/filtering logic is what lets
-/// `run_project_with` be tested without a cargo toolchain.
+/// `run_project_with` be tested without a cargo toolchain. `timeout` is a
+/// parameter rather than a call to `build_tool_timeout()` so the caller can
+/// hand down whatever is left of the request budget (#6018) — on expiry
+/// `run_command_with_timeout` kills the process group, so the child cargo dies
+/// with the request instead of running on for the full build-class cap.
 /// What: shells out with `--workspace` so a workspace root covers all members
 /// in one build. `--all-targets` is deliberately omitted: it would compile the
-/// test and bench targets too, and this endpoint is bounded by a per-request
-/// deadline. A failed spawn or a timeout logs at warn and yields `None`, which
-/// the caller treats as "this root produced no diagnostics".
+/// test and bench targets too, and this endpoint is deadline-bounded. A failed
+/// spawn or a timeout logs at warn and yields `None`, which the caller treats
+/// as "this root produced no diagnostics".
 /// Test: not unit-tested (spawns cargo); the callers inject a fake.
-fn clippy_stdout(root: &Path) -> Option<String> {
+fn clippy_stdout(root: &Path, timeout: Duration) -> Option<String> {
     match run_command_with_timeout(
         "cargo",
         &["clippy", "--workspace", "--message-format=json", "--quiet"],
         root,
-        build_tool_timeout(),
+        timeout,
     ) {
         Ok(o) => Some(o.stdout),
         Err(e) => {
@@ -129,12 +141,21 @@ fn clippy_stdout(root: &Path) -> Option<String> {
 /// under no cargo root are skipped. The emitted `file` is absolute, matching
 /// the contract the dispatcher's `abs_to_rel` expects from project-scoped
 /// tools.
+/// Between roots it rechecks the budget via `remaining_build_budget` and stops
+/// entirely once it is spent, so a request with three project roots cannot cost
+/// three full build timeouts (#6018).
 /// Test: `run_project_invokes_cargo_once_per_root_not_per_file`,
 /// `run_project_filters_to_requested_files`,
-/// `run_project_skips_files_outside_any_cargo_root`.
-fn run_project_with<F>(files: &[PathBuf], mut invoke: F) -> Result<Vec<ToolDiagnostic>>
+/// `run_project_skips_files_outside_any_cargo_root`,
+/// `run_project_caps_each_invocation_to_the_remaining_budget`,
+/// `run_project_stops_between_roots_when_budget_expires`.
+fn run_project_with<F>(
+    files: &[PathBuf],
+    deadline: Option<Instant>,
+    mut invoke: F,
+) -> Result<Vec<ToolDiagnostic>>
 where
-    F: FnMut(&Path) -> Option<String>,
+    F: FnMut(&Path, Duration) -> Option<String>,
 {
     let mut by_root: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     for f in files {
@@ -144,9 +165,19 @@ where
         }
     }
 
+    let total_roots = by_root.len();
     let mut out = Vec::new();
-    for (root, group) in &by_root {
-        let Some(stdout) = invoke(root) else {
+    for (done, (root, group)) in by_root.iter().enumerate() {
+        // #6018: recheck between roots — a build that consumed the budget must
+        // not be followed by another one.
+        let Some(timeout) = remaining_build_budget(deadline) else {
+            tracing::warn!(
+                "clippy: request budget spent after {done} of {total_roots} project root(s); \
+                 skipping the rest"
+            );
+            break;
+        };
+        let Some(stdout) = invoke(root, timeout) else {
             continue;
         };
         let wanted: HashSet<&PathBuf> = group.iter().collect();
@@ -298,6 +329,7 @@ fn severity_from_level(level: &str) -> Severity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tool_impls::build_tool_timeout;
     use std::cell::RefCell;
 
     /// One cargo build message for `file` at `line`, as clippy emits it.
@@ -380,7 +412,7 @@ mod tests {
         let files = scaffold(root, false, &rel_refs);
 
         let calls = RefCell::new(Vec::<PathBuf>::new());
-        let diags = run_project_with(&files, |dir| {
+        let diags = run_project_with(&files, None, |dir, _timeout| {
             calls.borrow_mut().push(dir.to_path_buf());
             Some(String::new())
         })
@@ -417,8 +449,8 @@ mod tests {
             warning_line("src/wanted.rs", 3),
             warning_line("src/ignored.rs", 9)
         );
-        let diags =
-            run_project_with(&requested, |_| Some(stdout.clone())).expect("run_project_with");
+        let diags = run_project_with(&requested, None, |_, _| Some(stdout.clone()))
+            .expect("run_project_with");
 
         assert_eq!(
             diags.len(),
@@ -443,7 +475,7 @@ mod tests {
         std::fs::write(&orphan, "fn x() {}\n").expect("write source");
 
         let calls = RefCell::new(0usize);
-        let diags = run_project_with(&[orphan], |_| {
+        let diags = run_project_with(&[orphan], None, |_, _| {
             *calls.borrow_mut() += 1;
             Some(String::new())
         })
@@ -451,6 +483,82 @@ mod tests {
 
         assert_eq!(*calls.borrow(), 0, "no cargo root means no invocation");
         assert!(diags.is_empty());
+    }
+
+    /// Why: #6018 HIGH 2 — `Budget::is_expired` only gates whether `run_project`
+    /// STARTS. Inside, each `cargo clippy` used a flat `build_tool_timeout()`
+    /// (300 s default, independently tunable), so a single cold root kept an
+    /// uncancellable `spawn_blocking` and its child cargo alive for minutes
+    /// after the client already had its 504 — and a client retry stacked a
+    /// second clippy behind the first on cargo's build lock.
+    /// What: hands `run_project_with` a deadline 2 s out and records the
+    /// timeout the invocation is given. It must be capped at the remaining
+    /// budget, far below the build-class timeout.
+    /// Test: this test. Fails against the pre-fix code, which passed no timeout
+    /// at all and always spent `build_tool_timeout()`.
+    #[test]
+    fn run_project_caps_each_invocation_to_the_remaining_budget() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let files = scaffold(root, false, &["src/lib.rs"]);
+
+        let seen = RefCell::new(Vec::<Duration>::new());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        run_project_with(&files, Some(deadline), |_, timeout| {
+            seen.borrow_mut().push(timeout);
+            Some(String::new())
+        })
+        .expect("run_project_with");
+
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 1, "expected one invocation, got {seen:?}");
+        assert!(
+            seen[0] <= Duration::from_secs(2),
+            "invocation timeout {:?} exceeds the 2 s remaining budget",
+            seen[0]
+        );
+        assert!(
+            seen[0] < build_tool_timeout(),
+            "invocation timeout {:?} was not capped below the build-class \
+             timeout {:?} — a cold build would outlive the request",
+            seen[0],
+            build_tool_timeout()
+        );
+    }
+
+    /// Why: capping one spawn is not enough — N project roots at the full cap
+    /// each still outlive the request by multiples of the deadline. The budget
+    /// must be rechecked between roots.
+    /// What: scaffolds two independent cargo roots, gives a 60 ms deadline, and
+    /// has the first invocation sleep past it. The second root must never be
+    /// invoked.
+    /// Test: this test. Fails against the pre-fix loop, which invoked every
+    /// root unconditionally.
+    #[test]
+    fn run_project_stops_between_roots_when_budget_expires() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root_a = tmp.path().join("a");
+        let root_b = tmp.path().join("b");
+        let mut files = scaffold(&root_a, false, &["src/lib.rs"]);
+        files.extend(scaffold(&root_b, false, &["src/lib.rs"]));
+
+        let calls = RefCell::new(Vec::<PathBuf>::new());
+        let deadline = Instant::now() + Duration::from_millis(60);
+        run_project_with(&files, Some(deadline), |dir, _| {
+            calls.borrow_mut().push(dir.to_path_buf());
+            // Burn the whole budget on the first root.
+            std::thread::sleep(Duration::from_millis(120));
+            Some(String::new())
+        })
+        .expect("run_project_with");
+
+        let calls = calls.borrow();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the second cargo root must not be built after the budget expired; \
+             invocations: {calls:?}"
+        );
     }
 
     /// Why: stopping at the nearest package manifest would still cost one build

@@ -64,7 +64,11 @@ fn run_diagnostics_blocking_with_registry_two_files_same_basename() {
                 code: None,
             }])
         }
-        fn run_project(&self, _files: &[PathBuf]) -> anyhow::Result<Vec<ToolDiagnostic>> {
+        fn run_project(
+            &self,
+            _files: &[PathBuf],
+            _deadline: Option<std::time::Instant>,
+        ) -> anyhow::Result<Vec<ToolDiagnostic>> {
             Ok(Vec::new())
         }
     }
@@ -146,7 +150,11 @@ fn report_marks_unavailable_tool() {
         fn run(&self, _: &Path, _: &str) -> anyhow::Result<Vec<ToolDiagnostic>> {
             Ok(Vec::new())
         }
-        fn run_project(&self, _: &[PathBuf]) -> anyhow::Result<Vec<ToolDiagnostic>> {
+        fn run_project(
+            &self,
+            _: &[PathBuf],
+            _: Option<std::time::Instant>,
+        ) -> anyhow::Result<Vec<ToolDiagnostic>> {
             Ok(Vec::new())
         }
     }
@@ -194,7 +202,11 @@ fn report_clean_run_populates_tools_run() {
         fn run(&self, _: &Path, _: &str) -> anyhow::Result<Vec<ToolDiagnostic>> {
             Ok(Vec::new()) // no findings
         }
-        fn run_project(&self, _: &[PathBuf]) -> anyhow::Result<Vec<ToolDiagnostic>> {
+        fn run_project(
+            &self,
+            _: &[PathBuf],
+            _: Option<std::time::Instant>,
+        ) -> anyhow::Result<Vec<ToolDiagnostic>> {
             Ok(Vec::new())
         }
     }
