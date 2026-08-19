@@ -559,6 +559,24 @@ pub struct AppState {
     /// warm-up succeeds.  The transition is one-way and lock-free.
     /// Test: `daemon_readiness_transitions_warming_to_ready`.
     pub daemon_readiness: Arc<AtomicU8>,
+    /// Total wall-clock ceiling for one MCP write operation (issue #4002).
+    ///
+    /// Why: a write waits for the per-palace write mutex and then waits again
+    /// to enter the per-palace open queue. Each leg was bounded by its own
+    /// timeout, so the effective ceiling was their sum (60 s + ~63 s), not
+    /// either configured bound. The handlers stamp one
+    /// [`trusty_common::memory_core::timeouts::OpBudget`] from this value and
+    /// clamp every leg through it, so the later leg spends what the earlier
+    /// leg left.
+    /// What: defaults to
+    /// [`trusty_common::memory_core::timeouts::write_op_budget`]
+    /// (`TRUSTY_WRITE_OP_BUDGET_SECS`, 60 s). Stored per-instance rather than
+    /// re-read from the environment so
+    /// [`AppState::with_write_op_budget`] can inject a short deadline in tests
+    /// without mutating process-wide state, which would race parallel tests —
+    /// the same reason `PalaceRegistry::with_open_queue_timeout` exists.
+    /// Test: `tools::tests::write_budget_tests`.
+    pub write_op_budget: std::time::Duration,
 }
 
 impl AppState {
@@ -636,7 +654,22 @@ impl AppState {
             // Start in Warming state; flipped to Ready by spawn_startup_tasks
             // once the embedder warm-up succeeds (issues #910/#911).
             daemon_readiness: Arc::new(AtomicU8::new(DaemonReadiness::Warming as u8)),
+            // #4002: one ceiling for the whole write, read once at construction.
+            write_op_budget: trusty_common::memory_core::timeouts::write_op_budget(),
         }
+    }
+
+    /// Override the per-operation write budget (issue #4002).
+    ///
+    /// Why: tests must prove the two write legs draw on ONE budget without
+    /// setting `TRUSTY_WRITE_OP_BUDGET_SECS`, which is process-wide and would
+    /// race any test running in parallel.
+    /// What: consuming builder that overwrites [`AppState::write_op_budget`].
+    /// Test: `tools::tests::write_budget_tests`.
+    #[must_use]
+    pub fn with_write_op_budget(mut self, budget: std::time::Duration) -> Self {
+        self.write_op_budget = budget;
+        self
     }
 
     /// Acquire (lazily, then clone) the per-palace write mutex.

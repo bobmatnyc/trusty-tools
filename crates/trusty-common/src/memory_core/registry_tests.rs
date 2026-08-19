@@ -979,6 +979,72 @@ fn writer_open_queue_wait_is_bounded_under_sustained_contention() {
     );
 }
 
+/// Why (issue #4002): the joint budget must be a ceiling on WAITING, never a
+/// new failure mode. An exhausted budget makes the open-queue acquisition
+/// non-blocking, and a non-blocking `try_lock_for` on an UNCONTENDED lock
+/// still succeeds — so the ordinary single-caller open must be unaffected. A
+/// fix that turned an exhausted budget into an unconditional error would break
+/// every write whose write-lock leg happened to consume the budget, which is
+/// worse than the additive wait it replaced.
+/// What: creates a palace, then opens it through `open_palace_within` with a
+/// zero-total (already spent) budget and asserts the handle comes back.
+/// `Duration::ZERO` makes `remaining()` exactly zero on any machine —
+/// `saturating_sub` can only move it down — so this needs no sleep and cannot
+/// flake on a slow host.
+/// Test: this test.
+#[test]
+fn open_palace_within_an_exhausted_budget_still_opens_an_uncontended_palace() {
+    use crate::memory_core::palace::Palace;
+    use crate::memory_core::timeouts::OpBudget;
+    use chrono::Utc;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let palace = Palace {
+        id: PalaceId::new("budgeted"),
+        name: "Budgeted".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_root.join("budgeted"),
+    };
+    {
+        let reg = PalaceRegistry::new();
+        reg.create_palace(data_root, palace).expect("create_palace");
+    }
+
+    let spent = OpBudget::start(std::time::Duration::ZERO);
+    assert_eq!(spent.remaining(), std::time::Duration::ZERO);
+
+    let reg = PalaceRegistry::new();
+    let handle = reg
+        .open_palace_within(data_root, &PalaceId::new("budgeted"), spent)
+        .expect("an exhausted budget must not fail an uncontended open");
+    assert_eq!(handle.id, PalaceId::new("budgeted"));
+}
+
+/// Why (issue #4002): the budget is a ceiling, not a replacement. A fix that
+/// handed `budget.remaining()` straight to `try_lock_for` would let a 60 s
+/// residual override a registry configured for a 100 ms queue wait — raising
+/// a bound the operator deliberately lowered.
+/// What: builds a registry with a 100 ms `open_queue_timeout` and a budget with
+/// far more left, then asserts the clamp itself resolves to the smaller of the
+/// two. This checks the arithmetic the open path applies, without needing to
+/// manufacture queue contention.
+/// Test: this test.
+#[test]
+fn open_palace_within_does_not_extend_the_configured_queue_bound() {
+    use crate::memory_core::timeouts::OpBudget;
+
+    let configured = std::time::Duration::from_millis(100);
+    let generous = OpBudget::start(std::time::Duration::from_secs(600));
+    assert_eq!(
+        generous.leg(configured),
+        configured,
+        "a large residual budget must not raise a small configured queue bound"
+    );
+}
+
 /// Restore a path's mode on drop, including while unwinding from a failed
 /// assertion, so a test can never leave `tempfile` an untraversable tree.
 ///

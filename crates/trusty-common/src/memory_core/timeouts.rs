@@ -8,19 +8,24 @@
 //! module centralises the three timeout thresholds and their env-var overrides
 //! so callers get a single import and defaults can be tuned per deployment.
 //!
-//! What: Exports three `std::time::Duration` functions:
+//! What: Exports per-leg `std::time::Duration` functions —
 //! `embedder_init_timeout()`, `embed_batch_timeout()`, `write_lock_timeout()`,
-//! plus a `lock_with_timeout` async helper that applies the write-lock timeout
-//! at every call site uniformly.
+//! `open_queue_timeout()` — plus a `lock_with_timeout` async helper that
+//! applies a lock timeout at every call site uniformly. Issue #4002 adds
+//! `write_op_budget()` and [`OpBudget`], the joint ceiling that stops two
+//! sequential per-leg waits from composing into their sum.
 //!
 //! Test: `embedder_init_timeout_default`, `embed_batch_timeout_default`,
-//! `write_lock_timeout_default`, `parse_secs_with_falls_back_on_bad_value`,
+//! `write_lock_timeout_default`, `write_op_budget_default`,
+//! `budget_clamps_a_leg_to_what_is_left`,
+//! `an_exhausted_budget_leaves_a_later_leg_nothing`,
+//! `parse_secs_with_falls_back_on_bad_value`,
 //! `parse_secs_with_reads_custom_value`, `parse_secs_with_uses_default_when_absent`
 //! (unit tests at the bottom of this file; run with
 //! `cargo test -p trusty-common --features memory-core`).
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, MutexGuard};
 
 /// Default ceiling for `FastEmbedder::new()` cold init.
@@ -58,6 +63,26 @@ const DEFAULT_WRITE_LOCK_SECS: u64 = 60;
 /// legitimate burst, still finite) caps roughly 30+ such attempts before
 /// giving up with a clear error rather than hanging indefinitely.
 const DEFAULT_OPEN_QUEUE_SECS: u64 = 60;
+
+/// Total wall-clock ceiling for one memory write operation (issue #4002).
+///
+/// Why: a write acquires the per-palace write mutex
+/// ([`DEFAULT_WRITE_LOCK_SECS`]) and then the per-palace open queue
+/// ([`DEFAULT_OPEN_QUEUE_SECS`]) in sequence. Each leg is bounded on its own,
+/// but nothing bounded their sum, so a caller that exhausted both waited
+/// 60 s + ~63 s before an error surfaced. 60 s is `max` of the two legs, not
+/// their sum: it keeps the operator-visible SLA equal to the larger single
+/// leg, which is what the two per-leg defaults already imply.
+const DEFAULT_WRITE_OP_BUDGET_SECS: u64 = 60;
+
+/// The budget only fixes anything while it is strictly smaller than the sum of
+/// the legs it governs. Raising it to 120 s would restore the composed ceiling
+/// issue #4002 removed while every runtime test kept passing, so the
+/// relationship is a build failure rather than a test failure.
+const _: () = assert!(
+    DEFAULT_WRITE_OP_BUDGET_SECS < DEFAULT_WRITE_LOCK_SECS + DEFAULT_OPEN_QUEUE_SECS,
+    "the joint write budget must be smaller than the additive worst case it replaces (#4002)"
+);
 
 /// Return the `FastEmbedder::new()` init timeout.
 ///
@@ -105,6 +130,81 @@ pub fn write_lock_timeout() -> Duration {
 /// Test: `open_queue_timeout_default`.
 pub fn open_queue_timeout() -> Duration {
     parse_secs_env("TRUSTY_OPEN_QUEUE_TIMEOUT_SECS", DEFAULT_OPEN_QUEUE_SECS)
+}
+
+/// Return the total budget one memory write operation may spend waiting
+/// (issue #4002).
+///
+/// Why: Overridable via `TRUSTY_WRITE_OP_BUDGET_SECS`. This is the number an
+/// operator reasons about — "how long before `memory_remember` gives up" —
+/// whereas [`write_lock_timeout`] and [`open_queue_timeout`] cap individual
+/// legs inside it.
+/// What: Reads the env var; falls back to `DEFAULT_WRITE_OP_BUDGET_SECS` (60).
+/// Test: `write_op_budget_default`; the default's relationship to the legs it
+/// replaces is a `const` assertion beside `DEFAULT_WRITE_OP_BUDGET_SECS`.
+pub fn write_op_budget() -> Duration {
+    parse_secs_env("TRUSTY_WRITE_OP_BUDGET_SECS", DEFAULT_WRITE_OP_BUDGET_SECS)
+}
+
+/// One operation's remaining share of a joint wait budget (issue #4002).
+///
+/// Why: `memory_remember` waits for the per-palace write mutex, then waits
+/// again to enter the per-palace open queue. Both waits were bounded, but each
+/// by its own full timeout, so the effective ceiling was their SUM (60 s + 60 s
+/// with stock defaults) rather than either configured bound. An `OpBudget`
+/// makes the later leg spend what the earlier leg left instead of starting a
+/// fresh window: the caller stamps one at the top of the operation and clamps
+/// every subsequent wait through [`OpBudget::leg`].
+/// What: stores the start instant and the total. [`OpBudget::remaining`]
+/// saturates at zero, so an overrun can only shrink a later leg, never extend
+/// one; [`OpBudget::leg`] returns `min(configured_leg, remaining)`, so the
+/// budget is a ceiling on top of each per-leg timeout and never raises one.
+/// Storing `total` rather than a precomputed deadline keeps a large configured
+/// value from overflowing `Instant`.
+/// Test: `budget_clamps_a_leg_to_what_is_left`,
+/// `an_exhausted_budget_leaves_a_later_leg_nothing`,
+/// `budget_never_extends_a_shorter_leg`.
+#[derive(Debug, Clone, Copy)]
+pub struct OpBudget {
+    started: Instant,
+    total: Duration,
+}
+
+impl OpBudget {
+    /// Stamp a budget of `total` starting now.
+    #[must_use]
+    pub fn start(total: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            total,
+        }
+    }
+
+    /// Stamp a budget of [`write_op_budget`] starting now.
+    #[must_use]
+    pub fn start_default() -> Self {
+        Self::start(write_op_budget())
+    }
+
+    /// Time left in this budget, saturating at zero once it is spent.
+    #[must_use]
+    pub fn remaining(&self) -> Duration {
+        self.total.saturating_sub(self.started.elapsed())
+    }
+
+    /// Clamp one leg's configured timeout to what the budget has left.
+    ///
+    /// Why: this is the whole fix for issue #4002 — it is what stops two
+    /// independently-bounded waits from composing into their sum.
+    /// What: `min(configured, remaining())`. Returns `Duration::ZERO` once the
+    /// budget is spent, which makes the leg a non-blocking attempt rather than
+    /// an unconditional failure: an uncontended acquisition still succeeds.
+    /// Test: `budget_clamps_a_leg_to_what_is_left`,
+    /// `an_exhausted_budget_leaves_a_later_leg_nothing`.
+    #[must_use]
+    pub fn leg(&self, configured: Duration) -> Duration {
+        configured.min(self.remaining())
+    }
 }
 
 /// Acquire a `tokio::sync::Mutex` with a bounded timeout, returning an error
@@ -297,5 +397,64 @@ mod tests {
         unsafe { std::env::remove_var("TRUSTY_OPEN_QUEUE_TIMEOUT_SECS") };
         let t = open_queue_timeout();
         assert_eq!(t, Duration::from_secs(DEFAULT_OPEN_QUEUE_SECS));
+    }
+
+    /// Why (issue #4002): Guard that the default total budget is 60 s when the
+    /// env var is absent.
+    /// What: Hold the env mutex, unset the var, call `write_op_budget()`.
+    /// Test: itself.
+    #[test]
+    fn write_op_budget_default() {
+        let _guard = env_lock();
+        unsafe { std::env::remove_var("TRUSTY_WRITE_OP_BUDGET_SECS") };
+        let t = write_op_budget();
+        assert_eq!(t, Duration::from_secs(DEFAULT_WRITE_OP_BUDGET_SECS));
+    }
+
+    // -------------------------------------------------------------------------
+    // `OpBudget` (issue #4002). No sleeps: an exhausted budget is constructed
+    // with a zero total, whose `remaining()` is exactly zero on any machine
+    // because `saturating_sub` can only move it down.
+    // -------------------------------------------------------------------------
+
+    /// Why (issue #4002): the second leg must spend what the first left, not
+    /// open a fresh window of its own.
+    /// What: stamp a 5 s budget, assert a 60 s configured leg is clamped to at
+    /// most the 5 s total.
+    /// Test: itself.
+    #[test]
+    fn budget_clamps_a_leg_to_what_is_left() {
+        let budget = OpBudget::start(Duration::from_secs(5));
+        let leg = budget.leg(Duration::from_secs(60));
+        assert!(
+            leg <= Duration::from_secs(5),
+            "a 60s leg under a 5s budget must be clamped to the budget; got {leg:?}"
+        );
+    }
+
+    /// Why (issue #4002): once the first leg has spent the whole budget the
+    /// second must not start another 60 s wait — that composition is the defect.
+    /// What: stamp a zero budget (exact, no clock dependence) and assert both
+    /// `remaining()` and a 60 s clamped leg are zero.
+    /// Test: itself.
+    #[test]
+    fn an_exhausted_budget_leaves_a_later_leg_nothing() {
+        let budget = OpBudget::start(Duration::ZERO);
+        assert_eq!(budget.remaining(), Duration::ZERO);
+        assert_eq!(budget.leg(Duration::from_secs(60)), Duration::ZERO);
+    }
+
+    /// Why (issue #4002): the budget is a ceiling, never a floor. A fix that
+    /// returned `remaining()` unconditionally would let a 1 ms leg wait the
+    /// whole budget.
+    /// What: stamp a 60 s budget, assert a 1 ms configured leg passes through.
+    /// Test: itself.
+    #[test]
+    fn budget_never_extends_a_shorter_leg() {
+        let budget = OpBudget::start(Duration::from_secs(60));
+        assert_eq!(
+            budget.leg(Duration::from_millis(1)),
+            Duration::from_millis(1)
+        );
     }
 }

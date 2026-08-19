@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use trusty_common::memory_core::filter::{FilterConfig, MCP_MIN_TOKENS};
 use trusty_common::memory_core::palace::{PalaceId, RoomType};
 use trusty_common::memory_core::retrieval::{admit_tier_c, RememberOptions, TierCAdmission};
+use trusty_common::memory_core::timeouts::{self, OpBudget};
 use uuid::Uuid;
 
 /// Look up the friendly palace name (Palace.name) from the in-memory cache,
@@ -336,12 +337,67 @@ pub(crate) fn open_palace_handle(
     state: &AppState,
     palace_id: &str,
 ) -> Result<std::sync::Arc<trusty_common::memory_core::PalaceHandle>> {
+    open_palace_handle_within(state, palace_id, OpBudget::start(state.write_op_budget))
+}
+
+/// Open a palace handle inside an operation that has already spent part of its
+/// budget (issue #4002).
+///
+/// Why: [`open_palace_handle`] starts a fresh
+/// [`trusty_common::memory_core::timeouts::open_queue_timeout`] window every
+/// time it is called. On the write path the caller has already waited up to
+/// `write_lock_timeout` for the per-palace write mutex, so the two waits
+/// composed into their sum — 60 s + ~63 s before any error surfaced. Write
+/// callers pass their in-flight budget here so this leg spends only the
+/// remainder.
+/// What: identical to [`open_palace_handle`] except the open-queue wait is
+/// clamped by `budget`; the liveness guard and error context are unchanged.
+/// Read paths keep calling [`open_palace_handle`], which stamps a full budget
+/// and therefore behaves exactly as before.
+/// Test: `tools::tests::write_budget_tests`.
+pub(crate) fn open_palace_handle_within(
+    state: &AppState,
+    palace_id: &str,
+    budget: OpBudget,
+) -> Result<std::sync::Arc<trusty_common::memory_core::PalaceHandle>> {
     let _tracked = state.worker_liveness.track();
     let pid = PalaceId::new(palace_id);
     state
         .registry
-        .open_palace(&state.data_root, &pid)
+        .open_palace_within(&state.data_root, &pid, budget)
         .with_context(|| format!("open palace {palace_id}"))
+}
+
+/// Acquire the per-palace write mutex as the FIRST leg of a budgeted write
+/// (issue #4002).
+///
+/// Why: `memory_remember`, `memory_note` and `task_add` all open with the same
+/// three lines, and all three previously handed `write_lock_timeout()` straight
+/// to the lock. That is the leg the open-queue wait then stacked on top of.
+/// Routing them through one helper is what guarantees the budget is stamped
+/// before the first wait — a per-handler copy is exactly how one of them would
+/// later drift back to the additive shape.
+/// What: stamps an [`OpBudget`] of [`AppState::write_op_budget`], waits at most
+/// `min(write_lock_timeout(), budget)` for the palace's write mutex, and
+/// returns the budget so the caller can pass its remainder to
+/// [`open_palace_handle_within`]. `tool` prefixes the error so the caller sees
+/// which handler gave up.
+/// Test: `tools::tests::write_budget_tests`.
+pub(crate) async fn begin_budgeted_write<'a>(
+    state: &AppState,
+    write_lock: &'a std::sync::Arc<tokio::sync::Mutex<()>>,
+    palace_id: &str,
+    tool: &str,
+) -> Result<(tokio::sync::MutexGuard<'a, ()>, OpBudget)> {
+    let budget = OpBudget::start(state.write_op_budget);
+    let guard = timeouts::lock_with_timeout(
+        write_lock,
+        budget.leg(timeouts::write_lock_timeout()),
+        palace_id,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{tool}: {e:#}"))?;
+    Ok((guard, budget))
 }
 
 /// Run deterministic KG extraction over a freshly-written drawer and assert
@@ -436,6 +492,15 @@ pub(crate) struct WriteDrawerParams<'a> {
     pub(crate) importance: f32,
     pub(crate) opts: RememberOptions,
     pub(crate) room_label_for_kg: Option<String>,
+    /// Remaining budget of the write that is already in flight (issue #4002).
+    ///
+    /// Why: `write_drawer` opens the palace handle, which is the second leg of
+    /// the wait the caller started when it took the write mutex. Without the
+    /// caller's budget it would start a fresh open-queue window and the two
+    /// legs would sum again.
+    /// What: the [`OpBudget`] returned by [`begin_budgeted_write`].
+    /// Test: `tools::tests::write_budget_tests`.
+    pub(crate) budget: OpBudget,
 }
 
 /// Run the shared write pipeline after content has been gated and attribution
@@ -462,9 +527,11 @@ pub(crate) async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>
         importance,
         opts,
         room_label_for_kg,
+        budget,
     } = params;
 
-    let handle = open_palace_handle(state, palace_id)?;
+    // #4002: second leg of the caller's budget, not a fresh open-queue window.
+    let handle = open_palace_handle_within(state, palace_id, budget)?;
     // Snapshot the preview before `content` is moved into the write so the
     // activity feed shows what landed on disk (matches the HTTP path).
     let preview = crate::service::drawer_content_preview(&content);
