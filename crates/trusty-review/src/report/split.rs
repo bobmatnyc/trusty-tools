@@ -29,6 +29,10 @@ const AUTHORSHIP_HEADING_NEEDLE: &str = "Authorship";
 /// Filename suffix the authorship document is written under.
 pub const AUTHORSHIP_STEM_SUFFIX: &str = "-authorship";
 
+/// Prefix every authorship-load gap line carries, set in one place by
+/// `model.rs`'s fail-open arm (#5453/#6004).
+const AUTHORSHIP_GAP_PREFIX: &str = "Authorship (";
+
 /// Remove the authorship section from a rendered document.
 ///
 /// Why: the split is a post-render cut rather than a second template, so both
@@ -93,10 +97,26 @@ fn rejoin(lines: &[&str], source: &str) -> String {
 /// nothing else.
 /// What: promotes the section's `## ` heading to the document's `# ` title,
 /// suffixed with the report codename, then the provenance legend, a line naming
-/// the companion report and the generation date, and the section body verbatim.
+/// the companion report and the generation date, the authorship-load gaps from
+/// `gaps`, and the section body verbatim.
+///
+/// The gap lines are what keeps an authorship-leg failure legible on its own.
+/// `polish` collapses a section with no data to `_No data available — see Gaps &
+/// Caveats._`, and since #6046 that referenced section renders in the OTHER
+/// document — so a reader holding only this one saw the collapse line and no
+/// reason for it. Restating the repository's own gap lines here costs nothing
+/// when the leg succeeded (`gaps` carries none) and is the whole explanation
+/// when it failed.
 /// Test: `split_tests::{authorship_document_carries_title_and_legend,
-/// authorship_document_keeps_the_section_body}`.
-pub fn authorship_document(title: &str, generated_date: &str, section: &str) -> String {
+/// authorship_document_keeps_the_section_body,
+/// authorship_document_states_its_own_data_gaps,
+/// authorship_document_omits_the_gap_block_when_the_leg_succeeded}`.
+pub fn authorship_document(
+    title: &str,
+    generated_date: &str,
+    section: &str,
+    gaps: &[String],
+) -> String {
     let mut lines = section.lines();
     let heading = lines
         .next()
@@ -108,10 +128,35 @@ pub fn authorship_document(title: &str, generated_date: &str, section: &str) -> 
 
     format!(
         "# {heading}: {title}\n\n{legend}\n\nCompanion to the technical \
-         due-diligence report for {title}; generated {generated_date}.\n\n{body}\n",
+         due-diligence report for {title}; generated {generated_date}.\n\n{gaps}{body}\n",
         legend = provenance::LEGEND,
+        gaps = gap_block(gaps),
         body = body.trim(),
     )
+}
+
+/// The authorship-load gap lines, as a leading block, or `""` when there are
+/// none.
+///
+/// Why: only the authorship leg's own gaps belong here — the code-review
+/// document keeps the full Gaps & Caveats list, and repeating an unrelated
+/// scan or metrics gap in this document would misattribute it to authorship.
+fn gap_block(gaps: &[String]) -> String {
+    let mine: Vec<&String> = gaps
+        .iter()
+        .filter(|g| g.starts_with(AUTHORSHIP_GAP_PREFIX))
+        .collect();
+    if mine.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("**Data gaps in this assessment:**\n\n");
+    for gap in mine {
+        out.push_str("- ");
+        out.push_str(gap);
+        out.push('\n');
+    }
+    out.push('\n');
+    out
 }
 
 #[cfg(test)]

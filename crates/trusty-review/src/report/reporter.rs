@@ -146,7 +146,15 @@ impl Reporter {
         RenderedReports {
             code_review: contents_links::inject(&code_body),
             authorship: authorship_section.map(|section| {
-                split::authorship_document(&model.title, &model.generated_date, &section)
+                // #6046: the model's authorship-load gaps travel WITH the
+                // section — the Gaps & Caveats section its no-data line points
+                // at renders in the code-review document, not this one.
+                split::authorship_document(
+                    &model.title,
+                    &model.generated_date,
+                    &section,
+                    &model.gaps,
+                )
             }),
         }
     }
