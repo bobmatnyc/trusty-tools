@@ -119,7 +119,7 @@ trusty-code = { path = "crates/trusty-code", version = "0.3.0" }
 # epic #3411). Not yet published (Slice 1, #3425).
 trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.6.0" }
-trusty-common = { path = "crates/trusty-common", version = "0.38" }
+trusty-common = { path = "crates/trusty-common", version = "0.39" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 # Why: `default-features = false` HERE, not only on the member entry (mirrors

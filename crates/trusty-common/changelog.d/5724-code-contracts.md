@@ -1,3 +1,0 @@
-Added
-
-- Public API items now carry machine-readable `# Code Contract` blocks stating preconditions, postconditions, and invariants, extracted to a checked-in `contracts.json` artifact and each enforced by a test. Ten items are contracted in this first pass, selected by measured break history and cross-crate reach: `latest_trusty_mpm_snapshot`, `filter_sessions_since`, `PausedSession::sort_key`, `resolve_bedrock_region`, `redact_secret`, `scrub_secrets`, `retry_on_etxtbsy`, `retry_on_etxtbsy_async`, `KgStoreRedb::count_active_triples`, `read_daemon_addr`, and `resolve_daemon_base_url`. See ADR-0047.
