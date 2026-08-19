@@ -1069,6 +1069,48 @@ pub enum AuditError {
         source: Box<trusty_installer::download::pinned::PinnedError>,
     },
 
+    /// A re-render was pointed at a directory carrying no report to render.
+    ///
+    /// Why: #6080. The recipient of a delivered package types one command
+    /// against a directory they just unzipped, so the two things they can get
+    /// wrong are the directory and the unzipping — and both look identical to a
+    /// run that renders nothing and exits 0. "0 reports re-rendered" reads as a
+    /// finished job, so an empty discovery refuses instead.
+    /// What: names the directory that was searched and the file that was looked
+    /// for, one level deep in it and in its `reports/` and `out/` children.
+    /// Test: `crate::rerender::rerender_tests::a_source_with_no_manifest_is_refused`.
+    #[error(
+        "no {file} under {searched} — point `--from` at the unzipped audit package (the one \
+         holding `reports/`), or at a working directory a sweep has run in"
+    )]
+    NothingToRerender {
+        /// The directory that was searched.
+        searched: PathBuf,
+        /// The file that was looked for.
+        file: &'static str,
+    },
+
+    /// The renderer a re-render needs could not be started.
+    ///
+    /// Why: #6080. Unlike a sweep, a re-render performs no pin check — it runs
+    /// whatever `trusty-review` it resolves — so the only version-shaped failure
+    /// left is not having one at all. It fails the whole run rather than each
+    /// report in turn: a binary that will not start for the first manifest will
+    /// not start for the fourth either, and four identical failures bury the
+    /// one fact the operator needs.
+    /// What: names the binary as it was resolved — an explicit `--review-bin`, a
+    /// path under the working directory's `tools/`, or the bare name that was
+    /// looked for on `PATH`.
+    /// Test: `crate::rerender::rerender_tests::a_renderer_that_cannot_start_names_the_binary`.
+    #[error(
+        "cannot run {binary} — a re-render needs trusty-review on this machine; install it, \
+         or name a copy with `--review-bin`"
+    )]
+    ReviewBinaryMissing {
+        /// The binary that could not be started, as resolved.
+        binary: String,
+    },
+
     /// A capability this scaffold declares but does not yet implement.
     ///
     /// Why: a half-built capability must fail closed rather than silently

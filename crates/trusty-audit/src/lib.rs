@@ -34,6 +34,7 @@
 //! | [`package`] | assembling the unencrypted deliverable that goes back (#5499) |
 //! | [`chain`] | driving all four of those in one call, resumably (#5824) |
 //! | [`distribute`] | assembling the install package that goes to a client (#5825) |
+//! | [`rerender`] | regenerating a delivered audit's reports from what shipped with it (#6080) |
 //!
 //! ## What this milestone is not
 //!
@@ -92,6 +93,10 @@ pub mod package;
 pub mod progress;
 pub mod registry;
 mod relay;
+// #6080: the render step of the sweep, run on its own by whoever RECEIVED the
+// finished deliverable. Named `rerender` because `cli::render` already means
+// turning an `Outcome` into text; the verb the recipient types is `render`.
+pub mod rerender;
 pub mod run;
 pub mod session;
 pub mod tools;

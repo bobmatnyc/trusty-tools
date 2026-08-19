@@ -22,6 +22,7 @@ use crate::chain::ChainOptions;
 use crate::clone::CloneOptions;
 use crate::distribute::DistributeOptions;
 use crate::registry::TargetKind;
+use crate::rerender::RerenderOptions;
 use crate::run::RunOptions;
 use crate::session::{Command, Outcome};
 
@@ -189,6 +190,29 @@ pub enum Verb {
         #[arg(long, value_name = "FILE")]
         binary: Option<PathBuf>,
     },
+    /// Regenerate the reports from a finished audit package.
+    ///
+    /// Point it at the directory you unzipped the audit into — the one holding
+    /// `reports/` — and it runs the report step again over every manifest in
+    /// there, writing a fresh copy beside it. It clones nothing, collects
+    /// nothing, and never writes into the package it read.
+    ///
+    /// It needs an OpenRouter key in OPENROUTER_API_KEY: the report's executive
+    /// summary is written by a model, so a re-render calls one. The dimensions
+    /// that need the repositories themselves — the code scan and the analysis
+    /// pass — are named as gaps rather than silently left out, because an audit
+    /// package carries no checkouts.
+    Render {
+        /// The unzipped audit package, or a working directory a sweep ran in.
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+        /// Where to write the regenerated reports (default: <from>/rerendered).
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// The trusty-review to run (default: the installed one, else PATH).
+        #[arg(long, value_name = "FILE")]
+        review_bin: Option<PathBuf>,
+    },
 }
 
 /// What `taudit add` was asked to register.
@@ -293,6 +317,17 @@ impl Cli {
                 output_dir: out.clone(),
                 binary: binary.clone(),
             }),
+            // #6080: every knob defaults, so `taudit render --from <package>` is
+            // the whole invocation the recipient is given.
+            Some(Verb::Render {
+                from,
+                out,
+                review_bin,
+            }) => Command::Rerender(RerenderOptions {
+                from: from.clone(),
+                out: out.clone(),
+                review: review_bin.clone(),
+            }),
         }
     }
 }
@@ -382,6 +417,7 @@ mod cli_tests {
             Command::Package { .. } => vec!["taudit", "package"],
             Command::Audit(_) => vec!["taudit", "audit"],
             Command::Distribute(_) => vec!["taudit", "distribute"],
+            Command::Rerender(_) => vec!["taudit", "render"],
         }
     }
 
@@ -418,6 +454,7 @@ mod cli_tests {
             Command::Package { destination: None },
             Command::Audit(ChainOptions::default()),
             Command::Distribute(DistributeOptions::default()),
+            Command::Rerender(RerenderOptions::default()),
         ]
     }
 
@@ -437,6 +474,63 @@ mod cli_tests {
                 fresh: true,
                 destination: Some(PathBuf::from("/tmp/p.zip")),
             })
+        );
+    }
+
+    /// #6080: the recipient reads two things off this — the files to open, and
+    /// how this copy differs from the one they were sent. Both are asserted,
+    /// because a re-render that looks like a clean reproduction of a report it
+    /// cannot fully reproduce is the fail-open shape the verb must not have.
+    #[test]
+    fn a_re_render_names_the_files_and_what_did_not_reproduce() {
+        use crate::rerender::{RenderResult, RenderedReport, RerenderReport};
+
+        let outcome = Outcome::Rerendered(RerenderReport {
+            source: PathBuf::from("/pkg"),
+            output: PathBuf::from("/pkg/rerendered"),
+            review: PathBuf::from("/usr/local/bin/trusty-review"),
+            reports: vec![
+                RenderedReport {
+                    manifest: PathBuf::from("/pkg/reports/01-acme-api/manifest.toml"),
+                    name: "01-acme-api".to_owned(),
+                    output: PathBuf::from("/pkg/rerendered/01-acme-api"),
+                    log: PathBuf::from("/pkg/rerendered/01-acme-api.log"),
+                    artifacts: vec![PathBuf::from("/pkg/rerendered/01-acme-api/report.md")],
+                    gaps: vec!["no checkout for acme/api at /work/repos/acme-api".to_owned()],
+                    result: RenderResult::Succeeded,
+                },
+                RenderedReport {
+                    manifest: PathBuf::from("/pkg/reports/02-acme-web/manifest.toml"),
+                    name: "02-acme-web".to_owned(),
+                    output: PathBuf::from("/pkg/rerendered/02-acme-web"),
+                    log: PathBuf::from("/pkg/rerendered/02-acme-web.log"),
+                    artifacts: Vec::new(),
+                    gaps: Vec::new(),
+                    result: RenderResult::Failed {
+                        reason: "exited with code 3".to_owned(),
+                    },
+                },
+            ],
+        });
+
+        let rendered = render(&outcome);
+        assert!(
+            rendered.contains("/pkg/rerendered/01-acme-api/report.md"),
+            "the file to open must be named: {rendered}"
+        );
+        assert!(
+            rendered.contains("no checkout for acme/api"),
+            "a dimension that did not reproduce must be stated: {rendered}"
+        );
+        assert!(rendered.contains("PARTIAL"), "{rendered}");
+        assert!(
+            rendered.contains("written by a model"),
+            "the narrative's non-reproducibility must be stated: {rendered}"
+        );
+        assert_eq!(
+            exit_code(&outcome),
+            crate::session::EXIT_PARTIAL,
+            "a re-render that could not regenerate every report must not exit 0"
         );
     }
 
