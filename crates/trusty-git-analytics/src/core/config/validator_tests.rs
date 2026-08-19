@@ -170,38 +170,104 @@ fn empty_jira_block_is_fine() {
     );
 }
 
-#[test]
-fn missing_llm_key_reported() {
-    let prev_or = std::env::var("OPENROUTER_API_KEY").ok();
-    let prev_oa = std::env::var("OPENAI_API_KEY").ok();
-    // SAFETY: env var manipulation is unsafe in 2024 edition.
-    unsafe {
-        std::env::remove_var("OPENROUTER_API_KEY");
-        std::env::remove_var("OPENAI_API_KEY");
-    }
-
-    let mut cfg = empty_config();
-    cfg.classification = Some(ClassificationConfig {
+/// Build a `ClassificationConfig` with LLM classification on.
+fn llm_enabled(provider: &str, config_key: Option<&str>) -> ClassificationConfig {
+    ClassificationConfig {
         use_llm: true,
-        llm_provider: "openrouter".into(),
-        openrouter_api_key: None,
+        llm_provider: provider.into(),
+        openrouter_api_key: config_key.map(str::to_string),
         ..Default::default()
-    });
-    let errors = ConfigValidator::new(&cfg).validate();
-    let found = errors
-        .iter()
-        .any(|e| matches!(e, ConfigError::MissingLlmKey { .. }));
-
-    // SAFETY: env var manipulation is unsafe in 2024 edition.
-    unsafe {
-        if let Some(v) = prev_or {
-            std::env::set_var("OPENROUTER_API_KEY", v);
-        }
-        if let Some(v) = prev_oa {
-            std::env::set_var("OPENAI_API_KEY", v);
-        }
     }
-    assert!(found, "got {errors:?}");
+}
+
+/// An `env_lookup` that answers only for the named key.
+fn only(key: &'static str, value: &'static str) -> impl Fn(&str) -> Option<String> {
+    move |k| (k == key).then(|| value.to_string())
+}
+
+/// Why: a config with `use_llm = true` and no API key anywhere cannot classify,
+/// so validation must say so before the run starts.
+/// What: drive `llm_key_missing` across every provider and every source a key
+/// can come from, with `env_lookup` supplied per case.
+/// Test: this test. #5725: it used to remove `OPENROUTER_API_KEY` and
+/// `OPENAI_API_KEY` process-wide to reach the missing-key branch. That is
+/// `unsafe` under the 2024 edition, and its restore raced
+/// `profile::batch_reviewer::tests::from_slug_with_store_errors_when_no_credential_resolves` —
+/// putting the key back mid-resolution and failing that test 40 runs out of 40.
+/// The env lookup is now an argument, so the present-key branches are covered
+/// too; they were unreachable before.
+#[test]
+fn llm_key_missing_across_providers_and_env() {
+    let none = |_: &str| None;
+
+    assert_eq!(
+        llm_key_missing(&llm_enabled("openrouter", None), none),
+        Some("openrouter".to_string()),
+        "no config key and no env key means classification cannot run"
+    );
+    assert_eq!(
+        llm_key_missing(&llm_enabled("openrouter", Some("   ")), |_| Some(
+            "\t".to_string()
+        )),
+        Some("openrouter".to_string()),
+        "whitespace-only keys count as absent"
+    );
+    assert_eq!(
+        llm_key_missing(&llm_enabled("openrouter", Some("sk-or-xxx")), none),
+        None,
+        "a config key satisfies the check"
+    );
+    assert_eq!(
+        llm_key_missing(
+            &llm_enabled("openrouter", None),
+            only("OPENROUTER_API_KEY", "sk-or-xxx")
+        ),
+        None,
+        "OPENROUTER_API_KEY satisfies the check"
+    );
+    assert_eq!(
+        llm_key_missing(
+            &llm_enabled("openrouter", None),
+            only("OPENAI_API_KEY", "sk-oa-xxx")
+        ),
+        Some("openrouter".to_string()),
+        "the wrong provider's key does not satisfy openrouter"
+    );
+
+    // `openai` reads no config field — its key must come from the environment.
+    assert_eq!(
+        llm_key_missing(&llm_enabled("openai", Some("sk-or-xxx")), none),
+        Some("openai".to_string()),
+        "the openrouter config key is not an openai key"
+    );
+    assert_eq!(
+        llm_key_missing(
+            &llm_enabled("openai", None),
+            only("OPENAI_API_KEY", "sk-oa-xxx")
+        ),
+        None
+    );
+
+    // `auto` accepts either provider's key.
+    assert_eq!(
+        llm_key_missing(
+            &llm_enabled("auto", None),
+            only("OPENAI_API_KEY", "sk-oa-xxx")
+        ),
+        None
+    );
+    assert_eq!(
+        llm_key_missing(&llm_enabled("auto", None), none),
+        Some("auto".to_string())
+    );
+
+    // Bedrock uses the AWS credential chain — no API-key check applies.
+    assert_eq!(llm_key_missing(&llm_enabled("bedrock", None), none), None);
+
+    // LLM off means no key is required.
+    let mut off = llm_enabled("openrouter", None);
+    off.use_llm = false;
+    assert_eq!(llm_key_missing(&off, none), None);
 }
 
 #[test]
@@ -241,88 +307,143 @@ fn nonexistent_output_dir_is_created_and_passes() {
     assert!(exists, "validator should have created the dir");
 }
 
-/// Drop guard that snapshots an env var, removes it for the test, and
-/// restores it (or removes it again if it was originally absent) on drop.
-///
-/// Why: previous closure-based helpers ran restore code *after* the test
-/// body, which meant a panicking assertion would skip the restore and
-/// leak mutated global env state into the rest of the test run. A Drop
-/// guard runs during unwinding too, so panicking tests still restore.
-///
-/// SAFETY: env-var mutation is `unsafe` in the 2024 edition. We accept
-/// it here only inside `#[cfg(test)]` and rely on the guard being the
-/// sole writer in the test it covers.
-struct EnvVarGuard {
-    name: &'static str,
-    original: Option<String>,
-}
-
-impl EnvVarGuard {
-    /// Snapshot `name`, remove it, and arrange for restore on drop.
-    fn remove(name: &'static str) -> Self {
-        let original = std::env::var(name).ok();
-        // SAFETY: 2024-edition env mutation; isolated to this test thread
-        // via Drop ordering; cleanup is guaranteed via the impl below.
-        unsafe { std::env::remove_var(name) };
-        Self { name, original }
+/// Build a `BitbucketConfig` with PR fetching on and the given auth fields.
+fn bitbucket_fetching_prs(
+    token: Option<&str>,
+    username: Option<&str>,
+    app_password: Option<&str>,
+) -> BitbucketConfig {
+    BitbucketConfig {
+        token: token.map(str::to_string),
+        username: username.map(str::to_string),
+        app_password: app_password.map(str::to_string),
+        workspace: Some("acme".into()),
+        repo_slug: Some("widgets".into()),
+        fetch_prs: true,
+        ..Default::default()
     }
 }
 
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: see [`EnvVarGuard::remove`].
-        unsafe {
-            match self.original.as_deref() {
-                Some(v) => std::env::set_var(self.name, v),
-                None => std::env::remove_var(self.name),
-            }
-        }
-    }
+/// Why: Bitbucket PR fetching needs one of two auth modes, and either half of
+/// either mode can arrive from the config file or the environment. Validation
+/// must reject only the combinations that leave no usable mode.
+/// What: drive `bitbucket_auth_missing` across bearer-token and basic-auth
+/// sources, including whitespace-only values and the partial-basic case.
+/// Test: this test. #5725: the four Bitbucket tests below used to clear
+/// `BITBUCKET_TOKEN` and `BITBUCKET_APP_PASSWORD` process-wide through an
+/// `EnvVarGuard`, which is `unsafe` under the 2024 edition and races every other
+/// test thread. Both env values are now arguments, so the env-supplied branches
+/// are covered too; they were unreachable before.
+#[test]
+fn bitbucket_auth_missing_across_config_and_env() {
+    assert!(
+        bitbucket_auth_missing(&bitbucket_fetching_prs(None, None, None), None, None),
+        "no auth in config and none in the environment"
+    );
+    assert!(
+        !bitbucket_auth_missing(
+            &bitbucket_fetching_prs(Some("workspace-access-token"), None, None),
+            None,
+            None
+        ),
+        "a config bearer token satisfies the check"
+    );
+    assert!(
+        !bitbucket_auth_missing(
+            &bitbucket_fetching_prs(None, None, None),
+            Some("env-token"),
+            None
+        ),
+        "BITBUCKET_TOKEN satisfies the check"
+    );
+    assert!(
+        !bitbucket_auth_missing(
+            &bitbucket_fetching_prs(None, Some("alice"), Some("abcd")),
+            None,
+            None
+        ),
+        "a config username/app-password pair satisfies the check"
+    );
+    assert!(
+        !bitbucket_auth_missing(
+            &bitbucket_fetching_prs(None, Some("alice"), None),
+            None,
+            Some("env-pwd")
+        ),
+        "BITBUCKET_APP_PASSWORD pairs with a config username"
+    );
+    assert!(
+        bitbucket_auth_missing(
+            &bitbucket_fetching_prs(None, Some("alice"), None),
+            None,
+            None
+        ),
+        "a username with no password anywhere is partial auth, not auth"
+    );
+    assert!(
+        bitbucket_auth_missing(
+            &bitbucket_fetching_prs(None, None, Some("abcd")),
+            None,
+            None
+        ),
+        "an app password with no username is partial auth, not auth"
+    );
+    assert!(
+        bitbucket_auth_missing(
+            &bitbucket_fetching_prs(Some("  "), Some("alice"), Some("\t")),
+            Some(" "),
+            Some("")
+        ),
+        "whitespace-only values count as absent in every position"
+    );
+
+    let mut off = bitbucket_fetching_prs(None, None, None);
+    off.fetch_prs = false;
+    assert!(
+        !bitbucket_auth_missing(&off, None, None),
+        "no auth is required when fetch_prs is off"
+    );
 }
 
-/// Save and clear the Bitbucket env vars for the duration of a closure,
-/// then restore them — panic-safe via [`EnvVarGuard`].
-fn with_clean_bitbucket_env<F: FnOnce()>(f: F) {
-    let _t = EnvVarGuard::remove("BITBUCKET_TOKEN");
-    let _p = EnvVarGuard::remove("BITBUCKET_APP_PASSWORD");
-    f();
-    // Guards drop here (or earlier on panic), restoring env.
-}
-
+/// Why: the workspace and repo_slug checks are separate from auth and consult
+/// no environment, so they are provable through the whole validator.
+/// What: a Bitbucket block with PR fetching on and neither field set reports
+/// both as incomplete.
+/// Test: this test itself.
 #[test]
 fn bitbucket_requires_workspace_and_repo_slug_when_fetch_prs() {
-    with_clean_bitbucket_env(|| {
-        let mut cfg = empty_config();
-        cfg.bitbucket = Some(BitbucketConfig {
-            token: Some("bearer".into()),
-            fetch_prs: true,
-            ..Default::default()
-        });
-        let errors = ConfigValidator::new(&cfg).validate();
-        let missing: Vec<&str> = errors
-            .iter()
-            .filter_map(|e| match e {
-                ConfigError::IncompleteBitbucketConfig { field } => Some(field.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert!(missing.contains(&"workspace"), "got {errors:?}");
-        assert!(missing.contains(&"repo_slug"), "got {errors:?}");
+    let mut cfg = empty_config();
+    cfg.bitbucket = Some(BitbucketConfig {
+        token: Some("bearer".into()),
+        fetch_prs: true,
+        ..Default::default()
     });
+    let errors = ConfigValidator::new(&cfg).validate();
+    let missing: Vec<&str> = errors
+        .iter()
+        .filter_map(|e| match e {
+            ConfigError::IncompleteBitbucketConfig { field } => Some(field.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(missing.contains(&"workspace"), "got {errors:?}");
+    assert!(missing.contains(&"repo_slug"), "got {errors:?}");
 }
 
+/// Why: the two complete auth modes must pass the whole validator, not just the
+/// decision function.
+/// What: a bearer token and a username/app-password pair each yield no
+/// Bitbucket error. An ambient `BITBUCKET_*` value could only ADD auth, so
+/// these assertions need no environment control (#5725).
+/// Test: this test itself.
 #[test]
-fn bitbucket_accepts_app_password_pair() {
-    with_clean_bitbucket_env(|| {
+fn bitbucket_complete_auth_passes_validation() {
+    for bb in [
+        bitbucket_fetching_prs(None, Some("alice"), Some("abcd")),
+        bitbucket_fetching_prs(Some("workspace-access-token"), None, None),
+    ] {
         let mut cfg = empty_config();
-        cfg.bitbucket = Some(BitbucketConfig {
-            username: Some("alice".into()),
-            app_password: Some("abcd".into()),
-            workspace: Some("acme".into()),
-            repo_slug: Some("widgets".into()),
-            fetch_prs: true,
-            ..Default::default()
-        });
+        cfg.bitbucket = Some(bb);
         let errors = ConfigValidator::new(&cfg).validate();
         assert!(
             !errors.iter().any(|e| matches!(
@@ -331,51 +452,7 @@ fn bitbucket_accepts_app_password_pair() {
             )),
             "got {errors:?}"
         );
-    });
-}
-
-#[test]
-fn bitbucket_accepts_bearer_token() {
-    with_clean_bitbucket_env(|| {
-        let mut cfg = empty_config();
-        cfg.bitbucket = Some(BitbucketConfig {
-            token: Some("workspace-access-token".into()),
-            workspace: Some("acme".into()),
-            repo_slug: Some("widgets".into()),
-            fetch_prs: true,
-            ..Default::default()
-        });
-        let errors = ConfigValidator::new(&cfg).validate();
-        assert!(
-            !errors.iter().any(|e| matches!(
-                e,
-                ConfigError::MissingBitbucketAuth | ConfigError::IncompleteBitbucketConfig { .. }
-            )),
-            "got {errors:?}"
-        );
-    });
-}
-
-#[test]
-fn bitbucket_rejects_partial_auth() {
-    with_clean_bitbucket_env(|| {
-        let mut cfg = empty_config();
-        // username without app_password
-        cfg.bitbucket = Some(BitbucketConfig {
-            username: Some("alice".into()),
-            workspace: Some("acme".into()),
-            repo_slug: Some("widgets".into()),
-            fetch_prs: true,
-            ..Default::default()
-        });
-        let errors = ConfigValidator::new(&cfg).validate();
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ConfigError::MissingBitbucketAuth)),
-            "got {errors:?}"
-        );
-    });
+    }
 }
 
 #[test]
@@ -409,16 +486,16 @@ fn config_validator_rejects_ado_with_no_projects() {
 
 #[test]
 fn bitbucket_block_off_is_fine() {
-    with_clean_bitbucket_env(|| {
-        let mut cfg = empty_config();
-        cfg.bitbucket = Some(BitbucketConfig::default());
-        let errors = ConfigValidator::new(&cfg).validate();
-        assert!(
-            !errors.iter().any(|e| matches!(
-                e,
-                ConfigError::MissingBitbucketAuth | ConfigError::IncompleteBitbucketConfig { .. }
-            )),
-            "got {errors:?}"
-        );
-    });
+    // `fetch_prs` defaults off, so the check returns before it reads anything —
+    // no environment control needed (#5725).
+    let mut cfg = empty_config();
+    cfg.bitbucket = Some(BitbucketConfig::default());
+    let errors = ConfigValidator::new(&cfg).validate();
+    assert!(
+        !errors.iter().any(|e| matches!(
+            e,
+            ConfigError::MissingBitbucketAuth | ConfigError::IncompleteBitbucketConfig { .. }
+        )),
+        "got {errors:?}"
+    );
 }
