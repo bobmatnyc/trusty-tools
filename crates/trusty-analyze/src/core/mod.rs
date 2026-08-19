@@ -59,7 +59,9 @@ pub use review::{
 pub use scip::{extract_kg_from_scip, index_to_graph as scip_index_to_graph, ScipIngestSummary};
 pub use scip_overlay::{overlay_path_beside_facts, ScipOverlayRecord, ScipOverlayStore};
 pub use tool_registry::{global_registry, ToolRegistry};
-pub use tools::{DiagnosticsReport, Severity as DiagnosticSeverity, StaticTool, ToolDiagnostic};
+pub use tools::{
+    DeadlineCutoff, DiagnosticsReport, Severity as DiagnosticSeverity, StaticTool, ToolDiagnostic,
+};
 
 #[cfg(test)]
 mod integration_tests;

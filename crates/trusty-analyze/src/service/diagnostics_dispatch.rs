@@ -8,16 +8,86 @@
 //! What: exports `run_diagnostics_blocking`, which is called from
 //! `diagnostics_for_index` under `tokio::task::spawn_blocking`. The function
 //! splits tools into file-scoped (scratch dir) and project-scoped (real disk)
-//! buckets and dispatches each correctly.
+//! buckets, dispatches each correctly, and honours a per-request wall-clock
+//! deadline between subprocess spawns so a large corpus returns a partial
+//! result instead of running unbounded (#6018).
 //! Test: `run_diagnostics_blocking_skips_unknown_languages`,
 //! `run_diagnostics_blocking_respects_language_filter`, and
 //! `run_diagnostics_blocking_project_scoped_skips_when_no_root` in
-//! `service/mod.rs` exercise this via the public interface.
+//! `service/mod.rs` exercise this via the public interface;
+//! `dispatch_stops_at_deadline_and_reports_cutoff` covers the deadline branch.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::time::Instant;
 
-use crate::core::{DiagnosticsReport, ToolDiagnostic};
+use crate::core::{DeadlineCutoff, DiagnosticsReport, ToolDiagnostic};
+
+/// Cooperative wall-clock budget for one diagnostics dispatch.
+///
+/// Why: the dispatch spawns one external subprocess per (file, file-scoped
+/// tool) pair and runs inside a `spawn_blocking` task that nothing can cancel
+/// from the outside. Without an internal budget a 4097-file Rust index ran for
+/// 10+ minutes and the client saw a transport-level abandon, not a response
+/// (#6018). Checking a deadline between invocations is the only way to stop
+/// mid-corpus and still return the work already done.
+/// What: wraps the deadline `Instant` and tallies what the deadline cut off.
+/// `deadline: None` means "no budget" — every legacy caller and every test that
+/// does not exercise the cutoff path passes `None` and keeps the old behavior.
+/// Test: `dispatch_stops_at_deadline_and_reports_cutoff` and
+/// `dispatch_without_deadline_reports_no_cutoff`.
+struct Budget {
+    deadline: Option<Instant>,
+    budget_secs: u64,
+    files_analyzed: usize,
+    files_skipped: usize,
+    tools_skipped: BTreeSet<String>,
+    expired: bool,
+}
+
+impl Budget {
+    fn new(deadline: Option<Instant>) -> Self {
+        let budget_secs = deadline
+            .map(|d| d.saturating_duration_since(Instant::now()).as_secs())
+            .unwrap_or(0);
+        Self {
+            deadline,
+            budget_secs,
+            files_analyzed: 0,
+            files_skipped: 0,
+            tools_skipped: BTreeSet::new(),
+            expired: false,
+        }
+    }
+
+    /// True once the wall-clock budget is spent. Latches `expired` so later
+    /// callers do not re-read the clock after the first expiry.
+    fn is_expired(&mut self) -> bool {
+        if self.expired {
+            return true;
+        }
+        if let Some(d) = self.deadline {
+            if Instant::now() >= d {
+                self.expired = true;
+            }
+        }
+        self.expired
+    }
+
+    /// Fold the tally into the report field. `None` when the dispatch ran to
+    /// completion, which is what tells a caller the result is not partial.
+    fn into_cutoff(self) -> Option<DeadlineCutoff> {
+        if !self.expired {
+            return None;
+        }
+        Some(DeadlineCutoff {
+            deadline_secs: self.budget_secs,
+            files_analyzed: self.files_analyzed,
+            files_skipped: self.files_skipped,
+            tools_skipped: self.tools_skipped.into_iter().collect(),
+        })
+    }
+}
 
 /// Abs-to-rel mapping: given the absolute on-disk path of a diagnostic and
 /// the `(rel, real)` pairs for the current language bucket, return the
@@ -69,7 +139,9 @@ pub(crate) fn abs_to_rel<'a>(
 /// so callers can distinguish "ran tools, found nothing" from "no tools
 /// available" (#915).
 /// What: delegates to `run_diagnostics_blocking_with_registry` with
-/// `global_registry()`.
+/// `global_registry()`. `deadline` is the wall-clock instant after which the
+/// dispatch stops starting new work and returns a partial report; `None`
+/// disables the budget (#6018).
 /// Test: `run_diagnostics_blocking_skips_unknown_languages`,
 /// `run_diagnostics_blocking_respects_language_filter`.
 pub fn run_diagnostics_blocking(
@@ -77,6 +149,7 @@ pub fn run_diagnostics_blocking(
     language_filter: Option<String>,
     tool_filter: Option<Vec<String>>,
     root_path: Option<String>,
+    deadline: Option<Instant>,
 ) -> DiagnosticsReport {
     use crate::core::global_registry;
     run_diagnostics_blocking_with_registry(
@@ -84,6 +157,7 @@ pub fn run_diagnostics_blocking(
         language_filter,
         tool_filter,
         root_path,
+        deadline,
         global_registry(),
     )
 }
@@ -112,8 +186,14 @@ pub fn run_diagnostics_blocking(
 ///      `diag.file` (absolute) back to the index-relative rel via
 ///      `abs_to_rel`. Drop diagnostics that don't map to any indexed file.
 ///      When `root_path` is `None`, log at info and skip (graceful degradation).
-///   5. Returns a `DiagnosticsReport` with `tools_run`, `tools_unavailable`,
-///      and `diagnostics` populated.
+///   5. Between every unit of work — each file in the file-scoped loop and each
+///      project-scoped tool — checks `deadline`. Once it has passed, no new
+///      subprocess is started: the remaining files are counted into
+///      `files_skipped`, the untouched tools into `tools_skipped`, and the
+///      report carries a `cutoff` so the truncated list cannot read as a clean
+///      run (#6018). `deadline: None` disables the budget entirely.
+///   6. Returns a `DiagnosticsReport` with `tools_run`, `tools_unavailable`,
+///      `diagnostics`, and `cutoff` populated.
 ///
 /// Test: `run_diagnostics_blocking_project_scoped_skips_when_no_root` uses
 /// this directly with a `FakeProjectScopedTool` registry.
@@ -121,17 +201,22 @@ pub fn run_diagnostics_blocking(
 /// proves the per-file subdir isolation prevents basename collisions.
 /// `report_marks_unavailable_tool` proves that tools absent from PATH are
 /// reported under `tools_unavailable`.
+/// `dispatch_stops_at_deadline_and_reports_cutoff` proves the budget stops the
+/// fan-out mid-corpus and names what it skipped.
 pub fn run_diagnostics_blocking_with_registry(
     by_file: HashMap<String, String>,
     language_filter: Option<String>,
     tool_filter: Option<Vec<String>>,
     root_path: Option<String>,
+    deadline: Option<Instant>,
     registry: &crate::core::tool_registry::ToolRegistry,
 ) -> DiagnosticsReport {
     use crate::lang::LanguageDetector;
 
     // Collect unavailable tool names from the registry upfront.
     let tools_unavailable: Vec<String> = registry.unavailable_names().to_vec();
+    // #6018: per-request wall-clock budget, checked between subprocess spawns.
+    let mut budget = Budget::new(deadline);
 
     let scratch = match tempfile::tempdir() {
         Ok(d) => d,
@@ -141,6 +226,7 @@ pub fn run_diagnostics_blocking_with_registry(
                 tools_run: Vec::new(),
                 tools_unavailable,
                 diagnostics: Vec::new(),
+                cutoff: None,
             };
         }
     };
@@ -195,6 +281,16 @@ pub fn run_diagnostics_blocking_with_registry(
             // (closes #976) that applied the same isolation to
             // `run_diagnostics_blocking` in `handlers/analysis.rs`.
             for (idx, (rel_file, content)) in file_pairs.iter().enumerate() {
+                // #6018: stop starting subprocesses once the budget is spent.
+                // The remaining files (this one included) are reported as
+                // skipped rather than silently absent from the result.
+                if budget.is_expired() {
+                    budget.files_skipped += file_pairs.len() - idx;
+                    for tool in &file_tools {
+                        budget.tools_skipped.insert(tool.name().to_string());
+                    }
+                    break;
+                }
                 let name = Path::new(rel_file)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -223,6 +319,7 @@ pub fn run_diagnostics_blocking_with_registry(
                         Err(e) => tracing::warn!("diagnostics for {rel_file} failed: {e:#}"),
                     }
                 }
+                budget.files_analyzed += 1;
             }
         }
 
@@ -273,6 +370,12 @@ pub fn run_diagnostics_blocking_with_registry(
             .collect();
 
         for tool in &proj_tools {
+            // #6018: a project-scoped build (cargo clippy, dotnet build) is the
+            // single most expensive unit here — never start one past the budget.
+            if budget.is_expired() {
+                budget.tools_skipped.insert(tool.name().to_string());
+                continue;
+            }
             tools_run_set.insert(tool.name().to_string());
             match tool.run_project(&real_paths) {
                 Ok(diags) => {
@@ -302,10 +405,21 @@ pub fn run_diagnostics_blocking_with_registry(
     let mut tools_run: Vec<String> = tools_run_set.into_iter().collect();
     tools_run.sort();
 
+    let cutoff = budget.into_cutoff();
+    if let Some(c) = &cutoff {
+        tracing::warn!(
+            deadline_secs = c.deadline_secs,
+            files_analyzed = c.files_analyzed,
+            files_skipped = c.files_skipped,
+            "diagnostics dispatch hit its per-request deadline; returning a partial result"
+        );
+    }
+
     DiagnosticsReport {
         tools_run,
         tools_unavailable,
         diagnostics: out,
+        cutoff,
     }
 }
 

@@ -1,0 +1,10 @@
+Fixed
+
+- **`GET /indexes/{id}/diagnostics` ran unbounded and clients got zero bytes instead of a response.** The handler awaited one `spawn_blocking` that looped every unique file and spawned one subprocess per file-scoped tool with no per-request deadline; on the 4097-file trusty-tools index that ran past ten minutes and every client abandoned the connection at the transport layer ([#6018](https://github.com/bobmatnyc/trusty-tools/issues/6018))
+  - the dispatch now takes a wall-clock deadline and checks it between subprocess spawns, so it stops mid-corpus and returns what it has. The response carries `timed_out` plus a `cutoff` object naming the files never reached and the tools never invoked — a truncated list can no longer read as a clean corpus
+  - the deadline defaults to 180 s and is tunable with `TRUSTY_DIAGNOSTICS_DEADLINE_SECS`. Past that budget plus a 30 s grace the handler answers HTTP 504 with a JSON body saying which request was abandoned, rather than holding the connection
+  - `service/routes.rs` layers a blanket 300 s `tower_http::timeout::TimeoutLayer` as a last-resort net under every non-streaming route. `/sse` is merged in after the layer so the event stream is not cut off
+
+- **`cargo clippy` was invoked once per Rust file in a directory with no `Cargo.toml`, so it could never produce a diagnostic.** Every invocation errored with "could not find Cargo.toml" and returned `Ok(vec![])` while still costing ~0.155 s, which made a structurally useless tool the endpoint's main cost driver ([#6018](https://github.com/bobmatnyc/trusty-tools/issues/6018))
+  - `ClippyTool` is now project-scoped, like the existing Roslyn tool: the dispatcher hands it real on-disk paths and calls `run_project` once per request instead of `run` once per file
+  - `run_project` groups the files by their enclosing cargo root — the workspace root when one exists, so a 21-crate workspace is one build and not 21 — runs `cargo clippy --workspace` there under the build-class timeout, parses that output once, and keeps the diagnostics belonging to the requested files

@@ -48,7 +48,10 @@ tokio              = { workspace = true }
 #      `trusty-common` (`axum-server`) and `trusty-memory` so downstream library
 #      consumers can drop the HTTP stack entirely with `default-features = false`.
 axum               = { workspace = true, optional = true }
-tower-http         = { workspace = true, optional = true }
+# Why (#6018): `timeout` is additive on top of the workspace feature set
+# (cors, trace, compression-gzip). `service/routes.rs` layers a blanket
+# `TimeoutLayer` so no handler can hold a connection open indefinitely.
+tower-http         = { workspace = true, optional = true, features = ["timeout"] }
 reqwest            = { workspace = true, features = ["http2"] }
 futures-util       = { workspace = true }
 futures            = { workspace = true }

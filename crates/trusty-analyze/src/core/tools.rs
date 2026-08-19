@@ -74,6 +74,38 @@ pub struct DiagnosticsReport {
     pub tools_unavailable: Vec<String>,
     /// All findings emitted by the tools that ran.
     pub diagnostics: Vec<ToolDiagnostic>,
+    /// `Some` when the per-request deadline stopped the dispatch early, in
+    /// which case `diagnostics` is a PARTIAL result. `None` means the dispatch
+    /// ran to completion. See [`DeadlineCutoff`] (#6018).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cutoff: Option<DeadlineCutoff>,
+}
+
+/// What a per-request deadline cut off, so a partial result never reads as a
+/// complete one.
+///
+/// Why: stopping the dispatch at a deadline is a new failure branch, and a
+/// truncated diagnostics list is indistinguishable from a clean run unless the
+/// response says which work never happened. A caller that sees `files_skipped:
+/// 3900` knows to narrow the request (`?language=`, `?tools=`) rather than
+/// concluding the corpus is clean (#6018).
+/// What: records the deadline that expired plus the exact work not done — files
+/// whose file-scoped tools never ran, and project-scoped tools never invoked.
+/// `files_analyzed` is the completed half of the same count.
+/// Test: `dispatch_stops_at_deadline_and_reports_cutoff` and
+/// `dispatch_without_deadline_reports_no_cutoff` in
+/// `service/diagnostics_dispatch_tests.rs`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DeadlineCutoff {
+    /// Wall-clock budget the dispatch was given, in seconds.
+    pub deadline_secs: u64,
+    /// Files whose file-scoped tool runs completed before the deadline.
+    pub files_analyzed: usize,
+    /// Files never reached because the deadline expired first.
+    pub files_skipped: usize,
+    /// Names of tools that were selected but never invoked (or invoked for
+    /// only part of the corpus) because the deadline expired.
+    pub tools_skipped: Vec<String>,
 }
 
 impl DiagnosticsReport {
@@ -89,6 +121,7 @@ impl DiagnosticsReport {
             tools_run: Vec::new(),
             tools_unavailable: Vec::new(),
             diagnostics: Vec::new(),
+            cutoff: None,
         }
     }
 }
