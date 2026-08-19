@@ -235,7 +235,9 @@ fn build_scope(model: &ReportModel) -> Scope {
     // trajectory facts ahead of the executive summary.
     fill_key_facts(&mut root, model);
     // #5453/#6004: completes the author-count/trajectory rows PR A left as
-    // named gaps, once a repository's authorship artifact loaded.
+    // named gaps, once a repository's authorship artifact loaded. Must run
+    // AFTER `fill_key_facts`, which seeds those rows with gap text (#6029) —
+    // pinned by `reporter_tests::key_facts_authorship_rows_survive_the_fill_order`.
     fill_authorship_facts(&mut root, model);
     // #6004: deterministic structure, never data — always set.
     contents_links::set_contents_placeholder(&mut root);

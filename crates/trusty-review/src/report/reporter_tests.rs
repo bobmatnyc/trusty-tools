@@ -2270,3 +2270,76 @@ fn key_facts_renders_scan_loc_without_analyze_metrics() {
         "the author rows must name their missing input:\n{block}"
     );
 }
+
+/// #6029 regression: `fill_key_facts` writes named-gap text into
+/// `facts_author_count`/`facts_trajectory` unconditionally, so the measured
+/// figures reach the report only because `reporter::build_scope` runs
+/// `fill_authorship_facts` AFTER it (reporter.rs:236, 239). Nothing else in the
+/// suite exercises both together — `completes_key_facts_author_rows` calls
+/// `fill_authorship_facts` alone, and no other full-render test loads an
+/// authorship artifact — so swapping the two calls would clobber measured
+/// authorship data with "Not computed" and leave every test green. This renders
+/// the whole report with an artifact loaded and asserts the measured figures
+/// win in the Key Facts table.
+#[test]
+fn key_facts_authorship_rows_survive_the_fill_order() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let repo = model.repositories.first_mut().expect("one repository");
+    repo.authorship = Some(crate::report::authorship::AuthorshipSummary {
+        schema_version: "v0".to_string(),
+        repository: "Acme Web".to_string(),
+        distinct_authors: 7,
+        bus_factor: 2,
+        top_author_share_pct: 61.0,
+        single_author_subsystems: vec!["src".to_string()],
+        monthly_trajectory: vec![
+            crate::report::authorship::MonthlyActivity {
+                month: "2026-01".to_string(),
+                active_authors: 1,
+                commits: 5,
+            },
+            crate::report::authorship::MonthlyActivity {
+                month: "2026-02".to_string(),
+                active_authors: 2,
+                commits: 40,
+            },
+        ],
+        unresolved_authors: 0,
+        caveats: vec![],
+    });
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    let section = md.split("## Key Facts").nth(1).expect("key facts body");
+    let block = section.split("## 2.").next().expect("block before §2");
+
+    let authors = block
+        .lines()
+        .find(|l| l.starts_with("| Number of authors |"))
+        .expect("author-count row");
+    assert!(
+        authors.contains('7'),
+        "the measured author count must win over the named gap:\n{authors}"
+    );
+    assert!(
+        !authors.contains("Not computed"),
+        "the named gap clobbered the measured author count:\n{authors}"
+    );
+
+    let trajectory = block
+        .lines()
+        .find(|l| l.starts_with("| 12-month trajectory |"))
+        .expect("trajectory row");
+    assert!(
+        trajectory.contains("increasing"),
+        "the measured trajectory must win over the named gap:\n{trajectory}"
+    );
+    assert!(
+        !trajectory.contains("Not computed"),
+        "the named gap clobbered the measured trajectory:\n{trajectory}"
+    );
+}
