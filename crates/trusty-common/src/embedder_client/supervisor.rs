@@ -563,8 +563,18 @@ fn should_give_up(
 /// counters feed `should_give_up` and both drive the exponential back-off, so
 /// a workload-deterministic wedge that recurs after every respawn eventually
 /// trips `max_restarts` instead of cycling forever at a 1s backoff.
+///
+/// Both signal channels can also CLOSE — their senders drop without either
+/// ever firing — and a closed `watch` channel is not an event: `changed()`
+/// resolves `Ready(Err(_))` forever, so each branch must be excluded from the
+/// `select!` rather than looped over. `shutdown_rx` latches `shutdown_closed`
+/// (#3023); `unhealthy_signal` re-reads `has_changed()` each iteration
+/// (#3026), because it is swapped for the new client's receiver on every
+/// respawn and must start being watched again.
 /// Test: `supervisor_restarts_on_crash`,
-/// `supervisor_intentional_shutdown_does_not_respawn`.
+/// `supervisor_intentional_shutdown_does_not_respawn`,
+/// `supervisor_closed_unhealthy_signal_does_not_busy_spin`,
+/// `supervisor_health_branch_is_live_again_after_respawn`.
 /// Test-only iteration counter (issue #3023 regression test): bumped once per
 /// `supervision_loop` pass so `supervisor_tests.rs` can assert the loop
 /// blocks normally — rather than busy-spinning — once `shutdown_rx`'s sender
@@ -631,6 +641,26 @@ async fn supervision_loop(
             last_wedge_restart_at = None;
         }
 
+        // #3026: `watch::Receiver::changed()` resolves `Ready(Err(_))` on
+        // every poll once the last sender drops, and an immediately-ready
+        // future never yields to the scheduler — so an `Err` arm that loops
+        // back around (what this branch used to do) re-enters the `select!`,
+        // wins it again instantly, and busy-spins a tokio worker for the
+        // remaining lifetime of the child. Same hazard #3023 fixed for
+        // `shutdown_rx`. Reading `has_changed()` first excludes the branch
+        // from the `select!` before its future is ever polled, so a closed
+        // channel costs zero extra iterations and supervision continues via
+        // `child.wait()` / `shutdown_rx` alone.
+        //
+        // Recomputed each iteration rather than latched in a
+        // `shutdown_closed`-style flag: `shutdown_rx`'s sender lives for the
+        // whole supervision, but `unhealthy_signal` is REPLACED by the newly
+        // spawned client's receiver after every successful respawn (see the
+        // respawn arm below). A latched flag would keep the branch disabled
+        // across that swap, so the replacement sidecar's health would never
+        // be watched and a wedged one would never be restarted.
+        let unhealthy_open = unhealthy_signal.has_changed().is_ok();
+
         // Race the child actually exiting against the live client reporting
         // itself unhealthy (#1448/#1450) — whichever happens first drives
         // this iteration.
@@ -647,11 +677,15 @@ async fn supervision_loop(
                                 return;
                             }
                         },
-                        changed = unhealthy_signal.changed() => {
+                        changed = unhealthy_signal.changed(), if unhealthy_open => {
                             if changed.is_err() {
-                                // The sender side closed without ever firing —
-                                // treat conservatively as "keep waiting on
-                                // child.wait() only" by looping back around.
+                                // The sender closed while we were parked here.
+                                // A closed channel is NOT a health event — the
+                                // sidecar may still be running fine — so keep
+                                // supervising via `child.wait()`. The
+                                // `unhealthy_open` guard above reads `false` on
+                                // the next pass, so this arm runs at most once
+                                // per receiver rather than spinning (#3026).
                                 tracing::debug!(
                                     "EmbedderSupervisor: unhealthy_signal channel closed \
                                      without firing — continuing to watch child.wait()"
