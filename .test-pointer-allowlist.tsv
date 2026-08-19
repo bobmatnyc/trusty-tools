@@ -721,8 +721,6 @@ crates/trusty-review/src/report/mermaid.rs	parses_table_rows
 crates/trusty-review/src/report/mermaid.rs	renders_bar
 crates/trusty-review/src/report/polish.rs	polish_end_to_end
 crates/trusty-review/src/report/synthesize_guard.rs	canonicalize_number_variants
-crates/trusty-review/src/report/synthesize_guard.rs	verify_prose_passes_faithful
-crates/trusty-review/src/report/synthesize_guard.rs	verify_prose_rejects_fabricated
 crates/trusty-review/src/service/handlers.rs	health_inference_ok_when_llm_ok
 crates/trusty-review/src/service/handlers.rs	health_returns_ok_json
 crates/trusty-review/src/service/handlers.rs	new_for_test
