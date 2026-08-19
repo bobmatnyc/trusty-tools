@@ -448,7 +448,17 @@ async fn spawn_session_without_claude_returns_422() {
     );
 }
 
+/// Why serial (#5813): every tmux path in this crate runs through
+/// `TmuxDriver::discover`, which consults the #5784 host-state gate. That gate
+/// reads the PROCESS `$HOME` and compares it against the password-database
+/// home for this uid — so while any of the ~40 `$HOME`-overriding tests in this
+/// binary holds its temp home, `discover` classifies a scratch environment and
+/// returns `DaemonError::TmuxUnavailable`, which is a 500. The assertion below
+/// then reads `left: 500, right: 422` for a reason that has nothing to do with
+/// tmux. `#[serial]`'s crate-wide default group is the remedy this crate
+/// already documents for that global — see `test_support::tests::HomeOverride`.
 #[tokio::test]
+#[serial]
 async fn spawn_session_without_tmux_returns_422_on_no_tmux_host() {
     // Force the `claude` lookup positive so the spawn proceeds past the
     // binary check, then assert that the daemon degrades gracefully when
@@ -998,7 +1008,12 @@ fn apply_compression_summarise() {
     assert_eq!(result.stats.original_bytes, 100);
 }
 
+/// Why serial (#5813): `TmuxService::adopt` shares
+/// `tmux_snapshot_unknown_session_is_404`'s exposure to the host-state gate —
+/// it also reaches tmux through `discover_or_session_error`, so a concurrent
+/// `$HOME` override turns this 404 into a 500.
 #[tokio::test]
+#[serial]
 async fn adopt_tmux_session_handles_missing() {
     // Adopting a session that does not exist (or with tmux absent) is 404.
     let state = DaemonState::shared();
@@ -1012,7 +1027,12 @@ async fn adopt_tmux_session_handles_missing() {
     assert_eq!(result.unwrap_err().status(), StatusCode::NOT_FOUND);
 }
 
+/// Why serial (#5813): same `$HOME`-vs-host-state-gate race as
+/// `spawn_session_without_tmux_returns_422_on_no_tmux_host` — a concurrent
+/// `$HOME` override makes `TmuxService::snapshot` return `TmuxUnavailable`
+/// (500) instead of the `SessionNotFound` (404) this asserts.
 #[tokio::test]
+#[serial]
 async fn tmux_snapshot_unknown_session_is_404() {
     let state = DaemonState::shared();
     let result = tmux_snapshot(State(state), Path("no-such-session-xyz".into())).await;

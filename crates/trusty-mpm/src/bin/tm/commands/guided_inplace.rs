@@ -282,8 +282,8 @@ async fn fetch_managed_session(
     resp.json().await.ok()
 }
 
-/// Poll [`fetch_managed_session`] until the record reads `"stopped"` or the
-/// [`FETCH_RETRY_BUDGET`] is exhausted (#2148 race hardening).
+/// Poll [`fetch_managed_session`] until the record reads `"stopped"` or
+/// `budget` is exhausted (#2148 race hardening).
 ///
 /// Why: [`plan_inplace`] requires the FIRST fetch to already show `"stopped"`;
 /// a record that is transitioning `Active` -> `Stopped` (the `SessionEnd` stop
@@ -293,17 +293,28 @@ async fn fetch_managed_session(
 /// a small, bounded budget lets the transition land before giving up.
 /// What: fetches once immediately; returns as soon as `state == "stopped"`.
 /// Otherwise sleeps [`FETCH_RETRY_INTERVAL`] and retries, stopping the moment
-/// the elapsed time reaches [`FETCH_RETRY_BUDGET`] — returning whatever the
-/// LAST attempt produced (`Some` non-stopped record, or `None` if the fetch
-/// itself kept failing). Never blocks longer than the budget, so a genuinely
+/// the elapsed time reaches `budget` — returning whatever the LAST attempt
+/// produced (`Some` non-stopped record, or `None` if the fetch itself kept
+/// failing). Never blocks longer than the budget, so a genuinely
 /// unresolved/unknown id still falls through promptly.
+///
+/// `budget` is a parameter rather than a read of [`FETCH_RETRY_BUDGET`]
+/// (#5840): the production 400ms is short enough that one slow first fetch on
+/// a loaded CI runner can exhaust it, in which case this returns after a
+/// single attempt — correct behaviour, but it made
+/// `fetch_until_stopped_gives_up_after_budget_when_never_stopped`'s "it
+/// retried" assertion a coin flip. The tests pass a budget no single loopback
+/// round trip can consume, so the retry they assert is the code's, not the
+/// scheduler's. The one production call site passes [`FETCH_RETRY_BUDGET`].
 /// Test: `fetch_until_stopped_returns_immediately_when_already_stopped`,
-/// `fetch_until_stopped_gives_up_after_budget_when_never_stopped` (both use a
+/// `fetch_until_stopped_retries_past_transitioning_state`,
+/// `fetch_until_stopped_gives_up_after_budget_when_never_stopped` (all use a
 /// local one-shot/counting mock, mirroring `spawn_mock`'s convention).
 async fn fetch_managed_session_until_stopped(
     client: &reqwest::Client,
     url: &str,
     id: &str,
+    budget: std::time::Duration,
 ) -> Option<trusty_mpm::client::ManagedSessionSummary> {
     let start = std::time::Instant::now();
     loop {
@@ -311,7 +322,7 @@ async fn fetch_managed_session_until_stopped(
         if record.as_ref().map(|r| r.state.as_str()) == Some("stopped") {
             return record;
         }
-        if start.elapsed() >= FETCH_RETRY_BUDGET {
+        if start.elapsed() >= budget {
             return record;
         }
         tokio::time::sleep(FETCH_RETRY_INTERVAL).await;
@@ -719,7 +730,8 @@ pub(crate) async fn try_inplace_relaunch(
     };
     // #2148: bounded retry absorbs the Active->Stopped transition race instead
     // of giving up on a single unlucky fetch — see `fetch_managed_session_until_stopped`.
-    let record = fetch_managed_session_until_stopped(client, url, &env_id).await;
+    let record =
+        fetch_managed_session_until_stopped(client, url, &env_id, FETCH_RETRY_BUDGET).await;
     let record_state = record.as_ref().map(|r| r.state.as_str());
     match plan_inplace(Some(&env_id), record_state) {
         Some(ResumeAction::InPlace) => {

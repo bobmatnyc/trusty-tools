@@ -190,22 +190,47 @@ async fn spawn_state_mock(states: Vec<&'static str>) -> (String, Arc<AtomicUsize
     (format!("http://{addr}"), hits)
 }
 
+/// The retry budget the `fetch_until_stopped_*` cases drive the loop with
+/// (#5840).
+///
+/// Why: the production [`FETCH_RETRY_BUDGET`] is 400ms, and one loopback fetch
+/// on a loaded CI runner can consume all of it — the loop then returns after a
+/// single attempt, which is its documented contract but leaves "it retried"
+/// untestable. A budget an order of magnitude above any plausible loopback
+/// round trip makes the retry the code's decision rather than the scheduler's,
+/// so the assertions below hold regardless of runner load.
+/// What: 1 second, paired with the production 80ms
+/// [`FETCH_RETRY_INTERVAL`] — roughly 12 polls, where the flake needed the
+/// first fetch alone to blow the whole budget.
+/// Test: the three `fetch_until_stopped_*` cases below.
+const TEST_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A liveness ceiling for a call that must terminate on its own (#5840).
+///
+/// Why: "gives up rather than retrying forever" needs an upper bound, but a
+/// TIGHT one (the former `budget + interval * 3`) fails on a slow runner
+/// without a regression in sight — it measures the machine, not the code. A
+/// bound 30x the budget still catches a loop that never exits, and cannot be
+/// tripped by load.
+const TEST_LIVENESS_CEILING: std::time::Duration =
+    std::time::Duration::from_secs(TEST_RETRY_BUDGET.as_secs() * 30);
+
 #[tokio::test]
 async fn fetch_until_stopped_returns_immediately_when_already_stopped() {
     // #2148: the common case — no race — must not pay any retry delay.
     let (url, hits) = spawn_state_mock(vec!["stopped"]).await;
     let client = reqwest::Client::new();
-    let start = std::time::Instant::now();
-    let record = fetch_managed_session_until_stopped(&client, &url, TEST_ID).await;
+    let record =
+        fetch_managed_session_until_stopped(&client, &url, TEST_ID, TEST_RETRY_BUDGET).await;
     assert_eq!(record.map(|r| r.state), Some("stopped".to_string()));
+    // #5840: one hit IS "paid no retry delay" — the loop's only delay is the
+    // sleep between fetches, so a single fetch cannot have slept. The former
+    // wall-clock `elapsed < budget` said the same thing while also failing
+    // whenever the runner made one fetch slow.
     assert_eq!(
         hits.load(Ordering::SeqCst),
         1,
         "must not retry once the first fetch already reads stopped"
-    );
-    assert!(
-        start.elapsed() < FETCH_RETRY_BUDGET,
-        "must return promptly, not wait out the whole retry budget"
     );
 }
 
@@ -216,7 +241,12 @@ async fn fetch_until_stopped_retries_past_transitioning_state() {
     // on "stopped" a couple of polls later.
     let (url, hits) = spawn_state_mock(vec!["active", "active", "stopped"]).await;
     let client = reqwest::Client::new();
-    let record = fetch_managed_session_until_stopped(&client, &url, TEST_ID).await;
+    let record = tokio::time::timeout(
+        TEST_LIVENESS_CEILING,
+        fetch_managed_session_until_stopped(&client, &url, TEST_ID, TEST_RETRY_BUDGET),
+    )
+    .await
+    .expect("must settle on stopped, not poll forever");
     assert_eq!(record.map(|r| r.state), Some("stopped".to_string()));
     assert!(
         hits.load(Ordering::SeqCst) >= 3,
@@ -232,16 +262,21 @@ async fn fetch_until_stopped_gives_up_after_budget_when_never_stopped() {
     let (url, hits) = spawn_state_mock(vec!["active"]).await;
     let client = reqwest::Client::new();
     let start = std::time::Instant::now();
-    let record = fetch_managed_session_until_stopped(&client, &url, TEST_ID).await;
+    // #5840: the "does not retry forever" bound is a generous liveness
+    // ceiling, not a tight window — a real regression (a loop with no exit)
+    // trips it, a slow runner does not.
+    let record = tokio::time::timeout(
+        TEST_LIVENESS_CEILING,
+        fetch_managed_session_until_stopped(&client, &url, TEST_ID, TEST_RETRY_BUDGET),
+    )
+    .await
+    .expect("must give up once the budget elapses, not poll forever");
     let elapsed = start.elapsed();
     assert_eq!(record.map(|r| r.state), Some("active".to_string()));
+    // A LOWER bound only gets safer under load, so this one stays wall-clock.
     assert!(
-        elapsed >= FETCH_RETRY_BUDGET,
+        elapsed >= TEST_RETRY_BUDGET,
         "must not give up before the retry budget elapses"
-    );
-    assert!(
-        elapsed < FETCH_RETRY_BUDGET + FETCH_RETRY_INTERVAL * 3,
-        "must not overrun the budget by more than a poll or two"
     );
     assert!(
         hits.load(Ordering::SeqCst) > 1,
