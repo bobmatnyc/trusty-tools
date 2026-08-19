@@ -31,7 +31,7 @@ use uuid::Uuid;
 /// connection's outbound stream, asynchronously, outside the normal
 /// request/response cycle.
 ///
-/// Why: `serde_json::Value` (rather than `trusty_common::mcp::Response`) is
+/// Why: `serde_json::Value` (rather than `trusty_mcp::Response`) is
 /// the channel item type because a server-initiated *notification*
 /// (`{"jsonrpc":"2.0","method":"session.event","params":{...}}`) has no
 /// `result`/`error` field — it isn't a `Response` at all — so the channel

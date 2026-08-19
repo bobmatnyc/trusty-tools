@@ -5,7 +5,7 @@
 //! here means future Telegram tool handlers focus on Bot API specifics.
 //! What: `AppState` holds an `Arc<BaseClient>`; `handle_message` is the pure
 //! JSON-RPC dispatcher; `handle_tool_call` is the (currently all-stub) tool
-//! router; `run_stdio` wires it into `trusty_common::mcp::run_stdio_loop`.
+//! router; `run_stdio` wires it into `trusty_mcp::run_stdio_loop`.
 //! Test: `handle_message_initialize_returns_server_info`,
 //! `handle_message_tools_list_returns_tools`, and
 //! `tools_call_returns_not_implemented` in `mod tests`.
@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::telegram::api::client::BaseClient;
-use trusty_common::mcp::{error_codes, initialize_response, run_stdio_loop, Request, Response};
+use trusty_mcp::{error_codes, initialize_response, run_stdio_loop, Request, Response};
 
 /// Shared state passed to every dispatcher invocation.
 ///

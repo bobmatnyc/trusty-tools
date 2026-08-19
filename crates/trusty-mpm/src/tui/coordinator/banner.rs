@@ -254,7 +254,7 @@ pub async fn probe_memory(base: Option<&str>) -> ProbeOutcome {
     let base = match base {
         Some(b) => b,
         None => {
-            resolved = trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
+            resolved = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
             resolved.as_str()
         }
     };

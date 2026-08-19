@@ -135,12 +135,19 @@ impl DaemonBridgeConfig {
 /// carrying over from a failed probe to a later successful one.
 /// What: builds a one-shot client with `DAEMON_PROBE_TIMEOUT`, issues a GET,
 /// returns `true` on 2xx, `false` on any error or non-2xx.
-/// Test: `probe_health_once_returns_false_on_refused` (async unit test); the
-/// proxy immunity is proven in `http_client::tests`.
+/// Test: `probe_health_once_returns_false_on_refused` (async unit test).
 pub(crate) async fn probe_health_once(health_url: &str) -> bool {
     // #4392: the target is a loopback daemon, so the client must not honour an
     // exported HTTP_PROXY.
-    let client = match crate::http_client::loopback_client_builder()
+    //
+    // This restates `trusty_common::http_client::loopback_client_builder`
+    // rather than calling it. trusty-common depends on this crate (its
+    // `tickets` feature), so a dependency back the other way is a Cargo cycle —
+    // ADR-0040 made this crate a leaf. `.no_proxy()` is the entire fix, so the
+    // behaviour is identical; if that entry point ever grows more than
+    // `.no_proxy()`, it has to move to a crate both can depend on.
+    let client = match reqwest::Client::builder()
+        .no_proxy()
         .timeout(DAEMON_PROBE_TIMEOUT)
         .connect_timeout(DAEMON_PROBE_TIMEOUT)
         .build()
@@ -223,7 +230,7 @@ pub async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<String> {
 /// child outlives the bridge process, and spawns. Does NOT wait for readiness —
 /// that is [`poll_until_ready`]'s job.
 /// Test: the spawn path is exercised end-to-end by
-/// `crates/trusty-common/tests/single_flight_exclusion.rs`.
+/// `crates/trusty-mcp/tests/single_flight_exclusion.rs`.
 pub(crate) fn spawn_daemon_detached(config: &DaemonBridgeConfig) -> Result<()> {
     eprintln!("\u{25cf} Starting {} daemon\u{2026}", config.service_name);
 
@@ -259,7 +266,7 @@ pub(crate) fn spawn_daemon_detached(config: &DaemonBridgeConfig) -> Result<()> {
 /// probes `/health`. Hard-errors once `startup_timeout` is exceeded. There is no
 /// success path that does not include a live 2xx health response.
 /// Test: `daemon_that_never_becomes_ready_is_a_hard_error` in
-/// `crates/trusty-common/tests/single_flight_exclusion.rs`.
+/// `crates/trusty-mcp/tests/single_flight_exclusion.rs`.
 pub(crate) async fn poll_until_ready(
     config: &DaemonBridgeConfig,
     startup_timeout: Duration,

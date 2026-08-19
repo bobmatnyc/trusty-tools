@@ -221,6 +221,11 @@ aws-smithy-types = { workspace = true, optional = true }
 # reqwest, dirs, serde, serde_json, anyhow, tokio) are already unconditional.
 rusqlite = { workspace = true, optional = true }
 
+# `tickets`' MCP stdio server speaks JSON-RPC through the shared primitives,
+# which ADR-0040 (#5803) moved out of this crate into `trusty-mcp`. Optional so
+# the 20-plus consumers that never enable `tickets` do not compile it.
+trusty-mcp = { workspace = true, optional = true }
+
 # libc on every unix target: the macOS `launchd` module needs getuid(2) for the
 # gui/<uid> domain, and (#5099) the `uds` module needs getuid(2) plus
 # SO_PEERCRED / getpeereid on both macOS and Linux for peer-credential checks.
@@ -295,17 +300,24 @@ docgen = []
 # `run_catchup_blocking`, and the per-source submodules (`git`, `palace`,
 # `state`, `session_finder`, `mpm_session`, `mpm_registry`). Pulls in
 # `rusqlite` for the claude-mpm session-registry reader; all other deps are
-# already unconditional in this crate. Also requires `mcp` (issue #2030):
-# `catchup::palace` reaches trusty-memory via `mcp::memory_rpc`'s discovery +
+# already unconditional in this crate. Also requires `memory-rpc` (issue #2030):
+# `catchup::palace` reaches trusty-memory via `memory_rpc`'s discovery +
 # JSON-RPC helper rather than a hardcoded REST URL.
-catchup = ["dep:rusqlite", "mcp", "palace-resolve"]
+catchup = ["dep:rusqlite", "memory-rpc", "palace-resolve"]
 # Enables the `server` module: standard axum middleware stack (CORS, trace,
 # gzip) and a fast-fail reqwest client for daemon-to-daemon calls.
 axum-server = ["dep:axum", "dep:tower-http"]
-# Enables the `mcp` module: shared JSON-RPC 2.0 / MCP primitives (formerly the
-# `trusty-mcp-core` crate). Pulls in no extra deps beyond `serde` / `tokio`
-# which are already required.
-mcp = []
+# Enables the `memory_rpc` module: discovery-based JSON-RPC client for the
+# trusty-memory daemon. Pulls in no extra deps — `reqwest`, `serde_json` and
+# `anyhow` are already unconditional here.
+#
+# This is what remains of the former `mcp` feature. ADR-0040 (#5803) moved the
+# protocol primitives — `Request`, `Response`, `error_codes`,
+# `initialize_response`, `run_stdio_loop`, `ServiceDescriptor`, `OpenRpcBuilder`,
+# `ensure_daemon_up`, `ensure_daemon_up_single_flight` — into the `trusty-mcp`
+# crate. A consumer that wants those depends on `trusty-mcp` directly; there is
+# deliberately no re-export here, so `trusty_common::mcp` no longer exists.
+memory-rpc = []
 # Enables the `search_index` module: the shared best-effort "ensure this project
 # is indexed by trusty-search" entry point (issues #1373 / #1908), used by
 # trusty-mpm at session launch and trusty-code at task start. Adds no new
@@ -520,8 +532,8 @@ embedder-client = ["dep:thiserror", "embedder", "uds"]
 # Enables the `tickets` module: unified ticketing MCP server with GitHub,
 # JIRA, and Linear backends (absorbed from the former standalone `trusty-tickets`
 # crate). Pulls in `chrono`, `uuid`, `base64`, `thiserror`, and `toml` as
-# additional optional deps. Requires the `mcp` feature for the stdio loop.
-tickets = ["mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml", "gh-cli"]
+# additional optional deps. Pulls in `trusty-mcp` for the stdio loop.
+tickets = ["dep:trusty-mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml", "gh-cli"]
 # Enables the `gh` module: the workspace's single entry point for invoking the
 # GitHub CLI (#5475). Pulls in `thiserror` only — `tokio/process`, `serde` and
 # `serde_json` are already unconditional here.

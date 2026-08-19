@@ -83,7 +83,7 @@ pub mod workstreams;
 use axum::Json;
 use axum::http::StatusCode;
 use serde_json::Value;
-use trusty_common::mcp::{Request, Response, error_codes};
+use trusty_mcp::{Request, Response, error_codes};
 
 use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 

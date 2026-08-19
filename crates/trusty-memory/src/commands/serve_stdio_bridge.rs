@@ -8,7 +8,7 @@
 //! the stdio process never opens redb.
 //!
 //! What: `run_stdio_bridge` (1) ensures the daemon is running via the shared
-//! `trusty_common::mcp::ensure_daemon_up_single_flight` helper — starting it
+//! `trusty_mcp::ensure_daemon_up_single_flight` helper — starting it
 //! under an exclusive lock if absent (#5267), polling the `http_addr` file for
 //! the real dynamic port; (2) forwards each non-notification request to
 //! `POST /rpc` on the daemon and returns the daemon response verbatim to the
@@ -36,7 +36,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use std::time::Duration;
-use trusty_common::mcp;
+use trusty_mcp as mcp;
 
 /// Per-request forwarding timeout (60 s -- headroom for cold-start embedding).
 ///
@@ -102,7 +102,7 @@ pub(crate) async fn forward_rpc(
 /// CANONICAL daemon via the single-instance-guarded start … so duplicates are
 /// structurally impossible"); the lock is the exclusion it assumed.
 /// What: delegates to the shared
-/// [`trusty_common::mcp::ensure_daemon_up_single_flight`] with the one
+/// [`trusty_mcp::ensure_daemon_up_single_flight`] with the one
 /// [`crate::commands::start::daemon_start_config`] that `trusty-memory start`
 /// also uses — same spawn args, same lock file, so the two paths cannot race
 /// each other. Fails closed if the daemon does not become ready.
@@ -113,7 +113,7 @@ pub(crate) async fn ensure_daemon_up_for_stdio() -> Result<String> {
     let lock_path = crate::commands::start::start_lock_path()
         .ok_or_else(|| anyhow!("could not resolve the trusty-memory data directory"))?;
     let config = crate::commands::start::daemon_start_config();
-    trusty_common::mcp::ensure_daemon_up_single_flight(&config, &lock_path).await
+    trusty_mcp::ensure_daemon_up_single_flight(&config, &lock_path).await
 }
 
 /// Returns true if the request is a JSON-RPC notification.
@@ -224,7 +224,7 @@ pub async fn run_stdio_bridge(palace: Option<String>) -> Result<()> {
     result
 }
 
-/// Convert a `trusty_common::mcp::Request` to a `serde_json::Value`.
+/// Convert a `trusty_mcp::Request` to a `serde_json::Value`.
 ///
 /// Why: `forward_rpc` sends raw JSON to the daemon; the mcp::Request struct
 /// must be serialised first. Infallible because `mcp::Request` is always

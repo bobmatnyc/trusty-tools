@@ -12,12 +12,12 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
-use crate::mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
 use crate::tickets::api::backends::{
     Backend, CreateIssueParams, CreateMilestoneParams, ListIssuesParams, SearchIssuesParams,
     UpdateIssueParams,
 };
 use crate::tickets::api::client::BackendClient;
+use trusty_mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
 
 /// Shared state passed to every dispatcher invocation.
 ///

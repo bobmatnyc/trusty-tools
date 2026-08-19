@@ -4,7 +4,7 @@ use super::*;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
-use trusty_common::mcp::Request;
+use trusty_mcp::Request;
 
 use crate::workstreams::store::WorkstreamStore;
 
@@ -193,7 +193,7 @@ async fn activate_malformed_id_maps_to_invalid_params() {
     let err = activate(&store, json!({"id": "not-a-uuid"}), test_ctx())
         .await
         .expect_err("must reject malformed id");
-    assert_eq!(err.code, trusty_common::mcp::error_codes::INVALID_PARAMS);
+    assert_eq!(err.code, trusty_mcp::error_codes::INVALID_PARAMS);
 }
 
 /// Deactivating the currently active workstream must clear the pointer and
@@ -316,7 +316,7 @@ async fn get_invalid_params_maps_to_invalid_params() {
     let err = get(&store, json!({"id": "not-a-uuid"}), test_ctx())
         .await
         .unwrap_err();
-    assert_eq!(err.code, trusty_common::mcp::error_codes::INVALID_PARAMS);
+    assert_eq!(err.code, trusty_mcp::error_codes::INVALID_PARAMS);
 }
 
 #[tokio::test]
@@ -507,7 +507,7 @@ async fn rename_invalid_params_maps_to_invalid_params() {
     let err = rename(&store, json!({"id": "not-a-uuid", "name": "B"}), test_ctx())
         .await
         .unwrap_err();
-    assert_eq!(err.code, trusty_common::mcp::error_codes::INVALID_PARAMS);
+    assert_eq!(err.code, trusty_mcp::error_codes::INVALID_PARAMS);
 }
 
 // -- resolve_validate_bind / check_workstream_immutable (issue #3298;

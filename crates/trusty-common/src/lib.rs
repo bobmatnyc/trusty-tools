@@ -229,19 +229,18 @@ pub mod spawn_retry;
 #[cfg(feature = "axum-server")]
 pub mod server;
 
-/// Shared JSON-RPC 2.0 / MCP primitives (formerly the `trusty-mcp-core` crate).
+/// Discovery-based JSON-RPC client for the trusty-memory daemon (issue #2030).
 ///
-/// Why: Centralises `Request`/`Response`/`JsonRpcError` envelopes, the
-/// `initialize` response builder, an async stdio dispatch loop, and the
-/// OpenRPC `rpc.discover` helpers so every MCP server in the workspace
-/// imports the same types.
-/// What: Gated behind the `mcp` feature; pulls in no extra dependencies
-/// beyond `serde` / `tokio`, both of which are already required.
-/// Test: `cargo test -p trusty-common --features mcp` runs the module's own
-/// unit tests (envelope round-trips, stdio loop dispatch, OpenRPC builder
-/// shape).
-#[cfg(feature = "mcp")]
-pub mod mcp;
+/// Why: every trusty-mpm / trusty-code / trusty-common call site that talks to
+/// trusty-memory needs the same "resolve the daemon's address, then POST /rpc"
+/// pair, and hardcoding a port is what this module exists to retire.
+/// What: gated behind the `memory-rpc` feature. It resolves the address
+/// through [`daemon_addr::read_daemon_addr`], which is why ADR-0040 (#5803)
+/// left it here when the protocol primitives moved to the `trusty-mcp` crate —
+/// it was `trusty_common::memory_rpc` before that move.
+/// Test: `cargo test -p trusty-common --features memory-rpc`.
+#[cfg(feature = "memory-rpc")]
+pub mod memory_rpc;
 
 /// General-purpose JSON-RPC client + transports (formerly the library half
 /// of the `trusty-rpc` crate).

@@ -93,7 +93,7 @@ fn isolate_ambient_daemons() {
         // A reserved, unassigned TCP port: connection attempts fail fast
         // rather than hanging or timing out. Mirrors
         // `catchup::tests::UNREACHABLE_MEMORY_URL` and
-        // `trusty_common::mcp::memory_rpc`'s own `UNREACHABLE_PLACEHOLDER`
+        // `trusty_common::memory_rpc`'s own `UNREACHABLE_PLACEHOLDER`
         // convention. An explicit `TRUSTY_MEMORY_URL` always wins over
         // discovery (see `resolve_memory_base_url`), so this alone is
         // sufficient to stop `catchup::pm_catchup_context` from ever
@@ -105,7 +105,7 @@ fn isolate_ambient_daemons() {
         // (and thus no unsafe-across-threads mutation) is needed.
         unsafe {
             std::env::set_var(
-                trusty_common::mcp::memory_rpc::TRUSTY_MEMORY_URL_ENV,
+                trusty_common::memory_rpc::TRUSTY_MEMORY_URL_ENV,
                 "http://127.0.0.1:1",
             );
         }

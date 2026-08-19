@@ -3,9 +3,9 @@
 //! Why: surfaces recent memory palace activity as one of three catch-up sources
 //! so the operator is reminded of context stored in trusty-memory during the gap.
 //! What: [`fetch_recent_palace_drawers`] calls the `memory_list` MCP tool via
-//! [`crate::mcp::memory_rpc::call_memory_tool_at`] (discovery + JSON-RPC,
+//! [`crate::memory_rpc::call_memory_tool_at`] (discovery + JSON-RPC,
 //! issue #2030 — `memory_url` is already resolved by the caller, e.g.
-//! `crate::mcp::memory_rpc::resolve_memory_base_url`) and returns parsed
+//! `crate::memory_rpc::resolve_memory_base_url`) and returns parsed
 //! [`DrawerSummary`] values. `memory_list` itself sorts by importance DESC, so
 //! this re-sorts client-side by `created_at` DESC to match the old
 //! `sort=created_desc` REST contract callers depend on. Fail-open: if the
@@ -105,7 +105,7 @@ fn parse_memory_list_result(result: Value) -> anyhow::Result<Vec<DrawerSummary>>
 /// render a distinct "unreachable" message instead of conflating it with a
 /// genuinely empty result (issue #2030, item 5).
 /// What: calls `memory_list` via
-/// [`crate::mcp::memory_rpc::call_memory_tool_at`] against `memory_url`
+/// [`crate::memory_rpc::call_memory_tool_at`] against `memory_url`
 /// (already resolved by the caller). On success, parses + sorts via
 /// [`parse_memory_list_result`] and — when `since` is `Some` — filters
 /// client-side to drawers created after that timestamp. Returns
@@ -120,19 +120,14 @@ pub async fn fetch_recent_palace_drawers(
     since: Option<DateTime<Utc>>,
 ) -> Option<Vec<DrawerSummary>> {
     let params = json!({ "palace": palace_id, "limit": limit });
-    let result = match crate::mcp::memory_rpc::call_memory_tool_at(
-        memory_url,
-        "memory_list",
-        params,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("catchup: could not reach trusty-memory at {memory_url}: {e}");
-            return None;
-        }
-    };
+    let result =
+        match crate::memory_rpc::call_memory_tool_at(memory_url, "memory_list", params).await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("catchup: could not reach trusty-memory at {memory_url}: {e}");
+                return None;
+            }
+        };
     let mut summaries = match parse_memory_list_result(result) {
         Ok(d) => d,
         Err(e) => {

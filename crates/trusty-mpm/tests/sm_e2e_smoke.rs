@@ -16,7 +16,7 @@
 //! provider/resolver and a real [`SmDispatcher`] over a public-trait mock
 //! [`SessionControl`], then frames `sm.*` requests as JSON lines through a
 //! production-faithful stdio loop (the same line framing
-//! `trusty_common::mcp::run_stdio_loop` uses) over an in-memory duplex pipe. It
+//! `trusty_mcp::run_stdio_loop` uses) over an in-memory duplex pipe. It
 //! drives `sm.health` → `sm.chat` (a goal-style message) → `sm.sessions.list`
 //! always, and — under `--features sm-memory` — the SM-8 delegation path
 //! (`sm.delegate`) which launches a managed session, confirming via
@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use trusty_common::mcp::{Request, Response, error_codes};
+use trusty_mcp::{Request, Response, error_codes};
 
 use trusty_mpm::activity::cache::ActivityState;
 use trusty_mpm::core::sm::agent::SessionManagerAgent;
@@ -397,7 +397,7 @@ fn in_memory_goal_store(
 ///
 /// Why: the smoke test's whole point is to exercise the SM the way `claude-mpm`
 /// does — as newline-delimited JSON-RPC lines over a pipe, not by calling
-/// `dispatch` directly. `trusty_common::mcp::run_stdio_loop` is hard-wired to the
+/// `dispatch` directly. `trusty_mcp::run_stdio_loop` is hard-wired to the
 /// process's real stdin/stdout, so this mirrors its loop body over an injected
 /// in-memory duplex (identical framing: one request line in → one
 /// non-suppressed JSON response line out). The dispatcher runs on a background

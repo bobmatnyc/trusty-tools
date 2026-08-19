@@ -1,0 +1,39 @@
+[package]
+name = "trusty-mcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared JSON-RPC 2.0 / MCP protocol primitives for the trusty-* ecosystem: request/response envelopes, the stdio dispatch loop, OpenRPC document building, and the daemon-bridge startup guard."
+readme = "README.md"
+keywords = ["mcp", "json-rpc", "openrpc", "daemon"]
+categories = ["network-programming"]
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `io-std` + `io-util` back `run_stdio_loop`; `time` backs the daemon-bridge
+# poll interval; `rt` backs `spawn_blocking` for the single-flight start lock.
+tokio = { workspace = true, features = ["io-std", "io-util", "time", "rt", "macros"] }
+# `daemon_bridge`'s health probe. Inherited from the workspace so this crate
+# links the same rustls TLS stack as the rest of trusty-*.
+reqwest = { workspace = true }
+# `daemon_bridge` spawns the daemon with `home_dir()` as its working directory,
+# so a relative path in the child never resolves against a caller's cwd.
+dirs = { workspace = true }
+
+# `single_flight` uses `flock(2)` directly: an advisory whole-file lock that the
+# kernel releases on process death, which is what makes the guard crash-safe.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = { workspace = true }

@@ -49,9 +49,10 @@ path = "src/main.rs"
 
 [dependencies]
 # Shared JSON-RPC 2.0 / MCP stdio framework (run_stdio_loop + initialize_response
-# + Request/Response). The `mcp` feature pulls no deps beyond serde/tokio, which
-# this crate already needs — so the whole MCP surface stays in one place.
-trusty-common = { workspace = true, features = ["mcp"] }
+# + Request/Response), extracted from `trusty_common::mcp` by ADR-0040 (#5803).
+# `trusty-common` itself is no longer a dependency: that feature was the only
+# thing this crate took from it.
+trusty-mcp = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }

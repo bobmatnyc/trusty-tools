@@ -382,7 +382,7 @@ async fn delete_embedded_name_returns_permission_denied() {
 
 #[tokio::test]
 async fn register_wires_all_three_methods() {
-    use trusty_common::mcp::Request;
+    use trusty_mcp::Request;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut router = Router::new();

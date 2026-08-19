@@ -10,7 +10,7 @@
 //! behavior change.
 //!
 //! Two pending changes make this snapshot load-bearing right now: #5331
-//! proposes routing this document through `trusty_common::mcp::openrpc`'s
+//! proposes routing this document through `trusty_mcp::openrpc`'s
 //! shared builder, and the crate is scheduled to move into a new
 //! `trusty-mcp-services` crate. Neither may alter what a client discovers.
 //! Re-run this test after either one; the golden is deliberately independent

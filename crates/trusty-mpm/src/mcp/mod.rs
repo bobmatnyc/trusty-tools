@@ -28,11 +28,11 @@
 //! [`tools::TOOL_CATALOG`]: crate::mcp::tools::TOOL_CATALOG
 //! [`OrchestratorBackend`]: crate::mcp::OrchestratorBackend
 //! [`dispatch`]: crate::mcp::dispatch
-//! [`Request`]: trusty_common::mcp::Request
+//! [`Request`]: trusty_mcp::Request
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use trusty_common::mcp::{Request, Response, error_codes};
+use trusty_mcp::{Request, Response, error_codes};
 
 pub mod project_dispatch;
 pub mod proxy_dispatch;
@@ -534,7 +534,7 @@ pub async fn dispatch<B: OrchestratorBackend>(backend: &B, req: Request) -> Resp
     match req.method.as_str() {
         "initialize" => Response::ok(
             id,
-            trusty_common::mcp::initialize_response(SERVER_NAME, SERVER_VERSION, None),
+            trusty_mcp::initialize_response(SERVER_NAME, SERVER_VERSION, None),
         ),
         "tools/list" => Response::ok(id, json!({ "tools": tool_catalog() })),
         "tools/call" => dispatch_tool_call(backend, id, req.params).await,

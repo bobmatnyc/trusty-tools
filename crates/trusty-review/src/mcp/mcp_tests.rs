@@ -16,7 +16,7 @@ use super::*;
 use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
-use trusty_common::mcp::error_codes;
+use trusty_mcp::error_codes;
 
 use crate::{
     config::ReviewConfig,

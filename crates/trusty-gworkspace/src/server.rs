@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::api::client::BaseClient;
 use crate::api::services;
-use trusty_common::mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
+use trusty_mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
 
 /// Shared state passed to every dispatcher invocation.
 ///

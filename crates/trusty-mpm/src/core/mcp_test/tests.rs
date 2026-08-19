@@ -195,7 +195,7 @@ fn tools_list_request_has_method() {
 
 #[test]
 fn validate_initialize_accepts_valid() {
-    // Shape mirrors trusty_common::mcp::initialize_response.
+    // Shape mirrors trusty_mcp::initialize_response.
     let resp = json!({
         "jsonrpc": "2.0",
         "id": 1,

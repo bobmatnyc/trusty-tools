@@ -17,11 +17,11 @@
 //! Test: this module's unit tests.
 
 use serde_json::{Value, json};
-use trusty_common::mcp::error_codes;
+use trusty_mcp::error_codes;
 
 /// A JSON-RPC 2.0 error, as returned by a method handler.
 ///
-/// Why: mirrors `trusty_common::mcp::JsonRpcError`'s shape so the router can
+/// Why: mirrors `trusty_mcp::JsonRpcError`'s shape so the router can
 /// convert one into the other with a straight field copy, but stays a
 /// separate type so handler code never has to construct the wire envelope
 /// directly.

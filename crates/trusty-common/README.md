@@ -129,26 +129,23 @@ let app = with_standard_middleware(app); // CORS + trace + gzip (SSE-safe)
 Middleware order: `CorsLayer` → `TraceLayer` → `CompressionLayer` (gzip,
 `text/event-stream` excluded for SSE compatibility).
 
-### MCP / JSON-RPC Primitives (`mcp` feature)
+### MCP / JSON-RPC Primitives — moved to `trusty-mcp`
 
-Formerly the `trusty-mcp-core` crate. Provides the shared envelope types and
-a ready-made stdio dispatch loop for MCP servers.
+ADR-0040 (#5803) moved `Request`, `Response`, `JsonRpcError`, `error_codes`,
+`initialize_response`, `run_stdio_loop`, `ServiceDescriptor`, `OpenRpcBuilder`,
+`ensure_daemon_up`, and `ensure_daemon_up_single_flight` into the separate
+[`trusty-mcp`](../trusty-mcp/README.md) crate. Depend on that crate and import
+`trusty_mcp::…`; there is no re-export here, so `trusty_common::mcp` is gone.
+
+### trusty-memory JSON-RPC client (`memory-rpc` feature)
+
+What stayed: `memory_rpc` resolves the trusty-memory daemon's address through
+`trusty_common::daemon_addr` and POSTs to its `/rpc` endpoint, so every caller
+discovers the port instead of hardcoding one.
 
 ```rust
-use trusty_common::mcp::{Request, Response, initialize_response, run_stdio_loop};
-
-// Build the initialize response for your server
-let result = initialize_response("my-server", "0.1.0", None);
-
-// Run a full JSON-RPC 2.0 stdio loop
-run_stdio_loop(|req: Request| async move {
-    // dispatch and return a Response
-    Response::ok(req.id, serde_json::json!({"result": "ok"}))
-}).await?;
+use trusty_common::memory_rpc::{call_memory_tool_at, resolve_memory_base_url_or_unreachable};
 ```
-
-Key exports: `Request`, `Response`, `JsonRpcError`, `initialize_response`,
-`run_stdio_loop`, `error_codes`.
 
 ### RPC Client (`rpc` feature)
 

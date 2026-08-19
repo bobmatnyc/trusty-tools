@@ -178,7 +178,7 @@ impl ImportReport {
 pub async fn run_import(opts: &ImportOptions) -> anyhow::Result<ImportReport> {
     let base_url = match &opts.memory_url {
         Some(url) => url.clone(),
-        None => trusty_common::mcp::memory_rpc::resolve_memory_base_url()
+        None => trusty_common::memory_rpc::resolve_memory_base_url()
             .context("resolve trusty-memory daemon address")?,
     };
 
@@ -403,7 +403,7 @@ async fn existing_drawer(
     palace: &str,
     parsed: &ParsedMemory,
 ) -> anyhow::Result<Existing> {
-    let result = trusty_common::mcp::memory_rpc::call_memory_tool_at(
+    let result = trusty_common::memory_rpc::call_memory_tool_at(
         base_url,
         "memory_list",
         json!({ "palace": palace, "tag": parsed.name, "limit": DEDUP_CANDIDATE_LIMIT }),
@@ -500,7 +500,7 @@ async fn write_drawer(
     opts: &ImportOptions,
     parsed: &ParsedMemory,
 ) -> anyhow::Result<String> {
-    let result = trusty_common::mcp::memory_rpc::call_memory_tool_at(
+    let result = trusty_common::memory_rpc::call_memory_tool_at(
         base_url,
         "memory_remember",
         json!({

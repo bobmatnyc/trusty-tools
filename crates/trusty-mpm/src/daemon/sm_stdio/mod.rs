@@ -19,7 +19,7 @@
 //! What: [`SmDispatcher`] owns the SM surfaces and exposes the transport-neutral
 //! [`SmDispatcher::dispatch`] (request → response). [`run_sm_stdio`] builds the
 //! dispatcher from the daemon state and drives the shared
-//! [`trusty_common::mcp::run_stdio_loop`] (line framing + stderr-only logging),
+//! [`trusty_mcp::run_stdio_loop`] (line framing + stderr-only logging),
 //! so the wire framing is the SAME proven loop trusty-memory/trusty-search use.
 //! Test: `tests.rs` — each of the 14 methods round-trips with correct JSON-RPC
 //! framing, plus parse-error / method-not-found / stdout-cleanliness / scripted
@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use trusty_common::mcp::{Request, Response, run_stdio_loop};
+use trusty_mcp::{Request, Response, run_stdio_loop};
 
 use crate::core::sm::{SessionManagerAgent, SessionManagerConfig};
 

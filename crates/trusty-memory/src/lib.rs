@@ -29,10 +29,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{broadcast, OnceCell, RwLock};
-use trusty_common::mcp::initialize_response;
 use trusty_common::memory_core::embed::Embedder;
 use trusty_common::memory_core::{store::ChatSessionStore, PalaceRegistry};
 use trusty_common::ChatProvider;
+use trusty_mcp::initialize_response;
 
 /// Two-phase daemon readiness state (issues #910/#911, revised by #1970).
 ///

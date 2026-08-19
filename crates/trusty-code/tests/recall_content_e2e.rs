@@ -16,7 +16,7 @@
 //! Uses `TCODE_MOCK_LLM=echo-recall`
 //! ([`trusty_code::task::mock_llm::RecallEchoLlmClient`]) so the PM issues
 //! exactly one `recall_session` tool call, no live model/API key required,
-//! and `TRUSTY_MEMORY_URL` (`trusty_common::mcp::memory_rpc::TRUSTY_MEMORY_URL_ENV`)
+//! and `TRUSTY_MEMORY_URL` (`trusty_common::memory_rpc::TRUSTY_MEMORY_URL_ENV`)
 //! pointed at an in-process mock trusty-memory `/rpc` server that returns two
 //! results: one huge, high-scored entry that alone busts `recall_session`'s
 //! token budget (so it alone is INJECTED), and one small, lower-scored entry
@@ -213,7 +213,7 @@ async fn held_back_recall_result_carries_its_text_and_run_id_over_the_wire() {
         project.path(),
         trusty_code::task::mock_llm::MOCK_LLM_ECHO_RECALL,
         &[(
-            trusty_common::mcp::memory_rpc::TRUSTY_MEMORY_URL_ENV,
+            trusty_common::memory_rpc::TRUSTY_MEMORY_URL_ENV,
             &mock_base_url,
         )],
     );

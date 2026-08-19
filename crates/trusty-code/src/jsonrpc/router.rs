@@ -1,7 +1,7 @@
 //! Method-name -> async-handler registry and the JSON-RPC dispatch algorithm.
 //!
 //! Why: the transport loop (`crate::serve::transport`) only knows how to
-//! turn bytes into a `trusty_common::mcp::Request` and a `Response` back
+//! turn bytes into a `trusty_mcp::Request` and a `Response` back
 //! into bytes; it must not know *which* methods exist. The [`Router`] is
 //! the seam in between: handlers register under a method name once, and
 //! every future ticket that adds a method (`session.*` #2054, `task.*`
@@ -51,7 +51,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::Value;
-use trusty_common::mcp::{Request, Response, error_codes};
+use trusty_mcp::{Request, Response, error_codes};
 
 use super::context::ConnectionContext;
 use super::error::RpcError;

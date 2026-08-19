@@ -37,7 +37,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::warn;
-use trusty_common::mcp::memory_rpc::call_memory_tool_at;
+use trusty_common::memory_rpc::call_memory_tool_at;
 
 use crate::agent_loop::estimate_tokens;
 use crate::events::RecalledMemory;

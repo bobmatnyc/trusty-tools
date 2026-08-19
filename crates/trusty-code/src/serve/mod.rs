@@ -281,7 +281,7 @@ pub async fn run_http(binding: ProjectBinding, port: u16) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
-    use trusty_common::mcp::Request;
+    use trusty_mcp::Request;
 
     fn test_ctx() -> crate::jsonrpc::ConnectionContext {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

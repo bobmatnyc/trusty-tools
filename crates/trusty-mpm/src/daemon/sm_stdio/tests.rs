@@ -17,7 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use trusty_common::mcp::{Request, Response, error_codes};
+use trusty_mcp::{Request, Response, error_codes};
 
 use super::SmDispatcher;
 use super::control::{LaunchParams, SessionControl, SessionControlError};
@@ -637,7 +637,7 @@ async fn line_framing_round_trips_one_response() {
 
 /// Minimal copy of the shared stdio loop parameterised over injected I/O.
 ///
-/// Why: `trusty_common::mcp::run_stdio_loop` only accepts the real stdin/stdout;
+/// Why: `trusty_mcp::run_stdio_loop` only accepts the real stdin/stdout;
 /// to test the dispatcher over the SAME framing rules without touching the real
 /// process streams, this mirrors the loop body over an injected reader/writer.
 /// What: reads newline-delimited requests, dispatches, writes one JSON line per

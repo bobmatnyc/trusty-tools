@@ -4,7 +4,7 @@
 //! Why: external orchestrators already speak line-delimited JSON-RPC / MCP over
 //! stdio to trusty-memory and trusty-search; trusty-agents was the missing
 //! surface. Rather than grow a third bespoke stdio loop, this reuses the shared
-//! native-MCP framework in `trusty_common::mcp` (`run_stdio_loop` +
+//! native-MCP framework in `trusty_mcp` (`run_stdio_loop` +
 //! `initialize_response`) that trusty-memory and trusty-search already ship
 //! against — so parse-error handling, notification suppression, flush
 //! semantics, and the `2024-11-05` protocol version stay fixed in one place and
@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use trusty_common::mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
+use trusty_mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
 
 use crate::tools::pm_bridge::PmBridgeTool;
 use crate::tools::pm_bridge_backend::ProcessPmBridge;
@@ -58,7 +58,7 @@ use crate::tools::traits::ToolExecutor;
 /// so `dispatch_task`'s diagnostics (e.g. the orphaned-tm-session WARN in
 /// `pm_bridge_backend`) are not silently dropped, keeping stdout clean; (3)
 /// hands the module-level [`dispatch`] fn to
-/// [`trusty_common::mcp::run_stdio_loop`], which reads stdin line-by-line and
+/// [`trusty_mcp::run_stdio_loop`], which reads stdin line-by-line and
 /// writes one JSON-RPC response line per request (notifications suppressed).
 /// Test: exercised by the live binary smoke; the per-message logic is unit
 /// tested via [`dispatch`] directly.

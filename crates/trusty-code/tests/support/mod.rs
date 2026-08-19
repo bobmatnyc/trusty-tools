@@ -192,7 +192,7 @@ impl StdioSession {
     ///
     /// Why: `tests/recall_content_e2e.rs` needs to point the daemon's
     /// `recall_session` tool at a MOCK trusty-memory backend (via
-    /// `TRUSTY_MEMORY_URL`, `trusty_common::mcp::memory_rpc::TRUSTY_MEMORY_URL_ENV`)
+    /// `TRUSTY_MEMORY_URL`, `trusty_common::memory_rpc::TRUSTY_MEMORY_URL_ENV`)
     /// rather than a real daemon — no prior e2e scenario in this crate needed
     /// to override an env var beyond the mock-LLM selector, so this is the
     /// general form that adds that capability without touching any other

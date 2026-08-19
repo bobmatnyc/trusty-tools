@@ -50,7 +50,7 @@ impl SessionRegistry {
     /// `begin_execution`/`begin_pm_transcript`). On the FIRST call for a
     /// session, derives the palace id from `project_dir` via
     /// [`derive_palace_id_for_project`], resolves trusty-memory's base URL
-    /// via `trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable`
+    /// via `trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable`
     /// (fail-open — the sink is built regardless of whether the daemon is
     /// currently reachable; every write attempt after that is independently
     /// fail-open, see `memory_sink::write_turn`), and stores the constructed
@@ -147,7 +147,7 @@ impl SessionRegistry {
         let mut sessions = self.lock();
         let entry = sessions.get_mut(id)?;
         if entry.memory_sink.is_none() {
-            let base_url = trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
+            let base_url = trusty_common::memory_rpc::resolve_memory_base_url_or_unreachable();
             // #4638: only a durable project root entitles the recorder to bring
             // a new palace into being — a temp root's id is unique per run.
             let creation = if trusty_common::bin_resolve::is_under_system_temp(project_dir) {

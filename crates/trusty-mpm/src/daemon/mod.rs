@@ -830,7 +830,7 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
 pub async fn run_mcp(state: Arc<DaemonState>) -> anyhow::Result<()> {
     info!("trusty-mpm MCP server starting on stdio");
     let backend = mcp_backend::StateBackend::new(state);
-    trusty_common::mcp::run_stdio_loop(move |req| {
+    trusty_mcp::run_stdio_loop(move |req| {
         let backend = backend.clone();
         async move { crate::mcp::dispatch(&backend, req).await }
     })
