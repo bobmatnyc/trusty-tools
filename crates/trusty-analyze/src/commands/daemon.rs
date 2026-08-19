@@ -214,7 +214,11 @@ pub async fn handle_status(port: u16) -> Result<()> {
 
     if reachable {
         let url = format!("http://127.0.0.1:{port}/health");
-        let client = reqwest::Client::new();
+        // #4392: loopback target — an exported HTTP_PROXY would otherwise
+        // report a healthy daemon as DOWN.
+        let client = trusty_common::http_client::loopback_client_builder()
+            .build()
+            .context("build health-probe client")?;
         match client
             .get(&url)
             .timeout(Duration::from_secs(2))

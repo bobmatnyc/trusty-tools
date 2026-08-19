@@ -897,6 +897,23 @@ pub mod daemon_addr;
 /// Test: covered via daemon_addr integration tests.
 pub mod health_probe;
 
+/// The single HTTP-client constructor for loopback/daemon targets (#4392).
+///
+/// Why: reqwest 0.12 routes `127.0.0.1` through an exported `HTTP_PROXY` /
+/// `ALL_PROXY` — hyper-util's matcher has no loopback exemption — so on a
+/// machine with a proxy configured every tm↔daemon call fails and the caller
+/// reports a healthy daemon as down. `.no_proxy()` fixes it, and it belongs at
+/// ONE entry point rather than across ~133 `Client::builder()` sites.
+/// What: Exposes [`http_client::loopback_client_builder`] (the primitive, no
+/// timeout policy), [`http_client::loopback_client`] (standard bounds), and
+/// [`http_client::blocking_loopback_client_builder`] behind `blocking-http`.
+/// Public-internet callers (crates.io, inference providers, the GitHub API)
+/// deliberately do NOT route through here — they must keep honouring the
+/// operator's proxy.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// http_client::tests`.
+pub mod http_client;
+
 /// Unix-domain-socket permission enforcement (issue #5099).
 ///
 /// Why: ADR-0031 and ADR-0032 both argue for UDS over loopback TCP on the

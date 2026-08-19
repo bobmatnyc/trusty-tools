@@ -330,9 +330,12 @@ fn address_reachable_blocking(host_port: &str) -> bool {
 /// simple and predictable across cold/warm starts.
 /// What: builds a one-shot reqwest client with `PROBE_TIMEOUT`, issues a GET,
 /// returns `true` on any 2xx status and `false` on any error or non-2xx.
-/// Test: `probe_once_returns_false_for_refused_port` (async unit test below).
+/// Test: `probe_once_returns_false_for_refused_port` (async unit test below);
+/// the proxy immunity is proven in `http_client::tests`.
 pub async fn probe_once(health_url: &str) -> bool {
-    let client = match reqwest::Client::builder()
+    // #4392: the target is a loopback daemon, so the client must not honour an
+    // exported HTTP_PROXY.
+    let client = match crate::http_client::loopback_client_builder()
         .timeout(PROBE_TIMEOUT)
         .connect_timeout(PROBE_TIMEOUT)
         .build()

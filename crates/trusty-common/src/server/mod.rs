@@ -24,7 +24,6 @@
 use anyhow::{Context, Result};
 use axum::{Json, Router, response::IntoResponse};
 use serde_json::json;
-use std::time::Duration;
 use tower_http::{
     compression::{
         CompressionLayer,
@@ -222,18 +221,16 @@ where
 /// Why: every CLI command that talks to the daemon must fail fast when the
 /// daemon is not running. Without timeouts, reqwest waits for the OS TCP
 /// stack (minutes on some platforms), freezing the terminal.
-/// What: 2 s connect timeout, 5 s total request timeout. Returns
+/// What: delegates to [`crate::http_client::loopback_client`] — proxies off
+/// (#4392), 2 s connect timeout, 5 s total request timeout. Returns
 /// `anyhow::Result` so callers can `?`-propagate alongside other anyhow
 /// errors without conversion boilerplate.
 /// Test: `daemon_http_client_builds` — construction succeeds with the
 /// configured timeouts; the timeout values themselves are exercised in the
-/// dependent CLIs (manual: stop daemon, run `trusty-search status`).
+/// dependent CLIs (manual: stop daemon, run `trusty-search status`). The proxy
+/// immunity is proven in `http_client::tests`.
 pub fn daemon_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(5))
-        .build()
-        .context("build daemon http client")
+    crate::http_client::loopback_client().context("build daemon http client")
 }
 
 /// Standard health-check handler returning `{"status":"ok","version":"<v>"}`.

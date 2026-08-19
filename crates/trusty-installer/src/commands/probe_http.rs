@@ -18,10 +18,13 @@
 //! actually exists. Three properties are load-bearing and each has a named
 //! regression test — remove any one of them and #4246 comes straight back:
 //!
-//! 1. **[`build_probe_client`] calls `.no_proxy()`.** reqwest 0.12 honours
+//! 1. **[`build_probe_client`] is proxy-free.** reqwest 0.12 honours
 //!    `HTTP_PROXY`/`http_proxy`/`ALL_PROXY` for `127.0.0.1` — hyper-util's proxy
 //!    matcher has no loopback exemption, so a developer with a proxy exported
-//!    reproduces the identical false `down` through the NEW transport.
+//!    reproduces the identical false `down` through the NEW transport. Since
+//!    #4392 the `.no_proxy()` call itself lives in
+//!    `trusty_common::http_client::loopback_client_builder`, which this module
+//!    now builds on.
 //! 2. **Dual resolution with an explicit precedence rule** — see [`reconcile`].
 //!    A daemon that port-walked off its documented default (trusty-memory walks
 //!    `7070..=7079`) makes the fixed-port leg refuse while it is perfectly
@@ -293,10 +296,13 @@ impl ProbeOutcome {
 /// entry the user is not required to have. Without this call a developer with a
 /// proxy exported gets every daemon reported `down` through the new transport,
 /// and (pre-gate) every healthy daemon kickstarted — the exact #4246 signature,
-/// reintroduced. There is no other `.no_proxy()` in this workspace, so this is
-/// also the first place the property is asserted at all. The client is built per
-/// probe rather than cached because reqwest reads the proxy environment at BUILD
-/// time; a cached client would make the behaviour depend on process start order.
+/// reintroduced. #4392 moved the `.no_proxy()` call to
+/// `trusty_common::http_client::loopback_client_builder` so every loopback
+/// caller in the workspace inherits it; this module keeps its own regression
+/// test because the property is load-bearing HERE regardless of where the call
+/// lives. The client is built per probe rather than cached because reqwest reads
+/// the proxy environment at BUILD time; a cached client would make the behaviour
+/// depend on process start order.
 /// What: a client with proxies disabled and both a connect and a whole-request
 /// bound.
 /// Test: `tests::probe_ignores_http_proxy_env` — sets `HTTP_PROXY` to a dead
@@ -315,7 +321,7 @@ pub fn build_probe_client() -> reqwest::Result<reqwest::Client> {
 /// shorter ones against a deliberately silent peer. The caller is expected to
 /// pass `connect` ≪ `request`, so that a silent peer's verdict is reached on the
 /// READ path rather than on the handshake.
-/// What: same client as [`build_probe_client`] — `.no_proxy()` included, since
+/// What: same client as [`build_probe_client`] — proxies stay disabled, since
 /// the proxy test needs both bounds AND the flag — with `connect`/`request`
 /// substituted.
 /// Test: `tests::probe_distinguishes_failure_causes`.
@@ -323,8 +329,9 @@ pub fn build_probe_client_with(
     connect: Duration,
     request: Duration,
 ) -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .no_proxy()
+    // #4392: `.no_proxy()` now lives at the shared entry point, so this module's
+    // property and every other loopback caller's cannot drift apart.
+    trusty_common::http_client::loopback_client_builder()
         .connect_timeout(connect)
         .timeout(request)
         .build()

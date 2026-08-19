@@ -739,7 +739,9 @@ fn relative_index_path(root: &Path, abs: &Path) -> String {
 /// (which builds and drives one), and by the daemon-down fail-open path in
 /// `index_files_inner_skips_gracefully_when_daemon_down`.
 fn build_index_client() -> reqwest::Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
+    // #4392: trusty-search answers on loopback, so the client must not honour an
+    // exported HTTP_PROXY.
+    crate::http_client::blocking_loopback_client_builder()
         .timeout(std::time::Duration::from_secs(2))
         .connect_timeout(std::time::Duration::from_millis(750))
         .build()
@@ -1018,7 +1020,8 @@ fn best_effort_create_index(
     let result = std::thread::spawn(move || {
         // 1s overall / 750ms connect cap: this runs synchronously on a hot
         // path, so the worst-case stall must stay small.
-        let client = reqwest::blocking::Client::builder()
+        // #4392: loopback target, so proxies stay off.
+        let client = crate::http_client::blocking_loopback_client_builder()
             .timeout(std::time::Duration::from_secs(1))
             .connect_timeout(std::time::Duration::from_millis(750))
             .build()?;
@@ -1108,7 +1111,8 @@ fn best_effort_trigger_reindex(base: &str, index_id: &str) {
         // 2s overall / 750ms connect cap: this runs synchronously on a hot path
         // (after best_effort_create_index's own 1s budget), so the worst-case
         // added stall must stay small.
-        let client = reqwest::blocking::Client::builder()
+        // #4392: loopback target, so proxies stay off.
+        let client = crate::http_client::blocking_loopback_client_builder()
             .timeout(std::time::Duration::from_secs(2))
             .connect_timeout(std::time::Duration::from_millis(750))
             .build()?;

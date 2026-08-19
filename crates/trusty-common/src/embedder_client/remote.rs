@@ -41,16 +41,18 @@ impl RemoteEmbedderClient {
     /// Why: callers pass the base URL (e.g. `http://127.0.0.1:7890`) and the
     /// client appends `/embed` for the POST endpoint.
     ///
-    /// What: builds a `reqwest::Client` with default TLS settings, stores the
+    /// What: builds a `reqwest::Client` with default TLS settings and proxies
+    /// disabled (#4392 — trusty-embedderd answers on loopback), stores the
     /// fully-qualified embed URL.
     ///
     /// Test: `remote_client_construction` below verifies the URL is stored
-    /// correctly without sending any network requests.
+    /// correctly without sending any network requests; the proxy immunity is
+    /// proven in `http_client::tests`.
     pub fn new(base_url: impl Into<String>) -> Self {
         let base = base_url.into();
         let base = base.trim_end_matches('/').to_owned();
         let embed_url = format!("{base}/embed");
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::loopback_client_builder()
             .build()
             .expect("reqwest client construction is infallible on supported platforms");
         tracing::debug!(embed_url = %embed_url, "RemoteEmbedderClient constructed");

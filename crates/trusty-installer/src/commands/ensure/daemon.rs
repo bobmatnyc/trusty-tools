@@ -65,11 +65,17 @@ pub fn resolve_base_url(app: &str) -> Result<Option<String>> {
 /// Build the `reqwest::Client` used for ensure's daemon calls.
 ///
 /// Why: one audited place for the timeout config so every ensure request fails
-/// fast against a dead daemon instead of hanging on the OS TCP timeout.
-/// What: a client with [`REQUEST_TIMEOUT`] applied to the whole request.
-/// Test: `tests::build_client_succeeds`.
+/// fast against a dead daemon instead of hanging on the OS TCP timeout. Every
+/// target is a loopback daemon, so it also has to be proxy-free: reqwest routes
+/// `127.0.0.1` through an exported `HTTP_PROXY` and `tctl ensure --wait` then
+/// waits out its whole budget against a daemon that is up (#4392).
+/// What: the shared `trusty_common::http_client` loopback builder with
+/// [`REQUEST_TIMEOUT`] applied to the whole request.
+/// Test: `tests::build_client_succeeds`; the proxy immunity is proven in
+/// `trusty_common::http_client::tests` and in
+/// `probe_http_tests::probe_ignores_http_proxy_env`.
 pub fn build_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    trusty_common::http_client::loopback_client_builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
         .context("build ensure HTTP client")

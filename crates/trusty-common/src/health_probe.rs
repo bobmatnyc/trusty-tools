@@ -17,10 +17,13 @@
 /// returns `true` only when the response is HTTP 2xx. Any client-builder error
 /// or transport failure returns `false`.
 /// Test: covered indirectly via `check_already_running_*` tests in
-/// `daemon_addr` module and the three daemon integration paths.
+/// `daemon_addr` module and the three daemon integration paths; the proxy
+/// immunity is proven in `http_client::tests`.
 pub async fn probe_health(base_url: &str, health_path: &str) -> bool {
     let probe = format!("{base_url}{health_path}");
-    let client = match reqwest::Client::builder()
+    // #4392: the target is a loopback daemon, so the client must not honour an
+    // exported HTTP_PROXY.
+    let client = match crate::http_client::loopback_client_builder()
         .timeout(std::time::Duration::from_secs(1))
         .build()
     {

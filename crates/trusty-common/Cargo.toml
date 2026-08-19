@@ -314,7 +314,14 @@ mcp = []
 # `index_id` / `daemon_addr` helpers it uses are already unconditional, so the
 # feature flag gates module compilation + the blocking client only. Off by
 # default so consumers that don't register indexes pay nothing.
-search-index = ["reqwest/blocking"]
+search-index = ["blocking-http"]
+# Enables `http_client::blocking_loopback_client_builder`, the synchronous
+# counterpart of the #4392 proxy-free loopback entry point, by turning on
+# `reqwest/blocking`. Named for what it provides rather than for one consumer:
+# `search-index` implies it (its index-registration and readiness paths run on
+# detached threads with no reactor), and any other off-reactor loopback caller
+# enables it directly instead of reaching for `reqwest::blocking` bare.
+blocking-http = ["reqwest/blocking"]
 # Enables the `session_naming` module: the ONE canonical tmux-session naming
 # rule (managed prefix, adjective+noun / dir-slug / serial derivation, and the
 # `is_managed_session_name` classifier) shared by trusty-mpm's SessionManager

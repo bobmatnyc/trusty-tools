@@ -134,7 +134,9 @@ pub async fn call_memory_tool(method: &str, params: Value) -> Result<Value> {
 /// Test: `call_memory_tool_at_rejects_rpc_error`,
 /// `call_memory_tool_at_unreachable_daemon` (ignored).
 pub async fn call_memory_tool_at(base_url: &str, method: &str, params: Value) -> Result<Value> {
-    let client = reqwest::Client::builder()
+    // #4392: trusty-memory answers on loopback, so the client must not honour an
+    // exported HTTP_PROXY.
+    let client = crate::http_client::loopback_client_builder()
         .timeout(Duration::from_secs(5))
         .build()
         .context("build reqwest client")?;

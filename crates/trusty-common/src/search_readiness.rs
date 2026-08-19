@@ -180,7 +180,9 @@ pub fn probe_index_readiness(project_root: &Path) -> Option<IndexReadiness> {
     // Blocking reqwest inside a tokio runtime panics on runtime drop; run it on
     // a dedicated OS thread (joined here) exactly like search_index's helpers.
     let body: serde_json::Value = std::thread::spawn(move || {
-        let client = reqwest::blocking::Client::builder()
+        // #4392: trusty-search answers on loopback, so the client must not
+        // honour an exported HTTP_PROXY.
+        let client = crate::http_client::blocking_loopback_client_builder()
             .timeout(std::time::Duration::from_millis(1500))
             .connect_timeout(std::time::Duration::from_millis(750))
             .build()

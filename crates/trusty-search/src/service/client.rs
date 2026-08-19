@@ -8,10 +8,22 @@ pub struct SearchClient {
 }
 
 impl SearchClient {
+    /// Build a client for the trusty-search daemon at `base_url`.
+    ///
+    /// Why: the daemon answers on loopback, and reqwest routes `127.0.0.1`
+    /// through an exported `HTTP_PROXY` — so without the shared proxy-free
+    /// builder every call here fails on a machine with a proxy configured
+    /// (#4392).
+    /// What: `trusty_common::http_client::loopback_client_builder`, built. The
+    /// `expect` mirrors `reqwest::Client::new`'s own contract — it panics on a
+    /// build failure too, which only a broken TLS backend can cause.
+    /// Test: proxy immunity is proven in `trusty_common::http_client::tests`.
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            client: reqwest::Client::new(),
+            client: trusty_common::http_client::loopback_client_builder()
+                .build()
+                .expect("reqwest client construction is infallible on supported platforms"),
         }
     }
 
