@@ -1,6 +1,0 @@
-Changed
-
-- `engagement.toml` now declares what an engagement audits, in a `[[targets]]` array, and `<work-dir>/state/audit-targets.toml` is a working copy rebuilt from it. An engagement is described by one portable file: hand someone the config and they have the key, the models and the scope ([#5979](https://github.com/bobmatnyc/trusty-tools/issues/5979))
-- `taudit add repo` / `add board` / `remove` write the engagement config, under the same cross-process lock the registry took, and the config is published at mode 0600 before the working copy is mirrored — so a config write that fails leaves both files untouched ([#5979](https://github.com/bobmatnyc/trusty-tools/issues/5979))
-- An engagement whose config declares no targets adopts whatever the working copy holds, so an upgrade keeps every target that was registered before this change; the first `add` or `remove` persists the adopted set into the config. `targets = []` is a declaration of zero and does not adopt ([#5979](https://github.com/bobmatnyc/trusty-tools/issues/5979))
-- `taudit add` and `taudit remove` now refuse in a directory with no `engagement.toml`, naming the file and the command that creates one, rather than writing a registry nothing treats as authoritative ([#5979](https://github.com/bobmatnyc/trusty-tools/issues/5979))

@@ -1,7 +1,0 @@
-Fixed
-
-- The profile-issue thread lookup could comment on the WRONG contributor's issue. `find_thread_by_marker` matched with a bare `title.contains(marker)`, and one email address can be a substring of another — `"[dev-profile] Bob Jones <bob.jones@x.com>".contains("jones@x.com")` is `true`. Since `in:title` is a token index and the two addresses share every token, a single search plausibly returns both issues, so Jones's performance profile could be appended to Bob Jones's thread. The match is now anchored on `<marker>`, which angle brackets close because they cannot appear inside an email address, and `upsert_issue_thread` refuses a title that does not carry the anchor — an issue opened under such a title is invisible to the next run, which would then open another.
-
-- The same lookup read only the first page of search results. `in:title alice@example.com` also matches every colleague at `example.com`, so in an org with hundreds of profiled contributors the real thread sits past page one and the upsert would conclude "no thread exists" and open a duplicate. The search now walks up to 10 pages of 100 — GitHub's whole reachable result set — and when `total_count` exceeds what the walk could read it returns the new `CollectError::GithubSearchInconclusive` rather than creating.
-
-  Both are the same class of defect: an ambiguity resolved toward `create`. Writes land on a live tracker and re-running undoes neither a wrong comment nor a duplicate issue, so every uncertain path is now an error.

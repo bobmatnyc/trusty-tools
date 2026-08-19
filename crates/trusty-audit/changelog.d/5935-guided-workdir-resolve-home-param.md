@@ -1,2 +1,0 @@
-Fixed
-- `trusty-audit-ui`'s guided-flow session builder (`guided.rs`) failed to compile against `WorkDir::resolve`'s new `home: Option<&Path>` parameter (#5929), which broke `origin/main` as a workspace. Both call sites — the production `session()` builder and its own test — now pass `dirs::home_dir()`, the same source `trusty-audit`'s CLI entry point uses, so the shell and the CLI keep resolving the same default work-dir root (#5935).

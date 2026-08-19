@@ -1,5 +1,0 @@
-Fixed
-
-- Linear `fetch_issue` no longer reports an auth or HTTP failure as `Ok(None)`. A non-2xx response is an error carrying the status and Linear's own message, so a rejected API key is no longer indistinguishable from an absent issue (#5665).
-- The Linear response body carried into that error is scrubbed of the configured API key before it is truncated, so a provider that echoes the rejected key back cannot put it in the collection summary. Scrubbing runs through `trusty_common::credentials::scrub_secrets` and precedes truncation, so a key straddling the cut cannot survive as an unmatchable fragment (#5239).
-- `fetch_referenced_issues` returns `Result<Vec<LinearIssue>>` and stops at the first failure instead of returning an empty vec. A run against an invalid-but-present key now records `Linear: fetch issues failed: …` as a stage failure (#5727), so it reaches both the collection summary and the exit code rather than writing zero rows and exiting 0 with no diagnostic. This changes the public signature of `LinearClient::fetch_referenced_issues`.

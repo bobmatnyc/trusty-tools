@@ -1,4 +1,0 @@
-Fixed
-
-- Two `trusty-audit add` runs against one working directory no longer discard each other's target. Registering and removing both load, mutate and save `state/audit-targets.toml`, and nothing made that sequence indivisible — the later save dropped the earlier one's entry while both reported success. Both now run under `trusty_common::file_lock::with_exclusive_lock`, the workspace's one implementation of that critical section ([#5822](https://github.com/bobmatnyc/trusty-tools/issues/5822))
-- A `boards.jira.url` carrying `user:password@` userinfo no longer reaches a `Debug` render of the engagement config. The field is a plain string an operator may paste credentials into, and the derived `Debug` printed it verbatim; the userinfo is now stripped, leaving the site identifiable. The value itself is unchanged, so the request still carries it ([#5822](https://github.com/bobmatnyc/trusty-tools/issues/5822))
