@@ -739,7 +739,13 @@ fn short_reason(e: &anyhow::Error) -> String {
 /// Test: `tests::select_prebuilt_bin_path_matches_by_filename`,
 /// `tests::select_prebuilt_bin_path_falls_back_when_no_match`,
 /// `tests::select_prebuilt_bin_path_does_not_substring_match`.
-fn select_prebuilt_bin_path(paths: &[PathBuf], binary: &str, install_dir: &Path) -> PathBuf {
+// #5807: `pub(super)` so `self_update` health-gates the binary it placed
+// through the SAME path selection this one does, rather than a second copy.
+pub(super) fn select_prebuilt_bin_path(
+    paths: &[PathBuf],
+    binary: &str,
+    install_dir: &Path,
+) -> PathBuf {
     paths
         .iter()
         .find(|p| p.file_name().and_then(|f| f.to_str()) == Some(binary))

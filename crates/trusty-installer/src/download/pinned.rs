@@ -679,10 +679,13 @@ struct Pending {
 ///
 /// What: Rejects a final path already occupied by a directory and a final path
 /// two tools in the set both claim — both would surface later as a confusing
-/// mid-commit failure. Then copies via `fetch::stage_binary`.
+/// mid-commit failure. Then copies via `fetch::stage_binary`. A name whose
+/// source file is absent is a third rejection (#5810), not a skip: placing a
+/// subset while returning `Ok` would report a partial set as a complete one.
 ///
 /// Test: `tests::a_set_places_nothing_when_a_later_tool_cannot_be_placed`,
-/// `tests::a_set_is_rejected_when_two_tools_claim_the_same_binary_name`.
+/// `tests::a_set_is_rejected_when_two_tools_claim_the_same_binary_name`,
+/// `tests::a_binary_missing_from_the_staged_set_is_never_silently_skipped`.
 fn copy_set_into_install_dir(
     staged: &[Staged],
     install_dir: &Path,
@@ -729,7 +732,23 @@ fn copy_set_into_install_dir(
             }
 
             match fetch::stage_binary(&s.extract_dir, install_dir, name) {
-                Ok(None) => continue,
+                // #5810: `stage_binary` answers `Ok(None)` when the source file
+                // is not there, and this arm used to `continue`. The pinned
+                // path then placed fewer binaries than it named and still
+                // returned `Ok` — a partial set reported as a complete one,
+                // which is the mixed-version outcome the pin exists to prevent.
+                // Fail closed here, before the first commit rename, so the
+                // "nothing was installed" text stays true.
+                Ok(None) => {
+                    discard(temporaries(&pending).chain(temporaries_of(&renames)));
+                    return Err(io(
+                        s,
+                        anyhow::anyhow!(
+                            "`{name}` was staged for installation but is not present in {}",
+                            s.extract_dir.display()
+                        ),
+                    ));
+                }
                 Ok(Some(tmp)) => {
                     claimed.push(dest.clone());
                     renames.push((tmp, dest));

@@ -561,6 +561,39 @@ fn a_set_is_rejected_when_two_tools_claim_the_same_binary_name() {
     assert_nothing_installed(dir.path());
 }
 
+/// Why (#5810): `fetch::stage_binary` returns `Ok(None)` when the source file
+/// is absent, and the copy phase used to `continue` past it. A pinned set could
+/// then place fewer binaries than it staged and still return `Ok` — a partial
+/// set reported as a complete one, which is the mixed-version result the pin
+/// exists to prevent.
+/// What: Stages a tool whose name list contains a binary the extraction
+/// directory does not hold; asserts the copy phase fails closed, names the
+/// missing binary, and leaves the install directory empty.
+/// Test: This is the test.
+#[test]
+fn a_binary_missing_from_the_staged_set_is_never_silently_skipped() {
+    let src = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut staged = staged_fixture("tool-a", "1.0.0", &["tool-a"], src.path());
+    // The shared table promises an alias the extraction dir never received.
+    staged.binary_names.push("tool-a-alias".to_owned());
+
+    let err = copy_set_into_install_dir(&[staged], dir.path())
+        .expect_err("a binary the staging dir does not hold must fail closed");
+
+    assert!(matches!(err, PinnedError::Io { .. }), "got {err:?}");
+    let text = err.to_string();
+    assert!(
+        text.contains("tool-a-alias"),
+        "the missing binary must be named: {text}"
+    );
+    assert!(
+        text.contains("nothing was installed"),
+        "a phase-2 failure before any commit must report the truth: {text}"
+    );
+    assert_nothing_installed(dir.path());
+}
+
 /// Why: The copy phase creates hidden temporaries inside the install directory;
 /// if a failure left them there, "nothing was installed" would be a half-truth
 /// and the next run would find litter.

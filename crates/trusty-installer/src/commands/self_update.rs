@@ -3,14 +3,16 @@
 //! Why: The installer binary manages the whole stack but has no automated path
 //! to update itself; this command closes that gap.
 //!
-//! What: Attempts a prebuilt download for "trusty-installer" into the current
-//! binary's parent directory. On success prints a restart hint (does NOT re-exec).
-//! On fallback, attempts `cargo install trusty-installer --locked` if cargo is on
-//! PATH; otherwise prints a manual install hint. Before either attempt, the target
-//! directory is probed for writability — `PermissionDenied`, `StorageFull`, and
-//! `ReadOnlyFilesystem` all abort up-front with distinct actionable errors (all
-//! three predict that the subsequent write into the same directory will also fail);
-//! genuinely transient/inconclusive errors fall through to the prebuilt-attempt +
+//! What: Attempts a prebuilt download for "trusty-installer" into the canonical
+//! cargo bin dir, then runs `--version` on the binary it just placed and
+//! cross-checks the version before printing a restart hint (#5807; does NOT
+//! re-exec). On fallback, attempts `cargo install trusty-installer --locked` if
+//! cargo is on PATH; otherwise prints a manual install hint. Before either
+//! attempt, the target directory is probed for writability —
+//! `PermissionDenied`, `StorageFull`, and `ReadOnlyFilesystem` all abort
+//! up-front with distinct actionable errors (all three predict that the
+//! subsequent write into the same directory will also fail); genuinely
+//! transient/inconclusive errors fall through to the prebuilt-attempt +
 //! cargo-fallback path.
 //!
 //! Test: `tests` covers the probe tri-state, the Outcome→message mapping,
@@ -107,16 +109,24 @@ pub fn probe_install_dir(dir: &Path) -> WriteProbe {
 /// default install dir as fallback), probes the directory with `probe_install_dir`
 /// — aborting on `PermissionDenied`, `StorageFull`, and `ReadOnlyFilesystem`
 /// (all predict the subsequent write will fail), falling through on other errors —
-/// then calls `try_install_prebuilt("trusty-installer", &dir)` and either prints
-/// the restart hint or falls back to cargo with a truthful location message.
+/// then calls `try_install_prebuilt("trusty-installer", &dir)` and either
+/// health-gates what it placed or falls back to cargo with a truthful location
+/// message.
 ///
 /// #5518: a `ChecksumMismatch` outcome is the one case that does NOT fall back.
 /// It prints the mismatch as an error and exits 1, because a source build here
 /// would turn a tamper signal into a slower-but-successful self-update.
 ///
+/// #5807: a successful placement exits 0 only after the placed binary answered
+/// `--version` with the version the download layer says it wrote. A failed
+/// probe or a version mismatch is an ERROR and exit 1 — never a cargo fallback,
+/// which would rebuild over a binary that is already on disk and hide why the
+/// prebuilt one did not run.
+///
 /// Test: `tests::outcome_installed_message`, `tests::probe_nonwritable_dir`,
 ///       `tests::cargo_updated_different_dir`,
-///       `tests::a_checksum_mismatch_aborts_self_update_without_a_cargo_fallback`.
+///       `tests::a_checksum_mismatch_aborts_self_update_without_a_cargo_fallback`,
+///       `tests::a_binary_that_fails_its_health_check_aborts_the_self_update`.
 pub fn run(json: bool) -> i32 {
     let narr = narrator(json);
     let install_dir = resolve_install_dir();
@@ -153,9 +163,26 @@ pub fn run(json: bool) -> i32 {
     ));
 
     match next_step(outcome) {
-        Next::Done(msg) => {
-            let _ = narr.info(&msg);
-            0
+        // #5807: placing the file is not the update. Probe the exact binary
+        // just written and cross-check its reported version before anything
+        // narrates success — the gate `install_one` has always run.
+        Next::Verify { paths, version } => {
+            let bin_path =
+                super::install::select_prebuilt_bin_path(&paths, INSTALLER_BINARY, &install_dir);
+            let probed = crate::commands::runtime::block_on(
+                trusty_common::update::verify_installed_binary_at_path(&bin_path),
+            )
+            .map_err(|e| e.to_string());
+            match health_gate_verdict(&bin_path, &version, probed) {
+                Ok(msg) => {
+                    let _ = narr.info(&msg);
+                    0
+                }
+                Err(msg) => {
+                    let _ = narr.error(&msg);
+                    1
+                }
+            }
         }
         Next::CargoFallback(msg) => {
             let _ = narr.info(&msg);
@@ -176,11 +203,20 @@ pub fn run(json: bool) -> i32 {
 /// makes "a checksum mismatch never reaches `cargo install`" a claim a test can
 /// check rather than one a reader has to take on trust.
 ///
-/// What: Success narrates and stops; a routine failure narrates and falls back;
-/// a checksum mismatch narrates AS AN ERROR and stops.
+/// What: A placement hands off to the health gate; a routine failure narrates
+/// and falls back; a checksum mismatch narrates AS AN ERROR and stops.
+///
+/// #5807 removed the `Done` variant. It was the terminal success `Installed`
+/// mapped straight to, and keeping it would leave a way to report an update
+/// without probing the binary.
 enum Next {
-    /// Installed. Narrate at info level, exit 0.
-    Done(String),
+    /// Files were placed. Health-gate them before reporting anything (#5807).
+    Verify {
+        /// Every path the download layer reports having written.
+        paths: Vec<PathBuf>,
+        /// The version that layer believes it placed.
+        version: String,
+    },
     /// Prebuilt genuinely unavailable. Narrate at info level, then run cargo.
     CargoFallback(String),
     /// Terminal. Narrate at ERROR level, exit 1, never run cargo.
@@ -194,11 +230,18 @@ enum Next {
 /// [`Next::CargoFallback`]. A source build would leave the operator with a
 /// working `tctl` and no reason to look at why the prebuilt failed.
 ///
+/// [`Outcome::Installed`] yields [`Next::Verify`], never a success verdict
+/// (#5807). Only [`health_gate_verdict`] can report an update, and only after
+/// the placed binary has answered `--version`.
+///
 /// Test: `tests::a_checksum_mismatch_aborts_self_update_without_a_cargo_fallback`,
-/// `tests::an_absent_prebuilt_still_falls_back_to_cargo`.
+/// `tests::an_absent_prebuilt_still_falls_back_to_cargo`,
+/// `tests::an_installed_prebuilt_is_not_reported_done_before_it_is_health_gated`.
 fn next_step(outcome: Outcome) -> Next {
     match outcome {
-        Outcome::Installed { version, .. } => Next::Done(installed_message(&version)),
+        // #5807: a placement is a claim, not a result. The verdict waits for
+        // the probe.
+        Outcome::Installed { paths, version } => Next::Verify { paths, version },
         Outcome::Fallback { reason } => {
             tracing::info!(%reason, "prebuilt self-update unavailable");
             Next::CargoFallback(format!("prebuilt unavailable: {reason}"))
@@ -206,6 +249,60 @@ fn next_step(outcome: Outcome) -> Next {
         // #5518: a failed checksum is terminal — no cargo fallback, nonzero exit.
         Outcome::ChecksumMismatch(mismatch) => Next::Abort(mismatch.to_string()),
     }
+}
+
+/// The binary whose `--version` proves a self-update took effect.
+///
+/// The tarball also ships the `tctl` alias; this is the name the stable set
+/// health-probes for the same crate (`stable_set`'s trusty-installer row).
+const INSTALLER_BINARY: &str = "trusty-installer";
+
+/// Decide what a self-update reports about the binary it just placed.
+///
+/// Why (#5807): `run` used to narrate `trusty-installer updated to X` the
+/// moment [`Outcome::Installed`] came back, so a placement that produced an
+/// unrunnable or wrong-version binary still exited 0. `install_one` has always
+/// gated the same claim; this is that gate, kept pure so the decision is
+/// testable without a real download.
+///
+/// # Preconditions
+/// `probed` is the outcome of running `--version` on `bin_path` itself —
+/// never a name re-resolved through `$PATH`, which a stale earlier copy could
+/// answer for.
+///
+/// # Postconditions
+/// `Ok` only when the binary at `bin_path` ran AND reported exactly
+/// `expected_version`. Every other input yields `Err` with a message that names
+/// the path and never carries the restart hint, so an abort can never be read
+/// as a completed update.
+///
+/// Test: `tests::a_binary_that_fails_its_health_check_aborts_the_self_update`,
+/// `tests::a_version_mismatch_after_placement_aborts_the_self_update`,
+/// `tests::a_verified_binary_reports_the_update`.
+fn health_gate_verdict(
+    bin_path: &Path,
+    expected_version: &str,
+    probed: Result<String, String>,
+) -> Result<String, String> {
+    let reported_line = probed.map_err(|e| {
+        format!(
+            "self-update aborted: the binary just placed at `{}` did not answer \
+             `--version`: {e}. The update was NOT verified — retry \
+             `tctl self-update`, or install manually: \
+             `cargo install trusty-installer --locked`",
+            bin_path.display()
+        )
+    })?;
+    let reported = crate::commands::update_engine::extract_version_from_line(&reported_line);
+    if reported.as_deref() != Some(expected_version) {
+        return Err(format!(
+            "self-update aborted: version {expected_version} was placed at `{}`, but that \
+             exact binary reports {reported:?} (raw `--version` output: {reported_line:?}) — \
+             refusing to report success",
+            bin_path.display()
+        ));
+    }
+    Ok(installed_message(expected_version))
 }
 
 /// Resolve the directory into which to place the updated binary.
@@ -445,6 +542,79 @@ mod tests {
             !msg.contains("prebuilt unavailable"),
             "must not read as a routine absence: {msg}"
         );
+    }
+
+    /// Why (#5807): placing a file is not evidence that the tool it stands for
+    /// works. `next_step` used to answer `Outcome::Installed` with a terminal
+    /// `Next::Done("trusty-installer updated to X. Restart to apply.")`, so a
+    /// self-update reported success for a binary nothing had run — the same
+    /// failure shape `install_one`'s health gate exists to catch. Against that
+    /// code this test read `!matches!(…, Next::Done(_))` and failed; `Done` is
+    /// gone now, because a variant that reports an update without a probe is
+    /// the defect itself.
+    /// What: Asserts an installed prebuilt routes to the health gate rather
+    /// than to any verdict. `health_gate_verdict` is the only producer of a
+    /// success message, and it runs the binary first.
+    /// Test: This is the test.
+    #[test]
+    fn an_installed_prebuilt_is_not_reported_done_before_it_is_health_gated() {
+        let outcome = Outcome::Installed {
+            paths: vec![PathBuf::from("/nonexistent/bin/trusty-installer")],
+            version: "0.8.0".to_owned(),
+        };
+        assert!(
+            matches!(next_step(outcome), Next::Verify { .. }),
+            "self-update must not report success before health-gating the \
+             binary it just placed (#5807)"
+        );
+    }
+
+    /// Why (#5807): a `--version` that cannot run at all is the loudest form of
+    /// "placed but not working"; it must abort, never narrate an update.
+    /// What: Feeds a probe error to `health_gate_verdict`; asserts the message
+    /// names the path and does not read as a completed update.
+    /// Test: This is the test.
+    #[test]
+    fn a_binary_that_fails_its_health_check_aborts_the_self_update() {
+        let path = PathBuf::from("/opt/bin/trusty-installer");
+        let msg = health_gate_verdict(&path, "0.8.0", Err("exec format error".to_owned()))
+            .expect_err("a failed health check must abort");
+        assert!(msg.contains("/opt/bin/trusty-installer"), "{msg}");
+        assert!(msg.contains("exec format error"), "{msg}");
+        assert!(
+            !msg.contains("Restart to apply"),
+            "must not read as done: {msg}"
+        );
+    }
+
+    /// Why (#5807): the health check passing is not enough on its own — a
+    /// pre-existing file at the destination can run and report another version,
+    /// which proves the probed binary is not the one just placed.
+    /// What: Feeds a `--version` line naming a different version; asserts the
+    /// abort names both versions.
+    /// Test: This is the test.
+    #[test]
+    fn a_version_mismatch_after_placement_aborts_the_self_update() {
+        let path = PathBuf::from("/opt/bin/trusty-installer");
+        let msg = health_gate_verdict(&path, "0.8.0", Ok("trusty-installer 0.7.1".to_owned()))
+            .expect_err("a version mismatch must abort");
+        assert!(msg.contains("0.8.0"), "{msg}");
+        assert!(msg.contains("0.7.1"), "{msg}");
+        assert!(
+            !msg.contains("Restart to apply"),
+            "must not read as done: {msg}"
+        );
+    }
+
+    /// Why (#5807): the gate must still let a genuine update through.
+    /// What: Feeds a matching `--version` line; asserts the restart hint.
+    /// Test: This is the test.
+    #[test]
+    fn a_verified_binary_reports_the_update() {
+        let path = PathBuf::from("/opt/bin/trusty-installer");
+        let msg = health_gate_verdict(&path, "0.8.0", Ok("trusty-installer 0.8.0".to_owned()))
+            .expect("a matching version must report success");
+        assert_eq!(msg, installed_message("0.8.0"));
     }
 
     /// Why: The abort must be specific to a failed checksum — a 404 on an
