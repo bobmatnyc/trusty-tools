@@ -7,9 +7,12 @@
 //! already optionally depends on trusty-review via its `review` feature), so
 //! this adapter is a thin HTTP client over the analyze daemon (`:7879`) plus a
 //! pure mapping from the daemon's wire JSON onto the report's v0
-//! [`AnalyzeMetrics`]. Every probe/fetch/parse failure is fail-open — the whole
+//! [`AnalyzeMetrics`]. Every probe/fetch/parse failure is fail-open — the
 //! adapter degrades to `None` and the report falls through to the built-in
-//! scan; a missing analyze index is never an error.
+//! scan; a missing analyze index is never an error. Since #6041 that degradation
+//! is per endpoint rather than per repository: a dataset that fails leaves the
+//! others' data in place and names itself under Gaps & Caveats. Only a fetch
+//! where NO dataset answered falls all the way back to scan.
 //!
 //! What: [`AnalyzeMetricsSource`] is the injectable fetch seam;
 //! [`HttpAnalyzeMetricsSource`] is the live implementation. The pure mapping
@@ -19,7 +22,9 @@
 //! owns those measured numbers.
 //!
 //! Test: `analyze_adapter_tests.rs` covers envelope parsing, the severity map,
-//! the complexity-bucket thresholds, and fail-open on malformed JSON.
+//! the complexity-bucket thresholds, fail-open on malformed JSON, and the
+//! per-endpoint budgets and independence (`a_failing_endpoint_keeps_what_the_
+//! others_returned`, `a_fetch_where_no_endpoint_answered_falls_back_to_scan`).
 
 use std::path::Path;
 use std::time::Duration;
@@ -31,10 +36,13 @@ use super::metrics::{
     AnalyzeMetrics, ComplexityBucket, ComplexityDistribution, MetricFinding, Severity,
 };
 
-// ─── Tunables ──────────────────────────────────────────────────────────────
+// The per-endpoint paths, budgets, and failure vocabulary live one module over,
+// beside each other, so an endpoint's cost and its timeout cannot drift apart.
+pub use super::analyze_endpoints::{
+    AnalyzeCaveat, AnalyzeEndpoint, EndpointFailure, diagnostics_budget_for,
+};
 
-/// Per-request HTTP timeout for analyze fetches (fail-open on timeout).
-const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+// ─── Tunables ──────────────────────────────────────────────────────────────
 
 /// How many extra attempts a retryable transport failure earns.
 ///
@@ -60,9 +68,17 @@ const TRANSPORT_RETRIES: u32 = 1;
 /// conversion; `error_display` covers the `Display` strings.
 #[derive(Debug, thiserror::Error)]
 pub enum AnalyzeAdapterError {
-    /// HTTP transport failure (connection refused, timeout, DNS, ...).
+    /// HTTP transport failure (connection refused, DNS, a connection that died).
     #[error("trusty-analyze transport error: {0}")]
     Transport(String),
+
+    /// The request outlived its per-endpoint budget.
+    ///
+    /// Separate from [`Self::Transport`] because the remedy differs: a timeout
+    /// points at a deadline to raise, not a daemon to start, and the gap line
+    /// says so.
+    #[error("trusty-analyze request timed out: {0}")]
+    Timeout(String),
 
     /// trusty-analyze returned a non-2xx status.
     #[error("trusty-analyze API returned {status}: {body}")]
@@ -84,12 +100,35 @@ pub enum AnalyzeAdapterError {
 
 type AdapterResult<T> = std::result::Result<T, AnalyzeAdapterError>;
 
+/// Classify a fetch failure into the category the report states.
+///
+/// Why: the Gaps & Caveats line names which endpoint failed and why, and "why"
+/// must come from the error class rather than from string-matching a message
+/// that can quote a URL. A 408/504 is the daemon reporting its OWN deadline was
+/// hit, so it lands in the same category as a client-side timeout — both mean
+/// the analysis ran out of time, not that nothing was listening.
+/// Test: `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`.
+fn classify_failure(e: &AnalyzeAdapterError) -> EndpointFailure {
+    match e {
+        AnalyzeAdapterError::Timeout(_) => EndpointFailure::TimedOut,
+        AnalyzeAdapterError::Api { status, .. } if *status == 408 || *status == 504 => {
+            EndpointFailure::TimedOut
+        }
+        AnalyzeAdapterError::Api { .. } | AnalyzeAdapterError::Parse(_) => {
+            EndpointFailure::Rejected
+        }
+        AnalyzeAdapterError::Transport(_) | AnalyzeAdapterError::ClientInit(_) => {
+            EndpointFailure::Unanswered
+        }
+    }
+}
+
 /// Does this transport failure describe a connection that went away mid-request?
 ///
 /// Why (#6038): only that class earns a retry. A connect refusal means nothing
-/// is listening, and a timeout means the daemon is slower than
-/// [`FETCH_TIMEOUT`] — re-running either just doubles the wall-clock cost of a
-/// fetch that is going to fail open anyway. What is left is the case the client
+/// is listening, and a timeout means the daemon outlived the endpoint's own
+/// [`AnalyzeEndpoint::budget`] — re-running either just doubles the wall-clock
+/// cost of a fetch that fails open anyway. What is left is the case the client
 /// cannot avoid: a keep-alive connection the daemon closed after the request
 /// was already committed to it.
 /// What: true for a send/body failure that is neither a timeout nor a connect
@@ -432,53 +471,6 @@ pub trait AnalyzeMetricsSource: Send + Sync {
     }
 }
 
-/// A dimension the daemon answered incompletely, for one repository (#5317,
-/// #5320).
-///
-/// Why: a fetch that succeeds is not the same as a fetch that answered
-/// everything, and the difference is invisible on the page. An empty RED band
-/// because no linter was installed reads exactly like a clean codebase; a
-/// missing complexity table reads like a rendering slip. Both are facts the
-/// report owes its reader, and both travel the same Gaps & Caveats path
-/// [`AnalyzeGap`] already uses.
-/// What: one variant per condition the fetch can distinguish, each with a fixed
-/// report-facing phrase carrying no run-specific detail.
-/// Test: `analyze_adapter_tests.rs::caveat_labels_are_stable`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[non_exhaustive]
-pub enum AnalyzeCaveat {
-    /// The daemon serves no full-corpus histogram, so the §7 complexity
-    /// distribution was left out rather than filled from a truncated top-N.
-    ComplexityDistributionUnavailable,
-    /// No external static-analysis tool was installed, so nothing could
-    /// populate the RED/defect band.
-    NoStaticAnalysisTools,
-}
-
-impl AnalyzeCaveat {
-    /// The report-facing sentence for this caveat.
-    ///
-    /// Why: read by a stranger to this toolchain, so it names the condition and
-    /// what it means for the section, not the variant.
-    /// What: a fixed string per variant — deterministic across runs.
-    /// Test: `analyze_adapter_tests.rs::caveat_labels_are_stable`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ComplexityDistributionUnavailable => {
-                "complexity distribution not available — the analysis daemon serves no \
-                 full-corpus histogram, and the truncated top-N hotspot sample it does serve \
-                 is not a distribution. The §7 complexity table is omitted rather than \
-                 filled with shares of a truncation"
-            }
-            Self::NoStaticAnalysisTools => {
-                "no external static-analysis tool was available to the analysis daemon — the \
-                 RED/CRITICAL band is populated only from such tools, so an empty band here \
-                 means unassessed, not clean"
-            }
-        }
-    }
-}
-
 /// Why one repository has no live analyze metrics (#5239, DOC-67 §9).
 ///
 /// Why: "the daemon was down" and "this repo was never indexed" are different
@@ -557,7 +549,11 @@ impl HttpAnalyzeMetricsSource {
     ///
     /// Why: the CLI resolves the URL from a manifest key / config / default and
     /// hands it here.
-    /// What: trims a trailing slash and builds a timeout-bounded reqwest client.
+    /// What: trims a trailing slash and builds the shared loopback client. Every
+    /// request sets its own timeout from [`AnalyzeEndpoint::budget`]; the
+    /// client-level default is the longest of them, so a future call site that
+    /// forgets to set one inherits a generous budget rather than a truncating
+    /// one.
     /// Test: `new_trims_trailing_slash`.
     pub fn new(base_url: impl Into<String>) -> AdapterResult<Self> {
         let mut base = base_url.into();
@@ -568,7 +564,7 @@ impl HttpAnalyzeMetricsSource {
         // what applies `.no_proxy()`, so an exported HTTP_PROXY no longer
         // diverts a 127.0.0.1 fetch to a proxy that never answers (#4392).
         let http = trusty_common::http_client::loopback_client_builder()
-            .timeout(FETCH_TIMEOUT)
+            .timeout(AnalyzeEndpoint::Diagnostics.budget())
             .connect_timeout(Duration::from_secs(3))
             .build()
             .map_err(|e| AnalyzeAdapterError::ClientInit(e.to_string()))?;
@@ -586,8 +582,12 @@ impl HttpAnalyzeMetricsSource {
     /// What: returns the status and the body text, or the raw `reqwest::Error`
     /// so the caller can classify it.
     /// Test: exercised by every `get_json` test.
-    async fn send_once(&self, url: &str) -> reqwest::Result<(reqwest::StatusCode, String)> {
-        let resp = self.http.get(url).send().await?;
+    async fn send_once(
+        &self,
+        url: &str,
+        budget: Duration,
+    ) -> reqwest::Result<(reqwest::StatusCode, String)> {
+        let resp = self.http.get(url).timeout(budget).send().await?;
         let status = resp.status();
         let body = resp.text().await?;
         Ok((status, body))
@@ -606,13 +606,21 @@ impl HttpAnalyzeMetricsSource {
     /// when [`is_retryable_transport`] classifies the failure as a lost
     /// connection; reqwest discards the errored connection, so the retry
     /// necessarily dials a new one. Non-2xx and parse failures are terminal.
+    /// `budget` is the endpoint's own timeout, applied per request: the daemon
+    /// answers a diagnostics call in minutes and a histogram call in seconds,
+    /// and one client-wide timeout cannot be right for both.
     /// Test: `transport_failure_on_a_reused_connection_retries_once`,
-    /// `a_connection_that_keeps_dying_is_retried_exactly_once`.
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> AdapterResult<T> {
+    /// `a_connection_that_keeps_dying_is_retried_exactly_once`,
+    /// `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`.
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        budget: Duration,
+    ) -> AdapterResult<T> {
         let url = format!("{}{path}", self.base_url);
         let mut retries = 0;
         let (status, body) = loop {
-            match self.send_once(&url).await {
+            match self.send_once(&url, budget).await {
                 Ok(answer) => break answer,
                 Err(e) if retries < TRANSPORT_RETRIES && is_retryable_transport(&e) => {
                     retries += 1;
@@ -621,6 +629,11 @@ impl HttpAnalyzeMetricsSource {
                         error = %e,
                         "--analyze: pooled connection lost; retrying on a fresh one"
                     );
+                }
+                Err(e) if e.is_timeout() => {
+                    return Err(AnalyzeAdapterError::Timeout(format!(
+                        "GET {url} exceeded {budget:?}"
+                    )));
                 }
                 Err(e) => return Err(AnalyzeAdapterError::Transport(format!("GET {url}: {e}"))),
             }
@@ -639,19 +652,65 @@ impl HttpAnalyzeMetricsSource {
     /// Why: distinguishes "repo not indexed" (a fail-open skip with a clear
     /// warning) from a transport error, per the indexing prerequisite (#2448).
     async fn index_served(&self, index_id: &str) -> AdapterResult<bool> {
-        let indexes: Vec<IndexInfo> = self.get_json("/indexes").await?;
+        let endpoint = AnalyzeEndpoint::IndexList;
+        let indexes: Vec<IndexInfo> = self
+            .get_json(&endpoint.path(index_id), endpoint.budget())
+            .await?;
         Ok(indexes.iter().any(|i| i.id == index_id))
+    }
+
+    /// Fetch one dataset endpoint, reporting a failure as a NAMED caveat rather
+    /// than aborting the whole repository's fetch.
+    ///
+    /// Why (#6041): the per-repo fetch used to be all-or-nothing — one endpoint
+    /// failing discarded the data every other endpoint had already returned. In
+    /// the field the diagnostics call was the slow one, so a complexity
+    /// histogram that answered in seconds was thrown away with it and the whole
+    /// report fell back to scan. Each endpoint now stands alone: what arrived is
+    /// kept, and what did not names itself.
+    /// What: `Some(T)` on success; on failure logs the detail to stderr, pushes
+    /// an [`AnalyzeCaveat::EndpointUnavailable`] naming the endpoint and the
+    /// failure category, and returns `None`. The error text never reaches the
+    /// caveat — it can quote a URL or a response body, and the artifact gets the
+    /// category only.
+    /// Test: `a_failing_endpoint_keeps_what_the_others_returned`,
+    /// `a_request_that_outlives_its_budget_is_a_timeout_not_a_transport_error`.
+    async fn fetch_dataset<T: serde::de::DeserializeOwned>(
+        &self,
+        index_id: &str,
+        endpoint: AnalyzeEndpoint,
+        caveats: &mut Vec<AnalyzeCaveat>,
+    ) -> Option<T> {
+        match self
+            .get_json(&endpoint.path(index_id), endpoint.budget())
+            .await
+        {
+            Ok(v) => Some(v),
+            Err(e) => {
+                let reason = classify_failure(&e);
+                tracing::warn!(index_id, endpoint = endpoint.as_str(), error = %e,
+                    "--analyze: endpoint unavailable; the rest of the fetch continues");
+                eprintln!(
+                    "[trusty-review report] --analyze: '{index_id}' {} unavailable ({e}); \
+                     the sections it feeds are marked unassessed",
+                    endpoint.as_str()
+                );
+                caveats.push(AnalyzeCaveat::EndpointUnavailable(endpoint, reason));
+                None
+            }
+        }
     }
 
     /// The success path behind [`AnalyzeMetricsSource::fetch`]: probe readiness,
     /// pull the datasets, and map them. Returns `Err` on any failure; the
     /// public `fetch` swallows it to `None`.
     ///
-    /// The complexity distribution is the one dataset whose absence is
-    /// tolerated rather than fatal (#5320): a daemon predating
-    /// `/complexity_distribution` answers 404, and the honest response to that
-    /// is to omit the §7 table and say so, not to abandon the findings that DID
-    /// come back.
+    /// Every dataset endpoint is fetched independently (#6041): a failure on one
+    /// leaves the others' data in place and adds a caveat naming the endpoint
+    /// that dropped out. Only the readiness probe is still fatal — without it
+    /// the adapter cannot tell an unindexed repository from a broken one — and
+    /// so is the case where NO dataset answered, which is a fetch that assessed
+    /// nothing and must fall back to scan rather than render an empty pass.
     async fn try_fetch(
         &self,
         index_id: &str,
@@ -670,39 +729,38 @@ impl HttpAnalyzeMetricsSource {
         }
         let mut caveats: Vec<AnalyzeCaveat> = Vec::new();
 
-        let distribution: Option<DistributionEnvelope> = match self
-            .get_json(&format!("/indexes/{index_id}/complexity_distribution"))
-            .await
-        {
-            Ok(d) => Some(d),
-            Err(e) => {
-                tracing::warn!(index_id, error = %e, "--analyze: no complexity distribution");
-                eprintln!(
-                    "[trusty-review report] --analyze: '{index_id}' complexity distribution \
-                     unavailable ({e}); the §7 table is omitted"
-                );
-                caveats.push(AnalyzeCaveat::ComplexityDistributionUnavailable);
-                None
-            }
-        };
+        let distribution: Option<DistributionEnvelope> = self
+            .fetch_dataset(
+                index_id,
+                AnalyzeEndpoint::ComplexityDistribution,
+                &mut caveats,
+            )
+            .await;
+        let diagnostics: Option<DiagnosticsEnvelope> = self
+            .fetch_dataset(index_id, AnalyzeEndpoint::Diagnostics, &mut caveats)
+            .await;
+        let refactors: Option<RefactorEnvelope> = self
+            .fetch_dataset(index_id, AnalyzeEndpoint::RefactorSuggestions, &mut caveats)
+            .await;
 
-        let diagnostics: DiagnosticsEnvelope = self
-            .get_json(&format!("/indexes/{index_id}/diagnostics"))
-            .await?;
-        if diagnostics.tools_run.is_empty() {
+        if distribution.is_none() && diagnostics.is_none() && refactors.is_none() {
+            // Nothing was assessed, so there is nothing partial to render.
+            // Reporting metrics here would put an empty findings table and an
+            // empty §7 on the page, which reads as a clean pass.
+            return Err(AnalyzeAdapterError::Transport(format!(
+                "no dataset endpoint answered for '{index_id}'"
+            )));
+        }
+        // An empty `tools_run` is the daemon answering that no linter existed —
+        // a different fact from the endpoint not answering at all (#5317).
+        if diagnostics.as_ref().is_some_and(|d| d.tools_run.is_empty()) {
             caveats.push(AnalyzeCaveat::NoStaticAnalysisTools);
         }
 
-        let refactors: RefactorEnvelope = self
-            .get_json(&format!("/indexes/{index_id}/refactor-suggestions"))
-            .await?;
-
+        let diags = diagnostics.map(|d| d.diagnostics).unwrap_or_default();
+        let refs = refactors.map(|r| r.suggestions).unwrap_or_default();
         Ok(Some((
-            map_metrics(
-                distribution.as_ref(),
-                &diagnostics.diagnostics,
-                &refactors.suggestions,
-            ),
+            map_metrics(distribution.as_ref(), &diags, &refs),
             caveats,
         )))
     }
@@ -865,7 +923,7 @@ pub async fn enrich_with_analyze_gaps(
     lines.extend(
         partial
             .into_iter()
-            .map(|(caveat, repos)| format!("{} — affects: {}.", caveat.as_str(), repos.join(", "))),
+            .map(|(caveat, repos)| format!("{caveat} — affects: {}.", repos.join(", "))),
     );
     lines
 }
