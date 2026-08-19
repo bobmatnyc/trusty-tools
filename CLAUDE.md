@@ -256,6 +256,24 @@ hit — `COMMENT`, `REOPEN`, `NEW REGRESSION`, or `NO TICKET` — is `tm-ticketi
 disposition to make, not automatically an append (#5202). Rationale per key:
 [docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md).
 
+🔴 **Issue lifecycle — open → coded → merged → tested → closed (owner ruling
+2026-08-19).** Project-specific ticket states, tracked with three mutually
+exclusive labels between GitHub's native open/closed:
+
+| Label | Meaning |
+|---|---|
+| `status:coded` | Implementation pushed on a branch; PR not yet merged |
+| `status:merged` | PR merged to main; live verification pending |
+| `status:tested` | Verified live (installed binary / real run); eligible to close |
+
+Advancing a state removes the prior label in the same edit (`gh issue edit N
+--add-label status:merged --remove-label status:coded`) — GitHub has no native
+exclusive-label mechanism, so the discipline is on the writer. Fix PRs
+reference their issue as `Refs #N`, **never** `Closes #N`: merge must not
+auto-close. An issue closes only from `status:tested`, with the live
+verification evidence in the closing comment; a merged fix that fails live
+verification keeps its issue open with the failure evidence.
+
 🔴 **Why/What/Test doc pattern with proportional depth** — public items carry
 documentation proportional to how surprising the code is:
 
