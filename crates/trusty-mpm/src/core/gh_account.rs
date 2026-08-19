@@ -90,6 +90,28 @@ impl GhAccountStatus {
     pub fn is_ambiguous(&self) -> bool {
         self.logged_in.len() > 1
     }
+
+    /// `gh`'s own spelling of `login` when it is one of the logged-in accounts.
+    ///
+    /// Why (#2121): a caller that wants to STORE a login must first prove `gh`
+    /// knows it, and must store the spelling `gh` reports. GitHub logins are
+    /// case-insensitive, but [`enforce::ensure_gh_account_in_dir`]'s
+    /// `verify_active_account` compares them byte-for-byte — so a `gh_user`
+    /// persisted as `Acme-Bot` against a `gh` that reports `acme-bot` would
+    /// pass a naive membership test here and then fail that later exact match.
+    /// Returning the canonical form makes the two agree by construction.
+    /// What: case-insensitive lookup over `logged_in`, returning `gh`'s
+    /// spelling. `active` is deliberately not consulted — a project may name
+    /// any logged-in account, not only the currently active one.
+    /// Test: `canonical_logged_in_login_is_case_insensitive`,
+    /// `canonical_logged_in_login_rejects_unknown`.
+    pub fn canonical_logged_in_login(&self, login: &str) -> Option<String> {
+        let needle = login.trim();
+        self.logged_in
+            .iter()
+            .find(|known| known.eq_ignore_ascii_case(needle))
+            .cloned()
+    }
 }
 
 /// Resolve `gh`'s config directory, honouring the same env vars `gh` itself does.
@@ -955,6 +977,39 @@ github.com
             vec!["bob-duetto".to_string(), "bobmatnyc".to_string()]
         );
         assert!(status.is_ambiguous());
+    }
+
+    /// Why (#2121): a stored `gh_user` is later compared byte-for-byte by
+    /// `verify_active_account`, so the lookup must return `gh`'s spelling
+    /// rather than whatever case the caller typed.
+    /// Test: itself.
+    #[test]
+    fn canonical_logged_in_login_is_case_insensitive() {
+        let status = parse_gh_account_status_from_auth_status(MULTI_AUTH_STATUS);
+        assert_eq!(
+            status.canonical_logged_in_login("BobMatNyc").as_deref(),
+            Some("bobmatnyc")
+        );
+        // A non-active account is still a valid choice for a project.
+        assert_eq!(
+            status
+                .canonical_logged_in_login("  bob-duetto  ")
+                .as_deref(),
+            Some("bob-duetto")
+        );
+    }
+
+    /// Why (#2121): the whole point of the lookup is to say "no" to a login
+    /// `gh` has never seen, including on a host with no accounts at all.
+    /// Test: itself.
+    #[test]
+    fn canonical_logged_in_login_rejects_unknown() {
+        let status = parse_gh_account_status_from_auth_status(MULTI_AUTH_STATUS);
+        assert_eq!(status.canonical_logged_in_login("typo-bot"), None);
+        assert_eq!(
+            GhAccountStatus::default().canonical_logged_in_login("bobmatnyc"),
+            None
+        );
     }
 
     /// Why: env-token auth writes no `hosts.yml`, so `gh auth status` is the
