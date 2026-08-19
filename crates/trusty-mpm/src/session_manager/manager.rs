@@ -788,7 +788,9 @@ impl SessionManager {
     /// existence-checks `last_cwd` → `workspace_path` → `cwd` in order,
     /// erroring with [`ManagedError::WorkspaceMissing`] rather than handing a
     /// stale/removed path to tmux when none remain), then branches on
-    /// [`ManagedTmuxDriver::session_exists`]: if the tmux SESSION is STILL
+    /// [`ManagedTmuxDriver::session_exists_checked`] — a probe that cannot
+    /// reach tmux refuses the resume rather than falling into the destructive
+    /// recreate branch below (#5859): if the tmux SESSION is STILL
     /// alive, it is (usually) reused as-is — no `kill_session`, no
     /// `create_session` — because the caller (e.g. `resume_managed`)
     /// re-spawns the runtime via `RuntimeAdapter::spawn_resume`, which now
@@ -823,7 +825,10 @@ impl SessionManager {
     /// `resume_reattach_tests.rs`'s
     /// `resume_refuses_when_stored_pane_gone_but_session_alive` — asserts a
     /// confirmed-gone recorded pane refuses with `PaneGone` and never falls
-    /// through to a session-scoped reuse or a session-wide kill/recreate.
+    /// through to a session-scoped reuse or a session-wide kill/recreate;
+    /// `liveness_tests.rs`'s `resume_refuses_when_the_tmux_probe_fails` —
+    /// asserts an unobservable probe refuses instead of killing the pane
+    /// (#5859).
     pub async fn resume(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
         let mut record = self.get(id).await?;
         match record.state {
@@ -839,14 +844,9 @@ impl SessionManager {
         }
 
         // #3823: guarantee the tmux SERVER exists before the FIRST tmux call
-        // below (`session_exists`'s `list-sessions` probe). Its default trait
-        // implementation swallows a `list-sessions` failure into `false`
-        // (harmless here — the recreate branch below already routes through
-        // the #3386/#3722 `create_managed_session` choke point, which starts
-        // the server itself), but resuming should not depend on that
-        // swallow-and-recreate side effect being correct forever; an explicit
-        // guard makes the guarantee the issue asks for ("session creation
-        // *and resume*") structural rather than incidental. Also redundant
+        // below (`session_exists_checked`'s `list-sessions` probe), so a cold
+        // socket is STARTED rather than reported as a probe failure the
+        // #5859 guard below would (correctly) refuse to resume through. Also redundant
         // (cheap no-op `tmux start-server`) with the recreate branch's own
         // eventual #3386/#3722 `ensure_server_up` when the pane needs
         // rebuilding — accepted for the same reason as the create paths'
@@ -865,7 +865,12 @@ impl SessionManager {
         // #2148: a pane that survived the runtime exit (e.g.
         // `mark_runtime_exited_stopped`, #2023 A) must be REUSED, not destroyed.
         // Only recreate the tmux session when no live pane remains.
-        if self.tmux.session_exists(&record.tmux_name) {
+        //
+        // #5859: `session_exists_checked` + `?`, not `session_exists`. The else
+        // branch below KILLS the session and rebuilds the pane, so an
+        // undeterminable probe answering `false` destroyed a live pane. Refuse
+        // the resume instead — the operator can retry once tmux answers.
+        if self.tmux.session_exists_checked(&record.tmux_name)? {
             // Sibling-window hijack fix (follow-up to #2456): `session_exists`
             // only proves SOME pane in this tmux session is alive — it says
             // nothing about whether it is the SPECIFIC pane this record is

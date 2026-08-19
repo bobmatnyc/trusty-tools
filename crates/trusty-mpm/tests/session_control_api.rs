@@ -95,11 +95,14 @@ impl ManagedTmuxDriver for RecordingDriver {
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(self.live.lock().unwrap().clone())
     }
-    fn session_exists(&self, name: &str) -> bool {
+    /// #5859: overrides the CHECKED probe, so `force_alive` still steers both
+    /// the display-only `session_exists` (which delegates here) and the
+    /// destructive guards that call this method directly.
+    fn session_exists_checked(&self, name: &str) -> Result<bool, ManagedError> {
         if let Some(f) = *self.force_alive.lock().unwrap() {
-            return f;
+            return Ok(f);
         }
-        self.live.lock().unwrap().iter().any(|n| n == name)
+        Ok(self.live.lock().unwrap().iter().any(|n| n == name))
     }
 }
 

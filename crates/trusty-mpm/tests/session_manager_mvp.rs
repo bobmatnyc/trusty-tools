@@ -107,8 +107,10 @@ impl ManagedTmuxDriver for RecordingTmux {
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(Vec::new())
     }
-    fn session_exists(&self, _name: &str) -> bool {
-        false
+    /// #5859: overrides the CHECKED probe so `session_exists` (which now
+    /// delegates to it) keeps answering `false` rather than diverging.
+    fn session_exists_checked(&self, _name: &str) -> Result<bool, ManagedError> {
+        Ok(false)
     }
 }
 

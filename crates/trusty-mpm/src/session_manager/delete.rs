@@ -56,7 +56,11 @@ impl SessionManager {
     /// deletes cleanly without `--force`. Otherwise transitions the record to
     /// `Deleted`, persists it, and returns the PRE-deletion [`SessionRecord`]
     /// snapshot (so callers can render the state it was in before deletion).
+    /// A liveness probe that could not reach tmux at all is neither "running"
+    /// nor "not running": its error surfaces as
+    /// [`ManagedError::TmuxUnavailable`] and no record is touched (#5859).
     /// Test: `delete_record_marks_deleted`,
+    /// `delete_record_refuses_when_the_tmux_probe_fails` (#5859),
     /// `delete_record_refuses_running_without_force`,
     /// `delete_record_force_bypasses_running_guard`,
     /// `delete_record_never_touches_workspace_dir`,
@@ -68,7 +72,9 @@ impl SessionManager {
         force: bool,
     ) -> Result<SessionRecord, ManagedError> {
         let record = self.get(id).await?;
-        if !force && is_running(&record, self.tmux.as_ref()) {
+        // #5859: `?` — a probe that could not reach tmux refuses the delete
+        // instead of answering "not running" and dropping a live session.
+        if !force && is_running(&record, self.tmux.as_ref())? {
             return Err(ManagedError::InvalidState(
                 id.to_string(),
                 format!(

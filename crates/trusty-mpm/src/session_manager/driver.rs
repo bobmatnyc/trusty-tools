@@ -359,11 +359,44 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// Return all live tmux session names on the host.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError>;
 
-    /// True if a tmux session with this name currently exists.
-    fn session_exists(&self, name: &str) -> bool {
+    /// Whether a tmux session with this name currently exists, keeping
+    /// "confirmed absent" and "could not tell" apart (#5859).
+    ///
+    /// Why: [`Self::session_exists`] answers `false` for both, and two
+    /// destructive guards used to read that `false` as proof of death — the
+    /// delete/prune running-guard ([`super::prune::is_running`]) and
+    /// [`super::SessionManager::resume`]'s reuse-or-recreate branch. A
+    /// transient `list-sessions` failure, or the
+    /// [`super::real_tmux::NoopTmuxDriver`] installed whenever
+    /// `RealTmuxDriver::discover()` fails, then read a live attached pane as
+    /// prunable without `--force`, or as a dead pane to kill and rebuild.
+    /// This is the same "a liveness check that cannot see tmux is not proof of
+    /// death" rule [`super::SessionManager::observed_live_managed_names`]
+    /// already applies to the boot-time passes (#5856).
+    /// What: propagates [`Self::list_sessions`]'s error instead of folding it
+    /// into `false`. A driver that can probe one session more cheaply than
+    /// listing them all may override this; overriding THIS method (rather than
+    /// `session_exists`) keeps both spellings of the question consistent.
+    /// Test: `delete_record_refuses_when_the_tmux_probe_fails`,
+    /// `prune_refuses_when_the_tmux_probe_fails`,
+    /// `resume_refuses_when_the_tmux_probe_fails`.
+    fn session_exists_checked(&self, name: &str) -> Result<bool, ManagedError> {
         self.list_sessions()
             .map(|names| names.iter().any(|n| n == name))
-            .unwrap_or(false)
+    }
+
+    /// True if a tmux session with this name currently exists, reading an
+    /// undeterminable probe as absent.
+    ///
+    /// Why: display and best-effort callers (status rendering, name-collision
+    /// avoidance, the worktree inventory report) already tolerate an unknown
+    /// answer and must not fail for it. A caller that ACTS destructively on
+    /// `false` must call [`Self::session_exists_checked`] instead (#5859).
+    /// What: [`Self::session_exists_checked`] with `Err` mapped to `false`.
+    /// Test: covered through its callers; the error arm is pinned by
+    /// `session_exists_reads_an_unobservable_probe_as_absent`.
+    fn session_exists(&self, name: &str) -> bool {
+        self.session_exists_checked(name).unwrap_or(false)
     }
 
     /// Probe whether the runtime inside `name`'s pane is READY to accept typed

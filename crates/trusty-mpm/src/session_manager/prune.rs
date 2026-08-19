@@ -187,14 +187,22 @@ fn canonicalize_failure_streaks() -> &'static std::sync::Mutex<CanonicalizeFailu
 /// session (and, as a bonus, closes the reverse gap noted in #2022 where a
 /// stale non-running `state` could under-guard a session whose tmux is
 /// somehow still alive).
+///
+/// #5859: an UNDETERMINABLE probe is not an absent session. `Err` propagates to
+/// the caller, which refuses the teardown, rather than folding into `false` and
+/// letting a live pane be pruned without `--force`.
 /// Test: `prune_by_state_never_touches_active` (live session still guarded),
 /// `delete_record_refuses_running_without_force` (live session still
 /// guarded), `delete_record_stale_active_deletable_when_tmux_dead` (#2022 —
 /// stale `Active` with a dead tmux is deletable without `--force`),
 /// `prune_stale_active_removable_without_force_*` (#2022 — same for
-/// `prune_managed`).
-pub(super) fn is_running(record: &SessionRecord, tmux: &dyn ManagedTmuxDriver) -> bool {
-    tmux.session_exists(&record.tmux_name)
+/// `prune_managed`), `delete_record_refuses_when_the_tmux_probe_fails` and
+/// `prune_refuses_when_the_tmux_probe_fails` (#5859 — the error arm).
+pub(super) fn is_running(
+    record: &SessionRecord,
+    tmux: &dyn ManagedTmuxDriver,
+) -> Result<bool, ManagedError> {
+    tmux.session_exists_checked(&record.tmux_name)
 }
 
 /// Whether a record is a terminal tombstone — the two states prune COMPACTS
@@ -427,12 +435,20 @@ impl SessionManager {
 
         // Select the in-scope records, applying the running safety gate — a REAL
         // tmux liveness probe (#2022), not the persisted `state` field.
+        //
+        // #5859: the gate fails CLOSED. `is_running` now returns `Err` when tmux
+        // could not be observed at all, and that error aborts the whole prune
+        // rather than reading as "not running" and tearing down a live pane.
+        // `include_active` short-circuits before the probe, so the bulk
+        // ephemeral sweep (which ignores liveness by design) still runs on a
+        // host with no reachable tmux.
         let tmux = self.tmux.as_ref();
-        let targets: Vec<SessionRecord> = all
-            .into_iter()
-            .filter(|r| matches_filter(r, filter))
-            .filter(|r| include_active || !is_running(r, tmux))
-            .collect();
+        let mut targets: Vec<SessionRecord> = Vec::new();
+        for record in all.into_iter().filter(|r| matches_filter(r, filter)) {
+            if include_active || !is_running(&record, tmux)? {
+                targets.push(record);
+            }
+        }
 
         // Worktree base names for the slot-release guard below, resolved AT MOST
         // ONCE per prune and only when a tombstone is actually compacted —

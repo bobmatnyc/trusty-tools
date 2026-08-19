@@ -289,8 +289,10 @@ impl ManagedTmuxDriver for NoopTmuxDriver {
     /// route through
     /// [`super::SessionManager::observed_live_managed_names`] and skip their
     /// pass on `Err` rather than inventing an empty set. The one caller that
-    /// can tolerate an unknown still degrades explicitly: the trait's
-    /// `session_exists` default maps `Err` to `false` (#5859).
+    /// can tolerate an unknown still degrades explicitly, and only there: the
+    /// trait's `session_exists` maps `Err` to `false` for display and
+    /// best-effort callers, while every destructive guard routes through
+    /// `session_exists_checked`, which propagates it (#5859).
     /// Test: `noop_driver_list_sessions_refuses_rather_than_reporting_zero`,
     /// and end-to-end by
     /// `dedup_refuses_on_the_noop_driver_rather_than_reading_zero_as_dead`.
