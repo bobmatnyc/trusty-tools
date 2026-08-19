@@ -313,6 +313,68 @@ describe('links and metavariables inside an item', () => {
 		);
 	});
 
+	/**
+	 * The collision the #5640 fallback would otherwise open. `README.md`,
+	 * `LICENSE` and `CHANGELOG.md` each exist at the repo root AND in most crate
+	 * directories (22, 19 and 27 of them). So a crate-local `[readme](README.md)`
+	 * that used to resolve beside the changelog would silently repoint at the
+	 * ROOT twin the day the crate file is renamed — a green build shipping a link
+	 * to the wrong document. A bare filename gets no second reading at all.
+	 */
+	it('refuses a bare filename rather than repointing it at the repo root', () => {
+		const { failures, releases } = withProbe(item('[readme](README.md)'), ['README.md']);
+		expect(failures).toHaveLength(1);
+		expect(failures[0].code).toBe('CHANGELOG-BAD-LINK');
+		expect(failures[0].problem).toContain('crates/trusty-mpm/README.md');
+		expect(releases[0].categories[0].items[0].html).not.toContain('blob/main');
+	});
+
+	// The same rule after normalisation, so `docs/../README.md` cannot smuggle a
+	// bare filename past the check by carrying a slash.
+	it('refuses a path that normalises to a bare filename', () => {
+		const { failures } = withProbe(item('[readme](docs/../README.md)'), ['README.md']);
+		expect(failures).toHaveLength(1);
+		expect(failures[0].code).toBe('CHANGELOG-BAD-LINK');
+	});
+
+	// The fallback is a resolution decision the build makes on the author's
+	// behalf, so it is never silent: a warning names the file, the line, and both
+	// candidates, and reaches the build log through `site.ts`.
+	it('records a warning whenever the repo-root fallback fires', () => {
+		const { failures, warnings } = withProbe(
+			item('see [ADR-0043](docs/adr/0043-cargo-bin-policy.md)'),
+			['docs/adr/0043-cargo-bin-policy.md']
+		);
+		expect(failures).toEqual([]);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0].code).toBe('CHANGELOG-ROOT-RELATIVE-LINK');
+		expect(warnings[0].file).toBe('crates/trusty-mpm/CHANGELOG.md');
+		expect(warnings[0].problem).toContain('crates/trusty-mpm/docs/adr/0043-cargo-bin-policy.md');
+		expect(warnings[0].problem).toContain('docs/adr/0043-cargo-bin-policy.md');
+	});
+
+	// The critic's case, in the shape a rename actually produces: a link that
+	// used to resolve beside the changelog now resolves only at the root. It is
+	// still accepted — refusing it would undo #5640 — but it cannot pass quietly.
+	it('warns when a crate-local target is gone and a same-named root file takes over', () => {
+		const { releases, failures, warnings } = withProbe(item('[guide](docs/guide.md)'), [
+			'docs/guide.md'
+		]);
+		expect(failures).toEqual([]);
+		expect(warnings.map((w) => w.code)).toEqual(['CHANGELOG-ROOT-RELATIVE-LINK']);
+		expect(releases[0].categories[0].items[0].html).toContain('blob/main/docs/guide.md');
+	});
+
+	// The ordinary path stays quiet — a warning on every resolving link would be
+	// noise, and noise is how a real one gets missed.
+	it('records no warning when the changelog-relative reading resolves', () => {
+		const { failures, warnings } = withProbe(item('see [spec](../../docs/specs/foo.md)'), [
+			'docs/specs/foo.md'
+		]);
+		expect(failures).toEqual([]);
+		expect(warnings).toEqual([]);
+	});
+
 	// An href that states its base explicitly gets one reading. `./` and `../`
 	// mean "from here", so a root file with the same name must not rescue them.
 	it('does not fall back to the repository root for an explicitly relative link', () => {

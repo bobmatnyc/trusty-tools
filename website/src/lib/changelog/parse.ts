@@ -49,7 +49,12 @@ import type { Element, Root, RootContent } from 'hast';
 import { classifyAbsoluteHref } from '../docs/links';
 import { ALLOWED_ELEMENTS, parsePage, stringifyHast } from '../docs/render';
 import { GITHUB_REPO } from '../docs/repo';
-import { CHANGELOG_CODES, type ChangelogFailure } from './errors';
+import {
+	CHANGELOG_CODES,
+	CHANGELOG_WARNING_CODES,
+	type ChangelogFailure,
+	type ChangelogWarning
+} from './errors';
 
 /** One bullet under a category heading. */
 export interface ChangelogItem {
@@ -95,6 +100,8 @@ export interface ChangelogRelease {
 export interface ParsedChangelog {
 	releases: ChangelogRelease[];
 	failures: ChangelogFailure[];
+	/** Accepted, but worth saying out loud. Never stops a build — see `errors.ts`. */
+	warnings: ChangelogWarning[];
 }
 
 /**
@@ -233,9 +240,10 @@ export function parseChangelog(
 ): ParsedChangelog {
 	const { tree } = parsePage(stripLinkDefinitions(markdown));
 	const failures: ChangelogFailure[] = [];
+	const warnings: ChangelogWarning[] = [];
 	const releases: ChangelogRelease[] = [];
 
-	harden(tree, file, probe, failures);
+	harden(tree, file, probe, failures, warnings);
 
 	let release: ChangelogRelease | undefined;
 	let category: ChangelogCategory | undefined;
@@ -296,7 +304,7 @@ export function parseChangelog(
 		entry.itemCount = entry.categories.reduce((total, cat) => total + cat.items.length, 0);
 	}
 
-	return { releases, failures };
+	return { releases, failures, warnings };
 }
 
 /**
@@ -322,13 +330,14 @@ export function parseChangelog(
  * tree in place, before any of it is serialised.
  *
  * A link resolves against the changelog's own directory first. A BARE path
- * (`docs/adr/0043-cargo-bin-policy.md` — no leading `./` or `../`) that
- * resolves to nothing there is tried a second time against the repository
- * root, which is what a fragment author writing that path meant (#5640). The
- * order matters: the fallback fires only where the first reading found
- * nothing, so a link that already resolved cannot change meaning. An href that
- * states its base explicitly gets one reading, and an escaping link is refused
- * before any fallback — `rootRelativeCandidate` below holds both rules.
+ * carrying a directory (`docs/adr/0043-cargo-bin-policy.md` — no leading `./`
+ * or `../`) that resolves to nothing there is tried a second time against the
+ * repository root, which is what a fragment author writing that path meant
+ * (#5640). Three rules keep that from becoming a guess, all held by
+ * `rootRelativeCandidate` below: the fallback fires only where the first
+ * reading found nothing, an href that states its base gets one reading, and a
+ * bare FILENAME gets none. Every fallback that does fire is recorded as a
+ * warning, so a link that changed base is visible in the build log.
  *
  * Case 2 RECOVERS rather than failing, unlike the identical hazard in the doc
  * reader. The difference is who can fix it: a published page's author can add
@@ -343,7 +352,8 @@ function harden(
 	tree: Root,
 	file: string,
 	probe: (relative: string) => boolean,
-	failures: ChangelogFailure[]
+	failures: ChangelogFailure[],
+	warnings: ChangelogWarning[]
 ): void {
 	const dir = path.posix.dirname(file);
 
@@ -450,6 +460,17 @@ function harden(
 				return;
 			}
 			target = rootTarget;
+			// Accepted, never silent. The build just resolved this link against a
+			// base the author did not write, and the day a crate-local file is
+			// renamed that decision is the difference between a red build and a
+			// published link to the wrong document (#5640 review).
+			warnings.push({
+				code: CHANGELOG_WARNING_CODES.ROOT_RELATIVE_LINK,
+				file,
+				line,
+				problem: `\`${href}\` does not resolve to \`${relativeTarget}\` beside this file; it was resolved against the repository root as \`${rootTarget}\``,
+				remedy: `write it relative to \`${dir}/\` if it meant a file beside this one, or as an absolute https:// URL`
+			});
 		}
 
 		// `blob/main`, not a pinned SHA: see `changelogUrl` in `site.ts`.
@@ -471,25 +492,33 @@ function harden(
  * (#5640).
  *
  * What: returns the repo-root reading of an href worth trying as a SECOND
- * candidate, or `undefined` when there is no second reading to try. An href
- * that opens with `./` or `../` states its base explicitly, so it gets one
- * reading and one only; a bare path is the ambiguous shape, and its root
- * reading is returned normalized. A root reading that escapes the repository
- * is discarded here rather than offered, so the caller can never resolve a
- * link to somewhere outside the tree.
+ * candidate, or `undefined` when there is no second reading to try. Three
+ * shapes get no second reading: an href opening `./` or `../` (it states its
+ * base), a reading that escapes the repository, and a bare filename with no
+ * directory (see the comment on that check — it is the collision guard).
  *
  * The caller tries the changelog-relative reading FIRST and falls back only
- * when it resolves to nothing, so no link that already resolved can change
- * meaning — which keeps this a strictly widening change to a release-adjacent
- * gate.
+ * when it resolves to nothing, and every fallback that fires is recorded as a
+ * warning. So no link that already resolved can change meaning, and no link
+ * that changed base does so silently.
  *
- * Test: `parse.test.ts` (`resolves a repo-root-relative link …` and the
- * precedence and escape cases beside it).
+ * Test: `parse.test.ts` (`resolves a repo-root-relative link …`, `refuses a
+ * bare filename …`, `records a warning whenever the repo-root fallback fires`,
+ * and the precedence and escape cases beside them).
  */
 function rootRelativeCandidate(rawTarget: string): string | undefined {
 	if (rawTarget.startsWith('./') || rawTarget.startsWith('../')) return undefined;
 	const normalized = path.posix.normalize(rawTarget);
 	if (normalized.startsWith('..')) return undefined;
+	// A BARE FILENAME names a sibling of the changelog and has no second reading.
+	// `README.md`, `LICENSE` and `CHANGELOG.md` each exist at the repository root
+	// AND in most crate directories (22, 19 and 27 of them), so a fallback here
+	// would hand a crate-local link to the root twin the day the crate file is
+	// renamed — accepted, published, and wrong. A fragment author writing a
+	// repo-root path always writes a directory with it (`docs/…`, `scripts/…`),
+	// which is the shape #5640 is about. Checked after normalising so
+	// `docs/../README.md` cannot carry a slash past this.
+	if (!normalized.includes('/')) return undefined;
 	return normalized;
 }
 

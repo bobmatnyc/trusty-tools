@@ -52,6 +52,13 @@ sections are populated.
 Every finding in a build is collected and reported together, one per line, as
 `FAIL <CODE> <file>:<line>: <problem> — <remedy>`.
 
+One code is NON-fatal. It is written to the build log as
+`WARN <CODE> <file>:<line>: <problem> — <remedy>` and never throws:
+
+| Code                           | Fires when                                                        |
+| ------------------------------ | ----------------------------------------------------------------- |
+| `CHANGELOG-ROOT-RELATIVE-LINK` | A link resolved against the repository root, not beside the file. |
+
 ## Links inside changelog prose
 
 A relative link in a changelog (`[spec](../../docs/specs/foo.md)`) is written to
@@ -74,6 +81,27 @@ zero failures reported. That falsifies the only guarantee this gate offers — a
 green build means every link resolved AS WRITTEN. The one real off-by-one in the
 corpus (`crates/trusty-mpm/CHANGELOG.md` line 1982) was corrected at the source
 instead, which is what a typo deserves.
+
+**The one second reading there is, and its three limits.** A bare path carrying
+a directory — `docs/adr/0043-cargo-bin-policy.md`, no leading `./` or `../` —
+that resolves to nothing beside the changelog is tried again against the
+repository ROOT. A fragment author writes that shape meaning the repo root, and
+refusing it took every Vercel deploy down from `d1774c81` on (issue #5640).
+
+It is a second reading, never a guess:
+
+1. **The changelog-relative reading wins wherever it resolves.** The fallback
+   only runs where the first reading found nothing, so no link that already
+   worked can change meaning.
+2. **A bare FILENAME gets no fallback at all.** `README.md`, `LICENSE` and
+   `CHANGELOG.md` exist at the repository root AND in most crate directories, so
+   a crate-local `[readme](README.md)` would silently repoint at the root twin
+   the day the crate file is renamed. Those stay `CHANGELOG-BAD-LINK`.
+3. **Every fallback that fires is logged** as `CHANGELOG-ROOT-RELATIVE-LINK`,
+   naming both candidates. A link whose base the build chose is never silent.
+
+An escaping link (`../../../README.md`) is still refused before any of this — the
+paragraph above is unchanged by it.
 
 ## The one thing that recovers instead of failing
 

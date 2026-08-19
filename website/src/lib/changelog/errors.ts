@@ -21,6 +21,21 @@ import { formatFailure, type DocFailure } from '../docs/errors';
 /** One build-stopping finding in a crate's `CHANGELOG.md`. */
 export type ChangelogFailure = DocFailure;
 
+/**
+ * Why: one resolution decision is neither clean nor fatal — the repo-root link
+ * fallback (#5640) accepts a link the changelog's own directory cannot resolve.
+ * Failing it would undo that fix; passing it in silence would let a renamed
+ * crate-local file hand its link to a same-named root file with a green build.
+ * A warning is the only honest report of "accepted, and here is what I decided".
+ *
+ * What: the same record shape as a failure, so it renders identically in a build
+ * log, carried on a separate channel that never throws.
+ *
+ * Test: `parse.test.ts` (`records a warning whenever the repo-root fallback
+ * fires`), `site.test.ts` (the build logs them and stays green).
+ */
+export type ChangelogWarning = DocFailure;
+
 /** Every code this gate can emit, with what provokes it. */
 export const CHANGELOG_CODES = {
 	/** The crate's `CHANGELOG.md` is absent or unreadable. */
@@ -34,6 +49,29 @@ export const CHANGELOG_CODES = {
 	/** A link in the prose points somewhere this site cannot send a reader. */
 	BAD_LINK: 'CHANGELOG-BAD-LINK'
 } as const;
+
+/** Every NON-fatal code. Reported in the build log; never throws. */
+export const CHANGELOG_WARNING_CODES = {
+	/** A link resolved only against the repository root, not beside the file. */
+	ROOT_RELATIVE_LINK: 'CHANGELOG-ROOT-RELATIVE-LINK'
+} as const;
+
+/**
+ * Why: SvelteKit gives a build no reporting channel but the log, and a warning
+ * nobody prints is a warning that does not exist.
+ * What: one line per warning, same fields and order as `formatFailure` but
+ * prefixed `WARN` — that formatter hardcodes `FAIL`, and a build that did not
+ * fail must not print the word. A no-op on an empty list.
+ */
+export function formatWarning(warning: ChangelogWarning): string {
+	const location = warning.line === undefined ? warning.file : `${warning.file}:${warning.line}`;
+	return `WARN ${warning.code} ${location}: ${warning.problem} — ${warning.remedy}`;
+}
+
+/** Writes every warning to the build log. A no-op on an empty list. */
+export function reportWarnings(warnings: readonly ChangelogWarning[]): void {
+	for (const warning of warnings) console.warn(formatWarning(warning));
+}
 
 /**
  * Why: SvelteKit surfaces a thrown error's `message` in the build log and
