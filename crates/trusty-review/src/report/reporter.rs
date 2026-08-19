@@ -34,6 +34,8 @@ use super::reporter_graph_datasets::{
     inject_complexity_distribution_dataset, inject_loc_by_technology_dataset,
 };
 use super::reporter_performance::fill_performance_note;
+// #6046: the authorship section leaves as its own document.
+use super::split;
 
 /// Renders a [`ReportModel`] to markdown + JSON and writes them atomically.
 ///
@@ -76,19 +78,38 @@ impl Reporter {
         self
     }
 
-    /// Render the model into markdown using the supplied template source.
+    /// Render the model into the code-review markdown document.
     ///
     /// Why: exposed separately so tests can assert on rendered markdown without
-    /// touching disk.
+    /// touching disk. Since #6046 this is the CODE-REVIEW half only — the
+    /// authorship section renders as its own document, reachable through
+    /// [`render_documents`](Self::render_documents).
+    /// What: delegates to [`render_documents`](Self::render_documents) and
+    /// returns its code-review document.
+    /// Test: `reporter_tests.rs::{render_contains_expected,
+    /// reporter_strips_leading_comment_header}`.
+    pub fn render(&self, model: &ReportModel, template: &str) -> String {
+        self.render_documents(model, template).code_review
+    }
+
+    /// Render the model into both documents one `report` run produces (#6046).
+    ///
+    /// Why: the code review and the authorship assessment answer different
+    /// diligence questions from different data — analyze metrics versus git
+    /// history — and the owner asked to read them apart. Rendering both from
+    /// ONE fill pass is what keeps them consistent: a single [`Scope`], one
+    /// polish, one set of provenance markers, no second template to drift.
     /// What: strips the template's leading instructional `<!-- … -->` comment
     /// (live-QA defect #2314 — a generated report must never carry template
     /// authoring instructions, and the header's own literal `{{field}}` /
     /// BEGIN-END documentation examples would otherwise be mangled by the fill
-    /// engine), builds the fill [`Scope`] from the model, and renders the
-    /// remainder.
-    /// Test: `reporter_tests.rs::{render_contains_expected,
-    /// reporter_strips_leading_comment_header}`.
-    pub fn render(&self, model: &ReportModel, template: &str) -> String {
+    /// engine), builds the fill [`Scope`] from the model, renders and polishes
+    /// the whole document, then cuts the authorship section out of it. The cut
+    /// happens BEFORE the jump-list injection so the code-review document never
+    /// links a heading it no longer carries.
+    /// Test: `reporter_tests.rs::{render_splits_authorship_into_its_own_document,
+    /// render_without_authorship_data_still_produces_the_document}`.
+    pub fn render_documents(&self, model: &ReportModel, template: &str) -> RenderedReports {
         let scope = build_scope(model);
         // Fill deterministically, then polish the OUTPUT (#2342): strip every
         // non-dataset template comment, drop honesty-marker rows, collapse empty
@@ -115,11 +136,19 @@ impl Reporter {
         // sections, plus the rejected-evidence note, are appended after polish so
         // their measured/inferred rows are never subject to omit-empty.
         out.push_str(&super::investigate::report_sections(model));
+        // #6046: cut the authorship section out before the jump list is built,
+        // so the code-review document links only what it still carries.
+        let (code_body, authorship_section) = split::split_authorship(&out);
         // #6004: LAST — every section this render pass can produce has now been
         // appended, so this is the one point where the final `##` heading set is
         // known. Replaces the exec-summary jump-list sentinel with real links to
         // whichever of those headings actually survived.
-        contents_links::inject(&out)
+        RenderedReports {
+            code_review: contents_links::inject(&code_body),
+            authorship: authorship_section.map(|section| {
+                split::authorship_document(&model.title, &model.generated_date, &section)
+            }),
+        }
     }
 
     /// Render and write `{slug}.md` + `{slug}.json` atomically to `output_dir`.
@@ -141,6 +170,7 @@ impl Reporter {
     /// any I/O or serialisation failure.
     ///
     /// Test: `reporter_tests.rs::{write_emits_both,
+    /// write_emits_the_authorship_document_alongside,
     /// write_refuses_a_model_with_no_synthesis}`.
     pub fn write(&self, model: &ReportModel, template: &str) -> Result<Vec<PathBuf>> {
         // #5454: inference is required, so a synthesis-free model is a bug in the
@@ -155,7 +185,7 @@ impl Reporter {
         })?;
 
         let stem = report_stem(model);
-        let markdown = self.render(model, template);
+        let documents = self.render_documents(model, template);
         let json = serde_json::to_string_pretty(model).map_err(|source| ReportError::Metrics {
             path: PathBuf::from("<model.json>"),
             source,
@@ -163,12 +193,45 @@ impl Reporter {
 
         let md_path = self.output_dir.join(format!("{stem}.md"));
         let json_path = self.output_dir.join(format!("{stem}.json"));
-        atomic_write(&md_path, markdown.as_bytes())?;
+        atomic_write(&md_path, documents.code_review.as_bytes())?;
         atomic_write(&json_path, json.as_bytes())?;
         info!(md = %md_path.display(), json = %json_path.display(), "report written");
 
-        Ok(vec![md_path, json_path])
+        let mut written = vec![md_path, json_path];
+        // #6046: appended, never inserted — tga reads the `.json` path out of
+        // this list by extension, and every consumer that indexes it expects
+        // the code-review report first.
+        if let Some(authorship) = &documents.authorship {
+            let path = self
+                .output_dir
+                .join(format!("{stem}{}.md", split::AUTHORSHIP_STEM_SUFFIX));
+            atomic_write(&path, authorship.as_bytes())?;
+            info!(md = %path.display(), "authorship report written");
+            written.push(path);
+        }
+
+        Ok(written)
     }
+}
+
+/// The documents one render pass produces (#6046).
+///
+/// Why: `report` renders the code review and the authorship assessment as
+/// separate deliverables, and a caller needs both back from one call rather
+/// than rendering twice.
+/// What: `code_review` is every section except authorship; `authorship` is the
+/// standalone authorship document, `None` only when the template carries no
+/// authorship section at all. A run with no authorship data still produces the
+/// document, carrying the polished section's no-data line.
+/// Test: `reporter_tests.rs::{render_splits_authorship_into_its_own_document,
+/// render_without_authorship_data_still_produces_the_document}`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RenderedReports {
+    /// The code-review report: every rendered section except authorship.
+    pub code_review: String,
+    /// The standalone authorship report, when the render produced one.
+    pub authorship: Option<String>,
 }
 
 /// Compute the output file stem for a report: `{date}-{title-slug}`.

@@ -50,6 +50,8 @@ pub mod scan;
 // #5747: the schema-tag parse both artifact loaders decide compatibility from.
 pub(crate) mod schema;
 pub mod section_instructions;
+// #6046: the code-review / authorship output split.
+pub mod split;
 pub mod synthesize;
 pub mod synthesize_digest;
 pub mod synthesize_guard;
@@ -89,8 +91,9 @@ pub use model::{ReportModel, RepositoryReport};
 pub use polish::{polish, polish_with_gaps, strip_template_comments};
 pub use provenance::{Provenance, tag};
 pub use redact::{report_secrets, scrub_finding, scrub_investigation, scrub_metrics, scrub_prose};
-pub use reporter::Reporter;
+pub use reporter::{RenderedReports, Reporter};
 pub use scan::{Framework, RepoScan, scan_repo};
+pub use split::{authorship_document, split_authorship};
 pub use synthesize::{FindingProse, RiskRow, Synthesis, SynthesisError, Synthesizer};
 pub use template::{DEFAULT_TEMPLATE, TemplateLoader, parse_section_instructions};
 pub use ticketing::{TicketingSummary, load_ticketing};
