@@ -254,6 +254,62 @@ fn verify_prose_passes_and_rejects() {
     );
 }
 
+/// Why: #6030 — the guardrail compares canonical strings, so a measured 85.19
+/// written as "85%" looked fabricated and the whole narrative was dropped. The
+/// allowed set must therefore carry the coarser spellings of every measured
+/// figure.
+/// What: asserts both the truncation and the round-half-up form at each coarser
+/// precision are admitted (including a carry, 9.99 → 10), and that neighbouring
+/// values that are no rounding of the source are still absent.
+/// Test: this test itself.
+#[test]
+fn allowed_numbers_admits_rounded_forms() {
+    let allowed = allowed_numbers(&serde_json::json!({
+        "top_author_share_pct": 85.19,
+        "score": 9.99,
+    }));
+    // The set holds canonical keys, so 10.0 is present under the key "10".
+    for form in ["85.19", "85.1", "85.2", "85", "9.99", "9.9", "10"] {
+        assert!(allowed.contains(form), "{form} is a rounding of the source");
+    }
+    for absent in ["85.3", "84", "86", "8.9", "11"] {
+        assert!(
+            !allowed.contains(absent),
+            "{absent} is no rounding of any source figure"
+        );
+    }
+}
+
+/// Why: #6030 regression — live verification of #6037 failed because the
+/// authorship narrative said "85%" for a measured `top_author_share_pct` of
+/// 85.19 and the guardrail reported "rejected (unverified figure): 85".
+/// What: the rounded spellings verify; a figure that is no rounding of any
+/// measured value is still rejected with the offending token surfaced.
+/// Test: this test itself.
+#[test]
+fn verify_prose_accepts_rounding() {
+    let allowed = allowed_numbers(&serde_json::json!({ "top_author_share_pct": 85.19 }));
+    for prose in [
+        "The top author owns 85% of the code.",
+        "The top author owns 85.2% of the code.",
+        "The top author owns 85.1% of the code.",
+        "The top author owns 85.19% of the code.",
+    ] {
+        assert!(
+            verify_prose(prose, &allowed).is_ok(),
+            "a conventional rounding must verify: {prose}"
+        );
+    }
+    assert_eq!(
+        verify_prose("The top author owns 84% of the code.", &allowed),
+        Err("84".to_string())
+    );
+    assert_eq!(
+        verify_prose("The top author owns 85.3% of the code.", &allowed),
+        Err("85.3".to_string())
+    );
+}
+
 // ── Prompt / schema ─────────────────────────────────────────────────────────
 
 /// Why: the no-green-analysis rule must be STRUCTURAL — greens never reach the
@@ -643,6 +699,101 @@ async fn synthesize_happy_path_injects_new_narrative_fields() {
     assert!(
         result.notes.is_empty(),
         "none of the three new fields is unrecognized or unverified: {:?}",
+        result.notes
+    );
+}
+
+/// Build the fixture model with an authorship artifact whose top-author share is
+/// `pct` — the shape behind #6030's live failure.
+fn fixture_model_with_top_author_share(pct: f64) -> ReportModel {
+    use crate::report::authorship::AuthorshipSummary;
+
+    let mut model = fixture_model(vec![]);
+    model.repositories[0].authorship = Some(AuthorshipSummary {
+        schema_version: "v0".to_string(),
+        repository: "acme-core".to_string(),
+        distinct_authors: 4,
+        bus_factor: 1,
+        top_author_share_pct: pct,
+        single_author_subsystems: vec!["migrations".to_string()],
+        monthly_trajectory: vec![],
+        unresolved_authors: 0,
+        caveats: vec![],
+    });
+    model
+}
+
+/// Why: #6030 end-to-end regression — the run that failed live verification of
+/// #6037 rendered "rejected (unverified figure) in authorship summary: 85"
+/// against a measured `top_author_share_pct` of 85.19, so the narrative was
+/// dropped for restating a real figure at report precision.
+/// What: drives a full synthesize with an authorship narrative that writes 85.19
+/// as "85%"; asserts the field survives and no rejection note was recorded.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesize_accepts_rounded_authorship_figure() {
+    let model = fixture_model_with_top_author_share(85.19);
+    let body = r#"{
+      "executive_summary": "The 8,200 LoC Rust codebase spans 120 files.",
+      "authorship_summary": "One author owns 85% of the code, leaving a bus factor of 1.",
+      "top_risks": [],
+      "findings": []
+    }"#
+    .to_string();
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm {
+        body,
+        finish_reason: Some("stop".to_string()),
+    });
+    let result = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect("a rounded but faithful figure synthesizes");
+
+    assert_eq!(
+        result.authorship_summary.as_deref(),
+        Some("One author owns 85% of the code, leaving a bus factor of 1.")
+    );
+    assert!(
+        result.notes.is_empty(),
+        "a rounding of a measured figure records no rejection note: {:?}",
+        result.notes
+    );
+}
+
+/// Why: widening the guardrail for roundings must not widen it for wrong
+/// figures — 84 is neither the truncation nor the round-half-up form of 85.19.
+/// What: the same shape as the accepting case with the share misstated; asserts
+/// the field is dropped and the rejection note names the offending token.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesize_still_rejects_a_wrong_authorship_figure() {
+    let model = fixture_model_with_top_author_share(85.19);
+    let body = r#"{
+      "executive_summary": "The 8,200 LoC Rust codebase spans 120 files.",
+      "authorship_summary": "One author owns 84% of the code.",
+      "top_risks": [],
+      "findings": []
+    }"#
+    .to_string();
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm {
+        body,
+        finish_reason: Some("stop".to_string()),
+    });
+    let result = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect("the executive summary still verifies, so the pass succeeds");
+
+    assert!(
+        result.authorship_summary.is_none(),
+        "a figure matching no rounding must still drop the field"
+    );
+    assert!(
+        result
+            .notes
+            .iter()
+            .any(|n| n.contains("authorship summary: 84")),
+        "the rejection note must name the offending token: {:?}",
         result.notes
     );
 }
