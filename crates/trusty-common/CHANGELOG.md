@@ -6,6 +6,229 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.39.0] — 2026-08-19
+
+### Breaking
+
+- The public `bm25_client` module and the `bm25-client` feature that gated it
+  are removed (#5329). Callers lose `Bm25Client`, its `new` / `for_palace`
+  constructors, the `index` / `search` / `delete` / `stats` / `missing_docs`
+  operations, and the `socket_path_for_palace` resolver. It was the UDS
+  JSON-RPC client for the `trusty-bm25-daemon` subprocess, whose sole consumer
+  was trusty-memory; #5329 moved that index in-process, so there is no socket,
+  no wire protocol, and no binary to locate. A dependent that enables
+  `bm25-client` no longer builds: switch to the `bm25` feature, which is the
+  index itself (`BM25Index`) and needs no client. There is no deprecation
+  period and no drop-in replacement for the remote-access shape — an in-process
+  index is the only lexical lane now. The `uds` module and its `supervisor`
+  submodule are untouched: trusty-console and trusty-agents supervise
+  trusty-review and trusty-analyze through them. This is why `trusty-common`
+  moves to `0.35.0` under Cargo's 0.x rule, where a breaking change bumps the
+  MINOR position.
+
+### Added
+
+- `mcp::ensure_daemon_up_single_flight` and `mcp::StartLock`: start a daemon at
+  most once across concurrent processes, using an exclusive `flock(2)` that the
+  kernel releases if the starter dies. Additive — `DaemonBridgeConfig` and
+  `ensure_daemon_up` are unchanged.
+- Public API items now carry machine-readable `# Code Contract` blocks stating preconditions, postconditions, and invariants, extracted to a checked-in `contracts.json` artifact and each enforced by a test. Ten items are contracted in this first pass, selected by measured break history and cross-crate reach: `latest_trusty_mpm_snapshot`, `filter_sessions_since`, `PausedSession::sort_key`, `resolve_bedrock_region`, `redact_secret`, `scrub_secrets`, `retry_on_etxtbsy`, `retry_on_etxtbsy_async`, `KgStoreRedb::count_active_triples`, `read_daemon_addr`, and `resolve_daemon_base_url`. See ADR-0047.
+- `palace_alias::alias_target_if_absent` names the palace an alias redirects to, and only when the redirect actually fires. `memory_core::registry` now reads this rule from there instead of implementing it privately.
+- `index_id::identifies_same_path` — the one implementation of "do these two paths name the same directory tree?", comparing `(dev, ino)` when both exist and falling back to path equality otherwise. On case-insensitive APFS `canonicalize` preserves the spelling it was given rather than normalising it, so two cases of one directory compare unequal as strings; both registration guards now route through this rather than carrying separate copies of that rule. Filesystem-only, so a non-git tree compares exactly like a checkout ([#5827](https://github.com/bobmatnyc/trusty-tools/issues/5827))
+- `memory_core::content_hash`: one content-addressed identity for memory bodies, with a versioned normalization contract (NFC, LF line endings, per-line trailing-whitespace trim, collapsed trailing newlines) so two machines that recorded the same fact produce the same digest. Normalization applies to hashing only — stored content is untouched (#5902).
+- `Drawer::content_hash`, derived from `Drawer::content` at every point a drawer enters memory, plus `Drawer::set_content` and `Drawer::refresh_content_hash` to keep it in step. `Drawer::id` is unchanged and stays the vector-store, KG-subject, and slot-index key.
+- `memory_core::share`: a palace-targeted JSONL export/import primitive keyed on the content hash. Importing the same export twice is a no-op, importing a superset adds only what is new, two machines' overlapping exports converge to one memory, and a merge keeps the earlier `created_at`. Exports carry memory bodies and metadata only — no embedding vector, no index data of any kind — and exclude expired and Tier C drawers; the room travels as its label so both machines mint the same UUIDv5 room id. Import re-embeds and fails closed: if the embedder is unavailable the record is skipped and nothing is written, so an import never leaves a durable memory that recall cannot find.
+- `memory_core::share::supersede`: the `superseded_by` KG-triple writer, now shared with the dream cycle so both paths assert one edge shape and the #1713 guarantee (an original is only retirable once its provenance write is durable) lives in one place.
+- `DrawerType::from_tag`, the inverse of `DrawerType::as_str`. `store::kg_redb`'s private `parse_drawer_type` delegates to it.
+
+Notes
+
+- The export path does NOT screen content for secrets — `filter::check_secret` is write-time only. Safe for a local file; a workflow that commits an export to a repository must re-scan first. See `docs/reference/shared-memory-identity.md`.
+- `inference::ModelTier` maps a capability tier plus a `ProviderId` to a
+  concrete model id, so a consumer asks for the class of model its work needs
+  instead of pinning a version-stamped string that never moves when the model
+  behind a role moves. Three tiers: `Analysis`, `Interaction`, `Haiku`. Analysis
+  and Interaction both resolve to Opus 4.8 today and stay separate variants so
+  they can diverge later.
+- `ModelTier::resolve` returns `Option`, not `Result`. A provider with no
+  verified id for a tier returns `None`, which means "no tier default here" and
+  leaves the caller on whatever default it already had. AWS Bedrock's opus tiers
+  are deliberately unmapped: the inference-profile id could not be verified, and
+  its shape is not derivable from the family name — this table shows both
+  directions, with Sonnet 4.6 working bare while Haiku 4.5 needs a date stamp
+  and a `-v1:0` suffix.
+
+### Fixed
+
+- Palace-id derivation now produces ids trusty-memory's creation gate accepts. `derive_palace_id` had no length bound while the daemon rejects any slug over 63 bytes, so a project under a long directory or repo name derived an id `palace_create` refused — and trusty-code's turn recorder, which calls it on its first turn, then recorded nothing for that project and only warned. `palace_id_is_valid` and `PALACE_ID_MAX_LEN` state the daemon's rule once (trusty-memory's `validate_slug_format` now calls them instead of restating the shape), and every precedence level — env override, git `owner/repo`, and `parent/dir` — runs its result through the new `clamp_palace_id`. Clamping keeps a 54-byte prefix and appends an FNV-1a suffix rather than truncating, so two long projects sharing a prefix do not collapse onto one palace ([#2443](https://github.com/bobmatnyc/trusty-tools/issues/2443))
+- The embedder supervision loop no longer busy-spins when the sidecar
+  client's `unhealthy_signal` sender drops without ever firing. A closed
+  `watch` channel makes `changed()` resolve `Ready(Err(_))` on every poll,
+  and the old `Err` arm logged and looped back around — re-arming the same
+  immediately-ready future and monopolising a tokio worker for the rest of
+  the child's life (88,897 loop passes in 300ms, measured). The branch is
+  now excluded from the `select!` while the channel is closed, so the loop
+  keeps supervising through `child.wait()` and `shutdown_rx` alone. Unlike
+  the sibling `shutdown_rx` fix (#3023), the disabled state is recomputed
+  per iteration rather than latched, because a successful respawn replaces
+  the receiver and the new sidecar's health must be watched again (#3026).
+- Tests no longer inherit the machine's real `.env.local` credentials.
+  `credentials::redact`'s `resolved_secret_values` test fired the process-wide
+  `.env.local` loader while holding no lock, republishing a real
+  `OPENROUTER_API_KEY` mid-assertion in `credentials::resolver`'s tests; it now
+  joins the `dotenv_credential_env` serial group. The `memory_core::dream`
+  dedup, prune, stats and recall tests built on `DreamConfig::default()`, whose
+  empty key resolves against that same environment — with one present they
+  built a live OpenRouter backend and issued billed LLM calls whose merge
+  actions moved the drawer counts they assert on, which is why
+  `dream_cycle_merges_duplicates` and
+  `dream_cycle_compression_ratio_nonzero_after_dedup` failed intermittently.
+  Those tests now disable the semantic phase explicitly and read no credential
+  environment variable (#3451).
+- `memory_core::timeouts` gains `OpBudget` and `write_op_budget()` (`TRUSTY_WRITE_OP_BUDGET_SECS`, 60 s), one wall-clock ceiling an operation stamps once and spends across every wait inside it. `write_lock_timeout` and `open_queue_timeout` each opened their own full window, so a caller that exhausted both waited their sum — 60 s for the per-palace write mutex, then another ~63 s to enter the open queue — before any error surfaced. `OpBudget::leg` clamps a leg to `min(configured, remaining)`, so it can only shorten a wait, never extend one, and an exhausted budget leaves a later leg a non-blocking attempt rather than an unconditional failure. `PalaceRegistry::open_palace_within` takes the caller's residual budget; `open_palace` is unchanged and still spends its full configured queue timeout ([#4002](https://github.com/bobmatnyc/trusty-tools/issues/4002))
+- Loopback daemon calls no longer go through an exported `HTTP_PROXY` /
+  `http_proxy` / `ALL_PROXY`. reqwest 0.12 routes `127.0.0.1` through the proxy
+  — hyper-util's matcher has no loopback exemption — so on a machine with a
+  proxy configured every daemon call failed and the caller reported a healthy
+  daemon as down. The new `http_client` module is the one entry point that
+  applies `.no_proxy()`: `loopback_client_builder` (proxies off, caller keeps
+  its own timeouts), `loopback_client` (plus 2s connect / 5s request bounds),
+  and `blocking_loopback_client_builder` behind the new `blocking-http` feature.
+  `daemon_http_client`, `health_probe`, `daemon_guard`, `mcp::daemon_bridge`,
+  `mcp::memory_rpc`, `search_index`, `search_readiness`, the monitor search and
+  memory clients (request and SSE), and `embedder_client::RemoteEmbedderClient`
+  all route through it. Public-internet clients — `update`, `chat`,
+  `inference`, `openrouter_legacy` — deliberately still honour the operator's
+  proxy (#4392).
+- `cargo test -p trusty-common` no longer reports success over modules it never compiled. `default = []` gates 25+ modules, so the feature-less form ran 328 of the crate's ~2062 tests and exited 0 — including with a `memory_core` file that did not compile. A new `build.rs` detects the zero-feature build and `lib.rs` turns it into a `compile_error!` naming the right command; `cargo build` / `cargo check` and all 20 consumer crates are unaffected because the guard is `cfg(test)`-scoped. New no-dependency `unconditional-only` feature names a run that deliberately covers only the always-compiled surface ([#4901](https://github.com/bobmatnyc/trusty-tools/issues/4901))
+- Qualified the `docgen` module's own doc links to `assert_region` and
+  `sync_region`, which rustdoc could not resolve as bare names. #5744's
+  `#![deny(rustdoc::broken_intra_doc_links)]` turned them into errors, and
+  because the `docgen` feature is enabled only from `[dev-dependencies]` the
+  workspace-wide link gate never documented the module — so the two broke
+  `scripts/check_contracts.sh` on `main` for everyone instead.
+- Stopped six doc comments in non-gated code from linking to macOS-gated items
+  (`physical_footprint_mb`, `launchd`), which rustdoc could not resolve on
+  Linux. #5744 measured the link count on macOS only, so these never appeared
+  in its baseline and left the pre-publish contract gate red on `main`.
+- `cargo install` invocations (`perform_upgrade` / `perform_upgrade_captured`,
+  and everything routed through them — the installer's fallback paths, the
+  in-daemon `upgrade` commands, and both MCP `upgrade` tools) now run under a
+  cargo ownership guard: any cargo-untracked binary already sitting at the
+  destination is atomically renamed aside first, restored on cargo failure,
+  and restored when cargo's already-installed skip writes nothing. Without
+  the guard, a downloader-placed binary makes `cargo install` exit 101 with
+  "binary already exists in destination" (#5777, #4964 Phase 2). The guard
+  threads each crate's FULL binary set via the new canonical
+  `bin_resolve::installed_binaries` table, so alias and multi-binary crates
+  (`tctl`, `tm`, `trusty-embedderd`, `tagent`, …) are covered — not just the
+  binary named after the crate.
+- The cargo ownership guard is now infallible-by-construction when
+  interrupted: a guard dropped without settling (the daemon's detached
+  `tokio::spawn` upgrade tasks dying on shutdown, a panic unwind, or a
+  Ctrl-C abort mid-`cargo install`) restores its moved-aside binaries from
+  `Drop`, and `move_aside` sweeps stale `.{name}.pre-cargo.*` asides whose
+  owning pid is dead — restoring the aside when the destination is missing
+  (SIGKILL, where `Drop` never runs) and deleting it otherwise. Previously
+  an interrupted upgrade could leave the destination empty with the only
+  copy stranded under a hidden aside name, breaking the next launchd
+  respawn (#5777, code-critic round on PR #5778).
+- The stale-aside sweep no longer silently discards additional stranded
+  copies: when the destination is missing and MORE than one dead-pid aside
+  exists for the same binary, the first (sorted) aside is restored and every
+  later one is deleted with an explicit warning naming the file. Previously
+  the later copies — whose contents may differ from the restored one — were
+  destroyed with no distinct trace, purely because the first restore made the
+  destination exist (#5777, trusty-review round on PR #5778).
+- The stale-aside sweep's delete branch now logs "deleted stale pre-cargo
+  aside litter" instead of reusing the restore branch's "recovered" message,
+  so an operator reading the logs can tell a restore from a deletion
+  (#5777, trusty-review round on PR #5778).
+- `pid_is_alive` converts the aside's pid with `try_from` instead of a bare
+  `as` cast: a pid above `i32::MAX` no longer wraps negative — where
+  `kill(-n, 0)` would probe a process GROUP — and the (today unreachable)
+  overflow maps to `kill(-1, 0)`, which reads as alive and keeps the sweep
+  fail-closed (#5778).
+- New `palace_resolve` module (feature `palace-resolve`) is now the single entry point for "which trusty-memory palace does this project use?". `derive_palace_id` covered three of the four precedence levels — the committed `.trusty-tools/trusty-memory.yaml` pin needs filesystem I/O and lived above it in one caller — so the other four callers answered without the pin, and trusty-mpm's pin-blind answer became `TRUSTY_MEMORY_PALACE`, which outranks the pin. Three behaviour fixes ship with the consolidation: the `parent/dir` fallback now keys on the MAIN worktree root (`git rev-parse --git-common-dir`) so a worktree and its main checkout resolve identically instead of `worktrees-agent-x` versus `<parent>-<dir>`; a pin file that exists but cannot be parsed or read is an error rather than a silent fallthrough to a derived name; and `PalaceSource` reports which level decided. `catchup`'s `derive_palace_id_for` routes through it ([#5811](https://github.com/bobmatnyc/trusty-tools/issues/5811))
+- `palace_resolve::main_worktree_root` now returns `None` when the path it derived cannot be confirmed as a working tree of the same repository. It took `git rev-parse --git-common-dir` and returned that path's parent unchecked, which is the main worktree only when the common dir is `<root>/.git`. Inside a submodule — or any repo created with `--separate-git-dir` — the common dir is `<outer>/.git/modules/<name>`, so it returned `<outer>/.git/modules`: a git internals directory, named confidently, that no checkout sits under. A second `git rev-parse --show-toplevel --git-common-dir` run under the derived path now has to agree on both before it is returned, so an answer that cannot be reconciled produces `None` and every caller falls back rather than trusting a wrong path. Consumers affected: `resolve_palace`'s `parent/dir` fallback, `palace_alias`, and trusty-memory's prompt-context project-scope filter, which dropped every provenance-tagged drawer when handed the internals path ([#5819](https://github.com/bobmatnyc/trusty-tools/issues/5819))
+- `ensure_project_indexed` no longer reports a successful registration when the daemon already holds that index id pointed at a different directory tree. `best_effort_create_index` read only the HTTP status, so `200 {created: false, reason: "already exists"}` was indistinguishable from a real create — the caller pinned the id and every later search was answered from the other checkout, with no error. It now reads the registered `root_path` out of the response and withholds confirmation when it names a different tree. A daemon that does not report `root_path` leaves the verdict unchanged ([#5827](https://github.com/bobmatnyc/trusty-tools/issues/5827))
+
+### Changed
+
+- Consolidated the three independent `EnvVarGuard` test helpers
+  (`credentials::resolver`, `memory_core::dream`, `memory_core::semantic_consolidation`)
+  into one shared `credentials::env_guard::EnvVarGuard`. All three restored a
+  variable's prior value (or absence) identically on drop and relied on the
+  same external `#[serial(dotenv_credential_env)]` group; the only difference
+  was `semantic_consolidation`'s method being named `clear` instead of
+  `remove`, now unified. One implementation around the process-env mutation
+  race tracked in #3451, instead of three that could drift apart.
+- **`embedder_client::uds` now sends and receives through `uds::rpc`, the
+  shared framing entry point, instead of its own copy.** ADR-0034 §4 decided
+  every UDS client routes through one module. #5169 landed the dial half
+  (`connect_hardened`); the framing half did not, so `send_framed_request` had
+  exactly one consumer while this client kept a private `write_all` +
+  `BufReader::read_line` + `serde_json::from_str` sequence. The wire bytes are
+  unchanged — `embed_batch_sends_one_newline_framed_jsonrpc_frame` asserts the
+  raw request frame against a stub listener and fails if the framing drifts
+  (#5180)
+- **The client gained a wall-clock bound where it had none.** A daemon that
+  accepted the connection and then wedged used to hold the caller open forever.
+  Embed exchanges are now bounded at 600 s — far above anything that completes
+  today. The point is that the wait is finite, not that it is short (#5180)
+- `uds::rpc` grew three additions the migration needed:
+  `send_framed_request_capped` (the response-size budget as a caller argument),
+  `send_framed_notification` (one frame out, no reply — for a peer that never
+  writes back), and `write_frame` / `encode_frame` (the write half alone, for
+  streaming NDJSON senders). `send_framed_request` is unchanged and still
+  defaults to `MAX_FRAME_BYTES` (#5180)
+- The embedder client passes a 256 MiB response budget rather than the shared
+  8 MiB default. An embed reply is bulk data — roughly 12 bytes per
+  JSON-encoded `f32`, so ~9.5 KB per 768-dimension vector — and the dream-dedup
+  pass embeds every drawer in a palace in a single batch, crossing 8 MiB at
+  around 900 drawers. The shared default would have turned a working dream
+  cycle into a hard failure (#5180)
+- `candidate_bin_dirs` (the install-dir list behind
+  `verify_installed_binary`) now returns the single canonical cargo bin dir
+  (`$CARGO_HOME/bin`, falling back to `~/.cargo/bin`). `~/.local/bin` is no
+  longer consulted as an install destination — with every write path flipped
+  onto the canonical dir (#4964 Phase 3), a stale legacy copy there must not
+  satisfy the post-upgrade health gate. Legacy copies on `PATH` are still
+  found via the `which` fallback (#5777).
+- `Drawer` is now `#[non_exhaustive]`, and `Drawer::content` / `Drawer::content_hash` are private behind `Drawer::content()` and `Drawer::content_hash()`. The digest is derived from the body, so a struct literal or a field assignment outside this module could mint a drawer whose digest describes text it no longer holds; `Drawer::new` and `Drawer::set_content` are now the only ways to set a body. Breaking for any consumer that read those fields directly (#5902).
+- `content_hash::normalize_for_hash` strips U+200B, U+200C, U+200D and U+FEFF, and folds U+00A0 to a space, before hashing. NFC does not touch those codepoints, so the same fact pasted from a webpage and typed by hand used to produce two hashes, two memories, and no convergence. `CONTENT_HASH_VERSION` stays 1: nothing has shipped, so there is no prior state to migrate. Bidi marks are deliberately left alone (#5902).
+- `share::import` takes the embedder as a parameter internally, so a test can drive an import through a failing embedder. That proves the embed runs before the durable write and aborts the insert with nothing written — previously an inspection claim with no coverage (#5902).
+- `share::import` resolves the embedder once per run instead of once per inserted record. A resolution failure now aborts the whole import with an error, where before each record retried it and was counted as skipped. Both fail closed; a per-record embed failure or timeout is still skipped and the run still continues (#5902).
+- `ModelTier::Interaction` resolves `us.anthropic.claude-sonnet-4-6` on AWS
+  Bedrock instead of returning `None`. The analysis tier stays unmapped there:
+  its Opus 4.8 inference-profile id could not be verified, and the Sonnet
+  profile's shape does not predict it.
+- `ModelTier::Interaction` resolves Claude Sonnet 4.6 instead of Opus 4.8, on both OpenRouter (`anthropic/claude-sonnet-4.6`) and the Anthropic first-party API (`claude-sonnet-4-6`). Bedrock's opus arms stay deliberately unmapped. See #5987.
+- **Breaking:** `ModelTier::Haiku` is renamed to `ModelTier::Classification`, so the tier names its purpose rather than the model it currently resolves to. The mapped value is unchanged at Haiku 4.5 on every provider. See #5987.
+
+### Security
+
+- `credentials::resolver`'s precedence tests no longer print a resolved
+  credential when they fail. The env tier reads real credential variables, so
+  a bare `assert_eq!` on the result echoed whatever the process held — which
+  is how a live OpenRouter key reached test output. Actual values now render
+  through `redact_secret`, and a test provokes the failure path to prove it
+  (#3451).
+- `inference::types::SecretString`'s `Debug` and `Display` no longer disclose
+  the first four characters of the wrapped credential, nor its byte length.
+  Both now write the fixed constant `SecretString(<redacted>)`, computed from
+  no part of the value, which is what DOC-45 `C-8.2` requires. Anything that
+  derives `Debug` and holds a `SecretString` — `ResolvedProvider`, whose own
+  doc comment promised `Debug` was safe to log — printed a live API key's head
+  before this. Two property tests pin the guarantee: the rendering never varies
+  with the value, and it contains no substring of it (#4632).
+
+### Documentation
+
+- Repaired every broken rustdoc intra-doc link in this crate and added
+  `#![deny(rustdoc::broken_intra_doc_links)]` to its crate root(s), so a new
+  one fails the build instead of shipping as dead text on docs.rs (#5744).
+
 ## [0.34.0] — 2026-08-14
 
 ### Added
