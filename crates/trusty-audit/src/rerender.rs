@@ -238,8 +238,8 @@ pub async fn rerender(
 /// for a manifest directly and then for one in each subdirectory. Symlinked
 /// entries are skipped, the same posture `crate::package` takes about reading
 /// outside the tree it was pointed at.
-/// Test: `super::rerender_tests::a_delivered_package_layout_is_discovered`,
-/// `super::rerender_tests::a_working_directory_layout_is_discovered`,
+/// Test: `super::rerender_tests::a_delivered_package_layout_is_rendered`,
+/// `super::rerender_tests::a_working_directory_layout_is_rendered`,
 /// `super::rerender_tests::a_source_with_no_manifest_is_refused`.
 ///
 /// # Errors
