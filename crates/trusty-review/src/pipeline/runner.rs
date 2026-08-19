@@ -36,6 +36,7 @@ use crate::{
         },
         diff_analyzer::DiffAnalyzer, // noise filter (Stages A+B); #624
         parser::parse_review_response,
+        post::{FinalizeAction, decide_action},
         prompt::{ReviewPrMeta, build_review_prompt_with_coverage},
         runner_context::{gather_context, gather_external_context_md},
         runner_mapreduce::{MapReduceRun, run_mapreduce_branch},
@@ -168,7 +169,8 @@ pub struct ReviewDeps {
 /// errors (fail-safe: verdict = APPROVE with an `error` field set).
 /// Test: `run_review_with_fake_provider_approves`, `run_review_fail_safe_on_llm_error`,
 /// `run_review_search_down_skips_when_required`,
-/// `run_review_search_down_degraded_when_optout`.
+/// `run_review_search_down_degraded_when_optout`,
+/// `run_review_posting_without_dedup_store_fails_closed`.
 pub async fn run_review(
     config: &ReviewConfig,
     input: ReviewInput,
@@ -205,6 +207,40 @@ pub async fn run_review(
     } else {
         String::new()
     };
+
+    // ── Step 1b: posting requires the claim gate (#5113) ──────────────────
+    // The dedup contract makes a live post idempotent, so a run that can reach
+    // the post path without a store has no defence against a duplicate comment
+    // on a re-run. `decide_action` is the single place that decides whether the
+    // post path is reachable, so ask it rather than re-deriving the rule. This
+    // runs before the PR-metadata fetch so an unguarded run costs nothing.
+    if !is_local
+        && deps.dedup.is_none()
+        && decide_action(config.dry_run, input.trigger, input.allow_posting, true)
+            == FinalizeAction::Post
+    {
+        error!(
+            owner = %owner,
+            repo = %repo,
+            pr = pr_number,
+            "posting is enabled with no dedup claim store — aborting without posting (#5113)"
+        );
+        let mut result = ReviewResult::new(
+            owner.clone(),
+            repo.clone(),
+            pr_number,
+            format!("PR #{pr_number}"),
+            pr_url.clone(),
+        );
+        result.verdict = Verdict::Unknown;
+        result.error = Some(
+            "not reviewed: posting is enabled but no dedup claim store is configured, so a \
+             re-run could post a duplicate comment (#5113)"
+                .to_string(),
+        );
+        // NotHeld — no claim was ever attempted, let alone acquired.
+        return abort_dry(result, config, &input, &deps, DedupClaim::NotHeld).await;
+    }
 
     // ── Step 2: fetch PR metadata (skip for local-diff mode) ──────────────
     let (pr_meta, head_sha): (ReviewPrMeta, String) = if is_local {

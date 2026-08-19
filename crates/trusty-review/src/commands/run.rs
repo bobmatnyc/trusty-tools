@@ -26,6 +26,7 @@ use trusty_review::{
         CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, log_json_path,
         run_review,
     },
+    store::{DedupNeed, open_dedup_for},
 };
 
 use crate::cli_verify;
@@ -167,8 +168,17 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         .resolve_index(&search_for_resolve)
         .await;
 
-    let mut deps =
-        build_deps_async(&config_with_overrides, &reviewer_model, &default_provider).await?;
+    // #5113: `allow_posting` is hardcoded `true` below, so a GitHub-PR run can
+    // post — and must carry the claim gate that keeps a re-run from posting a
+    // second comment.
+    const ALLOW_POSTING: bool = true;
+    let mut deps = build_deps_async(
+        &config_with_overrides,
+        &reviewer_model,
+        &default_provider,
+        dedup_need_for(&diff_source, ALLOW_POSTING),
+    )
+    .await?;
     apply_source_root_fallback(&mut deps, source_root_notice.as_deref());
 
     let surface = surface_for_diff_source(&diff_source);
@@ -180,7 +190,7 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         print_result: true,
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
-        allow_posting: true,
+        allow_posting: ALLOW_POSTING,
         caller_context: CallerContext::default(),
         surface,
     };
@@ -285,18 +295,47 @@ pub async fn resolve_diff_source_run(config: &ReviewConfig, args: &RunArgs) -> R
     })
 }
 
+/// Decide whether a `run`-style invocation needs the durable dedup store
+/// (#5113).
+///
+/// Why: `cmd_run` sets `allow_posting: true`, so a GitHub-PR invocation can
+/// post a live comment — and a run that can post must carry the claim gate that
+/// makes the post idempotent, or a re-run against the same
+/// `(owner, repo, pr, head_sha)` posts a second comment. The local sources
+/// never reach the post path, so opening (and locking) `dedup.redb` for them
+/// would be pure cost. Extracted as a pure function for the same reason
+/// `surface_for_diff_source` is: the rule is testable without building a
+/// `ReviewConfig` or an LLM provider.
+/// What: `Required` when posting is allowed AND the diff came from a GitHub PR;
+/// `NotNeeded` otherwise.
+/// Test: `dedup_need_for_github_posting_is_required`,
+/// `dedup_need_for_github_without_posting_is_not_needed`,
+/// `dedup_need_for_local_sources_is_not_needed`.
+pub fn dedup_need_for(diff_source: &DiffSource, allow_posting: bool) -> DedupNeed {
+    if allow_posting && matches!(diff_source, DiffSource::Github { .. }) {
+        DedupNeed::Required
+    } else {
+        DedupNeed::NotNeeded
+    }
+}
+
 /// Build the injected service dependencies from `ReviewConfig` and a model id.
 ///
 /// Why: both `run` and `compare` need the same set of deps; building them from
 /// config in one place avoids repetition.  Async because `BedrockProvider::new`
 /// loads AWS credentials asynchronously.
 /// What: uses `build_provider` (which resolves the `bedrock/`/`openrouter/`
-/// prefix), builds the optional verifier, constructs search/analyze clients.
-/// Test: covered transitively by runner tests that inject a FakeLlm.
+/// prefix), builds the optional verifier, constructs search/analyze clients, and
+/// opens the dedup store when `dedup_need` says this invocation can post
+/// (#5113). A `Required` store that cannot be opened is an error, never a
+/// downgrade to `dedup: None` — the same contract the `serve` path declares.
+/// Test: covered transitively by runner tests that inject a FakeLlm;
+/// `dedup_need_for_*` cover the need decision itself.
 pub async fn build_deps_async(
     config: &ReviewConfig,
     model: &str,
     default_provider: &trusty_review::config::Provider,
+    dedup_need: DedupNeed,
 ) -> Result<ReviewDeps> {
     let llm = build_provider(model, default_provider, config)
         .await
@@ -313,12 +352,15 @@ pub async fn build_deps_async(
     let analyze = SubprocessAnalyzeClient::from_config(config)
         .map_err(|e| anyhow::anyhow!("failed to build analyze HTTP client: {e}"))?;
 
+    let dedup = open_dedup_for(&config.log_dir, dedup_need)
+        .map_err(|e| anyhow::anyhow!("failed to open the dedup claim store: {e}"))?;
+
     Ok(ReviewDeps {
         llm,
         verifier,
         search: Arc::new(search),
         analyze: Some(Arc::new(analyze)),
-        dedup: None,
+        dedup,
     })
 }
 
@@ -489,6 +531,65 @@ mod tests {
             surface_for_diff_source(&DiffSource::Stdin),
             InvocationSurface::Interactive
         );
+    }
+
+    // ── dedup_need_for (#5113) ──────────────────────────────────────────────
+
+    /// REGRESSION (#5113): a posting-capable `run` against a GitHub PR must
+    /// declare the claim store required.
+    ///
+    /// Why: `cmd_run` sets `allow_posting: true` and `build_deps_async` hardcoded
+    /// `dedup: None`, so a re-run against the same `(owner, repo, pr, head_sha)`
+    /// posted a second comment with nothing to stop it.
+    /// What: asserts the need decision for the posting GitHub case.
+    /// Test: this test.
+    #[test]
+    fn dedup_need_for_github_posting_is_required() {
+        let source = DiffSource::Github {
+            owner: "acme".to_string(),
+            repo: "backend".to_string(),
+            pr: 42,
+            token: "tok".to_string(),
+        };
+        assert_eq!(dedup_need_for(&source, true), DedupNeed::Required);
+    }
+
+    /// A GitHub source that cannot post (`compare`, the MCP tools) has nothing
+    /// for the claim gate to guard, so it must not open — or lock — the file.
+    #[test]
+    fn dedup_need_for_github_without_posting_is_not_needed() {
+        let source = DiffSource::Github {
+            owner: "acme".to_string(),
+            repo: "backend".to_string(),
+            pr: 42,
+            token: "tok".to_string(),
+        };
+        assert_eq!(dedup_need_for(&source, false), DedupNeed::NotNeeded);
+    }
+
+    /// Every local source is forced log-only downstream, so posting stays
+    /// unreachable even with `allow_posting: true` — which is exactly how the
+    /// CLI runs `--local-diff` and `--base`.
+    #[test]
+    fn dedup_need_for_local_sources_is_not_needed() {
+        let sources = [
+            DiffSource::LocalFile {
+                path: std::path::PathBuf::from("/tmp/x.diff"),
+            },
+            DiffSource::GitRange {
+                repo_root: std::path::PathBuf::from("/repo"),
+                base: "main".to_string(),
+                head: None,
+            },
+            DiffSource::Stdin,
+        ];
+        for source in &sources {
+            assert_eq!(
+                dedup_need_for(source, true),
+                DedupNeed::NotNeeded,
+                "a local source can never post: {source:?}"
+            );
+        }
     }
 
     // ── --source-root (#2994) ───────────────────────────────────────────────
