@@ -135,9 +135,12 @@ impl DaemonBridgeConfig {
 /// carrying over from a failed probe to a later successful one.
 /// What: builds a one-shot client with `DAEMON_PROBE_TIMEOUT`, issues a GET,
 /// returns `true` on 2xx, `false` on any error or non-2xx.
-/// Test: `probe_health_once_returns_false_on_refused` (async unit test).
+/// Test: `probe_health_once_returns_false_on_refused` (async unit test); the
+/// proxy immunity is proven in `http_client::tests`.
 pub(crate) async fn probe_health_once(health_url: &str) -> bool {
-    let client = match reqwest::Client::builder()
+    // #4392: the target is a loopback daemon, so the client must not honour an
+    // exported HTTP_PROXY.
+    let client = match crate::http_client::loopback_client_builder()
         .timeout(DAEMON_PROBE_TIMEOUT)
         .connect_timeout(DAEMON_PROBE_TIMEOUT)
         .build()

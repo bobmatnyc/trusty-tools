@@ -587,7 +587,9 @@ async fn main() -> Result<()> {
             );
             // The analyzer's own health is queried via HTTP if it's running.
             let analyzer_url = format!("http://127.0.0.1:{}", DEFAULT_PORT);
-            let client = reqwest::Client::new();
+            // #4392: loopback target — an exported HTTP_PROXY would otherwise
+            // report a healthy analyzer as DOWN.
+            let client = trusty_common::http_client::loopback_client()?;
             let analyzer_ok = client
                 .get(format!("{analyzer_url}/health"))
                 .send()

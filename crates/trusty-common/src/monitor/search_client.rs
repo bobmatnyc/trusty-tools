@@ -163,7 +163,9 @@ impl SearchClient {
     /// timeout so a hung daemon cannot stall the refresh loop.
     /// Test: `search_client_stores_base_url`.
     pub fn new(base: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
+        // #4392: the daemon answers on loopback, so the client must not honour
+        // an exported HTTP_PROXY.
+        let http = crate::http_client::loopback_client_builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap_or_default();
@@ -467,7 +469,8 @@ impl SearchClient {
 
         // SSE streams must outlive the short probe timeout — a large reindex
         // runs for minutes. A dedicated client bounds only the connect phase.
-        let sse = reqwest::Client::builder()
+        // #4392: loopback target, so proxies stay off here too.
+        let sse = crate::http_client::loopback_client_builder()
             .connect_timeout(Duration::from_secs(5))
             .build()?;
         let resp = sse

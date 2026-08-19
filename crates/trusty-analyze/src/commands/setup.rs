@@ -318,7 +318,11 @@ async fn setup_daemon() -> Result<()> {
         }
 
         // Poll /health for up to 10 s.
-        let client = reqwest::Client::new();
+        // #4392: loopback target — an exported HTTP_PROXY would otherwise make
+        // this poll time out against a daemon that started correctly.
+        let client = trusty_common::http_client::loopback_client_builder()
+            .build()
+            .context("build health-poll client")?;
         let url = format!("http://127.0.0.1:{DEFAULT_PORT}/health");
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(500)).await;

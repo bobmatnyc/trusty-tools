@@ -39,7 +39,9 @@ impl MemoryClient {
     /// timeout.
     /// Test: `memory_client_stores_base_url`.
     pub fn new(base: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
+        // #4392: the daemon answers on loopback, so the client must not honour
+        // an exported HTTP_PROXY.
+        let http = crate::http_client::loopback_client_builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap_or_default();
@@ -327,7 +329,8 @@ impl MemoryClient {
         use futures_util::StreamExt;
 
         // SSE is long-lived — bound only the connect phase, not the read.
-        let sse = reqwest::Client::builder()
+        // #4392: loopback target, so proxies stay off here too.
+        let sse = crate::http_client::loopback_client_builder()
             .connect_timeout(Duration::from_secs(5))
             .build()?;
         let resp = sse

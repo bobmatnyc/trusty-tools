@@ -390,7 +390,7 @@ async fn probe_distinguishes_failure_causes() {
     // hyper-util reports a connect timeout as `io::ErrorKind::TimedOut`, so both
     // land on `Timeout`. A loopback connect completes in microseconds, so 250ms
     // is ~1000x headroom while 2s leaves the read path an 8x margin over it.
-    // `build_probe_client_with` keeps `.no_proxy()`.
+    // `build_probe_client_with` keeps proxies disabled.
     let client = build_probe_client_with(Duration::from_millis(250), Duration::from_secs(2))
         .expect("probe client builds");
 
@@ -441,8 +441,11 @@ async fn probe_distinguishes_failure_causes() {
 
 // ── Proxy immunity ──────────────────────────────────────────────────────────
 
-/// Why: `.no_proxy()` is the single most load-bearing line in this module and
-/// there is no other `.no_proxy()` anywhere in the workspace. reqwest 0.12
+/// Why: proxy immunity is the single most load-bearing property of this module.
+/// Since #4392 the `.no_proxy()` call lives in
+/// `trusty_common::http_client::loopback_client_builder`, so this test now also
+/// guards against a caller here being rewritten back onto a bare
+/// `reqwest::Client::builder()`. reqwest 0.12
 /// honours `HTTP_PROXY`/`http_proxy`/`ALL_PROXY` for `127.0.0.1` — hyper-util's
 /// proxy matcher has no runtime loopback exemption — so a developer with a proxy
 /// exported reproduces the identical #4246 false `down` through the NEW
