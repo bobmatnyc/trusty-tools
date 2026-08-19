@@ -136,17 +136,34 @@ struct ClaimRecord {
 
 /// Outcome of a `claim` attempt.
 ///
-/// Why: the runner branches on whether it owns the review or should skip a
-/// duplicate.
-/// What: `Claimed` means this caller should proceed; `Skipped` means a completed
-/// review already exists for this SHA.
-/// Test: `claim_then_skip_after_complete`, `different_sha_not_skipped`.
+/// Why: the runner branches on whether it owns the review, should skip a
+/// duplicate, or was blocked by a claim someone else holds. #5126: `Skipped`
+/// used to cover the last two at once, so a review that never ran reported the
+/// same outcome as one that ran and finished — and the runner turned both into
+/// `Verdict::Approve`. Only a `Completed` record proves a review happened.
+/// What: `Claimed` means this caller should proceed; `Skipped` means a
+/// *completed* review already exists for this SHA; `InProgressElsewhere` means
+/// another holder wrote a fresh `InProgress` claim and nothing has been
+/// reviewed yet.
+/// Test: `claim_then_skip_after_complete`, `different_sha_not_skipped`,
+/// `fresh_in_progress_claim_is_not_a_completed_review`.
+///
+/// `#[non_exhaustive]`: adding `InProgressElsewhere` is the second variant
+/// addition this module has paid a breaking bump for (see [`DedupError`]). The
+/// attribute makes every future one additive for external exhaustive matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClaimOutcome {
     /// The claim was acquired; the caller owns this review.
     Claimed,
     /// A completed review already exists for this SHA; skip.
     Skipped,
+    /// Another holder owns a fresh (non-stale) in-progress claim for this SHA.
+    ///
+    /// Nothing has been reviewed. The caller must not proceed AND must not
+    /// report a verdict — a crashed holder leaves this state standing for the
+    /// whole `DEDUP_STALE_SECS` window (#5126).
+    InProgressElsewhere,
 }
 
 // ─── Store ──────────────────────────────────────────────────────────────────────
@@ -186,11 +203,13 @@ impl DedupStore {
     /// Open (or create) the dedup store at `path`.
     ///
     /// **Blocking** — probes the file, so it can wait out a concurrent holder
-    /// for up to the lock-wait budget. Today the only `Required` caller is the
-    /// HTTP daemon's synchronous startup, before it accepts traffic; the stdio
-    /// path declares `DedupNeed::NotNeeded` and never reaches here. A future
-    /// caller on a hot async path must wrap this the way the claim/complete/
-    /// release wrappers do (#5064).
+    /// for up to the lock-wait budget. Two `Required` callers reach here, both
+    /// during one-shot startup: the HTTP daemon before it accepts traffic, and
+    /// `commands::run::build_deps_async` before the CLI's single review begins
+    /// (#5113). Neither has other work on the runtime to stall. A future caller
+    /// on a hot async path must wrap this the way the claim/complete/release
+    /// wrappers do (#5064). The stdio path declares `DedupNeed::NotNeeded` and
+    /// never reaches here.
     ///
     /// Why: the store lives under the review log dir so it persists across
     /// daemon restarts (spec: `{LOG_DIR}/dedup.redb`). Issue #702: redb 4.x
@@ -262,10 +281,12 @@ impl DedupStore {
     /// Why: this is the idempotency gate — it must atomically decide whether the
     /// caller runs the review or skips because a completed one already exists.
     /// What: within one write transaction, reads any existing record: a
-    /// `Completed` record → `Skipped`; a fresh `InProgress` record → `Skipped`
-    /// (another worker owns it); a stale `InProgress` record or no record →
-    /// writes a fresh `InProgress` claim and returns `Claimed`.
-    /// Test: `claim_then_skip_after_complete`, `concurrent_in_progress_skips`,
+    /// `Completed` record → `Skipped`; a fresh `InProgress` record →
+    /// `InProgressElsewhere` (another holder owns it and nothing has been
+    /// reviewed — #5126); a stale `InProgress` record or no record → writes a
+    /// fresh `InProgress` claim and returns `Claimed`.
+    /// Test: `claim_then_skip_after_complete`,
+    /// `fresh_in_progress_claim_is_not_a_completed_review`,
     /// `stale_in_progress_is_reclaimable`.
     pub fn claim_blocking(
         &self,
@@ -291,22 +312,28 @@ impl DedupStore {
                     .map_err(|e| DedupError::Transaction(e.to_string()))?
                     .map(|v| v.value().to_string());
 
-                let should_claim = match existing {
-                    None => true,
+                // #5126: three outcomes, not two. A completed record proves a
+                // review ran; a fresh in-progress record proves only that
+                // someone else holds the slot.
+                let decided = match existing {
+                    None => ClaimOutcome::Claimed,
                     Some(raw) => {
                         let rec: ClaimRecord = serde_json::from_str(&raw)
                             .map_err(|e| DedupError::Serde(e.to_string()))?;
                         match rec.state {
-                            ClaimState::Completed => false,
+                            ClaimState::Completed => ClaimOutcome::Skipped,
                             // In-progress: reclaim only if stale (assume abandoned).
-                            ClaimState::InProgress => {
-                                now.saturating_sub(rec.updated_at) > DEDUP_STALE_SECS
+                            ClaimState::InProgress
+                                if now.saturating_sub(rec.updated_at) > DEDUP_STALE_SECS =>
+                            {
+                                ClaimOutcome::Claimed
                             }
+                            ClaimState::InProgress => ClaimOutcome::InProgressElsewhere,
                         }
                     }
                 };
 
-                if should_claim {
+                if decided == ClaimOutcome::Claimed {
                     let rec = ClaimRecord {
                         state: ClaimState::InProgress,
                         updated_at: now,
@@ -316,10 +343,8 @@ impl DedupStore {
                     table
                         .insert(key.as_str(), json.as_str())
                         .map_err(|e| DedupError::Transaction(e.to_string()))?;
-                    ClaimOutcome::Claimed
-                } else {
-                    ClaimOutcome::Skipped
                 }
+                decided
             };
             write
                 .commit()

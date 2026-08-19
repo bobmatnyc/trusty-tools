@@ -443,7 +443,16 @@ pub async fn cmd_calibrate(_config: ReviewConfig, args: CalibrateArgs) -> Result
             entry.repo,
             entry.pr
         );
-        let deps = match build_deps_async(&cfg, &reviewer_model, &default_provider).await {
+        // #5113: calibration is always `allow_posting: false`, so the post path
+        // is unreachable and the claim store has nothing to guard.
+        let deps = match build_deps_async(
+            &cfg,
+            &reviewer_model,
+            &default_provider,
+            trusty_review::store::DedupNeed::NotNeeded,
+        )
+        .await
+        {
             Ok(d) => d,
             Err(e) => {
                 warn!("calibrate: failed to build deps for PR {}: {e}", entry.pr);

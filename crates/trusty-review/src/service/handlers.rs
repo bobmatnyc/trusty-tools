@@ -29,7 +29,7 @@ use crate::{
     llm::LlmProvider,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
     service::inference_probe::{InferenceProbe, InferenceStatus},
-    store::{DedupStore, InFlightRegistry},
+    store::{DedupStore, InFlightCountGuard, InFlightRegistry},
 };
 
 // ─── AppState ─────────────────────────────────────────────────────────────────
@@ -593,8 +593,10 @@ pub async fn handle_status(State(state): State<AppState>) -> impl IntoResponse {
 /// until the verdict is ready (design intent: sub-10s for a normal PR).
 /// What: parses the request body, resolves the DiffSource, calls `run_review`,
 /// and returns the `ReviewResult` as JSON.  Always dry-run (push firewall
-/// remains in force).  Does NOT post to GitHub.
-/// Test: `review_endpoint_with_fake_deps_returns_result`.
+/// remains in force).  Does NOT post to GitHub.  The `in_flight` counter is
+/// held by an RAII guard so a dropped future still releases it (#5020).
+/// Test: `review_handler_bad_request_missing_fields`,
+/// `review_handler_decrements_in_flight_when_client_disconnects`.
 pub async fn handle_review(
     State(state): State<AppState>,
     Json(req): Json<ReviewRequest>,
@@ -648,9 +650,11 @@ pub async fn handle_review(
         surface: InvocationSurface::default(),
     };
 
-    state.in_flight.fetch_add(1, Ordering::Relaxed);
+    // #5020: the decrement has to survive a dropped future (client disconnect,
+    // consumer timeout) and a panic, so it lives in the guard's `Drop`, not in
+    // a statement after the `await` that a cancellation never reaches.
+    let _in_flight = InFlightCountGuard::enter(&state.in_flight);
     let result = run_review(&state.config, input, deps).await;
-    state.in_flight.fetch_sub(1, Ordering::Relaxed);
 
     info!(
         verdict = %result.verdict,

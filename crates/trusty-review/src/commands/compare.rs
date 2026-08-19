@@ -22,6 +22,8 @@ use trusty_review::{
 };
 
 use crate::commands::diff_source::{LocalDiffFlags, resolve_local_diff_source};
+use trusty_review::store::DedupNeed;
+
 use crate::commands::run::{apply_source_root_fallback, build_deps_async, resolve_source_root_arg};
 
 // ─── compare args ────────────────────────────────────────────────────────────
@@ -161,7 +163,10 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
     let (diff_source, _stdin_tmp) = materialize_stdin_if_needed(diff_source)?;
 
     for model in &models {
-        let mut deps = build_deps_async(&config, model, default_provider).await?;
+        // #5113: `compare` runs `allow_posting: false` below, so the post path
+        // is unreachable and the claim store has nothing to guard.
+        let mut deps =
+            build_deps_async(&config, model, default_provider, DedupNeed::NotNeeded).await?;
         apply_source_root_fallback(&mut deps, source_root_notice.as_deref());
         let input = ReviewInput {
             diff_source: diff_source.clone(),

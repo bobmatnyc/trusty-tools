@@ -36,6 +36,7 @@ use crate::{
         },
         diff_analyzer::DiffAnalyzer, // noise filter (Stages A+B); #624
         parser::parse_review_response,
+        post::{FinalizeAction, decide_action},
         prompt::{ReviewPrMeta, build_review_prompt_with_coverage},
         runner_context::{gather_context, gather_external_context_md},
         runner_mapreduce::{MapReduceRun, run_mapreduce_branch},
@@ -168,7 +169,8 @@ pub struct ReviewDeps {
 /// errors (fail-safe: verdict = APPROVE with an `error` field set).
 /// Test: `run_review_with_fake_provider_approves`, `run_review_fail_safe_on_llm_error`,
 /// `run_review_search_down_skips_when_required`,
-/// `run_review_search_down_degraded_when_optout`.
+/// `run_review_search_down_degraded_when_optout`,
+/// `run_review_posting_without_dedup_store_fails_closed`.
 pub async fn run_review(
     config: &ReviewConfig,
     input: ReviewInput,
@@ -205,6 +207,40 @@ pub async fn run_review(
     } else {
         String::new()
     };
+
+    // ── Step 1b: posting requires the claim gate (#5113) ──────────────────
+    // The dedup contract makes a live post idempotent, so a run that can reach
+    // the post path without a store has no defence against a duplicate comment
+    // on a re-run. `decide_action` is the single place that decides whether the
+    // post path is reachable, so ask it rather than re-deriving the rule. This
+    // runs before the PR-metadata fetch so an unguarded run costs nothing.
+    if !is_local
+        && deps.dedup.is_none()
+        && decide_action(config.dry_run, input.trigger, input.allow_posting, true)
+            == FinalizeAction::Post
+    {
+        error!(
+            owner = %owner,
+            repo = %repo,
+            pr = pr_number,
+            "posting is enabled with no dedup claim store — aborting without posting (#5113)"
+        );
+        let mut result = ReviewResult::new(
+            owner.clone(),
+            repo.clone(),
+            pr_number,
+            format!("PR #{pr_number}"),
+            pr_url.clone(),
+        );
+        result.verdict = Verdict::Unknown;
+        result.error = Some(
+            "not reviewed: posting is enabled but no dedup claim store is configured, so a \
+             re-run could post a duplicate comment (#5113)"
+                .to_string(),
+        );
+        // NotHeld — no claim was ever attempted, let alone acquired.
+        return abort_dry(result, config, &input, &deps, DedupClaim::NotHeld).await;
+    }
 
     // ── Step 2: fetch PR metadata (skip for local-diff mode) ──────────────
     let (pr_meta, head_sha): (ReviewPrMeta, String) = if is_local {
@@ -263,6 +299,27 @@ pub async fn run_review(
                 // `ReviewResult::new()` default staying 0 forever.
                 result.findings_count = result.findings.len();
                 return result;
+            }
+            // #5126: the slot is held by someone else, so this review never
+            // ran. Report that, never a verdict.
+            ClaimGate::InProgressElsewhere => {
+                warn!(
+                    owner = %owner,
+                    repo = %repo,
+                    pr = pr_number,
+                    head_sha = %head_sha,
+                    "dedup: another holder owns the in-progress claim — not reviewed"
+                );
+                let stale_secs = crate::config::constants::DEDUP_STALE_SECS;
+                result.verdict = Verdict::Unknown;
+                result.error = Some(format!(
+                    "not reviewed: another review holds the in-progress dedup claim for \
+                     head SHA {head_sha}; it clears when that review finishes or after \
+                     {stale_secs}s"
+                ));
+                // NotHeld — this review never acquired the claim, so it must
+                // not delete the holder's record.
+                return abort_dry(result, config, &input, &deps, DedupClaim::NotHeld).await;
             }
             ClaimGate::Proceed => {
                 debug!(head_sha = %head_sha, "dedup: claimed review slot");
@@ -821,18 +878,22 @@ fn is_truncated(finish_reason: Option<&str>, output_tokens: u32, max_tokens: u32
 
 /// What the runner does with a `claim()` outcome.
 ///
-/// Why: naming the three outcomes makes the fail-closed rule reviewable in one
-/// place. It used to be an inline `match` whose error arm proceeded with the
-/// review, so a store failure produced an ungated live comment — and on the
-/// next redelivery, another one.
-/// What: `Proceed` owns the slot; `DuplicateSkip` short-circuits a completed
-/// review; `Abort` carries the reason a claim could not be established.
+/// Why: naming the outcomes makes the fail-closed rule reviewable in one place.
+/// It used to be an inline `match` whose error arm proceeded with the review,
+/// so a store failure produced an ungated live comment — and on the next
+/// redelivery, another one.
+/// What: `Proceed` owns the slot; `DuplicateSkip` short-circuits a review that
+/// already ran to completion; `InProgressElsewhere` blocks a review that has
+/// NOT run because another holder owns the slot (#5126); `Abort` carries the
+/// reason a claim could not be established.
 /// Test: `classify_claim_*` in `runner_tests.rs`.
 pub(super) enum ClaimGate {
     /// This caller owns the review slot.
     Proceed,
     /// A completed review already exists for this head SHA.
     DuplicateSkip,
+    /// Another holder owns a fresh in-progress claim; nothing was reviewed.
+    InProgressElsewhere,
     /// The claim gate did not engage; abort without posting.
     Abort(String),
 }
@@ -848,14 +909,17 @@ pub(super) enum ClaimGate {
 /// of the trade: a dropped review is visible and re-requestable, a duplicate
 /// comment cannot be retracted. Every error aborts, `Contended` included, which
 /// is the variant a stuck sibling process produces during a rolling upgrade.
-/// What: maps `Ok(Claimed)` → `Proceed`, `Ok(Skipped)` → `DuplicateSkip`, and
-/// every `Err` → `Abort` carrying the error's `Display`.
+/// What: maps `Ok(Claimed)` → `Proceed`, `Ok(Skipped)` → `DuplicateSkip`,
+/// `Ok(InProgressElsewhere)` → `InProgressElsewhere` (#5126), and every `Err` →
+/// `Abort` carrying the error's `Display`.
 /// Test: `classify_claim_contended_aborts`, `classify_claim_open_error_aborts`,
-/// `classify_claim_claimed_proceeds`, `classify_claim_skipped_is_duplicate`.
+/// `classify_claim_claimed_proceeds`, `classify_claim_skipped_is_duplicate`,
+/// `stranded_in_progress_claim_is_not_a_duplicate_skip`.
 pub(super) fn classify_claim(outcome: Result<ClaimOutcome, DedupError>) -> ClaimGate {
     match outcome {
         Ok(ClaimOutcome::Claimed) => ClaimGate::Proceed,
         Ok(ClaimOutcome::Skipped) => ClaimGate::DuplicateSkip,
+        Ok(ClaimOutcome::InProgressElsewhere) => ClaimGate::InProgressElsewhere,
         Err(e) => ClaimGate::Abort(e.to_string()),
     }
 }

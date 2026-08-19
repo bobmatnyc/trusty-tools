@@ -1349,7 +1349,14 @@ async fn run_review_serve_mode_empty_token_fails_closed_with_actionable_error() 
         caller_context: CallerContext::default(),
         surface: InvocationSurface::default(),
     };
-    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+    // #5113: the serve path declares `DedupNeed::Required`, so a faithful
+    // fixture carries a real store — without one the run now aborts at the
+    // claim-gate guard before it ever reaches token resolution.
+    let dir = tempfile::tempdir().unwrap();
+    let mut deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+    deps.dedup = Some(Arc::new(
+        crate::store::DedupStore::open(&dir.path().join("dedup.redb")).expect("open"),
+    ));
 
     let result = run_review(&config, input, deps).await;
 
@@ -1925,6 +1932,7 @@ fn classify_claim_contended_aborts() {
             panic!("a contended claim must NOT proceed — that posts an ungated comment (#5064)")
         }
         ClaimGate::DuplicateSkip => panic!("a contended claim is not a duplicate"),
+        ClaimGate::InProgressElsewhere => panic!("a contended claim is not a live claim"),
     }
 }
 
@@ -1966,6 +1974,78 @@ fn classify_claim_skipped_is_duplicate() {
         classify_claim(Ok(ClaimOutcome::Skipped)),
         ClaimGate::DuplicateSkip
     ));
+}
+
+/// REGRESSION (#5126): a claim another holder owns must not classify as a
+/// completed duplicate.
+///
+/// Why: `DuplicateSkip` is the arm that sets `Verdict::Approve` and returns. A
+/// stranded `InProgress` record — what a process that died between `claim` and
+/// `complete` leaves behind — reached that arm too, so for the whole
+/// `DEDUP_STALE_SECS` window every re-run of that PR reported approval for a
+/// review that never ran. This drives the outcome through a real store rather
+/// than a hand-built enum value, so it exercises the store and the classifier
+/// together and compiles against the pre-fix source as well.
+/// What: one store writes an in-progress claim; a second store on the same file
+/// claims the same key; the resulting gate must not be `DuplicateSkip`.
+/// Test: this test. Fails pre-fix at the first assertion — the second claim
+/// returned `Skipped`, which classified as `DuplicateSkip`.
+#[tokio::test]
+async fn stranded_in_progress_claim_is_not_a_duplicate_skip() {
+    use crate::store::DedupStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dedup.redb");
+
+    // A holder claims the slot and then dies without completing or releasing.
+    let stranded = DedupStore::open(&path).expect("open");
+    stranded
+        .claim_blocking("acme", "backend", 42, "sha-stranded")
+        .expect("claim");
+    drop(stranded);
+
+    let store = Arc::new(DedupStore::open(&path).expect("open"));
+    let gate = classify_claim(store.claim("acme", "backend", 42, "sha-stranded").await);
+
+    assert!(
+        !matches!(gate, ClaimGate::DuplicateSkip),
+        "a stranded in-progress claim is not a completed review — classifying it as one \
+         is what made the runner report Verdict::Approve for an unrun review (#5126)"
+    );
+    assert!(
+        matches!(gate, ClaimGate::InProgressElsewhere),
+        "the runner must be told the slot is held, so it can report 'not reviewed'"
+    );
+}
+
+/// Why: fixing the stranded-claim arm must not disarm the case dedup exists
+/// for — a genuinely completed review must still short-circuit.
+/// What: a store completes a claim; a second store's claim for the same key
+/// still classifies as `DuplicateSkip`.
+/// Test: this test.
+#[tokio::test]
+async fn completed_claim_still_classifies_as_duplicate_skip() {
+    use crate::store::DedupStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dedup.redb");
+
+    let owner = DedupStore::open(&path).expect("open");
+    owner
+        .claim_blocking("acme", "backend", 42, "sha-done")
+        .expect("claim");
+    owner
+        .complete_blocking("acme", "backend", 42, "sha-done")
+        .expect("complete");
+    drop(owner);
+
+    let store = Arc::new(DedupStore::open(&path).expect("open"));
+    let gate = classify_claim(store.claim("acme", "backend", 42, "sha-done").await);
+
+    assert!(
+        matches!(gate, ClaimGate::DuplicateSkip),
+        "a completed review must still suppress the re-run"
+    );
 }
 
 /// Why: the round-1 fix routed the failed-claim path into `abort_dry`, which
@@ -2244,5 +2324,103 @@ async fn run_review_self_admitted_unverifiable_claim_is_not_confirmed() {
     assert!(
         result.findings[0].description.contains("incidents::run"),
         "the original claim must still reach the author verbatim"
+    );
+}
+
+// ─── #5113: posting requires the claim gate ─────────────────────────────────
+
+/// REGRESSION (#5113): a run that can post but carries no dedup store must
+/// abort before doing anything, not review and post unguarded.
+///
+/// Why: the CLI `run` path set `allow_posting: true` with `dedup: None`, so a
+/// re-run against an already-reviewed `(owner, repo, pr, head_sha)` posted a
+/// second comment with no error and no warning. Wiring a store into that one
+/// call site fixes the instance; failing closed here makes the combination
+/// unusable wherever it is expressed.
+/// What: a GitHub diff source, `allow_posting: true`, `dry_run: false` (so
+/// `decide_action` selects `Post`), and no dedup store. The run must return
+/// UNKNOWN with an error naming the missing claim store, and must not post.
+/// Test: this test. Fails pre-fix: the run proceeded past this point, so the
+/// error named GitHub token resolution instead of the missing claim store.
+#[tokio::test]
+async fn run_review_posting_without_dedup_store_fails_closed() {
+    let mut config = default_config();
+    config.dry_run = false; // service-live: the post path is reachable
+
+    let input = ReviewInput {
+        diff_source: DiffSource::Github {
+            owner: "acme".to_string(),
+            repo: "backend".to_string(),
+            pr: 42,
+            token: "tok".to_string(),
+        },
+        reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: true,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+    // `dedup: None` — the exact `build_deps_async` shape #5113 reported.
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+    assert!(deps.dedup.is_none(), "the fixture must carry no claim gate");
+
+    let result = run_review(&config, input, deps).await;
+
+    assert!(!result.posted, "an unguarded run must never post");
+    assert_eq!(
+        result.verdict,
+        Verdict::Unknown,
+        "a run that never happened must not report a verdict"
+    );
+    let error = result.error.expect("the abort must explain itself");
+    assert!(
+        error.contains("dedup claim store"),
+        "the error must name the missing claim gate so an operator can wire it: {error}"
+    );
+}
+
+/// Why: the #5113 guard must not fire where nothing can be posted. The CLI runs
+/// `--local-diff` and `--base` with the same `allow_posting: true` it uses for a
+/// PR, so a guard keyed on that flag alone would break both — and `compare` and
+/// `calibrate` build their deps through the same helper.
+/// What: a local diff source with `allow_posting: true` and `dry_run: false`,
+/// carrying no dedup store, must review normally rather than abort.
+/// Test: this test.
+#[tokio::test]
+async fn run_review_local_source_without_dedup_store_is_not_blocked() {
+    let (source, _tmp) = local_diff_source("+fn x() {}\n");
+    let mut config = default_config();
+    config.dry_run = false; // would select Post if the source were a GitHub PR
+
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: true,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+
+    let result = run_review(&config, input, deps).await;
+
+    assert!(
+        !result
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("dedup claim store")),
+        "a local diff has nowhere to post, so the claim gate must not block it: {:?}",
+        result.error
+    );
+    assert_eq!(
+        result.verdict,
+        Verdict::Approve,
+        "the review itself must still run to completion"
     );
 }

@@ -466,6 +466,109 @@ async fn review_handler_bad_request_missing_fields() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+// ── in_flight counter leak (#5020) ────────────────────────────────────────────
+
+/// A search stub that signals once `health()` is entered and then never
+/// answers, parking `handle_review` inside `run_review`'s required-context
+/// gate.
+///
+/// Why: reproducing the leak needs the handler future to be dropped while it is
+/// suspended mid-review — exactly what a client disconnect does. Signalling on
+/// entry makes that deterministic: the test waits for the signal instead of
+/// sleeping and hoping.
+/// What: sends on a one-shot channel the first time `health()` runs, then awaits
+/// `std::future::pending`.
+/// Test: `review_handler_decrements_in_flight_when_client_disconnects`.
+struct ParkingSearch {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[async_trait]
+impl SearchClient for ParkingSearch {
+    async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+        if let Some(tx) = self
+            .entered
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            let _ = tx.send(());
+        }
+        std::future::pending::<()>().await;
+        unreachable!("ParkingSearch::health never resolves")
+    }
+
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(vec![])
+    }
+
+    async fn search(
+        &self,
+        _index_id: &str,
+        _query: &str,
+        _top_k: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
+/// REGRESSION (#5020): dropping the `handle_review` future mid-review must
+/// still release the `in_flight` slot.
+///
+/// Why: the counter was raised before the `await` and lowered after it, so a
+/// dropped future — which a client disconnect or a consumer timeout produces
+/// against a long review — skipped the decrement entirely. The counter then only
+/// grew, and `GET /status` (whose sole load signal it is) reported a figure that
+/// never came back down until the process restarted. A fix that only handles the
+/// normal return path leaves this test red.
+/// What: parks the review inside the context gate, confirms the counter reads 1
+/// while it is suspended, drops the future without ever polling it to
+/// completion, and asserts the counter returns to 0.
+/// Test: this test. Fails pre-fix at the final assertion, which reads 1.
+#[tokio::test]
+async fn review_handler_decrements_in_flight_when_client_disconnects() {
+    use std::sync::atomic::Ordering;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let state = AppState::new(
+        crate::config::ReviewConfig::load(None),
+        Arc::new(FakeLlm),
+        Arc::new(ParkingSearch {
+            entered: std::sync::Mutex::new(Some(tx)),
+        }),
+        None,
+    );
+
+    let req = ReviewRequest {
+        local_diff_text: Some("+fn hello() {}\n".to_string()),
+        ..Default::default()
+    };
+    let mut fut = Box::pin(handle_review(State(state.clone()), Json(req)));
+
+    // Drive the handler only until the review is provably suspended inside the
+    // pipeline — no sleep, no timeout guess.
+    tokio::select! {
+        _ = &mut fut => panic!("the parked review must not complete"),
+        signal = rx => signal.expect("the review must reach the context gate"),
+    }
+
+    assert_eq!(
+        state.in_flight.load(Ordering::Relaxed),
+        1,
+        "the counter must be raised while a review is running"
+    );
+
+    // The client hangs up: axum drops the handler future mid-`await`.
+    drop(fut);
+
+    assert_eq!(
+        state.in_flight.load(Ordering::Relaxed),
+        0,
+        "a dropped handler future must still release the in_flight slot — leaking it \
+         is what pinned /status at a load figure that never came down (#5020)"
+    );
+}
+
 // ── Inference-probe handler tests (#719) ──────────────────────────────────────
 
 /// /health includes `inference: "ok"` and `status: "ok"` when the LLM succeeds.
