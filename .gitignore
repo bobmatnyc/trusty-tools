@@ -123,6 +123,17 @@ crates/trusty-analyze/ui/node_modules/
 # trusty-console runtime artifacts
 crates/trusty-console/ui/node_modules/
 
+# npm lockfiles under the Svelte UI trees. Nothing reads them: CI's ui-checks
+# job and every build.rs install run pnpm against pnpm-lock.yaml, and each ui/
+# package.json pins packageManager to pnpm. The only writer is the pnpm-absent
+# `npm install` fallback in build.rs, which rewrites the file with the host
+# platform's optional-dependency set and dirties the tree — the #5078 shape.
+# Anchored per crate for the #4789 reason spelled out above.
+crates/trusty-analyze/ui/package-lock.json
+crates/trusty-console/ui/package-lock.json
+crates/trusty-memory/ui/package-lock.json
+crates/trusty-search/ui/package-lock.json
+
 # Temp directories and analytics databases
 claude-mpm-patch/
 tga.db

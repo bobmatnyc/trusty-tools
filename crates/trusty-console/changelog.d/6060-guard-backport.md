@@ -1,0 +1,3 @@
+Fixed
+
+- `build.rs` keeps the committed `ui/dist/` bundle instead of rebuilding it on every cold build. It used to run the package manager's install and a full `vite build` unconditionally, and `vite build` empties `ui/dist/`, deleting the tracked `ui-source-hash.txt` the publish-time freshness gate reads. Freshness is decided by `scripts/check-ui-bundle-freshness.sh`, the same check `preflight-publish.sh` runs, and an unreadable answer keeps the committed bundle rather than rebuilding it. `FORCE_UI_BUILD=1` rebuilds unconditionally and re-stamps the bundle afterwards, which is what a UI change now needs. Backported from trusty-memory ([#6060](https://github.com/bobmatnyc/trusty-tools/pull/6060), [#5078](https://github.com/bobmatnyc/trusty-tools/issues/5078))

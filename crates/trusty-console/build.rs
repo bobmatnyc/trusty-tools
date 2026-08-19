@@ -10,10 +10,11 @@
 //! `cargo build` only re-runs the JS pipeline when UI sources change.
 //!
 //! NOTE: The core UI-build logic (SKIP_UI_BUILD guard, pnpm detection,
-//! install+build pipeline, placeholder fallback) is intentionally kept
-//! identical across trusty-memory, trusty-analyze, trusty-console, and
-//! trusty-search (issue #987). `scripts/check_buildrs_sync.sh` asserts that
-//! the canonical implementation block does not drift between these four files.
+//! install+build pipeline, placeholder fallback, and the #5078 committed-bundle
+//! freshness guard) is intentionally kept identical across trusty-memory,
+//! trusty-analyze, trusty-console, and trusty-search (issue #987).
+//! `scripts/check_buildrs_sync.sh` asserts that the canonical implementation
+//! block does not drift between these four files.
 //!
 //! Test: `SKIP_UI_BUILD=1 cargo check -p trusty-console` exits without invoking
 //! pnpm; a normal `cargo build` populates `ui/dist/index.html`.
@@ -27,15 +28,114 @@ fn main() {
     let dist_dir = ui_dir.join("dist");
 
     println!("cargo:rerun-if-env-changed=SKIP_UI_BUILD");
+    println!("cargo:rerun-if-env-changed=FORCE_UI_BUILD");
     println!("cargo:rerun-if-changed=ui/package.json");
     println!("cargo:rerun-if-changed=ui/vite.config.js");
     println!("cargo:rerun-if-changed=ui/index.html");
     println!("cargo:rerun-if-changed=ui/src");
 
-    build_svelte_ui(&ui_dir, &dist_dir, "trusty-console");
+    // #5078: `cargo test -p trusty-console` used to run the UI install and
+    // build unconditionally, and both write files git tracks — `vite build`
+    // empties `ui/dist/`, taking `ui-source-hash.txt` with it. The committed
+    // bundle already matches the committed source in every checkout that is
+    // not mid-UI-edit, so rebuilding it is work that only dirties the tree.
+    if std::env::var("FORCE_UI_BUILD").as_deref() != Ok("1")
+        && committed_bundle_is_fresh(&crate_root, &dist_dir, "trusty-console")
+    {
+        return;
+    }
+
+    if build_svelte_ui(&ui_dir, &dist_dir, "trusty-console") {
+        restamp_bundle(&crate_root, "trusty-console");
+    }
 }
 
 // ── CANONICAL BLOCK BEGIN (kept in sync by scripts/check_buildrs_sync.sh) ──
+
+/// Whether the committed bundle directory was built from the UI source now on
+/// disk, so rebuilding it would produce the same thing.
+///
+/// Why: see the `#5078` note in each crate's `main`. The freshness question
+/// already has one answer in this repo — `scripts/check-ui-bundle-freshness.sh`,
+/// which preflight-publish.sh runs as CHECK 7 — so this asks that script rather
+/// than minting a second definition of "fresh" that could disagree with it.
+/// What: `true` when the script reports the bundle fresh, when it is absent
+/// (a published tarball ships the bundle and has no `scripts/`), or when it
+/// cannot answer; `false` only on exit 1, the script's "stale bundle" finding.
+/// Skipping on an unreadable answer keeps the tree clean, which is the
+/// invariant #5078 asks for; the publish-time gate still refuses a stale
+/// bundle either way.
+/// Test: `git status --porcelain` is empty after `cargo test -p <crate>`.
+fn committed_bundle_is_fresh(crate_root: &Path, dist_dir: &Path, crate_name: &str) -> bool {
+    if !dist_dir.join("index.html").exists() {
+        return false;
+    }
+    let Some(repo_root) = crate_root.parent().and_then(Path::parent) else {
+        return true;
+    };
+    let script = repo_root.join("scripts/check-ui-bundle-freshness.sh");
+    if !script.exists() {
+        return true;
+    }
+    match Command::new("bash")
+        .arg(&script)
+        .arg(crate_name)
+        .current_dir(repo_root)
+        .output()
+    {
+        Ok(out) if out.status.success() => true,
+        Ok(out) if out.status.code() == Some(1) => false,
+        _ => {
+            println!(
+                "cargo:warning={crate_name}: could not check UI bundle freshness — \
+                 keeping the committed bundle (set FORCE_UI_BUILD=1 to rebuild)."
+            );
+            true
+        }
+    }
+}
+
+/// Record which UI source the bundle just built came from.
+///
+/// Why: `vite build` empties the dist directory, so a build that ran leaves the
+/// freshness stamp deleted — a tracked-file deletion that lands in whatever
+/// commit follows. Re-stamping leaves a coherent bundle instead: unchanged
+/// source rewrites the same bytes, changed source writes the digest the
+/// publish gate will look for.
+/// What: runs `scripts/stamp-ui-bundle.sh <crate_name>`, warning if it fails.
+///
+/// Call this ONLY when a build actually produced the bundle. The stamp is a
+/// claim that `check-ui-bundle-freshness.sh` trusts and cannot re-verify — its
+/// own header says re-stamping without rebuilding falsifies it undetectably —
+/// so writing it after a skipped or failed build turns a BUNDLE-STALE finding
+/// green while the stale bundle is still the one on disk. That is why
+/// `build_svelte_ui` reports whether it ran, rather than the caller assuming
+/// it did.
+/// Test: `git status --porcelain` is empty after `FORCE_UI_BUILD=1 cargo build
+/// -p <crate>` with no UI source edit, and after `SKIP_UI_BUILD=1 cargo check
+/// -p <crate>` against a stale committed bundle.
+fn restamp_bundle(crate_root: &Path, crate_name: &str) {
+    let Some(repo_root) = crate_root.parent().and_then(Path::parent) else {
+        return;
+    };
+    let script = repo_root.join("scripts/stamp-ui-bundle.sh");
+    if !script.exists() {
+        return;
+    }
+    let ok = Command::new("bash")
+        .arg(&script)
+        .arg(crate_name)
+        .current_dir(repo_root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        println!(
+            "cargo:warning={crate_name}: the bundle was rebuilt but stamp-ui-bundle.sh \
+             failed — run it by hand before committing the bundle."
+        );
+    }
+}
 
 /// Run the Svelte UI build pipeline, or degrade gracefully to a placeholder.
 ///
@@ -44,10 +144,13 @@ fn main() {
 /// identical logic without a published build-helper crate (#987).
 /// What: Checks SKIP_UI_BUILD, detects pnpm/npm, runs install + build inside
 /// `ui_dir`, writes a placeholder on any failure so the Rust build still
-/// completes even without the JS toolchain.
-/// Test: `SKIP_UI_BUILD=1 cargo check` short-circuits; `cargo build` with pnpm
-/// installed populates `dist_dir/index.html` with real Vite output.
-fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
+/// completes even without the JS toolchain. Returns `true` only when the
+/// package manager's `build` script actually ran and succeeded, so the caller
+/// knows whether `dist_dir` holds output this invocation produced.
+/// Test: `SKIP_UI_BUILD=1 cargo check` short-circuits and returns `false`;
+/// `cargo build` with pnpm installed populates `dist_dir/index.html` with real
+/// Vite output and returns `true`.
+fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) -> bool {
     // Step 1: honour explicit skip (CI / `cargo publish --verify`).
     if std::env::var("SKIP_UI_BUILD").as_deref() == Ok("1") {
         if !dist_dir.join("index.html").exists() {
@@ -58,14 +161,14 @@ fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
             );
             ensure_placeholder(dist_dir, crate_name);
         }
-        return;
+        return false;
     }
 
     // Step 2: no `ui/package.json` means we are inside an extracted tarball
     // that already shipped the dist — nothing to build.
     if !ui_dir.join("package.json").exists() {
         ensure_placeholder(dist_dir, crate_name);
-        return;
+        return false;
     }
 
     // Step 3: detect package manager (pnpm preferred, npm fallback).
@@ -75,7 +178,7 @@ fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
              build (set SKIP_UI_BUILD=1 to silence, or install pnpm)."
         );
         ensure_placeholder(dist_dir, crate_name);
-        return;
+        return false;
     };
 
     // Step 4a: install — prefer frozen lockfile when pnpm-lock.yaml exists.
@@ -94,7 +197,7 @@ fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
     if !install_ok {
         println!("cargo:warning={crate_name}: `{pm} install` failed — embedding placeholder UI.");
         ensure_placeholder(dist_dir, crate_name);
-        return;
+        return false;
     }
 
     // Step 4b: build.
@@ -108,6 +211,7 @@ fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
         println!("cargo:warning={crate_name}: `{pm} run build` failed — embedding placeholder UI.");
         ensure_placeholder(dist_dir, crate_name);
     }
+    build_ok
 }
 
 /// Write a stub `index.html` so embed macros compile without the JS build.
