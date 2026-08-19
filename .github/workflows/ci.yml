@@ -1999,6 +1999,20 @@ jobs:
   # `needs` lists every hard-gating job. `search-daemon-smoke` is now included:
   # it was excluded only because `continue-on-error: true` meant its result
   # never surfaced as `failure`, and that flag is gone.
+  #
+  # A CANCELLED SHARD IS NOT A FAILURE (#5998). The `test` job is an aggregator:
+  # it reads `needs.test-shard.result` and exits 1 on anything that is not
+  # `success`, so a shard cancelled by a newer push to the same concurrency
+  # group reached the classifier as `test=failure` and became red. Run
+  # 32154560958 (head 41fee6ac6) filed that false alarm on the `ci-red-main`
+  # issue with shards 5 and 6 cancelled 4 seconds before `2875e1f9d` landed, and
+  # that superseding run was fully green. So the classifier is handed the SHARD
+  # results directly, and the aggregate is reported as `cancelled` when the
+  # cancellation is what made it red — a cancelled shard lands in `inconclusive`
+  # ("this commit has NO verification result"), never in red, while a genuine
+  # `failure` from either job still lands in red unchanged. `test=` is kept, not
+  # replaced, so the aggregator breaking on its own (green shards, red `test`)
+  # is still caught.
   # --------------------------------------------------------------------------
   notify-main-failure:
     name: Notify on red main
@@ -2009,6 +2023,8 @@ jobs:
         fmt,
         clippy,
         test,
+        test-shard,
+        test-doc,
         msrv,
         agents-ui,
         audit-ui,
@@ -2031,7 +2047,9 @@ jobs:
           CI_JOB_RESULTS: >-
             fmt=${{ needs.fmt.result }}
             clippy=${{ needs.clippy.result }}
-            test=${{ needs.test.result }}
+            test=${{ (needs['test-shard'].result == 'cancelled' || needs['test-doc'].result == 'cancelled') && 'cancelled' || needs.test.result }}
+            test-shard=${{ needs['test-shard'].result }}
+            test-doc=${{ needs['test-doc'].result }}
             msrv=${{ needs.msrv.result }}
             agents-ui=${{ needs['agents-ui'].result }}
             audit-ui=${{ needs['audit-ui'].result }}

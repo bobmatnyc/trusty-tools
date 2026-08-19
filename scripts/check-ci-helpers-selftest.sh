@@ -80,6 +80,40 @@ assert_eq "success+cancelled after red"    "red"         "$(verdict_of 'a=failur
 assert_eq "the #4179 live run shape"      "inconclusive" \
   "$(verdict_of 'fmt=success clippy=cancelled test=cancelled msrv=cancelled smoke=cancelled')"
 
+# #5998, both halves of the same live run (32154560958, head 41fee6ac6): two of
+# eight shards cancelled by a newer push to the same concurrency group, every
+# other job green. Laundered through the `test` aggregator — which exits 1 on
+# any non-success matrix result — it arrives as `failure` and reads red; taken
+# from the shard job itself it arrives as `cancelled` and reads inconclusive.
+# The script is right either way, so the defect is entirely in WHICH of the two
+# it is handed, which is why the ci.yml wiring is asserted below.
+assert_eq "superseded shards, raw conclusions"   "inconclusive" \
+  "$(verdict_of 'fmt=success clippy=success test=cancelled test-shard=cancelled test-doc=success msrv=success')"
+assert_eq "superseded shards, laundered (#5998)" "red" \
+  "$(verdict_of 'fmt=success clippy=success test=failure msrv=success')"
+# The other direction: a shard that genuinely FAILED is still red, and a red
+# shard beside a cancelled sibling stays red.
+assert_eq "a genuinely failed shard is still red" "red" \
+  "$(verdict_of 'fmt=success clippy=success test=failure test-shard=failure test-doc=success msrv=success')"
+assert_eq "a failed doctest job is still red"     "red" \
+  "$(verdict_of 'fmt=success clippy=success test=failure test-shard=success test-doc=failure msrv=success')"
+
+# The wiring that decides which of the two shapes above the notifier produces.
+# Same guard pattern as the #4688 / #5407 ones further down: the script being
+# correct in isolation proves nothing while the workflow hands it a laundered
+# conclusion.
+notify_job="$(sed -n '/^  notify-main-failure:/,$p' .github/workflows/ci.yml)"
+assert_eq "notify waits on the shard matrix itself" "1" \
+  "$(grep -c '^        test-shard,$' <<<"${notify_job}" || true)"
+assert_eq "notify waits on the doctest job itself" "1" \
+  "$(grep -c '^        test-doc,$' <<<"${notify_job}" || true)"
+assert_eq "notify classifies the shard result directly (#5998)" "1" \
+  "$(grep -cF "test-shard=\${{ needs['test-shard'].result }}" <<<"${notify_job}" || true)"
+assert_eq "notify classifies the doctest result directly (#5998)" "1" \
+  "$(grep -cF "test-doc=\${{ needs['test-doc'].result }}" <<<"${notify_job}" || true)"
+assert_eq "a cancelled shard is not laundered into red (#5998)" "1" \
+  "$(grep -cF "needs['test-shard'].result == 'cancelled'" <<<"${notify_job}" || true)"
+
 # ---------------------------------------------------------------------------
 # detect-docs-only.sh
 # ---------------------------------------------------------------------------
