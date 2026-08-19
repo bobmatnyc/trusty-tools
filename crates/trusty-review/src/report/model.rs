@@ -196,6 +196,17 @@ pub struct RepositoryReport {
     /// Test: `model_tests::{authorship_loads_when_declared,
     /// unreadable_authorship_is_a_named_gap_not_a_build_failure}`.
     pub authorship: Option<super::authorship::AuthorshipSummary>,
+    /// Manifest-declared inspection ranking for the investigation pass (#6078).
+    ///
+    /// Why: `run_investigation` reads its selection inputs off the model, so the
+    /// external ranking has to travel here to reach `select_files`. Serialising
+    /// it keeps the JSON twin an honest record of WHY those files were read.
+    /// What: the resolved [`super::manifest::InspectionPriority`] list, in
+    /// declared order. Empty (the default) leaves selection and the JSON twin
+    /// byte-identical to a manifest without the key.
+    /// Test: `select_tests::manifest_priority_outranks_heuristics`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inspect_priority: Vec<super::manifest::InspectionPriority>,
 }
 
 impl ReportModel {
@@ -343,6 +354,9 @@ fn build_repository(
             scan,
             metrics,
             authorship,
+            // #6078: the external selection ranking rides through to
+            // `select_files` unchanged; this crate never recomputes it.
+            inspect_priority: entry.inspect_priority.clone(),
         },
         authorship_gap,
     ))

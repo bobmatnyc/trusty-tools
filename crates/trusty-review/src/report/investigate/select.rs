@@ -8,6 +8,11 @@
 //! dimensions (auth/secrets, dependencies, state, error handling, scaling,
 //! tests) via path/name heuristics.  Determinism (a stable sort) means the same
 //! repo always yields the same selection, so a report is reproducible.
+//! Path heuristics are guesses, so #6078 lets better-informed rankers override
+//! them through [`RiskSignals`] — the manifest's declared `inspect_priority`
+//! (trusty-audit writes it; owner ruling 2026-08-19 makes it THE interface for
+//! external selection intelligence) and the trusty-analyze findings already on
+//! the model.  Absent both, the ranking is byte-identical to the pre-#6078 one.
 //! What: [`Budget`] holds the file/byte caps; [`select_files`] ranks the tracked
 //! file list, greedily fills the budget, reads (and truncates) content, and
 //! records coverage — which DD dimensions were actually reached and which were
@@ -18,6 +23,9 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+
+use crate::report::manifest::InspectionPriority;
+use crate::report::metrics::AnalyzeMetrics;
 
 /// The per-file content ceiling before truncation (~24 KiB).
 ///
@@ -283,17 +291,116 @@ pub fn instruction_keywords(instructions: Option<&str>) -> Vec<String> {
     out
 }
 
-/// Compute a file's relevance score against instruction keywords + DD dimensions.
+/// The relevance weight a file trusty-analyze already flagged receives (#6078).
+///
+/// Why: every other term guesses from the path name. A `MetricFinding` naming
+/// this file is a tool's direct observation that something is wrong in it, so it
+/// must weigh more than a DD-dimension name match (×2). It stays below two
+/// analyst-brief keyword hits (×3 each) because the analyst's stated focus is
+/// the one signal that outranks a machine's.
+/// What: added once per flagged file however many findings name it, so a single
+/// noisy linter rule cannot bury the rest of the ranking.
+const FLAGGED_WEIGHT: u32 = 4;
+
+/// External risk evidence that steers selection — every field optional (#6078).
+///
+/// Why: two independent rankers know more about a repository than any path-name
+/// heuristic: the manifest's declared `inspect_priority` (written by
+/// trusty-audit, the stable interface per the owner ruling of 2026-08-19) and
+/// the trusty-analyze findings already on the model. Passing them as one struct
+/// means a third signal later changes no call site.
+/// What: `priorities` is the ranked manifest list; `metrics` are the analyze
+/// findings. [`RiskSignals::default`] carries neither, which reproduces the
+/// pre-#6078 ranking exactly — that is the contract the absent-input tests pin.
+/// Test: `select_tests::{absent_signals_reproduce_baseline_order,
+/// manifest_priority_outranks_heuristics, analyze_flagged_file_outranks_peer}`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RiskSignals<'a> {
+    /// Manifest-declared ranked paths; empty means "no external ranking".
+    pub priorities: &'a [InspectionPriority],
+    /// Per-file findings from trusty-analyze; `None` when `--analyze` was off.
+    pub metrics: Option<&'a AnalyzeMetrics>,
+}
+
+/// Compute a file's relevance score against instruction keywords, DD dimensions,
+/// and whether a code-analysis tool already flagged it.
 ///
 /// Higher is more relevant: instruction-keyword hits weigh most (×3), each DD
-/// dimension match ×2, and a recognised source file gets +1 so code outranks
-/// data when nothing else separates them.
-fn score(path: &str, keywords: &[String], dims: &[String]) -> u32 {
+/// dimension match ×2, a tool-flagged file [`FLAGGED_WEIGHT`], and a recognised
+/// source file gets +1 so code outranks data when nothing else separates them.
+fn score(path: &str, keywords: &[String], dims: &[String], flagged: bool) -> u32 {
     let p = path.to_ascii_lowercase();
     let instr_hits = keywords.iter().filter(|k| p.contains(k.as_str())).count() as u32;
     let dim_hits = dims.len() as u32;
     let code = u32::from(is_code_file(path));
-    3 * instr_hits + 2 * dim_hits + code
+    3 * instr_hits + 2 * dim_hits + FLAGGED_WEIGHT * u32::from(flagged) + code
+}
+
+/// Normalise a path-ish string into the key both signal matchers compare on.
+///
+/// Why: a `MetricFinding.component` may be absolute or repo-relative and may
+/// carry a `:<line>` suffix (that is the shape `apply_investigation` writes),
+/// and a manifest author may use either separator. One normal form makes both
+/// comparisons a plain string test.
+/// What: backslashes to `/`, lower-cased, and a trailing `:<digits>` dropped.
+/// Lower-casing only ever ranks a file higher, never excludes one.
+/// Test: `select_tests::analyze_component_with_line_suffix_matches`.
+fn path_key(raw: &str) -> String {
+    let c = raw.replace('\\', "/").to_ascii_lowercase();
+    match c.rsplit_once(':') {
+        Some((file, line)) if !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()) => {
+            file.to_string()
+        }
+        _ => c,
+    }
+}
+
+/// True when `key` names the same file as the already-normalised `path`.
+///
+/// Matches exactly, or when `key` is a longer path ending in `/{path}` — which
+/// is how an absolute component from the analyze daemon names a repo-relative
+/// file. A bare basename never matches, so one `login.rs` cannot flag every
+/// other one.
+fn names_same_file(path: &str, key: &str) -> bool {
+    key == path
+        || (key.len() > path.len()
+            && key.ends_with(path)
+            && key.as_bytes()[key.len() - path.len() - 1] == b'/')
+}
+
+/// The normalised paths trusty-analyze flagged, or empty when it supplied none.
+fn flagged_keys(metrics: Option<&AnalyzeMetrics>) -> Vec<String> {
+    let Some(m) = metrics else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = m
+        .findings
+        .iter()
+        .filter(|f| !f.component.is_empty())
+        .map(|f| path_key(&f.component))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+/// The manifest priorities as `(normalised path, weight)`, highest weight first.
+fn priority_keys(priorities: &[InspectionPriority]) -> Vec<(String, u32)> {
+    priorities
+        .iter()
+        .filter(|p| !p.path.is_empty())
+        .map(|p| (path_key(&p.path), p.weight))
+        .collect()
+}
+
+/// The highest manifest-declared weight naming `path`, or 0 when none does.
+fn priority_weight(path: &str, priorities: &[(String, u32)]) -> u32 {
+    priorities
+        .iter()
+        .filter(|(key, _)| names_same_file(path, key))
+        .map(|(_, w)| *w)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Rank the repository's files and greedily fill the budget, capturing content
@@ -302,41 +409,60 @@ fn score(path: &str, keywords: &[String], dims: &[String]) -> u32 {
 /// Why: this is the single place that turns a raw tracked-file list into the
 /// bounded, relevance-ranked, coverage-annotated set the LLM will inspect; its
 /// determinism (a stable score-then-path sort) makes every report reproducible.
-/// What: scores each file (instruction keywords + DD dimensions + code boost),
-/// sorts by score desc then path asc, then walks the ranking reading content
-/// (per-file truncated to [`MAX_FILE_BYTES`], and to the remaining byte budget)
-/// until `max_files` or `max_bytes` is reached.  Records total/skipped counts,
-/// bytes sent, and the covered/absent DD dimensions (tests count as covered when
-/// any test path is present, even if unread).  Unreadable/binary files are
-/// skipped without consuming budget.
+/// What: scores each file (instruction keywords + DD dimensions + a trusty-analyze
+/// flag + code boost), sorts by manifest priority desc, then score desc, then path
+/// asc, then walks the ranking reading content (per-file truncated to
+/// [`MAX_FILE_BYTES`], and to the remaining byte budget) until `max_files` or
+/// `max_bytes` is reached.  Records total/skipped counts, bytes sent, and the
+/// covered/absent DD dimensions (tests count as covered when any test path is
+/// present, even if unread).  Unreadable/binary files are skipped without
+/// consuming budget.
+///
+/// `signals` carries the two external rankers (#6078); [`RiskSignals::default`]
+/// carries neither and reproduces the pre-#6078 ranking exactly.  A manifest
+/// priority is a SEPARATE, dominant sort key rather than another score term, so
+/// a declared path is inspected ahead of every heuristic-only file whatever its
+/// weight — the budget still bounds how many of them are actually read.
 /// Test: `select_tests::{ranks_relevant_first, budget_caps_file_count,
-/// budget_caps_total_bytes, coverage_reports_dimensions}`.
+/// budget_caps_total_bytes, coverage_reports_dimensions,
+/// absent_signals_reproduce_baseline_order, manifest_priority_outranks_heuristics,
+/// priorities_beyond_the_budget_truncate_in_rank_order}`.
 pub fn select_files(
     root: &Path,
     files: &[PathBuf],
     instructions: Option<&str>,
     budget: Budget,
+    signals: RiskSignals<'_>,
 ) -> Selection {
     let keywords = instruction_keywords(instructions);
     let total_files = files.len();
+    // #6078: both external rankings are normalised once, not per candidate.
+    let flagged = flagged_keys(signals.metrics);
+    let priorities = priority_keys(signals.priorities);
 
     // Score every candidate (skip obvious noise the scanner already excludes is
     // handled upstream; here we rank whatever the tracked list contains).
-    let mut ranked: Vec<(u32, String, Vec<String>)> = files
+    let mut ranked: Vec<(u32, u32, String, Vec<String>)> = files
         .iter()
         .map(|rel| {
             let path = rel.to_string_lossy().replace('\\', "/");
+            let key = path.to_ascii_lowercase();
             let dims = dimensions_for(&path);
-            let s = score(&path, &keywords, &dims);
-            (s, path, dims)
+            let is_flagged = flagged.iter().any(|f| names_same_file(&key, f));
+            let s = score(&path, &keywords, &dims, is_flagged);
+            (priority_weight(&key, &priorities), s, path, dims)
         })
         .collect();
-    // Deterministic: score desc, then path asc.
-    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    // Deterministic: declared priority desc, then score desc, then path asc.
+    ranked.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
 
     let mut selected: Vec<SelectedFile> = Vec::new();
     let mut bytes_sent = 0usize;
-    for (_, path, dims) in &ranked {
+    for (_, _, path, dims) in &ranked {
         if selected.len() >= budget.max_files {
             break;
         }

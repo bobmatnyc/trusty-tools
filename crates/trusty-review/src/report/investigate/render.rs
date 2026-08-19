@@ -100,10 +100,13 @@ fn coverage_lines(repo: &RepoInvestigation) -> String {
         }
     }
     let c: &Coverage = &repo.coverage;
+    // #6078: "12 of 200" left the reader to divide; the percentage is the figure
+    // a due-diligence reader actually weighs the findings against.
     out.push_str(&format!(
-        "- files examined: {} of {} tracked ({} skipped); {} bytes sent (budget {}/{})\n",
+        "- files examined: {} of {} tracked ({}% coverage, {} skipped); {} bytes sent (budget {}/{})\n",
         c.files_examined,
         c.total_files,
+        coverage_pct(c.files_examined, c.total_files),
         c.skipped,
         c.bytes_sent,
         c.budget.max_files,
@@ -160,6 +163,21 @@ fn batch_lines(c: &Coverage) -> String {
     out
 }
 
+/// Format `examined / total` as a one-decimal percentage (#6078).
+///
+/// Why: both coverage surfaces — the rendered section and the synthesis prompt —
+/// must state the SAME figure, so it is computed once here.
+/// What: one decimal place; `0.0` when nothing is tracked, which is the only
+/// division-by-zero case and reads correctly (nothing was examined).
+/// Test: `render_tests::{coverage_section_states_examined_and_rejected,
+/// coverage_percentage_handles_empty_repo}`.
+fn coverage_pct(examined: usize, total: usize) -> String {
+    if total == 0 {
+        return "0.0".to_string();
+    }
+    format!("{:.1}", (examined as f64 / total as f64) * 100.0)
+}
+
 /// Join a list with `, `, or render `none` when empty.
 fn join_or_none(items: &[String]) -> String {
     if items.is_empty() {
@@ -182,10 +200,11 @@ pub fn coverage_prompt_summary(inv: &Investigation) -> String {
         match &repo.status {
             InvestigationStatus::Available => {
                 out.push_str(&format!(
-                    "- {}: examined {} of {} files; {} verified finding(s); {} rejected; not investigated: {}\n",
+                    "- {}: examined {} of {} files ({}%); {} verified finding(s); {} rejected; not investigated: {}\n",
                     repo.name,
                     c.files_examined,
                     c.total_files,
+                    coverage_pct(c.files_examined, c.total_files),
                     repo.findings.len(),
                     c.rejected,
                     join_or_none(&c.dimensions_absent),

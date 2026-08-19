@@ -38,7 +38,7 @@ use crate::report::synthesize::{FindingProse, Synthesis};
 
 pub use batch::BatchStatus;
 pub use deps::{Dependency, DependencyInventory};
-pub use select::{Budget, Selection};
+pub use select::{Budget, RiskSignals, Selection};
 pub use verify::VerifiedFinding;
 
 // ─── Result types ─────────────────────────────────────────────────────────────
@@ -234,7 +234,14 @@ pub async fn run_investigation(
         let deps = deps::build_inventory(path);
 
         let files = crate::report::scan::list_tracked_files(path);
-        let selection = select::select_files(path, &files, instructions, budget);
+        // #6078: the manifest's declared ranking and the trusty-analyze findings
+        // already on this repo steer which files get read; absent both, the
+        // selection is byte-identical to the pre-#6078 one.
+        let signals = select::RiskSignals {
+            priorities: &repo.inspect_priority,
+            metrics: repo.metrics.as_ref(),
+        };
+        let selection = select::select_files(path, &files, instructions, budget, signals);
         if selection.is_empty() {
             repos.push(RepoInvestigation {
                 slug: repo.slug.clone(),

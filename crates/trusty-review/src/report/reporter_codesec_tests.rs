@@ -18,6 +18,7 @@ fn repo(metrics: Option<AnalyzeMetrics>) -> RepositoryReport {
         scan: None,
         metrics,
         authorship: None,
+        inspect_priority: Vec::new(),
     }
 }
 
