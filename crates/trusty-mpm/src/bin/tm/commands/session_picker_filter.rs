@@ -304,6 +304,8 @@ pub(crate) async fn run_f_command(
             false,
             SessionSortArg::Recent,
             filter,
+            // `tm f` has no `--no-prune` flag; its fallback keeps the #4702 default.
+            false,
         )
         .await;
     }

@@ -782,6 +782,7 @@ fn cli_parses_ls_connector_bare() {
             current,
             all,
             attached,
+            no_prune,
             root,
         } => {
             assert!(
@@ -794,6 +795,7 @@ fn cli_parses_ls_connector_bare() {
             assert!(!current);
             assert!(!all);
             assert!(!attached, "bare `tm ls` must not set --attached");
+            assert!(!no_prune, "bare `tm ls` keeps the #4702 auto-prune");
             assert!(root.is_none());
         }
         other => panic!("expected top-level ls, got {other:?}"),
@@ -2993,6 +2995,85 @@ async fn session_ls_json_passthrough_prunes_dead_records() {
     assert!(
         !live.iter().any(|s| s.id == id.to_string()),
         "`tm ls --json` must clear a confirmed dead record from the registry"
+    );
+}
+
+/// `--no-prune` makes the listing a pure read (#5950).
+///
+/// Why: `tm sessions ls --all --json` is a READ verb, and it decommissioned
+/// three records during a fleet census without being asked to. The default
+/// stays as #4702 set it — the two tests above pin that — but an operator who
+/// needs a listing that provably changes nothing now has a flag for it. This
+/// is the exact setup of `session_ls_json_passthrough_prunes_dead_records`
+/// with `PruneContext::disabled()` swapped in, so the ONLY difference between
+/// "record gone" and "record intact" is the flag.
+#[tokio::test]
+async fn session_ls_no_prune_makes_the_read_non_mutating() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
+    );
+    let mgr = state.session_manager().await;
+    let id = seed_dead_session(&mgr, root.path(), "no-prune").await;
+
+    let server = LocalTestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let ls_json = async |ctx: &crate::commands::session_picker_prune::PruneContext| {
+        crate::commands::managed::session_ls_at(
+            &client,
+            &server.url,
+            true, // json = true: the raw passthrough path
+            None,
+            false,
+            false,
+            crate::commands::session_picker::SessionSortArg::Recent,
+            None,
+            ctx,
+        )
+        .await
+        .expect("session_ls --json --no-prune");
+    };
+
+    // Pre-seed the record as already CONFIRMED (sighted long ago), so a single
+    // listing with the prune on would clear it. The only thing standing between
+    // this record and a tombstone is the flag.
+    let mut seen = std::collections::HashMap::new();
+    seen.insert(id.to_string(), "2020-01-01T00:00:00Z".to_string());
+    std::fs::write(
+        &marker_path,
+        serde_json::to_string(&seen).expect("serialize marker"),
+    )
+    .expect("write marker");
+
+    // Identical context to the passing sibling test above, with ONLY the
+    // `--no-prune` bit cleared — same marker file, same tmux set.
+    ls_json(&hermetic_prune_ctx(&marker_path).without_prune()).await;
+    ls_json(&hermetic_prune_ctx(&marker_path).without_prune()).await;
+
+    let live = default_view_pre_4994(fetch_raw_live(&client, &server.url).await);
+    assert!(
+        live.iter().any(|s| s.id == id.to_string()),
+        "`--no-prune` must leave the record live, not tombstoned"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&marker_path).expect("read marker"),
+        serde_json::to_string(&seen).expect("serialize marker"),
+        "`--no-prune` must not rewrite the confirmation marker either"
+    );
+}
+
+/// `--no-prune` is what selects that context, and nothing else does (#5950).
+#[test]
+fn no_prune_flag_selects_the_non_mutating_prune_context() {
+    assert!(
+        !crate::commands::session_picker_prune::PruneContext::disabled().enabled,
+        "--no-prune must disable the sweep"
+    );
+    assert!(
+        crate::commands::session_picker_prune::PruneContext::production().enabled,
+        "the default listing keeps the #4702 auto-prune"
     );
 }
 

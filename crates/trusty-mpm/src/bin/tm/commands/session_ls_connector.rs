@@ -78,6 +78,7 @@ pub(crate) async fn run_ls_connector(
     attached: bool,
     sort: SessionSortArg,
     term: Option<SessionFilter>,
+    no_prune: bool,
 ) -> anyhow::Result<()> {
     // `--current` derives the source_id from the cwd git remote, exactly like
     // `tm session ls --current`. `--source-id` and `--current` are mutually
@@ -107,6 +108,8 @@ pub(crate) async fn run_ls_connector(
             attached,
             sort,
             term,
+            // #5950: the operator's explicit "this read must not mutate".
+            no_prune,
         )
         .await;
     }
@@ -126,6 +129,7 @@ pub(crate) async fn run_ls_connector(
                 false,
                 sort,
                 term,
+                no_prune,
             )
             .await;
         }

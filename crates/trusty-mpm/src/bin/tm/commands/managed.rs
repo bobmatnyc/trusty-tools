@@ -188,12 +188,19 @@ pub(crate) fn filter_live_sessions(
 /// unsorted passthrough, matching `--all`'s existing "no effect on --json"
 /// precedent.
 ///
-/// #4702: this path — every piped, scripted, and `--json` listing — now runs
-/// the same dead-record auto-prune the interactive picker runs. It previously
-/// ran none, which is why dead records accumulated without bound for anyone not
+/// #4702: this path — every piped, scripted, and `--json` listing — runs the
+/// same dead-record auto-prune the interactive picker runs. It previously ran
+/// none, which is why dead records accumulated without bound for anyone not
 /// using the TTY picker. See
 /// [`session_picker_prune::prune_and_report`](crate::commands::session_picker_prune::prune_and_report)
-/// for why doing this unconditionally is safe.
+/// for why doing this by default is safe.
+///
+/// #5950: a listing verb that mutates surprised an operator taking a fleet
+/// census, so `no_prune` (`tm ls --no-prune`, `tm sessions ls --no-prune`)
+/// turns it off for one invocation and the default is stated in the `ls`
+/// help rather than only in this doc comment. The prune's own operator lines
+/// go to STDERR (`prune_and_report_at`), so `--json` stdout is parseable JSON
+/// with or without the flag.
 /// Test: HTTP path covered by the integration test; filter logic unit-tested by
 /// `ls_source_id_filter_selects_correct_slug`,
 /// `picker_filter_excludes_decommissioned_keeps_active`; sort/filter logic by
@@ -211,8 +218,15 @@ pub(crate) async fn session_ls(
     attached: bool,
     sort: crate::commands::session_picker::SessionSortArg,
     term: Option<crate::commands::session_picker::SessionFilter>,
+    no_prune: bool,
 ) -> anyhow::Result<()> {
-    let ctx = crate::commands::session_picker_prune::PruneContext::production();
+    // #5950: `--no-prune` is the operator's explicit "this read must not
+    // mutate" — it selects a context that sweeps nothing.
+    let ctx = if no_prune {
+        crate::commands::session_picker_prune::PruneContext::disabled()
+    } else {
+        crate::commands::session_picker_prune::PruneContext::production()
+    };
     session_ls_at(
         client, url, json, source_id, all, attached, sort, term, &ctx,
     )

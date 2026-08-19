@@ -442,3 +442,92 @@ fn cli_parses_projects_milestones_show() {
         other => panic!("expected show, got {other:?}"),
     }
 }
+
+// ── `tm project list` reads the persistent registry (#5994) ──────────────────
+
+/// Build a minimal registry record without restating all twelve fields.
+fn registry_project() -> trusty_mpm::project::Project {
+    serde_json::from_value(serde_json::json!({
+        "name": "widget",
+        "repo_url": "https://github.com/acme/widget",
+        "default_branch": "main"
+    }))
+    .expect("deserialize a minimal Project")
+}
+
+/// `tm project list` must query the registry that actually holds the projects.
+///
+/// Why (#5994): the verb used to `GET /projects`, the daemon's in-memory
+/// session-derived project map. On a live host that route answered
+/// `{"projects":[]}` while `GET /api/v1/projects` — the on-disk registry the
+/// `project_list` MCP tool also reads — answered with five projects, so the
+/// command reported "no projects registered" against a fully populated
+/// registry. This stub serves ONLY `/api/v1/projects` and records every path it
+/// is asked for: against the pre-fix code the request lands on `/projects`, the
+/// stub answers 404, and `list_rows` returns an error instead of a row.
+#[tokio::test]
+async fn project_list_reads_the_persistent_registry() {
+    use std::sync::{Arc, Mutex};
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = seen.clone();
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/projects",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({ "projects": [ {
+                    "name": "widget",
+                    "repo_url": "https://github.com/acme/widget",
+                    "default_branch": "main"
+                } ] }))
+            }),
+        )
+        .layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let recorder = recorder.clone();
+                async move {
+                    if let Ok(mut paths) = recorder.lock() {
+                        paths.push(req.uri().path().to_string());
+                    }
+                    next.run(req).await
+                }
+            },
+        ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback port");
+    let addr = listener.local_addr().expect("resolve bound addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let url = format!("http://{addr}");
+
+    let rows = crate::commands::project::list_rows(&reqwest::Client::new(), &url)
+        .await
+        .expect("list_rows against the registry route");
+    handle.abort();
+
+    assert_eq!(rows.len(), 1, "one registered project, one row: {rows:?}");
+    assert!(
+        rows[0].starts_with("widget\thttps://github.com/acme/widget"),
+        "row must carry the registry record: {}",
+        rows[0]
+    );
+    assert_eq!(
+        seen.lock().expect("recorded request paths").as_slice(),
+        ["/api/v1/projects"],
+        "`tm project list` must read the persistent registry, never the \
+         in-memory session-derived map at /projects"
+    );
+}
+
+/// The `[mcp-trusted]` marker survives the move to the registry route (#5994).
+#[test]
+fn project_list_row_marks_a_trusted_local_path() {
+    let p = registry_project();
+    assert!(
+        crate::commands::project::project_list_row(&p, true).ends_with(" [mcp-trusted]"),
+        "a trusted project keeps the marker this verb has always carried"
+    );
+    assert!(!crate::commands::project::project_list_row(&p, false).contains("mcp-trusted"));
+}

@@ -243,6 +243,15 @@ pub(crate) struct PruneContext {
     /// Live tmux session names, or `None` when tmux could not be enumerated at
     /// all — which [`auto_prune_dead_records_at`] treats as "prune nothing".
     pub(crate) live_tmux_names: Option<HashSet<String>>,
+    /// Whether the listing may prune at all (`tm ls --no-prune` clears it).
+    ///
+    /// Why (#5950): auto-pruning every listing is deliberate (#4702) and stays
+    /// the default, but `tm sessions ls` is a READ verb and an operator taking
+    /// a census — or a script sampling the fleet — is entitled to a run that
+    /// provably changes nothing. `false` skips the sweep entirely: no
+    /// decommission call, no marker write, and no operator notice, so the
+    /// listing is a pure read.
+    pub(crate) enabled: bool,
 }
 
 impl PruneContext {
@@ -252,6 +261,19 @@ impl PruneContext {
         Self {
             marker_path: default_marker_path(),
             live_tmux_names: live_tmux_session_names(),
+            enabled: true,
+        }
+    }
+
+    /// A context that prunes nothing — `tm ls --no-prune` (#5950).
+    ///
+    /// Why: neither input is resolved, so the read path never touches the
+    /// marker file and never shells out to tmux either.
+    pub(crate) fn disabled() -> Self {
+        Self {
+            marker_path: PathBuf::new(),
+            live_tmux_names: None,
+            enabled: false,
         }
     }
 
@@ -264,7 +286,20 @@ impl PruneContext {
         Self {
             marker_path,
             live_tmux_names,
+            enabled: true,
         }
+    }
+
+    /// Clear [`enabled`](Self::enabled), leaving every other input untouched.
+    ///
+    /// Why: lets a test hold the marker file and tmux set fixed and vary ONLY
+    /// the `--no-prune` bit, so `session_ls_no_prune_makes_the_read_non_mutating`
+    /// differs from `session_ls_json_passthrough_prunes_dead_records` by that
+    /// bit alone.
+    #[cfg(test)]
+    pub(crate) fn without_prune(mut self) -> Self {
+        self.enabled = false;
+        self
     }
 }
 
@@ -327,8 +362,11 @@ pub(crate) async fn prune_and_report(
 /// `~/.trusty-mpm/auto-prune-seen.json`, and must never depend on whether the
 /// machine running it has tmux. See [`PruneContext`] for the CI failure that
 /// made the second half of that non-negotiable.
-/// What: see [`prune_and_report`].
-/// Test: `session_ls_prunes_dead_records_on_piped_invocation`.
+/// What: see [`prune_and_report`]. A context built by [`PruneContext::disabled`]
+/// (`tm ls --no-prune`, #5950) returns `sessions` untouched with an empty
+/// `dead_ids` — nothing is swept, so nothing is classified.
+/// Test: `session_ls_prunes_dead_records_on_piped_invocation`,
+/// `session_ls_no_prune_makes_the_read_non_mutating`.
 pub(crate) async fn prune_and_report_at(
     client: &reqwest::Client,
     url: &str,
@@ -336,6 +374,16 @@ pub(crate) async fn prune_and_report_at(
     ctx: &PruneContext,
     hides_dead_rows: bool,
 ) -> PrunedListing {
+    // #5950: `--no-prune` makes the listing a pure read — no sweep, no
+    // decommission call, no marker write, and no operator notice.
+    // #5950: `--no-prune` makes the listing a pure read — no sweep, no
+    // decommission call, no marker write, and no operator notice.
+    if !ctx.enabled {
+        return PrunedListing {
+            sessions,
+            dead_ids: HashSet::new(),
+        };
+    }
     let outcome = auto_prune_dead_records_at(
         client,
         url,

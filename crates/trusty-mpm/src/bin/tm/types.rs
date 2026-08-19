@@ -3,8 +3,10 @@
 //! Why: the thin CLI handlers deserialize daemon API responses into typed
 //! structs; centralising them keeps the handler files free of boilerplate
 //! and avoids duplicate definitions.
-//! What: `SessionRow`, `ProjectRow`, and `EventRow` mirror the shapes returned
-//! by `GET /sessions`, `GET /projects`, and `GET /events/poll`.
+//! What: `SessionRow` and `EventRow` mirror the shapes returned by
+//! `GET /sessions` and `GET /events/poll`. `ProjectRow` (the `GET /projects`
+//! shape) went away with #5994 — `tm project list` reads the persistent
+//! registry through `DaemonClient` and its typed `Project` record instead.
 //! Test: deserialization is exercised indirectly by the handler unit tests.
 
 use serde::Deserialize;
@@ -21,15 +23,6 @@ pub(crate) struct SessionRow {
     /// Number of active delegations.
     #[serde(default)]
     pub(crate) active_delegations: u32,
-}
-
-/// One project row as returned by `GET /projects`.
-#[derive(Debug, Deserialize)]
-pub(crate) struct ProjectRow {
-    /// Absolute project path.
-    pub(crate) path: std::path::PathBuf,
-    /// Human-readable project name.
-    pub(crate) name: String,
 }
 
 /// One event row as returned by `GET /events`.

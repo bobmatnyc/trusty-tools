@@ -789,6 +789,45 @@ fn evaluate_worktree_add_command_resolves_relative_target_against_cwd() {
     );
 }
 
+/// Both spellings of macOS's `$TMPDIR` root deny, cwd-relative included (#5924).
+///
+/// Why: `/var` is a symlink to `/private/var`, and `current_dir()` inside
+/// `$TMPDIR` returns the resolved `/private/var/folders/...` spelling. The
+/// denylist carried only `/var/folders`, so a relative target resolved from
+/// that cwd matched nothing and the guard let it through — the same paired-entry
+/// treatment `/tmp` and `/private/tmp` already had was never applied to `/var`.
+#[test]
+fn evaluate_worktree_add_command_denies_both_var_folders_spellings() {
+    for cwd in [
+        Path::new("/var/folders/x1/abc/T"),
+        Path::new("/private/var/folders/x1/abc/T"),
+    ] {
+        assert_eq!(
+            evaluate_worktree_add_command("git worktree add wt-x", cwd),
+            Some(WORKTREE_TMP_REASON),
+            "cwd-relative target must deny from: {}",
+            cwd.display()
+        );
+    }
+    let proj = Path::new("/Users/x/proj");
+    for cmd in [
+        "git worktree add /private/var/folders/x1/abc/T/wt-x",
+        "cd /private/var/folders/x1/abc/T && git worktree add wt-x",
+        "git -C /private/var/folders/x1/abc/T worktree add wt-x",
+    ] {
+        assert_eq!(
+            evaluate_worktree_add_command(cmd, proj),
+            Some(WORKTREE_TMP_REASON),
+            "expected deny for: {cmd}"
+        );
+    }
+    // `/private/var` outside `folders/` is ordinary system state, not scratch.
+    assert_eq!(
+        evaluate_worktree_add_command("git worktree add /private/var/lib/wt-x", proj),
+        None
+    );
+}
+
 #[test]
 fn evaluate_worktree_add_command_follows_cd_prefix() {
     // `cd /tmp && git worktree add wt-foo` — the cwd change must be tracked

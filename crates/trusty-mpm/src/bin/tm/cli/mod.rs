@@ -865,7 +865,9 @@ pub(crate) enum Command {
         root: Option<String>,
     },
 
-    /// Interactive managed-session connector — list sessions and connect (#2311).
+    /// Interactive managed-session connector — list sessions and connect
+    /// (#2311). Auto-prunes dead records; `--no-prune` for a read that
+    /// changes nothing.
     ///
     /// Why: bare `tm ls` should do the most useful fleet action for the operator's
     /// current context. On a real terminal it opens the interactive session picker
@@ -956,6 +958,17 @@ pub(crate) enum Command {
         /// `filter_attached_*`, `ls_connector_should_show_picker_attached_static`.
         #[arg(long, short = 'a')]
         attached: bool,
+        /// Do NOT auto-prune dead records on this listing (session mode only,
+        /// #5950).
+        ///
+        /// Every listing decommissions confirmed-dead records by default
+        /// (#4702) — records whose workspace is gone, never a live session.
+        /// This flag turns that off for one invocation, making the listing a
+        /// pure read: no decommission call, no confirmation-marker write, no
+        /// prune notice. Dead rows the sweep would have hidden stay visible,
+        /// because nothing classified them.
+        #[arg(long)]
+        no_prune: bool,
         /// Override the managed root (default: `~/.trusty-mpm`). `--projects` only.
         ///
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >

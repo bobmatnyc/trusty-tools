@@ -367,10 +367,12 @@ fn normalize_bool_flag(value: &str) -> anyhow::Result<String> {
 
 /// Render one project as a compact `name  repo_url  (branch)` line.
 ///
-/// Why: shared between `list` and `show`; a pure helper keeps it testable.
+/// Why: shared between `list`, `show`, and the singular `tm project list`
+/// (#5994), which appends its own `[mcp-trusted]` marker to this line rather
+/// than growing a second renderer that could drift from it.
 /// What: name, repo URL, and default branch on one line.
 /// Test: `render_project_line_basic`.
-fn render_project_line(p: &Project) -> String {
+pub(crate) fn render_project_line(p: &Project) -> String {
     format!("{}\t{}\t({})", p.name, p.repo_url, p.default_branch)
 }
 

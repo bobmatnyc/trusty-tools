@@ -531,12 +531,25 @@ pub(crate) const WORKTREE_TMP_REASON: &str = "`git worktree add` must not target
 /// symlink) but both are listed literally because [`resolves_under_denylisted_tmp`]
 /// does a lexical prefix match, not a filesystem-resolving one (see that
 /// function's doc for why). `/var/folders` is the root `$TMPDIR` resolves
-/// under on macOS (e.g. `/var/folders/x1/…/T/`), and the harness scratchpad
-/// (`/private/tmp/claude-502/…`) is already covered by the `/private/tmp`
-/// entry — it is called out separately in the deny message (not here) because
-/// agents are told to prefer it "instead of /tmp", making it the subtle case
-/// that looks compliant while still landing in a denylisted zone.
-const WORKTREE_TMP_DENYLIST_ROOTS: &[&str] = &["/tmp", "/private/tmp", "/var/folders"];
+/// under on macOS (e.g. `/var/folders/x1/…/T/`), and `/var` is itself a
+/// symlink to `/private/var`, so `/private/var/folders` is the SAME location
+/// under its resolved spelling and needs the same paired entry `/tmp` already
+/// has. `current_dir()` inside `$TMPDIR` returns that resolved spelling, so
+/// without this entry a cwd-relative target resolved from a
+/// `/private/var/folders` working directory slipped past the guard (#5924).
+/// The harness scratchpad (`/private/tmp/claude-502/…`) is already covered by
+/// the `/private/tmp` entry — it is called out separately in the deny message
+/// (not here) because agents are told to prefer it "instead of /tmp", making
+/// it the subtle case that looks compliant while still landing in a
+/// denylisted zone.
+const WORKTREE_TMP_DENYLIST_ROOTS: &[&str] = &[
+    "/tmp",
+    "/private/tmp",
+    "/var/folders",
+    // #5924: /var is a symlink to /private/var, so $TMPDIR's resolved spelling
+    // needs the same paired entry /tmp already has.
+    "/private/var/folders",
+];
 
 /// `git worktree add`'s own flags that consume a following argv token.
 ///
@@ -589,10 +602,11 @@ const WORKTREE_ADD_FLAGS_WITH_ARG: &[&str] = &["-b", "-B", "--reason"];
 ///   yet and a guard must stay fast and side-effect-free.
 ///   `resolves_under_denylisted_tmp` therefore cannot see through a symlink
 ///   the way the OS eventually would.
-///   `/tmp` itself being a symlink to `/private/tmp` is NOT in this bucket —
-///   both spellings are literal entries in [`WORKTREE_TMP_DENYLIST_ROOTS`],
-///   so a literal `/tmp/...` argument is caught without needing to resolve
-///   the symlink.
+///   `/tmp` itself being a symlink to `/private/tmp`, and `/var` to
+///   `/private/var`, are NOT in this bucket — both spellings of each are
+///   literal entries in [`WORKTREE_TMP_DENYLIST_ROOTS`] (#5924), so a literal
+///   `/tmp/...` or `/private/var/folders/...` argument is caught without
+///   needing to resolve the symlink.
 /// - Multiple/cumulative `git -C` flags are collapsed to "the last one
 ///   present"; real git applies them successively relative to each other.
 ///   Realistic invocations use at most one `-C`.
