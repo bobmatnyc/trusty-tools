@@ -133,8 +133,8 @@ pub struct ReportSection {
     /// Why: `--analyze` populates the complexity chart + finding bands from the
     /// analyze daemon; the URL is deployment-specific.  Precedence: this manifest
     /// key wins when set; otherwise `ReviewConfig.analyzer_url` (env
-    /// `PR_INTELLIGENCE_ANALYZER_URL`, itself defaulting to the loopback daemon
-    /// `http://localhost:7879` ≡ `http://127.0.0.1:7879`) applies.
+    /// `PR_INTELLIGENCE_ANALYZER_URL`, itself defaulting to
+    /// [`crate::config::DEFAULT_ANALYZER_URL`]) applies.
     #[serde(default)]
     pub analyze_url: Option<String>,
 }

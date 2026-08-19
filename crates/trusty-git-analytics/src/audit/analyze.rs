@@ -58,7 +58,13 @@ pub const DEFAULT_ANALYZE_BIN: &str = "trusty-analyze";
 pub const ENV_ANALYZE_URL: &str = "PR_INTELLIGENCE_ANALYZER_URL";
 
 /// Default analyze daemon address, matching `trusty-review`'s own default.
-pub const DEFAULT_ANALYZE_URL: &str = "http://localhost:7879";
+///
+/// Why (#6038): the literal address, not `localhost`. `trusty-analyze serve`
+/// binds `127.0.0.1` only, and macOS resolves `localhost` to `::1` first, so
+/// the spelling decided whether the first connect reached the daemon at all.
+/// It tracks `trusty_review::config::DEFAULT_ANALYZER_URL` by hand — the two
+/// crates must not disagree about which daemon they mean.
+pub const DEFAULT_ANALYZE_URL: &str = "http://127.0.0.1:7879";
 
 /// The port `trusty-analyze serve` binds when the URL names none.
 pub const DEFAULT_ANALYZE_PORT: u16 = 7879;
@@ -104,7 +110,7 @@ pub struct AnalyzeDaemonUnavailable {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct AnalyzeGuard {
-    /// Base address of the daemon, e.g. `http://localhost:7879`.
+    /// Base address of the daemon, e.g. `http://127.0.0.1:7879`.
     pub url: String,
     /// Binary name or path to spawn when the daemon is absent.
     pub binary: String,

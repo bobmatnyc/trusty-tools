@@ -33,6 +33,21 @@ use tokio_stream::wrappers::BroadcastStream;
 use super::handlers;
 use super::ui;
 
+/// The one interface `serve` binds.
+///
+/// Why (#6038): this was an unnamed `[127, 0, 0, 1]` literal at the bind site,
+/// so nothing said out loud that the daemon answers on the IPv4 loopback and
+/// ONLY there. A client whose default URL said `localhost` therefore looked
+/// correct while resolving `::1` first on macOS and never reaching this socket;
+/// naming the address is what lets a reader check the two agree. It stays
+/// loopback: binding any other interface would expose an unauthenticated
+/// analysis API to the network (ADR-0018).
+/// What: the IPv4 loopback octets, paired with the caller's `start_port` in
+/// [`serve`].
+/// Test: `super::tests` bind their own ephemeral listeners; the loopback
+/// doctrine itself is inventoried in `docs/reference/threat-model.md`.
+const LOOPBACK_BIND: [u8; 4] = [127, 0, 0, 1];
+
 /// Build the axum router around `state`.
 ///
 /// Why: Composes the analyzer's HTTP surface in one place so callers (binary,
@@ -166,7 +181,7 @@ pub fn build_router_with_self_origins(
 /// Test: integration tests bind their own listener — exercised by
 /// `cargo test -p trusty-analyzer-service`.
 pub async fn serve(state: AnalyzerAppState, start_port: u16) -> Result<()> {
-    let start_addr: SocketAddr = ([127, 0, 0, 1], start_port).into();
+    let start_addr: SocketAddr = (LOOPBACK_BIND, start_port).into();
     let listener = trusty_common::bind_with_auto_port(start_addr, 64).await?;
     let actual = listener.local_addr()?;
     trusty_common::write_daemon_addr("trusty-analyze", &actual.to_string())?;

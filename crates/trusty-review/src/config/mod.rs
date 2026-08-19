@@ -47,6 +47,20 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::warn;
 
+// ─── Service defaults ─────────────────────────────────────────────────────────
+
+/// Where `--analyze` looks for the trusty-analyze daemon when
+/// `PR_INTELLIGENCE_ANALYZER_URL` is unset.
+///
+/// Why (#6038): the literal address, not `localhost`. `trusty-analyze serve`
+/// binds `127.0.0.1` only (ADR-0018, and `service/routes.rs::LOOPBACK_BIND`),
+/// while macOS resolves `localhost` to `::1` first — so the default URL named a
+/// socket that does not exist, the first connect was refused, and the operator
+/// had to export the variable by hand to get a populated report.
+/// What: `http://127.0.0.1:7879`. The env-var override is unchanged.
+/// Test: `config::tests::analyzer_url_defaults_to_the_literal_loopback_address`.
+pub const DEFAULT_ANALYZER_URL: &str = "http://127.0.0.1:7879";
+
 // ─── Provider identifier ──────────────────────────────────────────────────────
 
 /// LLM backend provider.
@@ -199,7 +213,7 @@ pub struct ReviewConfig {
     /// trusty-search base URL (`TRUSTY_SEARCH_URL`, default `http://localhost:7878`).
     pub search_url: String,
     /// trusty-analyze base URL (`PR_INTELLIGENCE_ANALYZER_URL`, default
-    /// `http://localhost:7879`).
+    /// [`DEFAULT_ANALYZER_URL`]).
     pub analyzer_url: String,
     /// Default trusty-search index (`TRUSTY_SEARCH_INDEX`, default `main`).
     ///
@@ -425,7 +439,7 @@ impl ReviewConfig {
             search_url: std::env::var("TRUSTY_SEARCH_URL")
                 .unwrap_or_else(|_| "http://localhost:7878".to_string()),
             analyzer_url: std::env::var("PR_INTELLIGENCE_ANALYZER_URL")
-                .unwrap_or_else(|_| "http://localhost:7879".to_string()),
+                .unwrap_or_else(|_| DEFAULT_ANALYZER_URL.to_string()),
             search_index: std::env::var("TRUSTY_SEARCH_INDEX")
                 .unwrap_or_else(|_| "main".to_string()),
             search_index_explicit: std::env::var("TRUSTY_SEARCH_INDEX").is_ok(),

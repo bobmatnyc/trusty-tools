@@ -872,7 +872,8 @@ target and is O(corpus) (never a readiness probe, per REV-441).
 
 **Daemon URL.** Precedence: manifest `[report].analyze_url` (when set) > env
 `PR_INTELLIGENCE_ANALYZER_URL` (via `ReviewConfig.analyzer_url`) > default
-`http://127.0.0.1:7879` (the loopback `localhost:7879` the config defaults to).
+`http://127.0.0.1:7879` (the address the config defaults to; #6038 dropped the
+`localhost` spelling, which macOS resolves `::1`-first).
 
 **Metrics-resolution precedence (fail-open).** Declared metrics file (manifest
 `metrics` key) > `--analyze` live fetch > `None` (bare scan). `--analyze` fills a

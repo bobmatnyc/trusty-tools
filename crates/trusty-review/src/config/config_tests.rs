@@ -174,6 +174,28 @@ fn config_analyzer_url_default() {
     );
 }
 
+/// Why (#6038): the default named `localhost`, which macOS resolves `::1`
+/// first, while `trusty-analyze serve` binds `127.0.0.1` only — so a stock
+/// `--analyze` run could not reach a healthy daemon and every report degraded
+/// to scan until the operator exported the variable by hand. The default must
+/// name an address, not a hostname whose resolution decides whether the fetch
+/// works.
+/// What: asserts the constant is the literal IPv4 loopback, and that an
+/// unset `PR_INTELLIGENCE_ANALYZER_URL` loads exactly it.
+/// Test: This is the test.
+#[test]
+fn analyzer_url_defaults_to_the_literal_loopback_address() {
+    assert_eq!(
+        crate::config::DEFAULT_ANALYZER_URL,
+        "http://127.0.0.1:7879",
+        "the default must not depend on hostname resolution"
+    );
+    if std::env::var("PR_INTELLIGENCE_ANALYZER_URL").is_err() {
+        let config = ReviewConfig::from_env_and_file(None, None);
+        assert_eq!(config.analyzer_url, crate::config::DEFAULT_ANALYZER_URL);
+    }
+}
+
 #[test]
 fn live_review_requesters_parses_csv() {
     // The parser is pure aside from the env read; assert it lowercases,

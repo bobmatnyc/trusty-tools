@@ -36,6 +36,17 @@ use super::metrics::{
 /// Per-request HTTP timeout for analyze fetches (fail-open on timeout).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How many extra attempts a retryable transport failure earns.
+///
+/// Why (#6038): the adapter issues four GETs back to back, and reqwest keeps
+/// them on one HTTP/1.1 keep-alive connection. The daemon closing that
+/// connection races the client's next write, so a GET can be committed to a
+/// socket that is already going away — which surfaced as
+/// `error sending request` and degraded every `--analyze` render to scan. The
+/// bound is one: a peer that closes the replacement connection too is not
+/// answering, and the report falls back to scan either way.
+const TRANSPORT_RETRIES: u32 = 1;
+
 // ─── Error type ────────────────────────────────────────────────────────────
 
 /// Errors produced while fetching analyze data. All are handled fail-open by
@@ -72,6 +83,22 @@ pub enum AnalyzeAdapterError {
 }
 
 type AdapterResult<T> = std::result::Result<T, AnalyzeAdapterError>;
+
+/// Does this transport failure describe a connection that went away mid-request?
+///
+/// Why (#6038): only that class earns a retry. A connect refusal means nothing
+/// is listening, and a timeout means the daemon is slower than
+/// [`FETCH_TIMEOUT`] — re-running either just doubles the wall-clock cost of a
+/// fetch that is going to fail open anyway. What is left is the case the client
+/// cannot avoid: a keep-alive connection the daemon closed after the request
+/// was already committed to it.
+/// What: true for a send/body failure that is neither a timeout nor a connect
+/// error.
+/// Test: `transport_failure_on_a_reused_connection_retries_once` (retried) and
+/// `fetch_returns_none_on_unreachable_daemon` (a refused connect is not).
+fn is_retryable_transport(e: &reqwest::Error) -> bool {
+    !e.is_timeout() && !e.is_connect() && !e.is_builder()
+}
 
 // ─── Wire types (trusty-analyze JSON, minimal shapes) ────────────────────────
 
@@ -537,7 +564,10 @@ impl HttpAnalyzeMetricsSource {
         if base.ends_with('/') {
             base.pop();
         }
-        let http = reqwest::Client::builder()
+        // #6038: the shared loopback constructor, not a bare builder — it is
+        // what applies `.no_proxy()`, so an exported HTTP_PROXY no longer
+        // diverts a 127.0.0.1 fetch to a proxy that never answers (#4392).
+        let http = trusty_common::http_client::loopback_client_builder()
             .timeout(FETCH_TIMEOUT)
             .connect_timeout(Duration::from_secs(3))
             .build()
@@ -548,21 +578,53 @@ impl HttpAnalyzeMetricsSource {
         })
     }
 
+    /// One attempt: send the GET and read the whole body.
+    ///
+    /// Why: separated from [`Self::get_json`] so the retry in that function can
+    /// re-run send AND body-read together — a connection torn down part-way
+    /// through the response fails at the read, not at the send.
+    /// What: returns the status and the body text, or the raw `reqwest::Error`
+    /// so the caller can classify it.
+    /// Test: exercised by every `get_json` test.
+    async fn send_once(&self, url: &str) -> reqwest::Result<(reqwest::StatusCode, String)> {
+        let resp = self.http.get(url).send().await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        Ok((status, body))
+    }
+
     /// GET `path` and deserialize the JSON body into `T`, mapping every failure
     /// mode to a typed [`AnalyzeAdapterError`].
+    ///
+    /// Why (#6038): a transport failure on a POOLED connection is not evidence
+    /// the daemon is down — HTTP/1.1 keep-alive makes "the server closed a
+    /// connection the client still held" an unavoidable race, and RFC 9112 §9.3
+    /// puts recovery on the client. A GET is idempotent, so one retry on a
+    /// fresh connection is safe and is the difference between a populated
+    /// `--analyze` report and a silent fall back to scan.
+    /// What: retries [`Self::send_once`] at most [`TRANSPORT_RETRIES`] times
+    /// when [`is_retryable_transport`] classifies the failure as a lost
+    /// connection; reqwest discards the errored connection, so the retry
+    /// necessarily dials a new one. Non-2xx and parse failures are terminal.
+    /// Test: `transport_failure_on_a_reused_connection_retries_once`,
+    /// `a_connection_that_keeps_dying_is_retried_exactly_once`.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> AdapterResult<T> {
         let url = format!("{}{path}", self.base_url);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| AnalyzeAdapterError::Transport(format!("GET {url}: {e}")))?;
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| AnalyzeAdapterError::Transport(format!("read body of {url}: {e}")))?;
+        let mut retries = 0;
+        let (status, body) = loop {
+            match self.send_once(&url).await {
+                Ok(answer) => break answer,
+                Err(e) if retries < TRANSPORT_RETRIES && is_retryable_transport(&e) => {
+                    retries += 1;
+                    tracing::debug!(
+                        %url,
+                        error = %e,
+                        "--analyze: pooled connection lost; retrying on a fresh one"
+                    );
+                }
+                Err(e) => return Err(AnalyzeAdapterError::Transport(format!("GET {url}: {e}"))),
+            }
+        };
         if !status.is_success() {
             return Err(AnalyzeAdapterError::Api {
                 status: status.as_u16(),

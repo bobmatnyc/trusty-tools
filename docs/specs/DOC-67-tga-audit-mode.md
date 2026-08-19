@@ -352,7 +352,7 @@ delivered a report with those three sections empty and exited 0.
 (`crates/trusty-git-analytics/src/audit/analyze.rs`): it probes `/health`,
 spawns `<binary> serve --port <port>` detached when there is no answer, and polls
 until the daemon answers. The binary is `TRUSTY_ANALYZE_BIN` else PATH, and the
-address is `PR_INTELLIGENCE_ANALYZER_URL` else `http://localhost:7879` — the same
+address is `PR_INTELLIGENCE_ANALYZER_URL` else `http://127.0.0.1:7879` (#6038) — the same
 variable `trusty-review` reads, so the daemon that gets started and the daemon
 that gets queried are the same process by construction. The probe/spawn/poll loop
 is `trusty_common::daemon_guard`, not a second copy.
