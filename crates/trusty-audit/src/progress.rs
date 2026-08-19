@@ -55,6 +55,8 @@ pub enum Operation {
     Package,
     /// Assembling the inbound install package to send a client (#5825).
     Distribute,
+    /// Re-rendering a delivered audit's reports from what shipped with it (#6080).
+    Rerender,
 }
 
 impl Operation {
@@ -66,6 +68,7 @@ impl Operation {
             Self::Sweep => "auditing repositories",
             Self::Package => "assembling the return package",
             Self::Distribute => "assembling the install package",
+            Self::Rerender => "re-rendering reports",
         }
     }
 
@@ -76,6 +79,7 @@ impl Operation {
             Self::CloneRepos | Self::Sweep => "repository",
             Self::Package => "archive",
             Self::Distribute => "file",
+            Self::Rerender => "report",
         }
     }
 
@@ -89,6 +93,7 @@ impl Operation {
             Self::CloneRepos | Self::Sweep => "repositories",
             Self::Package => "archives",
             Self::Distribute => "files",
+            Self::Rerender => "reports",
         }
     }
 }

@@ -169,7 +169,33 @@ pub fn inference_env<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
-    if config.openrouter_key.is_empty() {
+    selection_env(!config.openrouter_key.is_empty(), &config.models, operator)
+}
+
+/// [`inference_env`], for a caller that has a key but may have no config.
+///
+/// Why: #6080's re-render runs on the machine of whoever received the finished
+/// audit, and that machine has no `engagement.toml` — the config travels TO a
+/// recipient, not back out with the deliverable. The selection rule is the same
+/// one either way, so it stays one function rather than a second copy that can
+/// drift about which layer wins; only where the two inputs come from differs.
+/// What: everything [`inference_env`] does, with the key's presence and the
+/// `[models]` table passed in. A caller with no config passes
+/// [`ModelPins::default`], which resolves the built-in slugs.
+/// Test: `super::inference_tests::an_absent_models_table_resolves_the_defaults`.
+///
+/// # Errors
+///
+/// Exactly [`inference_env`]'s.
+pub fn selection_env<F>(
+    key_present: bool,
+    models: &ModelPins,
+    operator: F,
+) -> Result<Vec<(&'static str, String)>, AuditError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if !key_present {
         return Ok(Vec::new());
     }
 
@@ -188,7 +214,7 @@ where
         return Ok(Vec::new());
     }
 
-    let pins: &ModelPins = &config.models;
+    let pins: &ModelPins = models;
     let from_config = [
         pins.provider.as_deref(),
         pins.reviewer.as_deref(),
@@ -259,6 +285,29 @@ trusty-review = "0.15.1"
             .expect("an untouched operator environment resolves")
             .into_iter()
             .collect()
+    }
+
+    /// #6080: the re-render runs where there is no `engagement.toml` at all, so
+    /// the selection has to resolve from a key and nothing else — and it must be
+    /// the same four values the sweep would have used.
+    #[test]
+    fn an_absent_models_table_resolves_the_defaults() {
+        let without: HashMap<&'static str, String> =
+            selection_env(true, &ModelPins::default(), nothing_set)
+                .expect("a key with no config resolves")
+                .into_iter()
+                .collect();
+        assert_eq!(without, pairs(&config_from(CONFIG)));
+        assert_eq!(
+            without.get(ENV_PROVIDER).map(String::as_str),
+            Some(PROVIDER_OPENROUTER)
+        );
+        assert!(
+            selection_env(false, &ModelPins::default(), nothing_set)
+                .expect("no key resolves")
+                .is_empty(),
+            "with nothing to authenticate with there is nothing to select"
+        );
     }
 
     #[test]

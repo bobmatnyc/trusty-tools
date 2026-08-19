@@ -197,6 +197,7 @@ fn verb(operation: Operation) -> &'static str {
         Operation::CloneRepos => "cloning",
         Operation::Sweep => "auditing",
         Operation::Package | Operation::Distribute => "packaging",
+        Operation::Rerender => "re-rendering",
     }
 }
 
@@ -207,6 +208,7 @@ fn done(operation: Operation) -> &'static str {
         Operation::CloneRepos => "cloned",
         Operation::Sweep => "audited",
         Operation::Package | Operation::Distribute => "packaged",
+        Operation::Rerender => "re-rendered",
     }
 }
 

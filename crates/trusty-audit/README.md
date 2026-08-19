@@ -367,6 +367,40 @@ output, in `package.toml`, and in a non-zero exit status.
 `--out` is the one path on which this client writes outside the working
 directory, and only when you name one.
 
+## Re-rendering a delivered audit
+
+Whoever receives the finished audit can produce the report again from the
+package itself. Unzip it, then:
+
+```
+export OPENROUTER_API_KEY=<your OpenRouter key>
+trusty-audit render --from ~/acme-audit --out ~/acme-audit/rerendered
+```
+
+`--from` is the directory holding `reports/`; `--out` defaults to
+`<from>/rerendered`. It finds every `reports/<repo>/manifest.toml` and runs the
+report step over each one — the same step the sweep ran. It clones nothing,
+collects nothing, and never writes into the package it read, so the delivered
+files stay byte for byte what was sent.
+
+It needs `trusty-review` on the machine. The copy this client installed under
+`<work-dir>/tools/` is used when it is there, otherwise whatever is on `PATH`;
+`--review-bin` names one directly. There is no pin check — the verb renders at
+whatever version it finds.
+
+**What comes back, and what does not.** The scorecards, findings and appendices
+rebuild from the collected data that shipped in the package. Two things differ
+from the copy you were sent:
+
+- The executive summary and top risks are written by a model, so they are worded
+  differently over the same figures.
+- The code scan and the analysis pass need the repositories themselves, and the
+  package carries none — those repositories are named as gaps, one line each,
+  rather than left out silently.
+
+A report that fails to render is named with its log path and the others still
+render; a run that could not regenerate everything it found exits non-zero.
+
 ## Reading the manifest
 
 `tga audit` writes `manifest.toml` into its output directory (DOC-67 §6):

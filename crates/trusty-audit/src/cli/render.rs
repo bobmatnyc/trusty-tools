@@ -248,7 +248,65 @@ pub fn render(outcome: &Outcome) -> String {
         // differently from a `taudit clone`.
         Outcome::Audit(report) => render_chain(report),
         Outcome::Distributed(package) => render_install_package(package),
+        Outcome::Rerendered(report) => render_rerender(report),
     }
+}
+
+/// The regenerated reports, where they landed, and what did not come back.
+///
+/// Why: #6080 — the reader is whoever received the finished audit, so the two
+/// things they need are the files to open and an honest account of how this
+/// copy differs from the one they were sent. The differences are stated even on
+/// a clean run: a report rendered without the checkouts is thinner than the
+/// original, and nothing else on the screen would say so.
+/// What: the renderer and its source, one line per report with its written
+/// files, each report's gaps, and the closing note that the narrative is
+/// model-authored (DOC-68 §12).
+/// Test: `super::cli_tests::a_re_render_names_the_files_and_what_did_not_reproduce`.
+fn render_rerender(report: &crate::rerender::RerenderReport) -> String {
+    let mut out = format!(
+        "Re-rendered from {} with {}\n",
+        report.source.display(),
+        report.review.display()
+    );
+    for rendered in &report.reports {
+        match &rendered.result {
+            crate::rerender::RenderResult::Succeeded => {
+                out.push_str(&format!("ok      {}\n", rendered.name));
+                for artifact in &rendered.artifacts {
+                    out.push_str(&format!("        {}\n", artifact.display()));
+                }
+            }
+            crate::rerender::RenderResult::Failed { reason } => {
+                out.push_str(&format!("FAILED  {:<24} {reason}\n", rendered.name))
+            }
+        }
+        for gap in &rendered.gaps {
+            out.push_str(&format!("  gap   {gap}\n"));
+        }
+    }
+    let failed = report.failures().count();
+    let rendered = report.reports.len() - failed;
+    out.push_str(&match failed {
+        0 => format!(
+            "\nRe-rendered {} into {}.\n",
+            count_of(rendered, "report", "reports"),
+            report.output.display()
+        ),
+        _ => format!(
+            "\nPARTIAL: {rendered} re-rendered, {failed} failed. Only what succeeded is in {}.\n",
+            report.output.display()
+        ),
+    });
+    // DOC-68 §12: the facts rebuild from the shipped artifacts; the narrative
+    // does not, and saying so is what keeps a differently-worded summary from
+    // reading as a changed finding.
+    out.push_str(
+        "The executive summary and top risks are written by a model, so this copy words \
+         them differently from the one you were sent. The figures under them come from the \
+         same collected data.\n",
+    );
+    out
 }
 
 /// The inbound install package, and the credential it carries.

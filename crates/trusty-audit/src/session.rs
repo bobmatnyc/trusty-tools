@@ -32,6 +32,7 @@ use crate::manifest::{AuditManifest, RepositoryEntry};
 use crate::package::{self, ReturnPackage};
 use crate::progress::{Progress, ProgressSink};
 use crate::registry::{self, Registration, Removal, TargetKind, TargetList};
+use crate::rerender::{self, RerenderOptions, RerenderReport};
 use crate::run::{self, RunOptions, RunReport};
 use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
 use crate::validate;
@@ -124,6 +125,13 @@ pub enum Command {
     /// travel opposite ways and disagree about the credential, so they are two
     /// variants dispatching to two modules. See [`crate::distribute`].
     Distribute(DistributeOptions),
+    /// Re-render a delivered audit's reports from what shipped with it (#6080).
+    ///
+    /// The one capability whoever RECEIVES the finished deliverable runs, on a
+    /// machine that has the package and nothing else — no checkouts, no
+    /// engagement config, no pinned tools. It carries its options because all
+    /// three are operator choices with defaults; see [`crate::rerender`].
+    Rerender(RerenderOptions),
 }
 
 /// How hard a front end should look for the inference credential (#5868).
@@ -170,7 +178,15 @@ impl Command {
             // prompt: packaging must not stop to ask, and the auditor running
             // `distribute` supplies a key through the environment or the
             // template, which is the contract #5825 set.
-            Self::Package { .. } | Self::Distribute(_) => CredentialNeed::Environment,
+            // #6080: the re-render's renderer needs inference the same way the
+            // sweep's does, but it must never PROMPT: it runs on the recipient's
+            // machine, where the engagement config that a prompt would write a
+            // key into does not exist. An exported key, or the config's when
+            // there is one — `Session::rerender` owns that second fallback,
+            // exactly as `Session::engagement_config` owns it for the sweep.
+            Self::Package { .. } | Self::Distribute(_) | Self::Rerender(_) => {
+                CredentialNeed::Environment
+            }
             Self::Guided
             | Self::WorkDir
             | Self::Manifest
@@ -300,6 +316,12 @@ pub enum Outcome {
     /// From [`Command::Distribute`] — the file to send a client, and what it
     /// will run on.
     Distributed(InstallPackage),
+    /// From [`Command::Rerender`] — the reports regenerated, and where.
+    ///
+    /// Like [`Outcome::Run`], a report carrying failures is an ORDINARY `Ok`:
+    /// the renders ran and some of them did not work, and those failures are
+    /// data the front end must show.
+    Rerendered(RerenderReport),
 }
 
 /// Exit status for a run that succeeded but did not cover everything asked for.
@@ -356,6 +378,11 @@ impl Outcome {
             {
                 EXIT_INCOMPLETE
             }
+            // #6080: a re-render that could not regenerate every report it
+            // found is the same shape as a partly-failed sweep — the reports it
+            // did produce are worth having, and `taudit render && open …` must
+            // not read that as a whole deliverable.
+            Outcome::Rerendered(report) if report.failures().next().is_some() => EXIT_PARTIAL,
             _ => 0,
         }
     }
@@ -608,6 +635,9 @@ impl Session {
             // calls each of them unchanged, so this and they cannot drift.
             Command::Audit(options) => self.audit(&options).await.map(Outcome::Audit),
             Command::Distribute(options) => self.distribute(&options).map(Outcome::Distributed),
+            // #6080: the render step of the sweep, run on its own against the
+            // manifests a delivered package already carries.
+            Command::Rerender(options) => self.rerender(&options).await.map(Outcome::Rerendered),
         }
     }
 
@@ -938,6 +968,41 @@ impl Session {
         run::sweep(&self.work, &config, options, &self.progress).await
     }
 
+    /// Re-render a delivered audit's reports (#6080).
+    ///
+    /// Why: this is the one capability that must work with no engagement — the
+    /// person running it received a finished deliverable, not a handoff
+    /// package, so `engagement.toml` is usually absent and the pinned tools
+    /// were never installed here. So it loads the config only if there is one,
+    /// and it performs no pin check: the verb runs at whatever version the
+    /// renderer is (owner ruling on #6080).
+    /// What: resolves the key — the front end's, else the config's — refuses a
+    /// run that has neither, resolves the model selection through the same
+    /// `crate::inference` rule the sweep uses, and hands both to
+    /// [`crate::rerender::rerender`].
+    /// Test: `crate::session::session_tests::a_re_render_with_no_credential_anywhere_is_refused`.
+    ///
+    /// # Errors
+    ///
+    /// [`AuditError::NoCredentialSource`] when no key was exported and none is
+    /// configured, plus whatever [`crate::rerender::rerender`] refuses with.
+    async fn rerender(&self, options: &RerenderOptions) -> Result<RerenderReport, AuditError> {
+        let config = EngagementConfig::load_if_present(&self.config_path)?;
+        let key = self
+            .credential
+            .clone()
+            .or_else(|| config.as_ref().map(|c| c.openrouter_key.clone()))
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| AuditError::NoCredentialSource {
+                env: run::ENV_INFERENCE_CREDENTIAL,
+                config: self.config_path.clone(),
+            })?;
+        let models = config.map(|c| c.models).unwrap_or_default();
+        let inference =
+            crate::inference::selection_env(true, &models, |name| std::env::var(name).ok())?;
+        rerender::rerender(&self.work, &key, &inference, options, &self.progress).await
+    }
+
     /// Read the engagement's pins, then install exactly those.
     ///
     /// The config is loaded rather than defaulted: an absent or unreadable
@@ -1084,6 +1149,49 @@ path = "/work/repos/acme-api"
 
     fn session_in(dir: &Path) -> Session {
         Session::new(WorkDir::new(dir.join("work")))
+    }
+
+    /// 🔴 #6080: the re-render calls a model, so a run with no key anywhere must
+    /// refuse before it starts a renderer that would fail on every manifest —
+    /// and the refusal must name both ways to supply one, because the recipient
+    /// running this usually has no engagement config at all.
+    #[tokio::test]
+    async fn a_re_render_with_no_credential_anywhere_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path());
+
+        let refusal = session
+            .execute(Command::Rerender(RerenderOptions::default()))
+            .await
+            .expect_err("a re-render with no key must refuse");
+
+        let rendered = refusal.to_string();
+        assert!(
+            rendered.contains(run::ENV_INFERENCE_CREDENTIAL),
+            "{rendered}"
+        );
+        assert!(rendered.contains("engagement.toml"), "{rendered}");
+    }
+
+    /// The front end's key is enough on its own: the recipient of a finished
+    /// audit exports one and has no config for it to live in.
+    #[tokio::test]
+    async fn a_re_render_takes_the_front_ends_key_with_no_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session =
+            session_in(tmp.path()).with_credential(Some(SecretKey::new("sk-or-v1-not-a-real-key")));
+
+        let refusal = session
+            .execute(Command::Rerender(RerenderOptions::default()))
+            .await
+            .expect_err("an empty working directory carries no report");
+
+        // Past the credential check, and stopped by the thing that is actually
+        // missing — a report to render.
+        assert!(
+            matches!(refusal, AuditError::NothingToRerender { .. }),
+            "{refusal}"
+        );
     }
 
     /// Record a sweep that reached the end of its selection (#5494).
