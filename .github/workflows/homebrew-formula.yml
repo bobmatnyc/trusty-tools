@@ -1,0 +1,57 @@
+# Homebrew formula generator gate.
+#
+# The generator itself (scripts/generate-homebrew-formula.sh) runs in
+# release.yml's homebrew-bump job, which fires only on a real tag push. That is
+# the whole reason this workflow exists: before the extraction the renderer was
+# an inline Python heredoc, and the only way to observe it was to cut a release
+# and look at what appeared in bobmatnyc/homebrew-trusty afterwards. A renderer
+# regression would have been discovered by a user running `brew install`.
+#
+# So CI runs the self-test's fixtures, not the generator. Two properties are
+# pinned there and neither is visible from a green release run:
+#
+#   - byte identity with every formula the live tap actually holds, which is the
+#     only evidence the extraction changed nothing;
+#   - the exit contract, including exit 3 for a run that updated zero formulae.
+#     A generator that returns 0 whether or not it wrote anything is reporting
+#     success from the evidence that it ran.
+#
+# Pure shell, no Rust toolchain, so it stays a fast standalone job. Mirrors
+# tag-publish-parity.yml's shape.
+name: Homebrew formula
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/generate-homebrew-formula.sh"
+      - "scripts/generate-homebrew-formula-selftest.sh"
+      - "scripts/test-data/homebrew/**"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/homebrew-formula.yml"
+  pull_request:
+    # Explicit activity types, matching line-cap.yml and tag-publish-parity.yml:
+    # `edited` catches a base-branch retarget, which the default set does not.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+    paths:
+      - "scripts/generate-homebrew-formula.sh"
+      - "scripts/generate-homebrew-formula-selftest.sh"
+      - "scripts/test-data/homebrew/**"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/homebrew-formula.yml"
+
+concurrency:
+  group: homebrew-formula-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  selftest:
+    name: Formula generator self-test (byte identity + exit contract)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Formula generator self-test
+        run: bash scripts/generate-homebrew-formula-selftest.sh
