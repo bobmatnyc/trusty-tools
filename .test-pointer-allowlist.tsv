@@ -253,10 +253,6 @@ crates/trusty-git-analytics/src/collect/git/reachability.rs	scan_default_branch_
 crates/trusty-git-analytics/src/collect/pm_adapter/tests.rs	logs_contain
 crates/trusty-git-analytics/src/commands/incidents/mod.rs	parse_datadog_value_handles_monitor_shape
 crates/trusty-git-analytics/src/commands/override_cmd.rs	list_returns_all_when_repo_none
-crates/trusty-git-analytics/src/report/aggregator/mod.rs	persist_weekly_engineer_upserts_rows
-crates/trusty-git-analytics/src/report/aggregator/mod.rs	persist_weekly_quality_upserts_rows
-crates/trusty-git-analytics/src/report/persist.rs	persist_weekly_engineer_upserts_rows
-crates/trusty-git-analytics/src/report/persist.rs	persist_weekly_quality_upserts_rows
 crates/trusty-installer/src/commands/plist_bootstrap.rs	resolve_uid_returns_nonzero
 crates/trusty-installer/src/commands/prereqs/mod.rs	check_no_warn_for_unrelated
 crates/trusty-installer/src/commands/prereqs/phase.rs	phase_all_present
