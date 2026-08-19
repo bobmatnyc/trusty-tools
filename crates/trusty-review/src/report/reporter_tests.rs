@@ -2213,3 +2213,60 @@ fn cast_reporter_states_a_zero_coverage_run_rather_than_omitting_it() {
 fn a_missing_ticketing_artifact_is_named_in_the_cast_template_too() {
     assert_template_names_a_missing_ticketing_artifact("report-technical-dd-cast");
 }
+
+/// #6029 regression: a sweep run WITHOUT `--analyze` carries no
+/// `AnalyzeMetrics`, but `RepoScan` is built on every model build — and the
+/// rendered Key Facts block must show that LoC figure. Before the fix
+/// `fill_key_facts` read `metrics` alone, so every row fell to the honesty
+/// marker, the omit-empty pass dropped all of them, and the polish pass
+/// collapsed the whole block to `_No data available — see Gaps & Caveats._`
+/// while the scan held 1.5M LoC. Assert the heading, the figure, and the
+/// absence of the collapse line together — the figure alone would pass on a
+/// report that had also dropped the heading.
+#[test]
+fn key_facts_renders_scan_loc_without_analyze_metrics() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    // Reproduce the no-`--analyze` shape: scan data present, metrics absent.
+    let repo = model.repositories.first_mut().expect("one repository");
+    repo.metrics = None;
+    repo.scan = Some(crate::report::scan::RepoScan {
+        total_loc: 1_500_000,
+        file_count: 8_432,
+        by_language: vec![crate::report::metrics::LanguageLoc {
+            language: "Rust".to_string(),
+            loc: 1_500_000,
+        }],
+        frameworks: vec![],
+    });
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("## Key Facts"), "{md}");
+    let section = md.split("## Key Facts").nth(1).expect("key facts body");
+    let block = section.split("## 2.").next().expect("block before §2");
+    assert!(
+        block.contains("1500000"),
+        "the scan's LoC figure must reach Key Facts:\n{block}"
+    );
+    assert!(
+        block.contains("8432"),
+        "the scan's file count must reach Key Facts:\n{block}"
+    );
+    assert!(
+        !block.contains("No data available"),
+        "Key Facts must never collapse while the sweep holds data:\n{block}"
+    );
+    // A genuinely absent input names itself in its own row rather than
+    // blanking the block around the data that IS present.
+    assert!(
+        block.contains("--analyze"),
+        "the complexity row must name its missing input:\n{block}"
+    );
+    assert!(
+        block.contains("authorship artifact"),
+        "the author rows must name their missing input:\n{block}"
+    );
+}

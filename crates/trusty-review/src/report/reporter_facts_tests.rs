@@ -1,10 +1,15 @@
 use super::*;
 use crate::report::metrics::{
-    AnalyzeMetrics, ComplexityBucket, ComplexityDistribution, CountMetrics, LanguageLoc, LocMetrics,
+    AnalyzeMetrics, ComplexityBucket, ComplexityDistribution, CountMetrics, LocMetrics,
 };
 use crate::report::model::RepositoryReport;
+use crate::report::scan::RepoScan;
 
 fn repo(metrics: Option<AnalyzeMetrics>) -> RepositoryReport {
+    repo_with(metrics, None)
+}
+
+fn repo_with(metrics: Option<AnalyzeMetrics>, scan: Option<RepoScan>) -> RepositoryReport {
     RepositoryReport {
         name: "app".to_string(),
         slug: "app".to_string(),
@@ -14,9 +19,16 @@ fn repo(metrics: Option<AnalyzeMetrics>) -> RepositoryReport {
         git_ref: None,
         git_info: None,
         local_path: None,
-        scan: None,
+        scan,
         metrics,
         authorship: None,
+    }
+}
+
+fn lang(name: &str, loc: u64) -> LanguageLoc {
+    LanguageLoc {
+        language: name.to_string(),
+        loc,
     }
 }
 
@@ -95,21 +107,100 @@ fn fills_aggregate_facts() {
     assert!(!rendered.contains("facts_author_count"));
 }
 
-/// (b)-style: a model with no metrics produces honesty markers, never
-/// fabricated values — every `facts_*` scalar stays unset.
+/// (b)-style: a model with neither metrics nor scan never fabricates a
+/// density figure — the three density rows stay unset, and the rows whose
+/// input is genuinely absent name that input instead of blanking (#6029).
 #[test]
 fn empty_model_is_all_gaps() {
     let model = model_with(vec![repo(None)]);
     let mut scope = Scope::new();
     fill_key_facts(&mut scope, &model);
-    let rendered = crate::report::fill::render(
-        "{{facts_total_loc}}|{{facts_total_files}}|{{facts_languages}}|{{facts_complexity_summary}}",
+    let density = crate::report::fill::render(
+        "{{facts_total_loc}}|{{facts_total_files}}|{{facts_languages}}",
         &scope,
     );
     assert_eq!(
-        rendered,
-        format!("{h}|{h}|{h}|{h}", h = crate::report::fill::HONESTY_MARKER)
+        density,
+        format!("{h}|{h}|{h}", h = crate::report::fill::HONESTY_MARKER)
     );
+
+    let named = crate::report::fill::render(
+        "{{facts_complexity_summary}}|{{facts_author_count}}|{{facts_work_estimate}}|{{facts_trajectory}}",
+        &scope,
+    );
+    assert!(named.contains("--analyze"), "{named}");
+    assert_eq!(named.matches("authorship artifact").count(), 2, "{named}");
+    assert!(named.contains("effort-estimation"), "{named}");
+    assert!(
+        !named.contains(crate::report::fill::HONESTY_MARKER),
+        "a genuinely absent input must name itself, never blank: {named}"
+    );
+}
+
+/// #6029 regression: a sweep with no `--analyze` still carries `RepoScan`
+/// data on every repository, and the Key Facts block must render that LoC
+/// figure. Before the fix `fill_key_facts` read `metrics` alone, every row
+/// fell to the honesty marker, and the omit-empty pass collapsed the whole
+/// block to `_No data available — see Gaps & Caveats._` while the scan held
+/// the number.
+#[test]
+fn scan_only_model_fills_density_facts() {
+    let scan = RepoScan {
+        total_loc: 1_500_000,
+        file_count: 8_432,
+        by_language: vec![lang("Rust", 1_400_000), lang("TypeScript", 100_000)],
+        frameworks: vec![],
+    };
+    let model = model_with(vec![repo_with(None, Some(scan))]);
+
+    let mut scope = Scope::new();
+    fill_key_facts(&mut scope, &model);
+    let rendered = crate::report::fill::render(
+        "{{facts_total_loc}}|{{facts_total_files}}|{{facts_languages}}",
+        &scope,
+    );
+
+    assert!(rendered.contains("1500000"), "{rendered}");
+    assert!(rendered.contains("8432"), "{rendered}");
+    assert!(rendered.contains("Rust"), "{rendered}");
+    assert!(
+        !rendered.contains(crate::report::fill::HONESTY_MARKER),
+        "scan data must reach every density row: {rendered}"
+    );
+}
+
+/// A `--analyze` figure wins over the scan's for the same repository, the
+/// precedence `reporter_fill::fill_profile` already established.
+#[test]
+fn metrics_win_over_scan_in_key_facts() {
+    let metrics = AnalyzeMetrics {
+        loc: LocMetrics {
+            total: 900,
+            by_language: vec![lang("Rust", 900)],
+        },
+        counts: CountMetrics {
+            files: 9,
+            functions: 90,
+        },
+        ..Default::default()
+    };
+    let scan = RepoScan {
+        total_loc: 111,
+        file_count: 1,
+        by_language: vec![lang("Shell", 111)],
+        frameworks: vec![],
+    };
+    let model = model_with(vec![repo_with(Some(metrics), Some(scan))]);
+
+    let mut scope = Scope::new();
+    fill_key_facts(&mut scope, &model);
+    let rendered = crate::report::fill::render(
+        "{{facts_total_loc}}|{{facts_total_files}}|{{facts_languages}}",
+        &scope,
+    );
+    assert!(rendered.contains("900"), "{rendered}");
+    assert!(!rendered.contains("111"), "{rendered}");
+    assert!(!rendered.contains("Shell"), "{rendered}");
 }
 
 /// Complexity buckets with the same label across repositories merge counts

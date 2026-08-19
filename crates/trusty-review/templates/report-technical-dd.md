@@ -88,12 +88,15 @@
      count, estimated work volume, and its trajectory by month — ahead of the
      narrative below. Every row is deterministic, never LLM-touched (it is
      the same anchor set the numeric guardrail validates narrative against).
-     Author count and monthly trajectory are the tga-side authorship artifact
-     (#5453); a manifest without one renders those two rows as named gaps,
-     never a silent zero. "Estimated work volume" is a named gap in every run
-     today — tga has no effort-estimation metric (its `story_points` fields
-     are documented placeholders, always zero) — rather than an invented
-     figure. -->
+     Density rows (LoC, file count, languages) come from a `--analyze` metrics
+     file when one was supplied, else from the built-in repository scan every
+     run produces (#6029). Complexity needs `--analyze`; author count and
+     monthly trajectory need the tga-side authorship artifact (#5453);
+     "Estimated work volume" is absent in every run today, because tga has no
+     effort-estimation metric (its `story_points` fields are documented
+     placeholders, always zero). Each of those rows states its own missing
+     input by name — never an invented figure, and never a blanket "no data"
+     covering the rows the run did populate. -->
 
 | Metric | Value |
 |---|---|
@@ -109,10 +112,15 @@
 
 {{executive_summary_paragraph}}
 
-<!-- One paragraph, deal-relevant: what matters to an acquirer, synthesized
-     across all applications — not a restatement of section headers. Voice is
+<!-- Deal-relevant, synthesized across all applications — not a restatement of
+     section headers. Owner ruling 2026-08-19 (#6030): it opens by describing
+     what the codebase IS and DOES, then analyzes the major components and
+     each one's role, then covers risk. Risk is still the core; the purpose
+     and component narrative sets it up rather than replacing it. Voice is
      balanced/adversarial: acquirer-side, skeptical of risk, evenhanded about
-     genuine strengths, never promotional. -->
+     genuine strengths, never promotional. Every claim is grounded in the
+     provided scan/dependency/authorship data — no invented product, market,
+     customer, component, or figure. -->
 
 {{report_contents_block}}
 
