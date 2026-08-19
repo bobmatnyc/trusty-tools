@@ -283,6 +283,15 @@ fn render_install_package(package: &InstallPackage) -> String {
     } else {
         "  credential: from the template config\n"
     });
+    // #5861: the template's board credentials belong to whichever engagement
+    // they were set for, so they do not ship. Said out loud, because an auditor
+    // whose template carries one would otherwise expect that board to collect.
+    if !package.dropped_board_credentials.is_empty() {
+        out.push_str(&format!(
+            "  not shipped: {} — set them in the recipient's own engagement.toml\n",
+            package.dropped_board_credentials.join(", ")
+        ));
+    }
     out.push_str(&format!("\nSend this file: {}\n", package.path.display()));
     out
 }

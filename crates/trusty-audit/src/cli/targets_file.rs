@@ -28,7 +28,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{AuditError, BadLine, BadLines};
+use crate::error::{AuditError, BadLine, BadLines, UnreadableFile, UnreadableFiles};
 use crate::registry::{self, TargetKind};
 
 /// The repository list, read from `engagement.toml`'s own directory.
@@ -149,27 +149,45 @@ impl Detected {
 /// issue removes.
 /// What: `None` when neither file exists. Both files are read before any
 /// verdict, so one run names every bad line in both.
+///
+/// #5993: a file that cannot be READ is collected the same way a bad line is,
+/// rather than returning immediately. An unreadable `repos.txt` used to end the
+/// read before `boards.txt` was opened, so the operator fixed the permissions,
+/// re-ran, and only then learned about the bad lines in the other file. One
+/// problem still reports the shape it always did — a single unreadable file and
+/// no bad lines is [`AuditError::Read`], with the OS error kept as its `source`.
+/// Anything else is one [`AuditError::TargetsFileRefused`] carrying both lists.
 /// Test: `super::targets_file_tests::neither_file_present_is_no_detection`,
-/// `super::targets_file_tests::one_bad_line_refuses_the_whole_read`.
+/// `super::targets_file_tests::one_bad_line_refuses_the_whole_read`,
+/// `super::targets_file_tests::an_unreadable_file_does_not_hide_the_other_files_bad_lines`.
 ///
 /// # Errors
 ///
-/// [`AuditError::Read`] when a file exists and cannot be read, and
-/// [`AuditError::TargetsFileRefused`] when any line in either file is not a
-/// target — in which case nothing from either file is returned.
+/// [`AuditError::Read`] when one file exists, cannot be read, and is the only
+/// problem; [`AuditError::TargetsFileRefused`] when any line in either file is
+/// not a target, or when more than one file could not be read — in which case
+/// nothing from either file is returned.
 pub fn detect(config_path: &Path) -> Result<Option<Detected>, AuditError> {
     let dir = config_path.parent().unwrap_or(Path::new("."));
     let mut specs = Vec::new();
     let mut sources = Vec::new();
     let mut bad = Vec::new();
+    let mut unreadable: Vec<Unreadable> = Vec::new();
 
     for (file, kind) in [
         (REPOS_FILE, TargetKind::Repo),
         (BOARDS_FILE, TargetKind::Board),
     ] {
         let path = dir.join(file);
-        let Some(text) = read_if_present(&path)? else {
-            continue;
+        // #5993: collected, never returned from here — the other file's
+        // diagnostics are the thing an early return was throwing away.
+        let text = match read_if_present(file, &path) {
+            Ok(Some(text)) => text,
+            Ok(None) => continue,
+            Err(failure) => {
+                unreadable.push(failure);
+                continue;
+            }
         };
         sources.push(path);
         for (offset, line) in text.lines().enumerate() {
@@ -188,8 +206,19 @@ pub fn detect(config_path: &Path) -> Result<Option<Detected>, AuditError> {
         }
     }
 
-    if !bad.is_empty() {
-        return Err(AuditError::TargetsFileRefused { bad: BadLines(bad) });
+    match (bad.is_empty(), unreadable.len()) {
+        // Nothing wrong.
+        (true, 0) => {}
+        // One unreadable file and nothing else: the shape this has always had,
+        // keeping the OS error as the refusal's `source`.
+        (true, 1) => return Err(unreadable.swap_remove(0).into_read_error()),
+        // Bad lines, or two unreadable files — one refusal naming everything.
+        _ => {
+            return Err(AuditError::TargetsFileRefused {
+                bad: BadLines(bad),
+                unreadable: UnreadableFiles(unreadable.iter().map(Unreadable::described).collect()),
+            });
+        }
     }
     if sources.is_empty() {
         return Ok(None);
@@ -197,14 +226,48 @@ pub fn detect(config_path: &Path) -> Result<Option<Detected>, AuditError> {
     Ok(Some(Detected { specs, sources }))
 }
 
+/// A targets file that is there and could not be opened (#5993).
+///
+/// Held rather than raised so [`detect`] can decide, once both files have been
+/// tried, whether this is the only problem — and therefore still the plain
+/// [`AuditError::Read`] callers have always seen — or one of several.
+struct Unreadable {
+    /// The file's own name, e.g. `repos.txt`.
+    file: &'static str,
+    /// Where it was looked for.
+    path: PathBuf,
+    /// What `read_to_string` failed with.
+    source: std::io::Error,
+}
+
+impl Unreadable {
+    /// This failure as the crate's structured read error, `source` intact.
+    fn into_read_error(self) -> AuditError {
+        AuditError::Read {
+            path: self.path,
+            source: self.source,
+        }
+    }
+
+    /// This failure as a line in a combined refusal.
+    fn described(&self) -> UnreadableFile {
+        UnreadableFile {
+            file: self.file.to_owned(),
+            path: self.path.clone(),
+            reason: self.source.to_string(),
+        }
+    }
+}
+
 /// A file's text, or `None` when it is not there.
-fn read_if_present(path: &Path) -> Result<Option<String>, AuditError> {
+fn read_if_present(file: &'static str, path: &Path) -> Result<Option<String>, Unreadable> {
     match std::fs::read_to_string(path) {
         // #5990: the byte-order mark comes off HERE, once, before any line is
         // looked at — see [`without_bom`].
         Ok(text) => Ok(Some(without_bom(text))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(AuditError::Read {
+        Err(source) => Err(Unreadable {
+            file,
             path: path.to_path_buf(),
             source,
         }),
@@ -698,7 +761,7 @@ mod targets_file_tests {
         );
         let err =
             detect(&tmp.path().join("engagement.toml")).expect_err("a bad line refuses the read");
-        let AuditError::TargetsFileRefused { bad } = &err else {
+        let AuditError::TargetsFileRefused { bad, .. } = &err else {
             panic!("expected a targets-file refusal: {err:?}");
         };
         assert_eq!(bad.0.len(), 1);
@@ -725,7 +788,7 @@ mod targets_file_tests {
             Some("linear:ENG\nhttps://linear.app/acme\n"),
         );
         let err = detect(&tmp.path().join("engagement.toml")).expect_err("both files are bad");
-        let AuditError::TargetsFileRefused { bad } = &err else {
+        let AuditError::TargetsFileRefused { bad, .. } = &err else {
             panic!("expected a targets-file refusal: {err:?}");
         };
         assert_eq!(bad.0.len(), 2);
@@ -754,5 +817,91 @@ mod targets_file_tests {
 
         let err = detect(&tmp.path().join("engagement.toml")).expect_err("unreadable");
         assert!(matches!(err, AuditError::Read { .. }), "{err:?}");
+    }
+
+    /// Make `file` present and unopenable. `None` when this account can read it
+    /// anyway — running as root defeats the mode, and CI containers do.
+    #[cfg(unix)]
+    fn unreadable(dir: &Path, file: &str, body: &str) -> Option<PathBuf> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = dir.join(file);
+        std::fs::write(&path, body).expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        std::fs::read_to_string(&path).is_err().then_some(path)
+    }
+
+    /// 🔴 #5993: an unreadable `repos.txt` must not hide `boards.txt`'s bad
+    /// lines.
+    ///
+    /// Against `6d937ba66` the read failure returned through `?` from the first
+    /// file, so `boards.txt` was never opened: the operator fixed the
+    /// permissions, re-ran, and only then met the bad line. Both problems are
+    /// now one refusal, so one run fixes them together.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_does_not_hide_the_other_files_bad_lines() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let Some(repos) = unreadable(tmp.path(), REPOS_FILE, "acme/api\n") else {
+            return;
+        };
+        std::fs::write(tmp.path().join(BOARDS_FILE), "linear:ENG\nnot a board\n").expect("write");
+
+        let err = detect(&tmp.path().join("engagement.toml")).expect_err("two problems, one read");
+        let AuditError::TargetsFileRefused { bad, unreadable } = &err else {
+            panic!("expected one refusal carrying both problems: {err:?}");
+        };
+        assert_eq!(bad.0.len(), 1, "{bad:?}");
+        assert_eq!(bad.0[0].file, BOARDS_FILE);
+        assert_eq!(bad.0[0].line, 2);
+        assert_eq!(unreadable.0.len(), 1, "{unreadable:?}");
+        assert_eq!(unreadable.0[0].file, REPOS_FILE);
+        assert_eq!(unreadable.0[0].path, repos);
+
+        let message = err.to_string();
+        assert!(message.contains(REPOS_FILE), "{message}");
+        assert!(message.contains("not a board"), "{message}");
+        assert!(message.contains("key is saved"), "{message}");
+    }
+
+    /// Two unreadable files are both named, for the same reason one unreadable
+    /// file plus a bad line is: fixing the first and re-running to discover the
+    /// second is the round trip #5993 removes.
+    #[cfg(unix)]
+    #[test]
+    fn both_unreadable_files_are_named_at_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let Some(_) = unreadable(tmp.path(), REPOS_FILE, "acme/api\n") else {
+            return;
+        };
+        let Some(_) = unreadable(tmp.path(), BOARDS_FILE, "linear:ENG\n") else {
+            return;
+        };
+
+        let err = detect(&tmp.path().join("engagement.toml")).expect_err("neither file opened");
+        let AuditError::TargetsFileRefused { bad, unreadable } = &err else {
+            panic!("expected a refusal naming both files: {err:?}");
+        };
+        assert!(bad.0.is_empty(), "{bad:?}");
+        assert_eq!(
+            unreadable
+                .0
+                .iter()
+                .map(|u| u.file.as_str())
+                .collect::<Vec<_>>(),
+            [REPOS_FILE, BOARDS_FILE]
+        );
+
+        // A refusal with no bad lines must not announce a section it has no
+        // entries for.
+        let message = err.to_string();
+        assert!(
+            !message.contains("these lines are not audit targets"),
+            "{message}"
+        );
+        assert!(
+            message.contains("these targets files could not be read"),
+            "{message}"
+        );
     }
 }

@@ -1,0 +1,3 @@
+Fixed
+
+- `cli::targets_file::detect` no longer stops at the first targets file it cannot open. An unreadable `repos.txt` used to return before `boards.txt` was read, so that file's bad lines went unreported and the operator fixed one problem, re-ran, and met the second. Read failures are now collected the way bad lines already were, and `AuditError::TargetsFileRefused` carries both lists — each under its own header, each rendering as nothing when empty. A single unreadable file with no bad lines still surfaces as `AuditError::Read` with the OS error as its `source` ([#5993](https://github.com/bobmatnyc/trusty-tools/issues/5993))

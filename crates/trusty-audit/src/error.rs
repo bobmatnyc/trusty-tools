@@ -49,18 +49,73 @@ impl fmt::Display for BadLine {
     }
 }
 
-/// Every [`BadLine`] one read produced, rendered one per line.
+/// Every [`BadLine`] one read produced, rendered one per line under a header.
 ///
 /// A newtype rather than a bare `Vec` so [`AuditError::TargetsFileRefused`] can
 /// interpolate the whole list into its message while the caller keeps the
 /// structure to assert on.
+///
+/// #5993: the header moved INTO this `Display` and an empty list renders as
+/// nothing, because that refusal now carries two lists and either one may be
+/// empty. A header printed from the message string would announce a section
+/// that has no entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BadLines(pub Vec<BadLine>);
 
 impl fmt::Display for BadLines {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return Ok(());
+        }
+        writeln!(f, "these lines are not audit targets:")?;
         for bad in &self.0 {
             writeln!(f, "  {bad}")?;
+        }
+        Ok(())
+    }
+}
+
+/// A targets file that is present and could not be read (#5993).
+///
+/// Why: `detect` used to return a read failure through `?` from the first file,
+/// so an unreadable `repos.txt` ended the read before `boards.txt` was opened
+/// and that file's bad lines were never reported. The operator fixed one
+/// problem, re-ran, and met the second. Carrying the failure beside [`BadLine`]
+/// is what lets one refusal state both.
+/// What: the file's own name, the full path, and the OS reason as text.
+/// `std::io::Error` is not `Clone`, and the structured error is not lost — a
+/// read failure that is the ONLY problem still surfaces as [`AuditError::Read`]
+/// with its `source` intact.
+/// Test: `crate::cli::targets_file::targets_file_tests::an_unreadable_file_does_not_hide_the_other_files_bad_lines`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableFile {
+    /// Which file, e.g. `repos.txt`.
+    pub file: String,
+    /// Where it was looked for.
+    pub path: PathBuf,
+    /// Why it could not be read, in the OS's own words.
+    pub reason: String,
+}
+
+impl fmt::Display for UnreadableFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { file, path, reason } = self;
+        write!(f, "{file} ({}): {reason}", path.display())
+    }
+}
+
+/// Every [`UnreadableFile`] one read produced. Empty renders as nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableFiles(pub Vec<UnreadableFile>);
+
+impl fmt::Display for UnreadableFiles {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return Ok(());
+        }
+        writeln!(f, "these targets files could not be read:")?;
+        for one in &self.0 {
+            writeln!(f, "  {one}")?;
         }
         Ok(())
     }
@@ -83,6 +138,39 @@ pub enum AuditError {
         /// The path that failed.
         path: PathBuf,
         /// The underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The working-directory root cannot be created where it was resolved.
+    ///
+    /// Why: #5941. `WorkDir::create` went straight to `create_dir_all`, so an
+    /// operator standing at `/` with no resolvable home met
+    /// `working directory /trusty-audit-work/tools: Read-only file system
+    /// (os error 30)` as their first sight of the tool — a message naming a
+    /// directory that was never created, which sends the reader hunting for a
+    /// path instead of at the cause. `workdir::default_root`'s own comment
+    /// assumed "the cwd is at least writable" for exactly that branch, and
+    /// nothing checked it.
+    /// What: names the root it needs, the directory it actually tried to write
+    /// in, why that failed, and the two ways out — run somewhere writable, or
+    /// set the environment variable. Raised before anything under the root is
+    /// created, so a refusal leaves the filesystem as it found it.
+    /// Test: `crate::workdir::layout_tests::an_unwritable_cwd_is_named_before_anything_is_created`,
+    /// `crate::workdir::layout_tests::an_unwritable_root_leaves_nothing_behind`.
+    #[error(
+        "the working directory {root} cannot be created: {tried} is not writable ({source}). \
+         Run this from a directory you can write to, or set {env} to a writable path; \
+         nothing was written"
+    )]
+    WorkDirNotWritable {
+        /// The root that was resolved and could not be made.
+        root: PathBuf,
+        /// The nearest existing ancestor — where creation would have begun.
+        tried: PathBuf,
+        /// The environment variable that names another root.
+        env: &'static str,
+        /// Why that directory refused the write.
         #[source]
         source: std::io::Error,
     },
@@ -617,16 +705,24 @@ pub enum AuditError {
     /// because the operator's next thought is whether re-running costs them the
     /// key prompt again.
     /// What: carries every refused line, from both files, with its number and
-    /// its own reason. The entry is quoted; a targets file holds no credential.
-    /// Test: `crate::cli::targets_file::targets_file_tests::one_bad_line_refuses_the_whole_read`.
+    /// its own reason, plus every file that could not be opened at all. The
+    /// entry is quoted; a targets file holds no credential.
+    ///
+    /// #5993: `unreadable` exists because a read failure used to return before
+    /// the second file was looked at, so its bad lines went unreported. Both
+    /// lists render under their own header and an empty one renders as nothing,
+    /// so this message never announces a section with no entries.
+    /// Test: `crate::cli::targets_file::targets_file_tests::one_bad_line_refuses_the_whole_read`,
+    /// `crate::cli::targets_file::targets_file_tests::an_unreadable_file_does_not_hide_the_other_files_bad_lines`.
     #[error(
-        "these lines are not audit targets:\n{bad}\nNothing was registered. Fix them and run \
-         `trusty-audit` again — your OpenRouter key is saved, so you will not be asked for it \
-         again."
+        "{bad}{unreadable}Nothing was registered. Fix them and run `trusty-audit` again — your \
+         OpenRouter key is saved, so you will not be asked for it again."
     )]
     TargetsFileRefused {
         /// Every line that could not be read, in file order.
         bad: BadLines,
+        /// Every targets file that is present and could not be opened.
+        unreadable: UnreadableFiles,
     },
 
     /// The install package's destination is already taken.

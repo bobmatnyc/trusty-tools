@@ -515,8 +515,15 @@ pub const OPENROUTER_KEY_FIELD: &str = "openrouter_key";
 /// back through [`EngagementConfig::from_toml`], so a template that would
 /// produce an unloadable config fails HERE and not on the recipient's machine.
 ///
+/// 🔴 Surviving verbatim is correct for an IN-PLACE re-render, which is what
+/// this function is for: `crate::cli::credential` saves a newly-entered key into
+/// the recipient's own `engagement.toml` and must not destroy the board
+/// credentials that recipient configured. Generating a config for a DIFFERENT
+/// engagement is [`generate_for_new_engagement`], because the same substitution
+/// carries one client's board credentials into another's package (#5861).
+///
 /// #5478 (the engagement-config generator) is unimplemented; when it lands it
-/// calls this rather than growing a second way to write the file.
+/// calls one of these two rather than growing a third way to write the file.
 /// Test: `config_tests::the_generated_config_carries_the_supplied_key`,
 /// `config_tests::generating_a_config_that_would_not_load_fails_here`,
 /// `config_tests::generating_preserves_every_other_field`.
@@ -527,13 +534,92 @@ pub const OPENROUTER_KEY_FIELD: &str = "openrouter_key";
 /// result is not a loadable engagement config; [`AuditError::Render`] when the
 /// table cannot be re-serialized.
 pub fn generate(template: &str, key: &SecretKey, path: &Path) -> Result<String, AuditError> {
-    let mut table: toml::Table = toml::from_str(template).map_err(|source| AuditError::Parse {
+    let table = parse_template(template, path)?;
+    render_with_key(table, key, path)
+}
+
+/// The TOML table holding the client's board credentials.
+///
+/// Named once so [`generate_for_new_engagement`] and the schema cannot drift
+/// apart.
+pub const BOARDS_FIELD: &str = "boards";
+
+/// [`generate`], for a config that belongs to a DIFFERENT engagement (#5861).
+///
+/// Why: [`generate`] is a substitution, so everything the template holds
+/// survives verbatim — including `[boards.jira]` and `[boards.linear]`. An
+/// auditor reusing one template across engagements therefore shipped client A's
+/// board credentials inside client B's package, and `engagement.toml` is
+/// deliberately readable, so client B could read them. [`crate::package`]'s
+/// outbound scan cannot catch this: it guards what leaves on the way back, not
+/// what was carried over on the way in.
+///
+/// The board credentials are the CLIENT's, not the auditor's — `[boards.jira]`
+/// is documented as "their credential, not the owner's" on
+/// [`BoardCredentials`]. So nothing an auditor's template holds under
+/// [`BOARDS_FIELD`] can belong to the engagement being generated, and dropping
+/// the table is the whole fix rather than a heuristic about which fields look
+/// secret.
+///
+/// This is a SEPARATE function rather than a flag on [`generate`], because the
+/// other caller re-renders a config IN PLACE — `crate::cli::credential` saves a
+/// newly-entered key into the recipient's own `engagement.toml`, and stripping
+/// there would destroy the board credentials that recipient configured. A
+/// boolean saying which is which is a boolean somebody eventually passes wrong.
+///
+/// What: [`generate`] with [`BOARDS_FIELD`] removed from the parsed table
+/// first, plus the field names that were dropped so the caller can tell the
+/// operator what did not ship. The recipient is not left guessing either:
+/// registering a board with no credential is
+/// [`AuditError::BoardCredentialMissing`](crate::error::AuditError::BoardCredentialMissing),
+/// which names the field to set.
+/// Test: `config_tests::a_generated_config_never_carries_the_templates_board_credentials`,
+/// `config_tests::an_in_place_render_keeps_the_recipients_own_board_credentials`.
+///
+/// # Errors
+///
+/// As [`generate`].
+pub fn generate_for_new_engagement(
+    template: &str,
+    key: &SecretKey,
+    path: &Path,
+) -> Result<(String, Vec<String>), AuditError> {
+    let mut table = parse_template(template, path)?;
+    let dropped = drop_board_credentials(&mut table);
+    Ok((render_with_key(table, key, path)?, dropped))
+}
+
+/// The template as a TOML table.
+fn parse_template(template: &str, path: &Path) -> Result<toml::Table, AuditError> {
+    toml::from_str(template).map_err(|source| AuditError::Parse {
         path: path.to_path_buf(),
         what: "engagement config template",
         source: Box::new(source),
-    })?;
+    })
+}
+
+/// Take the board credentials out, naming every field that went (#5861).
+fn drop_board_credentials(table: &mut toml::Table) -> Vec<String> {
+    match table.remove(BOARDS_FIELD) {
+        None => Vec::new(),
+        Some(toml::Value::Table(providers)) => providers
+            .keys()
+            .map(|provider| format!("{BOARDS_FIELD}.{provider}"))
+            .collect(),
+        // Not a table, so nothing to enumerate — it still goes, because a
+        // `boards` this function does not understand is not one it may ship.
+        Some(_) => vec![BOARDS_FIELD.to_owned()],
+    }
+}
+
+/// Substitute the key into `table` and re-render, proving the result loads.
+fn render_with_key(
+    mut table: toml::Table,
+    key: &SecretKey,
+    path: &Path,
+) -> Result<String, AuditError> {
     // #5825: the ONE site that writes the plaintext credential into a generated
-    // file. See this function's docs for why it is not a `Serialize` impl.
+    // file. See [`generate`]'s docs for why it is not a `Serialize` impl.
     table.insert(
         OPENROUTER_KEY_FIELD.to_owned(),
         toml::Value::String(key.expose().to_owned()),
@@ -788,6 +874,94 @@ trusty-review = "0.15.1"
             "lin_api_secret"
         );
         assert!(text.contains("future_field"), "{text}");
+    }
+
+    /// The board credentials a template holds, as an auditor's reused template
+    /// carries them from the last engagement.
+    fn template_with_boards() -> String {
+        format!(
+            "{SAMPLE}\n[boards.jira]\nurl = \"https://client-a.atlassian.net\"\n\
+             email = \"auditor@client-a.example\"\ntoken = \"jira-token-client-a\"\n\
+             \n[boards.linear]\napi_key = \"lin_api_client_a\"\n"
+        )
+    }
+
+    /// 🔴 #5861: client A's board credentials must not reach client B.
+    ///
+    /// `generate` is a substitution, so against `6d937ba66` every field the
+    /// template held survived verbatim into the next engagement's config —
+    /// including `[boards.jira]`. `engagement.toml` is deliberately readable by
+    /// the recipient, so the previous client's token was legible to the next
+    /// one, and the outbound scan in `crate::package` cannot see it: that scan
+    /// guards what leaves on the way back, not what was carried over on the way
+    /// in.
+    #[test]
+    fn a_generated_config_never_carries_the_templates_board_credentials() {
+        let path = Path::new("engagement.toml");
+        let (text, dropped) = generate_for_new_engagement(
+            &template_with_boards(),
+            &SecretKey::new("sk-or-v1-client-b"),
+            path,
+        )
+        .expect("generates");
+
+        assert!(!text.contains("jira-token-client-a"), "{text}");
+        assert!(!text.contains("lin_api_client_a"), "{text}");
+        assert!(!text.contains("client-a.atlassian.net"), "{text}");
+        assert!(!text.contains("auditor@client-a.example"), "{text}");
+        assert_eq!(dropped, ["boards.jira", "boards.linear"]);
+
+        // What DOES ship: the new key, and everything that is not a credential.
+        let loaded = EngagementConfig::from_toml(&text, path).expect("loads");
+        assert_eq!(loaded.openrouter_key.expose(), "sk-or-v1-client-b");
+        assert_eq!(loaded.tools.trusty_review.version(), "0.15.1");
+        assert_eq!(loaded.client.as_deref(), Some("Acme"));
+        assert!(loaded.boards.jira.is_none());
+        assert!(loaded.boards.linear.is_none());
+        assert!(
+            loaded.configured_secrets().len() == 1,
+            "a credential rode along"
+        );
+    }
+
+    /// The other direction, and the reason this is two functions rather than a
+    /// flag: `crate::cli::credential` re-renders the RECIPIENT's own config to
+    /// save a key they just entered. Stripping there would delete the board
+    /// credentials that recipient configured.
+    #[test]
+    fn an_in_place_render_keeps_the_recipients_own_board_credentials() {
+        let text = generate(
+            &template_with_boards(),
+            &SecretKey::new("sk-or-v1-re-entered"),
+            Path::new("engagement.toml"),
+        )
+        .expect("generates");
+
+        let loaded =
+            EngagementConfig::from_toml(&text, Path::new("engagement.toml")).expect("loads");
+        assert_eq!(loaded.openrouter_key.expose(), "sk-or-v1-re-entered");
+        assert_eq!(
+            loaded
+                .boards
+                .jira
+                .as_ref()
+                .expect("jira survives an in-place render")
+                .token
+                .expose(),
+            "jira-token-client-a"
+        );
+    }
+
+    /// A template that names no board drops nothing and says so.
+    #[test]
+    fn a_template_with_no_boards_drops_nothing() {
+        let (_, dropped) = generate_for_new_engagement(
+            SAMPLE,
+            &SecretKey::new("sk-or-v1-x"),
+            Path::new("engagement.toml"),
+        )
+        .expect("generates");
+        assert!(dropped.is_empty(), "{dropped:?}");
     }
 
     /// The generated file is validated HERE, so a template that would produce

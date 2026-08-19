@@ -233,20 +233,68 @@ impl WorkDir {
     /// Why: the guided flow's first act is making the working directory exist,
     /// and a partially-created tree is worse than none — a later feature that
     /// assumes `state/` exists would fail somewhere unrelated to the cause.
-    /// What: `create_dir_all` per area, which also creates the root. Existing
+    /// What: the writability precondition first (see [`Self::writable`]), then
+    /// `create_dir_all` per area, which also creates the root. Existing
     /// directories are left alone, so re-running a flow is safe.
-    /// Test: `super::layout_tests::create_is_idempotent_and_makes_every_area`.
+    /// Test: `super::layout_tests::create_is_idempotent_and_makes_every_area`,
+    /// `super::layout_tests::an_unwritable_cwd_is_named_before_anything_is_created`.
     ///
     /// # Errors
     ///
-    /// [`AuditError::WorkDir`] naming the first path that could not be created.
+    /// [`AuditError::WorkDirNotWritable`] when nothing can be written where the
+    /// root resolved, and [`AuditError::WorkDir`] naming the first path that
+    /// could not be created for any other reason.
     pub fn create(&self) -> Result<(), AuditError> {
+        self.writable()?;
         for (_, path) in self.layout() {
             std::fs::create_dir_all(&path).map_err(|source| AuditError::WorkDir {
                 path: path.clone(),
                 source,
             })?;
         }
+        Ok(())
+    }
+
+    /// Prove something can be written where this root resolved (#5941).
+    ///
+    /// Why: `create_dir_all` on `/trusty-audit-work/tools` reports EROFS
+    /// against a path that does not exist, so the operator reads it as a
+    /// missing directory and goes looking for one. The condition that actually
+    /// failed is one level up and one step earlier: the directory creation
+    /// would have STARTED in is not writable. It is checked here rather than at
+    /// [`WorkDir::resolve`] because resolution is a pure path calculation and
+    /// must stay one — and because a root chosen by `--work-dir` or
+    /// [`WORKDIR_ENV`] can be just as unwritable as the cwd-relative fallback
+    /// [`default_root`] leaves behind when there is no home directory.
+    /// What: finds the nearest ancestor of the root that exists — where
+    /// `create_dir_all` would begin — and creates and removes a uniquely-named
+    /// probe directory in it. A probe rather than a mode check: `/` on macOS is
+    /// `drwxr-xr-x root:wheel` on a read-only volume, so its bits say writable
+    /// and the write still fails, and the reverse holds for an account whose
+    /// group grants access. The probe is removed whether or not the caller goes
+    /// on to create anything.
+    /// Test: `super::layout_tests::an_unwritable_cwd_is_named_before_anything_is_created`,
+    /// `super::layout_tests::an_unwritable_root_leaves_nothing_behind`,
+    /// `super::layout_tests::a_writable_root_passes_the_check_and_leaves_no_probe`.
+    ///
+    /// # Errors
+    ///
+    /// [`AuditError::WorkDirNotWritable`] naming the root, the directory tried,
+    /// and both remedies.
+    fn writable(&self) -> Result<(), AuditError> {
+        let tried = self
+            .root
+            .ancestors()
+            .find(|path| path.exists())
+            .unwrap_or(&self.root);
+        let probe = tried.join(format!(".trusty-audit-writable.{}", writer_tag()));
+        std::fs::create_dir(&probe).map_err(|source| AuditError::WorkDirNotWritable {
+            root: self.root.clone(),
+            tried: tried.to_path_buf(),
+            env: WORKDIR_ENV,
+            source,
+        })?;
+        let _ = std::fs::remove_dir(&probe);
         Ok(())
     }
 }
@@ -256,8 +304,14 @@ impl WorkDir {
 ///
 /// Absolute when `home` is known. The relative fallback is the pre-#5915
 /// behaviour, kept only for the case it was never the wrong answer to: a
-/// stripped environment with no home directory, where there is nowhere better
-/// and the cwd is at least writable.
+/// stripped environment with no home directory, where there is nowhere better.
+///
+/// #5941: this used to add "and the cwd is at least writable", which is false —
+/// an operator standing at `/` got a raw `os error 30` naming a directory that
+/// was never created. Nothing here can check it, because this is a pure path
+/// calculation over a root that normally does not exist yet;
+/// [`WorkDir::writable`] asks the question at the moment the answer matters,
+/// for every root rather than only this branch's.
 fn default_root(home: Option<&Path>) -> PathBuf {
     match home {
         Some(home) => {
@@ -742,5 +796,95 @@ mod layout_tests {
                 path.display()
             );
         }
+    }
+
+    /// A directory this account cannot write in, or `None` when it can write
+    /// anyway — running as root defeats the mode, and CI containers do.
+    #[cfg(unix)]
+    fn unwritable_dir(under: &Path) -> Option<PathBuf> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = under.join("read-only");
+        std::fs::create_dir(&dir).expect("mkdir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        std::fs::create_dir(dir.join("probe"))
+            .is_err()
+            .then_some(dir)
+    }
+
+    /// 🔴 #5941: an unwritable cwd with no home directory is named, not left to
+    /// surface as a bare OS error against a path that was never created.
+    ///
+    /// This is the exact shape the issue reports: `home: None` sends
+    /// [`default_root`] to the cwd-relative fallback, and the operator was
+    /// standing somewhere they cannot write. Against `6d937ba66` `create`
+    /// reached `create_dir_all` and returned `AuditError::WorkDir` naming
+    /// `<cwd>/trusty-audit-work/tools` — a directory that does not exist, which
+    /// sends the reader hunting for a path instead of at the cause.
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_cwd_is_named_before_anything_is_created() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let Some(cwd) = unwritable_dir(tmp.path()) else {
+            return;
+        };
+
+        let work = WorkDir::resolve(None, None, None, &cwd);
+        assert_eq!(work.root(), cwd.join(DEFAULT_WORKDIR_NAME));
+
+        let err = work.create().expect_err("nothing can be written there");
+        let AuditError::WorkDirNotWritable {
+            root, tried, env, ..
+        } = &err
+        else {
+            panic!("a raw OS error is what this refusal replaces: {err:?}");
+        };
+        assert_eq!(root, work.root());
+        assert_eq!(tried, &cwd, "the message must name the directory it tried");
+        assert_eq!(*env, WORKDIR_ENV);
+
+        // The remedy, and nothing the operator has to go and find.
+        let message = err.to_string();
+        assert!(message.contains(WORKDIR_ENV), "{message}");
+        assert!(message.contains("nothing was written"), "{message}");
+        assert!(
+            !message.contains(Area::Tools.dir_name()),
+            "the message names a directory that was never created: {message}"
+        );
+    }
+
+    /// The check is a write, so it owes the property every other writer here
+    /// owes: a refused root leaves no directory and no probe behind.
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_root_leaves_nothing_behind() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let Some(parent) = unwritable_dir(tmp.path()) else {
+            return;
+        };
+
+        let work = WorkDir::new(parent.join("work"));
+        work.create().expect_err("nothing can be written there");
+
+        let left: Vec<PathBuf> = std::fs::read_dir(&parent)
+            .expect("read the directory")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    /// And the check itself writes nothing that outlives it.
+    #[test]
+    fn a_writable_root_passes_the_check_and_leaves_no_probe() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = WorkDir::new(tmp.path().join("work"));
+
+        work.writable().expect("a tempdir is writable");
+
+        let left: Vec<PathBuf> = std::fs::read_dir(tmp.path())
+            .expect("read the directory")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+        assert!(left.is_empty(), "the probe outlived the check: {left:?}");
     }
 }

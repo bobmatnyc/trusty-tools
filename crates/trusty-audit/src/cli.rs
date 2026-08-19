@@ -970,6 +970,7 @@ mod cli_tests {
             packaged_bytes: 5 * 1024 * 1024,
             platform: "macos-aarch64".to_owned(),
             key_from_environment,
+            dropped_board_credentials: vec!["boards.jira".to_owned()],
         };
 
         let from_env = render(&Outcome::Distributed(package(true)));
@@ -984,6 +985,12 @@ mod cli_tests {
         let from_template = render(&Outcome::Distributed(package(false)));
         assert!(
             from_template.contains("credential: from the template config"),
+            "{from_template}"
+        );
+        // #5861: a board credential the template held and the package did not
+        // ship is stated, so the auditor does not expect that board to collect.
+        assert!(
+            from_template.contains("not shipped: boards.jira"),
             "{from_template}"
         );
     }
