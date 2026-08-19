@@ -441,6 +441,89 @@ assert_eq "all five disk-reclaim jobs call the helper" "5" \
   "$(grep -c 'bash scripts/ci-free-disk-space.sh' "${ci_wf}" || true)"
 
 # ---------------------------------------------------------------------------
+# ci-apt-install.sh (#5999)
+#
+# The step this replaces had no retry and no timeout: a stalled mirror printed
+# nothing and consumed the job's whole 30-minute budget. Both halves of the fix
+# are branch logic that only runs when apt is already misbehaving, which is
+# exactly the code nobody exercises before it matters. Drive every branch with a
+# stubbed `apt-get` (and a stubbed `sudo`, so the real invocation path including
+# the sudo prefix is what runs) rather than waiting on a real mirror.
+# ---------------------------------------------------------------------------
+echo
+echo "ci-apt-install:"
+
+# apt_stub_dir <script-body> — a PATH dir holding a fake apt-get with that body
+# plus a `sudo` that just runs its arguments.
+apt_stub_dir() {
+  local dir
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/aptstub.XXXXXX")"
+  printf '#!/usr/bin/env bash\n%s\n' "$1" > "${dir}/apt-get"
+  printf '#!/usr/bin/env bash\nexec "$@"\n' > "${dir}/sudo"
+  chmod +x "${dir}/apt-get" "${dir}/sudo"
+  echo "${dir}"
+}
+
+# apt_run <stub-dir> — exit code of the wrapper, with the stub ahead on PATH.
+# Retry delay 0 and small ceilings so the failing cases cost nothing.
+apt_run() {
+  local dir="$1" rc=0
+  PATH="${dir}:${PATH}" CI_APT_RETRY_DELAY_S=0 CI_APT_ATTEMPTS=3 \
+    CI_APT_UPDATE_TIMEOUT_S=2 CI_APT_INSTALL_TIMEOUT_S=2 \
+    bash scripts/ci-apt-install.sh build-essential \
+    >"${dir}/out" 2>&1 || rc=$?
+  echo "$rc"
+}
+
+# Always succeeds — the ordinary path, and proof the wrapper is transparent.
+ok_dir="$(apt_stub_dir 'exit 0')"
+assert_eq "a healthy mirror installs, exit 0" "0" "$(apt_run "${ok_dir}")"
+assert_eq "  and it does not retry a success" "1" \
+  "$(grep -c 'apt-get update, attempt' "${ok_dir}/out" || true)"
+
+# Fails twice, then succeeds: the retry the step did not have. The stub counts
+# its own invocations through a file so the attempt count is observable.
+flaky_dir="$(apt_stub_dir '
+count_file="${0%/*}/calls"
+n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$count_file"
+[ "$1" = "update" ] && [ "$n" -lt 3 ] && exit 100
+exit 0')"
+assert_eq "two transient failures then success" "0" "$(apt_run "${flaky_dir}")"
+assert_eq "  it took three update attempts"     "3" \
+  "$(grep -c 'apt-get update, attempt' "${flaky_dir}/out" || true)"
+
+# Never succeeds: bounded, and the failure names the phase rather than being a
+# generic job timeout.
+dead_dir="$(apt_stub_dir 'exit 100')"
+assert_eq "an unreachable mirror fails closed" "1" "$(apt_run "${dead_dir}")"
+assert_eq "  after exactly ATTEMPTS attempts"   "3" \
+  "$(grep -c 'apt-get update, attempt' "${dead_dir}/out" || true)"
+assert_eq "  and says so as a CI error"         "1" \
+  "$(grep -c '::error::ci-apt-install: apt-get update failed 3 time' "${dead_dir}/out" || true)"
+
+# THE ISSUE'S OWN CASE: a mirror that accepts the connection and then says
+# nothing. Unwrapped this is the 30-minute silent stall; here each attempt must
+# die at its 2s ceiling and be reported as a stall, not as a plain failure.
+if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+  stall_dir="$(apt_stub_dir 'sleep 300')"
+  assert_eq "a stalled mirror is killed at the ceiling" "1" "$(apt_run "${stall_dir}")"
+  assert_eq "  reported as a stall, not a plain failure" "3" \
+    "$(grep -c 'STALLED — killed at the 2s ceiling' "${stall_dir}/out" || true)"
+  rm -rf "${stall_dir}"
+else
+  echo "  skip 'stalled mirror' — no timeout(1) on PATH (GNU coreutils; present on the CI runners)"
+fi
+
+rm -rf "${ok_dir}" "${flaky_dir}" "${dead_dir}"
+
+# Wiring: the wrapper helps nobody while a job still inlines the raw pair.
+assert_eq "no raw apt-get left in ci.yml" "0" \
+  "$(grep -cE '^ *sudo apt-get' .github/workflows/ci.yml || true)"
+assert_eq "every apt step routes through the wrapper" "11" \
+  "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/ci.yml || true)"
+
+# ---------------------------------------------------------------------------
 # detect-pointer-lint-inputs.sh (#5311)
 # ---------------------------------------------------------------------------
 pointer_inputs_of() {
