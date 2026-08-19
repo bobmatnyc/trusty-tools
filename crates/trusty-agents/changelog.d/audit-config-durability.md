@@ -1,0 +1,5 @@
+Fixed
+
+- `GlobalConfig::save` now publishes `~/.trusty-agents/config.toml` by writing a scratch file beside the target and renaming it into place. It ran a plain `tokio::fs::write`, which truncates the live config first, so a crash between truncate and the last byte left a torn file that the next load silently replaced with defaults — every registered MCP service, GitHub identity, and listener gone. The doc comment had claimed an atomic write since #244. The scratch name comes from the same `temp_path` generator the agent-manifest writer uses, so the two cannot drift on the per-process, per-attempt naming that #4409 established
+- a `[local_inference]` section that omits `enabled` now inherits the documented default of `true`. The field carried `#[serde(default)]`, which resolves to `false` for a bool, while the doc comment and `LocalInferenceConfig::default()` both said `true` — so a hand-edited config that changed only `model` silently turned the Ollama fast-path off. An explicit `enabled = false` still wins
+- `truncate_history` lost a nested `max_turns == 0` check whose two arms both returned an empty vector. Behavior is unchanged

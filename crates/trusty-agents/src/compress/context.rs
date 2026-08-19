@@ -38,12 +38,11 @@ impl Default for TokenBudget {
 /// Test: `truncate_*` cases in `tests` module.
 pub fn truncate_history<T: Clone>(turns: &[T], budget: &TokenBudget) -> Vec<T> {
     let n = turns.len();
+    // `max_turns == 0` with `pin_turn_zero` is an edge case: the pinned turn 0
+    // would exceed the budget; we honor `max_turns` and return empty.
+    // audit 2026-08-19: collapsed a nested `max_turns == 0` check whose two
+    // arms both returned `Vec::new()`.
     if n == 0 || budget.max_turns == 0 {
-        // max_turns == 0 with pin_turn_zero is an edge case: pinned turn 0
-        // would exceed the budget; we choose to honor max_turns and return empty.
-        if budget.max_turns == 0 {
-            return Vec::new();
-        }
         return Vec::new();
     }
     if n <= budget.max_turns {

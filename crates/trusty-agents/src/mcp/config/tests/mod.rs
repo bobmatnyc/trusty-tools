@@ -244,6 +244,87 @@ async fn save_and_reload_roundtrip() {
 }
 
 #[tokio::test]
+async fn save_publishes_by_rename_leaving_the_old_file_intact() {
+    // audit 2026-08-19: `save()` documented an atomic write but ran a plain
+    // `tokio::fs::write`, which truncates the live config in place — a crash
+    // between truncate and the last byte leaves a torn config that the next
+    // `load()` silently replaces with defaults. Temp-then-rename swaps the
+    // directory entry instead, so the previously published inode is never
+    // written to and stays a complete, parseable config.
+    //
+    // The hard link is the observer: it names the inode that `save()` #1
+    // published. After `save()` #2 it must still read the OLD content. Under
+    // an in-place `fs::write` it would read the NEW content, because both
+    // names point at the one inode being overwritten.
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir();
+    unsafe {
+        std::env::set_var("HOME", &home);
+    }
+
+    let mut cfg = GlobalConfig::default();
+    cfg.mcp.inject_for_roles = vec!["ctrl".to_string()];
+    cfg.save().await.expect("first save");
+
+    let path = home.join(".trusty-agents").join("config.toml");
+    let published = std::fs::read_to_string(&path).expect("read first save");
+
+    let witness = home.join(".trusty-agents").join("witness.toml");
+    std::fs::hard_link(&path, &witness).expect("hard link the published inode");
+
+    cfg.mcp.inject_for_roles = vec!["pm".to_string()];
+    cfg.save().await.expect("second save");
+
+    let republished = std::fs::read_to_string(&path).expect("read second save");
+    assert_ne!(
+        republished, published,
+        "the target must carry the second save's content"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&witness).expect("read witness"),
+        published,
+        "the inode published by the first save must be untouched — proof the \
+         second save published by rename rather than truncating in place"
+    );
+}
+
+#[tokio::test]
+async fn save_leaves_no_scratch_file_behind() {
+    // audit 2026-08-19: temp-then-rename must clean up after itself — a
+    // scratch file left in `~/.trusty-agents/` is visible clutter, and an
+    // orphaned one is indistinguishable from an interrupted write.
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir();
+    unsafe {
+        std::env::set_var("HOME", &home);
+    }
+
+    let mut cfg = GlobalConfig::default();
+    cfg.mcp.inject_for_roles = vec!["ctrl".to_string()];
+    cfg.save().await.expect("save should succeed");
+
+    let dir = home.join(".trusty-agents");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("read config dir")
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["config.toml".to_string()],
+        "save() must leave exactly the published config, no scratch files"
+    );
+
+    let reloaded = GlobalConfig::load().await;
+    assert_eq!(reloaded.mcp.inject_for_roles, vec!["ctrl".to_string()]);
+}
+
+#[tokio::test]
 async fn add_service_replaces_existing() {
     // (#244) add_service with a name that already exists replaces, not appends.
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
