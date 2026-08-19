@@ -597,7 +597,7 @@ impl Aggregator {
     /// the implementation lives in [`crate::report::persist`] to keep this file
     /// within the 500-line cap.
     /// What: delegates to [`crate::report::persist::persist_weekly_quality`].
-    /// Test: `report::tests::persist_weekly_quality_upserts_rows`.
+    /// Test: `report::tests::persist_weekly_quality_upserts_rows_and_is_idempotent`.
     pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize> {
         crate::report::persist::persist_weekly_quality(db, data)
     }

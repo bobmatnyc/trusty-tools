@@ -7,7 +7,7 @@
 //! What: two public functions — [`persist_weekly_quality`] and
 //! [`persist_weekly_engineer`] — each UPSERT one row per
 //! [`crate::report::models::WeeklyActivity`] into the corresponding fact table.
-//! Test: `report::tests::persist_weekly_quality_upserts_rows` and
+//! Test: `report::tests::persist_weekly_quality_upserts_rows_and_is_idempotent` and
 //! `report::tests::persist_weekly_engineer_upserts_rows`.
 
 use std::collections::HashMap;
@@ -70,7 +70,7 @@ fn computed_at_secs() -> i64 {
 /// name into the email-keyed column: doing so would produce rows that can never
 /// join with other tables and would silently corrupt aggregate queries.
 /// To fix unmapped identities run `tga aliases list` and add the missing mapping.
-/// Test: `report::tests::persist_weekly_quality_upserts_rows`.
+/// Test: `report::tests::persist_weekly_quality_upserts_rows_and_is_idempotent`.
 ///
 /// # Errors
 ///

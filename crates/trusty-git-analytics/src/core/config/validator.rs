@@ -38,7 +38,7 @@
 
 use std::path::Path;
 
-use super::{expand_path, Config, GithubConfig};
+use super::{expand_path, BitbucketConfig, ClassificationConfig, Config, GithubConfig};
 
 /// A single configuration validation failure.
 ///
@@ -134,6 +134,93 @@ fn github_token_missing(gh: &GithubConfig, env_token: Option<&str>) -> bool {
     }
     let non_empty = |s: &str| !s.trim().is_empty();
     !gh.token.as_deref().is_some_and(non_empty) && !env_token.is_some_and(non_empty)
+}
+
+/// Is `s` present and not whitespace-only?
+fn present(s: Option<&str>) -> bool {
+    s.is_some_and(|v| !v.trim().is_empty())
+}
+
+/// Decide whether Bitbucket PR fetching is enabled with no usable auth mode.
+///
+/// Why (#5725): the enclosing check read `BITBUCKET_TOKEN` and
+/// `BITBUCKET_APP_PASSWORD` inline, so the only way to test the missing-auth
+/// branch was to remove both process-wide — `unsafe` under the 2024 edition and
+/// a race against every other test thread. Taking both env values as arguments
+/// makes every branch provable without touching global state, the same shape
+/// #5313 used for [`github_token_missing`].
+/// What: returns `true` only when `fetch_prs` is on and neither auth mode
+/// resolves — bearer token (config or env), nor `username` paired with an app
+/// password (config or env).
+/// Test: `bitbucket_auth_missing_across_config_and_env`.
+fn bitbucket_auth_missing(
+    bb: &BitbucketConfig,
+    token_env: Option<&str>,
+    pwd_env: Option<&str>,
+) -> bool {
+    if !bb.fetch_prs {
+        return false;
+    }
+    let has_token = present(bb.token.as_deref()) || present(token_env);
+    let has_basic = present(bb.username.as_deref())
+        && (present(bb.app_password.as_deref()) || present(pwd_env));
+    !has_token && !has_basic
+}
+
+/// The env var names whose presence can satisfy `provider`'s API-key
+/// requirement, or `None` when the provider needs no key check.
+///
+/// Why: `bedrock` uses the AWS default credential chain, so no single API-key
+/// check applies; every other provider has a fixed key list. Naming that list
+/// separately lets [`llm_key_missing`] stay pure.
+/// What: `openrouter` and `openai` map to their one key each; anything else
+/// (including `auto`) accepts either. `bedrock` maps to `None`.
+/// Test: `llm_key_missing_across_providers_and_env`.
+fn llm_env_keys(provider: &str) -> Option<&'static [&'static str]> {
+    match provider {
+        "openrouter" => Some(&["OPENROUTER_API_KEY"]),
+        "openai" => Some(&["OPENAI_API_KEY"]),
+        "bedrock" => None,
+        _ => Some(&["OPENROUTER_API_KEY", "OPENAI_API_KEY"]),
+    }
+}
+
+/// Decide whether LLM classification is enabled with no API key available.
+///
+/// Why (#5725): the enclosing check read `OPENROUTER_API_KEY` and
+/// `OPENAI_API_KEY` inline, so the only way to test the missing-key branch was
+/// to remove both process-wide. That removal raced
+/// `profile::batch_reviewer::tests::from_slug_with_store_errors_when_no_credential_resolves`,
+/// whose `#[serial]` tag serializes it only against other `#[serial]` tests —
+/// the unguarded restore put `OPENROUTER_API_KEY` back mid-resolution and that
+/// test failed. `env_lookup` is now an argument, so no test needs the process
+/// environment at all.
+/// What: returns the provider name when `use_llm` is on and neither the config
+/// key nor any key `env_lookup` answers for carries a non-whitespace value.
+/// `bedrock` always returns `None` — see [`llm_env_keys`].
+/// Test: `llm_key_missing_across_providers_and_env`.
+fn llm_key_missing(
+    cls: &ClassificationConfig,
+    env_lookup: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    if !cls.use_llm {
+        return None;
+    }
+    let provider = cls.llm_provider.as_str();
+    let env_keys = llm_env_keys(provider)?;
+    // Only `openrouter` and `auto` read a key from the config file; `openai`
+    // has no config field, so its key must come from the environment.
+    let config_key = match provider {
+        "openai" => None,
+        _ => cls.openrouter_api_key.as_deref(),
+    };
+    if present(config_key) {
+        return None;
+    }
+    if env_keys.iter().any(|k| present(env_lookup(k).as_deref())) {
+        return None;
+    }
+    Some(provider.to_string())
 }
 
 /// Runs a battery of validation checks against a [`Config`].
@@ -276,21 +363,10 @@ impl<'a> ConfigValidator<'a> {
             });
         }
 
-        let nonempty = |o: Option<&str>| o.map(|s| !s.trim().is_empty()).unwrap_or(false);
-        let token_in_cfg = nonempty(bb.token.as_deref());
-        let token_in_env = std::env::var("BITBUCKET_TOKEN")
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false);
-        let user = nonempty(bb.username.as_deref());
-        let pwd_in_cfg = nonempty(bb.app_password.as_deref());
-        let pwd_in_env = std::env::var("BITBUCKET_APP_PASSWORD")
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false);
-
-        let has_token = token_in_cfg || token_in_env;
-        let has_basic = user && (pwd_in_cfg || pwd_in_env);
-
-        if !has_token && !has_basic {
+        // #5725: read the env here so the decision itself stays pure.
+        let token_env = std::env::var("BITBUCKET_TOKEN").ok();
+        let pwd_env = std::env::var("BITBUCKET_APP_PASSWORD").ok();
+        if bitbucket_auth_missing(bb, token_env.as_deref(), pwd_env.as_deref()) {
             errors.push(ConfigError::MissingBitbucketAuth);
         }
     }
@@ -334,34 +410,9 @@ impl<'a> ConfigValidator<'a> {
         let Some(cls) = self.config.classification.as_ref() else {
             return;
         };
-        if !cls.use_llm {
-            return;
-        }
-        let provider = cls.llm_provider.as_str();
-        let (config_key, env_keys): (Option<&str>, &[&str]) = match provider {
-            "openrouter" => (cls.openrouter_api_key.as_deref(), &["OPENROUTER_API_KEY"]),
-            "openai" => (None, &["OPENAI_API_KEY"]),
-            // Bedrock uses the AWS default credential chain (env vars, shared
-            // config, IAM role, etc.) — no single API-key check applies. Skip
-            // the missing-key validation; the SDK will surface auth errors at
-            // call time.
-            "bedrock" => return,
-            // "auto" — accept either provider's key.
-            _ => (
-                cls.openrouter_api_key.as_deref(),
-                &["OPENROUTER_API_KEY", "OPENAI_API_KEY"],
-            ),
-        };
-        let cfg_present = config_key.map(|k| !k.trim().is_empty()).unwrap_or(false);
-        let env_present = env_keys.iter().any(|k| {
-            std::env::var(k)
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false)
-        });
-        if !cfg_present && !env_present {
-            errors.push(ConfigError::MissingLlmKey {
-                provider: provider.to_string(),
-            });
+        // #5725: read the env here so the decision itself stays pure.
+        if let Some(provider) = llm_key_missing(cls, |k| std::env::var(k).ok()) {
+            errors.push(ConfigError::MissingLlmKey { provider });
         }
     }
 

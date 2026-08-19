@@ -9,6 +9,8 @@
 
 use std::path::PathBuf;
 
+use crate::collect::ai_attribution::AgenticMode;
+use crate::collect::ai_markers::{detect, CommitSignals};
 use crate::core::config::{Config, OutputConfig, RepositoryConfig};
 use crate::core::db::Database;
 
@@ -985,4 +987,218 @@ fn agentic_pct_keeps_unknown_in_the_denominator() {
         "agentic_pct must be 1/4; 50.0 would bucket unknown as agentic and \
          33.3 would drop it from the denominator. got {pct}"
     );
+}
+
+// =========================================================================
+// fact_weekly_engineer end-to-end against real commit shapes (issue #5252)
+// =========================================================================
+
+/// One fixture commit, in the shape the git walk hands to detection.
+struct CommitShape {
+    sha: &'static str,
+    author_name: &'static str,
+    author_email: &'static str,
+    committer_email: &'static str,
+    message: &'static str,
+    is_merge: bool,
+    /// The mode detection must return. Asserted, not assumed — a marker-set
+    /// change that shifts a commit between buckets has to fail HERE, naming the
+    /// commit, rather than silently moving `agentic_pct`.
+    expect: AgenticMode,
+}
+
+/// Seven commit messages taken from the shapes this repository actually
+/// produces: a multi-trailer house footer, a bare Claude Code footer, a Copilot
+/// trailer, a forge squash-merge whose body was replaced, a machine merge
+/// summary, a hand-written commit, a revert, and a bot-authored commit
+/// identified only by its email.
+fn real_commit_shapes() -> Vec<CommitShape> {
+    vec![
+        CommitShape {
+            sha: "c1",
+            author_name: "Dana",
+            author_email: "dana@example.com",
+            committer_email: "dana@example.com",
+            message: "feat(tga): harvest branch and PR refs\n\n\
+                 Adds two extractors and routes both through the deny-list.\n\n\
+                 Refs #5734\n\
+                 Co-Authored-By: Claude <noreply@anthropic.com>\n\
+                 🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools\n",
+            is_merge: false,
+            expect: AgenticMode::FullAgentic,
+        },
+        CommitShape {
+            sha: "c2",
+            author_name: "Dana",
+            author_email: "dana@example.com",
+            committer_email: "dana@example.com",
+            // #5249: the house-footer shape that carries no `Co-Authored-By:`.
+            message: "fix(report): keep unknown in the denominator\n\n\
+                 🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+            is_merge: false,
+            expect: AgenticMode::FullAgentic,
+        },
+        CommitShape {
+            sha: "c3",
+            author_name: "Dana",
+            author_email: "dana@example.com",
+            committer_email: "dana@example.com",
+            message: "chore: tidy the import block\n\n\
+                 Co-authored-by: Copilot <copilot@users.noreply.github.com>\n",
+            is_merge: false,
+            expect: AgenticMode::IdeAssisted,
+        },
+        CommitShape {
+            sha: "c4",
+            author_name: "Dana",
+            author_email: "dana@example.com",
+            committer_email: "noreply@github.com",
+            // A forge squash-merge with the PR title as the subject and every
+            // remaining line a synthesized trailer — the body where a footer
+            // would have lived is gone (#5250).
+            message: "feat(audit): checkpoint the sweep per repository (#5494)\n\n\
+                 Co-authored-by: Dana Dev <dana@example.com>\n",
+            is_merge: false,
+            expect: AgenticMode::Unknown,
+        },
+        CommitShape {
+            sha: "c5",
+            author_name: "Dana",
+            author_email: "dana@example.com",
+            committer_email: "dana@example.com",
+            message: "Merge branch 'main' into feature/harvest-refs\n",
+            is_merge: true,
+            expect: AgenticMode::Unknown,
+        },
+        CommitShape {
+            sha: "c6",
+            author_name: "Dana",
+            author_email: "dana@example.com",
+            committer_email: "dana@example.com",
+            message: "docs: correct the fact-table column description\n",
+            is_merge: false,
+            expect: AgenticMode::None,
+        },
+        CommitShape {
+            sha: "c7",
+            author_name: "Dana",
+            author_email: "dana@example.com",
+            committer_email: "dana@example.com",
+            message: "Revert \"feat(tga): harvest branch and PR refs\"\n\n\
+                 This reverts commit c1.\n",
+            is_merge: false,
+            expect: AgenticMode::None,
+        },
+        CommitShape {
+            sha: "c8",
+            author_name: "devin-ai-integration[bot]",
+            author_email: "devin-ai-integration[bot]@users.noreply.github.com",
+            committer_email: "devin-ai-integration[bot]@users.noreply.github.com",
+            // No marker in the text at all — the bot identity is the signal.
+            message: "chore(deps): bump the lockfile\n",
+            is_merge: false,
+            expect: AgenticMode::FullAgentic,
+        },
+    ]
+}
+
+/// Why: #5252 — `persist.rs` and `aggregator/mod.rs` both cited a
+/// `persist_weekly_engineer_upserts_rows` that did not exist, so the
+/// `agentic_pct` formula had no test naming it, and every detection test was a
+/// synthetic one-liner. A percentage an acquirer reads (DOC-67 §8) was resting
+/// on arithmetic nothing proved end to end.
+/// What: runs the eight fixture messages through `ai_markers::detect` exactly as
+/// `collect::git::extractor` does, stores the verdict, aggregates, and reads the
+/// persisted row back. Dana's week is 7 commits, one of them a revert, so
+/// `net_commits` is 6 with 2 full-agentic — `agentic_pct` must be 33.33…, which
+/// no other bucketing produces: 42.9 would forget the revert, 28.6 would count
+/// the revert in the denominator, and 50.0 would fold `ide_assisted` into the
+/// numerator. The bot commit lands on its own grain key at 100.0, and a second
+/// persist proves the UPSERT.
+/// Test: this test itself.
+#[test]
+fn persist_weekly_engineer_upserts_rows() {
+    let db = Database::open_in_memory().expect("open db");
+    let shapes = real_commit_shapes();
+    for (i, c) in shapes.iter().enumerate() {
+        let detection = detect(&CommitSignals {
+            message: c.message,
+            author_email: c.author_email,
+            committer_email: c.committer_email,
+        });
+        assert_eq!(
+            detection.mode, c.expect,
+            "detection drifted for {}: {:?}",
+            c.sha, c.message
+        );
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                     repository, files_changed, insertions, deletions, is_merge, ticketed, \
+                     agentic_mode) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'repo-a', 2, 20, 4, ?6, 0, ?7)",
+                rusqlite::params![
+                    c.sha,
+                    c.author_name,
+                    c.author_email,
+                    // All eight land in ISO week 2024-W03.
+                    format!("2024-01-1{}T09:00:00+00:00", 5 + i % 5),
+                    c.message,
+                    c.is_merge as i64,
+                    detection.mode.as_str(),
+                ],
+            )
+            .expect("insert fixture commit");
+    }
+
+    let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+
+    let dana = data
+        .weekly_activity
+        .iter()
+        .find(|w| w.author.contains("Dana"))
+        .expect("Dana has a weekly bucket");
+    assert_eq!(dana.commit_count_net, 6, "7 commits less 1 revert");
+    assert_eq!(dana.agentic_count, 2, "c1 and c2 only");
+    assert_eq!(dana.ide_assisted_count, 1, "c3 only");
+
+    let row = |email: &str| -> (i64, i64, i64, f64) {
+        db.connection()
+            .query_row(
+                "SELECT net_commits, agentic_count, ide_assisted_count, agentic_pct \
+                 FROM fact_weekly_engineer WHERE author_email = ?1",
+                [email],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("read persisted engineer row")
+    };
+
+    let (net, agentic, ide, pct) = row("dana@example.com");
+    assert_eq!((net, agentic, ide), (6, 2, 1));
+    assert!(
+        (pct - 200.0 / 6.0).abs() < 1e-9,
+        "agentic_pct must be 2/6; 42.9 would forget the revert, 28.6 would keep \
+         it in the denominator, 50.0 would count ide_assisted. got {pct}"
+    );
+
+    let (bot_net, bot_agentic, bot_ide, bot_pct) = row(shapes[7].author_email);
+    assert_eq!(
+        (bot_net, bot_agentic, bot_ide),
+        (1, 1, 0),
+        "the bot commit is its own grain key, not folded into Dana's"
+    );
+    assert!((bot_pct - 100.0).abs() < 1e-9, "got {bot_pct}");
+
+    // UPSERT, not INSERT: persisting the same data again must not duplicate a
+    // grain key or change a value.
+    let written = Aggregator::persist_weekly_engineer(&db, &data).expect("second persist");
+    assert_eq!(written, 2, "one row per author-week");
+    let total: i64 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM fact_weekly_engineer", [], |r| {
+            r.get(0)
+        })
+        .expect("count rows");
+    assert_eq!(total, 2, "re-persisting must not duplicate the grain key");
+    assert_eq!(row("dana@example.com"), (6, 2, 1, pct));
 }
