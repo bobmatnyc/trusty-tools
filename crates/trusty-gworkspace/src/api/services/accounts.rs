@@ -40,18 +40,17 @@ use crate::api::services::{opt_str, require_str};
 /// Test: Covered indirectly via `TokenStorage` storage round-trip tests.
 fn accounts_json(client: &BaseClient) -> Result<Vec<Value>> {
     let rows = client.storage().list_accounts()?;
-    Ok(rows
-        .into_iter()
+    rows.into_iter()
         .map(|(name, email, is_default)| {
-            let client_label = oauth::profile_client_source(&name).label();
-            json!({
+            let client_label = oauth::profile_client_source(&name)?.label();
+            Ok(json!({
                 "name": name,
                 "email": email,
                 "is_default": is_default,
                 "client": client_label,
-            })
+            }))
         })
-        .collect())
+        .collect()
 }
 
 /// Why: Enumerate authenticated Google profiles stored locally so the model can pick one.
@@ -370,7 +369,7 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("OAuth client"), "{err}");
         assert!(
-            !oauth::profile_client_path("newprof").exists(),
+            !oauth::profile_client_path("newprof").unwrap().exists(),
             "a failed persist must never leave a partial per-profile client file"
         );
     }

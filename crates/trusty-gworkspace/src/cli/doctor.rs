@@ -84,7 +84,7 @@ pub async fn run(storage: &TokenStorage) -> Result<()> {
     match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
         Ok(http) => {
             for (name, email, _is_default) in &accounts {
-                let client_label = profile_client_source(name).label();
+                let client_label = profile_client_source(name)?.label();
                 let result = match resolve_client_creds_for_profile(name) {
                     Ok(creds) => probe_profile(&http, storage, &creds, name).await,
                     Err(_) => ProbeResult::Unknown,
@@ -97,7 +97,7 @@ pub async fn run(storage: &TokenStorage) -> Result<()> {
         Err(e) => {
             eprintln!("      Could not build a bounded HTTP client: {e}");
             for (name, email, _is_default) in &accounts {
-                let client_label = profile_client_source(name).label();
+                let client_label = profile_client_source(name)?.label();
                 for line in
                     health_lines(name, email.as_deref(), &client_label, &ProbeResult::Unknown)
                 {

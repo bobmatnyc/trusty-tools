@@ -36,7 +36,7 @@ pub fn list(storage: &TokenStorage) -> Result<()> {
     }
     println!("{:<24} {:<32} {:<8} CLIENT", "PROFILE", "EMAIL", "DEFAULT");
     for (name, email, is_default) in rows {
-        let client = profile_client_source(&name).label();
+        let client = profile_client_source(&name)?.label();
         println!(
             "{:<24} {:<32} {:<8} {client}",
             name,

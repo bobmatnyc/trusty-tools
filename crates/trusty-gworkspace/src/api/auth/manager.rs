@@ -252,7 +252,7 @@ mod tests {
             "global-secret",
         );
         write_client_json(
-            &profile_client_path("work"),
+            &profile_client_path("work").unwrap(),
             "profile-client",
             "profile-secret",
         );
