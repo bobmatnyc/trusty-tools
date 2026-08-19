@@ -101,9 +101,17 @@ fn end_to_end_two_repo_report() {
     assert!(!md.contains("PLACEHOLDER SYNTAX"));
     assert!(!md.contains("trusty-review template:"));
 
-    // Write and verify the dual-output pair.
+    // Write and verify the outputs: the code-review markdown, its JSON twin,
+    // and — since #6046 — the authorship report as its own document.
     let written = reporter.write(&model, &template).expect("write ok");
-    assert_eq!(written.len(), 2);
+    assert_eq!(written.len(), 3, "{written:?}");
+    assert!(
+        written[2]
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with("-authorship.md")),
+        "{written:?}"
+    );
     for path in &written {
         assert!(path.exists(), "missing output {}", path.display());
     }

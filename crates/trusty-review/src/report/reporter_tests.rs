@@ -255,6 +255,9 @@ fn build_model_from_manifest() {
 
 /// Why: `write` must emit both a markdown and a JSON file that round-trips.
 /// What: writes the report and asserts both files exist and the JSON parses.
+/// Since #6046 the bundled template also yields the authorship document, so the
+/// count is three — `write_emits_the_authorship_document_alongside` pins its
+/// name and ordering.
 /// Test: this test itself.
 #[test]
 fn write_emits_both() {
@@ -269,7 +272,7 @@ fn write_emits_both() {
         .expect("bundled template");
     let reporter = Reporter::new(&out_dir);
     let written = reporter.write(&model, &template).expect("write ok");
-    assert_eq!(written.len(), 2);
+    assert_eq!(written.len(), 3, "{written:?}");
 
     let md = written
         .iter()
@@ -2341,5 +2344,149 @@ fn key_facts_authorship_rows_survive_the_fill_order() {
     assert!(
         !trajectory.contains("Not computed"),
         "the named gap clobbered the measured trajectory:\n{trajectory}"
+    );
+}
+
+// ── #6046: the code-review / authorship output split ─────────────────────────
+
+/// Build a model whose single repo carries a loaded authorship artifact, so the
+/// Authorship & Key-Person Risk section has real rows and survives `polish`.
+fn fixture_model_with_authorship(dir: &Path) -> ReportModel {
+    let mut model = fixture_model(dir);
+    let repo = model.repositories.first_mut().expect("one repository");
+    repo.authorship = Some(crate::report::authorship::AuthorshipSummary {
+        schema_version: "v0".to_string(),
+        repository: "Acme Web".to_string(),
+        distinct_authors: 7,
+        bus_factor: 2,
+        top_author_share_pct: 61.0,
+        single_author_subsystems: vec!["src".to_string()],
+        monthly_trajectory: vec![crate::report::authorship::MonthlyActivity {
+            month: "2026-02".to_string(),
+            active_authors: 2,
+            commits: 40,
+        }],
+        unresolved_authors: 0,
+        caveats: vec!["squash-merge attribution is not corrected for".to_string()],
+    });
+    model
+}
+
+/// Why: the owner asked to read the code review apart from authorship (#6046),
+/// so one render must produce two documents with disjoint section membership.
+/// What: renders a model with authorship data and asserts the section is absent
+/// from the code-review document — including its jump list — and present, with
+/// its measured rows, in the authorship document.
+/// Test: this test itself.
+#[test]
+fn render_splits_authorship_into_its_own_document() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model_with_authorship(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+
+    let documents = Reporter::new(tmp.path()).render_documents(&model, &template);
+
+    assert!(
+        !documents
+            .code_review
+            .contains("## Authorship & Key-Person Risk"),
+        "the authorship section must not render in the code-review document:\n{}",
+        documents.code_review
+    );
+    assert!(
+        !documents.code_review.contains("| Acme Web | 7"),
+        "the authorship row must not render in the code-review document:\n{}",
+        documents.code_review
+    );
+    assert!(
+        !documents
+            .code_review
+            .contains("#authorship-key-person-risk"),
+        "the jump list must not link a section this document no longer carries"
+    );
+    // The frontloaded sections stay where the owner put them (#6004).
+    assert!(documents.code_review.contains("## Key Facts"));
+    assert!(documents.code_review.contains("## 2. Executive Summary"));
+    assert!(documents.code_review.contains("## 5. Findings by Severity"));
+
+    let authorship = documents.authorship.expect("authorship document rendered");
+    assert!(
+        authorship.starts_with("# Authorship & Key-Person Risk: Acme Due Diligence"),
+        "{authorship}"
+    );
+    assert!(authorship.contains("| Acme Web |"), "{authorship}");
+    assert!(authorship.contains("squash-merge"), "{authorship}");
+    assert!(
+        !authorship.contains("Findings by Severity"),
+        "the authorship document must carry only its own section:\n{authorship}"
+    );
+}
+
+/// Why: a run with no authorship data must still deliver the document — an
+/// absent file reads as "we forgot", where `polish`'s own no-data line reads as
+/// "we looked and there was nothing", which is what the Gaps & Caveats entry in
+/// the code-review report also says.
+/// What: the no-authorship fixture still renders a second document, carrying the
+/// collapsed section's no-data line rather than fabricated rows.
+/// Test: this test itself.
+#[test]
+fn render_without_authorship_data_still_produces_the_document() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+
+    let documents = Reporter::new(tmp.path()).render_documents(&model, &template);
+    let authorship = documents.authorship.expect("authorship document rendered");
+    assert!(authorship.contains("No data available"), "{authorship}");
+    assert!(
+        !documents
+            .code_review
+            .contains("## Authorship & Key-Person Risk"),
+        "the section must leave the code-review document even with no data"
+    );
+}
+
+/// Why: the split is only delivered once both documents reach disk — tga reads
+/// the paths trusty-review prints, and trusty-audit packages every file in the
+/// output directory.
+/// What: writes a model with authorship data and asserts a third file appears,
+/// named `{stem}-authorship.md`, with the code-review report still first.
+/// Test: this test itself.
+#[test]
+fn write_emits_the_authorship_document_alongside() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model_with_authorship(tmp.path());
+    model.synthesis = Some(crate::report::synthesize::Synthesis::default());
+    let out_dir = tmp.path().join("out");
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+
+    let written = Reporter::new(&out_dir)
+        .write(&model, &template)
+        .expect("write ok");
+
+    assert_eq!(written.len(), 3, "{written:?}");
+    let stem = report_stem(&model);
+    assert_eq!(written[0], out_dir.join(format!("{stem}.md")));
+    assert_eq!(written[1], out_dir.join(format!("{stem}.json")));
+    assert_eq!(written[2], out_dir.join(format!("{stem}-authorship.md")));
+    for path in &written {
+        assert!(path.exists(), "{} was not written", path.display());
+    }
+
+    let authorship = std::fs::read_to_string(&written[2]).expect("read authorship");
+    assert!(
+        authorship.contains("Authorship & Key-Person Risk"),
+        "{authorship}"
+    );
+    let code_review = std::fs::read_to_string(&written[0]).expect("read code review");
+    assert!(
+        !code_review.contains("## Authorship & Key-Person Risk"),
+        "{code_review}"
     );
 }
