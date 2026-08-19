@@ -191,8 +191,9 @@ pub(crate) fn parse_sha256_line(content: &str) -> anyhow::Result<String> {
 /// What: Opens the file, streams through a `sha2::Sha256` hasher, and returns
 /// the lowercase hex digest.
 ///
-/// Test: `tests::verify_sha256_match` / `tests::verify_sha256_tampered` exercise
-/// this indirectly; `tests::sha256_file_correct` exercises it directly.
+/// Test: `tests::sha256_file_correct` exercises it directly;
+/// `tests::verify_sha256_tampered_is_detectable` exercises it through the
+/// comparison [`download_and_verify`] makes.
 pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let mut hasher = Sha256::new();
     let mut file = std::fs::File::open(path)

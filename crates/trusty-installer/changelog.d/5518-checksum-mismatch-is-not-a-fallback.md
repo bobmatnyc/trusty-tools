@@ -7,6 +7,6 @@ Fixed
   digests and the artifact URL instead of falling back to `cargo install`
   (#5518).
 - `tctl install` no longer files an optional member's failed checksum under
-  "skipped (optional, no prebuilt for this platform)" — an integrity failure
-  now fails the run and its exit code regardless of whether the member is
-  required.
+  "skipped (optional, no prebuilt for this platform)" — in the checklist row or
+  in the summary footer. An integrity failure now fails the run and its exit
+  code regardless of whether the member is required.
