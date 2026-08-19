@@ -128,9 +128,11 @@ impl Drop for InFlightGuard {
 /// What: raises the counter on construction and lowers it in `Drop`, so every
 /// exit path — return, cancellation, panic unwind — settles it. The decrement
 /// saturates at zero so a stray extra drop cannot wrap the counter to `u64::MAX`
-/// and turn an undercount into an absurd overcount.
+/// and turn an undercount into an absurd overcount — and warns when it does,
+/// because saturating alone would swap one loud wrong number for a quiet one.
 /// Test: `count_guard_decrements_on_drop`, `count_guard_decrements_on_unwind`,
 /// `count_guard_drop_saturates_at_zero`,
+/// `count_guard_release_reports_an_already_zero_counter`,
 /// `review_handler_decrements_in_flight_when_client_disconnects`.
 #[derive(Debug)]
 pub struct InFlightCountGuard {
@@ -150,17 +152,38 @@ impl InFlightCountGuard {
             counter: Arc::clone(counter),
         }
     }
+
+    /// Lower `counter` by one, reporting whether it was already at zero.
+    ///
+    /// Why: the guard is the only writer of the counter it holds, so observing
+    /// zero here means one raise was released twice. Saturating keeps the
+    /// reported figure plausible; returning the observation is what stops it
+    /// from being silent. Split out of `Drop` so the underflow branch is
+    /// testable without capturing a tracing subscriber.
+    /// What: `saturating_sub(1)` under `fetch_update`; `true` when the value
+    /// read was already zero. The closure never returns `None`, so the update
+    /// cannot fail.
+    /// Test: `count_guard_release_reports_an_already_zero_counter`.
+    fn release_one(counter: &AtomicU64) -> bool {
+        counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_sub(1))
+            })
+            .is_ok_and(|previous| previous == 0)
+    }
 }
 
 impl Drop for InFlightCountGuard {
     fn drop(&mut self) {
-        // Saturating: a counter that already read zero must stay zero rather
-        // than wrap to u64::MAX.
-        let _ = self
-            .counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_sub(1))
-            });
+        if Self::release_one(&self.counter) {
+            // Unreachable while the guard is the counter's only writer, so
+            // reaching it means a second release against one raise — the
+            // undercount that saturating would otherwise hide (#5020).
+            tracing::warn!(
+                "in-flight counter was already zero when a guard dropped — one raise was \
+                 released twice, so /status now under-reports the real load"
+            );
+        }
     }
 }
 
@@ -265,6 +288,35 @@ mod tests {
         drop(guard);
 
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    /// The saturating decrement must report the underflow it absorbs.
+    ///
+    /// Why: saturating alone trades a loud wrong number (`u64::MAX`) for a
+    /// quiet one — `/status` would read plausibly low with nothing said. The
+    /// guard owns the counter outright, so an already-zero read is a broken
+    /// invariant and the operator needs to hear about it.
+    /// What: asserts `release_one` reports `true` at zero and `false` at one,
+    /// and that both leave a sane value behind.
+    /// Test: this test.
+    #[test]
+    fn count_guard_release_reports_an_already_zero_counter() {
+        let counter = AtomicU64::new(1);
+        assert!(
+            !InFlightCountGuard::release_one(&counter),
+            "a normal release is not an underflow"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+        assert!(
+            InFlightCountGuard::release_one(&counter),
+            "releasing an already-zero counter must be reported, not silently absorbed"
+        );
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "and it must still saturate rather than wrap"
+        );
     }
 
     #[test]
