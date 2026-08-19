@@ -93,7 +93,16 @@ done
   exit 3
 }
 
-EXCLUDES=(--exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui)
+# The four Tauri desktop crates, excluded for the same reason every headless
+# workspace job in ci.yml excludes them: they need WebKit2GTK, and nothing here
+# runs an ignored test of theirs. `trusty-audit-ui` was missing from this list
+# and compiled on every run of this gate (#5891).
+EXCLUDES=(
+  --exclude trusty-mpm-gui
+  --exclude trusty-code-gui
+  --exclude trusty-agents-ui
+  --exclude trusty-audit-ui
+)
 
 TMP_LIST="$(mktemp "${TMPDIR:-/tmp}/ignored-tests.list.XXXXXX")"
 TMP_SEL="$(mktemp "${TMPDIR:-/tmp}/ignored-tests.sel.XXXXXX")"

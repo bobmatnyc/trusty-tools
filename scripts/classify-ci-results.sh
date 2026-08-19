@@ -37,6 +37,20 @@
 #   mapping is then correct if it is ever fed raw check-run conclusions, where
 #   `timed_out` is a real value.
 #
+# FEED IT RAW CONCLUSIONS, NEVER A LAUNDERED ONE (#5998). This script can only
+#   classify what it is handed, so a caller that hands it an AGGREGATOR job's
+#   conclusion has already decided the verdict. `ci.yml`'s `test` job is one:
+#   it reads the shard matrix's result and `exit 1`s on anything that is not
+#   `success`, so two shards CANCELLED by a newer push to the same concurrency
+#   group reached this script as `test=failure` and were folded into red — run
+#   32154560958 on 41fee6ac6 filed a false alarm on the `ci-red-main` issue
+#   while the superseding run on 2875e1f9d was fully green. The fix is upstream
+#   of the mapping: `notify-main-failure` now classifies `test-shard` and
+#   `test-doc` directly, so a cancellation arrives as `cancelled` (inconclusive)
+#   and a genuine shard failure still arrives as `failure` (red). This is the
+#   mirror of #4179, which fixed cancelled-hides-a-failure; both hold only while
+#   the conclusions handed in are the jobs' own.
+#
 # Outputs (stdout, and appended to $GITHUB_OUTPUT when set):
 #   verdict=green|red|inconclusive
 #   summary=<one-line per-job breakdown>
@@ -46,7 +60,9 @@
 #
 # Test: scripts/check-ci-helpers-selftest.sh (`classify-ci-results:` cases)
 #   asserts the verdict for every conclusion value above, individually and in
-#   precedence combinations.
+#   precedence combinations, plus the #5998 pair — the raw superseded-shard set
+#   and the laundered one — and the ci.yml wiring that decides which of the two
+#   this script is handed.
 
 set -euo pipefail
 

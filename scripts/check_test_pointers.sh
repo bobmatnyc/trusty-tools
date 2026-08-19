@@ -14,7 +14,8 @@
 #   real one). This script turns that into a mechanical CI gate, mirroring
 #   scripts/check_line_cap.sh's ratcheted-allowlist shape.
 #
-# What: scans every tracked `.rs` file (`git ls-files '*.rs'`, minus
+# What: scans every tracked AND untracked-but-not-ignored `.rs` file
+#   (`git ls-files --cached --others --exclude-standard -- '*.rs'`, minus
 #   EXCLUDE_PREFIXES below) for `Test:` doc-comment annotations (a `///`/`//!`
 #   line whose stripped content starts with the literal `Test:`, plus any
 #   immediately-following `///`/`//!` continuation lines up to the next blank
@@ -498,10 +499,18 @@ scan() {
 
   # #4618: materialise the enumeration so a failing `git ls-files` is observable
   # instead of arriving as an empty stream that reads as "0 dangling pointers".
+  #
+  # #5798: `--others --exclude-standard` puts UNTRACKED, non-ignored `.rs` files
+  # in the corpus alongside the tracked ones. Tracked-only meant a developer who
+  # ran this before `git add` got a pass that said nothing about the file they
+  # were about to commit, and CI then failed on exactly that file (PR #5790:
+  # 24930 citations locally at 04:45, 24942 after the same files were tracked).
+  # `--cached` and `--others` are disjoint sets, so no file is listed twice, and
+  # `--exclude-standard` keeps `target/` and everything else gitignored out.
   rslist="$(mktemp "${TMPDIR:-/tmp}/tprslist.XXXXXX")"
-  if ! git ls-files '*.rs' > "$rslist"; then
-    echo "FAIL: TOOL ERROR — 'git ls-files *.rs' exited non-zero; nothing was" >&2
-    echo "      scanned. This is NOT a pass (issue #4618)." >&2
+  if ! git ls-files --cached --others --exclude-standard -- '*.rs' > "$rslist"; then
+    echo "FAIL: TOOL ERROR — 'git ls-files --cached --others *.rs' exited non-zero;" >&2
+    echo "      nothing was scanned. This is NOT a pass (issue #4618)." >&2
     rm -f "$raw" "$rslist"
     exit 1
   fi
@@ -751,6 +760,17 @@ mod tests {
 EOF
   ( cd "$tmp" && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -q -m fixture )
 
+  # #5798: written AFTER the commit and never `git add`ed, so it is untracked.
+  # `git ls-files '*.rs'` cannot see it, which is how a local run passed clean
+  # on PR #5790 while CI failed on this exact class of file. It must be scanned,
+  # and its dangling citation must be reported.
+  cat > "$tmp/crates/fixture/src/untracked_new.rs" <<'EOF'
+/// Why: fixture for the #5798 untracked-file case.
+/// What: nothing.
+/// Test: `untracked_file_dangling_test`.
+pub fn added_but_not_yet_staged() {}
+EOF
+
   local viol stale err checked rc
   viol="$(mktemp "${TMPDIR:-/tmp}/tpself.viol.XXXXXX")"
   stale="$(mktemp "${TMPDIR:-/tmp}/tpself.stale.XXXXXX")"
@@ -783,8 +803,14 @@ EOF
   # citation must resolve, not just `fn` citations (this is exactly the case
   # that shipped broken: module citations only ever passed via the
   # allowlist, never verified for real).
-  if [ "$(wc -l < "$viol" | tr -d ' ')" != "6" ]; then
-    echo "self-test FAIL: expected exactly 6 violations, got:" >&2
+  # ...plus untracked_file_dangling_test, cited by an UNTRACKED file (#5798) —
+  # seven in total.
+  if [ "$(wc -l < "$viol" | tr -d ' ')" != "7" ]; then
+    echo "self-test FAIL: expected exactly 7 violations, got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif ! grep -q "untracked_file_dangling_test" "$viol"; then
+    echo "self-test FAIL: the untracked file's dangling citation was not reported — the corpus is tracked-only again (issue #5798), got:" >&2
     cat "$viol" >&2
     ok=0
   elif ! grep -q "dangling_test_missing" "$viol"; then
