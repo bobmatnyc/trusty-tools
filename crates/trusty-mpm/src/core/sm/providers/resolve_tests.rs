@@ -138,6 +138,98 @@ fn route_prefix_contradicting_the_shape_is_an_error() {
     .expect_err("a bedrock profile id must not be sent to api.anthropic.com");
 }
 
+/// #6114 (code-critic MEDIUM 2): an explicit routing prefix survives a
+/// merely-probable Bedrock shape.
+///
+/// Why: `openrouter/anthropic.claude-x` states the provider for this call. The
+/// dotted-vendor rule is a guess from a vendor-name list, and a guess must not
+/// turn a working configuration into a hard error. The catalogue-fact shapes
+/// still veto — `route_prefix_contradicting_the_shape_is_an_error` proves that
+/// half is intact.
+/// What: pins the dotted remainder through the public resolver under each of
+/// the three prefixes, and asserts the prefix wins every time.
+/// Test: this test itself.
+#[test]
+fn route_explicit_prefix_survives_a_probable_bedrock_shape() {
+    let cases = [
+        ("openrouter/anthropic.claude-x", ProviderKind::OpenRouter),
+        ("anthropic/anthropic.claude-x", ProviderKind::Anthropic),
+        ("bedrock/anthropic.claude-x", ProviderKind::Bedrock),
+    ];
+    for (requested, expected) in cases {
+        let (kind, model) = routed(requested, ProviderKind::Bedrock);
+        assert_eq!(kind, expected, "the prefix on {requested:?} must win");
+        assert_eq!(
+            model, "anthropic.claude-x",
+            "only the routing prefix is stripped"
+        );
+    }
+
+    // With NO prefix the same id still reads as Bedrock — a config default does
+    // not outrank the shape, only an explicit per-call prefix does.
+    let (kind, _) = routed("anthropic.claude-x", ProviderKind::OpenRouter);
+    assert_eq!(kind, ProviderKind::Bedrock);
+}
+
+/// #6114 (code-critic MEDIUM 1): the remedy never names a `provider` value the
+/// config parser rejects.
+///
+/// Why: telling an operator to set `provider = "fireworks"` when
+/// [`ProviderKind::parse`] rejects it sends them in a circle.
+/// What: takes both shape errors, isolates the REMEDY half of each (the quoted
+/// model id in the diagnosis half is not a suggestion), and asserts every
+/// double-quoted token the remedy offers is either a parseable `provider` value
+/// or a routing prefix the resolver strips.
+/// Test: this test itself.
+#[test]
+fn shape_error_only_suggests_parseable_provider_values() {
+    /// The remedy starts after the refusal sentence; everything before it is
+    /// diagnosis, including the operator's own (unparseable) model id.
+    const REFUSAL: &str = "than the one requested. ";
+
+    let unbuildable = resolve_provider_and_model(
+        "accounts/fireworks/models/llama-v3p1-70b-instruct",
+        ProviderKind::OpenRouter,
+    )
+    .expect_err("a fireworks-native id must not run on OpenRouter")
+    .to_string();
+    let buildable = resolve_provider_and_model(
+        "bedrock/anthropic/claude-opus-4.8",
+        ProviderKind::OpenRouter,
+    )
+    .expect_err("an OpenRouter slug must not run on Bedrock")
+    .to_string();
+
+    for msg in [&unbuildable, &buildable] {
+        let (_, remedy) = msg
+            .split_once(REFUSAL)
+            .unwrap_or_else(|| panic!("the message must carry a remedy: {msg}"));
+        for token in remedy.split('"').skip(1).step_by(2) {
+            let is_prefix = ProviderKind::ALL
+                .iter()
+                .filter_map(|k| k.model_prefix())
+                .any(|p| token.starts_with(p));
+            assert!(
+                is_prefix || ProviderKind::parse(token).is_ok(),
+                "the remedy offers {token:?}, which is neither a parseable provider \
+                 value nor a routing prefix: {msg}"
+            );
+        }
+    }
+
+    // The unbuildable case must say so and name the set, rather than suggesting
+    // a `provider` value that parse() rejects (the #6114 MEDIUM-1 defect).
+    assert!(
+        unbuildable.contains("has no client for fireworks")
+            && unbuildable.contains(&ProviderKind::accepted_values()),
+        "the unbuildable remedy must name the accepted set: {unbuildable}"
+    );
+    assert!(
+        !unbuildable.contains("provider to \"fireworks\""),
+        "must never suggest a provider value parse() rejects: {unbuildable}"
+    );
+}
+
 /// #6114: a shape naming a provider the SM has no client for stops the call.
 ///
 /// Why: the SM builds Anthropic, Bedrock, and OpenRouter. A Fireworks-native id

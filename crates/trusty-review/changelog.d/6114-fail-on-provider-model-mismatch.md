@@ -10,6 +10,9 @@ Fixed
   `accounts/fireworks/models/*` to Fireworks — and returns
   `LlmError::Validation` naming both the id and the provider when the two cannot
   be reconciled. A genuinely ambiguous bare id still uses the configured
-  default. `resolve_provider_and_model` is now fallible; `build_provider`
+  default, and an explicit routing prefix is overruled only by a shape that
+  belongs to exactly one provider's catalogue — never by the dotted
+  `vendor.model` guess, so `openrouter/anthropic.claude-x` keeps working.
+  `resolve_provider_and_model` is now fallible; `build_provider`
   propagates the error, and `trusty-review report` raises it in its preflight,
   before a sweep spends minutes on a render that would use the wrong model.

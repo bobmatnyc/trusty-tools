@@ -310,14 +310,25 @@ pub fn resolve_provider_and_model(
 /// [`LlmError::Validation`] naming `requested`, the inferred provider, and
 /// `provider` otherwise. `requested` is the operator's original string (prefix
 /// included) so the message quotes what they actually typed.
+///
+/// Uses [`conclusive_shape_mismatch`], not the plain form: every caller here
+/// reaches this with a provider the operator pinned by prefix, or with a
+/// default that only sees ids no shape claimed. Rejecting a pinned provider on
+/// the dotted-vendor guess would break `openrouter/anthropic.claude-x`, a
+/// working configuration, on a vendor-name coincidence.
+///
+/// [`conclusive_shape_mismatch`]: trusty_common::inference::conclusive_shape_mismatch
 /// Test: `prefix_that_contradicts_the_id_shape_is_an_error`,
-/// `every_contradicting_pair_is_refused`.
+/// `every_contradicting_pair_is_refused`,
+/// `explicit_prefix_survives_a_probable_bedrock_shape`.
 fn reconcile(
     provider: Provider,
     bare: &str,
     requested: &str,
 ) -> Result<(Provider, String), LlmError> {
-    if let Some(inferred) = trusty_common::inference::shape_mismatch(provider.provider_id(), bare) {
+    if let Some(inferred) =
+        trusty_common::inference::conclusive_shape_mismatch(provider.provider_id(), bare)
+    {
         return Err(LlmError::Validation(format!(
             "model id {requested:?} names the {inferred} provider by its shape, but this call \
              would run on {provider}. Refusing to substitute a different model than the one \
@@ -631,6 +642,66 @@ mod tests {
             &Provider::OpenRouter,
         );
         assert_eq!(prov, Provider::Fireworks);
+    }
+
+    /// #6114 (code-critic MEDIUM 2): an explicit routing prefix survives a
+    /// merely-probable Bedrock shape.
+    ///
+    /// Why: `openrouter/anthropic.claude-x` states the provider for this call.
+    /// The dotted-vendor rule is a guess from a vendor-name list, and a guess
+    /// must not turn a working configuration into a hard error. The
+    /// catalogue-fact shapes still veto — the test below this one proves that
+    /// half is intact.
+    /// What: pins the dotted remainder through the public resolver under each
+    /// of the three prefixes, and asserts the prefix wins every time.
+    /// Test: this test itself.
+    #[test]
+    fn explicit_prefix_survives_a_probable_bedrock_shape() {
+        let cases = [
+            ("openrouter/anthropic.claude-x", Provider::OpenRouter),
+            ("fireworks/anthropic.claude-x", Provider::Fireworks),
+            ("bedrock/anthropic.claude-x", Provider::Bedrock),
+        ];
+        for (requested, expected) in cases {
+            let (prov, model) = resolved(requested, &Provider::Bedrock);
+            assert_eq!(prov, expected, "the prefix on {requested:?} must win");
+            assert_eq!(
+                model, "anthropic.claude-x",
+                "only the routing prefix is stripped"
+            );
+        }
+
+        // With NO prefix the same id still reads as Bedrock — a config default
+        // does not outrank the shape, only an explicit per-call prefix does.
+        let (prov, _) = resolved("anthropic.claude-x", &Provider::OpenRouter);
+        assert_eq!(prov, Provider::Bedrock);
+    }
+
+    /// #6114: every provider the shape module can infer is one this crate's
+    /// config parser accepts, so an error's remedy never names an unusable value.
+    ///
+    /// Why: the mismatch message tells the operator to set the provider to the
+    /// inferred one. Naming a value `Provider: FromStr` rejects would send them
+    /// in a circle (the trusty-mpm half of this was code-critic MEDIUM 1).
+    /// What: round-trips each inferable `ProviderId` through `Display` and
+    /// `FromStr`.
+    /// Test: this test itself.
+    #[test]
+    fn every_inferable_provider_is_parseable_here() {
+        use std::str::FromStr;
+        for id in [
+            trusty_common::inference::ProviderId::OpenRouter,
+            trusty_common::inference::ProviderId::Bedrock,
+            trusty_common::inference::ProviderId::Fireworks,
+        ] {
+            let provider = Provider::from_provider_id(id)
+                .unwrap_or_else(|| panic!("{} must map here", id.as_str()));
+            assert_eq!(
+                Provider::from_str(&provider.to_string()).as_ref(),
+                Ok(&provider),
+                "the name the error prints must parse back"
+            );
+        }
     }
 
     /// #6114: an id whose shape names no provider still uses the default —

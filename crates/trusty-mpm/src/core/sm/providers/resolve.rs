@@ -27,7 +27,9 @@ use tracing::debug;
 use tracing::info;
 #[cfg(feature = "bedrock")]
 use tracing::warn;
-use trusty_common::inference::{ProviderId, infer_provider_from_model_shape, shape_mismatch};
+use trusty_common::inference::{
+    ProviderId, conclusive_shape_mismatch, infer_provider_from_model_shape,
+};
 
 use super::{
     ANTHROPIC_MODEL_PREFIX, AnthropicProvider, BEDROCK_MODEL_PREFIX, LlmProvider,
@@ -133,14 +135,21 @@ pub fn resolve_provider_and_model(
 /// [`ProviderKind::Auto`] (nothing to contradict yet — the chain runs later, and
 /// it only ever reaches here on an ambiguous id). Otherwise a
 /// [`SmLlmError::Validation`] naming `requested` and both providers.
-/// Test: `route_prefix_contradicting_the_shape_is_an_error`.
+///
+/// Uses [`conclusive_shape_mismatch`], not the plain form: every caller here
+/// reaches this with a kind the operator pinned by prefix, or with a default
+/// that only sees ids no shape claimed. Rejecting a pinned kind on the
+/// dotted-vendor guess would break `openrouter/anthropic.claude-x`, a working
+/// configuration, on a vendor-name coincidence.
+/// Test: `route_prefix_contradicting_the_shape_is_an_error`,
+/// `route_explicit_prefix_survives_a_probable_bedrock_shape`.
 fn reconcile(
     kind: ProviderKind,
     bare: &str,
     requested: &str,
 ) -> Result<(ProviderKind, String), SmLlmError> {
     if let Some(id) = kind.provider_id()
-        && let Some(inferred) = shape_mismatch(id, bare)
+        && let Some(inferred) = conclusive_shape_mismatch(id, bare)
     {
         return Err(shape_error(requested, inferred, kind));
     }
@@ -152,14 +161,32 @@ fn reconcile(
 /// Why: the message is the deliverable of #6114 — it must name the id AND the
 /// provider that would have run it, so an operator can see what was substituted
 /// instead of discovering it in a bill.
-/// What: a [`SmLlmError::Validation`] carrying all three facts.
-/// Test: `route_prefix_contradicting_the_shape_is_an_error`.
+/// What: a [`SmLlmError::Validation`] carrying all three facts, plus a remedy.
+/// The remedy branches on whether the SM can actually build `inferred`: naming a
+/// provider [`ProviderKind::parse`] rejects would send the operator in a circle
+/// (#6114, code-critic MEDIUM 1), so an unbuildable one is reported as such and
+/// the accepted set comes from [`ProviderKind::accepted_values`].
+/// Test: `route_prefix_contradicting_the_shape_is_an_error`,
+/// `route_shape_the_sm_cannot_build_is_an_error`,
+/// `shape_error_only_suggests_parseable_provider_values`.
 fn shape_error(requested: &str, inferred: ProviderId, kind: ProviderKind) -> SmLlmError {
+    let remedy = match ProviderKind::from_provider_id(inferred) {
+        Some(target) => format!(
+            "Either set [session_manager.inference].provider to \"{target}\", or pin one \
+             explicitly with a routing prefix ({prefixes}).",
+            target = target.name(),
+            prefixes = ProviderKind::routing_prefix_hint()
+        ),
+        None => format!(
+            "The session manager has no client for {inferred}; provider accepts only \
+             {accepted}. Use a model id published by one of those providers.",
+            inferred = inferred.as_str(),
+            accepted = ProviderKind::accepted_values()
+        ),
+    };
     SmLlmError::Validation(format!(
         "model id {requested:?} names the {inferred} provider by its shape, but this call would \
-         run on {kind}. Refusing to substitute a different model than the one requested. \
-         Either set [session_manager.inference].provider to {inferred}, or pin one explicitly \
-         with a routing prefix (\"anthropic/…\", \"bedrock/…\", \"openrouter/…\").",
+         run on {kind}. Refusing to substitute a different model than the one requested. {remedy}",
         inferred = inferred.as_str(),
         kind = kind.name()
     ))

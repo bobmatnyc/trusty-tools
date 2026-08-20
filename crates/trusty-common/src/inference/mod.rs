@@ -103,7 +103,8 @@ pub use registry::{
 };
 #[cfg(feature = "inference-client")]
 pub use shape::{
-    BEDROCK_INFERENCE_PROFILE_PREFIXES, infer_provider_from_model_shape, shape_mismatch,
+    BEDROCK_INFERENCE_PROFILE_PREFIXES, ShapeEvidence, classify_model_shape,
+    conclusive_shape_mismatch, infer_provider_from_model_shape, shape_mismatch,
 };
 #[cfg(feature = "inference-client")]
 pub use streaming::{

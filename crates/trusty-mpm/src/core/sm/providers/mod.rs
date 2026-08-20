@@ -97,16 +97,84 @@ impl ProviderKind {
     /// Anything else returns [`SmLlmError::Validation`].
     /// Test: `provider_kind_parse_ok`, `provider_kind_parse_rejects_unknown`.
     pub fn parse(s: &str) -> Result<Self, SmLlmError> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "" | "auto" => Ok(ProviderKind::Auto),
-            "anthropic" => Ok(ProviderKind::Anthropic),
-            "bedrock" => Ok(ProviderKind::Bedrock),
-            "openrouter" => Ok(ProviderKind::OpenRouter),
-            other => Err(SmLlmError::Validation(format!(
-                "unknown [session_manager.inference] provider {other:?}; \
-                 expected one of: auto, anthropic, bedrock, openrouter"
-            ))),
+        let wanted = s.trim().to_ascii_lowercase();
+        if wanted.is_empty() {
+            return Ok(ProviderKind::Auto);
         }
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.name() == wanted)
+            .ok_or_else(|| {
+                SmLlmError::Validation(format!(
+                    "unknown [session_manager.inference] provider {wanted:?}; \
+                     expected one of: {}",
+                    Self::accepted_values()
+                ))
+            })
+    }
+
+    /// Every legal `provider` value, in the order the error message lists them.
+    ///
+    /// Why: #6114 (code-critic MEDIUM 1) — [`ProviderKind::parse`]'s error and
+    /// the shape-mismatch remedy both have to name the accepted set, and two
+    /// hand-written lists drift. Adding a variant is already a compile error in
+    /// [`ProviderKind::name`]; routing both messages through one list means it
+    /// cannot be a SILENT error here.
+    /// What: the four variants. `parse` matches against `name()` over this list,
+    /// so a variant missing from it is unparseable rather than misdescribed.
+    /// Test: `provider_kind_all_covers_every_variant`,
+    /// `provider_kind_name_round_trips`.
+    pub const ALL: &'static [ProviderKind] = &[
+        ProviderKind::Auto,
+        ProviderKind::Anthropic,
+        ProviderKind::Bedrock,
+        ProviderKind::OpenRouter,
+    ];
+
+    /// The accepted `provider` values as one comma-separated string.
+    ///
+    /// Why: an error that suggests a value the config parser rejects sends the
+    /// operator in a circle (#6114).
+    /// What: `"auto, anthropic, bedrock, openrouter"`, derived from
+    /// [`ProviderKind::ALL`].
+    /// Test: `provider_kind_accepted_values_are_all_parseable`.
+    pub fn accepted_values() -> String {
+        Self::ALL
+            .iter()
+            .map(|kind| kind.name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The routing prefix that pins this kind on a single call, if it has one.
+    ///
+    /// Why: the shape-mismatch remedy tells the operator which prefixes exist,
+    /// and a hand-written list there would drift from the constants the parser
+    /// actually strips (#6114).
+    /// What: `None` for [`ProviderKind::Auto`], which pins nothing.
+    /// Test: `provider_kind_prefixes_match_the_constants`.
+    pub fn model_prefix(self) -> Option<&'static str> {
+        match self {
+            ProviderKind::Auto => None,
+            ProviderKind::Anthropic => Some(ANTHROPIC_MODEL_PREFIX),
+            ProviderKind::Bedrock => Some(BEDROCK_MODEL_PREFIX),
+            ProviderKind::OpenRouter => Some(OPENROUTER_MODEL_PREFIX),
+        }
+    }
+
+    /// The routing prefixes an operator may write, as one quoted list.
+    ///
+    /// Why: same single-source reason as [`ProviderKind::accepted_values`].
+    /// What: `"\"anthropic/…\", \"bedrock/…\", \"openrouter/…\""`.
+    /// Test: `provider_kind_prefixes_match_the_constants`.
+    pub fn routing_prefix_hint() -> String {
+        Self::ALL
+            .iter()
+            .filter_map(|kind| kind.model_prefix())
+            .map(|prefix| format!("\"{prefix}…\""))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// The stable lowercase name of this provider kind.
@@ -297,15 +365,70 @@ mod tests {
     /// Test: this is the test.
     #[test]
     fn provider_kind_name_round_trips() {
+        for kind in ProviderKind::ALL.iter().copied() {
+            assert_eq!(ProviderKind::parse(kind.name()).unwrap(), kind);
+        }
+        assert_eq!(ProviderKind::Anthropic.name(), "anthropic");
+    }
+
+    /// #6114: `ALL` must list every variant, because `parse` now matches
+    /// against it — a variant missing from the list is unparseable.
+    ///
+    /// Why: `ALL` is hand-written, so the exhaustive match in `name()` is what
+    /// catches a new variant at compile time. This test catches the other half:
+    /// a variant that has a name but was never added to the list.
+    /// What: asserts the count, and that every variant appears.
+    /// Test: this is the test.
+    #[test]
+    fn provider_kind_all_covers_every_variant() {
         for kind in [
             ProviderKind::Auto,
             ProviderKind::Anthropic,
             ProviderKind::Bedrock,
             ProviderKind::OpenRouter,
         ] {
-            assert_eq!(ProviderKind::parse(kind.name()).unwrap(), kind);
+            assert!(
+                ProviderKind::ALL.contains(&kind),
+                "{} is missing from ProviderKind::ALL, so parse() rejects it",
+                kind.name()
+            );
         }
-        assert_eq!(ProviderKind::Anthropic.name(), "anthropic");
+        assert_eq!(ProviderKind::ALL.len(), 4, "ALL must list every variant");
+    }
+
+    /// #6114: every value `accepted_values` advertises must actually parse.
+    #[test]
+    fn provider_kind_accepted_values_are_all_parseable() {
+        let advertised = ProviderKind::accepted_values();
+        for value in advertised.split(", ") {
+            assert!(
+                ProviderKind::parse(value).is_ok(),
+                "accepted_values() offers {value:?}, which parse() rejects"
+            );
+        }
+        assert_eq!(advertised, "auto, anthropic, bedrock, openrouter");
+    }
+
+    /// #6114: the prefix hint must quote the constants the resolver strips.
+    #[test]
+    fn provider_kind_prefixes_match_the_constants() {
+        assert_eq!(
+            ProviderKind::Anthropic.model_prefix(),
+            Some(ANTHROPIC_MODEL_PREFIX)
+        );
+        assert_eq!(
+            ProviderKind::Bedrock.model_prefix(),
+            Some(BEDROCK_MODEL_PREFIX)
+        );
+        assert_eq!(
+            ProviderKind::OpenRouter.model_prefix(),
+            Some(OPENROUTER_MODEL_PREFIX)
+        );
+        assert_eq!(ProviderKind::Auto.model_prefix(), None, "auto pins nothing");
+        assert_eq!(
+            ProviderKind::routing_prefix_hint(),
+            "\"anthropic/…\", \"bedrock/…\", \"openrouter/…\""
+        );
     }
 
     /// #6114: the bridge to the shared `ProviderId` must round-trip every kind
