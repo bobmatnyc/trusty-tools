@@ -618,12 +618,17 @@ async fn run_one(
     // trusty-analyze, and write the ranking into the manifest the child just
     // wrote — the interface trusty-review's investigation pass reads (#6078).
     // It runs AFTER the child because the manifest is what it edits and the
-    // child is what writes it, and only on a success because a repository with
-    // no manifest has nothing to ground. Fail-open: a leg that degrades adds a
-    // gap line here and in the manifest, never a failed repository.
-    if result.succeeded() {
+    // child is what writes it, and it asks for that FILE rather than for the
+    // child's exit status: a child that failed at a later stage still left a
+    // manifest, and re-rendering it is the documented recovery. Gating on the
+    // status skipped grounding for exactly that repository, and skipped its gap
+    // with it. A repository with no manifest has nothing to ground and nothing
+    // to write a gap into — its recorded failure is the trace. Fail-open: a leg
+    // that degrades adds a gap line here and in the manifest, never a failed
+    // repository.
+    let manifest = output.join(AuditManifest::FILE_NAME);
+    if manifest.is_file() {
         let tools = grounding::Tools::pinned(binaries.search.clone(), binaries.analyze.clone());
-        let manifest = output.join(AuditManifest::FILE_NAME);
         gaps.extend(grounding::ground_manifest(&manifest, &tools, &checkout, &repo.name).await);
     }
     progress.unit_finished(
@@ -1019,6 +1024,13 @@ trusty-review = "0.15.1"
              printf '[report]\\ntitle = \"Acme\"\\n{gaps}\\n[[repositories]]\\n\
              name = \"acme\"\\npath = \"/r\"\\n' > \"$out/manifest.toml\"\nexit 0\n"
         )
+    }
+
+    /// A stub `tga` shaped like the child of the 2026-08-19 dogfood run: it
+    /// writes the manifest a real one would, and THEN fails — the shape of a
+    /// render stage that failed after everything before it was collected.
+    fn writes_a_manifest_then_fails() -> String {
+        writes_a_manifest(None).replace("\nexit 0\n", "\nexit 1\n")
     }
 
     /// A stub `trusty-search` that approves whatever it is asked to approve.
@@ -2046,6 +2058,45 @@ trusty-review = "0.15.1"
         assert!(
             report.repos[0].gaps.iter().any(|g| g.contains("jira sync")),
             "the gap must be surfaced: {:?}",
+            report.repos[0].gaps
+        );
+    }
+
+    /// 🔴 #6081: a child that failed AFTER writing its manifest must still be
+    /// grounded, and must still say so.
+    ///
+    /// Why: the dogfood sweep of 2026-08-19. `tga audit` wrote the manifest,
+    /// then its render stage failed on a truncated LLM response and the child
+    /// exited 1. The call site asked the child's EXIT STATUS whether there was a
+    /// manifest to ground, so grounding never ran — and because it never ran, it
+    /// stated no gap either. No `inspect_priority`, no gap, no log line: the one
+    /// combination `crate::grounding`'s "degrade, never silently" contract says
+    /// cannot happen. The manifest survives that failure and re-rendering it is
+    /// the documented recovery, so it is the file, not the status, that decides.
+    /// What: a stub that writes the manifest and then exits 1. The repository
+    /// still fails, and its manifest still carries a ranking or a named gap.
+    /// Test: this is the test. Against `origin/main` the final assertion fails —
+    /// `gaps` is empty and the manifest declares no `inspect_priority`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_fails_after_writing_a_manifest_is_still_grounded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work = work_in(tmp.path());
+        install_stubs(&work, &writes_a_manifest_then_fails());
+        make_repo(&work, "acme-api");
+        select(&work, &[("acme-api", "repos/acme-api")]);
+
+        let report = sweep(&work, &config(), &RunOptions::default(), &Progress::none())
+            .await
+            .expect("a failing child is a recorded failure, not an error");
+
+        assert_eq!(report.status, RunStatus::AllFailed, "{report:?}");
+        let manifest = std::fs::read_to_string(report.repos[0].output.join("manifest.toml"))
+            .expect("the manifest the child wrote survives its failure");
+        assert!(
+            !report.repos[0].gaps.is_empty() || manifest.contains("inspect_priority"),
+            "grounding must leave a ranking or a named gap on a manifest that outlived its \
+             child, never neither: gaps={:?}\n{manifest}",
             report.repos[0].gaps
         );
     }
