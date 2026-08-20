@@ -530,6 +530,49 @@ fn provider_maps_to_common_provider_id() {
     assert_eq!(Provider::Fireworks.provider_id(), ProviderId::Fireworks);
 }
 
+/// #6114: the bridge back from the shared identity must round-trip.
+///
+/// Why: model-shape inference speaks `ProviderId`. A lossy inverse would let an
+/// inferred shape resolve to the wrong client, which is the substitution the
+/// ticket removes.
+/// What: asserts `from_provider_id(provider_id(p)) == Some(p)` for all three.
+/// Test: this is the test.
+#[test]
+fn provider_id_round_trips_both_ways() {
+    for provider in [Provider::OpenRouter, Provider::Bedrock, Provider::Fireworks] {
+        assert_eq!(
+            Provider::from_provider_id(provider.provider_id()),
+            Some(provider.clone()),
+            "{provider} must survive the round trip"
+        );
+    }
+}
+
+/// #6114: a `ProviderId` this crate builds no client for maps to nothing.
+///
+/// Why: `None` is what makes the resolver report an unrunnable shape instead of
+/// coercing it onto whichever provider happened to be configured.
+/// What: asserts the five non-buildable identities.
+/// Test: this is the test.
+#[test]
+fn unbuildable_provider_ids_map_to_none() {
+    use trusty_common::inference::ProviderId;
+    for id in [
+        ProviderId::Anthropic,
+        ProviderId::OpenAI,
+        ProviderId::Together,
+        ProviderId::AtlasCloud,
+        ProviderId::Local,
+    ] {
+        assert_eq!(
+            Provider::from_provider_id(id),
+            None,
+            "{} has no trusty-review client",
+            id.as_str()
+        );
+    }
+}
+
 /// Why: the reviewer is the role that does the judging, and the owner ruled it
 /// runs on the opus tier. On OpenRouter — the provider the trusty-audit path
 /// uses for all inference — that tier has a verified id, so the reviewer must

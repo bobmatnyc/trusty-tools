@@ -17,7 +17,10 @@
 //! [`Configurator`]), and the [`test_support`] doubles. Concrete provider HTTP
 //! adapters land in #2403/#2407. Issue #5971 adds [`tier`] beside the
 //! configurator: the configurator answers "which provider and how do I reach
-//! it", [`ModelTier::resolve`] answers "which model on that provider".
+//! it", [`ModelTier::resolve`] answers "which model on that provider". Issue
+//! #6114 adds [`shape`], which runs that last question backwards — "which
+//! provider does this model id name" — so a resolver can refuse a run whose id
+//! and provider disagree instead of quietly substituting the default model.
 //!
 //! Test: the `inference-client` surface is covered by each submodule's inline
 //! tests and `crates/trusty-common/tests/inference_foundation.rs`; the
@@ -31,6 +34,7 @@
 //! [`configurator`]: crate::inference::configurator
 //! [`Configurator`]: configurator::Configurator
 //! [`test_support`]: crate::inference::test_support
+//! [`shape`]: crate::inference::shape
 //! [`tier`]: crate::inference::tier
 //! [`ModelTier::resolve`]: crate::inference::tier::ModelTier::resolve
 
@@ -67,6 +71,8 @@ pub mod providers;
 #[cfg(feature = "inference-client")]
 pub mod registry;
 #[cfg(feature = "inference-client")]
+pub mod shape;
+#[cfg(feature = "inference-client")]
 pub mod streaming;
 #[cfg(feature = "inference-client")]
 pub mod test_support;
@@ -94,6 +100,11 @@ pub use providers::{OpenAiCompatAdapter, OpenAiCompatConfig, register_default_fa
 pub use registry::{
     Pricing, ProviderCapabilities, ProviderId, ToolDialect, capabilities, capabilities_for,
     context_window, pricing,
+};
+#[cfg(feature = "inference-client")]
+pub use shape::{
+    BEDROCK_INFERENCE_PROFILE_PREFIXES, ShapeEvidence, classify_model_shape,
+    conclusive_shape_mismatch, infer_provider_from_model_shape, shape_mismatch,
 };
 #[cfg(feature = "inference-client")]
 pub use streaming::{

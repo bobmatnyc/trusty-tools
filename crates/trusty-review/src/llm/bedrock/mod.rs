@@ -66,7 +66,14 @@ const DEFAULT_REGION: &str = "us-east-1";
 /// at runtime with a ValidationException.  Cross-region inference profiles
 /// (`us.anthropic.*`, `eu.anthropic.*`, etc.) route to the best-available
 /// region and are the recommended way to invoke Anthropic models on Bedrock.
-pub(crate) const INFERENCE_PROFILE_PREFIXES: &[&str] = &["us.", "eu.", "ap.", "jp.", "global."];
+///
+/// #6114 moved the list itself to `trusty-common`, where the shared model-shape
+/// inference reads the same prefixes to decide that an id is Bedrock's. Two
+/// copies would let this validator and that inference disagree about the same
+/// string; this alias keeps the crate-local spelling with one definition behind
+/// it.
+pub(crate) const INFERENCE_PROFILE_PREFIXES: &[&str] =
+    trusty_common::inference::BEDROCK_INFERENCE_PROFILE_PREFIXES;
 
 /// Retry attempts for transient errors (Transport, RateLimited, Upstream 5xx).
 const MAX_RETRIES: u32 = 3;

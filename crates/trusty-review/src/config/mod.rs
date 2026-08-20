@@ -101,6 +101,33 @@ impl Provider {
             Provider::Fireworks => ProviderId::Fireworks,
         }
     }
+
+    /// The narrow `Provider` for a shared [`ProviderId`], when one exists.
+    ///
+    /// Why: #6114 infers a provider from a model id's shape, and that inference
+    /// speaks `ProviderId` — the shared identity covers eight providers while
+    /// this crate builds clients for three. Mapping back in one place keeps a
+    /// call site from having to decide what an unbuildable provider means.
+    /// What: the inverse of [`Provider::provider_id`]; `None` for a
+    /// `ProviderId` this crate has no client for (Anthropic, OpenAI, Together,
+    /// AtlasCloud, Local).
+    /// Test: `provider_id_round_trips_both_ways`,
+    /// `unbuildable_provider_ids_map_to_none`.
+    ///
+    /// [`ProviderId`]: trusty_common::inference::ProviderId
+    pub fn from_provider_id(id: trusty_common::inference::ProviderId) -> Option<Self> {
+        use trusty_common::inference::ProviderId;
+        match id {
+            ProviderId::OpenRouter => Some(Provider::OpenRouter),
+            ProviderId::Bedrock => Some(Provider::Bedrock),
+            ProviderId::Fireworks => Some(Provider::Fireworks),
+            ProviderId::Anthropic
+            | ProviderId::OpenAI
+            | ProviderId::Together
+            | ProviderId::AtlasCloud
+            | ProviderId::Local => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Provider {

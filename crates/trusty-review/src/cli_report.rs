@@ -448,7 +448,9 @@ fn resolve_budget(args: &ReportArgs, manifest: &Manifest) -> Budget {
 /// Test: the rule itself, via [`credential_rule`].
 fn preflight_inference_credential(config: &ReviewConfig) -> Result<()> {
     let role = &config.role_models.reviewer;
-    let (provider, _) = resolve_provider_and_model(&role.model, &role.provider);
+    // #6114: an id whose shape contradicts the provider stops here, before the
+    // sweep spends minutes on a render that would run a different model.
+    let (provider, _) = resolve_provider_and_model(&role.model, &role.provider)?;
     credential_rule(provider, &config.openrouter_api_key)
 }
 
