@@ -209,16 +209,28 @@ The run uses the triple this client installed AND verified, at the version the
 engagement config pins today — a config bumped after `install` refuses the run
 rather than silently running the older binary.
 
-**What the run does not pin.** `tga` runs from its absolute path and the report
-renderer is named to the child through `TRUSTY_REVIEW_BIN`, so neither can come
-from your `PATH`. The analyze step is different: `tga audit` invokes
-`trusty-review report --analyze`, which reads metrics over HTTP from a URL
-(default `http://127.0.0.1:7879`) rather than spawning a binary — so no
-environment variable this client sets can pin it, and `TRUSTY_ANALYZE_BIN` is
-deliberately left unset because setting it would read as a guarantee it is not.
-Nothing in this chain starts a `trusty-analyze` daemon either, so today the
-analyze-derived sections come back empty through `trusty-review`'s documented
-fail-open path. That gap is tracked separately.
+**What the run does not pin.** `tga` runs from its absolute path, and the report
+renderer, the search binary and the analyze binary are named to the child
+through `TRUSTY_REVIEW_BIN`, `TRUSTY_SEARCH_BIN` and `TRUSTY_ANALYZE_BIN`, so
+none of them can come from your `PATH`. What stays unpinned is the analyze
+daemon's ADDRESS: `trusty-review report --analyze` reads metrics over HTTP from a
+URL (default `http://127.0.0.1:7879`, overridable with `TRUSTY_ANALYZE_URL`), so
+whatever is listening there is what answers.
+
+**The code-analysis leg (#6081).** After each repository is audited, this client
+indexes its checkout in `trusty-search` and measures it with `trusty-analyze`,
+starting either daemon if it is not already answering, and writes the resulting
+complexity ranking into that repository's `manifest.toml` as `inspect_priority`.
+That is what the report's investigation pass inspects first, so the code it reads
+is the code a tool measured rather than the code whose path name looked
+interesting. `trusty-audit render` does the same indexing and measuring before it
+re-renders, because that path invokes `trusty-review report --analyze` too.
+
+Every leg of that is fail-open: a daemon that will not start, a checkout
+`trusty-search` refuses, an index with nothing complex in it. None of them fails
+the repository, and none of them is silent — each states one line naming the
+repository and what the report therefore does not carry, both on the console and
+in the manifest's own gap list, so the rendered report states it as well.
 
 The engagement's `instructions` prose and an audit window are NOT yet passed to
 the child: `tga audit` takes `--weeks`, not free prose, and mapping one to the

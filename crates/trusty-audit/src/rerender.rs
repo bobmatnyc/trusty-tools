@@ -13,7 +13,9 @@
 //! What: [`rerender`] finds every `manifest.toml` under a delivered package (or
 //! under a working directory) and runs one `trusty-review report` child per
 //! manifest into a fresh output directory. It reads the package and never
-//! writes into it; it clones nothing, collects nothing, and starts no daemon.
+//! writes into it, and it clones and collects nothing. It DOES index and
+//! measure any checkout the manifest names that is present on this machine
+//! (#6081), because the child it spawns asks for `--analyze`.
 //!
 //! ## What a re-render reproduces, and what it does not
 //!
@@ -27,7 +29,8 @@
 //! - The dimensions that need the repository itself — the code scan and the
 //!   `trusty-analyze` pass — need a checkout at the path the manifest names and
 //!   a local analyze daemon. A package carries neither. [`checkout_gaps`] states
-//!   that per report rather than letting a thinner report read as the same one.
+//!   the missing checkout and [`ground_present_checkouts`] states a daemon that
+//!   will not start, rather than letting a thinner report read as the same one.
 //!
 //! ## Versions
 //!
@@ -45,6 +48,7 @@ use std::process::Stdio;
 
 use crate::config::SecretKey;
 use crate::error::AuditError;
+use crate::grounding;
 use crate::manifest::AuditManifest;
 use crate::progress::{Operation, Progress, UnitOutcome};
 use crate::run::ENV_INFERENCE_CREDENTIAL;
@@ -191,6 +195,12 @@ pub async fn rerender(
         .clone()
         .unwrap_or_else(|| source.join(DEFAULT_OUTPUT_DIR));
     let review = resolve_review(work, options.review.as_deref());
+    // #6081: this is the tga-free render path, and nothing on it started a
+    // daemon or indexed anything — so `--analyze` fetched nothing and every
+    // analyze-derived section rendered empty over a clean exit. Resolved once,
+    // because the two addresses come from discovery files and the environment
+    // and re-reading them per manifest could disagree with itself mid-run.
+    let tools = grounding::Tools::resolved(work);
     mkdir(&output)?;
 
     let total = manifests.len();
@@ -200,7 +210,8 @@ pub async fn rerender(
     for (index, manifest) in manifests.into_iter().enumerate() {
         let name = unique_name(&manifest, index, &mut taken);
         progress.unit_started(Operation::Rerender, name.as_str(), index + 1, total);
-        let rendered = render_one(&review, &manifest, &output, name, key, inference).await?;
+        let rendered =
+            render_one(&review, &tools, &manifest, &output, name, key, inference).await?;
         progress.unit_finished(
             Operation::Rerender,
             rendered.name.as_str(),
@@ -325,8 +336,10 @@ fn resolve_review(work: &WorkDir, explicit: Option<&Path>) -> PathBuf {
 }
 
 /// Render one manifest, recording rather than propagating its failure.
+#[allow(clippy::too_many_arguments)]
 async fn render_one(
     review: &Path,
+    tools: &grounding::Tools,
     manifest: &Path,
     output_root: &Path,
     name: String,
@@ -348,7 +361,12 @@ async fn render_one(
     // A manifest that will not parse fails THIS report and no other: the file
     // is the interface, and one unreadable copy says nothing about the rest.
     match AuditManifest::load(manifest) {
-        Ok(read) => report.gaps = checkout_gaps(manifest, &read),
+        Ok(read) => {
+            report.gaps = checkout_gaps(manifest, &read);
+            report
+                .gaps
+                .extend(ground_present_checkouts(tools, manifest, &read).await);
+        }
         Err(refusal) => {
             report.result = RenderResult::Failed {
                 reason: refusal.to_string(),
@@ -370,6 +388,43 @@ async fn render_one(
         report.artifacts = written_files(&report.output);
     }
     Ok(report)
+}
+
+/// Index and measure every repository the manifest names that is on this
+/// machine (#6081).
+///
+/// Why: `spawn_review` asks for `--analyze`, and until this existed nothing on
+/// this path started trusty-search or trusty-analyze or indexed anything — so
+/// the fetch missed, fell open, and the findings table, the complexity
+/// distribution and the health factors all rendered empty over exit 0. Empty
+/// reads as a clean bill of health.
+/// What: the repositories whose checkout IS present, one grounding each. The
+/// absent ones are skipped in silence because [`checkout_gaps`] has already
+/// stated them, and starting a daemon to measure a directory that is not there
+/// would buy nothing. The ranking each grounding produces is DISCARDED here: the
+/// manifest is the interface, the sweep already wrote it (`crate::run`), and
+/// this module's postcondition is that nothing under the source is written.
+/// Test: `super::rerender_tests::a_render_whose_daemons_are_down_says_so`,
+/// `super::rerender_tests::grounding_writes_nothing_into_the_package`.
+async fn ground_present_checkouts(
+    tools: &grounding::Tools,
+    manifest: &Path,
+    read: &AuditManifest,
+) -> Vec<String> {
+    let base = manifest.parent().unwrap_or(Path::new("."));
+    let mut gaps = Vec::new();
+    for repo in &read.repositories {
+        let path = if repo.path.is_absolute() {
+            repo.path.clone()
+        } else {
+            base.join(&repo.path)
+        };
+        if !path.is_dir() {
+            continue;
+        }
+        gaps.extend(grounding::ground(tools, &path, &repo.name).await.gaps);
+    }
+    gaps
 }
 
 /// The dimensions this render cannot reproduce, one line each.
@@ -803,7 +858,17 @@ mod rerender_tests {
 
         let report = run(&package, &review, &work_in(tmp.path())).await;
 
-        assert!(report.reports[0].gaps.is_empty(), "{:?}", report.reports[0]);
+        // #6081: a present checkout may still owe a GROUNDING gap — this
+        // machine need not be running the two daemons. What it must never owe
+        // is the missing-checkout line, which is what this test is about.
+        assert!(
+            !report.reports[0]
+                .gaps
+                .iter()
+                .any(|g| g.contains("no checkout for")),
+            "{:?}",
+            report.reports[0]
+        );
     }
 
     /// A manifest that will not parse fails ITS report and no other.
@@ -851,5 +916,87 @@ mod rerender_tests {
         let second = unique_name(Path::new("/p/out/01-acme/manifest.toml"), 1, &mut taken);
         assert_eq!(first, "01-acme");
         assert_ne!(second, first);
+    }
+
+    // ─── #6081: grounding on the tga-free render path ────────────────────────
+
+    /// A manifest naming a checkout that IS here, and daemons that are not.
+    fn present_checkout(tmp: &Path) -> (PathBuf, PathBuf) {
+        let checkout = tmp.join("repos").join("acme-api");
+        std::fs::create_dir_all(&checkout).expect("mkdir checkout");
+        let manifest = tmp.join("manifest.toml");
+        std::fs::write(
+            &manifest,
+            format!(
+                "[report]\ntitle = \"Acme\"\n\n[[repositories]]\nname = \"acme/api\"\npath = \"{}\"\n",
+                checkout.display()
+            ),
+        )
+        .expect("write manifest");
+        (manifest, checkout)
+    }
+
+    /// Addresses with nothing listening, and binaries that do not exist, so no
+    /// test reaches a real daemon or a real install.
+    fn unreachable_tools() -> grounding::Tools {
+        grounding::Tools {
+            search: PathBuf::from("/nonexistent/trusty-search"),
+            // Port 1 is privileged: a connect there is refused immediately.
+            search_url: "http://127.0.0.1:1".to_owned(),
+            analyze: PathBuf::from("/nonexistent/trusty-analyze"),
+            analyze_url: "http://127.0.0.1:1".to_owned(),
+            bind_timeout: std::time::Duration::from_millis(50),
+            startup_timeout: std::time::Duration::from_millis(100),
+            poll_interval: std::time::Duration::from_millis(20),
+        }
+    }
+
+    /// #6081: before this, a re-render with `--analyze` and no daemon produced a
+    /// report whose code-analysis sections were empty, and said nothing about
+    /// it. The gap is now stated per repository.
+    #[tokio::test]
+    async fn a_render_whose_daemons_are_down_says_so() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (manifest, _checkout) = present_checkout(tmp.path());
+        let read = AuditManifest::load(&manifest).expect("parses");
+
+        let gaps = ground_present_checkouts(&unreachable_tools(), &manifest, &read).await;
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert!(gaps[0].contains("acme/api"), "{gaps:?}");
+        assert!(gaps[0].contains("trusty-search"), "{gaps:?}");
+    }
+
+    /// This module's postcondition: nothing under the source is written except
+    /// the output directory. Grounding here reads and measures; the ranking it
+    /// produces belongs to the sweep that wrote the manifest, not to a render.
+    #[tokio::test]
+    async fn grounding_writes_nothing_into_the_package() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (manifest, _checkout) = present_checkout(tmp.path());
+        let before = std::fs::read_to_string(&manifest).expect("read");
+        let read = AuditManifest::load(&manifest).expect("parses");
+
+        let _ = ground_present_checkouts(&unreachable_tools(), &manifest, &read).await;
+        assert_eq!(
+            std::fs::read_to_string(&manifest).expect("read back"),
+            before
+        );
+    }
+
+    /// A checkout that is not on this machine costs no daemon: `checkout_gaps`
+    /// already stated it, and one line per repository is the right number.
+    #[tokio::test]
+    async fn an_absent_checkout_is_not_grounded_twice() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = tmp.path().join("manifest.toml");
+        std::fs::write(&manifest, MANIFEST).expect("write manifest");
+        let read = AuditManifest::load(&manifest).expect("parses");
+
+        assert_eq!(checkout_gaps(&manifest, &read).len(), 1);
+        assert!(
+            ground_present_checkouts(&unreachable_tools(), &manifest, &read)
+                .await
+                .is_empty()
+        );
     }
 }
