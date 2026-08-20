@@ -385,8 +385,9 @@ async fn session_resume_restart_failure_errors() {
 /// and asserts: (1) `Ok(())` — headless success; (2) the daemon's own record
 /// of the session state is UNCHANGED afterward (still `provisioning`) — the
 /// only way to prove NO `/resume` POST landed, since a successful restart
-/// always flips state to `active`. The real tmux session is killed
-/// unconditionally (even on assertion failure) before returning.
+/// always flips state to `active`. The real tmux session is owned by a
+/// `ScratchTmuxSession` guard, so it is killed on every exit path — normal
+/// return, assertion failure, and panic alike (#6116).
 #[tokio::test]
 async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     use trusty_mpm::daemon::{api, state::DaemonState};
@@ -433,13 +434,13 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     // live agent process deterministically. Without it this fixture's verdict
     // depended on whether the login shell happened to still have a child mid-init
     // when the probe ran, making the test genuinely flaky under the new logic.
-    let create_status = std::process::Command::new(&tmux_bin)
-        .args(["new-session", "-d", "-s", &record.tmux_name, "sleep 300"])
-        .status()
-        .expect("spawn real tmux session for the liveness probe");
-    assert!(
-        create_status.success(),
-        "failed to create the real scratch tmux session"
+    //
+    // #6116: owned by an RAII guard, so the session dies with this test whether
+    // it returns, fails an assertion, or panics inside the wait below.
+    let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn(
+        &tmux_bin,
+        &record.tmux_name,
+        "sleep 300",
     );
     // tmux runs the command through a shell, so there is a brief window after
     // `new-session` in which the pane still reports `sh`/`zsh` rather than
@@ -458,11 +459,10 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
 
     let result = session_resume(&client, &url, id.to_string()).await;
 
-    // Unconditional cleanup of the real tmux session, even if an assertion
-    // below panics.
-    let _ = std::process::Command::new(&tmux_bin)
-        .args(["kill-session", "-t", &record.tmux_name])
-        .output();
+    // Killed here, before the assertions, as it always has been. Dropping the
+    // guard is now only the EARLIEST it can happen — an assertion failure or
+    // panic above already unwound through it.
+    drop(scratch);
 
     result.expect(
         "headless resume of an already-live, non-stopped/errored session must succeed (Ok), \
@@ -567,7 +567,10 @@ fn wait_for_stable_dead_runtime(session_name: &str) {
 /// shell — the exact dead-runtime shape — and asserts the daemon record flipped
 /// to `active`, which only a `/runtime-stop` + `/resume` round-trip can do. The
 /// daemon here is `FakeNoopTmuxDriver`-backed, so its `kill_session` is a no-op
-/// and the real scratch session is torn down by this test, unconditionally.
+/// and the real scratch session is torn down by this test. #6116: that teardown
+/// is a `ScratchTmuxSession` guard rather than a trailing `kill-session`,
+/// because `wait_for_stable_dead_runtime` below panics on timeout by design and
+/// a trailing kill never runs on that path.
 #[tokio::test]
 async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     use trusty_mpm::daemon::{api, state::DaemonState};
@@ -595,9 +598,9 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
             // (which would otherwise also derive `tm-r-01`) AND across test
             // BINARIES: this crate compiles the same sources into two bin targets
             // (`tm` and `trusty-mpm`) that cargo may run concurrently, so a fixed
-            // name lets one process's unconditional `kill-session` cleanup
-            // destroy the other process's session mid-test — observed as an
-            // intermittent failure of the final assertion below.
+            // name lets one process's cleanup destroy the other process's session
+            // mid-test — observed as an intermittent failure of the final
+            // assertion below.
             Some(format!(
                 "https://example.com/deadrt{}.git",
                 std::process::id()
@@ -631,13 +634,15 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     // `orphan_gc::IDLE_SHELL_COMMANDS` is equally an idle shell, and the point of
     // the argument is only to skip login/rc processing so the pane settles
     // immediately and stays childless.
-    let create_status = std::process::Command::new(&tmux_bin)
-        .args(["new-session", "-d", "-s", &record.tmux_name, "sh"])
-        .status()
-        .expect("spawn real tmux session for the liveness probe");
-    assert!(
-        create_status.success(),
-        "failed to create the real scratch tmux session"
+    //
+    // #6116: owned by an RAII guard. `wait_for_stable_dead_runtime` below
+    // panics on a 10s timeout by design, and the post-hoc `kill-session` this
+    // replaces never ran on that path — every such run leaked a real
+    // `tm-deadrt<pid>-01` session permanently.
+    let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn(
+        &tmux_bin,
+        &record.tmux_name,
+        "sh",
     );
     // Belt-and-braces on top of the deterministic fixture: require the "runtime
     // dead" reading to be STABLE (three consecutive probes) before proceeding,
@@ -654,9 +659,9 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
 
     let result = session_resume(&client, &url, id.to_string()).await;
 
-    let _ = std::process::Command::new(&tmux_bin)
-        .args(["kill-session", "-t", &record.tmux_name])
-        .output();
+    // The daemon here is `FakeNoopTmuxDriver`-backed, so its `kill_session` is a
+    // no-op and this guard is what actually tears the real session down.
+    drop(scratch);
 
     // Deliberately NOT asserted as `Ok`. Whether the daemon can actually spawn a
     // runtime is environment-dependent (CI has no agent binary on PATH, so

@@ -26,6 +26,16 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
+/// RAII ownership of a real tmux session created by a test (#6116).
+///
+/// Unlike `hermetic_temp_dir` above, this one is NOT duplicated for the binary:
+/// the lib's copy and this one are the same source file, included from both.
+/// A kill-on-drop guardrail written twice is one edit away from drifting, and
+/// the file needs nothing from either crate root, so `#[path]` costs nothing
+/// here that the duplication above pays for.
+#[path = "../../test_tmux_session.rs"]
+pub(crate) mod tmux_session;
+
 /// Same prefix the lib's fixture uses, so its sweep reaps these too.
 const TEST_DIR_PREFIX: &str = "tm-test-";
 
