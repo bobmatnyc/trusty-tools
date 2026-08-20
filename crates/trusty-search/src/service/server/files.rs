@@ -128,6 +128,41 @@ pub(super) async fn remove_file_handler(
     })))
 }
 
+/// Build the 503 for a chunk enumeration whose corpus read failed (#6043).
+///
+/// Why: #4087's `index_corpus_unavailable` covers a corpus that fails to OPEN
+/// and quarantines the index at that point. A corpus that opens and then goes
+/// bad — redb's "Previous I/O error occurred" state, which fails every
+/// subsequent range read for the process's lifetime — passes that guard, and
+/// both enumeration paths used to absorb the failure into an empty page. An
+/// index holding 50,929 chunks exported zero of them at HTTP 200, and
+/// trusty-analyze scored the empty corpus and reported
+/// `complexity_distribution total: 0`. Reusing the same error code keeps one
+/// name for "the durable corpus cannot answer", whichever stage broke.
+/// What: 503 with `retryable: true` — a rehydrate that has not committed does
+/// commit on a later access, and the redb error state clears on daemon
+/// restart, so waiting is a real remedy rather than a lie.
+/// Test: the offset path's refusal reaches this builder via
+/// `core::indexer::tests_cursor::enumerate_chunks_errors_when_rehydrate_did_not_commit`.
+/// The cursor path's redb arm has no direct test — see
+/// `CodeIndexer::enumerate_chunks_after` for why fixture-injecting a redb read
+/// fault is not reachable.
+fn corpus_read_failure_response(
+    index_id: &str,
+    err: &anyhow::Error,
+) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::warn!("index '{index_id}': chunk enumeration failed: {err:#}");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "index_corpus_unavailable",
+            "index_id": index_id,
+            "retryable": true,
+            "message": format!("{err:#}"),
+        })),
+    )
+}
+
 /// Query params for `GET /indexes/:id/chunks` (issue #54, #1325).
 ///
 /// Why: the original `offset`/`limit` pair forced an O(N log N) full-corpus
@@ -224,7 +259,10 @@ pub(super) async fn get_index_chunks_handler(
         } else {
             Some(cursor)
         };
-        let (total, chunks, next_cursor) = indexer.enumerate_chunks_after(after, limit).await;
+        let (total, chunks, next_cursor) = indexer
+            .enumerate_chunks_after(after, limit)
+            .await
+            .map_err(|e| corpus_read_failure_response(&index_id.0, &e))?;
         return Ok(Json(serde_json::json!({
             "index_id": index_id.0,
             "total": total,
@@ -240,7 +278,10 @@ pub(super) async fn get_index_chunks_handler(
     // not imply that a cursor walk can continue from an offset page (that would
     // drop or duplicate rows). Clients wanting fast deep pagination should use
     // the cursor mode from the start (`after=`).
-    let (total, chunks) = indexer.enumerate_chunks(params.offset, limit).await;
+    let (total, chunks) = indexer
+        .enumerate_chunks(params.offset, limit)
+        .await
+        .map_err(|e| corpus_read_failure_response(&index_id.0, &e))?;
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
         "total": total,

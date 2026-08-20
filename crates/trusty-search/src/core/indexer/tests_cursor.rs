@@ -49,7 +49,10 @@ async fn test_enumerate_chunks_after_cursor_in_memory_fallback() {
     let mut cursor: Option<String> = None;
     let mut pages = 0;
     loop {
-        let (total, page, next) = idx.enumerate_chunks_after(cursor.as_deref(), 2).await;
+        let (total, page, next) = idx
+            .enumerate_chunks_after(cursor.as_deref(), 2)
+            .await
+            .unwrap();
         assert_eq!(total, 5, "total chunk count is stable across pages");
         for c in &page {
             seen.push(c.id.clone());
@@ -64,7 +67,7 @@ async fn test_enumerate_chunks_after_cursor_in_memory_fallback() {
     assert_eq!(seen, vec!["a:1:1", "b:1:1", "c:1:1", "d:1:1", "e:1:1"]);
 
     // limit == 0 → empty page, no cursor.
-    let (total_z, z, next_z) = idx.enumerate_chunks_after(None, 0).await;
+    let (total_z, z, next_z) = idx.enumerate_chunks_after(None, 0).await.unwrap();
     assert_eq!(total_z, 5);
     assert!(z.is_empty());
     assert!(next_z.is_none());
@@ -102,7 +105,10 @@ async fn test_enumerate_chunks_after_cursor_pages_via_redb() {
     let mut cursor: Option<String> = None;
     let mut pages = 0;
     loop {
-        let (total, page, next) = idx.enumerate_chunks_after(cursor.as_deref(), 2).await;
+        let (total, page, next) = idx
+            .enumerate_chunks_after(cursor.as_deref(), 2)
+            .await
+            .unwrap();
         assert_eq!(total, total_chunks, "total is the redb chunk_count");
         for c in &page {
             seen.push(c.id.clone());
@@ -124,4 +130,122 @@ async fn test_enumerate_chunks_after_cursor_pages_via_redb() {
     assert_eq!(seen, sorted, "redb cursor pages in ascending id order");
     sorted.dedup();
     assert_eq!(sorted.len(), seen.len(), "no chunk returned twice");
+}
+
+/// #6043: an evicted, not-yet-repopulated chunk map must not be enumerated as
+/// though it were the corpus.
+///
+/// Why: `enumerate_chunks` reported `chunks.len()` as `total`, and
+/// `ensure_chunks_loaded` returns on a bounded budget whether or not the
+/// detached rehydrate has committed. An index holding 50,929 chunks therefore
+/// answered `GET /indexes/trusty-tools/chunks` with `total: 0` and an empty
+/// page at HTTP 200; trusty-analyze read that as a complete empty corpus and
+/// published `complexity_distribution total: 0`. Issue #5917 recorded the same
+/// mechanism as an intermittent flap — 0 chunks, then 85,269 chunks 67 seconds
+/// later from the identical command.
+/// What: indexes a real corpus, evicts the in-memory map, and holds the
+/// rehydrate past ALL `REHYDRATE_RACE_RETRIES` bounded waits with the test
+/// delay hook, so the call lands in exactly the state that produced the zero.
+/// Asserts `Err`. Before the fix this returned `Ok((0, vec![]))`.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn enumerate_chunks_errors_when_rehydrate_did_not_commit() {
+    use std::sync::atomic::Ordering;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut idx = CodeIndexer::new("evicted-mid-rehydrate", "/tmp/evicted-mid-rehydrate");
+    idx.set_corpus_store(Arc::new(
+        CorpusStore::open(&dir.path().join("index.redb")).expect("open corpus"),
+    ));
+    idx.index_files_batch(&[("src/a.rs".into(), "fn a_one() {}\nfn a_two() {}".into())])
+        .await
+        .expect("index batch");
+    assert!(
+        idx.enumerate_chunks(0, 100).await.expect("warm read").0 > 0,
+        "the corpus is non-empty before eviction"
+    );
+
+    // Hold the rehydrate scan well past the wait budget so the call observes
+    // the in-flight state rather than the committed one.
+    // SAFETY: serialized against every other reader/writer of this var by
+    // `#[serial_test::serial]` on this test.
+    unsafe { std::env::set_var("TRUSTY_REHYDRATE_WAIT_MS", "25") };
+    super::idle_evict::TEST_REHYDRATE_DELAY_MS.store(5_000, Ordering::Relaxed);
+
+    let evicted = idx.clear_in_memory_chunks().await;
+    assert!(evicted > 0, "eviction dropped the in-memory chunks");
+
+    let result = idx.enumerate_chunks(0, 100).await;
+
+    super::idle_evict::TEST_REHYDRATE_DELAY_MS.store(0, Ordering::Relaxed);
+    // SAFETY: same serialization as the `set_var` above.
+    unsafe { std::env::remove_var("TRUSTY_REHYDRATE_WAIT_MS") };
+
+    let err = result.expect_err(
+        "an evicted, unrepopulated map must be an error — reporting it as a \
+         zero-chunk corpus is #6043",
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("evicted") && msg.contains("#6043"),
+        "the error must name the state and the ticket, got: {msg}"
+    );
+}
+
+/// A rehydrate that outlasts ONE bounded wait but finishes within the retry
+/// budget must return the corpus, not an error.
+///
+/// Why: #3683 measured a healthy 315K-chunk corpus taking 27-40s to rehydrate
+/// against a 9s per-wait budget, so refusing after a single
+/// `ensure_chunks_loaded` would turn every large cold index into a hard error
+/// on its first read. That is why `bm25_search` and `grep_fallback_search`
+/// retry `REHYDRATE_RACE_RETRIES` times, and why `enumerate_chunks` counts to
+/// the same number — the #6043 refusal must fire for a corpus that cannot be
+/// read, never for one that is merely slow.
+/// What: sets a per-wait budget SHORTER than the rehydrate delay, so iteration
+/// one times out with `chunks_evicted` still set and a later iteration observes
+/// the commit. Asserts the full corpus comes back.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn enumerate_chunks_waits_out_a_rehydrate_that_outlasts_one_budget() {
+    use std::sync::atomic::Ordering;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut idx = CodeIndexer::new("slow-rehydrate", "/tmp/slow-rehydrate");
+    idx.set_corpus_store(Arc::new(
+        CorpusStore::open(&dir.path().join("index.redb")).expect("open corpus"),
+    ));
+    idx.index_files_batch(&[("src/a.rs".into(), "fn a_one() {}\nfn a_two() {}".into())])
+        .await
+        .expect("index batch");
+    let warm_total = idx.enumerate_chunks(0, 100).await.expect("warm read").0;
+    assert!(warm_total > 0, "the corpus is non-empty before eviction");
+
+    // 600ms scan against a 500ms per-wait budget: iteration 1 must time out
+    // with the flag still set, and the commit lands inside iteration 2's wait —
+    // comfortably short of the 3-iteration ceiling.
+    // SAFETY: serialized against every other reader/writer of this var by
+    // `#[serial_test::serial]` on this test.
+    unsafe { std::env::set_var("TRUSTY_REHYDRATE_WAIT_MS", "500") };
+    super::idle_evict::TEST_REHYDRATE_DELAY_MS.store(600, Ordering::Relaxed);
+
+    assert!(
+        idx.clear_in_memory_chunks().await > 0,
+        "eviction dropped the in-memory chunks"
+    );
+
+    let result = idx.enumerate_chunks(0, 100).await;
+
+    super::idle_evict::TEST_REHYDRATE_DELAY_MS.store(0, Ordering::Relaxed);
+    // SAFETY: same serialization as the `set_var` above.
+    unsafe { std::env::remove_var("TRUSTY_REHYDRATE_WAIT_MS") };
+
+    let (total, page) = result.expect(
+        "a rehydrate that finishes within the retry budget must serve the corpus, \
+         not fail — the #6043 refusal is for a corpus that cannot be read",
+    );
+    assert_eq!(total, warm_total, "the whole corpus is back");
+    assert_eq!(page.len(), warm_total, "and the page carries it");
 }
