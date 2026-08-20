@@ -382,22 +382,42 @@ directory, and only when you name one.
 ## Re-rendering a delivered audit
 
 Whoever receives the finished audit can produce the report again from the
-package itself. Unzip it, then:
+package itself. Unzip it, change into the directory that came out, and run:
+
+```
+trusty-audit render
+```
+
+That is the whole command. It reads the `engagement.toml` beside you for the
+OpenRouter key, finds every `reports/<repo>/manifest.toml` under you, and runs
+the report step over each one — the same step the sweep ran — writing the fresh
+copies to `rerendered/` in that same directory. It clones nothing, collects
+nothing, and never writes into the package it read, so the delivered files stay
+byte for byte what was sent.
+
+Every default is overridable, and no flag is required:
+
+| Flag | Default |
+|---|---|
+| `--config` | `engagement.toml` in the directory you are in |
+| `--from` | the directory you are in, when it holds reports; else the work dir |
+| `--out` | `<from>/rerendered` |
+| `--review-bin` | the copy under `<work-dir>/tools/`, else whatever is on `PATH` |
+
+```
+trusty-audit render --from ~/acme-audit --out ~/tmp/second-opinion
+```
+
+The key can come from the environment instead of the config, which is what a
+recipient who was sent a key rather than a package config uses:
 
 ```
 export OPENROUTER_API_KEY=<your OpenRouter key>
-trusty-audit render --from ~/acme-audit --out ~/acme-audit/rerendered
+trusty-audit render
 ```
 
-`--from` is the directory holding `reports/`; `--out` defaults to
-`<from>/rerendered`. It finds every `reports/<repo>/manifest.toml` and runs the
-report step over each one — the same step the sweep ran. It clones nothing,
-collects nothing, and never writes into the package it read, so the delivered
-files stay byte for byte what was sent.
-
-It needs `trusty-review` on the machine. The copy this client installed under
-`<work-dir>/tools/` is used when it is there, otherwise whatever is on `PATH`;
-`--review-bin` names one directly. There is no pin check — the verb renders at
+With neither, the run refuses and names both places it looked. It needs
+`trusty-review` on the machine; there is no pin check — the verb renders at
 whatever version it finds.
 
 **What comes back, and what does not.** The scorecards, findings and appendices

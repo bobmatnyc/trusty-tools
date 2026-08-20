@@ -91,6 +91,10 @@ async fn main() -> Result<()> {
 
     let mut session = Session::new(work)
         .with_config_path(config_path.clone())
+        // #6080: `render` with no arguments renders the package the recipient
+        // unzipped and is standing in. The cwd is read here, with the rest of
+        // the environment, so the library stays a function of what it is handed.
+        .with_cwd(&cwd)
         .with_credential(credential.map(cli::credential::Resolved::into_key))
         .with_auto_install(!cli.no_install)
         .with_progress(std::sync::Arc::new(TerminalProgress::to_stderr()));

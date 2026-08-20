@@ -73,12 +73,13 @@ const REPORT_PARENTS: [&str; 2] = ["reports", "out"];
 /// Why: three operator choices with defaults, in one struct rather than three
 /// positional arguments — the same shape [`crate::run::RunOptions`] takes, and
 /// for the same reason.
-/// What: all three default. [`RerenderOptions::default`] re-renders the working
-/// directory in place with the resolved `trusty-review`.
+/// What: all three default. [`RerenderOptions::default`] re-renders the
+/// directory the front end was run in, else the working directory, with the
+/// resolved `trusty-review` — see [`resolve_source`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RerenderOptions {
-    /// The unzipped package, or a working directory. Defaults to the work dir.
+    /// The unzipped package, or a working directory. See [`resolve_source`].
     pub from: Option<PathBuf>,
     /// Where the regenerated reports go. Defaults to [`DEFAULT_OUTPUT_DIR`]
     /// inside the source, which is the one place this writes.
@@ -166,7 +167,9 @@ impl RerenderReport {
 /// each with its child's combined output at its `log` path. Nothing under the
 /// source is written except the output directory, which is created here.
 ///
-/// What: discovers the manifests, resolves the renderer, then one child per
+/// What: resolves the source ([`resolve_source`] — `cwd` is the directory the
+/// front end was run in), discovers the manifests, resolves the renderer, then
+/// one child per
 /// manifest. A child that fails is RECORDED and the run continues — the same
 /// failed-but-continuing model the sweep uses (DOC-67 §9), because one report
 /// that will not render is not a reason to withhold the four that did.
@@ -180,15 +183,13 @@ impl RerenderReport {
 /// [`AuditError::WorkDir`] when the output directory or a log cannot be written.
 pub async fn rerender(
     work: &WorkDir,
+    cwd: &Path,
     key: &SecretKey,
     inference: &[(&'static str, String)],
     options: &RerenderOptions,
     progress: &Progress,
 ) -> Result<RerenderReport, AuditError> {
-    let source = options
-        .from
-        .clone()
-        .unwrap_or_else(|| work.root().to_path_buf());
+    let source = resolve_source(options.from.clone(), cwd, work.root());
     let manifests = discover(&source)?;
     let output = options
         .out
@@ -234,6 +235,40 @@ pub async fn rerender(
         review,
         reports,
     })
+}
+
+/// The directory a re-render reads when `--from` was not given.
+///
+/// Why: #6080 — the recipient unzips the delivered package, changes into it,
+/// and types `trusty-audit render`. Defaulting to the working directory sent
+/// that invocation to `~/.trusty-tools/trusty-audit/work`, which on a
+/// recipient's machine holds nothing, so the one command they were given
+/// refused while they were standing in the package it should have rendered.
+/// What: `explicit` wins; else `cwd` when a re-render there would find
+/// something; else `work_root` on the same test, which keeps the operator who
+/// still has the engagement on disk on the behaviour they had; else `cwd`, so a
+/// refusal names the directory they ran in rather than one they never chose.
+/// The test is [`discover`] itself, so the default and the search this run then
+/// performs cannot disagree.
+/// Test: `super::rerender_tests::an_unzipped_package_is_rendered_from_the_cwd`,
+/// `super::rerender_tests::a_cwd_with_no_reports_falls_back_to_the_work_dir`,
+/// `super::rerender_tests::an_explicit_source_beats_both_defaults`.
+pub fn resolve_source(explicit: Option<PathBuf>, cwd: &Path, work_root: &Path) -> PathBuf {
+    if let Some(path) = explicit {
+        return path;
+    }
+    if carries_reports(cwd) {
+        return cwd.to_path_buf();
+    }
+    if carries_reports(work_root) {
+        return work_root.to_path_buf();
+    }
+    cwd.to_path_buf()
+}
+
+/// Whether a re-render pointed at `dir` would find a manifest to render.
+fn carries_reports(dir: &Path) -> bool {
+    discover(dir).is_ok()
 }
 
 /// Every `manifest.toml` under `source`, in a stable order.
@@ -617,19 +652,31 @@ mod rerender_tests {
     }
 
     async fn run(from: &Path, review: &Path, work: &WorkDir) -> RerenderReport {
+        run_in(Some(from), from, review, work)
+            .await
+            .expect("the re-render runs")
+    }
+
+    /// One re-render, with the source and the cwd named separately (#6080).
+    async fn run_in(
+        from: Option<&Path>,
+        cwd: &Path,
+        review: &Path,
+        work: &WorkDir,
+    ) -> Result<RerenderReport, AuditError> {
         super::rerender(
             work,
+            cwd,
             &key(),
             &[],
             &RerenderOptions {
-                from: Some(from.to_path_buf()),
+                from: from.map(Path::to_path_buf),
                 out: None,
                 review: Some(review.to_path_buf()),
             },
             &Progress::none(),
         )
         .await
-        .expect("the re-render runs")
     }
 
     /// 🔴 The delivered package's own layout — `reports/<stem>/manifest.toml` —
@@ -680,6 +727,93 @@ mod rerender_tests {
         assert!(report.reports[0].result.succeeded());
     }
 
+    /// 🔴 #6080's whole point: the recipient unzips the package, changes into
+    /// it, and types `trusty-audit render`. Nothing names the source, and the
+    /// package it was run in is what renders — into `rerendered/` beside it.
+    #[tokio::test]
+    async fn an_unzipped_package_is_rendered_from_the_cwd() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = tmp.path().join("acme-audit");
+        report_dir(&package.join("reports"), "01-acme-api");
+        let review = stub_review(tmp.path(), WRITES_A_REPORT);
+        // The work dir carries a report of its own, so rendering the package
+        // proves the cwd WINS rather than that only one manifest existed.
+        let work = work_in(tmp.path());
+        report_dir(&work.root().join("out"), "99-stale");
+
+        let report = run_in(None, &package, &review, &work)
+            .await
+            .expect("the re-render runs");
+
+        assert_eq!(report.source, package);
+        assert_eq!(report.output, package.join(DEFAULT_OUTPUT_DIR));
+        assert_eq!(
+            report
+                .reports
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["01-acme-api"]
+        );
+    }
+
+    /// The operator who still has the engagement on disk keeps what they had:
+    /// a cwd with nothing to render falls back to the working directory.
+    #[tokio::test]
+    async fn a_cwd_with_no_reports_falls_back_to_the_work_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir");
+        let work = work_in(tmp.path());
+        report_dir(&work.root().join("out"), "01-acme-api");
+        let review = stub_review(tmp.path(), WRITES_A_REPORT);
+
+        let report = run_in(None, &elsewhere, &review, &work)
+            .await
+            .expect("the re-render runs");
+
+        assert_eq!(report.source, work.root());
+        assert_eq!(report.reports.len(), 1, "{:?}", report.reports);
+    }
+
+    /// Neither directory carries a report: the refusal names the one the
+    /// operator was standing in, not one they never chose.
+    #[tokio::test]
+    async fn nothing_anywhere_refuses_by_naming_the_cwd() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir");
+        let review = stub_review(tmp.path(), WRITES_A_REPORT);
+
+        let refusal = run_in(None, &elsewhere, &review, &work_in(tmp.path()))
+            .await
+            .expect_err("nothing to render must refuse");
+
+        assert!(
+            refusal
+                .to_string()
+                .contains(&elsewhere.display().to_string()),
+            "{refusal}"
+        );
+    }
+
+    /// 🔴 An explicit `--from` still decides, whatever either default holds.
+    #[test]
+    fn an_explicit_source_beats_both_defaults() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let named = tmp.path().join("named");
+        let cwd = tmp.path().join("cwd");
+        report_dir(&cwd.join("reports"), "01-acme-api");
+        let work = work_in(tmp.path());
+        report_dir(&work.root().join("out"), "01-acme-api");
+
+        assert_eq!(
+            resolve_source(Some(named.clone()), &cwd, work.root()),
+            named,
+            "the flag must win over a cwd that would have rendered"
+        );
+    }
+
     /// 🔴 The source is READ, never written into: everything this produces goes
     /// under the output directory, so the delivered package still hashes the way
     /// it was signed.
@@ -714,19 +848,9 @@ mod rerender_tests {
         std::fs::create_dir_all(&empty).expect("mkdir");
         let review = stub_review(tmp.path(), WRITES_A_REPORT);
 
-        let refusal = super::rerender(
-            &work_in(tmp.path()),
-            &key(),
-            &[],
-            &RerenderOptions {
-                from: Some(empty.clone()),
-                out: None,
-                review: Some(review),
-            },
-            &Progress::none(),
-        )
-        .await
-        .expect_err("a source with no manifest must refuse");
+        let refusal = run_in(Some(&empty), &empty, &review, &work_in(tmp.path()))
+            .await
+            .expect_err("a source with no manifest must refuse");
 
         assert!(
             refusal.to_string().contains(&empty.display().to_string()),
@@ -799,19 +923,9 @@ mod rerender_tests {
         report_dir(&package.join("reports"), "01-acme-api");
         let absent = tmp.path().join("no-such-trusty-review");
 
-        let refusal = super::rerender(
-            &work_in(tmp.path()),
-            &key(),
-            &[],
-            &RerenderOptions {
-                from: Some(package),
-                out: None,
-                review: Some(absent.clone()),
-            },
-            &Progress::none(),
-        )
-        .await
-        .expect_err("an absent renderer must refuse");
+        let refusal = run_in(Some(&package), &package, &absent, &work_in(tmp.path()))
+            .await
+            .expect_err("an absent renderer must refuse");
 
         assert!(
             refusal.to_string().contains(&absent.display().to_string()),

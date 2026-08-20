@@ -402,6 +402,8 @@ pub struct Session {
     work: WorkDir,
     manifest_path: PathBuf,
     config_path: PathBuf,
+    /// The directory the front end was run in (#6080) — see [`Session::with_cwd`].
+    cwd: PathBuf,
     auto_install: bool,
     /// Which `gh` invocations a repository registration runs (#5822).
     repo_probe: validate::RepoProbe,
@@ -448,10 +450,12 @@ impl Session {
     pub fn new(work: WorkDir) -> Self {
         let manifest_path = work.path(Area::Output).join(AuditManifest::FILE_NAME);
         let config_path = work.root().join(EngagementConfig::FILE_NAME);
+        let cwd = work.root().to_path_buf();
         Self {
             work,
             manifest_path,
             config_path,
+            cwd,
             auto_install: true,
             repo_probe: validate::RepoProbe::real(),
             credential: None,
@@ -549,6 +553,22 @@ impl Session {
     #[must_use]
     pub fn with_config_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.config_path = path.into();
+        self
+    }
+
+    /// Say which directory the front end was run in (#6080).
+    ///
+    /// Why: `trusty-audit render` with no arguments has to render the package
+    /// the recipient is standing in, and the library never reads the process
+    /// environment — so the cwd crosses this boundary the same way the resolved
+    /// credential and the config path do. Unset, it is the working directory's
+    /// root, which is the behaviour every capability had before.
+    /// What: stores the directory. Only [`crate::rerender::resolve_source`]
+    /// consults it.
+    /// Test: `super::session_tests::a_re_render_defaults_to_the_directory_it_was_run_in`.
+    #[must_use]
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = cwd.into();
         self
     }
 
@@ -979,8 +999,10 @@ impl Session {
     /// What: resolves the key — the front end's, else the config's — refuses a
     /// run that has neither, resolves the model selection through the same
     /// `crate::inference` rule the sweep uses, and hands both to
-    /// [`crate::rerender::rerender`].
-    /// Test: `crate::session::session_tests::a_re_render_with_no_credential_anywhere_is_refused`.
+    /// [`crate::rerender::rerender`] along with this session's cwd, which is
+    /// what a `--from`-less run renders (#6080).
+    /// Test: `crate::session::session_tests::a_re_render_with_no_credential_anywhere_is_refused`,
+    /// `crate::session::session_tests::a_re_render_defaults_to_the_directory_it_was_run_in`.
     ///
     /// # Errors
     ///
@@ -1000,7 +1022,15 @@ impl Session {
         let models = config.map(|c| c.models).unwrap_or_default();
         let inference =
             crate::inference::selection_env(true, &models, |name| std::env::var(name).ok())?;
-        rerender::rerender(&self.work, &key, &inference, options, &self.progress).await
+        rerender::rerender(
+            &self.work,
+            &self.cwd,
+            &key,
+            &inference,
+            options,
+            &self.progress,
+        )
+        .await
     }
 
     /// Read the engagement's pins, then install exactly those.
@@ -1190,6 +1220,31 @@ path = "/work/repos/acme-api"
         // missing — a report to render.
         assert!(
             matches!(refusal, AuditError::NothingToRerender { .. }),
+            "{refusal}"
+        );
+    }
+
+    /// 🔴 #6080: `render` with no `--from` renders where the front end was run,
+    /// so the cwd the front end reported is the directory this searches — the
+    /// working directory is only the fallback.
+    #[tokio::test]
+    async fn a_re_render_defaults_to_the_directory_it_was_run_in() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let unzipped = tmp.path().join("acme-audit");
+        std::fs::create_dir_all(&unzipped).expect("mkdir");
+        let session = session_in(tmp.path())
+            .with_credential(Some(SecretKey::new("sk-or-v1-not-a-real-key")))
+            .with_cwd(&unzipped);
+
+        let refusal = session
+            .execute(Command::Rerender(RerenderOptions::default()))
+            .await
+            .expect_err("an empty directory carries no report");
+
+        assert!(
+            refusal
+                .to_string()
+                .contains(&unzipped.display().to_string()),
             "{refusal}"
         );
     }
