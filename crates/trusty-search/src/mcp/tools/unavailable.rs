@@ -18,12 +18,13 @@
 //! worth more than a second bespoke one.
 //!
 //! The daemon body passes through VERBATIM. This module adds `error_code` and
-//! `http_status` and changes nothing else — notably it does not synthesise a
-//! `retryable` for the arms that carry the split under another name
-//! (`index_corpus_unavailable` reports it as `transient`). Inventing a field
-//! the daemon did not send is how a representation layer starts lying about
-//! the state it is supposed to relay; #5349 tracks the availability model
-//! itself and is deliberately untouched here.
+//! `http_status` and changes nothing else, and it never synthesises a field the
+//! daemon did not send — that is how a representation layer starts lying about
+//! the state it is supposed to relay. Since #5917 every `index_corpus_unavailable`
+//! body carries `retryable` in its own right (its two producers previously
+//! disagreed: the open-failure arm sent only `transient`, the read-failure arm
+//! only `retryable`), so no arm depends on this module filling the gap. #5349
+//! tracks the availability model itself and is deliberately untouched here.
 //!
 //! Test: `mcp/tools/tests_unavailable.rs`.
 

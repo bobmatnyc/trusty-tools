@@ -154,6 +154,7 @@ impl Fixture {
             .await
             .raw_chunks_snapshot()
             .await
+            .expect("corpus reads")
             .into_iter()
             .filter(|c| c.file == file)
             .map(|c| c.id)

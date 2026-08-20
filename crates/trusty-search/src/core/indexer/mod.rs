@@ -35,6 +35,7 @@ use crate::core::store::VectorStore;
 use crate::core::symbol_graph::SymbolGraph;
 
 pub(crate) mod archive;
+pub(crate) mod corpus_fault;
 pub(crate) mod docs_penalty;
 mod files;
 pub(crate) mod helpers;
@@ -83,6 +84,7 @@ pub(crate) use helpers::{
 };
 
 // Re-export types so callers outside this module see the same paths.
+pub use corpus_fault::CorpusReadUnavailable;
 pub use search::drops::SearchDrops;
 pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};
 pub(crate) use types::ChunkSnapshot;
@@ -296,6 +298,24 @@ pub struct CodeIndexer {
     /// Test: `lane_degraded_flag_sets_on_exhausted_retries_and_clears_on_rehydrate`
     /// in `indexer::rehydrate_tests`.
     pub(super) lane_degraded: Arc<AtomicBool>,
+
+    /// The last durable-corpus READ failure for this index, or `None` when the
+    /// corpus last read cleanly (#5917).
+    ///
+    /// Why: [`Self::lane_degraded`] above says "the rehydrate has not converged
+    /// yet", which a caller correctly reads as "retry in a moment". A corpus in
+    /// redb's "Previous I/O error occurred" state produces the identical
+    /// signal and never converges, so a search over an index holding 85,269
+    /// chunks returned `results: []` at HTTP 200 for as long as the daemon ran.
+    /// Separating the two is what lets the search path refuse the second case
+    /// instead of publishing its empty lanes as a result set.
+    /// What: recorded by `idle_evict::spawn_detached_rehydrate`'s failure arms
+    /// and by `search::lanes::fetch_chunks_for_ids`; cleared by any successful
+    /// durable read, so a transient failure never wedges the index; consumed by
+    /// the tail of `search::search_with_drops`. `Arc` because the detached
+    /// rehydrate task holds clones of this index's state, not `&self`.
+    /// Test: `core::indexer::tests::corpus_fault`.
+    pub(super) corpus_read_fault: Arc<corpus_fault::CorpusReadFault>,
 
     /// Most recently MEASURED wall-clock cost (milliseconds) of this index's
     /// corpus rehydrate scan (issue #3683 slice 2 — cost-scaled idle-eviction
@@ -558,6 +578,7 @@ impl CodeIndexer {
             rehydrate_inflight: Arc::new(std::sync::Mutex::new(None)),
             rehydrate_generation: Arc::new(Mutex::new(0)),
             lane_degraded: Arc::new(AtomicBool::new(false)),
+            corpus_read_fault: Arc::new(corpus_fault::CorpusReadFault::default()),
             last_rehydrate_cost_ms: Arc::new(AtomicU64::new(0)),
             corpus_open_failed: false,
             corpus_open_failure: None,

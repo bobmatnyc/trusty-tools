@@ -128,20 +128,15 @@ pub(super) async fn remove_file_handler(
     })))
 }
 
-/// Build the 503 for a chunk enumeration whose corpus read failed (#6043).
+/// Render a chunk enumeration's corpus-read failure through the shared builder
+/// (#6043; field shape unified by #5917).
 ///
-/// Why: #4087's `index_corpus_unavailable` covers a corpus that fails to OPEN
-/// and quarantines the index at that point. A corpus that opens and then goes
-/// bad — redb's "Previous I/O error occurred" state, which fails every
-/// subsequent range read for the process's lifetime — passes that guard, and
-/// both enumeration paths used to absorb the failure into an empty page. An
-/// index holding 50,929 chunks exported zero of them at HTTP 200, and
-/// trusty-analyze scored the empty corpus and reported
-/// `complexity_distribution total: 0`. Reusing the same error code keeps one
-/// name for "the durable corpus cannot answer", whichever stage broke.
-/// What: 503 with `retryable: true` — a rehydrate that has not committed does
-/// commit on a later access, and the redb error state clears on daemon
-/// restart, so waiting is a real remedy rather than a lie.
+/// Why: this file used to build the `index_corpus_unavailable` body itself,
+/// sending only `retryable` while `degraded::corpus_failure_response` sent only
+/// `failure_kind` + `transient` — two bodies under one error code that a caller
+/// could not branch on uniformly. One builder is the fix; this wrapper keeps
+/// the enumeration handlers' `warn` at the site that has the enumeration
+/// context.
 /// Test: the offset path's refusal reaches this builder via
 /// `core::indexer::tests_cursor::enumerate_chunks_errors_when_rehydrate_did_not_commit`.
 /// The cursor path's redb arm has no direct test — see
@@ -152,15 +147,7 @@ fn corpus_read_failure_response(
     err: &anyhow::Error,
 ) -> (StatusCode, Json<serde_json::Value>) {
     tracing::warn!("index '{index_id}': chunk enumeration failed: {err:#}");
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({
-            "error": "index_corpus_unavailable",
-            "index_id": index_id,
-            "retryable": true,
-            "message": format!("{err:#}"),
-        })),
-    )
+    super::degraded::corpus_read_failure_response(index_id, &format!("{err:#}"))
 }
 
 /// Query params for `GET /indexes/:id/chunks` (issue #54, #1325).
@@ -307,20 +294,27 @@ pub(super) async fn get_index_chunks_handler(
 /// (a read failure is logged at debug — the file may have been deleted since it
 /// was indexed). Greps the real on-disk bytes, so no embedding is required and
 /// line numbers are exact. Stops once `out.len()` reaches `max_results`.
+///
+/// Errors when the index's corpus cannot be read (#5917): the file set comes
+/// from the chunk corpus, so an unreadable one greps nothing and reports
+/// `{matches: [], total: 0}` — "this literal is nowhere in your code" for a
+/// corpus that was never scanned.
 /// Test: `grep::tests` covers the matcher; `grep_endpoint_*` server integration
-/// tests cover the file-walking + glob + root-confinement behaviour.
+/// tests cover the file-walking + glob + root-confinement behaviour;
+/// `grep_over_an_unreadable_corpus_returns_503_naming_the_index` covers the
+/// refusal.
 async fn grep_one_index(
     handle: &IndexHandle,
     compiled: &crate::service::grep::CompiledGrep,
     out: &mut Vec<crate::service::grep::GrepMatch>,
     max_results: usize,
-) {
+) -> anyhow::Result<()> {
     if out.len() >= max_results {
-        return;
+        return Ok(());
     }
     let chunks = {
         let indexer = handle.indexer.read().await;
-        indexer.raw_chunks_snapshot().await
+        indexer.raw_chunks_snapshot().await?
     };
     // One file produces many chunks; dedupe to a sorted, distinct file set so
     // each file is read and scanned exactly once in a deterministic order.
@@ -330,7 +324,7 @@ async fn grep_one_index(
 
     for rel in files {
         if out.len() >= max_results {
-            return;
+            return Ok(());
         }
         // Glob filter (cheap) before defense-in-depth root confinement.
         if !compiled.path_matches(&rel) {
@@ -357,6 +351,29 @@ async fn grep_one_index(
             }
         }
     }
+    Ok(())
+}
+
+/// Render a grep or call-chain corpus-read failure as the shared 503 (#5917).
+///
+/// Why: both grep handlers and `call_chain_handler` need the identical mapping,
+/// and BOTH sub-cases belong under one shape. `ensure_corpus_view_is_current`
+/// raises a typed `CorpusReadUnavailable` for a read that FAILED and an untyped
+/// bail for a rehydrate still in flight past the retry budget — but a caller
+/// cannot act on that distinction any differently, and the MCP layer classifies
+/// only a 503, so answering the untyped arm with a bespoke 500 would reach an
+/// MCP caller as an unstructured transport error. The sibling `/chunks` wrapper
+/// already treats both as `index_corpus_unavailable`; this matches it, so all
+/// four corpus-backed surfaces agree on both sub-cases.
+/// Test: `grep_over_an_unreadable_corpus_returns_503_naming_the_index`,
+/// `global_grep_over_an_unreadable_corpus_returns_503`,
+/// `call_chain_over_an_unreadable_corpus_is_503_not_404`.
+fn corpus_backed_read_error(
+    index_id: &str,
+    err: &anyhow::Error,
+) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::warn!("index '{index_id}': corpus-backed read failed: {err:#}");
+    super::degraded::corpus_read_failure_response(index_id, &format!("{err:#}"))
 }
 
 /// `POST /indexes/:id/grep` — grep-parity regex search over one index's files.
@@ -406,7 +423,11 @@ pub(super) async fn grep_handler(
 
     let started = std::time::Instant::now();
     let mut matches = Vec::new();
-    grep_one_index(&handle, &compiled, &mut matches, req.max_results).await;
+    // #5917: an unreadable corpus greps no files at all. Reporting that as
+    // zero matches tells the caller its literal is nowhere in the code.
+    grep_one_index(&handle, &compiled, &mut matches, req.max_results)
+        .await
+        .map_err(|e| corpus_backed_read_error(&index_id.0, &e))?;
     let truncated = matches.len() >= req.max_results;
     tracing::info!(
         index_id = %index_id,
@@ -468,7 +489,12 @@ pub(super) async fn global_grep_handler(
             break;
         }
         if let Some(handle) = state.registry.get(&id) {
-            grep_one_index(&handle, &compiled, &mut matches, req.max_results).await;
+            // #5917: one unreadable corpus makes the whole fan-out incomplete,
+            // and a global grep has no per-index field to say so. Refuse rather
+            // than return the other indexes' matches as the complete answer.
+            grep_one_index(&handle, &compiled, &mut matches, req.max_results)
+                .await
+                .map_err(|e| corpus_backed_read_error(&id.0, &e))?;
         }
     }
     let truncated = matches.len() >= req.max_results;
@@ -558,7 +584,13 @@ pub(super) async fn call_chain_handler(
     let (graph, chunks) = {
         let indexer = handle.indexer.read().await;
         let graph = indexer.snapshot_symbol_graph().await;
-        let chunks = indexer.raw_chunks_snapshot().await;
+        // #5917: the entry point is resolved against this snapshot, so an
+        // unreadable corpus rendered as `404 entry point not found` — a real
+        // symbol reported nonexistent, which reads as an answer about the code.
+        let chunks = indexer
+            .raw_chunks_snapshot()
+            .await
+            .map_err(|e| corpus_backed_read_error(&index_id.0, &e))?;
         (graph, chunks)
     };
 

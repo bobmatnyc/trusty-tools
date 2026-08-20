@@ -346,3 +346,53 @@ async fn unstructured_503_still_falls_through_to_the_transport_error() {
     assert_eq!(err.code, super::error_codes::INTERNAL_ERROR);
     assert!(err.data.is_none(), "nothing structured to carry");
 }
+
+/// The `503 index_corpus_unavailable` read-failure body reaches an MCP caller
+/// as data, on the grep twin as much as on search (#5917).
+///
+/// Why: `grep`, `get_call_chain`, and `search` all refuse an unreadable corpus
+/// over HTTP now, and every one of them relays through this module. A verdict
+/// that arrived as prose on the grep tool would leave the MCP surface reporting
+/// "no matches" for the state the HTTP surface calls an outage.
+/// What: answers a `grep` tool call with the exact body
+/// `degraded::corpus_read_failure_response` emits and asserts each field
+/// survives into `_meta`, including the two #5917 unified.
+#[tokio::test]
+async fn tools_call_grep_on_an_unreadable_corpus_returns_structured_meta() {
+    let body = json!({
+        "error": "index_corpus_unavailable",
+        "index_id": "wt-1",
+        "failure_kind": "read_failed",
+        "transient": true,
+        "retryable": true,
+        "message": "index 'wt-1': the durable corpus could not be read (#5917)",
+    });
+    let base = spawn_status_daemon(503, body).await;
+    let server = McpServer::new(base);
+
+    let resp = server
+        .dispatch(req(
+            "tools/call",
+            json!({
+                "name": "grep",
+                "arguments": { "index_id": "wt-1", "pattern": "authenticate_user" },
+            }),
+        ))
+        .await;
+
+    let m = meta(&resp).expect("_meta must carry the machine-readable verdict");
+    assert_eq!(m["error_code"], INDEX_UNAVAILABLE);
+    assert_eq!(m["error"], "index_corpus_unavailable");
+    assert_eq!(m["index_id"], "wt-1");
+    assert_eq!(
+        m["retryable"],
+        Value::Bool(true),
+        "#5917 unified the field set: both producers of this code send `retryable`"
+    );
+    assert_eq!(m["failure_kind"], "read_failed");
+    assert_eq!(m["http_status"], 503);
+    assert!(
+        text(&resp).contains("#5917"),
+        "the prose the model reads names the fault too"
+    );
+}

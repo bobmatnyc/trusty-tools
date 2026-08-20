@@ -644,6 +644,9 @@ impl CodeIndexer {
         let inflight_gate = Arc::clone(&self.rehydrate_inflight);
         let rehydrate_generation = Arc::clone(&self.rehydrate_generation);
         let lane_degraded = Arc::clone(&self.lane_degraded);
+        // #5917: the two failure arms below used to report an unreadable corpus
+        // to the log only, leaving every lane to answer from empty maps.
+        let corpus_read_fault = Arc::clone(&self.corpus_read_fault);
         let last_rehydrate_cost_ms = Arc::clone(&self.last_rehydrate_cost_ms);
 
         tokio::spawn(async move {
@@ -799,6 +802,9 @@ impl CodeIndexer {
                     if generation_now == generation_at_start {
                         chunks_evicted.store(false, Ordering::Relaxed);
                         bm25_entities_evicted.store(false, Ordering::Relaxed);
+                        // #5917: this scan read the whole corpus, so any fault
+                        // recorded by an earlier failed read is over.
+                        corpus_read_fault.clear();
                         // Finding 5: this commit is the "recovery" instant —
                         // the corpus is genuinely warm again, so clear the
                         // degraded signal here rather than waiting for some
@@ -824,14 +830,26 @@ impl CodeIndexer {
                     }
                     drop(generation_guard);
                 }
-                Ok(Err(e)) => tracing::warn!(
-                    "index '{index_id}': failed to rehydrate corpus from redb ({e}); \
-                     will retry on next access"
-                ),
-                Err(e) => tracing::warn!(
-                    "index '{index_id}': corpus rehydration task panicked ({e}); \
-                     will retry on next access"
-                ),
+                // #5917: record the fault, not just a log line. Both arms leave
+                // `*_evicted` set, so every lane below answers from an empty
+                // map — and an empty lexical lane is indistinguishable from a
+                // genuinely empty index unless the read failure travels with
+                // it. `search_with_drops` refuses on this record; a later
+                // successful rehydrate clears it above.
+                Ok(Err(e)) => {
+                    corpus_read_fault.record(format!("{e:#}"));
+                    tracing::warn!(
+                        "index '{index_id}': failed to rehydrate corpus from redb ({e:#}); \
+                         will retry on next access"
+                    );
+                }
+                Err(e) => {
+                    corpus_read_fault.record(format!("rehydrate task panicked: {e}"));
+                    tracing::warn!(
+                        "index '{index_id}': corpus rehydration task panicked ({e}); \
+                         will retry on next access"
+                    );
+                }
             }
 
             // `_clear_guard` drops here (or during an unwind above),

@@ -98,6 +98,7 @@ async fn at_cap_index_file_is_an_error_not_a_silent_success() {
     assert!(
         !idx.raw_chunks_snapshot()
             .await
+            .expect("corpus reads")
             .iter()
             .any(|c| c.id.starts_with("src/b.rs")),
         "the refused file's chunks must be absent from the corpus"

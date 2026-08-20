@@ -103,7 +103,7 @@ async fn idle_eviction_drops_and_lazily_rehydrates_chunks() {
     assert!(idx.corpus_store().unwrap().chunk_count().unwrap() >= 2);
 
     // An in-memory read (raw_chunks_snapshot) lazily rehydrates from redb.
-    let snapshot = idx.raw_chunks_snapshot().await;
+    let snapshot = idx.raw_chunks_snapshot().await.expect("corpus reads");
     assert_eq!(
         snapshot.len(),
         resident_before,

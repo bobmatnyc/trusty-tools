@@ -116,6 +116,9 @@ mod tests_index_config;
 // #2203: a search that drops rows after fusion must report how many and why.
 #[cfg(test)]
 mod tests_dropped_results;
+// #5917: a search over an index whose corpus cannot be read must be refused.
+#[cfg(test)]
+mod tests_corpus_read_5917;
 // #5068 / #5061 / #4787 / #4839: the index-routing + status-reporting cluster.
 #[cfg(test)]
 mod tests_index_routing;
