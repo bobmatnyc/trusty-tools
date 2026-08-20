@@ -71,7 +71,10 @@ use super::path_filter;
 /// (finding 5 — see `idle_evict::spawn_detached_rehydrate`'s commit-success
 /// branch). `TRUSTY_REHYDRATE_WAIT_MS` is the per-deployment knob for trading
 /// first-query latency against fewer degraded responses.
-const REHYDRATE_RACE_RETRIES: u32 = 3;
+// pub(crate): `files::enumerate_chunks` retries on the same budget (#6043) —
+// a chunk enumeration is subject to the identical cold-scan window as the
+// read lanes, so both must count to the same number.
+pub(crate) const REHYDRATE_RACE_RETRIES: u32 = 3;
 
 impl CodeIndexer {
     /// Batch-fetch the `RawChunk`s for a set of chunk ids, reading from the

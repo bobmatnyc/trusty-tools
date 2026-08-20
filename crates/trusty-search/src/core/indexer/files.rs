@@ -83,7 +83,9 @@ impl CodeIndexer {
     /// Test: `test_enumerate_chunks_paginates_stable_order` indexes a couple of
     /// files, pages through them, and asserts no overlap and full coverage;
     /// `enumerate_chunks_errors_when_rehydrate_did_not_commit` covers the
-    /// #6043 refusal.
+    /// #6043 refusal and
+    /// `enumerate_chunks_waits_out_a_rehydrate_that_outlasts_one_budget` covers
+    /// the retry that keeps a healthy slow corpus out of it.
     ///
     /// Errors when the in-memory map is not a view of the corpus — see the
     /// guard below.
@@ -92,23 +94,40 @@ impl CodeIndexer {
         offset: usize,
         limit: usize,
     ) -> Result<(usize, Vec<CodeChunk>)> {
-        self.ensure_chunks_loaded().await;
         // #6043: the map this page is sliced from is a CACHE, not the corpus.
-        // `ensure_chunks_loaded` waits on a bounded budget and returns whether
-        // or not the detached rehydrate committed, and the rehydrate task
-        // reports a redb read failure only to the log. `chunks_evicted` stays
-        // set on every path that did not commit, so reading it here is the one
-        // place the caller can tell "this index holds nothing" apart from
-        // "this map has not been filled". Reporting `chunks.len()` as `total`
-        // across that gap is what published `total: 0` for an index holding
+        // `ensure_chunks_loaded` waits on a bounded budget (default 9s) and
+        // returns whether or not the detached rehydrate committed, and the
+        // rehydrate task reports a redb read failure only to the log.
+        // `chunks_evicted` stays set on every path that did not commit, so it
+        // is the one place a caller can tell "this index holds nothing" apart
+        // from "this map has not been filled". Reporting `chunks.len()` as
+        // `total` across that gap published `total: 0` for an index holding
         // 50,929 chunks and let trusty-analyze score an empty corpus.
-        if self.chunks_evicted.load(Ordering::Relaxed) {
+        //
+        // Retry on the same budget as the read lanes rather than refusing after
+        // one wait: #3683 measured a healthy 315K-chunk corpus taking 27-40s to
+        // rehydrate, so a single 9s wait would turn every large cold index into
+        // an error. Each iteration rejoins the SAME in-flight detached task (it
+        // is deduplicated, not re-triggered), so this waits roughly
+        // `REHYDRATE_RACE_RETRIES * rehydrate_wait_budget()` — ~27s at the
+        // defaults, matching `search::lanes::{bm25_search, grep_fallback_search}`.
+        let mut corpus_view_is_current = false;
+        for _ in 0..crate::core::indexer::search::lanes::REHYDRATE_RACE_RETRIES {
+            self.ensure_chunks_loaded().await;
+            if !self.chunks_evicted.load(Ordering::Relaxed) {
+                corpus_view_is_current = true;
+                break;
+            }
+        }
+        if !corpus_view_is_current {
             anyhow::bail!(
                 "index '{}': the in-memory chunk map was evicted and has not been \
-                 repopulated — the durable corpus read either failed or is still in \
-                 flight, so enumerating it now would report a partial corpus as the \
-                 whole one (see #6043, #5917). Retry once the rehydrate commits.",
-                self.index_id
+                 repopulated after {} bounded waits — the durable corpus read either \
+                 failed or is still in flight, so enumerating it now would report a \
+                 partial corpus as the whole one (see #6043, #5917). Retry once the \
+                 rehydrate commits.",
+                self.index_id,
+                crate::core::indexer::search::lanes::REHYDRATE_RACE_RETRIES,
             );
         }
         let chunks = self.chunks.read().await;
@@ -154,9 +173,15 @@ impl CodeIndexer {
     /// `after`. `next_cursor` is `Some(last_id)` when a full `limit`-sized page
     /// was returned (more rows may follow) and `None` once the page is short
     /// (end reached) — so a client loops until `next_cursor` is `None`.
-    /// Test: `test_enumerate_chunks_after_cursor_pages_via_redb`,
-    /// `test_enumerate_chunks_after_cursor_in_memory_fallback`, and
-    /// `cursor_page_read_failure_is_an_error_not_an_empty_page` (#6043).
+    /// Test: `test_enumerate_chunks_after_cursor_pages_via_redb` and
+    /// `test_enumerate_chunks_after_cursor_in_memory_fallback` cover the happy
+    /// paths. The #6043 read-failure arms have no direct unit test: redb enters
+    /// its "Previous I/O error occurred" state only through a real I/O fault,
+    /// and `CorpusStore::open` materializes every table eagerly, so neither a
+    /// missing table nor a corrupted-after-open database is reachable from a
+    /// fixture. They are covered indirectly by
+    /// `trusty_analyze::core::client::tests::short_export_against_reported_total_is_an_error`,
+    /// which replays the live failure body this arm produces.
     ///
     /// Errors when the durable corpus cannot be read — see the #6043 note on
     /// the failure arms below.

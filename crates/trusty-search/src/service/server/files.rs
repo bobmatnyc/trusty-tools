@@ -142,7 +142,11 @@ pub(super) async fn remove_file_handler(
 /// What: 503 with `retryable: true` — a rehydrate that has not committed does
 /// commit on a later access, and the redb error state clears on daemon
 /// restart, so waiting is a real remedy rather than a lie.
-/// Test: `cursor_page_read_failure_is_an_error_not_an_empty_page`.
+/// Test: the offset path's refusal reaches this builder via
+/// `core::indexer::tests_cursor::enumerate_chunks_errors_when_rehydrate_did_not_commit`.
+/// The cursor path's redb arm has no direct test — see
+/// `CodeIndexer::enumerate_chunks_after` for why fixture-injecting a redb read
+/// fault is not reachable.
 fn corpus_read_failure_response(
     index_id: &str,
     err: &anyhow::Error,
