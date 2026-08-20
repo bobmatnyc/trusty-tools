@@ -600,6 +600,27 @@ fn cli_prune_worktrees_discard_dirty_is_opt_in() {
     }
 }
 
+/// #5947: the command `tm doctor` hands the operator must parse on this CLI.
+///
+/// Why: doctor's worktrees hint said `tm session prune --worktrees` for as long
+/// as the check existed, and `tm session prune` has only ever taken `--state` —
+/// so the suggested fix errored out. Nothing connected the hint string to the
+/// parser, so nothing could notice. This test is that connection: it feeds
+/// doctor's own constant to the real `Cli` and fails if it no longer resolves.
+#[test]
+fn doctor_worktree_remediation_command_parses() {
+    let command = trusty_mpm::daemon::doctor::WORKTREE_REMEDIATION_COMMAND;
+    let cli = Cli::try_parse_from(command.split_whitespace()).unwrap_or_else(|e| {
+        panic!("`tm doctor`'s worktree remediation hint `{command}` does not parse: {e}")
+    });
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::PruneWorktrees { force, .. },
+        } => assert!(!force, "the hint must preview, never delete unasked"),
+        other => panic!("expected session prune-worktrees, got {other:?}"),
+    }
+}
+
 /// #2919: the merged-pull-request reclaim pass requires its own explicit flag.
 ///
 /// Why: it is the only reclaim path that acts on GitHub state, so an operator
