@@ -121,6 +121,15 @@
 #     27. unreachable API       the latest attempt's jobs read failing outright
 #                               is UNREADABLE, with no attempt number to walk
 #                               from. Unchanged by #6113.
+#     28. annotations fetch     the ANNOTATIONS read failing outright, on a run
+#         fails hard            with no earlier attempt: UNREADABLE. A different
+#                               branch from case 24 — that one is a body that
+#                               parsed to nothing, this one is gate_api itself
+#                               exiting nonzero — and the branch a review found
+#                               untested on PR #6115.
+#     29. …and on the walk      the same hard failure on the latest attempt of a
+#                               RERUN still walks back and recovers the commit
+#                               attempt 1 recorded.
 #
 # Usage: bash scripts/preflight-check8-selftest.sh
 # Exit: 0 when every case matches; 1 on the first mismatch, printing both sides.
@@ -506,6 +515,23 @@ assert_eq "26 beyond the attempt cap: unreadable" "UNREADABLE" "$(run_target "$R
 # --- 27. the API not answering at all ----------------------------------------
 fx_reset
 assert_eq "27 unreachable API: unreadable" "UNREADABLE" "$(run_target "$RERUN_RUN")"
+
+# --- 28. the ANNOTATIONS read failing outright -------------------------------
+# The jobs list answers, the resolve job succeeded, and the annotations call
+# itself exits nonzero — a transient API failure, not a body that parsed to
+# nothing. Case 24's malformed body reaches UNREADABLE through the parser;
+# this reaches it through gate_api's own exit, which is the other branch.
+# Omitting the ann_path fixture is what makes the fetch fail hard.
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")" "$(jobs_body 7001 success 1)"
+assert_eq "28 annotations fetch fails hard: unreadable" "UNREADABLE" "$(run_target "$RERUN_RUN")"
+
+# --- 29. the same failure on a rerun still walks back ------------------------
+fx_reset
+fx "$(jobs_path "$RERUN_RUN")"      "$(jobs_body "$RERUN_JOB_A2" success 2)"
+fx "$(jobs_path "$RERUN_RUN" 1)"    "$(jobs_body "$RERUN_JOB_A1" success 1)"
+fx "$(ann_path "$RERUN_JOB_A1")"    "$(ann_body "$RERUN_SHA")"
+assert_eq "29 annotations fetch fails hard on rerun: walks back" "$RERUN_SHA" "$(run_target "$RERUN_RUN")"
 
 echo
 if [ "$FAILURES" -eq 0 ]; then
