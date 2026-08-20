@@ -194,8 +194,17 @@ impl TrustySearchClient {
     /// sequential because each one needs the previous page's cursor; the seek is
     /// O(page), against offset mode's O(N log N) re-sort of the whole corpus.
     ///
+    /// `total` is taken from the most recent page that carried one. During a
+    /// concurrent reindex the count can move between pages, so a corpus that
+    /// shrinks mid-walk can report a shortfall that is really a mutation. That
+    /// is the intended bias: a report computed over a corpus that changed under
+    /// the walk is wrong either way, and an error tells the caller to retry.
+    ///
     /// Test: `cursor_walk_collects_every_page`,
+    /// `cursor_walk_accepts_a_complete_export`,
     /// `short_export_against_reported_total_is_an_error`,
+    /// `walk_truncated_after_the_first_page_is_an_error`,
+    /// `repeated_cursor_stops_the_walk_instead_of_spinning`,
     /// `export_without_total_makes_no_completeness_claim`.
     pub async fn get_chunks(&self, index_id: &str) -> Result<Vec<CodeChunk>> {
         let base = format!("{}/indexes/{}/chunks", self.base_url, index_id);
@@ -286,6 +295,7 @@ async fn fetch_chunk_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn index_summary_deserializes_with_and_without_root_path() {
@@ -319,22 +329,55 @@ mod tests {
         assert!(listing.indexes[1].root_path.is_none());
     }
 
-    /// Spawn a stub trusty-search answering `GET /indexes/:id/chunks` with a
-    /// fixed body, and return its base URL.
-    async fn spawn_chunks_stub(body: serde_json::Value) -> String {
+    /// Spawn a cursor-aware stub trusty-search and return its base URL.
+    ///
+    /// Why: a stub that answers every request with the same body cannot
+    /// exercise a cursor walk at all — the loop's continuation, its
+    /// no-progress guard, and the post-walk shortfall check all stay dark
+    /// while the tests still pass. Keying the response on `after=` is what
+    /// makes a multi-page walk observable.
+    /// What: `pages` maps the `after` cursor value a request carries (`""` for
+    /// the first page) to the body to answer it with. An unmapped cursor is a
+    /// test bug, so it answers 500 rather than an empty page that would look
+    /// like a clean end of corpus.
+    /// Test: used by every `get_chunks` test below.
+    async fn spawn_chunks_stub(pages: Vec<(&'static str, serde_json::Value)>) -> String {
+        let pages: std::collections::HashMap<String, serde_json::Value> =
+            pages.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = axum::Router::new().route(
             "/indexes/{id}/chunks",
-            axum::routing::get(move || {
-                let body = body.clone();
-                async move { axum::Json(body) }
-            }),
+            axum::routing::get(
+                move |axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| {
+                    let pages = pages.clone();
+                    async move {
+                        let cursor = q.get("after").cloned().unwrap_or_default();
+                        match pages.get(&cursor) {
+                            Some(body) => Ok(axum::Json(body.clone())),
+                            None => Err((
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("stub has no page for cursor {cursor:?}"),
+                            )),
+                        }
+                    }
+                },
+            ),
         );
         tokio::spawn(async move {
             axum::serve(listener, app).await.ok();
         });
         format!("http://{addr}")
+    }
+
+    /// One page body: `chunks` for the given ids, plus `total` and the cursor
+    /// to follow (`None` ends the walk).
+    fn page(total: usize, ids: &[&str], next_cursor: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "total": total,
+            "chunks": ids.iter().map(|i| chunk_json(i)).collect::<Vec<_>>(),
+            "next_cursor": next_cursor,
+        })
     }
 
     fn chunk_json(id: &str) -> serde_json::Value {
@@ -357,10 +400,13 @@ mod tests {
     /// Test: this function IS the test.
     #[tokio::test]
     async fn short_export_against_reported_total_is_an_error() {
-        let base = spawn_chunks_stub(serde_json::json!({
-            "index_id": "trusty-tools", "total": 50929,
-            "chunks": [], "next_cursor": null
-        }))
+        let base = spawn_chunks_stub(vec![(
+            "",
+            serde_json::json!({
+                "index_id": "trusty-tools", "total": 50929,
+                "chunks": [], "next_cursor": null
+            }),
+        )])
         .await;
         let err = TrustySearchClient::new(base)
             .get_chunks("trusty-tools")
@@ -377,7 +423,11 @@ mod tests {
     /// nothing to check it against — the export is returned as-is.
     #[tokio::test]
     async fn export_without_total_makes_no_completeness_claim() {
-        let base = spawn_chunks_stub(serde_json::json!({ "chunks": [chunk_json("a:1:2")] })).await;
+        let base = spawn_chunks_stub(vec![(
+            "",
+            serde_json::json!({ "chunks": [chunk_json("a:1:2")] }),
+        )])
+        .await;
         let chunks = TrustySearchClient::new(base)
             .get_chunks("idx")
             .await
@@ -388,16 +438,93 @@ mod tests {
     /// A complete single-page export satisfies the reported total.
     #[tokio::test]
     async fn cursor_walk_accepts_a_complete_export() {
-        let base = spawn_chunks_stub(serde_json::json!({
-            "total": 2, "next_cursor": null,
-            "chunks": [chunk_json("a:1:2"), chunk_json("b:1:2")]
-        }))
-        .await;
+        let base = spawn_chunks_stub(vec![("", page(2, &["a:1:2", "b:1:2"], None))]).await;
         let chunks = TrustySearchClient::new(base)
             .get_chunks("idx")
             .await
             .expect("a complete export is accepted");
         assert_eq!(chunks.len(), 2);
+    }
+
+    /// The walk follows `next_cursor` across every page and stops on the page
+    /// that offers none.
+    ///
+    /// Why: a corpus larger than one page is the ordinary case — the live
+    /// `trusty-tools` index is 51 pages at the 1000-row server cap — and none
+    /// of the loop's continuation was exercised while the stub answered every
+    /// request identically. A walk that silently stopped after page one would
+    /// have looked correct in every other test here.
+    /// What: three pages chained by cursor, asserting all rows arrive exactly
+    /// once and in order.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn cursor_walk_collects_every_page() {
+        let base = spawn_chunks_stub(vec![
+            ("", page(5, &["a:1:2", "b:1:2"], Some("b:1:2"))),
+            ("b:1:2", page(5, &["c:1:2", "d:1:2"], Some("d:1:2"))),
+            ("d:1:2", page(5, &["e:1:2"], None)),
+        ])
+        .await;
+        let chunks = TrustySearchClient::new(base)
+            .get_chunks("idx")
+            .await
+            .expect("a three-page walk completes");
+        let ids: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["a:1:2", "b:1:2", "c:1:2", "d:1:2", "e:1:2"],
+            "every page's rows arrive exactly once, in walk order"
+        );
+    }
+
+    /// A multi-page walk that dies partway is a shortfall, not a short corpus.
+    ///
+    /// Why: `chunks_after` turns a mid-walk redb read failure into an empty
+    /// page with `next_cursor: null`, which is bit-identical to a clean end of
+    /// corpus. Page one succeeding is what makes this the insidious shape — the
+    /// client has rows in hand and no reason to doubt them.
+    /// What: page one returns 2 of 5 rows, page two returns the empty
+    /// end-of-corpus shape. Asserts the walk refuses rather than returning 2.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn walk_truncated_after_the_first_page_is_an_error() {
+        let base = spawn_chunks_stub(vec![
+            ("", page(5, &["a:1:2", "b:1:2"], Some("b:1:2"))),
+            ("b:1:2", page(5, &[], None)),
+        ])
+        .await;
+        let err = TrustySearchClient::new(base)
+            .get_chunks("idx")
+            .await
+            .expect_err("2 of 5 rows must not pass as the whole corpus");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("5 chunks") && msg.contains("returned 2"),
+            "the error must name both numbers, got: {msg}"
+        );
+    }
+
+    /// A server that keeps handing back the cursor it was given must not spin.
+    ///
+    /// Why: the walk advances only because the cursor is exclusive and strictly
+    /// increasing. A daemon that repeats it — a bug, or a corpus mutating under
+    /// the walk — would otherwise loop forever inside a request handler.
+    /// What: a page whose `next_cursor` equals the cursor that fetched it. The
+    /// guard breaks the loop and the shortfall check reports it, so the test
+    /// terminating at all is half the assertion.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn repeated_cursor_stops_the_walk_instead_of_spinning() {
+        let base = spawn_chunks_stub(vec![
+            ("", page(9, &["a:1:2"], Some("a:1:2"))),
+            ("a:1:2", page(9, &["a:1:2"], Some("a:1:2"))),
+        ])
+        .await;
+        let err = TrustySearchClient::new(base)
+            .get_chunks("idx")
+            .await
+            .expect_err("a non-advancing cursor is a failed walk, not a complete one");
+        assert!(format!("{err:#}").contains("incomplete"), "got: {err:#}");
     }
 
     #[test]
