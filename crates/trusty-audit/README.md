@@ -400,13 +400,30 @@ Every default is overridable, and no flag is required:
 | Flag | Default |
 |---|---|
 | `--config` | `engagement.toml` in the directory you are in |
-| `--from` | the directory you are in, when it holds reports; else the work dir |
+| `--from` | the first of these that holds reports: the directory you are in, then `work/` beside your `engagement.toml`, then the work dir |
 | `--out` | `<from>/rerendered` |
 | `--review-bin` | the copy under `<work-dir>/tools/`, else whatever is on `PATH` |
 
 ```
 trusty-audit render --from ~/acme-audit --out ~/tmp/second-opinion
 ```
+
+The middle rung of `--from` is for the operator who ran the engagement rather
+than received it. Sweeps run with `--work-dir ~/acme/work` leave their reports
+under `~/acme/work/out/`, which is neither the directory holding
+`engagement.toml` nor the default work dir — so a bare `trusty-audit render`
+from beside the config finds them. Nothing in `engagement.toml` declares a work
+dir; `work/` beside it is the layout the flow produces, and `--work-dir` or
+`--from` names anywhere else. When none of the three holds a report, the refusal
+names all three.
+
+**The renderer says where it came from.** There is no pin check, so a
+`trusty-review` picked up off `PATH` renders at whatever version it happens to
+be. When that is what happened — no `--review-bin`, and no copy under
+`<work-dir>/tools/` — the run prints one line naming the resolved path and the
+version it answered, before the reports. A renderer you named, or one this
+engagement installed, prints nothing: the line means something only because it
+is not on every run.
 
 The key can come from the environment instead of the config, which is what a
 recipient who was sent a key rather than a package config uses:

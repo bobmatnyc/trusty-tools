@@ -674,11 +674,13 @@ pub fn write_sweep(
 /// Write the re-render's index into its `--out` directory.
 ///
 /// Why: see [`write_sweep`] — one module decides what an index says.
-/// What: the `trusty-review` this run actually drove, asked for its own
-/// `--version` because a re-render has no install record to read (#6080), plus
-/// one entry per manifest it found. `tga` is stated as not recorded rather than
-/// omitted: a reader comparing this index against a sweep's should see why one
-/// row is empty rather than that a row is missing.
+/// What: the `trusty-review` this run actually drove, with the version it
+/// answered — asked for by the caller, because a re-render has no install
+/// record to read and states that version before it starts rendering rather
+/// than only here (#6080) — plus one entry per manifest it found. `tga` is
+/// stated as not recorded rather than omitted: a reader comparing this index
+/// against a sweep's should see why one row is empty rather than that a row is
+/// missing.
 /// Test: `crate::rerender::rerender_tests::a_re_render_writes_an_index_into_its_output`.
 ///
 /// # Errors
@@ -687,13 +689,14 @@ pub fn write_sweep(
 pub fn write_render(
     out_dir: &Path,
     review: &Path,
+    version: Option<&str>,
     reports: &[crate::rerender::RenderedReport],
     total: Duration,
 ) -> Result<(), AuditError> {
-    let review_version = match tool_version(review) {
+    let review_version = match version {
         Some(version) => ToolVersion::known(
             "trusty-review",
-            version,
+            version.to_owned(),
             format!("`{} --version`", review.display()),
         ),
         None => ToolVersion::unknown(

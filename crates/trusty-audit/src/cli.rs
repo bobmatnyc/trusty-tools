@@ -495,6 +495,8 @@ mod cli_tests {
             source: PathBuf::from("/pkg"),
             output: PathBuf::from("/pkg/rerendered"),
             review: PathBuf::from("/usr/local/bin/trusty-review"),
+            review_source: crate::rerender::ReviewSource::Engagement,
+            review_version: Some("0.20.0".to_owned()),
             reports: vec![
                 RenderedReport {
                     manifest: PathBuf::from("/pkg/reports/01-acme-api/manifest.toml"),
@@ -540,6 +542,75 @@ mod cli_tests {
             crate::session::EXIT_PARTIAL,
             "a re-render that could not regenerate every report must not exit 0"
         );
+    }
+
+    /// One re-render report driving `render`, with the renderer's provenance
+    /// named. Everything else is fixed — only the two #6080 fields vary.
+    fn re_render_resolved_from(
+        source: crate::rerender::ReviewSource,
+        version: Option<&str>,
+    ) -> Outcome {
+        use crate::rerender::{RenderResult, RenderedReport, RerenderReport};
+
+        Outcome::Rerendered(RerenderReport {
+            source: PathBuf::from("/pkg"),
+            output: PathBuf::from("/pkg/rerendered"),
+            review: PathBuf::from("/usr/local/bin/trusty-review"),
+            review_source: source,
+            review_version: version.map(str::to_owned),
+            reports: vec![RenderedReport {
+                manifest: PathBuf::from("/pkg/reports/01-acme-api/manifest.toml"),
+                name: "01-acme-api".to_owned(),
+                output: PathBuf::from("/pkg/rerendered/01-acme-api"),
+                log: PathBuf::from("/pkg/rerendered/01-acme-api.log"),
+                artifacts: vec![PathBuf::from("/pkg/rerendered/01-acme-api/report.md")],
+                gaps: Vec::new(),
+                duration_ms: None,
+                result: RenderResult::Succeeded,
+            }],
+        })
+    }
+
+    /// 🔴 #6080: a renderer nobody chose is disclosed at the top of the run,
+    /// with the path and the version it answered. The live failure was silent —
+    /// a `trusty-review` two minor versions behind the engagement's pin rendered
+    /// the whole audit and exited 0, and the only record was the versions table
+    /// in an `index.md` the operator opens afterwards.
+    #[test]
+    fn a_path_resolved_renderer_is_disclosed_with_its_version() {
+        let text = render(&re_render_resolved_from(
+            crate::rerender::ReviewSource::Path,
+            Some("0.18.0"),
+        ));
+
+        assert!(text.contains("/usr/local/bin/trusty-review"), "{text}");
+        assert!(text.contains("0.18.0"), "the version must be named: {text}");
+        assert!(text.contains("PATH"), "{text}");
+        assert!(
+            text.contains("--review-bin"),
+            "the remedy must be named: {text}"
+        );
+
+        // A binary that will not answer says so rather than rendering a blank.
+        let silent = render(&re_render_resolved_from(
+            crate::rerender::ReviewSource::Path,
+            None,
+        ));
+        assert!(silent.contains("did not answer"), "{silent}");
+    }
+
+    /// The line means something only if its absence does: a renderer somebody
+    /// chose — a flag, or the engagement's own `tools/` copy — is not disclosed.
+    #[test]
+    fn a_chosen_renderer_is_not_disclosed() {
+        for source in [
+            crate::rerender::ReviewSource::Explicit,
+            crate::rerender::ReviewSource::Engagement,
+        ] {
+            let text = render(&re_render_resolved_from(source, Some("0.20.0")));
+            assert!(!text.contains("NOTE:"), "{source:?} was disclosed: {text}");
+            assert!(!text.contains("resolved on PATH"), "{source:?}: {text}");
+        }
     }
 
     #[test]

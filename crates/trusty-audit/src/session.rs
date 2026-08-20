@@ -999,8 +999,11 @@ impl Session {
     /// What: resolves the key — the front end's, else the config's — refuses a
     /// run that has neither, resolves the model selection through the same
     /// `crate::inference` rule the sweep uses, and hands both to
-    /// [`crate::rerender::rerender`] along with this session's cwd, which is
-    /// what a `--from`-less run renders (#6080).
+    /// [`crate::rerender::rerender`] along with this session's cwd and config
+    /// path, which are what a `--from`-less run renders from (#6080). The
+    /// config path goes over for its DIRECTORY as much as its contents: an
+    /// engagement's own work root sits beside it, and that is the rung between
+    /// the cwd and the tool's default work dir.
     /// Test: `crate::session::session_tests::a_re_render_with_no_credential_anywhere_is_refused`,
     /// `crate::session::session_tests::a_re_render_defaults_to_the_directory_it_was_run_in`.
     ///
@@ -1025,6 +1028,7 @@ impl Session {
         rerender::rerender(
             &self.work,
             &self.cwd,
+            &self.config_path,
             &key,
             &inference,
             options,

@@ -259,16 +259,18 @@ pub fn render(outcome: &Outcome) -> String {
 /// copy differs from the one they were sent. The differences are stated even on
 /// a clean run: a report rendered without the checkouts is thinner than the
 /// original, and nothing else on the screen would say so.
-/// What: the renderer and its source, one line per report with its written
-/// files, each report's gaps, and the closing note that the narrative is
-/// model-authored (DOC-68 §12).
-/// Test: `super::cli_tests::a_re_render_names_the_files_and_what_did_not_reproduce`.
+/// What: the renderer and its source, the unchosen-renderer disclosure when one
+/// is owed, one line per report with its written files, each report's gaps, and
+/// the closing note that the narrative is model-authored (DOC-68 §12).
+/// Test: `super::cli_tests::a_re_render_names_the_files_and_what_did_not_reproduce`,
+/// `super::cli_tests::a_path_resolved_renderer_is_disclosed_with_its_version`.
 fn render_rerender(report: &crate::rerender::RerenderReport) -> String {
     let mut out = format!(
         "Re-rendered from {} with {}\n",
         report.source.display(),
         report.review.display()
     );
+    out.push_str(&describe_renderer(report));
     for rendered in &report.reports {
         match &rendered.result {
             crate::rerender::RenderResult::Succeeded => {
@@ -307,6 +309,36 @@ fn render_rerender(report: &crate::rerender::RerenderReport) -> String {
          same collected data.\n",
     );
     out
+}
+
+/// The renderer this run picked for itself, when nobody else picked it (#6080).
+///
+/// Why: a re-render performs no pin check, so a `trusty-review` off `PATH`
+/// renders at whatever version it happens to be — in the live dogfood run, two
+/// minor versions behind the engagement's own pin — and exits 0. The versions
+/// table in `index.md` recorded it, which is a file the operator opens after
+/// the render they have already read. This line puts the same fact at the top
+/// of the run, where a version surprise is still actionable.
+/// What: nothing at all when `--review-bin` or the engagement's `tools/` copy
+/// decided; otherwise one line naming the resolved path, the version it
+/// answered, and the flag that overrides it. A binary that will not answer
+/// `--version` says so rather than rendering a blank.
+/// Test: `super::cli_tests::a_path_resolved_renderer_is_disclosed_with_its_version`,
+/// `super::cli_tests::a_chosen_renderer_is_not_disclosed`.
+fn describe_renderer(report: &crate::rerender::RerenderReport) -> String {
+    if !report.review_source.is_unchosen() {
+        return String::new();
+    }
+    format!(
+        "NOTE: {} was resolved on PATH, not from this engagement's `tools/` — it is version {} \
+         and nothing checked that against the engagement's pin. Use `--review-bin` to name \
+         another copy.\n",
+        report.review.display(),
+        report
+            .review_version
+            .as_deref()
+            .unwrap_or("unknown — it did not answer `--version`"),
+    )
 }
 
 /// The inbound install package, and the credential it carries.

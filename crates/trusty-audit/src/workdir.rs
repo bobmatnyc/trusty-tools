@@ -68,7 +68,12 @@ const CRATE_NAME: &str = "trusty-audit";
 ///
 /// `config.yaml` is the sibling `crate_config` writes, so the run's own tree is
 /// kept one level down rather than sharing that directory.
-const WORK_SUBDIR: &str = "work";
+///
+/// #6080: it is also the name an engagement's own work root conventionally
+/// takes beside its `engagement.toml`, which is what
+/// [`crate::rerender::resolve_source`] looks for. Named once so the two cannot
+/// spell the convention differently.
+pub(crate) const WORK_SUBDIR: &str = "work";
 
 /// One entry in the working-directory layout.
 ///
