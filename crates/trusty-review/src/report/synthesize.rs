@@ -28,7 +28,9 @@ use tracing::{debug, warn};
 use crate::llm::LlmProvider;
 use crate::report::model::ReportModel;
 use crate::report::synthesize_guard::{allowed_numbers, verify_prose};
-use crate::report::synthesize_prompt::build_synthesis_prompt;
+use crate::report::synthesize_prompt::{
+    SYNTHESIS_DEFAULT_MAX_TOKENS, SYNTHESIS_TIER_LADDER, SynthesisTier, build_synthesis_prompt,
+};
 
 /// Default wall-clock ceiling for one synthesis pass before failing closed.
 const DEFAULT_SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(120);
@@ -240,6 +242,7 @@ pub struct Synthesizer {
     model: String,
     timeout: Duration,
     raw_capture_dir: Option<PathBuf>,
+    max_tokens: u32,
 }
 
 impl Synthesizer {
@@ -247,8 +250,9 @@ impl Synthesizer {
     ///
     /// Why: the CLI builds the provider from the reviewer role config; tests
     /// inject stubs.
-    /// What: stores the provider + model with the default timeout and no raw
-    /// capture directory (opt-in via [`Self::with_raw_capture_dir`]).
+    /// What: stores the provider + model with the default timeout, the default
+    /// output budget, and no raw capture directory (opt-in via
+    /// [`Self::with_raw_capture_dir`]).
     /// Test: exercised by every synthesize test.
     pub fn new(llm: Arc<dyn LlmProvider>, model: impl Into<String>) -> Self {
         Self {
@@ -256,7 +260,24 @@ impl Synthesizer {
             model: model.into(),
             timeout: DEFAULT_SYNTHESIS_TIMEOUT,
             raw_capture_dir: None,
+            max_tokens: SYNTHESIS_DEFAULT_MAX_TOKENS,
         }
+    }
+
+    /// Set the output-token ceiling synthesis asks for on its first attempt.
+    ///
+    /// Why: #6093 — `[models.reviewer].max_tokens` never reached this path.
+    /// `Synthesizer::new(provider, role.model.clone())` took the model id and
+    /// nothing else, and the request carried a hardcoded 3072 regardless of
+    /// what the operator configured, so raising the configured ceiling did
+    /// not change the request that truncated.
+    /// What: stores the ceiling used as the base of the retry ladder's budget
+    /// (see [`SynthesisTier::budget`], which clamps it into a supported range
+    /// and escalates it on each retry rung).
+    /// Test: `synthesize_tests.rs::configured_max_tokens_reaches_the_request`.
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = max_tokens;
+        self
     }
 
     /// Override the fail-closed timeout (used by tests).
@@ -291,18 +312,27 @@ impl Synthesizer {
     /// Why: the single entry point the CLI awaits; it NEVER fabricates and NEVER
     /// partial-trusts a malformed response.  A live-QA acceptance run found that a
     /// large, real finding count could still hit the output-token ceiling even
-    /// with the #2357-follow-up compact digest and bounded schema; a single cheap
-    /// retry (mirroring the wave-3 batch investigation's truncation retry) asks for
-    /// a shorter response before giving up, rather than discarding the whole
-    /// narrative on the first truncation.  #5454 changed only what happens when
-    /// that retry is exhausted: the failure propagates instead of degrading the
-    /// report to deterministic-only.
-    /// What: builds the numeric allow-set from the deterministic model, calls the
-    /// provider under a timeout; on `finish_reason = length`/`max_tokens`, retries
-    /// ONCE with `retry_concise = true` (a smaller `top_risks` cap + a shorter-
-    /// paragraph directive).  A parsed response is passed through the numeric
-    /// guardrail field-by-field, dropping any field whose prose cites a figure
-    /// absent from the source.
+    /// with the #2357-follow-up compact digest and bounded schema.  #6093 is what
+    /// that retry could not fix: it shrank `top_risks` from five rows to three
+    /// while leaving ten per-finding elaborations — the dominant output cost —
+    /// and the request's hardcoded 3072-token ceiling both untouched, so a
+    /// 45-finding investigation truncated on both calls and exited with no
+    /// report.  The retry is now a three-rung ladder in which every rung raises
+    /// the budget AND shrinks the ask, ending in a narrative-only rung that
+    /// requests no elaboration prose at all.  #5454 still decides what happens
+    /// when the ladder is spent: the failure propagates rather than degrading
+    /// the report to deterministic-only.
+    /// What: builds the numeric allow-set from the deterministic model, then
+    /// walks [`SYNTHESIS_TIER_LADDER`], calling the provider under a timeout at
+    /// each rung; a `finish_reason` of `length`/`max_tokens` advances to the
+    /// next rung, and exhausting the ladder is [`SynthesisError::Truncated`].
+    /// A parsed response is passed through the numeric guardrail field-by-field,
+    /// dropping any field whose prose cites a figure absent from the source.
+    ///
+    /// Dropping elaboration on the last rung drops no finding: every RED/AMBER
+    /// finding still renders from the deterministic composition (#5374), and the
+    /// investigation's verified prose is merged over synthesis prose afterwards
+    /// regardless (`cli_report::merge_investigation_prose`).
     ///
     /// # Errors
     ///
@@ -314,6 +344,7 @@ impl Synthesizer {
     /// synthesize_malformed_json_is_a_hard_error,
     /// synthesize_provider_error_is_a_hard_error, synthesize_rejects_unverified_figure,
     /// synthesize_retry_recovers_from_truncation,
+    /// synthesize_ladder_recovers_a_large_finding_set,
     /// synthesize_still_truncated_after_retry_is_a_hard_error}`.
     pub async fn synthesize(&self, model: &ReportModel) -> Result<Synthesis, SynthesisError> {
         // Ground truth for the guardrail comes from the DETERMINISTIC model only.
@@ -325,27 +356,28 @@ impl Synthesizer {
             }
         };
 
-        match self.try_once(model, false).await {
-            Attempt::Ok(raw, norm_notes) => apply_guardrail(raw, &allowed, norm_notes),
-            Attempt::Truncated => {
-                warn!("synthesis: response truncated — retrying once, concise");
-                match self.try_once(model, true).await {
-                    Attempt::Ok(raw, norm_notes) => apply_guardrail(raw, &allowed, norm_notes),
-                    // #5454: the retry is unchanged; only its exhaustion is now fatal.
-                    Attempt::Truncated => {
-                        warn!("synthesis: still truncated after retry");
-                        Err(SynthesisError::Truncated)
-                    }
-                    Attempt::Failed(e) => Err(e),
-                }
+        for (i, tier) in SYNTHESIS_TIER_LADDER.iter().enumerate() {
+            match self.try_once(model, *tier).await {
+                Attempt::Ok(raw, norm_notes) => return apply_guardrail(raw, &allowed, norm_notes),
+                Attempt::Failed(e) => return Err(e),
+                Attempt::Truncated => match SYNTHESIS_TIER_LADDER.get(i + 1) {
+                    Some(next) => warn!(
+                        next_tier = ?next,
+                        next_budget = next.budget(self.max_tokens),
+                        next_elaborations = next.elaboration_cap(),
+                        "synthesis: response truncated — retrying with a larger budget and a smaller ask"
+                    ),
+                    None => warn!("synthesis: still truncated after the narrative-only attempt"),
+                },
             }
-            Attempt::Failed(e) => Err(e),
         }
+        // #5454: the ladder is spent; the failure is fatal, never a degraded report.
+        Err(SynthesisError::Truncated)
     }
 
-    /// Make one provider call (initial or concise retry) and classify the result.
-    async fn try_once(&self, model: &ReportModel, retry_concise: bool) -> Attempt {
-        let req = build_synthesis_prompt(model, &self.model, retry_concise);
+    /// Make one provider call at one rung of the ladder and classify the result.
+    async fn try_once(&self, model: &ReportModel, tier: SynthesisTier) -> Attempt {
+        let req = build_synthesis_prompt(model, &self.model, tier, self.max_tokens);
         let resp = match tokio::time::timeout(self.timeout, self.llm.complete(req)).await {
             Err(_) => {
                 warn!("synthesis: provider timed out");

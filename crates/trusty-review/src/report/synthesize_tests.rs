@@ -24,7 +24,8 @@ use crate::report::metrics::{
 use crate::report::model::{ReportModel, RepositoryReport};
 use crate::report::synthesize_guard::{allowed_numbers, numbers_in, verify_prose};
 use crate::report::synthesize_prompt::{
-    build_synthesis_prompt, schema_contract_statement, synthesis_schema,
+    SYNTHESIS_DEFAULT_MAX_TOKENS, SYNTHESIS_ESCALATED_MAX_TOKENS, SYNTHESIS_MIN_MAX_TOKENS,
+    SynthesisTier, build_synthesis_prompt, schema_contract_statement, synthesis_schema,
 };
 
 use super::{Synthesis, SynthesisError, Synthesizer};
@@ -321,7 +322,12 @@ fn verify_prose_accepts_rounding() {
 #[test]
 fn prompt_excludes_greens() {
     let model = fixture_model(vec![red("SQL injection risk"), green("GREEN_SECRET_TOPIC")]);
-    let req = build_synthesis_prompt(&model, "stub/model", false);
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     let digest = &req.messages[0].content;
     assert!(
         digest.contains("SQL injection risk"),
@@ -339,9 +345,19 @@ fn prompt_excludes_greens() {
 #[test]
 fn prompt_strips_prefix() {
     let model = fixture_model(vec![]);
-    let req = build_synthesis_prompt(&model, "bedrock/us.anthropic.claude-sonnet-4-6", false);
+    let req = build_synthesis_prompt(
+        &model,
+        "bedrock/us.anthropic.claude-sonnet-4-6",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     assert_eq!(req.model, "us.anthropic.claude-sonnet-4-6");
-    let req2 = build_synthesis_prompt(&model, "openrouter/openai/gpt-5.4-mini", false);
+    let req2 = build_synthesis_prompt(
+        &model,
+        "openrouter/openai/gpt-5.4-mini",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     assert_eq!(req2.model, "openai/gpt-5.4-mini");
 }
 
@@ -353,7 +369,7 @@ fn prompt_strips_prefix() {
 /// Test: this test itself.
 #[test]
 fn synthesis_schema_shape() {
-    let schema = synthesis_schema(5);
+    let schema = synthesis_schema(5, 10);
     assert_eq!(schema.name, "report_synthesis");
     let props = &schema.schema["properties"];
     assert!(props["executive_summary"].is_object());
@@ -367,7 +383,12 @@ fn synthesis_schema_shape() {
     assert!(props["findings"].is_object());
     assert_eq!(props["top_risks"]["maxItems"], 5);
     assert_eq!(props["findings"]["maxItems"], 10);
-    let req = build_synthesis_prompt(&fixture_model(vec![]), "stub/model", false);
+    let req = build_synthesis_prompt(
+        &fixture_model(vec![]),
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     assert!(
         req.response_schema.is_some(),
         "every synthesis request must force structured output"
@@ -377,12 +398,12 @@ fn synthesis_schema_shape() {
 /// Why: #6009 shape 3 — the prompt-text contract must be derived FROM the
 /// schema, not hand-typed beside it, or the two can drift exactly the way
 /// the three live shapes drifted from the schema itself.
-/// What: asserts the statement built from `synthesis_schema(5)` names every
+/// What: asserts the statement built from `synthesis_schema(5, 10)` names every
 /// canonical top-level field and every `top_risks`/`findings` item field.
 /// Test: this test itself.
 #[test]
 fn schema_contract_statement_lists_every_field_name() {
-    let schema = synthesis_schema(5);
+    let schema = synthesis_schema(5, 10);
     let contract = schema_contract_statement(&schema.schema);
     for needle in [
         "executive_summary",
@@ -421,7 +442,12 @@ fn schema_contract_statement_lists_every_field_name() {
 #[test]
 fn schema_contract_statement_reaches_system_prompt() {
     let model = fixture_model(vec![]);
-    let req = build_synthesis_prompt(&model, "stub/model", false);
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     assert!(req.system.contains("Required JSON object shape"));
     assert!(req.system.contains("executive_summary"));
     // #6004: the same derivation must carry the new narrative slots into the
@@ -442,7 +468,12 @@ fn schema_contract_statement_reaches_system_prompt() {
 #[test]
 fn retry_concise_shrinks_top_risks_cap_and_adds_directive() {
     let model = fixture_model(vec![]);
-    let req = build_synthesis_prompt(&model, "stub/model", true);
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Concise,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     let schema = req.response_schema.expect("schema present");
     assert_eq!(schema.schema["properties"]["top_risks"]["maxItems"], 3);
     assert!(req.system.contains("Retry directive"));
@@ -459,7 +490,12 @@ fn retry_concise_shrinks_top_risks_cap_and_adds_directive() {
 #[test]
 fn system_prompt_uses_generic_defaults_when_no_override() {
     let model = fixture_model(vec![]);
-    let req = build_synthesis_prompt(&model, "stub/model", false);
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     assert!(
         req.system.contains("deal-analytic paragraph"),
         "generic executive_summary default must appear verbatim: {}",
@@ -481,7 +517,12 @@ fn template_override_reaches_system_prompt() {
         "executive_summary".to_string(),
         "CAST-FLAVOURED OVERRIDE: lead with the TQI and health-factor posture.".to_string(),
     );
-    let req = build_synthesis_prompt(&model, "stub/model", false);
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     assert!(
         req.system.contains("CAST-FLAVOURED OVERRIDE"),
         "template override must reach the system prompt: {}",
@@ -503,7 +544,12 @@ fn partial_template_override_leaves_other_sections_generic() {
         "top_risks".to_string(),
         "TOP RISKS OVERRIDE TEXT".to_string(),
     );
-    let req = build_synthesis_prompt(&model, "stub/model", false);
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     assert!(req.system.contains("TOP RISKS OVERRIDE TEXT"));
     assert!(req.system.contains("deal-analytic paragraph"));
 }
@@ -526,7 +572,12 @@ fn system_prompt_asks_for_unregistered_target_gaps() {
         "executive_summary".to_string(),
         "OVERRIDE: lead with the TQI posture.".to_string(),
     );
-    let req = build_synthesis_prompt(&model, "stub/model", false);
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     for needle in [
         "Coverage gaps in the assessed set",
         "coverage-gaps note",
@@ -586,7 +637,12 @@ fn authorship_figures_reach_the_synthesis_prompt() {
         caveats: vec![],
     });
 
-    let req = build_synthesis_prompt(&model, "stub/model", false);
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     let digest = &req.messages[0].content;
     assert!(
         digest.contains("Authorship:"),
@@ -603,7 +659,12 @@ fn authorship_figures_reach_the_synthesis_prompt() {
         "the trailing-window trend must reach the prompt too: {digest}"
     );
 
-    let without = build_synthesis_prompt(&fixture_model(vec![]), "stub/model", false);
+    let without = build_synthesis_prompt(
+        &fixture_model(vec![]),
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     assert!(
         !without.messages[0].content.contains("Authorship:"),
         "a repository with no artifact must contribute no authorship line at all: {}",
@@ -888,15 +949,19 @@ async fn synthesize_retry_recovers_from_truncation() {
     assert_eq!(llm.call_count(), 2, "exactly one retry must have occurred");
 }
 
-/// Why: the retry is a single cheap attempt, never an open-ended loop. #5454
-/// changed only what happens when it is spent — an error, not a degraded report.
-/// What: the queued stub truncates on both calls; asserts
-/// `Err(SynthesisError::Truncated)` and exactly 2 calls (no further retries).
+/// Why: the retry ladder is a bounded escalation, never an open-ended loop.
+/// #5454 decides what happens when it is spent — an error, not a degraded
+/// report. #6093 changed the bound from two calls to three (full → concise →
+/// narrative-only), so a provider that truncates unconditionally now costs
+/// three calls and no more.
+/// What: the queued stub truncates on every call; asserts
+/// `Err(SynthesisError::Truncated)` and exactly 3 calls.
 /// Test: this test itself.
 #[tokio::test]
 async fn synthesize_still_truncated_after_retry_is_a_hard_error() {
     let model = fixture_model(vec![red("x")]);
     let llm = Arc::new(QueuedLlm::new(vec![
+        ("{}", Some("length")),
         ("{}", Some("length")),
         ("{}", Some("length")),
     ]));
@@ -910,8 +975,8 @@ async fn synthesize_still_truncated_after_retry_is_a_hard_error() {
     );
     assert_eq!(
         llm.call_count(),
-        2,
-        "no more than one retry must be attempted"
+        3,
+        "the ladder must stop after its three rungs"
     );
 }
 
@@ -1575,7 +1640,12 @@ fn system_prompt_asks_what_the_codebase_does() {
         "executive_summary".to_string(),
         "OVERRIDE: lead with the TQI posture.".to_string(),
     );
-    let req = build_synthesis_prompt(&model, "stub/model", false);
+    let req = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
     for needle in [
         "What the codebase does",
         "what the audited system IS and what it DOES",
@@ -1630,7 +1700,13 @@ fn digest_carries_scan_profile_without_metrics() {
         frameworks: vec![],
     });
 
-    let digest = build_synthesis_prompt(&model, "stub/model", false).messages[0]
+    let digest = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    )
+    .messages[0]
         .content
         .clone();
     assert!(digest.contains("Total LoC: 1500000"), "{digest}");
@@ -1660,11 +1736,276 @@ fn digest_names_build_manifests_as_component_evidence() {
         }],
     });
 
-    let digest = build_synthesis_prompt(&model, "stub/model", false).messages[0]
+    let digest = build_synthesis_prompt(
+        &model,
+        "stub/model",
+        SynthesisTier::Full,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    )
+    .messages[0]
         .content
         .clone();
     assert!(digest.contains("Build manifests / frameworks:"), "{digest}");
     assert!(digest.contains("package.json"), "{digest}");
     assert!(digest.contains("acme-web"), "{digest}");
     assert!(digest.contains("react"), "{digest}");
+}
+
+// ── #6093: the output-budget retry ladder ───────────────────────────────────
+
+/// A provider that models a real output-token ceiling: it answers only when the
+/// response the request ASKS FOR fits inside the request's own `max_tokens`.
+///
+/// Why: the #6093 defect is not that a stub said "length" twice — it is that
+/// the ask stayed the same size while the ceiling stayed at a hardcoded 3072,
+/// so no retry could ever converge. A stub returning a scripted `finish_reason`
+/// cannot express that; this one derives the verdict from the request, so a fix
+/// that only shrinks content, or only raises the ceiling, still fails it if the
+/// two never meet.
+/// What: reads `max_tokens` and the schema's own `top_risks`/`findings`
+/// `maxItems` off the request, prices the response at
+/// `overhead + narrative + risks * per_risk + findings * per_finding`, and
+/// returns `finish_reason: "length"` with an empty body when that exceeds
+/// `max_tokens`. `overhead` stands in for the reasoning tokens an
+/// Anthropic-family model spends before the JSON starts.
+struct CeilingLlm {
+    overhead: u32,
+    narrative: u32,
+    per_risk: u32,
+    per_finding: u32,
+    calls: std::sync::atomic::AtomicUsize,
+    budgets: Mutex<Vec<u32>>,
+}
+
+impl CeilingLlm {
+    fn new(overhead: u32, narrative: u32, per_risk: u32, per_finding: u32) -> Self {
+        CeilingLlm {
+            overhead,
+            narrative,
+            per_risk,
+            per_finding,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            budgets: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The `max_tokens` seen on each call, in call order.
+    fn budgets(&self) -> Vec<u32> {
+        self.budgets.lock().unwrap().clone()
+    }
+
+    /// `maxItems` for one top-level array property, or 0 when the property is
+    /// absent from the schema entirely (the narrative-only rung).
+    fn max_items(req: &LlmRequest, property: &str) -> u32 {
+        req.response_schema
+            .as_ref()
+            .and_then(|s| s.schema["properties"][property]["maxItems"].as_u64())
+            .unwrap_or(0) as u32
+    }
+}
+
+#[async_trait]
+impl LlmProvider for CeilingLlm {
+    fn name(&self) -> &str {
+        "ceiling"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.budgets.lock().unwrap().push(req.max_tokens);
+
+        let risks = Self::max_items(&req, "top_risks");
+        let findings = Self::max_items(&req, "findings");
+        let needed =
+            self.overhead + self.narrative + risks * self.per_risk + findings * self.per_finding;
+
+        let truncated = needed > req.max_tokens;
+        Ok(LlmResponse {
+            text: if truncated {
+                String::new()
+            } else {
+                good_response()
+            },
+            model: "ceiling".to_string(),
+            input_tokens: 4000,
+            output_tokens: needed.min(req.max_tokens),
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some(if truncated { "length" } else { "stop" }.to_string()),
+        })
+    }
+}
+
+/// Why: the reported defect (#6093, reproduced twice on 0.21.0 against a 44-
+/// and a 45-finding investigation). Before the ladder, the first call and its
+/// "concise" retry both asked for ten per-finding elaborations at a fixed
+/// 3072-token ceiling, so both truncated and an eight-minute investigation
+/// exited with no report at all.
+/// What: 45 RED findings, none verified, against a provider that truncates
+/// whenever the ask outgrows the request's own `max_tokens`. Asserts synthesis
+/// SUCCEEDS, that it took more than one call to get there, and that each retry
+/// raised the budget — pre-fix code sends 3072 on both calls and fails this.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesize_ladder_recovers_a_large_finding_set() {
+    let findings: Vec<MetricFinding> = (0..45).map(|i| red(&format!("finding {i}"))).collect();
+    let model = fixture_model(findings);
+    // Prices roughly matched to a real run: ~1200 tokens of narrative, ~120 per
+    // risk row, ~320 per nine-field elaboration, ~900 of reasoning overhead.
+    let llm = Arc::new(CeilingLlm::new(900, 1200, 120, 320));
+
+    let result = Synthesizer::new(llm.clone(), "stub/model")
+        .synthesize(&model)
+        .await
+        .expect("a 45-finding investigation must synthesize to a complete report");
+
+    assert!(
+        result.executive_summary.is_some(),
+        "the narrative must survive the ladder: {:?}",
+        result.notes
+    );
+    let budgets = llm.budgets();
+    assert!(
+        llm.call_count() > 1,
+        "this fixture must exercise a retry, not pass on the first call"
+    );
+    assert!(
+        budgets.windows(2).all(|w| w[1] > w[0]),
+        "each retry must raise the output budget, got {budgets:?}"
+    );
+}
+
+/// Why: the ladder must converge even when per-finding prose is ruinously
+/// expensive — that is what the final narrative-only rung exists for.
+/// What: a per-finding price no budget can absorb; asserts synthesis still
+/// succeeds and that it took all three rungs.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesize_ladder_falls_back_to_narrative_only() {
+    let findings: Vec<MetricFinding> = (0..45).map(|i| red(&format!("finding {i}"))).collect();
+    let model = fixture_model(findings);
+    let llm = Arc::new(CeilingLlm::new(900, 1200, 120, 100_000));
+
+    let result = Synthesizer::new(llm.clone(), "stub/model")
+        .synthesize(&model)
+        .await
+        .expect("the narrative-only rung must still produce a report");
+
+    assert!(result.executive_summary.is_some());
+    assert_eq!(
+        llm.call_count(),
+        3,
+        "the ladder is three rungs: full, concise, narrative-only"
+    );
+}
+
+/// Why: #6093 closure condition 2 — a configured `[models.reviewer].max_tokens`
+/// must demonstrably reach the synthesis request. It never did: the request
+/// carried a hardcoded 3072 whatever the operator configured.
+/// What: sets 9000 via `with_max_tokens` and asserts the first request carried
+/// exactly that; then sets a value below the floor and asserts it is raised to
+/// the floor rather than sent as an unmeetable ceiling.
+/// Test: this test itself.
+#[tokio::test]
+async fn configured_max_tokens_reaches_the_request() {
+    let model = fixture_model(vec![red("x")]);
+
+    let llm = Arc::new(CeilingLlm::new(0, 10, 1, 1));
+    Synthesizer::new(llm.clone(), "stub/model")
+        .with_max_tokens(9000)
+        .synthesize(&model)
+        .await
+        .expect("synthesis succeeds");
+    assert_eq!(llm.budgets().first().copied(), Some(9000));
+
+    let small = Arc::new(CeilingLlm::new(0, 10, 1, 1));
+    Synthesizer::new(small.clone(), "stub/model")
+        .with_max_tokens(64)
+        .synthesize(&model)
+        .await
+        .expect("synthesis succeeds");
+    assert_eq!(
+        small.budgets().first().copied(),
+        Some(SYNTHESIS_MIN_MAX_TOKENS),
+        "a configured ceiling below the floor is raised to it"
+    );
+}
+
+/// Why: the ladder only converges if every rung both raises the budget and
+/// shrinks the ask; a rung that does one without the other reintroduces #6093.
+/// What: asserts the budget rises and the two array caps fall across the
+/// ladder, and that the escalation stays bounded.
+/// Test: this test itself.
+#[test]
+fn tier_ladder_raises_budget_and_shrinks_ask() {
+    let tiers = [
+        SynthesisTier::Full,
+        SynthesisTier::Concise,
+        SynthesisTier::NarrativeOnly,
+    ];
+    let budgets: Vec<u32> = tiers.iter().map(|t| t.budget(4096)).collect();
+    assert!(
+        budgets.windows(2).all(|w| w[1] > w[0]),
+        "budgets must rise: {budgets:?}"
+    );
+    assert!(
+        budgets.iter().all(|b| *b <= SYNTHESIS_ESCALATED_MAX_TOKENS),
+        "escalation must stay bounded: {budgets:?}"
+    );
+
+    let asks: Vec<(usize, usize)> = tiers
+        .iter()
+        .map(|t| (t.top_risks_cap(), t.elaboration_cap()))
+        .collect();
+    assert!(
+        asks.windows(2).all(|w| w[1].0 <= w[0].0 && w[1].1 < w[0].1),
+        "each rung must ask for strictly fewer elaborations: {asks:?}"
+    );
+    assert_eq!(
+        SynthesisTier::NarrativeOnly.elaboration_cap(),
+        0,
+        "the final rung asks for no elaboration prose"
+    );
+}
+
+/// Why: on the final rung the `findings` array must be absent from the schema,
+/// not merely capped at zero — a zero-length array the model is still shown is
+/// an invitation to fill it.
+/// What: builds the narrative-only request; asserts the schema and its derived
+/// contract statement both omit `findings`, and that the digest says
+/// elaboration was deferred rather than claiming everything is verified.
+/// Test: this test itself.
+#[test]
+fn narrative_only_tier_omits_findings_from_schema() {
+    let findings: Vec<MetricFinding> = (0..12).map(|i| red(&format!("finding {i}"))).collect();
+    let req = build_synthesis_prompt(
+        &fixture_model(findings),
+        "stub/model",
+        SynthesisTier::NarrativeOnly,
+        SYNTHESIS_DEFAULT_MAX_TOKENS,
+    );
+    let schema = req.response_schema.as_ref().expect("schema forced");
+    assert!(
+        schema.schema["properties"]["findings"].is_null(),
+        "findings must be absent: {}",
+        schema.schema
+    );
+    assert!(
+        !schema_contract_statement(&schema.schema).contains("findings"),
+        "the prompt-text contract must not name a field the schema dropped"
+    );
+    assert!(schema.schema["properties"]["executive_summary"].is_object());
+
+    let digest = &req.messages[0].content;
+    assert!(
+        digest.contains("none this pass"),
+        "the digest must say elaboration was deferred, not that all are verified: {digest}"
+    );
+    assert!(
+        !digest.contains("every RED/AMBER finding already has verified"),
+        "that line would be false here: {digest}"
+    );
 }
