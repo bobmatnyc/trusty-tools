@@ -20,6 +20,15 @@ use std::time::Duration;
 use crate::core::doctor::{CheckStatus, DoctorCheck, DoctorReport};
 use crate::core::paths::FrameworkPaths;
 
+// Split out to keep this file under the 500-SLOC production cap (#5947 — the
+// worktrees probe now reads the reconciled inventory, and its counts type and
+// remediation constant came with it).
+#[path = "doctor_worktrees.rs"]
+mod doctor_worktrees;
+use doctor_worktrees::check_worktrees;
+pub(crate) use doctor_worktrees::gather_worktree_counts;
+pub use doctor_worktrees::{WORKTREE_REMEDIATION_COMMAND, WorktreeOrphanCounts};
+
 use super::discover::{TRUSTY_MEMORY_DEFAULT_ADDR, TRUSTY_SEARCH_DEFAULT_ADDR, discover_addr};
 
 // Split out to keep this file under the 500-SLOC production cap (DOC-28 R4(a)).
@@ -302,6 +311,9 @@ pub async fn run_doctor(
     project_dir: Option<&Path>,
     repos_root: Option<&Path>,
     active_workspace_paths: &[PathBuf],
+    // #5947: the caller gathers the reconciled inventory, so doctor reports the
+    // same orphan count `prune-worktrees` and `reconcile-worktrees` agree on.
+    worktree_counts: Option<WorktreeOrphanCounts>,
 ) -> DoctorReport {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     // #5867: only a project that IS a managed workspace gets the workspace
@@ -378,7 +390,7 @@ pub async fn run_doctor(
     // resolves the id `.mcp.json` actually pins, which is what every `search`
     // call in the session sends.
     checks.push(check_search_index_pin(&home, project_dir).await);
-    checks.push(check_worktrees(repos_root, active_workspace_paths).await);
+    checks.push(check_worktrees(repos_root, worktree_counts).await);
     // #2919: `check_worktrees` above counts ORPHANS and has never reported a
     // byte, so it read identically whether the worktree store held 4 GiB or the
     // 1.1 TiB measured on 2026-07-21. This is the disk half.
@@ -524,85 +536,6 @@ fn build_oauth_token_check(
             "oauth_token",
             CheckStatus::Ok,
             "managed-session auth looks configured",
-        )
-    }
-}
-
-/// Probe for orphaned per-session git worktrees under the managed workspace root.
-///
-/// Why: `decommission` now calls `git worktree remove` (#1840), but sessions
-/// that were decommissioned before this fix—or where `git worktree remove`
-/// failed—may leave stale `.worktrees/<session-id>/` directories on disk. This
-/// probe surfaces orphaned dirs so operators know to run
-/// `tm session prune --worktrees`. Discovery is delegated to
-/// [`crate::session_manager::prune::find_orphaned_worktrees`] inside
-/// `spawn_blocking` so the async executor is not blocked by the synchronous
-/// git subprocesses it spawns.
-/// What: builds a canonicalized active-path set, then spawns a blocking task
-/// that asks GIT for the worktrees of each managed project (#4207 — this is no
-/// longer a filesystem walk of `.worktrees/`, and a candidate is no longer "any
-/// leaf directory"): a git-registered worktree counts as an orphan when it is
-/// not main/bare/prunable/locked, IS a strict descendant of the project whose
-/// registry named it, and is absent from the active set. Reports `Ok` (no
-/// orphans), `Warn` (orphans found), or `Ok` (repos_root absent /
-/// unconfigured).
-///
-/// Note this probe is REPORT-ONLY — it counts, it never removes — so it
-/// deliberately reports candidates the reclaim path would refuse to delete
-/// (owner-unknown, dirty). Conversely a directory git does not register is not
-/// counted at all, so an unregistered husk is invisible here; reclaiming those
-/// is a separate open concern, deliberately out of scope for #4207.
-/// Test: `worktrees_no_orphans_is_ok`, `worktrees_with_orphan_is_warn`.
-async fn check_worktrees(
-    repos_root: Option<&Path>,
-    active_workspace_paths: &[PathBuf],
-) -> DoctorCheck {
-    let Some(root) = repos_root else {
-        // No managed workspace root configured — this is a normal state for
-        // operators who don't use in-project worktree sessions (#1840).
-        return DoctorCheck::new(
-            "worktrees",
-            CheckStatus::Ok,
-            "no managed workspace root configured — worktree scan skipped",
-        );
-    };
-    if !root.is_dir() {
-        return DoctorCheck::new(
-            "worktrees",
-            CheckStatus::Ok,
-            format!("{} does not exist — no worktrees to check", root.display()),
-        );
-    }
-
-    // Build a canonicalized HashSet for O(1) lookup and symlink safety (Fix 1b, #1840).
-    let root = root.to_path_buf();
-    let active_set: std::collections::HashSet<PathBuf> = active_workspace_paths
-        .iter()
-        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
-        .collect();
-
-    // Delegate the blocking scan to spawn_blocking so the async executor is not
-    // stalled (#1840 F). Since #4207 what blocks is not directory I/O but the
-    // git subprocesses `find_orphaned_worktrees` spawns per managed project.
-    let orphans = tokio::task::spawn_blocking(move || {
-        crate::session_manager::prune::find_orphaned_worktrees(&root, &active_set)
-    })
-    .await
-    .unwrap_or_else(|e| {
-        tracing::error!("doctor: worktree scan panicked: {e}");
-        Vec::new()
-    });
-
-    if orphans.is_empty() {
-        DoctorCheck::new("worktrees", CheckStatus::Ok, "no orphaned worktrees found")
-    } else {
-        DoctorCheck::new(
-            "worktrees",
-            CheckStatus::Warn,
-            format!(
-                "{} orphaned worktree dir(s) found — run `tm session prune --worktrees` to remove",
-                orphans.len()
-            ),
         )
     }
 }

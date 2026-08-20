@@ -104,7 +104,7 @@ async fn agents_check_probes_the_managed_config_tier_not_the_workspace() {
     // legitimately disagree. `doctor_fs_checks`'s `agents_*` tests cover every
     // status branch hermetically.
     let project = tempfile::tempdir().unwrap();
-    let report = run_doctor(Some(project.path()), None, &[]).await;
+    let report = run_doctor(Some(project.path()), None, &[], None).await;
     let agents_check = report
         .checks
         .iter()
@@ -150,7 +150,7 @@ async fn unmanaged_cwd_audits_the_operator_home_tier() {
     // Before the fix this asserted false: the message read
     // "<tmp>/.claude/skills does not exist".
     let project = tempfile::tempdir().unwrap();
-    let report = run_doctor(Some(project.path()), None, &[]).await;
+    let report = run_doctor(Some(project.path()), None, &[], None).await;
     let skills = report
         .checks
         .iter()
@@ -176,7 +176,7 @@ async fn a_registered_workspace_still_gets_the_workspace_layout() {
     // own populated `$HOME/.claude`.
     let project = tempfile::tempdir().unwrap();
     let active = vec![project.path().to_path_buf()];
-    let report = run_doctor(Some(project.path()), None, &active).await;
+    let report = run_doctor(Some(project.path()), None, &active, None).await;
     let skills = report
         .checks
         .iter()
@@ -352,7 +352,7 @@ async fn run_doctor_produces_thirty_two_checks() {
     // thirty-one).
     // #1905's stale-skill cleanup is deliberately NOT a `run_doctor` probe
     // — see the `run_doctor` doc.
-    let report = run_doctor(None, None, &[]).await;
+    let report = run_doctor(None, None, &[], None).await;
     let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
     let expected = [
         "instructions",
@@ -448,37 +448,93 @@ fn oauth_token_check_ok_when_not_relocated() {
     assert_eq!(check.status, CheckStatus::Ok);
 }
 
+/// Counts for `repos_root`, taken from the SHARED reconciled inventory (#5947).
+///
+/// Why: the whole point of the fix is that doctor no longer has its own orphan
+/// rule, so every worktree test here must feed it the same classification
+/// `prune-worktrees` and `reconcile-worktrees` read. Computing the counts any
+/// other way in a test would re-introduce the third implementation the fix
+/// removed, in the one place nobody would look for it.
+fn counts_for(repos_root: &std::path::Path) -> WorktreeOrphanCounts {
+    let report = crate::session_manager::worktree_reconcile::reconcile_worktrees(
+        repos_root,
+        &[],
+        &[],
+        chrono::Utc::now(),
+    );
+    WorktreeOrphanCounts::from_reconcile(&report)
+}
+
 #[tokio::test]
 async fn worktrees_no_repos_root_is_ok() {
     // Fix 7 (#1840): absence of a managed workspace root is NORMAL — not every
     // operator uses in-project worktree sessions. Return Ok, not Warn.
-    let check = check_worktrees(None, &[]).await;
+    let check = check_worktrees(None, None).await;
     assert_eq!(check.status, CheckStatus::Ok);
     assert!(check.message.contains("no managed workspace"));
 }
 
 #[tokio::test]
 async fn worktrees_no_orphans_is_ok() {
-    // #4207: a REAL `git worktree add`, since discovery is now derived from
-    // git's registry — a `mkdir` is not a candidate and would make this pass
-    // for the wrong reason. The fixture canonicalizes its own root, so the
-    // /tmp vs /private/tmp symlink hazard (#1845 item 2) is handled there.
+    // #4207: a REAL `git worktree add`, since discovery is derived from git's
+    // registry — a `mkdir` is not a candidate and would make this pass for the
+    // wrong reason. The fixture canonicalizes its own root, so the /tmp vs
+    // /private/tmp symlink hazard (#1845 item 2) is handled there.
     let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
-    let wt = fx.add_worktree("session-abc");
-    let check = check_worktrees(Some(&fx.repos_root), &[wt]).await;
-    assert_eq!(check.status, CheckStatus::Ok);
+    let _wt = fx.add_worktree("session-abc");
+    let check = check_worktrees(Some(&fx.repos_root), Some(counts_for(&fx.repos_root))).await;
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+}
+
+#[tokio::test]
+async fn worktrees_unowned_worktree_is_not_an_orphan() {
+    // #5947 (fault 2): THE false positive. Two real worktrees, neither carrying
+    // an ownership sentinel. The old probe counted every git-registered
+    // worktree no live session claimed, so it warned "1 orphaned" here — and on
+    // the dogfood fleet, "198 orphaned" where `prune-worktrees` and
+    // `reconcile-worktrees` both found zero. A worktree with no sentinel is
+    // never auto-reclaimable, so it is not an orphan.
+    let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let _a = fx.add_worktree("session-live");
+    let _b = fx.add_worktree("session-dead");
+    let counts = counts_for(&fx.repos_root);
+    assert_eq!(counts.orphaned, 0, "reconcile must report zero orphans");
+    let check = check_worktrees(Some(&fx.repos_root), Some(counts)).await;
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+    assert!(check.message.contains("no orphaned worktrees found"));
 }
 
 #[tokio::test]
 async fn worktrees_with_orphan_is_warn() {
-    // #4207: two REAL worktrees; only one has an active session.
+    // A GENUINE orphan: admitted by git, sentinel names a provably-gone owner,
+    // tree clean — the same shape `clean_ownerless_admitted_worktree_is_orphaned`
+    // pins on the reconcile side.
     let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
-    let live = fx.add_worktree("session-live");
-    let _dead = fx.add_worktree("session-dead");
-    let check = check_worktrees(Some(&fx.repos_root), &[live]).await;
-    assert_eq!(check.status, CheckStatus::Warn);
+    let _live = fx.add_worktree("session-live");
+    let dead = fx.add_worktree("session-dead");
+    crate::session_manager::worktree_git_fixture::GitWorktreeFixture::stamp_reclaimable_sentinel(
+        &dead,
+    );
+    let check = check_worktrees(Some(&fx.repos_root), Some(counts_for(&fx.repos_root))).await;
+    assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
     assert!(check.message.contains("1 orphaned"));
-    assert!(check.message.contains("tm session prune --worktrees"));
+    // #5947 (fault 1): the hint must name the verb that exists.
+    assert!(check.message.contains(WORKTREE_REMEDIATION_COMMAND));
+    assert!(
+        !check.message.contains("prune --worktrees"),
+        "the nonexistent flag must not come back: {}",
+        check.message
+    );
+}
+
+#[tokio::test]
+async fn worktrees_without_a_reconciled_inventory_is_unknown() {
+    // #5947: no inventory means no count. Reporting Ok would hide real orphans
+    // and Warn would invent them, so the probe says it could not observe.
+    let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let check = check_worktrees(Some(&fx.repos_root), None).await;
+    assert_eq!(check.status, CheckStatus::Unknown, "{}", check.message);
+    assert!(check.message.contains("not established"));
 }
 
 // ---- Issues #4005 / #4001: doctor must observe, not infer ----

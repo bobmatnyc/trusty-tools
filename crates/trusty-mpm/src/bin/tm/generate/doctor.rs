@@ -213,7 +213,7 @@ mod tests {
     /// goes further by also asserting name equality, not just length.
     #[tokio::test]
     async fn doctor_checks_match_run_doctor_names() {
-        let report = run_doctor(None, None, &[]).await;
+        let report = run_doctor(None, None, &[], None).await;
         let actual: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         let expected: Vec<&str> = DOCTOR_CHECKS.iter().map(|(name, _)| *name).collect();
         assert_eq!(

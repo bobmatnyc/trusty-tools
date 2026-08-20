@@ -1797,11 +1797,14 @@ pub async fn doctor(
     // Derive the managed workspace root from config (same precedence as decommission).
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
+    // #5947: the orphan count comes from the reconciled inventory — the same
+    // classification `prune-worktrees` and `reconcile-worktrees` share.
     Json(
         super::doctor::run_doctor(
             query.project.as_deref(),
             Some(&repos_root),
             &active_workspace_paths,
+            super::doctor::gather_worktree_counts(&mgr, &repos_root).await,
         )
         .await,
     )
