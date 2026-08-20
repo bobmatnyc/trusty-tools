@@ -20,7 +20,7 @@ use trusty_review::config::{Provider, ReviewConfig};
 use trusty_review::llm::{build_provider, resolve_provider_and_model};
 use trusty_review::report::{
     Budget, CorpusSnapshot, Instructions, Reporter, TemplateLoader, benchmark,
-    investigate::{apply_investigation, merge_investigation_prose},
+    investigate::{Investigation, apply_investigation, merge_investigation_prose},
     load_instructions, load_manifest,
     manifest::Manifest,
     model::ReportModel,
@@ -518,11 +518,16 @@ async fn run_synthesis(
             "[trusty-review report] Investigation: {verified} verified finding(s) across {} local repo(s)",
             inv.repos.len()
         );
+        // #6093: persist BEFORE synthesis. Synthesis can fail, and until this
+        // landed a failure discarded the whole investigation — minutes of real
+        // LLM spend, unrecoverable.
+        persist_investigation(out_dir, &inv);
         apply_investigation(model, &inv);
         // #6009: capture the raw response next to the report output on an
         // unparseable-response failure, so a future occurrence is diagnosable
         // without spending another live call to find out what the model sent.
         let mut synthesis = Synthesizer::new(provider, role.model.clone())
+            .with_max_tokens(role.max_tokens)
             .with_raw_capture_dir(out_dir)
             .synthesize(model)
             .await?;
@@ -530,9 +535,52 @@ async fn run_synthesis(
         Ok(synthesis)
     } else {
         Ok(Synthesizer::new(provider, role.model.clone())
+            .with_max_tokens(role.max_tokens)
             .with_raw_capture_dir(out_dir)
             .synthesize(model)
             .await?)
+    }
+}
+
+/// Filename the pre-synthesis investigation snapshot is written under, inside
+/// the report's own output directory.
+const INVESTIGATION_SNAPSHOT_FILENAME: &str = "investigation.json";
+
+/// Write the verified investigation next to the report output before synthesis
+/// runs (#6093).
+///
+/// Why: the investigation is the expensive half of a report run — several
+/// minutes of selection, LLM calls, and mechanical evidence verification. A
+/// synthesis failure used to throw all of it away, so recovering meant paying
+/// for the whole investigation again. The snapshot lands before the first
+/// synthesis call, so it survives every failure downstream of it.
+/// What: serialises [`Investigation`] to
+/// `<out_dir>/`[`INVESTIGATION_SNAPSHOT_FILENAME`], creating the directory if
+/// needed, and prints the path. Any failure is a warning, never an error: a
+/// recovery aid must not itself abort a run that would otherwise succeed.
+/// Test: `tests::investigation_snapshot_is_written_and_reloadable`,
+/// `tests::investigation_snapshot_failure_is_not_fatal`.
+fn persist_investigation(out_dir: &Path, inv: &Investigation) {
+    let path = out_dir.join(INVESTIGATION_SNAPSHOT_FILENAME);
+    let json = match serde_json::to_string_pretty(inv) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!(error = %e, "investigation snapshot: could not serialise");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(out_dir) {
+        tracing::warn!(error = %e, dir = %out_dir.display(), "investigation snapshot: could not create output directory");
+        return;
+    }
+    match std::fs::write(&path, json) {
+        Ok(()) => eprintln!(
+            "[trusty-review report] Investigation snapshot: {}",
+            path.display()
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "investigation snapshot: could not write")
+        }
     }
 }
 
@@ -699,5 +747,71 @@ mod tests {
             !msg.contains("sk-or"),
             "no key-shaped text may appear: {msg}"
         );
+    }
+
+    /// A one-repo investigation with a single verified finding.
+    fn snapshot_fixture() -> Investigation {
+        use trusty_review::report::investigate::{
+            InvestigationStatus, RepoInvestigation, VerifiedFinding,
+        };
+        Investigation {
+            repos: vec![RepoInvestigation {
+                slug: "acme-core".to_string(),
+                name: "Acme Core".to_string(),
+                status: InvestigationStatus::Available,
+                findings: vec![VerifiedFinding {
+                    title: "Hardcoded credential".to_string(),
+                    severity: trusty_review::report::metrics::Severity::Red,
+                    dimension: "security".to_string(),
+                    file: "src/auth.rs".to_string(),
+                    line: Some(12),
+                    evidence_quote: "let api_key = \"…\";".to_string(),
+                    description: "A credential is committed in source.".to_string(),
+                    business_impact: String::new(),
+                    remediation: "Move it to the secret store.".to_string(),
+                    cost_effort: String::new(),
+                }],
+                deps: Default::default(),
+                coverage: Default::default(),
+            }],
+        }
+    }
+
+    /// Why: #6093 — a synthesis failure used to discard the whole investigation,
+    /// the expensive half of a report run. The snapshot must land before the
+    /// first synthesis call and must be readable afterwards.
+    /// What: writes a fixture investigation to a temp dir; asserts the file
+    /// exists at the documented name and that its JSON still carries the
+    /// verified finding's title and file.
+    /// Test: this test itself.
+    #[test]
+    fn investigation_snapshot_is_written_and_reloadable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        persist_investigation(dir.path(), &snapshot_fixture());
+
+        let path = dir.path().join(INVESTIGATION_SNAPSHOT_FILENAME);
+        let raw = std::fs::read_to_string(&path).expect("the snapshot must exist");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+        assert_eq!(parsed["repos"][0]["slug"], "acme-core");
+        assert_eq!(
+            parsed["repos"][0]["findings"][0]["title"],
+            "Hardcoded credential"
+        );
+        assert_eq!(parsed["repos"][0]["findings"][0]["file"], "src/auth.rs");
+    }
+
+    /// Why: a recovery aid must never turn a run that would have succeeded into
+    /// a failure of its own.
+    /// What: points the snapshot at a path that cannot be a directory (an
+    /// existing file); asserts the call returns normally rather than panicking
+    /// or propagating.
+    /// Test: this test itself.
+    #[test]
+    fn investigation_snapshot_failure_is_not_fatal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocked = dir.path().join("not-a-dir");
+        std::fs::write(&blocked, b"x").expect("write blocker");
+        persist_investigation(&blocked, &snapshot_fixture());
+        assert!(blocked.is_file(), "the blocking file is untouched");
     }
 }

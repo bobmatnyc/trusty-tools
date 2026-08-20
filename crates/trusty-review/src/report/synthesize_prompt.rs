@@ -18,9 +18,11 @@
 //! What: [`build_synthesis_prompt`] assembles the [`LlmRequest`] (a system
 //! prompt built from the resolved, layered section instructions — see
 //! [`super::section_instructions`] — plus the compact data digest and the
-//! forced [`ResponseSchema`]).  `retry_concise` shrinks the schema's `top_risks`
-//! cap and asks for a shorter paragraph — the same one-shot truncation-retry
-//! shape used by the wave-3 batch investigation.  The `bedrock/`/`openrouter/`
+//! forced [`ResponseSchema`]).  #6093: the active [`SynthesisTier`] decides
+//! both array caps AND the request's `max_tokens` — a rung of the retry ladder
+//! raises the budget while shrinking the ask, and the reviewer role's own
+//! configured ceiling reaches the request instead of a constant overriding it.
+//! The `bedrock/`/`openrouter/`
 //! routing prefix is stripped so the bare id reaches the provider API.  #6009
 //! shape 3: [`schema_contract_statement`] renders the required field names
 //! and a canonical example object directly from the same [`ResponseSchema`]
@@ -42,22 +44,114 @@ use crate::report::section_instructions::{
     SECURITY_SUMMARY, TOP_RISKS,
 };
 use crate::report::synthesize_digest::{
-    build_split, gather_compact_findings, render_context_section, render_elaboration_section,
+    build_split_with_cap, gather_compact_findings, render_context_section,
+    render_elaboration_section,
 };
 
 /// Temperature for synthesis — low, to keep the analytic voice grounded.
 pub(super) const SYNTHESIS_TEMPERATURE: f32 = 0.2;
-/// Output-token ceiling for one synthesis pass.
-pub(super) const SYNTHESIS_MAX_TOKENS: u32 = 3072;
 
-/// `top_risks` array cap on the first attempt.
-const TOP_RISKS_CAP: usize = 5;
-/// `top_risks` array cap on the one concise retry (#2357 follow-up).
-const TOP_RISKS_RETRY_CAP: usize = 3;
-/// `findings` (elaboration) array cap — see [`super::synthesize_digest::ELABORATION_TARGETS_CAP`],
-/// which this mirrors so the schema structurally cannot exceed what the digest
-/// ever asks for.
-const FINDINGS_CAP: usize = super::synthesize_digest::ELABORATION_TARGETS_CAP;
+/// Output-token floor for one synthesis pass, below which no configured
+/// ceiling may take the request.
+///
+/// Why: this was the whole ceiling until #6093 — a hardcoded 3072 that ignored
+/// `[models.reviewer].max_tokens` entirely. It survives as a FLOOR because a
+/// smaller budget cannot fit four narrative paragraphs plus a top-risks table
+/// on any model, so honouring a tiny configured value literally would only
+/// produce a truncation the operator cannot diagnose.
+pub(super) const SYNTHESIS_MIN_MAX_TOKENS: u32 = 3072;
+
+/// Output-token budget used when no role ceiling is plumbed in (tests, and any
+/// caller that constructs a [`super::synthesize::Synthesizer`] directly).
+///
+/// Matches the reviewer role's own `max_tokens` default in
+/// `config::role_models`, so an unconfigured run and a default-configured run
+/// ask for the same budget.
+pub(super) const SYNTHESIS_DEFAULT_MAX_TOKENS: u32 = 4096;
+
+/// Hard ceiling the escalating retry rungs may reach.
+///
+/// Why: #6093 closure condition 3 — the truncation retry must escalate the
+/// ceiling, not only shrink the content. It still needs a bound, because a
+/// provider bills every token an escalation buys.
+pub(super) const SYNTHESIS_ESCALATED_MAX_TOKENS: u32 = 16384;
+
+/// One rung of the synthesis retry ladder: how much output budget the request
+/// asks for, and how large an ask it spends that budget on.
+///
+/// Why: a 45-finding investigation truncated twice against the pre-#6093 fixed
+/// 3072-token ceiling, and the single "concise" retry shrank only `top_risks`
+/// (5 → 3) while leaving the ten per-finding elaborations — nine prose fields
+/// each, and by far the dominant output cost — untouched at the same ceiling.
+/// So the retry could not converge, and an ~8-minute investigation exited 1
+/// with no report. Each rung here both RAISES the budget and SHRINKS the ask,
+/// so the ladder converges by construction: the last rung asks only for the
+/// four narrative paragraphs and three risk rows, at four times the configured
+/// budget.
+/// What: [`Self::top_risks_cap`] and [`Self::elaboration_cap`] bound the two
+/// arrays (schema `maxItems` AND the digest's own target list, so the two can
+/// never disagree); [`Self::budget`] scales the caller's configured ceiling.
+/// Dropping elaboration on the last rung drops no FINDING — every RED/AMBER
+/// finding still renders from the deterministic composition (#5374) and from
+/// the investigation's own verified prose, which wins over synthesis prose
+/// regardless (see `cli_report::merge_investigation_prose`).
+/// Test: `synthesize_tests.rs::{tier_ladder_raises_budget_and_shrinks_ask,
+/// narrative_only_tier_omits_findings_from_schema,
+/// synthesize_ladder_recovers_a_large_finding_set}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SynthesisTier {
+    /// First attempt: the full ask at the configured budget.
+    Full,
+    /// Second attempt: fewer risk rows, fewer elaborations, double the budget.
+    Concise,
+    /// Final attempt: narrative + risk rows only, quadruple the budget.
+    NarrativeOnly,
+}
+
+/// The rungs tried in order, cheapest ask first.
+pub(super) const SYNTHESIS_TIER_LADDER: [SynthesisTier; 3] = [
+    SynthesisTier::Full,
+    SynthesisTier::Concise,
+    SynthesisTier::NarrativeOnly,
+];
+
+impl SynthesisTier {
+    /// `top_risks` array cap for this rung.
+    pub(crate) fn top_risks_cap(self) -> usize {
+        match self {
+            SynthesisTier::Full => 5,
+            SynthesisTier::Concise | SynthesisTier::NarrativeOnly => 3,
+        }
+    }
+
+    /// `findings` (elaboration) array cap for this rung; 0 omits the array
+    /// from both the schema and the digest.
+    pub(crate) fn elaboration_cap(self) -> usize {
+        match self {
+            SynthesisTier::Full => super::synthesize_digest::ELABORATION_TARGETS_CAP,
+            SynthesisTier::Concise => 3,
+            SynthesisTier::NarrativeOnly => 0,
+        }
+    }
+
+    /// The request's `max_tokens` for this rung, from the caller's configured
+    /// ceiling, clamped into
+    /// `[SYNTHESIS_MIN_MAX_TOKENS, SYNTHESIS_ESCALATED_MAX_TOKENS]`.
+    pub(crate) fn budget(self, configured: u32) -> u32 {
+        let scaled = match self {
+            SynthesisTier::Full => configured,
+            SynthesisTier::Concise => configured.saturating_mul(2),
+            SynthesisTier::NarrativeOnly => configured.saturating_mul(4),
+        };
+        scaled.clamp(SYNTHESIS_MIN_MAX_TOKENS, SYNTHESIS_ESCALATED_MAX_TOKENS)
+    }
+
+    /// True for every rung after the first — the response was truncated, so the
+    /// prompt says so and asks for a shorter answer.
+    fn is_retry(self) -> bool {
+        self != SynthesisTier::Full
+    }
+}
 
 /// The JSON Schema the provider forces the model to emit.
 ///
@@ -68,21 +162,21 @@ const FINDINGS_CAP: usize = super::synthesize_digest::ELABORATION_TARGETS_CAP;
 /// investigation's `maxItems`/`maxLength` fix for the identical class of
 /// output-truncation failure.
 /// What: returns a [`ResponseSchema`] named `report_synthesis`; `top_risks_cap`
-/// bounds the top-risks array (5 normally, 3 on the concise retry); the
-/// `findings` array is always capped at
-/// [`super::synthesize_digest::ELABORATION_TARGETS_CAP`] — the digest never
-/// lists more elaboration targets than that, so the model never has reason to
-/// exceed it.
-/// Test: `synthesize_tests.rs::{synthesis_schema_shape, schema_shrinks_on_retry}`.
+/// and `findings_cap` bound the two arrays at whatever the active
+/// [`SynthesisTier`] asks for, so the schema structurally cannot exceed what
+/// the digest lists. `findings_cap == 0` removes the `findings` property
+/// altogether (#6093's final rung), which also removes it from
+/// [`schema_contract_statement`] — the model is then never invited to spend
+/// output budget on prose the report body already carries.
+/// Test: `synthesize_tests.rs::{synthesis_schema_shape, schema_shrinks_on_retry,
+/// narrative_only_tier_omits_findings_from_schema}`.
 ///
 /// #5675: built via [`ResponseSchema::new`], which applies `enforce_strict_mode`.
 /// This schema previously used a struct literal and so never got that pass —
 /// `findings.items` carried no `additionalProperties`, and OpenAI strict mode
 /// (forwarded by OpenRouter for `openai/*`) rejected every synthesis call.
-pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
-    ResponseSchema::new(
-        "report_synthesis",
-        serde_json::json!({
+pub(crate) fn synthesis_schema(top_risks_cap: usize, findings_cap: usize) -> ResponseSchema {
+    let mut schema = serde_json::json!({
             "type": "object",
             "properties": {
                 // #6030: the summary opens with what the system is and does and
@@ -123,7 +217,7 @@ pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
                 },
                 "findings": {
                     "type": "array",
-                    "maxItems": FINDINGS_CAP,
+                    "maxItems": findings_cap,
                     "items": {
                         "type": "object",
                         "properties": {
@@ -145,8 +239,14 @@ pub(crate) fn synthesis_schema(top_risks_cap: usize) -> ResponseSchema {
                     "description": "Elaboration prose EXCLUSIVELY for the findings listed under \"Findings requiring elaboration\". Leave empty when that list says none. Never add a finding not in that list, and never re-elaborate a finding tagged [verified] elsewhere in the data."
                 }
             }
-        }),
-    )
+    });
+
+    if findings_cap == 0
+        && let Some(props) = schema["properties"].as_object_mut()
+    {
+        props.remove("findings");
+    }
+    ResponseSchema::new("report_synthesis", schema)
 }
 
 /// Render a deterministic statement of the required JSON shape directly from
@@ -341,37 +441,36 @@ Populate the structured response:
 /// What: resolves the active section instructions (template override else
 /// generic default, via [`section_instructions::resolve`]), assembles the
 /// dynamic system prompt, a compact data digest, and the size-bounded
-/// forced-output schema.  `retry_concise` (the one-shot truncation retry)
-/// shrinks `top_risks_cap` to [`TOP_RISKS_RETRY_CAP`] and appends the retry
-/// directive.  Strips any provider routing prefix from `llm_model`.
+/// forced-output schema.  `tier` decides both array caps and the request's
+/// `max_tokens` (see [`SynthesisTier`]); `configured_max_tokens` is the
+/// reviewer role's own ceiling, which reaches the request here rather than
+/// being overridden by a constant (#6093).  Strips any provider routing prefix
+/// from `llm_model`.
 /// Test: `synthesize_tests.rs::{prompt_excludes_greens, prompt_strips_prefix,
 /// synthesis_schema_shape, digest_uses_compact_findings,
-/// template_override_reaches_system_prompt}`.
+/// template_override_reaches_system_prompt,
+/// tier_ladder_raises_budget_and_shrinks_ask}`.
 pub(super) fn build_synthesis_prompt(
     model: &ReportModel,
     llm_model: &str,
-    retry_concise: bool,
+    tier: SynthesisTier,
+    configured_max_tokens: u32,
 ) -> LlmRequest {
     let resolved = section_instructions::resolve(&model.section_instructions);
-    let top_risks_cap = if retry_concise {
-        TOP_RISKS_RETRY_CAP
-    } else {
-        TOP_RISKS_CAP
-    };
     // #6009 shape 3: built from the SAME schema value forced via
     // `response_format` below, so the prompt-text contract and the schema can
     // never say different things — see `schema_contract_statement`.
-    let schema = synthesis_schema(top_risks_cap);
+    let schema = synthesis_schema(tier.top_risks_cap(), tier.elaboration_cap());
     let contract = schema_contract_statement(&schema.schema);
     LlmRequest {
         model: strip_provider_prefix(llm_model).to_string(),
-        system: synthesis_system_prompt(&resolved, retry_concise, &contract),
+        system: synthesis_system_prompt(&resolved, tier.is_retry(), &contract),
         messages: vec![ChatMessage {
             role: "user".to_string(),
-            content: build_digest(model),
+            content: build_digest(model, tier.elaboration_cap()),
         }],
         temperature: SYNTHESIS_TEMPERATURE,
-        max_tokens: SYNTHESIS_MAX_TOKENS,
+        max_tokens: tier.budget(configured_max_tokens),
         response_schema: Some(schema),
     }
 }
@@ -451,8 +550,10 @@ fn repo_profile_lines(repo: &super::model::RepositoryReport) -> String {
 /// [`super::synthesize_digest`]); then the wave-3 coverage summary
 /// (unchanged) and the analyst focus directives (unchanged, additive on top
 /// of whichever section instructions are active).
+/// `elaboration_cap` is the active [`SynthesisTier`]'s (#6093), so the digest's
+/// target list and the schema's `maxItems` are always the same number.
 /// Test: `synthesize_tests.rs::{prompt_excludes_greens, digest_stays_bounded_at_100_findings}`.
-fn build_digest(model: &ReportModel) -> String {
+fn build_digest(model: &ReportModel, elaboration_cap: usize) -> String {
     let mut msg = String::with_capacity(4096);
     msg.push_str(&format!("# Report: {}\n\n", model.title));
     msg.push_str(&format!(
@@ -507,7 +608,7 @@ fn build_digest(model: &ReportModel) -> String {
     // replacing the old per-repo full-title bullet list. Greens are excluded
     // structurally by `gather_compact_findings` (the no-green rule, unchanged).
     let compact = gather_compact_findings(model);
-    let split = build_split(&compact);
+    let split = build_split_with_cap(&compact, elaboration_cap);
     msg.push_str(&render_context_section(&split));
     msg.push_str(&render_elaboration_section(&split));
 

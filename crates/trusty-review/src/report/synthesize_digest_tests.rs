@@ -274,6 +274,34 @@ fn elaboration_targets_exclude_verified_and_cap_at_10() {
     );
 }
 
+/// Why: #6093's final retry rung asks for no elaboration at all. A cap of 0
+/// must count every unverified finding as overflow, so the rendered digest can
+/// say elaboration was deferred instead of claiming everything is verified —
+/// which would be a false statement in the prompt.
+/// What: 6 unverified findings at cap 0; asserts an empty target list, an
+/// overflow of 6, and the deferred wording in the rendered section.
+/// Test: this test itself.
+#[test]
+fn elaboration_cap_zero_reports_every_target_as_overflow() {
+    let findings: Vec<MetricFinding> = (0..6)
+        .map(|i| mf(&format!("f-{i}"), Severity::Red, "cat", "c.rs"))
+        .collect();
+    let model = model_with(vec![repo("a", findings)], None);
+    let compact = gather_compact_findings(&model);
+
+    let split = build_split_with_cap(&compact, 0);
+    assert!(split.elaboration_targets.is_empty());
+    assert_eq!(split.elaboration_overflow, 6);
+
+    let rendered = render_elaboration_section(&split);
+    assert!(rendered.contains("none this pass"), "{rendered}");
+    assert!(rendered.contains("6 unverified finding(s)"), "{rendered}");
+    assert!(
+        !rendered.contains("every RED/AMBER finding already has verified"),
+        "{rendered}"
+    );
+}
+
 // ── Rendering ────────────────────────────────────────────────────────────────
 
 /// Why: the tail note must name the count of additional findings, never just

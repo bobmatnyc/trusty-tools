@@ -189,20 +189,40 @@ pub struct DigestSplit {
     pub elaboration_overflow: usize,
 }
 
-/// Build the capped context + elaboration-target splits from a gathered list.
+/// Build the capped context + elaboration-target splits at the default
+/// elaboration cap.
+///
+/// Why: the shape every caller wanted before the output budget became a ladder
+/// (#6093); kept so a caller that does not vary the cap needs no argument.
+/// What: [`build_split_with_cap`] at [`ELABORATION_TARGETS_CAP`].
+/// Test: `synthesize_digest_tests::{caps_context_at_40_red_first,
+/// elaboration_targets_exclude_verified_and_cap_at_10}`.
+pub fn build_split(all: &[CompactFinding]) -> DigestSplit {
+    build_split_with_cap(all, ELABORATION_TARGETS_CAP)
+}
+
+/// Build the capped context + elaboration-target splits from a gathered list,
+/// at a caller-chosen elaboration cap.
 ///
 /// Why: this is the single place both output-size bounds are enforced —
 /// CONTEXT bounds prompt input size; ELABORATION bounds the genuinely
 /// expensive per-finding prose the model is asked to produce, and structurally
-/// excludes anything wave-3 already verified.
+/// excludes anything wave-3 already verified.  #6093 made the elaboration cap
+/// a parameter: each rung of the synthesis retry ladder asks for fewer
+/// elaborations than the last, and the final rung asks for none, because that
+/// array is the dominant output cost and a truncated response yields nothing
+/// at all.
 /// What: sorts a clone of `all` by severity (RED first, stable so same-severity
 /// order is preserved) for context; takes the top [`CONTEXT_FINDINGS_CAP`] and
 /// records the remainder as `context_overflow`.  Filters to `!verified`, sorts
-/// the same way, takes the top [`ELABORATION_TARGETS_CAP`] for
-/// `elaboration_targets`, recording `elaboration_overflow`.
-/// Test: `synthesize_digest_tests::{caps_context_at_40_red_first,
+/// the same way, takes the top `elaboration_cap` for `elaboration_targets`,
+/// recording `elaboration_overflow`.  A cap of 0 leaves `elaboration_targets`
+/// empty with every unverified finding counted as overflow, which
+/// [`render_elaboration_section`] reports honestly rather than as
+/// "everything is already verified".
+/// Test: `synthesize_digest_tests::{elaboration_cap_zero_reports_every_target_as_overflow,
 /// elaboration_targets_exclude_verified_and_cap_at_10}`.
-pub fn build_split(all: &[CompactFinding]) -> DigestSplit {
+pub fn build_split_with_cap(all: &[CompactFinding], elaboration_cap: usize) -> DigestSplit {
     let mut by_severity: Vec<CompactFinding> = all.to_vec();
     by_severity.sort_by_key(CompactFinding::severity_rank);
 
@@ -216,11 +236,9 @@ pub fn build_split(all: &[CompactFinding]) -> DigestSplit {
     let mut unverified: Vec<CompactFinding> =
         by_severity.into_iter().filter(|f| !f.verified).collect();
     unverified.sort_by_key(CompactFinding::severity_rank);
-    let elaboration_overflow = unverified.len().saturating_sub(ELABORATION_TARGETS_CAP);
-    let elaboration_targets: Vec<CompactFinding> = unverified
-        .into_iter()
-        .take(ELABORATION_TARGETS_CAP)
-        .collect();
+    let elaboration_overflow = unverified.len().saturating_sub(elaboration_cap);
+    let elaboration_targets: Vec<CompactFinding> =
+        unverified.into_iter().take(elaboration_cap).collect();
 
     DigestSplit {
         context,
@@ -282,15 +300,28 @@ pub fn render_context_section(split: &DigestSplit) -> String {
 /// model supplies the prose); an explicit "none" line when investigation
 /// already verified everything (the common case for a wave-3 run); a tail note
 /// when the unverified set itself exceeded the cap.
-/// Test: `synthesize_digest_tests::renders_elaboration_targets_or_none`.
+///
+/// #6093: an empty target list with a non-zero overflow means the retry ladder
+/// suppressed elaboration to buy output budget for the narrative, NOT that
+/// everything is verified.  Saying "already verified" there would be a false
+/// statement in the prompt, so the two cases print different lines.
+/// Test: `synthesize_digest_tests::{renders_elaboration_targets_or_none,
+/// elaboration_cap_zero_reports_every_target_as_overflow}`.
 pub fn render_elaboration_section(split: &DigestSplit) -> String {
     let mut out = String::from(
         "\n## Findings requiring elaboration (populate `findings` for EXACTLY these — leave verified findings above out entirely)\n\n",
     );
     if split.elaboration_targets.is_empty() {
-        out.push_str(
-            "- none — every RED/AMBER finding already has verified evidence-grounded prose elsewhere in this report; return an empty `findings` array.\n",
-        );
+        if split.elaboration_overflow > 0 {
+            out.push_str(&format!(
+                "- none this pass — {} unverified finding(s) keep the deterministic prose already in the report body; return an empty `findings` array and spend the response on the narrative sections.\n",
+                split.elaboration_overflow
+            ));
+        } else {
+            out.push_str(
+                "- none — every RED/AMBER finding already has verified evidence-grounded prose elsewhere in this report; return an empty `findings` array.\n",
+            );
+        }
         return out;
     }
     for f in &split.elaboration_targets {

@@ -44,7 +44,7 @@ fn all_sent_schemas() -> Vec<(&'static str, ResponseSchema)> {
         ),
         (
             "synthesis_schema",
-            crate::report::synthesize_prompt::synthesis_schema(5),
+            crate::report::synthesize_prompt::synthesis_schema(5, 10),
         ),
         (
             "investigation_schema",
@@ -86,7 +86,7 @@ fn every_sent_schema_is_openai_strict_compliant() {
 /// Test: this test itself.
 #[test]
 fn synthesis_findings_items_is_strict() {
-    let spec = crate::report::synthesize_prompt::synthesis_schema(5);
+    let spec = crate::report::synthesize_prompt::synthesis_schema(5, 10);
     let items = spec
         .schema
         .pointer("/properties/findings/items")
