@@ -24,6 +24,7 @@
 //! | [`daemons`] | is trusty-search up, is trusty-analyze up — and starting them |
 //! | [`index`] | is this checkout in trusty-search, and indexing it if not |
 //! | [`hotspots`] | asking trusty-analyze which files are worst, and ranking them |
+//! | [`evidence`] | asking trusty-search where each DD dimension's evidence is (#6082) |
 //! | [`priority`] | writing that ranking, and the gaps, into the manifest |
 //!
 //! ## Fail-open, and never silently
@@ -53,6 +54,7 @@ use crate::tools::RequiredTool;
 use crate::workdir::WorkDir;
 
 pub mod daemons;
+pub mod evidence;
 pub mod hotspots;
 pub mod index;
 pub mod priority;
@@ -157,8 +159,9 @@ fn resolve_binary(work: &WorkDir, tool: RequiredTool, env: &str) -> PathBuf {
 pub struct Grounding {
     /// The trusty-search index id this repository was indexed under.
     pub index_id: Option<String>,
-    /// Ranked repo-relative paths, worst complexity first. Empty on any gap.
-    pub priorities: Vec<String>,
+    /// Ranked repo-relative paths, each naming the signal that chose it
+    /// (#6082). Empty only when neither daemon produced anything.
+    pub priorities: Vec<priority::Priority>,
     /// One line per leg that degraded, naming the repository and the cost.
     pub gaps: Vec<String>,
 }
@@ -174,23 +177,32 @@ impl Grounding {
     }
 }
 
-/// Index `checkout`, analyze it, and rank its files by measured complexity.
+/// Index `checkout`, search it per DD dimension, measure it, and rank its files.
 ///
 /// Why: see the module docs — without this the code-analysis leg of the report
-/// reads nothing and says nothing, over a clean exit.
-/// What: four legs in prerequisite order. trusty-search must answer before a
-/// repository can be indexed; a repository must be indexed before trusty-analyze
-/// can measure it; trusty-analyze must answer before its hotspots can be read.
-/// The FIRST leg to degrade stops the rest and states why, because every later
-/// leg would only restate the same cause.
+/// reads nothing and says nothing, over a clean exit. #6082 adds the discovery
+/// leg: complexity alone ranked one dimension's worth of files, so the ranking
+/// steered the whole inference budget at the same corner of the repository.
+/// What: trusty-search must answer before a repository can be indexed, and a
+/// repository must be indexed before either later leg can read it. From there
+/// the two ranking legs are INDEPENDENT — search-driven per-dimension evidence
+/// needs only trusty-search, so a dead trusty-analyze costs the complexity
+/// ranking and the `--analyze` enrichment, not the evidence discovery.
+/// [`evidence::blend`] interleaves whichever of the two produced anything.
 ///
 /// # Postconditions
 /// Never panics and never returns an error: every failure is a line in
 /// [`Grounding::gaps`], one line, safe to show the recipient, naming `display`.
-/// [`Grounding::priorities`] is non-empty only when every leg succeeded.
+/// [`Grounding::priorities`] is empty only when neither leg produced a path,
+/// and that case is itself a named gap.
 ///
 /// Test: `super::grounding_tests`, which drives one arm per leg.
-pub async fn ground(tools: &Tools, checkout: &Path, display: &str) -> Grounding {
+pub async fn ground(
+    tools: &Tools,
+    checkout: &Path,
+    display: &str,
+    instructions: Option<&str>,
+) -> Grounding {
     let Some(index_id) = index::index_id_for(checkout) else {
         return Grounding::gap(format!(
             "{display}: {} has no final path component, so no trusty-search index id could be \
@@ -202,7 +214,8 @@ pub async fn ground(tools: &Tools, checkout: &Path, display: &str) -> Grounding 
     if let Err(cause) = daemons::ensure_search(tools).await {
         return Grounding::gap(format!(
             "{display}: {cause} — the report's findings, complexity distribution and health \
-             factors are not assessed for it"
+             factors are not assessed for it, and its investigation pass ranks files by path \
+             name alone"
         ));
     }
 
@@ -212,45 +225,101 @@ pub async fn ground(tools: &Tools, checkout: &Path, display: &str) -> Grounding 
             priorities: Vec::new(),
             gaps: vec![format!(
                 "{display}: {cause} — the report's findings, complexity distribution and health \
-                 factors are not assessed for it"
+                 factors are not assessed for it, and its investigation pass ranks files by path \
+                 name alone"
             )],
         };
     }
 
+    // #6082: the discovery leg. It asks the index where each DD dimension's
+    // evidence is, so a selected file arrives already attributed to what it is
+    // evidence FOR.
+    let discovery = match evidence::HttpSearch::new(&tools.search_url, &index_id, checkout) {
+        Ok(client) => evidence::discover(&client, instructions).await,
+        Err(cause) => evidence::Discovery {
+            dimensions: Vec::new(),
+            failures: vec![cause],
+        },
+    };
+    let mut gaps = discovery_gaps(&discovery, display);
+
+    let hotspots = complexity(tools, &index_id, checkout, display, &mut gaps).await;
+    let priorities = evidence::blend(
+        &hotspots,
+        &discovery.dimensions,
+        evidence::MAX_PRIORITY_PATHS,
+    );
+    if priorities.is_empty() {
+        gaps.push(format!(
+            "{display}: neither the search index nor trusty-analyze named a file to inspect, so \
+             the investigation pass ranks its files by path name alone"
+        ));
+    }
+    Grounding {
+        index_id: Some(index_id),
+        priorities,
+        gaps,
+    }
+}
+
+/// The complexity ranking, or the gap explaining why there is none.
+async fn complexity(
+    tools: &Tools,
+    index_id: &str,
+    checkout: &Path,
+    display: &str,
+    gaps: &mut Vec<String>,
+) -> Vec<String> {
     if let Err(cause) = daemons::ensure_analyze(tools).await {
-        return Grounding {
-            index_id: Some(index_id),
-            priorities: Vec::new(),
-            gaps: vec![format!(
-                "{display}: {cause} — the report's findings, complexity distribution and health \
-                 factors are not assessed for it"
-            )],
-        };
+        gaps.push(format!(
+            "{display}: {cause} — the report's findings, complexity distribution and health \
+             factors are not assessed for it"
+        ));
+        return Vec::new();
     }
+    match hotspots::fetch(&tools.analyze_url, index_id, checkout).await {
+        Ok(ranked) if ranked.is_empty() => {
+            gaps.push(format!(
+                "{display}: trusty-analyze measured no complexity hotspot for it, so its ranking \
+                 carries search-derived evidence only"
+            ));
+            ranked
+        }
+        Ok(ranked) => ranked,
+        Err(cause) => {
+            gaps.push(format!(
+                "{display}: {cause} — its ranking carries search-derived evidence only"
+            ));
+            Vec::new()
+        }
+    }
+}
 
-    let ranked = hotspots::fetch(&tools.analyze_url, &index_id, checkout).await;
-    match ranked {
-        Ok(priorities) if priorities.is_empty() => Grounding {
-            index_id: Some(index_id),
-            priorities,
-            gaps: vec![format!(
-                "{display}: trusty-analyze measured no complexity hotspot for it, so the \
-                 investigation pass ranks its files by path name alone"
-            )],
-        },
-        Ok(priorities) => Grounding {
-            index_id: Some(index_id),
-            priorities,
-            gaps: Vec::new(),
-        },
-        Err(cause) => Grounding {
-            index_id: Some(index_id),
-            priorities: Vec::new(),
-            gaps: vec![format!(
-                "{display}: {cause} — the investigation pass ranks its files by path name alone"
-            )],
-        },
+/// What the discovery leg could not do, one line each.
+///
+/// Why: an empty discovery and a discovery whose queries all failed produce the
+/// same ranking, and only the gap line tells the reader which happened. Both
+/// degrade to the pre-#6082 behaviour, and neither may do so silently.
+/// What: one line when no dimension produced evidence, and one line when any
+/// query failed — naming the count and the first cause rather than repeating a
+/// dead daemon fourteen times.
+/// Test: `super::grounding_tests::a_search_that_answers_nothing_is_a_named_gap`.
+fn discovery_gaps(discovery: &evidence::Discovery, display: &str) -> Vec<String> {
+    let mut gaps = Vec::new();
+    if let Some(first) = discovery.failures.first() {
+        gaps.push(format!(
+            "{display}: {} of this repository's evidence queries failed ({first}) — its \
+             investigation covers fewer dimensions than the report's list",
+            discovery.failures.len()
+        ));
     }
+    if discovery.dimensions.is_empty() {
+        gaps.push(format!(
+            "{display}: the search index matched no evidence for any due-diligence dimension, so \
+             the investigation pass ranks its files by complexity and path name alone"
+        ));
+    }
+    gaps
 }
 
 /// [`ground`], then write what it produced into `manifest`.
@@ -272,14 +341,48 @@ pub async fn ground_manifest(
     checkout: &Path,
     display: &str,
 ) -> Vec<String> {
-    let mut grounding = ground(tools, checkout, display).await;
-    if let Err(cause) =
-        priority::write_into(manifest, checkout, &grounding.priorities, &grounding.gaps)
-    {
+    let instructions = instructions_from(manifest);
+    let mut grounding = ground(tools, checkout, display, instructions.as_deref()).await;
+    if let Err(cause) = priority::write_into(
+        manifest,
+        checkout,
+        &grounding.priorities,
+        Some(priority::Budget::from_env()),
+        &grounding.gaps,
+    ) {
         grounding.gaps.push(format!(
             "{display}: {cause} — the rendered report does not state this repository's \
-             complexity ranking"
+             evidence ranking"
         ));
     }
     grounding.gaps
+}
+
+/// Longest analyst brief the discovery leg derives queries from.
+const MAX_INSTRUCTION_CHARS: usize = 8 * 1024;
+
+/// The analyst brief this manifest declares, when it declares one (#6082).
+///
+/// Why: the brief states what THIS engagement is worried about, and the
+/// discovery leg turns its topics into queries. Reading it here rather than
+/// taking it as a parameter keeps the sweep's call site unchanged — the whole
+/// feature costs the operator no new step.
+/// What: `[report].instructions`, resolved against the manifest directory when
+/// relative (the same rule trusty-review applies), truncated to
+/// [`MAX_INSTRUCTION_CHARS`]. Every failure — no key, no file, unreadable —
+/// reads as "no brief", because a brief is optional and its absence costs only
+/// the extra queries.
+/// Test: `super::grounding_tests::the_brief_a_manifest_declares_is_read`.
+fn instructions_from(manifest: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(manifest).ok()?;
+    let doc: toml::Value = toml::from_str(&text).ok()?;
+    let declared = doc.get("report")?.get("instructions")?.as_str()?;
+    let declared = Path::new(declared);
+    let resolved = if declared.is_absolute() {
+        declared.to_path_buf()
+    } else {
+        manifest.parent()?.join(declared)
+    };
+    let brief = std::fs::read_to_string(resolved).ok()?;
+    Some(brief.chars().take(MAX_INSTRUCTION_CHARS).collect())
 }

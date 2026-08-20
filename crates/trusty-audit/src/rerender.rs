@@ -627,7 +627,10 @@ async fn ground_present_checkouts(
         if !path.is_dir() {
             continue;
         }
-        gaps.extend(grounding::ground(tools, &path, &repo.name).await.gaps);
+        // #6082: no brief here on purpose — the ranking this produces is
+        // discarded (the manifest already carries the sweep's), so deriving
+        // extra queries from the brief would spend a request set for nothing.
+        gaps.extend(grounding::ground(tools, &path, &repo.name, None).await.gaps);
     }
     gaps
 }

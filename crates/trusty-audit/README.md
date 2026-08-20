@@ -217,20 +217,47 @@ daemon's ADDRESS: `trusty-review report --analyze` reads metrics over HTTP from 
 URL (default `http://127.0.0.1:7879`, overridable with `TRUSTY_ANALYZE_URL`), so
 whatever is listening there is what answers.
 
-**The code-analysis leg (#6081).** After each repository is audited, this client
-indexes its checkout in `trusty-search` and measures it with `trusty-analyze`,
-starting either daemon if it is not already answering, and writes the resulting
-complexity ranking into that repository's `manifest.toml` as `inspect_priority`.
-That is what the report's investigation pass inspects first, so the code it reads
-is the code a tool measured rather than the code whose path name looked
-interesting. `trusty-audit render` does the same indexing and measuring before it
-re-renders, because that path invokes `trusty-review report --analyze` too.
+**The code-analysis leg (#6081, #6082).** After each repository is audited, this
+client indexes its checkout in `trusty-search` and measures it with
+`trusty-analyze`, starting either daemon if it is not already answering, and
+writes the resulting ranking into that repository's `manifest.toml` as
+`inspect_priority`. That is what the report's investigation pass inspects first,
+so the code it reads is the code a tool pointed at rather than the code whose
+path name looked interesting. `trusty-audit render` does the same indexing and
+measuring before it re-renders, because that path invokes `trusty-review report
+--analyze` too.
+
+The ranking has two sources. `trusty-analyze` names the complexity hotspots.
+`trusty-search` answers a query set per due-diligence dimension — credential
+handling, swallowed errors, lock and cache consistency, and the rest — plus
+queries derived from the engagement's own `instructions` brief when it declares
+one. The two are interleaved round-robin, so the report's inference budget is
+spent across the dimensions rather than down whichever one complexity happens to
+concentrate in. Each entry records which dimension it is evidence for and which
+query found it:
+
+```toml
+inspect_priority = [
+    "src/pay.rs",
+    { path = "src/session.rs", dimension = "authentication & secrets", reason = "trusty-search hit for \"credential handling…\" (score 0.88, line 18)" },
+]
+```
+
+The client also asks for a wider investigation budget than `trusty-review`'s own
+default — 120 files and 1.2 MiB per repository, overridable per machine with
+`TRUSTY_AUDIT_INVESTIGATE_MAX_FILES` and `TRUSTY_AUDIT_INVESTIGATE_MAX_BYTES`.
+It writes `investigate_max_files` and `investigate_max_bytes` into `[report]`
+per key, and only where the manifest declares none: an operator who set one of
+the two keeps it, and gets the audit's default for the other.
 
 Every leg of that is fail-open: a daemon that will not start, a checkout
-`trusty-search` refuses, an index with nothing complex in it. None of them fails
-the repository, and none of them is silent — each states one line naming the
-repository and what the report therefore does not carry, both on the console and
-in the manifest's own gap list, so the rendered report states it as well.
+`trusty-search` refuses, an index that matches no evidence, an index with
+nothing complex in it. None of them fails the repository, and none of them is
+silent — each states one line naming the repository and what the report
+therefore does not carry, both on the console and in the manifest's own gap
+list, so the rendered report states it as well. The two ranking sources are
+independent: a dead `trusty-analyze` costs the complexity ranking, not the
+search-derived evidence.
 
 The engagement's `instructions` prose and an audit window are NOT yet passed to
 the child: `tga audit` takes `--weeks`, not free prose, and mapping one to the

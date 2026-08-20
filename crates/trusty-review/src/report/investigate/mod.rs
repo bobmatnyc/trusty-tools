@@ -38,7 +38,7 @@ use crate::report::synthesize::{FindingProse, Synthesis};
 
 pub use batch::BatchStatus;
 pub use deps::{Dependency, DependencyInventory};
-pub use select::{Budget, RiskSignals, Selection};
+pub use select::{Budget, DimensionCoverage, RiskSignals, Selection};
 pub use verify::VerifiedFinding;
 
 // ─── Result types ─────────────────────────────────────────────────────────────
@@ -108,6 +108,10 @@ pub struct Coverage {
     pub dimensions_covered: Vec<String>,
     /// DD dimensions no examined file reached.
     pub dimensions_absent: Vec<String>,
+    /// Per-dimension coverage of the examined set (#6082).
+    pub per_dimension: Vec<select::DimensionCoverage>,
+    /// Examined files the manifest named as evidence, with a reason (#6082).
+    pub attributed_files: usize,
     /// Findings rejected for unverifiable evidence (across all batches).
     pub rejected: usize,
     /// The file/byte budget in force for this run.
@@ -146,6 +150,8 @@ impl Coverage {
             bytes_sent: sel.bytes_sent,
             dimensions_covered: sel.dimensions_covered.clone(),
             dimensions_absent: sel.dimensions_absent.clone(),
+            per_dimension: sel.per_dimension.clone(),
+            attributed_files: sel.attributed_files,
             rejected,
             budget,
             batches_total: batches.len(),

@@ -17,12 +17,15 @@ fn selection(path: &str, content: &str) -> Selection {
             content: content.to_string(),
             truncated: false,
             dimensions: vec![],
+            selected_by: None,
         }],
         total_files: 1,
         skipped: 0,
         bytes_sent: content.len(),
         dimensions_covered: vec![],
         dimensions_absent: vec![],
+        per_dimension: vec![],
+        attributed_files: 0,
     }
 }
 

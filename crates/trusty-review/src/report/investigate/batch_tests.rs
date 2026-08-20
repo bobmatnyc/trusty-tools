@@ -29,6 +29,7 @@ fn selfile(path: &str, content: &str) -> SelectedFile {
         content: content.to_string(),
         truncated: false,
         dimensions: vec![],
+        selected_by: None,
     }
 }
 
@@ -203,6 +204,8 @@ fn full_selection(files: &[SelectedFile]) -> Selection {
         bytes_sent: files.iter().map(|f| f.content.len()).sum(),
         dimensions_covered: vec!["authentication & secrets".to_string()],
         dimensions_absent: vec![],
+        per_dimension: vec![],
+        attributed_files: 0,
     }
 }
 
