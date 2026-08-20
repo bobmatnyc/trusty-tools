@@ -17,10 +17,17 @@ Fixed
   keeps any pane a registry names — so adopting the pane is precisely what made
   it permanent. 55 of the 103 records in the reporting store were these. The
   pane is now left untracked and named in the daemon's boot log, which hands it
-  to the orphan-GC: it reaps a managed-prefix pane only when the pane is an idle
+  to the orphan-GC: it kills a managed-prefix pane only when the pane is an idle
   shell with no live child process, seen idle on two consecutive sweeps, and it
   keeps one still running an agent. Adoption of a pane whose cwd does resolve is
   unchanged.
+- The working-directory probe behind that decision retries before giving up. It
+  is a kill decision now — a declined pane is orphan-GC input — and
+  `TmuxDriver::pane_current_path` reports a failed spawn, a non-zero exit and
+  empty output all as `None` with no retry, while boot reconciliation runs once
+  per daemon process. One flaky answer would have cost a live pane inside two
+  minutes.
 - `ReconcileReport` carries `adoption_declined`, the tmux names reconciliation
-  declined this pass, so a pane that stops appearing in `tm ls` is accounted for
-  rather than silently absent.
+  declined this pass, and the daemon's boot summary logs the count and fires on
+  it, so a pane that stops appearing in `tm ls` is accounted for rather than
+  silently absent.

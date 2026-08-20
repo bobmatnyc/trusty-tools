@@ -14,12 +14,69 @@
 //! `derive_source_id_*` unit tests at the bottom of this module.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::Utc;
-use tracing::info;
+use tracing::{info, warn};
 
+use super::driver::ManagedTmuxDriver;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+
+/// Backoff between the boot-adopt path's working-directory probes; its length
+/// plus one is how many times [`resolve_adoptable_cwd`] asks.
+const CWD_PROBE_BACKOFF: [Duration; 2] = [Duration::from_millis(50), Duration::from_millis(150)];
+
+/// Resolve the working directory boot reconciliation will adopt a pane under,
+/// retrying a failed probe before reporting the pane unresolvable.
+///
+/// Why: declining a pane (#6118) leaves it untracked, and untracked is exactly
+/// what `daemon::orphan_gc` reaps — an idle-shell pane with no live child is
+/// killed after two 60-second sweeps. So the probe that decides this is now a
+/// kill decision, and a single false `None` costs a live pane within about two
+/// minutes. `TmuxDriver::pane_current_path` collapses spawn failure, a non-zero
+/// exit and empty output into one `None` with no retry, and
+/// [`SessionManager::reconcile_on_boot`] runs ONCE per daemon process (a
+/// `OnceCell` in `daemon::state::core`), so without a retry that one flaky
+/// answer is the pane's only hearing until the daemon next restarts.
+///
+/// Retrying inside the call, rather than declining only on a second boot
+/// observation, is what actually protects the pane. A cross-boot debounce
+/// cannot: the pane is untracked from the moment of the first decline, so the
+/// orphan-GC reaches it in 60-120 seconds while the second observation waits on
+/// a daemon restart that may be days away — and holding the observation by
+/// adopting provisionally just recreates the #6118 ghost.
+///
+/// What: asks `get_pane_cwd` up to `CWD_PROBE_BACKOFF.len() + 1` times, sleeping
+/// the matching backoff between attempts, and returns the first answer that
+/// names an existing directory. A pane that is genuinely unresolvable costs the
+/// full backoff once, at boot only.
+/// Test: `flaky_cwd_probe_still_adopts_within_one_reconcile`,
+/// `unresolvable_cwd_probe_is_retried_a_bounded_number_of_times` in
+/// `naming_tests.rs`.
+pub(super) async fn resolve_adoptable_cwd(
+    tmux: &dyn ManagedTmuxDriver,
+    name: &str,
+) -> Option<PathBuf> {
+    for attempt in 0..=CWD_PROBE_BACKOFF.len() {
+        if let Some(cwd) = tmux.get_pane_cwd(name).filter(|p| p.is_dir()) {
+            if attempt > 0 {
+                warn!(
+                    name = %name,
+                    attempt = attempt + 1,
+                    "reconcile: pane working directory resolved only on retry — the first probe \
+                     was a transient failure, and declining on it would have exposed a live pane \
+                     to the orphan-GC (#6118)"
+                );
+            }
+            return Some(cwd);
+        }
+        if let Some(backoff) = CWD_PROBE_BACKOFF.get(attempt) {
+            tokio::time::sleep(*backoff).await;
+        }
+    }
+    None
+}
 
 /// Derive the `source_id` (`"owner/repo"`) for a session record from its workspace git remote.
 ///

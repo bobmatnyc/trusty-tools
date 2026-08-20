@@ -45,6 +45,12 @@
 //! being tracked is exactly what the orphan-GC keys on (#6118 — such a pane is
 //! now declined, and reported in [`ReconcileReport::adoption_declined`]).
 //!
+//! **Declining is a kill decision, so the probe behind it retries.** An
+//! undeclared pane is orphan-GC input, and that GC kills an idle-shell pane
+//! with no live child after two sweeps. See
+//! [`super::adopt::resolve_adoptable_cwd`] for why the retry lives inside the
+//! single boot observation rather than across two of them.
+//!
 //! Test: `manager_reconcile_gone_tmux_yields_stopped`,
 //! `manager_reconcile_adopts_new_prefix_session` in `tests.rs`;
 //! `reconcile_refuses_to_stop_sessions_when_tmux_cannot_be_observed`,
@@ -239,18 +245,22 @@ impl SessionManager {
             // the orphan-GC keeps any pane a registry names — so adoption
             // itself is what granted a leaked idle `sh` pane permanent
             // immunity. 55 of 103 records in the reporting store were these.
-            // Declining leaves the pane untracked, which is exactly the input
-            // `daemon::orphan_gc` exists to handle: it reaps a managed-prefix
-            // pane only when it is idle, has no live child process, and has
-            // been seen idle on two consecutive sweeps, and it KEEPS (warns
-            // about) one still running an agent. Nothing here kills anything.
-            let Some(resolved_cwd) = self.tmux.get_pane_cwd(name).filter(|p| p.is_dir()) else {
+            //
+            // Declining leaves the pane untracked, which hands it to
+            // `daemon::orphan_gc`. That is a reap path, not a no-op: an idle
+            // shell with no live child is KILLED after two 60-second sweeps
+            // (a pane running an agent is kept and warned about instead). The
+            // probe therefore decides a pane's life, which is why
+            // `resolve_adoptable_cwd` retries a failed one — see its doc.
+            let Some(resolved_cwd) = super::adopt::resolve_adoptable_cwd(&*self.tmux, name).await
+            else {
                 warn!(
                     name = %name,
-                    "reconcile: declining external-adopt — the pane's working directory could \
-                     not be resolved, so there is nothing to track, resume or attach to (#6118). \
-                     The pane is left to the orphan-GC, which reaps it only if it is an idle \
-                     shell on two consecutive sweeps; `tmux attach -t <name>` still reaches it"
+                    "reconcile: declining external-adopt — the pane's working directory did not \
+                     resolve on any attempt, so there is nothing to track, resume or attach to \
+                     (#6118). The pane is left to the orphan-GC, which kills it only if it is an \
+                     idle shell with no live child on two consecutive sweeps; `tmux attach -t \
+                     <name>` still reaches it until then"
                 );
                 report.adoption_declined.push(name.clone());
                 continue;

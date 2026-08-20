@@ -318,6 +318,144 @@ async fn reconcile_resolves_adopted_session_cwd_from_pane() {
     assert_eq!(adopted.task, "adopted session");
 }
 
+/// A `ManagedTmuxDriver` whose `get_pane_cwd` fails the first `flaky_for`
+/// calls and succeeds afterwards, counting every call.
+///
+/// Why (#6118 review): every other fixture here fixes `pane_cwd` for its
+/// lifetime, so the case that actually matters — a probe that fails once and
+/// then works — had no coverage at all. That is the case where declining kills
+/// a live pane: `TmuxDriver::pane_current_path` reports spawn failure, a
+/// non-zero exit and empty output all as `None`, and a declined pane is
+/// orphan-GC input.
+/// What: `list_sessions` returns `alive`; `get_pane_cwd` returns `None` for the
+/// first `flaky_for` calls and `Some(pane_cwd)` after, incrementing `calls`
+/// every time. `pane_cwd: None` makes it permanently unresolvable, which is how
+/// the retry BOUND is asserted.
+/// Test: `flaky_cwd_probe_still_adopts_within_one_reconcile`,
+/// `unresolvable_cwd_probe_is_retried_a_bounded_number_of_times`.
+struct FlakyPaneCwdTmux {
+    alive: Vec<String>,
+    pane_cwd: Option<PathBuf>,
+    flaky_for: usize,
+    calls: std::sync::atomic::AtomicUsize,
+    /// What `get_pane_id` reports — `flaky_for: 0` plus a distinct value here
+    /// makes this a plain fixture standing in for a DIFFERENT physical pane
+    /// under a reused tmux name.
+    pane_id: Option<String>,
+}
+
+impl ManagedTmuxDriver for FlakyPaneCwdTmux {
+    fn create_session(
+        &self,
+        _name: &str,
+        _workdir: &str,
+    ) -> Result<(), super::manager::ManagedError> {
+        unimplemented!("not exercised by FlakyPaneCwdTmux tests")
+    }
+    fn kill_session(&self, _name: &str) -> Result<(), super::manager::ManagedError> {
+        unimplemented!("not exercised by FlakyPaneCwdTmux tests")
+    }
+    fn send_line(&self, _name: &str, _text: &str) -> Result<(), super::manager::ManagedError> {
+        unimplemented!("not exercised by FlakyPaneCwdTmux tests")
+    }
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, super::manager::ManagedError> {
+        unimplemented!("not exercised by FlakyPaneCwdTmux tests")
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, super::manager::ManagedError> {
+        Ok(self.alive.clone())
+    }
+    fn get_pane_cwd(&self, _name: &str) -> Option<PathBuf> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.flaky_for {
+            return None;
+        }
+        self.pane_cwd.clone()
+    }
+    fn get_pane_id(&self, _name: &str) -> Option<String> {
+        self.pane_id.clone()
+    }
+}
+
+/// #6118 review, CRITICAL: one transient probe failure must not cost a live
+/// pane.
+///
+/// Why: declining hands the pane to the orphan-GC, which kills an idle-shell
+/// pane with no live child after two 60-second sweeps — and `reconcile_on_boot`
+/// runs once per daemon process, so a single flaky `get_pane_cwd` would be that
+/// pane's only hearing until the next daemon restart. The retry in
+/// `resolve_adoptable_cwd` has to close that inside one reconcile pass.
+/// What: a probe that fails once then succeeds; asserts ONE `reconcile_on_boot`
+/// adopts the pane normally — real cwd, real workspace, nothing declined.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn flaky_cwd_probe_still_adopts_within_one_reconcile() {
+    let dir = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let _home = set_home(dir.path());
+    let fake = std::sync::Arc::new(FlakyPaneCwdTmux {
+        alive: vec!["tm-flaky-01".into()],
+        pane_cwd: Some(workspace.path().to_path_buf()),
+        flaky_for: 1,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        pane_id: None,
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert!(
+        report.adoption_declined.is_empty(),
+        "a probe that recovers on retry must not be declined; report: {report:?}"
+    );
+    let listed = mgr.list().await;
+    assert_eq!(
+        listed.len(),
+        1,
+        "the pane must be adopted within one reconcile pass: {listed:?}"
+    );
+    assert_eq!(listed[0].tmux_name, "tm-flaky-01");
+    assert_eq!(listed[0].cwd, workspace.path());
+    assert_eq!(listed[0].workspace_path.as_deref(), Some(workspace.path()));
+    assert!(
+        fake.calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "the first probe must have been retried"
+    );
+}
+
+/// The retry is bounded — a genuinely unresolvable pane is declined, not
+/// probed forever.
+///
+/// Why: the retry exists to survive a flake, not to hang boot on a pane that
+/// will never resolve. Boot holds the store write lock while it runs.
+/// What: a probe that never succeeds; asserts the pane is declined and that
+/// `get_pane_cwd` was called exactly three times (`CWD_PROBE_BACKOFF.len() + 1`).
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn unresolvable_cwd_probe_is_retried_a_bounded_number_of_times() {
+    let dir = TempDir::new().unwrap();
+    let _home = set_home(dir.path());
+    let fake = std::sync::Arc::new(FlakyPaneCwdTmux {
+        alive: vec!["tm-never-01".into()],
+        pane_cwd: None,
+        flaky_for: usize::MAX,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        pane_id: None,
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(report.adoption_declined, vec!["tm-never-01".to_string()]);
+    assert_eq!(mgr.list().await.len(), 0);
+    assert_eq!(
+        fake.calls.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "the probe must be attempted exactly 3 times, then give up"
+    );
+}
+
 /// #6118: a live pane whose cwd will not resolve is NOT adopted.
 ///
 /// Why: #2158 adopted it as an `Active` record with a `/unknown` cwd and an
@@ -624,6 +762,128 @@ async fn adopting_the_same_pane_twice_writes_one_record() {
         "re-adopting one tmux name must land on the same store key, so two \
          concurrent adopters overwrite each other instead of both surviving"
     );
+}
+
+/// #6117 review: a reused tmux name derives a reused id, so the record written
+/// under it must carry nothing from the pane that held the name before.
+///
+/// Why: a name-derived id is only safe if the id is not a handle onto state
+/// that outlives the record. Adoption can reach a previously-used id only after
+/// the earlier record LEFT the store — a terminal tombstone keeps its name in
+/// the known-name set and blocks re-adoption outright, so the reachable case is
+/// removal (retention, `tm sessions prune`, a manual delete). `decommission`
+/// clears no PID-registry entry and no correlation, so this pins what a
+/// re-adopted record actually sees.
+/// What: adopts `tm-recycled-01`, loads it with per-id residue (correlation,
+/// deliverable, claude session, scrollback, activity), registers a PID under
+/// its derived id, removes the record, then re-adopts the SAME name backed by a
+/// different pane and workspace. Asserts the id is reused, every residual field
+/// is clear, the record tracks the NEW pane, and that adoption neither reads nor
+/// writes the PID registry — `SessionRecord` carries no PID field, so a stale
+/// entry cannot reach it.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_reused_adopted_id_carries_no_residual_state() {
+    let dir = TempDir::new().unwrap();
+    let first_ws = TempDir::new().unwrap();
+    let second_ws = TempDir::new().unwrap();
+    let _home = set_home(dir.path());
+
+    let first_pane = std::sync::Arc::new(FlakyPaneCwdTmux {
+        alive: vec!["tm-recycled-01".into()],
+        pane_cwd: Some(first_ws.path().to_path_buf()),
+        flaky_for: 0,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        pane_id: Some("%11".into()),
+    });
+    let mgr = SessionManager::new(dir.path(), first_pane).await.unwrap();
+    mgr.reconcile_on_boot(false).await.expect("first reconcile");
+
+    let listed = mgr.list().await;
+    assert_eq!(listed.len(), 1);
+    let reused_id = listed[0].id;
+    assert_eq!(
+        reused_id,
+        super::record::ManagedSessionId::for_adopted_tmux_name("tm-recycled-01")
+    );
+
+    // Load the record with every per-id field a later adoption could inherit.
+    {
+        let mut store = mgr.store.write().await;
+        let mut rec = store.get(&reused_id).await.expect("get adopted");
+        rec.deliverable_id = Some(crate::deliverable::record::DeliverableId::new());
+        rec.claude_session_id = Some("claude-abc".into());
+        rec.scrollback_path = Some(dir.path().join("scrollback.log"));
+        rec.last_activity_at = Some(chrono::Utc::now());
+        rec.correlation.branch = Some("feature/old".into());
+        store.upsert(rec).await.expect("seed residue");
+    }
+
+    // A PID recorded under the derived id, the residue `decommission` never
+    // clears. It must stay inert, not become the new record's.
+    let pids = crate::core::pid_registry::PidRegistry::new(dir.path().join("pids"));
+    pids.register(&reused_id.to_string(), 4242)
+        .expect("register pid");
+
+    // Removal is the only path that frees the name for re-adoption.
+    mgr.store
+        .write()
+        .await
+        .remove(&reused_id)
+        .await
+        .expect("remove record");
+
+    // A DIFFERENT physical pane now answers to the same tmux name.
+    let second_pane = std::sync::Arc::new(FlakyPaneCwdTmux {
+        alive: vec!["tm-recycled-01".into()],
+        pane_cwd: Some(second_ws.path().to_path_buf()),
+        flaky_for: 0,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        pane_id: Some("%22".into()),
+    });
+    let mgr2 = SessionManager::new(dir.path(), second_pane).await.unwrap();
+    mgr2.reconcile_on_boot(false)
+        .await
+        .expect("second reconcile");
+
+    let after = mgr2.list().await;
+    assert_eq!(after.len(), 1, "one record for one pane: {after:?}");
+    let fresh = &after[0];
+    assert_eq!(fresh.id, reused_id, "the derived id is reused by design");
+    assert_eq!(
+        fresh.pane_id.as_deref(),
+        Some("%22"),
+        "the record must track the NEW pane, not the one that held the name"
+    );
+    assert_eq!(fresh.workspace_path.as_deref(), Some(second_ws.path()));
+    assert_eq!(
+        fresh.deliverable_id, None,
+        "deliverable link must not carry over"
+    );
+    assert_eq!(
+        fresh.claude_session_id, None,
+        "claude session must not carry over"
+    );
+    assert_eq!(
+        fresh.scrollback_path, None,
+        "scrollback must not carry over"
+    );
+    assert_eq!(fresh.last_activity_at, None, "activity must not carry over");
+    assert_eq!(
+        fresh.correlation,
+        Default::default(),
+        "correlation must not carry over: {:?}",
+        fresh.correlation
+    );
+
+    // The stale PID entry is untouched by adoption — neither consumed nor
+    // cleared. `SessionRecord` has no PID field, so it cannot reach the record;
+    // reaping it belongs to the PID sweep, not here.
+    let entries = pids.entries().expect("read pid registry");
+    assert_eq!(entries.len(), 1, "adoption must not write PID entries");
+    assert_eq!(entries[0].session_id, reused_id.to_string());
+    assert_eq!(entries[0].pid, 4242);
 }
 
 /// Requirement 3 of the fix: nothing changes for a resolvable pane.
