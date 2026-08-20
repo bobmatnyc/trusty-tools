@@ -436,12 +436,16 @@ fn reason(query: &str, hit: &Hit) -> String {
 /// dimension that has evidence, which is the coverage the report reports.
 /// What: round 0 takes the top complexity hotspot then the top file of each
 /// dimension, round 1 the next of each, and so on until both are exhausted or
-/// `cap` is reached. A path already ranked keeps its first (best) reason.
+/// `cap` is reached. A path is ranked ONCE, at the earliest position it earns —
+/// and when the two legs both name it, the entry carries the dimension as well
+/// as both reasons, because it is the dimension that decides whether the report
+/// can count that file as covering it.
 /// Test: `super::evidence_tests::{blending_spreads_the_budget_across_dimensions,
-/// blending_keeps_the_first_reason_for_a_repeated_path}`.
+/// a_hotspot_that_is_also_dimension_evidence_keeps_its_dimension}`.
 #[must_use]
 pub fn blend(hotspots: &[String], dimensions: &[DimensionEvidence], cap: usize) -> Vec<Priority> {
     let mut out: Vec<Priority> = Vec::new();
+    let attributed = attributions(dimensions);
     let depth = dimensions
         .iter()
         .map(|d| d.files.len())
@@ -451,17 +455,7 @@ pub fn blend(hotspots: &[String], dimensions: &[DimensionEvidence], cap: usize) 
 
     for round in 0..depth {
         if let Some(path) = hotspots.get(round) {
-            push(
-                &mut out,
-                Priority {
-                    path: path.clone(),
-                    dimension: None,
-                    reason: Some(format!(
-                        "trusty-analyze complexity hotspot (rank {})",
-                        round + 1
-                    )),
-                },
-            );
+            push(&mut out, hotspot(path, round, &attributed));
         }
         for dimension in dimensions {
             let Some(file) = dimension.files.get(round) else {
@@ -484,10 +478,54 @@ pub fn blend(hotspots: &[String], dimensions: &[DimensionEvidence], cap: usize) 
     out
 }
 
-/// Append a priority unless its path is already ranked (first reason wins).
+/// Append a priority unless its path is already ranked.
 fn push(out: &mut Vec<Priority>, priority: Priority) {
     if !out.iter().any(|p| p.path == priority.path) {
         out.push(priority);
+    }
+}
+
+/// Every path the search leg attributed, with its dimension and reason.
+///
+/// Why: the ranking emits a hotspot BEFORE the dimension entries of the same
+/// round and keeps one entry per path, so without this lookup a file that is
+/// both the top hotspot and a dimension's evidence would reach the manifest
+/// with no dimension at all — and the report would then count that dimension as
+/// not investigated even though it read a file addressing it.
+/// What: `(path, dimension, reason)` in table order, first occurrence winning,
+/// so a path several dimensions found is attributed to the first — one manifest
+/// entry carries one dimension.
+/// Test: `super::evidence_tests::a_hotspot_that_is_also_dimension_evidence_keeps_its_dimension`.
+fn attributions(dimensions: &[DimensionEvidence]) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for dimension in dimensions {
+        for file in &dimension.files {
+            if !out.iter().any(|(path, _, _)| path == &file.path) {
+                out.push((
+                    file.path.clone(),
+                    dimension.dimension.clone(),
+                    file.reason.clone(),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// One complexity hotspot, carrying the search attribution when it has one.
+fn hotspot(path: &str, round: usize, attributed: &[(String, String, String)]) -> Priority {
+    let measured = format!("trusty-analyze complexity hotspot (rank {})", round + 1);
+    match attributed.iter().find(|(p, _, _)| p == path) {
+        Some((_, dimension, found)) => Priority {
+            path: path.to_owned(),
+            dimension: Some(dimension.clone()),
+            reason: Some(format!("{measured}; {found}")),
+        },
+        None => Priority {
+            path: path.to_owned(),
+            dimension: None,
+            reason: Some(measured),
+        },
     }
 }
 

@@ -69,8 +69,9 @@ impl Priority {
 /// report (#6082). The budget is a manifest key, so raising it is one more
 /// thing written to the interface rather than a flag the operator must learn —
 /// `trusty-audit audit` still takes no new step.
-/// What: written to `[report]` only when the manifest does not already declare
-/// it, so an operator's explicit choice always wins.
+/// What: written to `[report]` PER KEY, and only where the manifest declares
+/// none — an operator who set one of the two keeps it and gets the audit's
+/// default for the other, rather than falling back to trusty-review's.
 /// Test: `priority_tests::{the_budget_is_recorded_once,
 /// a_declared_budget_is_left_alone}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,28 +426,45 @@ path = "/w/repos/acme-web"
     }
 
     /// An operator who declared a budget keeps it — the audit fills, never
-    /// overrides.
+    /// overrides — and it fills PER KEY, so declaring one of the two leaves the
+    /// other at the audit's default rather than at trusty-review's.
     #[test]
     fn a_declared_budget_is_left_alone() {
-        let declared = SAMPLE.replace(
-            "title = \"Acme — Technical Due Diligence\"",
-            "title = \"Acme\"\ninvestigate_max_files = 7",
-        );
-        let out = recorded(
-            &declared,
-            "/w/repos/acme-api",
-            &[Priority::bare("src/pay.rs")],
-            Some(Budget {
-                max_files: 120,
-                max_bytes: 1_200_000,
-            }),
-            &[],
-        );
-        let parsed: toml::Value = toml::from_str(&out).expect("valid TOML");
-        assert_eq!(
-            parsed["report"]["investigate_max_files"].as_integer(),
-            Some(7)
-        );
+        for (declared_key, declared_value) in [
+            ("investigate_max_files", 7_i64),
+            ("investigate_max_bytes", 4096),
+        ] {
+            let manifest = SAMPLE.replace(
+                "title = \"Acme — Technical Due Diligence\"",
+                &format!("title = \"Acme\"\n{declared_key} = {declared_value}"),
+            );
+            let out = recorded(
+                &manifest,
+                "/w/repos/acme-api",
+                &[Priority::bare("src/pay.rs")],
+                Some(Budget {
+                    max_files: 120,
+                    max_bytes: 1_200_000,
+                }),
+                &[],
+            );
+            let parsed: toml::Value = toml::from_str(&out).expect("valid TOML");
+            assert_eq!(
+                parsed["report"][declared_key].as_integer(),
+                Some(declared_value),
+                "the declared key survives: {out}"
+            );
+            let filled = if declared_key == "investigate_max_files" {
+                ("investigate_max_bytes", 1_200_000)
+            } else {
+                ("investigate_max_files", 120)
+            };
+            assert_eq!(
+                parsed["report"][filled.0].as_integer(),
+                Some(filled.1),
+                "the undeclared key still gets the audit's default: {out}"
+            );
+        }
     }
 
     /// The whole point: the ranking lands on the right repository, in order, and

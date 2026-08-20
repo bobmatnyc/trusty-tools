@@ -234,20 +234,50 @@ fn blending_spreads_the_budget_across_dimensions() {
     );
 }
 
-/// A path both legs name is ranked once, keeping the first (best) reason.
+/// The regression the critic caught on PR #6124: a file that is BOTH the top
+/// hotspot and a dimension's evidence used to reach the manifest with
+/// `dimension: None`, because the hotspot is pushed first and a path is ranked
+/// once. The report then counted that dimension as not investigated even though
+/// it read a file addressing it.
+///
+/// The path here carries no name a path heuristic would classify, which is what
+/// makes the loss observable — an `auth`-named file would have been rescued by
+/// trusty-review's own heuristics and hidden the defect.
 #[test]
-fn blending_keeps_the_first_reason_for_a_repeated_path() {
-    let hotspots = vec!["src/auth.rs".to_string()];
-    let dimensions = [dimension("authentication & secrets", &["src/auth.rs"])];
+fn a_hotspot_that_is_also_dimension_evidence_keeps_its_dimension() {
+    let hotspots = vec!["src/session_manager.rs".to_string()];
+    let dimensions = [dimension(
+        "authentication & secrets",
+        &["src/session_manager.rs"],
+    )];
     let blended = blend(&hotspots, &dimensions, 60);
-    assert_eq!(blended.len(), 1);
-    assert!(
-        blended[0]
-            .reason
-            .as_deref()
-            .expect("a reason")
-            .contains("complexity hotspot"),
-        "{blended:?}"
+
+    assert_eq!(blended.len(), 1, "one entry per path: {blended:?}");
+    assert_eq!(
+        blended[0].dimension.as_deref(),
+        Some("authentication & secrets"),
+        "the dimension must survive the hotspot entry: {blended:?}"
+    );
+    let reason = blended[0].reason.as_deref().expect("a reason");
+    assert!(reason.contains("complexity hotspot"), "{reason}");
+    assert!(reason.contains("trusty-search hit for"), "{reason}");
+}
+
+/// A hotspot no query found stays unattributed — the merge must not invent a
+/// dimension for a file the index never named.
+#[test]
+fn a_hotspot_no_query_found_carries_no_dimension() {
+    let hotspots = vec!["src/parser.rs".to_string()];
+    let dimensions = [dimension("error handling", &["src/err.rs"])];
+    let blended = blend(&hotspots, &dimensions, 60);
+    let parser = blended
+        .iter()
+        .find(|p| p.path == "src/parser.rs")
+        .expect("the hotspot is ranked");
+    assert!(parser.dimension.is_none(), "{blended:?}");
+    assert_eq!(
+        parser.reason.as_deref(),
+        Some("trusty-analyze complexity hotspot (rank 1)")
     );
 }
 
