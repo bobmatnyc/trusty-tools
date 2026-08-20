@@ -34,6 +34,23 @@
 //! reasons and this keeps it one — the loop logs the contradiction and the
 //! command that resolves it.
 //!
+//! **The adopt path owes the same hygiene the create path gives.** It did not,
+//! and the two defects that came of that share one shape: the loop decided
+//! from a snapshot instead of from the pane in front of it. It minted a random
+//! id for every name its pre-loop snapshot did not carry, so a second adopter
+//! holding its own stale snapshot wrote a second record for one pane (#6117 —
+//! the id now derives from the tmux name, see
+//! [`ManagedSessionId::for_adopted_tmux_name`]); and it adopted a pane whose
+//! cwd would not resolve, which made that pane permanently unreapable because
+//! being tracked is exactly what the orphan-GC keys on (#6118 — such a pane is
+//! now declined, and reported in [`ReconcileReport::adoption_declined`]).
+//!
+//! **Declining is a kill decision, so the probe behind it retries.** An
+//! undeclared pane is orphan-GC input, and that GC kills an idle-shell pane
+//! with no live child after two sweeps. See
+//! [`super::adopt::resolve_adoptable_cwd`] for why the retry lives inside the
+//! single boot observation rather than across two of them.
+//!
 //! Test: `manager_reconcile_gone_tmux_yields_stopped`,
 //! `manager_reconcile_adopts_new_prefix_session` in `tests.rs`;
 //! `reconcile_refuses_to_stop_sessions_when_tmux_cannot_be_observed`,
@@ -60,8 +77,9 @@ impl SessionManager {
     /// or legacy `tmpm-`/`trusty-mpm-`, issue #1955) via
     /// [`crate::core::names::is_managed_session_name`], cross-references
     /// against the store: live → `Active`; gone → `Stopped` (unless already
-    /// `Decommissioned`). External managed sessions unknown to the store are
-    /// adopted as `Active`.
+    /// `Decommissioned`). A managed session unknown to the store is adopted as
+    /// `Active` under an id derived from its tmux name (#6117), and only when
+    /// its pane resolves a working directory (#6118) — see this module's doc.
     /// When `auto_resume` is true, all `Stopped` sessions are immediately resumed.
     ///
     /// When tmux cannot be observed at all, every liveness-derived decision is
@@ -73,7 +91,11 @@ impl SessionManager {
     /// makes its own decision about a tmux it cannot see.
     /// Test: `manager_reconcile_gone_tmux_yields_stopped`,
     /// `manager_reconcile_adopts_new_prefix_session`;
-    /// `reconcile_refuses_to_stop_sessions_when_tmux_cannot_be_observed`.
+    /// `reconcile_refuses_to_stop_sessions_when_tmux_cannot_be_observed`;
+    /// `reconcile_declines_to_adopt_a_pane_whose_cwd_cannot_be_resolved`,
+    /// `repeated_reconcile_of_one_unresolvable_pane_stays_at_zero_records`,
+    /// `a_declined_pane_is_reapable_by_the_orphan_gc`,
+    /// `repeated_reconcile_of_one_resolvable_pane_keeps_one_record`.
     pub async fn reconcile_on_boot(
         &self,
         auto_resume: bool,
@@ -208,97 +230,110 @@ impl SessionManager {
         // cwd/workspace_path permanently stubbed to "/unknown" — re-resolve
         // the pane's real working directory via `get_pane_cwd` (the same
         // primitive the idle-auto-stop snapshot uses) so it can be validated
-        // and provisioned like any other managed workspace; a pane whose cwd
-        // cannot be resolved is left CLEARLY flagged as unmanaged in `task`
-        // rather than an indistinguishable-from-normal "adopted session".
+        // and provisioned like any other managed workspace.
         // #5856: `flatten` yields nothing when liveness was never observed, so
         // an unreachable tmux adopts no external session either.
         let mut newly_resolved: Vec<(ManagedSessionId, PathBuf)> = Vec::new();
         for name in live_names.iter().flatten() {
-            if !known_names.contains(name) {
-                let resolved_cwd = self.tmux.get_pane_cwd(name).filter(|p| p.is_dir());
-                // #3396: a live tmux session unknown BY NAME can still resolve
-                // to a workspace an EXISTING record already tracks — e.g. a
-                // renamed/second tmux session fronting the same worktree.
-                // Minting a second record here is exactly the duplicate-record
-                // defect; skip adoption and surface the crossed mapping loudly
-                // instead so an operator can reconcile the tmux_name drift
-                // (`tm sessions ls`, `tmux list-panes`) rather than the daemon
-                // silently doubling the identity.
-                if let Some(path) = &resolved_cwd {
-                    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-                    if known_workspaces.contains(&canon) {
-                        warn!(
-                            name = %name,
-                            workspace = %path.display(),
-                            "reconcile: skipping external-adopt — live tmux session resolves to \
-                             a workspace already tracked by another managed session record; its \
-                             tmux_name may be stale/crossed (#3396) — investigate with `tm sessions \
-                             ls` and `tmux list-panes` rather than auto-adopting a duplicate"
-                        );
-                        continue;
-                    }
-                }
-                let (cwd, workspace_path, task) = match &resolved_cwd {
-                    Some(path) => (
-                        path.clone(),
-                        Some(path.clone()),
-                        "adopted session".to_string(),
-                    ),
-                    None => (
-                        PathBuf::from("/unknown"),
-                        None,
-                        "adopted session (unmanaged — workspace path could not be resolved)"
-                            .to_string(),
-                    ),
-                };
-                let id = ManagedSessionId::new();
-                let external = SessionRecord {
-                    id,
-                    tmux_name: name.clone(),
-                    cwd,
-                    task,
-                    state: ManagedSessionState::Active,
-                    created_at: Utc::now(),
-                    last_activity_at: None,
-                    workspace_path,
-                    repo_url: None,
-                    branch: None,
-                    pending_decision: None,
-                    proposed_default: None,
-                    correlation: Default::default(),
-                    // Externally-created tmux sessions have unknown provenance;
-                    // assume the default (claude-code) backend.
-                    runtime: crate::runtime::RuntimeKind::default(),
-                    // Adopted external sessions are NEVER ephemeral: their
-                    // provenance is unknown, so they must never be auto-reaped.
-                    ephemeral: false,
-                    // Externally-adopted sessions are NEVER SM-owned — the SM
-                    // did not create the workspace; decommission must not delete
-                    // it (#1511).
-                    workspace_owned: false,
-                    // External sessions have no tracked source project.
-                    source_id: None,
-                    claude_session_id: None,
-                    scrollback_path: None,
-                    last_cwd: None,
-                    // External sessions have no known Deliverable linkage.
-                    deliverable_id: None,
-                    // Best-effort capture (#2453 review finding 1, round 2) —
-                    // the adopted pane already exists, so this is available
-                    // immediately, mirroring `adopt.rs`'s explicit adoption path.
-                    pane_id: self.tmux.get_pane_id(name),
-                    injection_status: Default::default(),
-                    worktree_owner: None,
-                    terminal_at: None,
-                };
-                if let Some(path) = resolved_cwd {
-                    newly_resolved.push((id, path));
-                }
-                guard.upsert(external).await?;
-                report.external_adopted.push(name.clone());
-                info!(name = %name, "reconcile: adopted external managed session");
+            if known_names.contains(name) {
+                continue;
             }
+            // #6118: a pane whose cwd will not resolve is NOT adopted. #2158
+            // adopted it anyway, flagged `unmanaged` in `task` with a
+            // `/unknown` cwd, and that record was unkillable by design: the
+            // `tm ls` auto-prune keeps any record whose tmux name is live, and
+            // the orphan-GC keeps any pane a registry names — so adoption
+            // itself is what granted a leaked idle `sh` pane permanent
+            // immunity. 55 of 103 records in the reporting store were these.
+            //
+            // Declining leaves the pane untracked, which hands it to
+            // `daemon::orphan_gc`. That is a reap path, not a no-op: an idle
+            // shell with no live child is KILLED after two 60-second sweeps
+            // (a pane running an agent is kept and warned about instead). The
+            // probe therefore decides a pane's life, which is why
+            // `resolve_adoptable_cwd` retries a failed one — see its doc.
+            let Some(resolved_cwd) = super::adopt::resolve_adoptable_cwd(&*self.tmux, name).await
+            else {
+                warn!(
+                    name = %name,
+                    "reconcile: declining external-adopt — the pane's working directory did not \
+                     resolve on any attempt, so there is nothing to track, resume or attach to \
+                     (#6118). The pane is left to the orphan-GC, which kills it only if it is an \
+                     idle shell with no live child on two consecutive sweeps; `tmux attach -t \
+                     <name>` still reaches it until then"
+                );
+                report.adoption_declined.push(name.clone());
+                continue;
+            };
+            // #3396: a live tmux session unknown BY NAME can still resolve
+            // to a workspace an EXISTING record already tracks — e.g. a
+            // renamed/second tmux session fronting the same worktree.
+            // Minting a second record here is exactly the duplicate-record
+            // defect; skip adoption and surface the crossed mapping loudly
+            // instead so an operator can reconcile the tmux_name drift
+            // (`tm sessions ls`, `tmux list-panes`) rather than the daemon
+            // silently doubling the identity.
+            let canon =
+                std::fs::canonicalize(&resolved_cwd).unwrap_or_else(|_| resolved_cwd.clone());
+            if known_workspaces.contains(&canon) {
+                warn!(
+                    name = %name,
+                    workspace = %resolved_cwd.display(),
+                    "reconcile: skipping external-adopt — live tmux session resolves to \
+                     a workspace already tracked by another managed session record; its \
+                     tmux_name may be stale/crossed (#3396) — investigate with `tm sessions \
+                     ls` and `tmux list-panes` rather than auto-adopting a duplicate"
+                );
+                continue;
+            }
+            // #6117: derived from the tmux name, never random — `known_names`
+            // is a pre-loop snapshot, and a concurrent adopter holding its own
+            // stale copy would otherwise write a SECOND record for this pane
+            // under a fresh id. Same name, same store key, one record.
+            let id = ManagedSessionId::for_adopted_tmux_name(name);
+            let external = SessionRecord {
+                id,
+                tmux_name: name.clone(),
+                cwd: resolved_cwd.clone(),
+                task: "adopted session".to_string(),
+                state: ManagedSessionState::Active,
+                created_at: Utc::now(),
+                last_activity_at: None,
+                workspace_path: Some(resolved_cwd.clone()),
+                repo_url: None,
+                branch: None,
+                pending_decision: None,
+                proposed_default: None,
+                correlation: Default::default(),
+                // Externally-created tmux sessions have unknown provenance;
+                // assume the default (claude-code) backend.
+                runtime: crate::runtime::RuntimeKind::default(),
+                // Adopted external sessions are NEVER ephemeral: their
+                // provenance is unknown, so they must never be auto-reaped.
+                ephemeral: false,
+                // Externally-adopted sessions are NEVER SM-owned — the SM
+                // did not create the workspace; decommission must not delete
+                // it (#1511).
+                workspace_owned: false,
+                // External sessions have no tracked source project.
+                source_id: None,
+                claude_session_id: None,
+                scrollback_path: None,
+                last_cwd: None,
+                // External sessions have no known Deliverable linkage.
+                deliverable_id: None,
+                // Best-effort capture (#2453 review finding 1, round 2) —
+                // the adopted pane already exists, so this is available
+                // immediately, mirroring `adopt.rs`'s explicit adoption path.
+                pane_id: self.tmux.get_pane_id(name),
+                injection_status: Default::default(),
+                worktree_owner: None,
+                terminal_at: None,
+            };
+            newly_resolved.push((id, resolved_cwd));
+            guard.upsert(external).await?;
+            report.external_adopted.push(name.clone());
+            info!(name = %name, "reconcile: adopted external managed session");
         }
 
         // Release write guard before auto-resume (which needs its own locks).

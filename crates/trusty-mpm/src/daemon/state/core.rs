@@ -821,13 +821,23 @@ impl DaemonState {
                         let n_stopped = report.stopped.len();
                         let n_external = report.external_adopted.len();
                         let n_stale_decisions = report.stale_decisions_cleared.len();
-                        if n_adopted > 0 || n_stopped > 0 || n_external > 0 || n_stale_decisions > 0
+                        // #6118: a declined pane leaves no record, so this
+                        // summary is the only place the boot accounts for it.
+                        // It must gate the log too — a boot whose ONLY finding
+                        // was declined panes would otherwise print nothing.
+                        let n_declined = report.adoption_declined.len();
+                        if n_adopted > 0
+                            || n_stopped > 0
+                            || n_external > 0
+                            || n_stale_decisions > 0
+                            || n_declined > 0
                         {
                             tracing::info!(
                                 adopted = n_adopted,
                                 stopped = n_stopped,
                                 external = n_external,
                                 stale_decisions_cleared = n_stale_decisions,
+                                adoption_declined = n_declined,
                                 "session-manager reconcile complete"
                             );
                         }
