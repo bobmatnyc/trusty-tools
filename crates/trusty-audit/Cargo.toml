@@ -56,6 +56,11 @@ libc = { workspace = true }
 # Reading the companion engagement config and tga's `manifest.toml`.
 serde = { workspace = true }
 toml = { workspace = true }
+# #6081: adding `inspect_priority` to a manifest `tga` wrote and `trusty-review`
+# reads. A `toml::Value` round trip would rewrite every key of a document two
+# other crates own — reordering it and dropping its comments — to add one; a
+# format-preserving edit is the smaller claim.
+toml_edit = { workspace = true }
 # #5555: `tga audit` takes its repository set from a YAML config, so driving it
 # at one repository means generating one. `serde_yaml` is the workspace-wide
 # standard for YAML (see the root Cargo.toml note).

@@ -31,6 +31,7 @@
 //! | [`clone`] | getting the selected repositories onto the recipient's disk (#5215) |
 //! | [`local_repo`] | ingesting a repository that is already on disk, without touching it (#6001) |
 //! | [`run`] | driving the pinned `tga audit` over the selected repositories |
+//! | [`grounding`] | indexing and measuring each repository, so the code analysis has inputs (#6081) |
 //! | [`package`] | assembling the unencrypted deliverable that goes back (#5499) |
 //! | [`chain`] | driving all four of those in one call, resumably (#5824) |
 //! | [`distribute`] | assembling the install package that goes to a client (#5825) |
@@ -82,6 +83,10 @@ pub mod discover;
 // opposite rules about the credential — never one with a flag.
 pub mod distribute;
 pub mod error;
+// #6081: indexing each audited repository in trusty-search, measuring it with
+// trusty-analyze, and writing the resulting ranking into the manifest — the
+// interface trusty-review's investigation pass reads (#6078).
+pub mod grounding;
 pub mod inference;
 // #6001: ingesting a repository that is already on disk — the disambiguation
 // rule, the read-only validation, and the never-modify-the-source invariant.

@@ -51,7 +51,7 @@ use std::process::Output;
 /// This is synchronous inside an async caller on purpose: `index add`
 /// canonicalises a path and rewrites one small TOML file, so it returns in
 /// well under the time the `tga` child it precedes takes to start.
-pub(super) fn approve_for_indexing(search: &Path, checkout: &Path) -> Result<(), String> {
+pub(crate) fn approve_for_indexing(search: &Path, checkout: &Path) -> Result<(), String> {
     let output = std::process::Command::new(search)
         .args(index_add_args(checkout))
         .output()

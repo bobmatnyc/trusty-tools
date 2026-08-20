@@ -68,7 +68,9 @@ use serde::Serialize;
 
 use crate::config::EngagementConfig;
 use crate::error::AuditError;
+use crate::grounding;
 use crate::inference;
+use crate::manifest::AuditManifest;
 use crate::progress::{Operation, Progress, StageEvent, StageState, UnitOutcome};
 use crate::registry;
 use crate::relay::{Scrubber, tee_and_relay};
@@ -113,7 +115,11 @@ mod pins;
 // it. Its own module for the same reason `pins` is one — this file is at the
 // 500-SLOC production cap — and because the flag it deliberately does not pass
 // needs somewhere to be explained and asserted.
-mod approve;
+//
+// #6081: `pub(crate)` because `crate::grounding::index` reaches the same
+// approval before it indexes. trusty-search is default-deny on both paths, and
+// two spawns of `index add` would be two sets of refusal rules free to drift.
+pub(crate) mod approve;
 
 // #5982: the values a sweep produces, split out when `RunReport::board_gaps`
 // crossed the 500-SLOC production cap. Re-exported, so `crate::run::RunReport`
@@ -608,6 +614,18 @@ async fn run_one(
             }
         }
     };
+    // #6081: index the checkout in trusty-search, measure it with
+    // trusty-analyze, and write the ranking into the manifest the child just
+    // wrote — the interface trusty-review's investigation pass reads (#6078).
+    // It runs AFTER the child because the manifest is what it edits and the
+    // child is what writes it, and only on a success because a repository with
+    // no manifest has nothing to ground. Fail-open: a leg that degrades adds a
+    // gap line here and in the manifest, never a failed repository.
+    if result.succeeded() {
+        let tools = grounding::Tools::pinned(binaries.search.clone(), binaries.analyze.clone());
+        let manifest = output.join(AuditManifest::FILE_NAME);
+        gaps.extend(grounding::ground_manifest(&manifest, &tools, &checkout, &repo.name).await);
+    }
     progress.unit_finished(
         Operation::Sweep,
         repo.name.as_str(),
@@ -2023,8 +2041,13 @@ trusty-review = "0.15.1"
             .await
             .expect("the sweep completes");
         assert_eq!(report.status, RunStatus::AllSucceeded, "{report:?}");
-        assert_eq!(report.repos[0].gaps.len(), 1, "the gap must be surfaced");
-        assert!(report.repos[0].gaps[0].contains("jira sync"));
+        // #6081: grounding adds its own line for a stub sweep, so what is
+        // asserted is that tga's stated gap survives — not the total count.
+        assert!(
+            report.repos[0].gaps.iter().any(|g| g.contains("jira sync")),
+            "the gap must be surfaced: {:?}",
+            report.repos[0].gaps
+        );
     }
 
     /// A hung child must cost its repository, not the whole run — and the
