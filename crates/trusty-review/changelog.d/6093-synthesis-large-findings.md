@@ -1,6 +1,3 @@
 Fixed
 - Report synthesis no longer fails outright on a large finding set. The request's output-token ceiling was a hardcoded 3072 that ignored `[models.reviewer].max_tokens`, and the single truncation retry shrank the top-risks table from five rows to three while leaving ten per-finding elaborations — the dominant output cost — untouched at the same ceiling, so it could not converge. A 44- and a 45-finding investigation both truncated twice and exited with no report; 26 findings rendered clean. The retry is now a three-rung ladder that raises the budget and shrinks the ask together: full ask at the configured ceiling, then a concise ask at double it, then a narrative-only ask at quadruple it with no elaboration array in the schema at all. No finding is dropped — every RED/AMBER finding still renders from the deterministic composition and from the investigation's own verified prose.
 - `[models.reviewer].max_tokens` now reaches the synthesis request instead of being overridden by a constant.
-
-Added
-- The verified investigation is written to `investigation.json` in the report's output directory before synthesis begins, so a synthesis failure no longer discards the run's expensive half.
