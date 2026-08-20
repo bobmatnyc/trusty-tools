@@ -14,12 +14,13 @@
 //! (gated behind `monitor-tui`, which trusty-mpm does not enable) or the
 //! subprocess-oriented `stdio_mcp_client` / `daemon_bridge` (no generic call
 //! surface).
-//! What: [`resolve_memory_base_url`] resolves the base URL (env override
-//! first, discovery fallback, `Err` when neither is available);
-//! [`resolve_memory_base_url_or_unreachable`] is the fail-open convenience
-//! wrapper callers that must never error use. [`call_memory_tool`] resolves
-//! the address and POSTs a JSON-RPC request for `method`/`params`, returning
-//! the envelope's `result`. [`call_memory_tool_at`] is the same call against
+//! What: [`memory_rpc::resolve_memory_base_url`] resolves the base URL (env
+//! override first, discovery fallback, `Err` when neither is available);
+//! [`memory_rpc::resolve_memory_base_url_or_unreachable`] is the fail-open
+//! convenience wrapper callers that must never error use.
+//! [`memory_rpc::call_memory_tool`] resolves the address and POSTs a
+//! JSON-RPC request for `method`/`params`, returning the envelope's
+//! `result`. [`memory_rpc::call_memory_tool_at`] is the same call against
 //! an explicit, already-resolved base URL (used by callers — e.g. catch-up's
 //! `CatchupOptions::memory_url` — that thread their own resolved/overridable
 //! address through, including tests that point at a controlled unreachable

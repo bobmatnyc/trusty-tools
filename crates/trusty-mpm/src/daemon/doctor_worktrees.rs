@@ -32,7 +32,8 @@ pub const WORKTREE_REMEDIATION_COMMAND: &str = "tm session prune-worktrees";
 /// The reconciled worktree inventory, reduced to the four numbers doctor
 /// reports (#5947).
 ///
-/// Why: [`run_doctor`] is public and the reconciled report is crate-internal,
+/// Why: [`crate::daemon::doctor::run_doctor`] is public and the reconciled
+/// report is crate-internal,
 /// so the check takes this instead — and taking only counts also makes the
 /// no-inventory case (`None`) explicit at the call site rather than something
 /// the probe has to infer.
