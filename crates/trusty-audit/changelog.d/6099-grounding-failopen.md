@@ -1,2 +1,0 @@
-Fixed
-- A sweep now grounds every repository whose `tga audit` child left a manifest, rather than only those whose child exited 0. A child that failed at a later stage — a render whose synthesis failed, for instance — still wrote the manifest, and gating on its exit status skipped the `inspect_priority` ranking together with the gap line that would have said so. The failure the grounding legs promise to name always was named; the skip that stopped them running never was.
