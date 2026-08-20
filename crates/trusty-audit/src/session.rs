@@ -1785,6 +1785,7 @@ trusty-review = "0.0.0-never-published"
             log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
             gaps: Vec::new(),
             resumed: false,
+            duration_ms: None,
             result: RepoResult::Succeeded,
         }];
         run::checkpoint::write_progress(
@@ -1838,6 +1839,7 @@ trusty-review = "0.0.0-never-published"
                     log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
                     gaps: Vec::new(),
                     resumed: false,
+                    duration_ms: None,
                     result: RepoResult::Succeeded,
                 }],
                 run::github_issues::GithubCredentialRecord::NoToken,
@@ -1891,6 +1893,7 @@ trusty-review = "0.0.0-never-published"
             log: session.work_dir().path(Area::Logs).join("00-acme-api.log"),
             gaps: Vec::new(),
             resumed: false,
+            duration_ms: None,
             result: RepoResult::Succeeded,
         }]);
         write_finished_progress(session.work_dir(), &report);

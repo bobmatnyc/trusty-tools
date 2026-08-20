@@ -64,6 +64,21 @@ pub struct RepoRun {
     /// suspiciously fast.
     #[serde(default)]
     pub resumed: bool,
+    /// Wall clock around this repository's `tga audit` child, in milliseconds.
+    ///
+    /// Why: #6080 — the run index states how long each piece took, and nothing
+    /// measured it. Recorded on the checkpoint rather than held in memory so a
+    /// RESUMED entry keeps the duration of the run that actually did the work;
+    /// carried over by `super::checkpoint::plan`'s `..entry.clone()`, so a
+    /// resumed sweep reports the real four hours rather than the second it took
+    /// to verify the output.
+    ///
+    /// What: `None` for a repository this run did not audit and no earlier one
+    /// recorded — a checkpoint written before this field existed reads that way,
+    /// and the index states it as "not recorded" rather than as zero.
+    /// Test: `super::run_tests::a_swept_repository_records_how_long_it_took`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     /// How it ended.
     pub result: RepoResult,
 }

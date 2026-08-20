@@ -36,6 +36,7 @@
 //! | [`chain`] | driving all four of those in one call, resumably (#5824) |
 //! | [`distribute`] | assembling the install package that goes to a client (#5825) |
 //! | [`rerender`] | regenerating a delivered audit's reports from what shipped with it (#6080) |
+//! | [`index_report`] | the `index.md` both of those write beside their reports (#6080) |
 //!
 //! ## What this milestone is not
 //!
@@ -87,6 +88,11 @@ pub mod error;
 // trusty-analyze, and writing the resulting ranking into the manifest — the
 // interface trusty-review's investigation pass reads (#6078).
 pub mod grounding;
+// #6080: the `index.md` a run leaves beside its reports — versions, timestamp,
+// per-unit timings, a contents table, and a link to every report that exists.
+// One module for both producers, so the sweep's index and the re-render's
+// cannot describe the same fact differently.
+pub mod index_report;
 pub mod inference;
 // #6001: ingesting a repository that is already on disk — the disambiguation
 // rule, the read-only validation, and the never-modify-the-source invariant.

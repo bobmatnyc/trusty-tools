@@ -124,6 +124,13 @@ pub struct RenderedReport {
     pub artifacts: Vec<PathBuf>,
     /// Dimensions this render could not reproduce — see [`checkout_gaps`].
     pub gaps: Vec<String>,
+    /// Wall clock around this report, in milliseconds (#6080).
+    ///
+    /// Covers the whole unit — reading the manifest, indexing and measuring any
+    /// checkout present on this machine, and the `trusty-review report` child —
+    /// because that is what the operator waited for. `None` only where nothing
+    /// measured it, which the index states rather than rendering as zero.
+    pub duration_ms: Option<u64>,
     /// How it ended.
     pub result: RenderResult,
 }
@@ -204,6 +211,8 @@ pub async fn rerender(
     let tools = grounding::Tools::resolved(work);
     mkdir(&output)?;
 
+    // #6080: this run's own wall clock, for the index written at the end.
+    let started = std::time::Instant::now();
     let total = manifests.len();
     progress.operation_started(Operation::Rerender, total);
     let mut reports = Vec::with_capacity(total);
@@ -211,8 +220,12 @@ pub async fn rerender(
     for (index, manifest) in manifests.into_iter().enumerate() {
         let name = unique_name(&manifest, index, &mut taken);
         progress.unit_started(Operation::Rerender, name.as_str(), index + 1, total);
-        let rendered =
+        let unit_started = std::time::Instant::now();
+        let mut rendered =
             render_one(&review, &tools, &manifest, &output, name, key, inference).await?;
+        // Timed here rather than inside `render_one`, which returns from two
+        // places — a manifest that will not parse is still a unit that took time.
+        rendered.duration_ms = Some(millis(unit_started.elapsed()));
         progress.unit_finished(
             Operation::Rerender,
             rendered.name.as_str(),
@@ -228,6 +241,10 @@ pub async fn rerender(
         reports.iter().filter(|r| r.result.succeeded()).count(),
         total,
     );
+    // #6080: the index goes in the OUTPUT directory and nowhere else, which is
+    // what keeps this module's postcondition — the source package is read, never
+    // written — true of the index as much as of every report.
+    crate::index_report::write_render(&output, &review, &reports, started.elapsed())?;
 
     Ok(RerenderReport {
         source,
@@ -390,6 +407,7 @@ async fn render_one(
         log,
         artifacts: Vec::new(),
         gaps: Vec::new(),
+        duration_ms: None,
         result: RenderResult::Succeeded,
     };
 
@@ -600,6 +618,11 @@ fn written_files(output: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files
+}
+
+/// A measured span as whole milliseconds, saturating rather than wrapping.
+fn millis(elapsed: std::time::Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn mkdir(path: &Path) -> Result<(), AuditError> {
@@ -837,6 +860,116 @@ mod rerender_tests {
             "the package must not be written to"
         );
         assert!(report.reports[0].output.starts_with(&report.output));
+    }
+
+    /// The index this re-render wrote into its output directory (#6080).
+    fn index_of(report: &RerenderReport) -> String {
+        std::fs::read_to_string(report.output.join(crate::index_report::INDEX_FILE))
+            .expect("the re-render writes an index")
+    }
+
+    /// 🔴 #6080: the re-render writes an index too, with the versions, the
+    /// timestamp, the per-report timings and a link to what it produced.
+    ///
+    /// The version of `trusty-review` comes from asking the binary this run
+    /// actually drove — a re-render has no install record to read, and the whole
+    /// point of the verb is that it runs at whatever version is resolved.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_re_render_writes_an_index_into_its_output() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = tmp.path().join("package");
+        report_dir(&package.join("reports"), "01-acme-api");
+        let review = stub_review(
+            tmp.path(),
+            &WRITES_A_REPORT.replace(
+                "#!/bin/sh\n",
+                "#!/bin/sh\ncase \"$1\" in --version) echo 'trusty-review 0.16.0'; exit 0;; esac\n",
+            ),
+        );
+
+        let report = run(&package, &review, &work_in(tmp.path())).await;
+
+        let index = index_of(&report);
+        assert!(index.contains("Reports: 1 of 1 report"), "{index}");
+        assert!(index.contains("| `trusty-review` | 0.16.0 |"), "{index}");
+        assert!(
+            index.contains("| `tga` | not recorded | not recorded — a re-render runs no `tga`"),
+            "an absent version must be stated, not left blank: {index}"
+        );
+        assert!(
+            index.contains("[01-acme-api/report.md](01-acme-api/report.md)"),
+            "{index}"
+        );
+        assert!(index.contains("## Timing"), "{index}");
+        assert!(
+            report.reports[0].duration_ms.is_some(),
+            "{:?}",
+            report.reports[0]
+        );
+    }
+
+    /// 🔴 A report that would not render still gets an entry, with the failure
+    /// named and its log linked. An index that simply omits the failure is how a
+    /// partial re-render reads as a whole one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_render_is_still_indexed_with_its_reason() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = tmp.path().join("package");
+        report_dir(&package.join("reports"), "01-acme-api");
+        let review = stub_review(tmp.path(), "#!/bin/sh\necho 'render failed' >&2\nexit 3\n");
+
+        let report = run(&package, &review, &work_in(tmp.path())).await;
+
+        let index = index_of(&report);
+        assert!(index.contains("Reports: 0 of 1 report"), "{index}");
+        assert!(index.contains("### 01-acme-api"), "{index}");
+        assert!(index.contains("No report — "), "{index}");
+        assert!(index.contains("exited with code 3"), "{index}");
+        assert!(
+            index.contains("[01-acme-api.log](01-acme-api.log)"),
+            "the failed report's log must be linked: {index}"
+        );
+    }
+
+    /// 🔴 The index goes in the OUTPUT directory and nowhere else — this
+    /// module's postcondition covers the index as much as every report, and the
+    /// delivered package still hashes the way it was signed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_index_is_not_written_into_the_source_package() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let package = tmp.path().join("package");
+        let source = report_dir(&package.join("reports"), "01-acme-api");
+        let review = stub_review(tmp.path(), WRITES_A_REPORT);
+
+        let report = run(&package, &review, &work_in(tmp.path())).await;
+
+        assert!(
+            report
+                .output
+                .join(crate::index_report::INDEX_FILE)
+                .is_file(),
+            "the index belongs in the output directory"
+        );
+        for reserved in [&source, &package.join("reports")] {
+            assert!(
+                !reserved.join(crate::index_report::INDEX_FILE).exists(),
+                "an index was written into the source package at {}",
+                reserved.display()
+            );
+        }
+        let left: Vec<String> = std::fs::read_dir(&source)
+            .expect("read source")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            left,
+            ["manifest.toml"],
+            "the package must not be written to"
+        );
     }
 
     /// A source with nothing to render is a refusal naming the directory, not an

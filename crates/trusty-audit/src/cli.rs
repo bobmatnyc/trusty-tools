@@ -503,6 +503,7 @@ mod cli_tests {
                     log: PathBuf::from("/pkg/rerendered/01-acme-api.log"),
                     artifacts: vec![PathBuf::from("/pkg/rerendered/01-acme-api/report.md")],
                     gaps: vec!["no checkout for acme/api at /work/repos/acme-api".to_owned()],
+                    duration_ms: None,
                     result: RenderResult::Succeeded,
                 },
                 RenderedReport {
@@ -512,6 +513,7 @@ mod cli_tests {
                     log: PathBuf::from("/pkg/rerendered/02-acme-web.log"),
                     artifacts: Vec::new(),
                     gaps: Vec::new(),
+                    duration_ms: None,
                     result: RenderResult::Failed {
                         reason: "exited with code 3".to_owned(),
                     },
@@ -922,6 +924,7 @@ mod cli_tests {
             log: PathBuf::from("/work/logs/00-acme-api.log"),
             gaps: vec!["Collection stage `jira sync` did not complete.".to_owned()],
             resumed: false,
+            duration_ms: None,
             result,
         };
         let ok = run(RepoResult::Succeeded);
@@ -974,6 +977,7 @@ mod cli_tests {
             log: PathBuf::from("/work/logs/00-acme-api.log"),
             gaps: Vec::new(),
             resumed: false,
+            duration_ms: None,
             result: RepoResult::Succeeded,
         };
         let gap = "linear:a1b2c3d4 was not audited — re-register it (#5982)";
@@ -1003,6 +1007,7 @@ mod cli_tests {
             log: PathBuf::from(format!("/work/logs/0{index}-{name}.log")),
             gaps: Vec::new(),
             resumed,
+            duration_ms: None,
             result: RepoResult::Succeeded,
         };
         let outcome = Outcome::Run(RunReport::of(vec![
@@ -1156,6 +1161,7 @@ mod cli_tests {
                 log: PathBuf::from("/work/logs/00-acme-api.log"),
                 gaps: Vec::new(),
                 resumed: false,
+                duration_ms: None,
                 result: RepoResult::Succeeded,
             }]),
             package: ReturnPackage {
